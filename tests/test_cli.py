@@ -42,15 +42,18 @@ class TestCLI:
         result = runner.invoke(app, [])
         # Exit code can be 0 or 2 depending on Python/Typer version
         assert result.exit_code in (0, 2)
-        assert "Weft: The Multi-Agent Weaving Toolkit" in result.stdout
-        assert "Options:" in result.stdout
+        # Help output may be in stdout or stderr depending on version
+        output = result.stdout or result.output
+        assert "Weft: The Multi-Agent Weaving Toolkit" in output
+        assert "Options:" in output
 
     def test_no_error_box_on_no_args(self):
         """Test that no error box appears when no arguments provided."""
         result = runner.invoke(app, [])
-        assert "Error" not in result.stdout
-        assert "╭" not in result.stdout  # Rich formatting character
-        assert "╰" not in result.stdout  # Rich formatting character
+        output = result.stdout or result.output
+        assert "Error" not in output
+        assert "╭" not in output  # Rich formatting character
+        assert "╰" not in output  # Rich formatting character
 
 
 class TestModuleExecution:
@@ -85,7 +88,9 @@ class TestModuleExecution:
         )
         # Exit code can be 0 or 2 depending on Python/Typer version
         assert result.returncode in (0, 2)
-        assert "Weft: The Multi-Agent Weaving Toolkit" in result.stdout
+        # Help output may be in stdout or stderr depending on version
+        output = result.stdout or result.stderr
+        assert "Weft: The Multi-Agent Weaving Toolkit" in output
 
 
 class TestCLIConstants:
