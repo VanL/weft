@@ -15,19 +15,19 @@
     "function_target": "weft.specs:analyze", // REQUIRED if type is "function". Format: "pkg.module:function_name". Any Python Callable.
     "process_target": ["grep"],              // REQUIRED if type is "command". Must be a string, either a path or a binary in the PATH
     "args": [],                              // OPTIONAL. Positional arguments for a target (function *args or subprocess args).
-    "kwargs": {},                            // OPTIONAL. Keyword arguments for a function.
+    "keyword_args": {},                      // OPTIONAL. Keyword arguments for a function.
     "timeout": 300.0 | null,                 // OPTIONAL. Timeout in seconds. null means no timeout.
     "memory_limit": 256 | null,              // OPTIONAL. Memory limit in MB (default value 1Gb) null means no limit.
     "cpu_limit": 50 | null,                  // OPTIONAL. CPU limit in percent. null means no limit.
     "max_fds": 20 | null,                    // OPTIONAL. Maximum number of open file descriptors. null means no limit.
     "max_connections": 0 | null,             // OPTIONAL. Maximum number of network connections. null means no limit.
     "env": { "DEBUG": "1" } | null,          // OPTIONAL. Environment variables to set in the task's process. These update, not replace, the existing environment.
-    "working_dir": "/tmp",                   // OPTIONAL. Working directory
+    "working_dir": "/tmp" | null,            // OPTIONAL. Working directory. null means not applicable or not set.
     "stream_output": false,                  // OPTIONAL. Stream stdout/stderr to queues. If false, all output will be written in one message.
     "cleanup_on_exit": true,                 // OPTIONAL. Delete task queues on completion
     "polling_interval": 1,                   // OPTIONAL. psutil polling interval in seconds. Defaults to 1 second.
     "reporting_interval": "poll" | "transition",  // OPTIONAL. Send reports to weft.tasks.log either on each transition or on each polling interval. Defaults to "transition"
-    "monitor_class": "weft.tasks.monitor.ResourceMonitor"   // OPTIONAL. A class conforming to the ResourceMonitor spec that will be used to wrap the target
+    "monitor_class": "weft.core.monitor.ResourceMonitor"   // OPTIONAL. Default value is "weft.core.monitor.ResourceMonitor". A class conforming to the ResourceMonitor spec that will be used to wrap the target. NOTE: Module will be created at weft/core/monitor.py
   },
   "io": {                                    // REQUIRED. Defines the communication queues.
     "inputs" : {                             // REQUIRED. Element must be present. May be empty or have *n* input queues.
@@ -47,19 +47,18 @@
     "return_code": null,                     // REQUIRED. null means no return code yet (probably still running).
     "started_at": null,                      // REQUIRED. Nanosecond/simplebroker timestamp (time.time_ns())
     "completed_at": null,                    // REQUIRED. Nanosecond/simplebroker timestamp (time.time_ns())
-    "error": null,                           // Error message if failed
-    "return_code": 0|null,                   // REQUIRED. null means no return code (probably still running).
-    "time": 60.0,                            // OPTIONAL. Time spent running so far (wall-clock in seconds)
-    "memory": 4.8,                           // OPTIONAL. Last memory measurement from psutil in MB
-    "cpu": 4 | null,                         // OPTIONAL. Last CPU percentage from psutil.
-    "fds": 3 | null,                         // OPTIONAL. Last number of open file descriptors from psutil.
-    "net_connections": 0 | null,             // OPTIONAL. Last number of network connections from psutil.
-    "max_memory": 4.8,                       // OPTIONAL. Highest memory measurement measured over the life of the process.
-    "max_cpu": 4 | null,                     // OPTIONAL. Highes CPU percentage measured over the life of the process.
-    "max_fds": 3 | null,                     // OPTIONAL. Highest number of open file descriptors measured over the life of the process.
-    "max_net_connections": 0 | null          // OPTIONAL. Highest number of network connections measured over the life of the process.
+    "error": null,                           // OPTIONAL. Error message if failed
+    "time": 60.0 | null,                     // OPTIONAL. Time spent running so far (wall-clock in seconds). null = not started/measured yet, 0.0+ = actual measurement
+    "memory": 4.8 | null,                    // OPTIONAL. Last memory measurement from psutil in MB. null = not measured yet, 0.0+ = actual measurement
+    "cpu": 4 | null,                         // OPTIONAL. Last CPU percentage from psutil. null = not measured yet, 0+ = actual measurement (can be 0%)
+    "fds": 3 | null,                         // OPTIONAL. Last number of open file descriptors from psutil. null = not measured yet, 0+ = actual count
+    "net_connections": 0 | null,             // OPTIONAL. Last number of network connections from psutil. null = not measured yet, 0+ = actual count
+    "max_memory": 4.8 | null,                // OPTIONAL. Highest memory measurement over the life of the process. null = not measured yet
+    "max_cpu": 4 | null,                     // OPTIONAL. Highest CPU percentage over the life of the process. null = not measured yet
+    "max_fds": 3 | null,                     // OPTIONAL. Highest number of open file descriptors over the life of the process. null = not measured yet
+    "max_net_connections": 0 | null          // OPTIONAL. Highest number of network connections over the life of the process. null = not measured yet
   },
-  "metadata": {                              // OPTIONAL. User-defined metadata for querying and tracking. These can be updated by the Task or from outside by sending an update_metadata: {"key": "value" } over the ctrl_in queue.
+  "metadata": {                              // REQUIRED. Section must be present, but all keys are optional. User-defined metadata for querying and tracking. These can be updated by the Task or from outside by sending an update_metadata: {"key": "value" } over the ctrl_in queue.
     "owner": "claude-session-123",
     "tags": ["spec", "analysis"],
     "session_id": "design-session-001",

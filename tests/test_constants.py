@@ -4,8 +4,38 @@ import os
 from unittest.mock import patch
 
 from weft._constants import (
+    CONTROL_PAUSE,
+    CONTROL_RESUME,
+    CONTROL_STOP,
+    DEFAULT_CLEANUP_ON_EXIT,
+    DEFAULT_CPU_LIMIT,
+    DEFAULT_FUNCTION_TARGET,
+    DEFAULT_MAX_CONNECTIONS,
+    DEFAULT_MAX_FDS,
+    DEFAULT_MEMORY_LIMIT,
+    DEFAULT_POLLING_INTERVAL,
+    DEFAULT_REPORTING_INTERVAL,
+    DEFAULT_STATUS,
+    DEFAULT_STREAM_OUTPUT,
+    DEFAULT_TIMEOUT,
     EXIT_SUCCESS,
+    MAX_CPU_LIMIT,
+    MIN_CONNECTIONS_LIMIT,
+    MIN_CPU_LIMIT,
+    MIN_FDS_LIMIT,
+    MIN_MEMORY_LIMIT,
     PROG_NAME,
+    QUEUE_CTRL_IN_SUFFIX,
+    QUEUE_CTRL_OUT_SUFFIX,
+    QUEUE_INBOX_SUFFIX,
+    QUEUE_OUTBOX_SUFFIX,
+    STATUS_CANCELLED,
+    STATUS_COMPLETED,
+    STATUS_CREATED,
+    STATUS_FAILED,
+    STATUS_RUNNING,
+    TASKSPEC_TID_LENGTH,
+    TASKSPEC_VERSION,
     __version__,
     load_config,
 )
@@ -48,6 +78,108 @@ class TestConstants:
         assert EXIT_SUCCESS == 0
         assert isinstance(EXIT_SUCCESS, int)
 
+    def test_taskspec_version_and_identification(self) -> None:
+        """Test TaskSpec version and identification constants."""
+        assert TASKSPEC_VERSION == "1.0"
+        assert isinstance(TASKSPEC_VERSION, str)
+
+        assert TASKSPEC_TID_LENGTH == 19
+        assert isinstance(TASKSPEC_TID_LENGTH, int)
+
+    def test_spec_section_defaults(self) -> None:
+        """Test SpecSection default value constants."""
+        assert DEFAULT_FUNCTION_TARGET == "weft.tasks:noop"
+        assert isinstance(DEFAULT_FUNCTION_TARGET, str)
+
+        assert DEFAULT_TIMEOUT is None
+
+        assert DEFAULT_MEMORY_LIMIT == 1024
+        assert isinstance(DEFAULT_MEMORY_LIMIT, int)
+
+        assert DEFAULT_CPU_LIMIT is None
+        assert DEFAULT_MAX_FDS is None
+        assert DEFAULT_MAX_CONNECTIONS is None
+
+        assert DEFAULT_STREAM_OUTPUT is False
+        assert isinstance(DEFAULT_STREAM_OUTPUT, bool)
+
+        assert DEFAULT_CLEANUP_ON_EXIT is True
+        assert isinstance(DEFAULT_CLEANUP_ON_EXIT, bool)
+
+        assert DEFAULT_POLLING_INTERVAL == 1.0
+        assert isinstance(DEFAULT_POLLING_INTERVAL, float)
+
+        assert DEFAULT_REPORTING_INTERVAL == "transition"
+        assert isinstance(DEFAULT_REPORTING_INTERVAL, str)
+
+    def test_queue_naming_conventions(self) -> None:
+        """Test queue naming suffix constants."""
+        assert QUEUE_INBOX_SUFFIX == "inbox"
+        assert QUEUE_OUTBOX_SUFFIX == "outbox"
+        assert QUEUE_CTRL_IN_SUFFIX == "ctrl_in"
+        assert QUEUE_CTRL_OUT_SUFFIX == "ctrl_out"
+
+        # All should be strings
+        for suffix in [
+            QUEUE_INBOX_SUFFIX,
+            QUEUE_OUTBOX_SUFFIX,
+            QUEUE_CTRL_IN_SUFFIX,
+            QUEUE_CTRL_OUT_SUFFIX,
+        ]:
+            assert isinstance(suffix, str)
+
+    def test_state_section_defaults(self) -> None:
+        """Test StateSection status constants."""
+        assert STATUS_CREATED == "created"
+        assert STATUS_RUNNING == "running"
+        assert STATUS_COMPLETED == "completed"
+        assert STATUS_FAILED == "failed"
+        assert STATUS_CANCELLED == "cancelled"
+
+        assert DEFAULT_STATUS == STATUS_CREATED
+        assert DEFAULT_STATUS == "created"
+
+        # All should be strings
+        for status in [
+            STATUS_CREATED,
+            STATUS_RUNNING,
+            STATUS_COMPLETED,
+            STATUS_FAILED,
+            STATUS_CANCELLED,
+        ]:
+            assert isinstance(status, str)
+
+    def test_control_commands(self) -> None:
+        """Test control command constants."""
+        assert CONTROL_STOP == "STOP"
+        assert CONTROL_PAUSE == "PAUSE"
+        assert CONTROL_RESUME == "RESUME"
+
+        # All should be strings
+        for cmd in [CONTROL_STOP, CONTROL_PAUSE, CONTROL_RESUME]:
+            assert isinstance(cmd, str)
+
+    def test_resource_limits(self) -> None:
+        """Test resource limit constants."""
+        assert MIN_MEMORY_LIMIT == 1
+        assert isinstance(MIN_MEMORY_LIMIT, int)
+
+        assert MAX_CPU_LIMIT == 100
+        assert MIN_CPU_LIMIT == 1
+        assert isinstance(MAX_CPU_LIMIT, int)
+        assert isinstance(MIN_CPU_LIMIT, int)
+
+        # CPU limits should be sensible
+        assert MIN_CPU_LIMIT < MAX_CPU_LIMIT
+        assert MIN_CPU_LIMIT > 0
+        assert MAX_CPU_LIMIT <= 100
+
+        assert MIN_FDS_LIMIT == 1
+        assert isinstance(MIN_FDS_LIMIT, int)
+
+        assert MIN_CONNECTIONS_LIMIT == 0
+        assert isinstance(MIN_CONNECTIONS_LIMIT, int)
+
 
 class TestLoadConfig:
     """Test the load_config function with various environment configurations."""
@@ -65,17 +197,23 @@ class TestLoadConfig:
 
     def test_debug_setting(self) -> None:
         """Test debug environment variable."""
-        # Any non-empty value should enable debug
-        for value in ["1", "true", "yes", "debug"]:
+        # Values that should enable debug
+        for value in ["1", "true", "yes", "debug", "TRUE", "Y"]:
             with patch.dict(os.environ, {"WEFT_DEBUG": value}):
                 config = load_config()
-                assert config["WEFT_DEBUG"] is True
+                assert config["WEFT_DEBUG"] is True, (
+                    f"Expected True for WEFT_DEBUG={value}"
+                )
 
-        # Empty or missing should be False
-        with patch.dict(os.environ, {"WEFT_DEBUG": ""}):
-            config = load_config()
-            assert config["WEFT_DEBUG"] is False
+        # Values that should disable debug
+        for value in ["", "0", "f", "F", "false", "False", "FALSE"]:
+            with patch.dict(os.environ, {"WEFT_DEBUG": value}):
+                config = load_config()
+                assert config["WEFT_DEBUG"] is False, (
+                    f"Expected False for WEFT_DEBUG={value}"
+                )
 
+        # Missing should be False
         with patch.dict(os.environ, {}, clear=True):
             config = load_config()
             assert config["WEFT_DEBUG"] is False

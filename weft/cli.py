@@ -1,10 +1,12 @@
 """CLI entry point for Weft."""
 
+from pathlib import Path
 from typing import Annotated
 
 import typer
 
 from ._constants import PROG_NAME, __version__
+from .commands import handle_validate_taskspec
 
 app = typer.Typer(
     name=PROG_NAME,
@@ -41,6 +43,23 @@ def main(
     A Python tool for orchestrating multi-agent workflows.
     """
     pass
+
+
+@app.command("validate-taskspec")
+def validate_taskspec(
+    file: Annotated[
+        Path,
+        typer.Argument(
+            help="Path to the TaskSpec JSON file to validate",
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            readable=True,
+        ),
+    ],
+) -> None:
+    """Validate a TaskSpec JSON file."""
+    handle_validate_taskspec(file)
 
 
 if __name__ == "__main__":
