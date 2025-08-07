@@ -40,7 +40,8 @@ class TestCLI:
     def test_no_args_shows_help(self):
         """Test that running with no arguments shows help."""
         result = runner.invoke(app, [])
-        assert result.exit_code == 0
+        # Exit code can be 0 or 2 depending on Python/Typer version
+        assert result.exit_code in (0, 2)
         assert "Weft: The Multi-Agent Weaving Toolkit" in result.stdout
         assert "Options:" in result.stdout
 
@@ -82,7 +83,8 @@ class TestModuleExecution:
             capture_output=True,
             text=True,
         )
-        assert result.returncode == 0
+        # Exit code can be 0 or 2 depending on Python/Typer version
+        assert result.returncode in (0, 2)
         assert "Weft: The Multi-Agent Weaving Toolkit" in result.stdout
 
 
