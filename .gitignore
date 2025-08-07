@@ -1,0 +1,78 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Testing
+.coverage
+.coverage.*
+.pytest_cache/
+htmlcov/
+.tox/
+.nox/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.ruff_cache/
+.ruff/
+.pytest_cache/
+
+# SimpleBroker specific
+*.db
+*.db-shm
+*.db-wal
+.broker.db*
+test.db
+benchmark_pragma.py
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.bak
+*.log
+
+# Multi-agent
+.claude
+.mcp.json
+agent_history/
+.broker.db
+.broker.db-shm
+.broker.db-wal
+*comments*.md
+
+# This is in context for agents but we don't want it to check it in here
+simplebroker/

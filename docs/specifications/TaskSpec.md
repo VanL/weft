@@ -1,0 +1,71 @@
+
+# TaskSpec
+
+### 1.0 JSON Schema v1.0
+
+```jsonc
+{
+  "tid": "1837025672140161024",              // REQUIRED. Unique 64-bit SimpleBroker timestamp. Provided on task initialization.
+  "version": "1.0",                          // REQUIRED. Spec version for future evolution.
+  "name": "analyze-specification-v4",        // REQUIRED. Human-readable name for reporting and legibility.
+  "description": "Tool to analyze ...",      // OPTIONAL. Long form human-readable description.
+  
+  "spec": {                                  // REQUIRED. Defines the work to be done.
+    "type": "function" | "command",          // REQUIRED. The type of execution. 
+    "function_target": "weft.specs:analyze", // REQUIRED if type is "function". Format: "pkg.module:function_name". Any Python Callable.
+    "process_target": ["grep"],              // REQUIRED if type is "command". Must be a string, either a path or a binary in the PATH
+    "args": [],                              // OPTIONAL. Positional arguments for a target (function *args or subprocess args).
+    "kwargs": {},                            // OPTIONAL. Keyword arguments for a function.
+    "timeout": 300.0 | null,                 // OPTIONAL. Timeout in seconds. null means no timeout.
+    "memory_limit": 256 | null,              // OPTIONAL. Memory limit in MB (default value 1Gb) null means no limit.
+    "cpu_limit": 50 | null,                  // OPTIONAL. CPU limit in percent. null means no limit.
+    "max_fds": 20 | null,                    // OPTIONAL. Maximum number of open file descriptors. null means no limit.
+    "max_connections": 0 | null,             // OPTIONAL. Maximum number of network connections. null means no limit.
+    "env": { "DEBUG": "1" } | null,          // OPTIONAL. Environment variables to set in the task's process. These update, not replace, the existing environment.
+    "working_dir": "/tmp",                   // OPTIONAL. Working directory
+    "stream_output": false,                  // OPTIONAL. Stream stdout/stderr to queues. If false, all output will be written in one message.
+    "cleanup_on_exit": true,                 // OPTIONAL. Delete task queues on completion
+    "polling_interval": 1,                   // OPTIONAL. psutil polling interval in seconds. Defaults to 1 second.
+    "reporting_interval": "poll" | "transition",  // OPTIONAL. Send reports to weft.tasks.log either on each transition or on each polling interval. Defaults to "transition"
+    "monitor_class": "weft.tasks.monitor.ResourceMonitor"   // OPTIONAL. A class conforming to the ResourceMonitor spec that will be used to wrap the target
+  },
+  "io": {                                    // REQUIRED. Defines the communication queues.
+    "inputs" : {                             // REQUIRED. Element must be present. May be empty or have *n* input queues.
+      "inbox": "T183...inbox"                // OPTIONAL. Stdin/input for long-running tasks. Follows naming convention if not provided on Task initialization. 
+    },   
+    "outputs": {                             // REQUIRED. Element must be present. Must include at least the "outbox" queue. May include *n* output queues.
+       "outbox": "T183...outbox",            // REQUIRED. For the final result message. Follows naming convention if not provided on task initialization.
+    },
+    "control": {                             // REQUIRED. Element must be present. Must include only the keys for the ctrl_in and ctrl_out queues.
+      "ctrl_in": "T183...ctrl_in",           // REQUIRED. INPUT. Control input monitored by the Task. Used for job control/side-channel comms for tasks. 
+      "ctrl_out": "T183...ctrl_out",         // REQUIRED. OUTPUT. Status, error messages reported by the Task. Used for side-channel comms. 
+    }        
+  },
+  "state": {                                 // REQUIRED. Element must be present. 
+    "status": "created|running|[...]",       // REQUIRED, Current process state
+    "pid": null,                             // OPTIONAL. Process ID when running
+    "return_code": null,                     // REQUIRED. null means no return code yet (probably still running).
+    "started_at": null,                      // REQUIRED. Nanosecond/simplebroker timestamp (time.time_ns())
+    "completed_at": null,                    // REQUIRED. Nanosecond/simplebroker timestamp (time.time_ns())
+    "error": null,                           // Error message if failed
+    "return_code": 0|null,                   // REQUIRED. null means no return code (probably still running).
+    "time": 60.0,                            // OPTIONAL. Time spent running so far (wall-clock in seconds)
+    "memory": 4.8,                           // OPTIONAL. Last memory measurement from psutil in MB
+    "cpu": 4 | null,                         // OPTIONAL. Last CPU percentage from psutil.
+    "fds": 3 | null,                         // OPTIONAL. Last number of open file descriptors from psutil.
+    "net_connections": 0 | null,             // OPTIONAL. Last number of network connections from psutil.
+    "max_memory": 4.8,                       // OPTIONAL. Highest memory measurement measured over the life of the process.
+    "max_cpu": 4 | null,                     // OPTIONAL. Highes CPU percentage measured over the life of the process.
+    "max_fds": 3 | null,                     // OPTIONAL. Highest number of open file descriptors measured over the life of the process.
+    "max_net_connections": 0 | null          // OPTIONAL. Highest number of network connections measured over the life of the process.
+  },
+  "metadata": {                              // OPTIONAL. User-defined metadata for querying and tracking. These can be updated by the Task or from outside by sending an update_metadata: {"key": "value" } over the ctrl_in queue.
+    "owner": "claude-session-123",
+    "tags": ["spec", "analysis"],
+    "session_id": "design-session-001",
+    "agent_id": "agent-alpha"
+  }
+}
+```
+
+

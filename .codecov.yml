@@ -1,0 +1,46 @@
+coverage:
+  status:
+    project:
+      default:
+        # Target coverage percentage
+        target: 85%
+        # Allow coverage to drop by up to 1% and still pass
+        threshold: 1%
+        # Use auto base to compare against the appropriate base
+        base: auto
+        # Only show coverage status on changes
+        if_not_found: success
+        if_ci_failed: error
+        informational: false
+        only_pulls: false
+    patch:
+      default:
+        # Target coverage for changed lines
+        target: 80%
+        # Allow patch coverage to drop by up to 5% and still pass
+        threshold: 5%
+        base: auto
+        if_not_found: success
+        if_ci_failed: error
+        informational: false
+        only_pulls: false
+
+# Comment configuration
+comment:
+  layout: "reach,diff,flags,files,footer"
+  behavior: default
+  require_changes: false
+  require_base: false
+  require_head: true
+
+# Ignore certain files/patterns from coverage
+ignore:
+  - "**/__pycache__"
+  - "**/tests/**"
+  - "**/test_*.py"
+  - "**/*_test.py"
+  - "**/conftest.py"
+  - "setup.py"
+  - "**/examples/**"
+  - "**/agent_history/**"
+  - "**/weft/**"
