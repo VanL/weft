@@ -1,7 +1,17 @@
 
 # TaskSpec
 
-### 1.0 JSON Schema v1.0
+This document defines the complete TaskSpec format - the core configuration structure for all tasks in Weft. Understanding TaskSpec structure is essential for task creation, validation, and system integration.
+
+## Design Context
+
+TaskSpec serves dual purposes:
+- **Task Definition**: Specifies what work to execute and how to execute it
+- **Runtime State**: Tracks execution progress, resource usage, and completion status
+
+The specification uses **partial immutability**: configuration sections (spec, io) become frozen after task creation to prevent accidental changes, while state and metadata remain mutable for runtime updates.
+
+## JSON Schema v1.0
 
 ```jsonc
 {
@@ -17,21 +27,29 @@
     "args": [],                              // OPTIONAL. Positional arguments for a target (function *args or subprocess args).
     "keyword_args": {},                      // OPTIONAL. Keyword arguments for a function.
     "timeout": 300.0 | null,                 // OPTIONAL. Timeout in seconds. null means no timeout.
-    "memory_limit": 256 | null,              // OPTIONAL. Memory limit in MB (default value 1Gb) null means no limit.
-    "cpu_limit": 50 | null,                  // OPTIONAL. CPU limit in percent. null means no limit.
-    "max_fds": 20 | null,                    // OPTIONAL. Maximum number of open file descriptors. null means no limit.
-    "max_connections": 0 | null,             // OPTIONAL. Maximum number of network connections. null means no limit.
+    
+    "limits": {                              // OPTIONAL. Resource limits for task execution.
+      "memory_mb": 256 | null,               // OPTIONAL. Memory limit in MB (default value 1Gb) null means no limit.
+      "cpu_percent": 50 | null,              // OPTIONAL. CPU limit in percent (0-100). null means no limit.
+      "max_fds": 20 | null,                  // OPTIONAL. Maximum number of open file descriptors. null means no limit.
+      "max_connections": 0 | null            // OPTIONAL. Maximum number of network connections. null means no limit.
+    },
+    
     "env": { "DEBUG": "1" } | null,          // OPTIONAL. Environment variables to set in the task's process. These update, not replace, the existing environment.
     "working_dir": "/tmp" | null,            // OPTIONAL. Working directory. null means not applicable or not set.
     "stream_output": false,                  // OPTIONAL. Stream stdout/stderr to queues. If false, all output will be written in one message.
     "cleanup_on_exit": true,                 // OPTIONAL. Delete task queues on completion
     "polling_interval": 1,                   // OPTIONAL. psutil polling interval in seconds. Defaults to 1 second.
     "reporting_interval": "poll" | "transition",  // OPTIONAL. Send reports to weft.tasks.log either on each transition or on each polling interval. Defaults to "transition"
-    "monitor_class": "weft.core.monitor.ResourceMonitor"   // OPTIONAL. Default value is "weft.core.monitor.ResourceMonitor". A class conforming to the ResourceMonitor spec that will be used to wrap the target. NOTE: Module will be created at weft/core/monitor.py
+    "monitor_class": "weft.core.monitor.ResourceMonitor",   // OPTIONAL. Default value is "weft.core.monitor.ResourceMonitor". A class conforming to the ResourceMonitor spec that will be used to wrap the target. NOTE: Module will be created at weft/core/monitor.py
+    
+    "enable_process_title": true,            // OPTIONAL. Enable OS process title updates for observability. Defaults to true.
+    "output_size_limit_mb": 10,              // OPTIONAL. Max output size before disk spill. Defaults to 10MB (SimpleBroker limit).
+    "weft_context": "/path/to/project" | null // OPTIONAL. Directory containing .broker.db and .weft/ - defines weft scope. Defaults to current working directory.
   },
   "io": {                                    // REQUIRED. Defines the communication queues.
     "inputs" : {                             // REQUIRED. Element must be present. May be empty or have *n* input queues.
-      "inbox": "T183...inbox"                // OPTIONAL. Stdin/input for long-running tasks. Follows naming convention if not provided on Task initialization. 
+      "inbox": "T183...inbox"                // OPTIONAL. Stdin/input for long-running tasks. If provided, inbox will be routed by the Task to the target stdin.
     },   
     "outputs": {                             // REQUIRED. Element must be present. Must include at least the "outbox" queue. May include *n* output queues.
        "outbox": "T183...outbox",            // REQUIRED. For the final result message. Follows naming convention if not provided on task initialization.
