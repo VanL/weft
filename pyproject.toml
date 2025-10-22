@@ -99,6 +99,10 @@ module = "tests.*"
 ignore_errors = true
 
 [[tool.mypy.overrides]]
+module = "simplebroker.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
 module = "simplebroker.tests.*"
 ignore_errors = true
 

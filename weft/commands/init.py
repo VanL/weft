@@ -33,7 +33,7 @@ def cmd_init(directory: Path | None = None, *, quiet: bool = False) -> int:
         db_path = (root / db_path).resolve()
 
     try:
-        result = sb_cmd_init(str(db_path), quiet=quiet)
+        result = int(sb_cmd_init(str(db_path), quiet=quiet))
     except Exception as exc:  # pragma: no cover - defensive
         if not quiet:
             print(
