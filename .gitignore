@@ -72,6 +72,6 @@ agent_history/
 .broker.db-shm
 .broker.db-wal
 *comments*.md
-
+.code/
 # This is in context for agents but we don't want it to check it in here
 simplebroker/
