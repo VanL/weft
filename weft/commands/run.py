@@ -343,7 +343,15 @@ def _ensure_manager(
 ) -> tuple[dict[str, Any], bool, subprocess.Popen[bytes] | None]:
     record = _select_active_manager(context)
     if record:
-        return record, False, None
+        pid = record.get("pid")
+        if not (isinstance(pid, int) and _is_pid_alive(pid)):
+            _snapshot_registry(context)  # prune stale entries
+            record = _select_active_manager(context)
+            if record is None:
+                new_record, process = _start_manager(context, verbose=verbose)
+                return new_record, True, process
+        if record:
+            return record, False, None
     record, process = _start_manager(context, verbose=verbose)
     return record, True, process
 
