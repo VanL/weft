@@ -748,9 +748,7 @@ def _run_inline(
     manager_record, started_here, process_handle = _ensure_manager(
         context, verbose=verbose
     )
-    reuse_enabled = bool(
-        context.config.get("WEFT_MANAGER_REUSE_ENABLED", True)
-    )
+    reuse_enabled = bool(context.config.get("WEFT_MANAGER_REUSE_ENABLED", True))
 
     try:
         if verbose:
@@ -846,9 +844,7 @@ def _run_spec_via_manager(
     manager_record, started_here, process_handle = _ensure_manager(
         context, verbose=verbose
     )
-    reuse_enabled = bool(
-        context.config.get("WEFT_MANAGER_REUSE_ENABLED", True)
-    )
+    reuse_enabled = bool(context.config.get("WEFT_MANAGER_REUSE_ENABLED", True))
 
     try:
         _enqueue_taskspec(context, manager_record, spec, None)

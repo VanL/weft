@@ -59,7 +59,9 @@ def _build_manager_spec(context: WeftContext, tid: str, name: str) -> TaskSpec:
     return TaskSpec.model_validate(spec_dict, context={"auto_expand": True})
 
 
-def _wait_for_registry(context: WeftContext, tid: str, timeout: float = 5.0) -> dict[str, Any] | None:
+def _wait_for_registry(
+    context: WeftContext, tid: str, timeout: float = 5.0
+) -> dict[str, Any] | None:
     queue = Queue(
         WEFT_WORKERS_REGISTRY_QUEUE,
         db_path=str(context.database_path),
@@ -120,7 +122,9 @@ def _spawn_manager_subprocess(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Launch a standalone Weft Manager process")
+    parser = argparse.ArgumentParser(
+        description="Launch a standalone Weft Manager process"
+    )
     parser.add_argument(
         "--context",
         type=Path,
@@ -148,8 +152,12 @@ def main(argv: list[str] | None = None) -> int:
     registry_record = _wait_for_registry(context, tid)
 
     inbox = manager_spec.io.inputs.get("inbox", f"worker.{tid}.{QUEUE_INBOX_SUFFIX}")
-    ctrl_in = manager_spec.io.control.get("ctrl_in", f"worker.{tid}.{QUEUE_CTRL_IN_SUFFIX}")
-    ctrl_out = manager_spec.io.control.get("ctrl_out", f"worker.{tid}.{QUEUE_CTRL_OUT_SUFFIX}")
+    ctrl_in = manager_spec.io.control.get(
+        "ctrl_in", f"worker.{tid}.{QUEUE_CTRL_IN_SUFFIX}"
+    )
+    ctrl_out = manager_spec.io.control.get(
+        "ctrl_out", f"worker.{tid}.{QUEUE_CTRL_OUT_SUFFIX}"
+    )
 
     print("Manager launched")
     print(f"  TID: {tid}")

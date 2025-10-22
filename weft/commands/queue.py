@@ -12,10 +12,10 @@ import io
 import json
 import os
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
-from typing import cast
+from typing import Any, cast
 
 from simplebroker import commands as sb_commands
 from simplebroker._timestamp import TimestampGenerator
@@ -54,7 +54,9 @@ def _context(spec_context: str | None = None) -> WeftContext:
     return build_context(spec_context=os.getcwd())
 
 
-def _run_simplebroker_command(fn, *args, **kwargs) -> tuple[int, str, str]:
+def _run_simplebroker_command(
+    fn: Callable[..., int], *args: object, **kwargs: object
+) -> tuple[int, str, str]:
     stdout = io.StringIO()
     stderr = io.StringIO()
     with redirect_stdout(stdout), redirect_stderr(stderr):
@@ -193,7 +195,8 @@ def watch_queue(
             )
 
         found = False
-        for body, timestamp in generator:
+        for item in generator:
+            body, timestamp = cast(tuple[Any, Any], item)
             found = True
             last_timestamp = int(timestamp)
             emitted += 1
@@ -292,7 +295,8 @@ def move_command(
             iterator = dest_queue.peek_generator(with_timestamps=True)
             payload_lines: list[str] = []
             count = 0
-            for body, timestamp in iterator:
+            for item in iterator:
+                body, timestamp = cast(tuple[Any, Any], item)
                 if json_output:
                     payload_lines.append(
                         json.dumps(

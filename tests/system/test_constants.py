@@ -255,7 +255,9 @@ class TestLoadConfig:
 
         with patch.dict(os.environ, {"WEFT_MANAGER_LIFETIME_TIMEOUT": "-1"}):
             config = load_config()
-            assert config["WEFT_MANAGER_LIFETIME_TIMEOUT"] == WEFT_MANAGER_LIFETIME_TIMEOUT
+            assert (
+                config["WEFT_MANAGER_LIFETIME_TIMEOUT"] == WEFT_MANAGER_LIFETIME_TIMEOUT
+            )
 
     def test_all_config_keys_present(self) -> None:
         """Test that all expected configuration keys are present."""

@@ -97,9 +97,7 @@ class Manager(BaseTask):
             "role": self.taskspec.metadata.get("role", "manager"),
         }
         try:
-            message_id = cast(
-                int | None, registry_queue.write(json.dumps(payload))
-            )
+            message_id = cast(int | None, registry_queue.write(json.dumps(payload)))
         except Exception:
             logger.debug("Failed to register worker", exc_info=True)
         else:
