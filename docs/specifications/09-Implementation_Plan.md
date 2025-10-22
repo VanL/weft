@@ -14,7 +14,7 @@ This document outlines the development roadmap for the Weft system, with a focus
 - [ ] Error handling and exit code mapping
 
 **CLI Command**: `weft bootstrap [--config FILE] [--recover]`
-**Dependencies**: WeftContext, WorkerTask, TaskSpec ✅
+**Dependencies**: WeftContext, Manager, TaskSpec ✅
 
 **Tests**: `tests/test_cli/test_bootstrap.py`
 - [ ] CLI argument parsing for bootstrap
@@ -22,15 +22,15 @@ This document outlines the development roadmap for the Weft system, with a focus
 - [ ] Error exit codes (0=success, 1=error)
 
 #### 0.2 Core Bootstrap Components
-**Files**: `weft/core/context.py`, `weft/core/worker.py`
+**Files**: `weft/core/context.py`, `weft/core.manager.py`
 - [ ] Implement WeftContext for directory scoping
-- [ ] Implement WorkerTask with run_forever target
+- [ ] Implement Manager with run_forever target
 - [ ] Add spawn_child method using message TID
 - [ ] Implement task registry validation
 - [ ] Add worker registration to weft.workers.registry
 - [ ] Handle control messages (STOP, PAUSE)
 
-**CLI Integration**: Bootstrap command calls WorkerTask.run()
+**CLI Integration**: Bootstrap command calls Manager.run()
 **Dependencies**: TaskSpec ✅, SimpleBroker Queue API
 
 **Tests**: `tests/test_core/test_worker.py`, `tests/test_cli_integration/test_bootstrap.py`
@@ -60,7 +60,7 @@ This document outlines the development roadmap for the Weft system, with a focus
 **Files**: `weft/commands.py`, `weft/core/tasks.py`, `weft/core/manager.py`
 
 **CLI Commands**: `weft run`, `weft status`, `weft result`
-**Dependencies**: Task, TaskManager, TaskMonitor
+**Dependencies**: Task, Client, TaskMonitor
 
 **CLI Implementation**:
 - [ ] `weft run COMMAND [--timeout N] [--wait] [--json]`
@@ -71,7 +71,7 @@ This document outlines the development roadmap for the Weft system, with a focus
 - [ ] Implement unified reservation pattern (inbox → reserved → outbox)
 - [ ] Integrate with SimpleBroker Queue API  
 - [ ] Add BaseWatcher inheritance for queue monitoring
-- [ ] Implement TaskManager for submission/querying
+- [ ] Implement Client for submission/querying
 - [ ] Implement state reporting to weft.tasks.log
 - [ ] Add recovery from reserved queue on startup
 - [ ] Implement process title management with setproctitle
@@ -79,11 +79,11 @@ This document outlines the development roadmap for the Weft system, with a focus
 - [ ] Register TID mappings to weft.tid.mappings queue
 - [ ] Update process titles on state transitions
 
-**CLI Integration**: Commands are thin wrappers around TaskManager/TaskMonitor
+**CLI Integration**: Commands are thin wrappers around Client/TaskMonitor
 
 **Tests**: `tests/test_cli/test_task_commands.py`, `tests/test_core/test_tasks.py`, `tests/test_cli_integration/test_run_status.py`
 - [ ] CLI argument parsing and validation
-- [ ] `weft run` creates tasks via TaskManager
+- [ ] `weft run` creates tasks via Client
 - [ ] `weft status` queries TaskMonitor correctly
 - [ ] Exit codes: 0=success, 1=error, 2=not found, 124=timeout
 - [ ] JSON output format consistency
@@ -128,7 +128,7 @@ This document outlines the development roadmap for the Weft system, with a focus
 - [ ] Emergency scenarios (kill failed tasks)
 
 #### 2.2 Executor and Resource Monitor
-**Files**: `weft/core/executor.py`, `weft/core/monitor.py`
+**Files**: `weft/core/executor.py`, `weft/core.resource_monitor.py`
 
 **CLI Integration**: Used by `weft run` for task execution
 
@@ -159,10 +159,10 @@ This document outlines the development roadmap for the Weft system, with a focus
 ### Phase 3: Worker Management and Queue Operations (Week 3)
 
 #### 3.1 Worker Management Commands
-**Files**: `weft/commands.py`, `weft/core/worker.py` (enhanced)
+**Files**: `weft/commands.py`, `weft/core.manager.py` (enhanced)
 
 **CLI Commands**: `weft worker start/stop/list`, `weft worker status`
-**Dependencies**: Enhanced WorkerTask, WorkerLifecycle
+**Dependencies**: Enhanced Manager, WorkerLifecycle
 
 **CLI Implementation**:
 - [ ] `weft worker start [--type TYPE] [--registry FILE]`
@@ -245,7 +245,7 @@ This document outlines the development roadmap for the Weft system, with a focus
 **Files**: `weft/commands.py`, `weft/integration/pipelines.py`, `weft/integration/templates.py`
 
 **CLI Commands**: `weft pipe`, `weft template`, `weft batch`
-**Dependencies**: PipelineBuilder, TaskTemplate, enhanced TaskManager
+**Dependencies**: PipelineBuilder, TaskTemplate, enhanced Client
 
 **CLI Implementation**:
 - [ ] `weft pipe STAGE1 "|" STAGE2 [--save-intermediate]`
@@ -388,7 +388,7 @@ weft/
 │   ├── executor.py               # Target execution (function/command)
 │   ├── monitor.py                # Resource monitoring with psutil
 │   ├── context.py                # WeftContext and directory scoping
-│   └── manager.py                # TaskManager for submission/querying
+│   └── manager.py                # Client for submission/querying
 
 ├── tools/                         # OS integration and process tools
 │   ├── __init__.py               # Tools exports
@@ -423,11 +423,11 @@ tests/                             # Test suite (mirrors module structure)
 **Core Package (`weft/core/`)**:
 - `taskspec.py`: TaskSpec data model and validation ✅
 - `tasks.py`: Task class extending SimpleBroker's MultiQueueWatcher
-- `worker.py`: WorkerTask implementation for recursive architecture
+- `worker.py`: Manager implementation for recursive architecture
 - `executor.py`: FunctionExecutor and CommandExecutor for target execution
 - `monitor.py`: ResourceMonitor using psutil for limits enforcement
 - `context.py`: WeftContext for directory-based scoping
-- `manager.py`: TaskManager for task submission and querying
+- `manager.py`: Client for task submission and querying
 
 **Tools Package (`weft/tools/`)**:
 - `process_tools.py`: Process discovery and management via OS commands
@@ -457,8 +457,8 @@ This structure follows SimpleBroker's successful patterns while organizing Weft'
 from weft import TaskSpec, Task, WeftContext
 
 # Core components
-from weft.core import TaskManager, ResourceMonitor
-from weft.core.worker import WorkerTask
+from weft.core import Client, ResourceMonitor
+from weft.core.manager import Manager
 
 # Tools for system administration
 from weft.tools import ProcessManager, TIDResolver

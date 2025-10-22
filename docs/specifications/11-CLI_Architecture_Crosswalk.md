@@ -39,7 +39,7 @@ def init(force):
 #### `weft bootstrap` 
 **Purpose**: Initialize Weft system with primordial worker
 **Dependencies**: 
-- `weft.core.worker.WorkerTask` ✅ **CRITICAL PATH**
+- `weft.core.manager.Manager` ✅ **CRITICAL PATH**
 - `weft.core.taskspec.TaskSpec` ✅ **EXISTS**
 - `weft.context.get_context` ✅ **CRITICAL PATH**
 - SimpleBroker Queue (external)
@@ -53,11 +53,11 @@ def init(force):
 def bootstrap(ctx, config, recover):
     """Start the primordial worker."""
     from weft.context import get_context
-    from weft.core.worker import WorkerTask
+    from weft.core.manager import Manager
     
     context = get_context()  # Auto-discovery
     worker_spec = create_primordial_worker_spec(config, context)
-    worker = WorkerTask(worker_spec, context=context)
+    worker = Manager(worker_spec, context=context)
     worker.run()  # Blocks until shutdown
 ```
 
@@ -70,7 +70,7 @@ def bootstrap(ctx, config, recover):
 #### `weft run` 
 **Purpose**: Execute tasks (primary user interface)
 **Dependencies**:
-- `weft.core.manager.TaskManager` ✅ **CRITICAL PATH**
+- `weft.core.manager.Client` ✅ **CRITICAL PATH**
 - `weft.core.tasks.Task` ✅ **CRITICAL PATH**
 - `weft.core.executor.FunctionExecutor` / `CommandExecutor`
 - `weft.integration.templates.TaskTemplate`
@@ -86,7 +86,7 @@ def bootstrap(ctx, config, recover):
 def run(ctx, command_args, spec, timeout, wait):
     """Execute a task."""
     context = ctx.obj['context']
-    manager = TaskManager(context)
+    manager = Client(context)
     
     if spec:
         taskspec = TaskSpec.model_validate(json.load(spec))
@@ -105,7 +105,7 @@ def run(ctx, command_args, spec, timeout, wait):
 **Purpose**: Check task status and system state
 **Dependencies**:
 - `weft.tools.observability.TaskMonitor` ✅ **CRITICAL PATH**
-- `weft.core.manager.TaskManager`
+- `weft.core.manager.Client`
 - `weft.tools.tid_tools.TIDResolver`
 
 **Implementation Location**: `weft/commands.py:status()`
@@ -138,7 +138,7 @@ def status(ctx, tid, all, json_output, watch):
 #### `weft result`
 **Purpose**: Retrieve task output
 **Dependencies**:
-- `weft.core.manager.TaskManager`
+- `weft.core.manager.Client`
 - `weft.tools.tid_tools.TIDResolver`
 - SimpleBroker Queue operations
 
@@ -178,7 +178,7 @@ def ps(failed, pattern, json_output):
 **Purpose**: Terminate tasks gracefully or forcefully
 **Dependencies**:
 - `weft.tools.process_tools.ProcessManager`
-- `weft.core.manager.TaskManager` (for graceful stop)
+- `weft.core.manager.Client` (for graceful stop)
 - `weft.tools.tid_tools.TIDResolver`
 
 #### `weft top`
@@ -186,7 +186,7 @@ def ps(failed, pattern, json_output):
 **Dependencies**:
 - `weft.tools.process_tools.ProcessManager`
 - `weft.tools.observability.TaskMonitor`
-- `weft.core.monitor.ResourceMonitor` (data source)
+- `weft.core.resource_monitor.ResourceMonitor` (data source)
 
 ---
 
@@ -195,8 +195,8 @@ def ps(failed, pattern, json_output):
 #### `weft worker`
 **Purpose**: Manage worker tasks
 **Dependencies**:
-- `weft.core.worker.WorkerTask` ✅ **CRITICAL PATH**
-- `weft.core.manager.TaskManager`
+- `weft.core.manager.Manager` ✅ **CRITICAL PATH**
+- `weft.core.manager.Client`
 - `weft.integration.templates.TaskRegistry`
 
 **Implementation Location**: `weft/commands.py:worker_group()`
@@ -274,7 +274,7 @@ def write(ctx, queue_name, message):
 **Purpose**: Task pipeline management
 **Dependencies**:
 - `weft.integration.pipelines.PipelineBuilder` ✅ **CRITICAL PATH**
-- `weft.core.manager.TaskManager`
+- `weft.core.manager.Client`
 - `weft.integration.templates.TaskTemplate`
 
 #### `weft template`
@@ -286,7 +286,7 @@ def write(ctx, queue_name, message):
 #### `weft batch`
 **Purpose**: Submit multiple tasks
 **Dependencies**:
-- `weft.core.manager.TaskManager`
+- `weft.core.manager.Client`
 - `weft.integration.templates.TaskTemplate`
 
 ---
@@ -296,9 +296,9 @@ def write(ctx, queue_name, message):
 ### Critical Path Components (Must Build First)
 1. **`weft.core.taskspec.TaskSpec`** ✅ **EXISTS**
 2. **`weft.context`** ✅ **CRITICAL PATH** - Git-like project discovery and initialization
-3. **`weft.core.worker.WorkerTask`**
+3. **`weft.core.manager.Manager`**
 4. **`weft.core.tasks.Task`**
-5. **`weft.core.manager.TaskManager`**
+5. **`weft.core.manager.Client`**
 
 ### Secondary Components (Depend on Critical Path)
 6. **`weft.tools.process_tools.ProcessManager`**
@@ -314,7 +314,7 @@ def write(ctx, queue_name, message):
 ### Phase 0: Bootstrap (Week 1)
 **Commands**: `weft bootstrap`
 **Required Components**:
-- `WorkerTask` basic implementation
+- `Manager` basic implementation
 - `WeftContext` directory scoping
 - CLI framework setup
 
@@ -338,7 +338,7 @@ def bootstrap():
 ### Phase 1: Core Task Management (Week 2)
 **Commands**: `weft run`, `weft status`, `weft result`
 **Required Components**:
-- `TaskManager` for submission/querying
+- `Client` for submission/querying
 - `Task` execution engine
 - `TaskMonitor` for status
 
@@ -351,7 +351,7 @@ def bootstrap():
 ### Phase 3: Worker Management (Week 3)
 **Commands**: `weft worker start/stop/list`
 **Required Components**:
-- Enhanced `WorkerTask` with lifecycle
+- Enhanced `Manager` with lifecycle
 - Worker registry system
 
 ### Phase 4: Queue Operations (Week 3-4)
@@ -375,11 +375,11 @@ Each CLI command must have integration tests that verify:
 1. **Component Interaction**:
 ```python
 def test_run_command_integration():
-    """Test that 'weft run' properly uses TaskManager."""
+    """Test that 'weft run' properly uses Client."""
     result = runner.invoke(cli, ['run', 'echo', 'hello'])
     assert result.exit_code == 0
     
-    # Verify TaskManager was called correctly
+    # Verify Client was called correctly
     tasks = TaskMonitor().get_all_tasks()
     assert len(tasks) == 1
     assert tasks[0]['name'].startswith('echo')
@@ -411,17 +411,17 @@ def test_all_commands_json_output():
 | Command | Module | Component | Exit Codes | JSON Support |
 |---------|--------|-----------|------------|--------------|
 | `init` | `commands.py` | `weft.context` | 0, 1 | ❌ |
-| `bootstrap` | `commands.py` | `WorkerTask` | 0, 1 | ❌ |
-| `run` | `commands.py` | `TaskManager` | 0, 1, 2 | ❌ |
+| `bootstrap` | `commands.py` | `Manager` | 0, 1 | ❌ |
+| `run` | `commands.py` | `Client` | 0, 1, 2 | ❌ |
 | `status` | `commands.py` | `TaskMonitor` | 0, 2 | ✅ |
-| `result` | `commands.py` | `TaskManager` | 0, 2, 124 | ✅ |
+| `result` | `commands.py` | `Client` | 0, 2, 124 | ✅ |
 | `list` | `commands.py` | `TaskMonitor` | 0 | ✅ |
 | `ps` | `commands.py` | `ProcessManager` | 0 | ✅ |
 | `kill` | `commands.py` | `ProcessManager` | 0, 2 | ❌ |
-| `stop` | `commands.py` | `TaskManager` | 0, 2 | ❌ |
+| `stop` | `commands.py` | `Client` | 0, 2 | ❌ |
 | `top` | `commands.py` | `ProcessManager`, `TaskMonitor` | 0, 130 | ❌ |
-| `worker start` | `commands.py` | `WorkerTask` | 0, 1 | ❌ |
-| `worker stop` | `commands.py` | `WorkerTask` | 0, 2 | ❌ |
+| `worker start` | `commands.py` | `Manager` | 0, 1 | ❌ |
+| `worker stop` | `commands.py` | `Manager` | 0, 2 | ❌ |
 | `worker list` | `commands.py` | `TaskMonitor` | 0 | ✅ |
 | `queue read` | `commands.py` | SimpleBroker | 0, 2 | ✅ |
 | `queue write` | `commands.py` | SimpleBroker | 0, 1 | ❌ |
@@ -431,7 +431,7 @@ def test_all_commands_json_output():
 | `template create` | `commands.py` | `TaskTemplate` | 0, 1 | ❌ |
 | `template list` | `commands.py` | `TaskTemplate` | 0 | ✅ |
 | `pipe` | `commands.py` | `PipelineBuilder` | 0, 1, 2 | ❌ |
-| `batch` | `commands.py` | `TaskManager` | 0, 1 | ✅ |
+| `batch` | `commands.py` | `Client` | 0, 1 | ✅ |
 
 ## Error Handling Crosswalk
 
@@ -479,8 +479,8 @@ def status(tid):
 |-----------|--------------|-------------------|
 | `TaskSpec` | `run` | Valid/invalid spec handling |
 | `Task` | `run`, `status` | Execution state tracking |
-| `TaskManager` | `run`, `status`, `result` | Submission and querying |
-| `WorkerTask` | `bootstrap`, `worker` | Lifecycle management |
+| `Client` | `run`, `status`, `result` | Submission and querying |
+| `Manager` | `bootstrap`, `worker` | Lifecycle management |
 | `ProcessManager` | `ps`, `kill`, `top` | OS integration accuracy |
 | `TaskMonitor` | `status`, `list` | State aggregation |
 | `TIDResolver` | `status`, `tid` | TID mapping consistency |

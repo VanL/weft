@@ -1,41 +1,44 @@
-# Worker Architecture: The Recursive Model
+# Manager Architecture: The Recursive Model
 
-This document details Weft's recursive architecture where Workers are themselves Tasks, using the same primitive throughout the system.
+This document details Weft's recursive architecture where Managers (formerly called WorkerTasks) are themselves Tasks, using the same primitive throughout the system. The CLI component that submits work is referred to as the **Client**. Queue names historically prefixed with `worker.` remain in use for compatibility even though the role is now called Manager.
 
-## Conceptual Model: Everything is a Task
+_Implementation status_: `Manager`, the spawn registry queue, and CLI wrappers (`weft worker start|stop|list|status`) are implemented. The `weft run` Client build now builds full `TaskSpec` payloads, mints TIDs via `generate_timestamp()`, and enqueues those specs on the manager request queue; the Manager consumes the JSON, launches the child task, and emits lifecycle events.
 
-The system uses a **recursive architecture** where Workers are Tasks that run long-lived targets. This approach provides:
-- **No special cases**: Workers follow the same lifecycle as any Task
-- **Uniform observability**: Workers appear in process listings, logs, and monitoring
-- **Uniform control**: Workers respond to the same control messages
+## Conceptual Model: Everything is a Task [WA-0]
+
+The system uses a **recursive architecture** where Managers are Tasks that run long-lived targets. This approach provides:
+- **No special cases**: Managers follow the same lifecycle as any Task
+- **Uniform observability**: Managers appear in process listings, logs, and monitoring
+- **Uniform control**: Managers respond to the same control messages
 - **Self-hosting**: The system can spawn and manage itself
 
-## Worker as Long-Running Task
+## Manager as Long-Running Task [WA-1]
 
-A Worker is simply a Task whose target function contains a `run_forever` loop:
+A Manager is simply a Task whose target function contains a `run_forever` loop:
 
 ```python
-class WorkerTask:
+class Manager:
     """A Task that spawns other Tasks - the recursive primitive."""
     
     def __init__(self, taskspec: TaskSpec):
-        # Workers ARE Tasks with their own TID
+        # Managers ARE Tasks with their own TID
         self.tid = taskspec.tid
         self.name = taskspec.name  # e.g., "worker-spawner"
         self.registry = TaskRegistry()  # Pre-loaded safe tasks
         self.stop_requested = False
         
     def run_forever(self):
-        """The target function that makes this Task a Worker."""
-        # Set process title as a worker
+        """The target function that makes this Task a Manager."""
+        # Set process title as a manager
         setproctitle(f"weft-{self.tid[-10:]}:{self.name}:listening")
         
-        # Register as active worker
-        Queue("weft.workers.registry").write({
+        # Register as active manager
+        registry_queue = Queue("weft.workers.registry")
+        registry_queue.write({
             "tid": self.tid,
             "name": self.name,
             "capabilities": list(self.registry.tasks.keys()),
-            "started_at": time.time_ns()
+            "started_at": registry_queue.generate_timestamp()
         })
         
         while not self.stop_requested:
@@ -52,39 +55,30 @@ class WorkerTask:
         self.cleanup()
 ```
 
-## TID Correlation: Message ID as Task ID
+Every message read from the manager inbox is the JSON-serialised `TaskSpec` constructed by the Client CLI. The Manager validates and deserialises the payload before handing it to the standard `Consumer` orchestration logic.
 
-A critical design decision is using the **SimpleBroker message timestamp as the Task ID**:
+## TID Correlation: Timestamp as Task ID [WA-2]
+
+The CLI generates Task IDs by calling SimpleBroker's `generate_timestamp()` helper (available on both `BrokerDB` and `Queue` objects) before enqueuing a `TaskSpec`. The same timestamp is embedded in the serialized spec and referenced throughout the task's lifecycle, ensuring end-to-end correlation.
 
 ```python
 def handle_spawn_request(self, msg: dict):
-    """Spawn a child task using message ID as TID."""
-    # The message timestamp becomes the child's TID
-    # This provides end-to-end correlation throughout the task's lifecycle
-    child_tid = str(msg["_timestamp"])  # e.g., "1837025672140161024"
+    """Spawn a child task using the pre-generated TID."""
+    child_spec = TaskSpec.model_validate_json(msg)
+    child_tid = child_spec.tid  # e.g., "1837025672140161024"
     
     # Extract spawn parameters
-    template_name = msg["task"]
-    params = msg.get("params", {})
-    
-    # Create child TaskSpec
-    child_spec = self.create_child_spec(
-        tid=child_tid,  # Message ID becomes Task ID
-        template=template_name,
-        params=params
-    )
-    
     # Spawn the child
     self.spawn_child(child_spec)
     
     # Log the spawn with correlation
-    Queue("weft.tasks.log").write({
-        "event": "task_spawned",
-        "parent_tid": self.tid,
-        "child_tid": child_tid,
-        "correlation_id": child_tid,  # Same ID everywhere
-        "template": template_name
-    })
+        Queue("weft.tasks.log").write({
+            "event": "task_spawned",
+            "parent_tid": self.tid,
+            "child_tid": child_tid,
+            "correlation_id": child_tid,
+            "taskspec": child_spec.model_dump()
+        })
 ```
 
 **Benefits of TID Correlation**:
@@ -93,7 +87,7 @@ def handle_spawn_request(self, msg: dict):
 - **Guaranteed uniqueness**: SimpleBroker ensures no timestamp collisions
 - **Audit trail**: Easy to trace a task's entire lifecycle
 
-## Bootstrap Sequence
+## Bootstrap Sequence [WA-3]
 
 The system starts with a minimal bootstrap that creates the primordial worker:
 
@@ -113,7 +107,7 @@ def bootstrap():
         name="worker-prime",
         spec=SpecSection(
             type="function",
-            function_target="weft.worker:WorkerTask.run_forever",
+            function_target="weft.worker:Manager.run_forever",
             timeout=None,  # Workers don't timeout
             limits=LimitsSection(
                 memory_mb=512,  # Conservative for a dispatcher
@@ -139,7 +133,7 @@ def bootstrap():
     prime_worker.run()  # Blocks until shutdown
 ```
 
-## Worker Hierarchy and Specialization
+## Worker Hierarchy and Specialization [WA-4]
 
 Workers can spawn other workers, creating a hierarchy:
 
@@ -175,7 +169,7 @@ class WorkerLifecycle:
             name=f"worker-{worker_type}",
             spec=SpecSection(
                 type="function",
-                function_target="weft.worker:WorkerTask.run_forever",
+                function_target="weft.worker:Manager.run_forever",
                 timeout=None  # Workers are long-lived
             ),
             io=IOSection(
@@ -368,7 +362,7 @@ class TestWorkerArchitecture:
         
     def test_worker_spawns_child(self):
         """Worker can spawn child tasks."""
-        worker = WorkerTask(worker_spec)
+        worker = Manager(worker_spec)
         child_tid = worker.spawn_child("grep", {"pattern": "test"})
         # Child appears in process list
         assert task_exists(child_tid)

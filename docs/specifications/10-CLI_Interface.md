@@ -1,10 +1,12 @@
 # CLI Interface Specification
 
-## Overview
+## Overview [CLI-0]
 
 The Weft CLI follows SimpleBroker's design philosophy: simple, intuitive commands that work with Unix pipes and require zero configuration. The CLI provides straightforward access to task management, queue operations, and system monitoring.
 
-## Design Principles
+_Implementation snapshot_: Current code implements the queue helpers (`weft/commands/queue.py`), task submission via `weft run` (`weft/commands/run.py`), and manager lifecycle helpers (`weft/commands/worker.py`). Task submission always flows through SimpleBroker queues: the CLI **Client** builds a validated `TaskSpec`, obtains a TID via `generate_timestamp()`, enqueues the JSON for the Manager, and optionally waits for completion by watching the task log/outbox queues. Additional commands described below remain planned.
+
+## Design Principles [CLI-0.1]
 
 1. **Zero Configuration** - Works immediately with `.broker.db` in current directory
 2. **Simple Verbs** - Use familiar commands: run, status, result, list
@@ -13,13 +15,13 @@ The Weft CLI follows SimpleBroker's design philosophy: simple, intuitive command
 5. **Exit Codes** - Meaningful codes for scripting (0=success, 1=error, 2=not found)
 6. **SimpleBroker Integration** - Queue operations delegate to SimpleBroker
 
-## Command Structure
+## Command Structure [CLI-0.2]
 
 ```
 weft [global-options] <command> [command-options] [arguments]
 ```
 
-## Global Options
+## Global Options [CLI-0.3]
 
 | Option | Description |
 |--------|-------------|
@@ -31,11 +33,19 @@ weft [global-options] <command> [command-options] [arguments]
 | `--version` | Show version information |
 | `--help` | Show help message |
 
-## Core Commands
+## Core Commands [CLI-1]
 
-### Task Execution
+### Task Execution [CLI-1.1]
 
-#### `run` - Execute a task
+#### `run` - Execute a task [CLI-1.1.1]
+_Implementation today_: `weft/commands/run.py` always routes execution through the Manager. The Client:
+
+1. Collects CLI options and builds a canonical `TaskSpec` dictionary (including generated queue names and metadata).
+2. Validates it locally with `TaskSpec.model_validate(...)` so user errors fail fast.
+3. Obtains a TID by calling `generate_timestamp()` on the SimpleBroker database or queue.
+4. Serialises the `TaskSpec` to JSON and enqueues it on the manager request queue.
+
+If `--wait` (current default) is provided the Client then tails `weft.tasks.log` and the task outbox queue until it observes a terminal event, streaming output as it arrives. When `--no-wait` is implemented it will simply enqueue the request, report the TID, and return; the Manager is unaware of the distinction.
 
 ```bash
 # Run a command
@@ -67,44 +77,37 @@ weft run --memory 512 --cpu 50 heavy-task
 - `--wait` - Wait for completion before returning
 
 **Exit codes:**
-- `0` - Task started successfully (or completed if --wait)
-- `1` - Failed to start task
-- `2` - Invalid arguments or spec
+- `0` - TaskSpec enqueued successfully (or completed if `--wait`)
+- `1` - Worker unavailable or enqueue failure
+- `2` - Invalid arguments or TaskSpec JSON
 
-### Task Monitoring
+> **Note:** Template shortcuts (for example `weft run git-clone ...`) and additional convenience flags remain planned; today only direct command/function/spec submission is implemented.
 
-#### `status` - Check task status
+### Task Monitoring [CLI-1.2]
+
+#### `status` - Broker status snapshot [CLI-1.2.1]
+
+_Implementation today_: `weft status` surfaces SimpleBroker's `--status` metrics for the active project database. The command queries the broker directly and formats the response itself so additional Weft-specific diagnostics can be layered in later. Task-level filtering remains planned.
 
 ```bash
-# Single task
-weft status T1837025672140161024
+# Default human-readable output
+weft status
 
-# Short TID
-weft status 0161024
-
-# All tasks
-weft status --all
-
-# Filter by status
-weft status --running
-weft status --failed
-weft status --completed
-
-# JSON output
+# JSON payload for scripting
 weft status --json
 
-# Watch mode
-weft status --watch
+# Inspect a different context directory
+weft status --context /path/to/project
 ```
 
+**Output fields:**
+- `total_messages` – Total messages across all queues
+- `last_timestamp` – Highest SimpleBroker timestamp observed (text output also shows the relative age)
+- `db_size` – Size of the broker database file in bytes (text output also shows a human-friendly unit)
+
 **Options:**
-- `--all` - Show all tasks
-- `--running` - Show only running tasks
-- `--failed` - Show only failed tasks
-- `--completed` - Show only completed tasks
-- `--json` - Output as JSON
-- `--watch` - Continuous monitoring mode
-- `-t, --timestamps` - Include timestamps
+- `--json` – Emit the payload as JSON
+- `--context PATH` – Resolve the Weft project from a specific directory
 
 #### `result` - Get task output
 
@@ -199,6 +202,8 @@ weft retry T1837025672140161024 --timeout 60
 
 #### `recover` - Recover from reserved queue
 
+_Implementation status_: Not yet implemented; manual queue commands must be used for recovery today.
+
 ```bash
 # Inspect reserved queue
 weft recover T1837025672140161024 --inspect
@@ -215,6 +220,8 @@ weft recover T1837025672140161024 --abandon
 Direct queue access using SimpleBroker commands:
 
 #### `queue` - Queue operations
+
+_Implementation_: Implemented via `weft/commands/queue.py` (read, write, peek, move, list, watch).
 
 ```bash
 # Read from queue
@@ -240,22 +247,42 @@ These commands delegate directly to SimpleBroker's Queue API.
 
 ## Worker Management
 
-#### `worker` - Manage worker tasks
+The `worker` commands manage long-lived Manager instances (Spec: [WA-0]–[WA-4]). The naming of the CLI command remains `worker` for compatibility, even though the runtime role is now called Manager.
+
+#### `worker start` – launch a Manager
 
 ```bash
-# Start a worker
-weft worker start
-weft worker start --type unix-executor
-weft worker start --registry safe-tasks.json
+# Launch a worker from TaskSpec JSON (runs in background by default)
+weft worker start worker.json
 
-# Stop a worker
+# Run the worker in the foreground (Ctrl+C to stop)
+weft worker start worker.json --foreground
+```
+
+#### `worker stop` – request a worker shutdown
+
+```bash
+# Gracefully stop the worker
 weft worker stop W1837025672140161024
 
-# List workers
-weft worker list
+# Force terminate after timeout
+weft worker stop W1837025672140161024 --force --timeout 2
+```
 
-# Worker status
+#### `worker list` – view registered workers
+
+```bash
+weft worker list
+weft worker list --json
+```
+
+#### `worker status` – inspect a specific worker
+
+```bash
 weft worker status W1837025672140161024
+weft worker status W1837025672140161024 --json
+
+All worker subcommands accept `--context PATH` to target a specific project directory when automatic discovery is insufficient.
 ```
 
 #### `bootstrap` - System initialization
@@ -272,6 +299,8 @@ weft bootstrap --recover
 ```
 
 ## Process Management
+
+_Implementation status_: `ps`, `tid`, `top`, and related tooling remain to be implemented.
 
 #### `ps` - List weft processes
 
@@ -603,7 +632,7 @@ def run(ctx, command_args, spec, timeout, memory, cpu, wait):
         )
     
     # Submit task
-    task_manager = TaskManager(context)
+    task_manager = Client(context)
     tid = task_manager.submit(taskspec)
     
     if wait:

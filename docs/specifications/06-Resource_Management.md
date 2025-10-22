@@ -2,9 +2,12 @@
 
 This document covers resource monitoring, limit enforcement, and comprehensive error handling strategies.
 
-## Resource Management
+_Implementation snapshot_: `weft/core.resource_monitor.py` and `TaskRunner` provide psutil-based measurements and limit enforcement. The specialised manager classes illustrated below are design references and are not yet implemented as standalone components.
 
-### 1. Memory Management
+## Resource Management [RM-0]
+
+### 1. Memory Management [RM-1]
+_Implementation status_: Memory monitoring and limit checking are handled generically in `PsutilResourceMonitor.check_limits`; dedicated `MemoryManager` helpers are not yet present.
 ```python
 class MemoryManager:
     def check_limit(self, current_mb: float, limit_mb: int) -> bool
@@ -17,7 +20,8 @@ class MemoryManager:
 - Hard limit: Kill at 100%
 - Grace period: 5 seconds between soft and hard
 
-### 2. CPU Management
+### 2. CPU Management [RM-2]
+_Implementation status_: CPU limit evaluation leverages the rolling average in `PsutilResourceMonitor`; throttling strategies (nice/renice, cgroups) remain future work.
 ```python
 class CPUManager:
     def calculate_usage(self, pid: int) -> float
@@ -30,7 +34,8 @@ class CPUManager:
 - Sustained violation: 5 consecutive over-limit samples
 - Throttling via nice/renice or cgroups
 
-### 3. File Descriptor Management
+### 3. File Descriptor Management [RM-3]
+_Implementation status_: `PsutilResourceMonitor` gathers open file counts and enforces configured limits. Cleanup routines are TODO.
 ```python
 class FDManager:
     def count_open_fds(self, pid: int) -> int
@@ -38,7 +43,8 @@ class FDManager:
     def cleanup_on_exit(self, pid: int) -> None
 ```
 
-### 4. Network Connection Management
+### 4. Network Connection Management [RM-4]
+_Implementation status_: Connection counts are monitored via psutil; proactive limiting/closure logic is not yet implemented.
 ```python
 class NetworkManager:
     def count_connections(self, pid: int) -> int
@@ -46,9 +52,10 @@ class NetworkManager:
     def close_idle_connections(self, pid: int, idle_seconds: int) -> None
 ```
 
-## Resource Monitoring Implementation
+## Resource Monitoring Implementation [RM-5]
 
-### Default psutil-Based Monitor
+### Default psutil-Based Monitor [RM-5.1]
+_Implementation_: `PsutilResourceMonitor` in `weft/core.resource_monitor.py` corresponds to this section and is used by `TaskRunner`.
 
 ```python
 class ResourceMonitor:
@@ -60,6 +67,7 @@ class ResourceMonitor:
         self.process = None
         self.history = []
         self.max_history = 100
+        self.metrics_queue = Queue("weft.metrics")
         
     def start_monitoring(self, pid: int) -> None:
         """Begin monitoring the specified process."""
@@ -97,7 +105,7 @@ class ResourceMonitor:
                 connections = 0
             
             metrics = ResourceMetrics(
-                timestamp=time.time_ns(),
+                timestamp=self.metrics_queue.generate_timestamp(),
                 memory_mb=memory_mb,
                 cpu_percent=cpu_percent,
                 open_files=open_fds,
@@ -186,7 +194,7 @@ class ResourceMonitor:
             return ResourceMetrics()
         
         return ResourceMetrics(
-            timestamp=time.time_ns(),
+            timestamp=self.metrics_queue.generate_timestamp(),
             memory_mb=max(m.memory_mb for m in self.history),
             cpu_percent=max(m.cpu_percent for m in self.history),
             open_files=max(m.open_files for m in self.history),

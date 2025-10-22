@@ -470,10 +470,13 @@ class TestProperties:
 ### Test Fixtures (`tests/fixtures/`)
 ```python
 # taskspecs.py
+from simplebroker import Queue
+
 def create_minimal_taskspec() -> TaskSpec:
     """Create minimal valid TaskSpec for testing."""
+    tid_queue = Queue("tests.generated.tids")
     return TaskSpec(
-        tid=str(time.time_ns()),
+        tid=str(tid_queue.generate_timestamp()),
         name="test-task",
         version="1.0",
         spec=SpecSection(
@@ -625,7 +628,7 @@ def is_valid_transition(old_status: str, new_status: str) -> bool:
     """Check if state transition is valid."""
     valid_transitions = {
         "created": {"spawning", "failed", "cancelled"},
-        "spawning": {"running", "failed", "timeout", "cancelled", "killed"},
+        "spawning": {"running", "completed", "failed", "timeout", "cancelled", "killed"},
         "running": {"completed", "failed", "timeout", "cancelled", "killed"},
     }
     

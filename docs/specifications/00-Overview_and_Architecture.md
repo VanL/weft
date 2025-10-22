@@ -37,7 +37,7 @@ SimpleBroker provides features that align with the ephemeral task model:
 │            (CLI, API, Programmatic)             │
 ├─────────────────────────────────────────────────┤
 │                Task Orchestration               │
-│         (TaskManager, Scheduler, Pool)          │
+│         (Client, Scheduler, Pool)          │
 ├─────────────────────────────────────────────────┤
 │                  Task Execution                 │
 │        (Task - Universal Primitive)             │

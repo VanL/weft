@@ -2,11 +2,15 @@
 
 This document details how Weft leverages SimpleBroker's features, avoiding reimplementation while building on a solid foundation.
 
-## SimpleBroker Features Leveraged by Weft
+_Implementation overview_: Queue operations are surfaced through `weft/commands/queue.py`, and runtime queue consumption is handled by `weft/core/tasks/multiqueue_watcher.py` / `weft/core/tasks/base.py`.
+
+## SimpleBroker Features Leveraged by Weft [SB-0]
 
 This section documents SimpleBroker features that Weft uses directly, avoiding reimplementation:
 
-### Queue Operations (via SimpleBroker Queue API)
+### Queue Operations (via SimpleBroker Queue API) [SB-0.1]
+
+_Implementation_: CLI helpers in `weft/commands/queue.py` call `Queue.write/read/peek/move`, mirroring the patterns shown here.
 
 ```python
 from simplebroker import Queue, QueueWatcher
@@ -27,7 +31,9 @@ queue.has_pending(since=ts)    # Check for messages newer than timestamp
 queue.stream_messages()        # Generator for continuous reading
 ```
 
-### Message IDs and Timestamps
+### Message IDs and Timestamps [SB-0.2]
+
+_Implementation_: `TaskSpec.tid` and TID utilities in `weft/helpers.py` rely on the SimpleBroker timestamp IDs.
 
 SimpleBroker automatically assigns unique 64-bit timestamp IDs to every message:
 - **Format**: High 52 bits (microseconds) + Low 12 bits (counter)
@@ -35,7 +41,9 @@ SimpleBroker automatically assigns unique 64-bit timestamp IDs to every message:
 - **Natural ordering**: IDs sort chronologically
 - **Extraction**: Use message `timestamp` field from JSON output
 
-### Safe Patterns Built into SimpleBroker
+### Safe Patterns Built into SimpleBroker [SB-0.3]
+
+_Implementation_: `BaseTask._apply_reserved_policy` and `weft/commands/queue.move_command` use `move_one/move_many` for reservation patterns. Peek/delete flows are exercised via queue helpers.
 
 1. **Move for Reservation** (SimpleBroker provides atomically):
 ```python
@@ -58,7 +66,9 @@ result = queue.read(json_output=True)
 # Returns: {"message": "content", "timestamp": 1837025672140161024}
 ```
 
-### QueueWatcher for Monitoring
+### QueueWatcher for Monitoring [SB-0.4]
+
+_Implementation_: `MultiQueueWatcher` (`weft/core/tasks/multiqueue_watcher.py`) wraps QueueWatcher primitives and exposes per-mode handlers.
 
 SimpleBroker provides QueueWatcher - Weft uses this directly:
 
@@ -252,7 +262,7 @@ def initialize_project(root_path: Optional[Path] = None, force: bool = False) ->
     try:
         # Import SimpleBroker's validation functions
         from simplebroker.cli import validate_database_path
-        from simplebroker.db import _validate_queue_name_cached
+        from simplebroker.db import BrokerDB, _validate_queue_name_cached
         
         # Validate database path using SimpleBroker's security checks
         validate_database_path(str(db_path), str(root))
@@ -266,10 +276,12 @@ def initialize_project(root_path: Optional[Path] = None, force: bool = False) ->
     (weft_dir / "outputs").mkdir(exist_ok=True, mode=0o700)
     (weft_dir / "logs").mkdir(exist_ok=True, mode=0o700)
     
-    # Create initial configuration
+    # Create initial configuration with a SimpleBroker-generated timestamp
+    with BrokerDB(str(db_path)) as db:
+        created_ts = db.generate_timestamp()
     config = {
         "version": "1.0",
-        "created": time.time_ns(),
+        "created": created_ts,
         "project_name": root.name
     }
     config_path = weft_dir / "config.json"

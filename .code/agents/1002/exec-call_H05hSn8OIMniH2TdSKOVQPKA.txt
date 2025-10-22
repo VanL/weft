@@ -1,0 +1,674 @@
+bringing up nodes...
+bringing up nodes...
+
+.............................F....F.F...F.....F........FFF............FE [ 33%]
+EE...................................................................... [ 66%]
+................................................................F..F..FF [ 99%]
+.                                                                        [100%]
+==================================== ERRORS ====================================
+_________________ ERROR at setup of test_manager_spawns_child __________________
+[gw6] darwin -- Python 3.13.9 /Users/van/Developer/weft/.venv/bin/python3
+
+broker_env = ('/private/var/folders/n8/9s9_46616rx83v03qymlwp3w0000gn/T/pytest-of-van/pytest-424/popen-gw6/test_manager_spawns_child0/weft-tests.db', <function broker_env.<locals>.factory at 0x10caff240>)
+unique_tid = '1761166545836891000'
+
+    @pytest.fixture
+    def manager_setup(broker_env, unique_tid):
+        db_path, make_queue = broker_env
+        inbox = f"manager.{unique_tid}.inbox"
+        ctrl_in = f"manager.{unique_tid}.ctrl_in"
+        ctrl_out = f"manager.{unique_tid}.ctrl_out"
+>       spec = make_manager_spec(unique_tid, inbox, ctrl_in, ctrl_out)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       TypeError: make_manager_spec() takes 1 positional argument but 4 were given
+
+/Users/van/Developer/weft/tests/core/test_manager.py:77: TypeError
+_______________ ERROR at setup of test_manager_registry_entries ________________
+[gw5] darwin -- Python 3.13.9 /Users/van/Developer/weft/.venv/bin/python3
+
+broker_env = ('/private/var/folders/n8/9s9_46616rx83v03qymlwp3w0000gn/T/pytest-of-van/pytest-424/popen-gw5/test_manager_registry_entries0/weft-tests.db', <function broker_env.<locals>.factory at 0x10d563920>)
+unique_tid = '1761166545864281000'
+
+    @pytest.fixture
+    def manager_setup(broker_env, unique_tid):
+        db_path, make_queue = broker_env
+        inbox = f"manager.{unique_tid}.inbox"
+        ctrl_in = f"manager.{unique_tid}.ctrl_in"
+        ctrl_out = f"manager.{unique_tid}.ctrl_out"
+>       spec = make_manager_spec(unique_tid, inbox, ctrl_in, ctrl_out)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       TypeError: make_manager_spec() takes 1 positional argument but 4 were given
+
+/Users/van/Developer/weft/tests/core/test_manager.py:77: TypeError
+_____________ ERROR at setup of test_manager_respects_supplied_tid _____________
+[gw6] darwin -- Python 3.13.9 /Users/van/Developer/weft/.venv/bin/python3
+
+broker_env = ('/private/var/folders/n8/9s9_46616rx83v03qymlwp3w0000gn/T/pytest-of-van/pytest-424/popen-gw6/test_manager_respects_supplied0/weft-tests.db', <function broker_env.<locals>.factory at 0x10cafe980>)
+unique_tid = '1761166545864521000'
+
+    @pytest.fixture
+    def manager_setup(broker_env, unique_tid):
+        db_path, make_queue = broker_env
+        inbox = f"manager.{unique_tid}.inbox"
+        ctrl_in = f"manager.{unique_tid}.ctrl_in"
+        ctrl_out = f"manager.{unique_tid}.ctrl_out"
+>       spec = make_manager_spec(unique_tid, inbox, ctrl_in, ctrl_out)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       TypeError: make_manager_spec() takes 1 positional argument but 4 were given
+
+/Users/van/Developer/weft/tests/core/test_manager.py:77: TypeError
+=================================== FAILURES ===================================
+_________________________ test_worker_start_and_status _________________________
+[gw2] darwin -- Python 3.13.9 /Users/van/Developer/weft/.venv/bin/python3
+
+workdir = PosixPath('/private/var/folders/n8/9s9_46616rx83v03qymlwp3w0000gn/T/pytest-of-van/pytest-424/popen-gw2/test_worker_start_and_status0')
+
+    def test_worker_start_and_status(workdir):
+        spec_path, tid, context_root = _write_worker_spec(workdir, auto_stop=True)
+    
+        rc, out, err = run_cli(
+            "worker",
+            "start",
+            spec_path,
+            "--foreground",
+            cwd=workdir,
+        )
+        assert rc == 0
+        assert out == ""
+        assert err == ""
+    
+        rc, out, err = run_cli(
+            "worker",
+            "list",
+            "--json",
+            "--context",
+            context_root,
+            cwd=workdir,
+        )
+        assert rc == 0
+        assert err == ""
+        records = json.loads(out or "[]")
+>       assert any(
+            record.get("tid") == tid and record.get("status") == "stopped"
+            for record in records
+        )
+E       assert False
+E        +  where False = any(<generator object test_worker_start_and_status.<locals>.<genexpr> at 0x1097f7ca0>)
+
+/Users/van/Developer/weft/tests/cli/test_cli_worker.py:78: AssertionError
+_________________________ test_cli_run_command_inline __________________________
+[gw6] darwin -- Python 3.13.9 /Users/van/Developer/weft/.venv/bin/python3
+
+workdir = PosixPath('/private/var/folders/n8/9s9_46616rx83v03qymlwp3w0000gn/T/pytest-of-van/pytest-424/popen-gw6/test_cli_run_command_inline0')
+
+    def test_cli_run_command_inline(workdir) -> None:
+>       rc, out, err = run_cli(
+            "run",
+            "--",
+            sys.executable,
+            str(PROCESS_SCRIPT),
+            "--result",
+            "cmd-output",
+            cwd=workdir,
+        )
+
+/Users/van/Developer/weft/tests/cli/test_cli_run.py:35: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/Users/van/Developer/weft/tests/conftest.py:104: in run_cli
+    completed = subprocess.run(
+/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/subprocess.py:556: in run
+    stdout, stderr = process.communicate(input, timeout=timeout)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/subprocess.py:1222: in communicate
+    stdout, stderr = self._communicate(input, endtime, timeout)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/subprocess.py:2129: in _communicate
+    self._check_timeout(endtime, orig_timeout, stdout, stderr)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <Popen: returncode: -9 args: ['/Users/van/Developer/weft/.venv/bin/python', ...>
+endtime = 226490.520194041, orig_timeout = 6.0, stdout_seq = [], stderr_seq = []
+skip_check_and_raise = False
+
+    def _check_timeout(self, endtime, orig_timeout, stdout_seq, stderr_seq,
+                       skip_check_and_raise=False):
+        """Convenience for checking if a timeout has expired."""
+        if endtime is None:
+            return
+        if skip_check_and_raise or _time() > endtime:
+>           raise TimeoutExpired(
+                    self.args, orig_timeout,
+                    output=b''.join(stdout_seq) if stdout_seq else None,
+                    stderr=b''.join(stderr_seq) if stderr_seq else None)
+E           subprocess.TimeoutExpired: Command '['/Users/van/Developer/weft/.venv/bin/python', '-m', 'weft.cli', 'run', '--', '/Users/van/Developer/weft/.venv/bin/python3', '/Users/van/Developer/weft/tests/tasks/process_target.py', '--result', 'cmd-output']' timed out after 6.0 seconds
+
+/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/subprocess.py:1269: TimeoutExpired
+___________________________ test_cli_run_reads_stdin ___________________________
+[gw5] darwin -- Python 3.13.9 /Users/van/Developer/weft/.venv/bin/python3
+
+workdir = PosixPath('/private/var/folders/n8/9s9_46616rx83v03qymlwp3w0000gn/T/pytest-of-van/pytest-424/popen-gw5/test_cli_run_reads_stdin0')
+
+    def test_cli_run_reads_stdin(workdir) -> None:
+        script = workdir / "stdin_script.py"
+        script.write_text(
+            "import sys\ndata = sys.stdin.read()\nprint(data.upper(), end='')\n",
+            encoding="utf-8",
+        )
+    
+>       rc, out, err = run_cli(
+            "run",
+            "--",
+            sys.executable,
+            str(script),
+            cwd=workdir,
+            stdin="piped data",
+        )
+
+/Users/van/Developer/weft/tests/cli/test_cli_run.py:57: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/Users/van/Developer/weft/tests/conftest.py:104: in run_cli
+    completed = subprocess.run(
+/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/subprocess.py:556: in run
+    stdout, stderr = process.communicate(input, timeout=timeout)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/subprocess.py:1222: in communicate
+    stdout, stderr = self._communicate(input, endtime, timeout)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/subprocess.py:2129: in _communicate
+    self._check_timeout(endtime, orig_timeout, stdout, stderr)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <Popen: returncode: -9 args: ['/Users/van/Developer/weft/.venv/bin/python', ...>
+endtime = 226490.720201916, orig_timeout = 6.0, stdout_seq = [], stderr_seq = []
+skip_check_and_raise = False
+
+    def _check_timeout(self, endtime, orig_timeout, stdout_seq, stderr_seq,
+                       skip_check_and_raise=False):
+        """Convenience for checking if a timeout has expired."""
+        if endtime is None:
+            return
+        if skip_check_and_raise or _time() > endtime:
+>           raise TimeoutExpired(
+                    self.args, orig_timeout,
+                    output=b''.join(stdout_seq) if stdout_seq else None,
+                    stderr=b''.join(stderr_seq) if stderr_seq else None)
+E           subprocess.TimeoutExpired: Command '['/Users/van/Developer/weft/.venv/bin/python', '-m', 'weft.cli', 'run', '--', '/Users/van/Developer/weft/.venv/bin/python3', '/private/var/folders/n8/9s9_46616rx83v03qymlwp3w0000gn/T/pytest-of-van/pytest-424/popen-gw5/test_cli_run_reads_stdin0/stdin_script.py']' timed out after 6.0 seconds
+
+/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/subprocess.py:1269: TimeoutExpired
+_________________________ test_cli_run_function_inline _________________________
+[gw7] darwin -- Python 3.13.9 /Users/van/Developer/weft/.venv/bin/python3
+
+workdir = PosixPath('/private/var/folders/n8/9s9_46616rx83v03qymlwp3w0000gn/T/pytest-of-van/pytest-424/popen-gw7/test_cli_run_function_inline0')
+
+    def test_cli_run_function_inline(workdir) -> None:
+>       rc, out, err = run_cli(
+            "run",
+            "--function",
+            "tests.tasks.sample_targets:echo_payload",
+            "--arg",
+            "hello",
+            cwd=workdir,
+        )
+
+/Users/van/Developer/weft/tests/cli/test_cli_run.py:20: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/Users/van/Developer/weft/tests/conftest.py:104: in run_cli
+    completed = subprocess.run(
+/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/subprocess.py:556: in run
+    stdout, stderr = process.communicate(input, timeout=timeout)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/subprocess.py:1222: in communicate
+    stdout, stderr = self._communicate(input, endtime, timeout)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/subprocess.py:2129: in _communicate
+    self._check_timeout(endtime, orig_timeout, stdout, stderr)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <Popen: returncode: -9 args: ['/Users/van/Developer/weft/.venv/bin/python', ...>
+endtime = 226491.03534375, orig_timeout = 6.0, stdout_seq = [], stderr_seq = []
+skip_check_and_raise = False
+
+    def _check_timeout(self, endtime, orig_timeout, stdout_seq, stderr_seq,
+                       skip_check_and_raise=False):
+        """Convenience for checking if a timeout has expired."""
+        if endtime is None:
+            return
+        if skip_check_and_raise or _time() > endtime:
+>           raise TimeoutExpired(
+                    self.args, orig_timeout,
+                    output=b''.join(stdout_seq) if stdout_seq else None,
+                    stderr=b''.join(stderr_seq) if stderr_seq else None)
+E           subprocess.TimeoutExpired: Command '['/Users/van/Developer/weft/.venv/bin/python', '-m', 'weft.cli', 'run', '--function', 'tests.tasks.sample_targets:echo_payload', '--arg', 'hello']' timed out after 6.0 seconds
+
+/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/subprocess.py:1269: TimeoutExpired
+____________________________ test_cli_run_spec_path ____________________________
+[gw0] darwin -- Python 3.13.9 /Users/van/Developer/weft/.venv/bin/python3
+
+workdir = PosixPath('/private/var/folders/n8/9s9_46616rx83v03qymlwp3w0000gn/T/pytest-of-van/pytest-424/popen-gw0/test_cli_run_spec_path0')
+
+    def test_cli_run_spec_path(workdir) -> None:
+        context = build_context(spec_context=workdir)
+    
+        inbox = context.queue("cli_spec.inbox", persistent=True)
+        outbox = context.queue("cli_spec.outbox", persistent=True)  # noqa: F841
+        inbox.write(json.dumps({"args": ["from-spec"]}))
+    
+        spec_path = workdir / "task.json"
+        spec_payload = {
+            "tid": "1760000000000000100",
+            "name": "cli-spec-task",
+            "version": "1.0",
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:echo_payload",
+                "weft_context": str(workdir),
+                "reserved_policy_on_stop": "keep",
+                "reserved_policy_on_error": "keep",
+            },
+            "io": {
+                "inputs": {"inbox": "cli_spec.inbox"},
+                "outputs": {"outbox": "cli_spec.outbox"},
+                "control": {"ctrl_in": "cli_spec.ctrl_in", "ctrl_out": "cli_spec.ctrl_out"},
+            },
+            "state": {"status": "created"},
+            "metadata": {},
+        }
+        spec_path.write_text(json.dumps(spec_payload, indent=2), encoding="utf-8")
+    
+>       rc, out, err = run_cli("run", "--spec", spec_path, cwd=workdir)
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+/Users/van/Developer/weft/tests/cli/test_cli_run.py:100: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/Users/van/Developer/weft/tests/conftest.py:104: in run_cli
+    completed = subprocess.run(
+/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/subprocess.py:556: in run
+    stdout, stderr = process.communicate(input, timeout=timeout)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/subprocess.py:1222: in communicate
+    stdout, stderr = self._communicate(input, endtime, timeout)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/subprocess.py:2129: in _communicate
+    self._check_timeout(endtime, orig_timeout, stdout, stderr)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <Popen: returncode: -9 args: ['/Users/van/Developer/weft/.venv/bin/python', ...>
+endtime = 226491.338968583, orig_timeout = 6.0, stdout_seq = [], stderr_seq = []
+skip_check_and_raise = False
+
+    def _check_timeout(self, endtime, orig_timeout, stdout_seq, stderr_seq,
+                       skip_check_and_raise=False):
+        """Convenience for checking if a timeout has expired."""
+        if endtime is None:
+            return
+        if skip_check_and_raise or _time() > endtime:
+>           raise TimeoutExpired(
+                    self.args, orig_timeout,
+                    output=b''.join(stdout_seq) if stdout_seq else None,
+                    stderr=b''.join(stderr_seq) if stderr_seq else None)
+E           subprocess.TimeoutExpired: Command '['/Users/van/Developer/weft/.venv/bin/python', '-m', 'weft.cli', 'run', '--spec', '/private/var/folders/n8/9s9_46616rx83v03qymlwp3w0000gn/T/pytest-of-van/pytest-424/popen-gw0/test_cli_run_spec_path0/task.json']' timed out after 6.0 seconds
+
+/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/subprocess.py:1269: TimeoutExpired
+_________________________ test_cmd_status_json_output __________________________
+[gw6] darwin -- Python 3.13.9 /Users/van/Developer/weft/.venv/bin/python3
+
+tmp_path = PosixPath('/private/var/folders/n8/9s9_46616rx83v03qymlwp3w0000gn/T/pytest-of-van/pytest-424/popen-gw6/test_cmd_status_json_output0')
+
+    def test_cmd_status_json_output(tmp_path):
+        ctx = build_context(spec_context=tmp_path)
+        queue = ctx.queue("status.queue", persistent=True)
+        queue.write("payload")
+    
+        exit_code, payload = cmd_status(json_output=True, spec_context=tmp_path)
+    
+        assert exit_code == 0
+        assert payload is not None
+        data = json.loads(payload)
+>       assert data["total_messages"] >= 1
+               ^^^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'total_messages'
+
+tests/commands/test_status.py:54: KeyError
+____________________ test_cli_run_interactive_json_conflict ____________________
+[gw3] darwin -- Python 3.13.9 /Users/van/Developer/weft/.venv/bin/python3
+
+workdir = PosixPath('/private/var/folders/n8/9s9_46616rx83v03qymlwp3w0000gn/T/pytest-of-van/pytest-424/popen-gw3/test_cli_run_interactive_json_0')
+
+    def test_cli_run_interactive_json_conflict(workdir) -> None:
+>       rc, out, err = run_cli(
+            "run",
+            "--interactive",
+            "--json",
+            "--",
+            sys.executable,
+            "-c",
+            "print('hi')",
+            cwd=workdir,
+        )
+
+/Users/van/Developer/weft/tests/cli/test_cli_run.py:163: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/Users/van/Developer/weft/tests/conftest.py:104: in run_cli
+    completed = subprocess.run(
+/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/subprocess.py:556: in run
+    stdout, stderr = process.communicate(input, timeout=timeout)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/subprocess.py:1222: in communicate
+    stdout, stderr = self._communicate(input, endtime, timeout)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/subprocess.py:2129: in _communicate
+    self._check_timeout(endtime, orig_timeout, stdout, stderr)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <Popen: returncode: -9 args: ['/Users/van/Developer/weft/.venv/bin/python', ...>
+endtime = 226491.796103458, orig_timeout = 6.0, stdout_seq = [], stderr_seq = []
+skip_check_and_raise = False
+
+    def _check_timeout(self, endtime, orig_timeout, stdout_seq, stderr_seq,
+                       skip_check_and_raise=False):
+        """Convenience for checking if a timeout has expired."""
+        if endtime is None:
+            return
+        if skip_check_and_raise or _time() > endtime:
+>           raise TimeoutExpired(
+                    self.args, orig_timeout,
+                    output=b''.join(stdout_seq) if stdout_seq else None,
+                    stderr=b''.join(stderr_seq) if stderr_seq else None)
+E           subprocess.TimeoutExpired: Command '['/Users/van/Developer/weft/.venv/bin/python', '-m', 'weft.cli', 'run', '--interactive', '--json', '--', '/Users/van/Developer/weft/.venv/bin/python3', '-c', "print('hi')"]' timed out after 6.0 seconds
+
+/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/subprocess.py:1269: TimeoutExpired
+___________________ test_cli_run_interactive_command_streams ___________________
+[gw1] darwin -- Python 3.13.9 /Users/van/Developer/weft/.venv/bin/python3
+
+workdir = PosixPath('/private/var/folders/n8/9s9_46616rx83v03qymlwp3w0000gn/T/pytest-of-van/pytest-424/popen-gw1/test_cli_run_interactive_comma0')
+
+    def test_cli_run_interactive_command_streams(workdir) -> None:
+>       rc, out, err = run_cli(
+            "run",
+            "--interactive",
+            "--",
+            sys.executable,
+            str(INTERACTIVE_SCRIPT),
+            cwd=workdir,
+            stdin="hello\nquit\n",
+        )
+
+/Users/van/Developer/weft/tests/cli/test_cli_run.py:108: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/Users/van/Developer/weft/tests/conftest.py:104: in run_cli
+    completed = subprocess.run(
+/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/subprocess.py:556: in run
+    stdout, stderr = process.communicate(input, timeout=timeout)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/subprocess.py:1222: in communicate
+    stdout, stderr = self._communicate(input, endtime, timeout)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/subprocess.py:2129: in _communicate
+    self._check_timeout(endtime, orig_timeout, stdout, stderr)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <Popen: returncode: -9 args: ['/Users/van/Developer/weft/.venv/bin/python', ...>
+endtime = 226491.782773708, orig_timeout = 6.0
+stdout_seq = [b'echo: hello\ngoodbye\n', b'\n'], stderr_seq = []
+skip_check_and_raise = False
+
+    def _check_timeout(self, endtime, orig_timeout, stdout_seq, stderr_seq,
+                       skip_check_and_raise=False):
+        """Convenience for checking if a timeout has expired."""
+        if endtime is None:
+            return
+        if skip_check_and_raise or _time() > endtime:
+>           raise TimeoutExpired(
+                    self.args, orig_timeout,
+                    output=b''.join(stdout_seq) if stdout_seq else None,
+                    stderr=b''.join(stderr_seq) if stderr_seq else None)
+E           subprocess.TimeoutExpired: Command '['/Users/van/Developer/weft/.venv/bin/python', '-m', 'weft.cli', 'run', '--interactive', '--', '/Users/van/Developer/weft/.venv/bin/python3', '/Users/van/Developer/weft/tests/tasks/interactive_echo.py']' timed out after 6.0 seconds
+
+/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/subprocess.py:1269: TimeoutExpired
+______________________ test_cli_run_function_with_kwargs _______________________
+[gw4] darwin -- Python 3.13.9 /Users/van/Developer/weft/.venv/bin/python3
+
+workdir = PosixPath('/private/var/folders/n8/9s9_46616rx83v03qymlwp3w0000gn/T/pytest-of-van/pytest-424/popen-gw4/test_cli_run_function_with_kwa0')
+
+    def test_cli_run_function_with_kwargs(workdir) -> None:
+>       rc, out, err = run_cli(
+            "run",
+            "--function",
+            "tests.tasks.sample_targets:echo_payload",
+            "--arg",
+            "base",
+            "--kw",
+            'suffix="!"',
+            cwd=workdir,
+        )
+
+/Users/van/Developer/weft/tests/cli/test_cli_run.py:217: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/Users/van/Developer/weft/tests/conftest.py:104: in run_cli
+    completed = subprocess.run(
+/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/subprocess.py:556: in run
+    stdout, stderr = process.communicate(input, timeout=timeout)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/subprocess.py:1222: in communicate
+    stdout, stderr = self._communicate(input, endtime, timeout)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/subprocess.py:2129: in _communicate
+    self._check_timeout(endtime, orig_timeout, stdout, stderr)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <Popen: returncode: -9 args: ['/Users/van/Developer/weft/.venv/bin/python', ...>
+endtime = 226492.280593625, orig_timeout = 6.0, stdout_seq = [], stderr_seq = []
+skip_check_and_raise = False
+
+    def _check_timeout(self, endtime, orig_timeout, stdout_seq, stderr_seq,
+                       skip_check_and_raise=False):
+        """Convenience for checking if a timeout has expired."""
+        if endtime is None:
+            return
+        if skip_check_and_raise or _time() > endtime:
+>           raise TimeoutExpired(
+                    self.args, orig_timeout,
+                    output=b''.join(stdout_seq) if stdout_seq else None,
+                    stderr=b''.join(stderr_seq) if stderr_seq else None)
+E           subprocess.TimeoutExpired: Command '['/Users/van/Developer/weft/.venv/bin/python', '-m', 'weft.cli', 'run', '--function', 'tests.tasks.sample_targets:echo_payload', '--arg', 'base', '--kw', 'suffix="!"']' timed out after 6.0 seconds
+
+/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/subprocess.py:1269: TimeoutExpired
+______________________ test_cli_run_function_json_output _______________________
+[gw7] darwin -- Python 3.13.9 /Users/van/Developer/weft/.venv/bin/python3
+
+workdir = PosixPath('/private/var/folders/n8/9s9_46616rx83v03qymlwp3w0000gn/T/pytest-of-van/pytest-424/popen-gw7/test_cli_run_function_json_out0')
+
+    def test_cli_run_function_json_output(workdir) -> None:
+>       rc, out, err = run_cli(
+            "run",
+            "--function",
+            "tests.tasks.sample_targets:provide_payload",
+            "--json",
+            cwd=workdir,
+        )
+
+/Users/van/Developer/weft/tests/cli/test_cli_run.py:179: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/Users/van/Developer/weft/tests/conftest.py:104: in run_cli
+    completed = subprocess.run(
+/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/subprocess.py:556: in run
+    stdout, stderr = process.communicate(input, timeout=timeout)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/subprocess.py:1222: in communicate
+    stdout, stderr = self._communicate(input, endtime, timeout)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/subprocess.py:2129: in _communicate
+    self._check_timeout(endtime, orig_timeout, stdout, stderr)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <Popen: returncode: -9 args: ['/Users/van/Developer/weft/.venv/bin/python', ...>
+endtime = 226497.108790958, orig_timeout = 6.0, stdout_seq = [], stderr_seq = []
+skip_check_and_raise = False
+
+    def _check_timeout(self, endtime, orig_timeout, stdout_seq, stderr_seq,
+                       skip_check_and_raise=False):
+        """Convenience for checking if a timeout has expired."""
+        if endtime is None:
+            return
+        if skip_check_and_raise or _time() > endtime:
+>           raise TimeoutExpired(
+                    self.args, orig_timeout,
+                    output=b''.join(stdout_seq) if stdout_seq else None,
+                    stderr=b''.join(stderr_seq) if stderr_seq else None)
+E           subprocess.TimeoutExpired: Command '['/Users/van/Developer/weft/.venv/bin/python', '-m', 'weft.cli', 'run', '--function', 'tests.tasks.sample_targets:provide_payload', '--json']' timed out after 6.0 seconds
+
+/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/subprocess.py:1269: TimeoutExpired
+________________________ test_cli_run_command_with_env _________________________
+[gw0] darwin -- Python 3.13.9 /Users/van/Developer/weft/.venv/bin/python3
+
+workdir = PosixPath('/private/var/folders/n8/9s9_46616rx83v03qymlwp3w0000gn/T/pytest-of-van/pytest-424/popen-gw0/test_cli_run_command_with_env0')
+
+    def test_cli_run_command_with_env(workdir) -> None:
+        script = workdir / "env_script.py"
+        script.write_text(
+            "import os\nprint(os.environ['RUN_ENV_VALUE'])\n",
+            encoding="utf-8",
+        )
+    
+>       rc, out, err = run_cli(
+            "run",
+            "--env",
+            "RUN_ENV_VALUE=via-cli",
+            "--",
+            sys.executable,
+            str(script),
+            cwd=workdir,
+        )
+
+/Users/van/Developer/weft/tests/cli/test_cli_run.py:201: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/Users/van/Developer/weft/tests/conftest.py:104: in run_cli
+    completed = subprocess.run(
+/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/subprocess.py:556: in run
+    stdout, stderr = process.communicate(input, timeout=timeout)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/subprocess.py:1222: in communicate
+    stdout, stderr = self._communicate(input, endtime, timeout)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/subprocess.py:2129: in _communicate
+    self._check_timeout(endtime, orig_timeout, stdout, stderr)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <Popen: returncode: -9 args: ['/Users/van/Developer/weft/.venv/bin/python', ...>
+endtime = 226497.425099541, orig_timeout = 6.0, stdout_seq = [], stderr_seq = []
+skip_check_and_raise = False
+
+    def _check_timeout(self, endtime, orig_timeout, stdout_seq, stderr_seq,
+                       skip_check_and_raise=False):
+        """Convenience for checking if a timeout has expired."""
+        if endtime is None:
+            return
+        if skip_check_and_raise or _time() > endtime:
+>           raise TimeoutExpired(
+                    self.args, orig_timeout,
+                    output=b''.join(stdout_seq) if stdout_seq else None,
+                    stderr=b''.join(stderr_seq) if stderr_seq else None)
+E           subprocess.TimeoutExpired: Command '['/Users/van/Developer/weft/.venv/bin/python', '-m', 'weft.cli', 'run', '--env', 'RUN_ENV_VALUE=via-cli', '--', '/Users/van/Developer/weft/.venv/bin/python3', '/private/var/folders/n8/9s9_46616rx83v03qymlwp3w0000gn/T/pytest-of-van/pytest-424/popen-gw0/test_cli_run_command_with_env0/env_script.py']' timed out after 6.0 seconds
+
+/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/subprocess.py:1269: TimeoutExpired
+______________________ test_cli_run_prunes_stale_manager _______________________
+[gw4] darwin -- Python 3.13.9 /Users/van/Developer/weft/.venv/bin/python3
+
+workdir = PosixPath('/private/var/folders/n8/9s9_46616rx83v03qymlwp3w0000gn/T/pytest-of-van/pytest-424/popen-gw4/test_cli_run_prunes_stale_mana0')
+
+    def test_cli_run_prunes_stale_manager(workdir) -> None:
+        context = build_context(spec_context=workdir)
+        registry = context.queue(WEFT_WORKERS_REGISTRY_QUEUE, persistent=False)
+        stale_pid = 999_999
+        registry.write(
+            json.dumps(
+                {
+                    "tid": "1762000000000000000",
+                    "name": "stale-manager",
+                    "status": "active",
+                    "pid": stale_pid,
+                    "role": "manager",
+                    "requests": WEFT_SPAWN_REQUESTS_QUEUE,
+                }
+            )
+        )
+    
+>       rc, out, err = run_cli(
+            "run",
+            "--function",
+            "tests.tasks.sample_targets:echo_payload",
+            "--arg",
+            "hello",
+            cwd=workdir,
+        )
+
+/Users/van/Developer/weft/tests/cli/test_cli_run.py:294: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/Users/van/Developer/weft/tests/conftest.py:104: in run_cli
+    completed = subprocess.run(
+/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/subprocess.py:556: in run
+    stdout, stderr = process.communicate(input, timeout=timeout)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/subprocess.py:1222: in communicate
+    stdout, stderr = self._communicate(input, endtime, timeout)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/subprocess.py:2129: in _communicate
+    self._check_timeout(endtime, orig_timeout, stdout, stderr)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <Popen: returncode: -9 args: ['/Users/van/Developer/weft/.venv/bin/python', ...>
+endtime = 226498.442911916, orig_timeout = 6.0, stdout_seq = [], stderr_seq = []
+skip_check_and_raise = False
+
+    def _check_timeout(self, endtime, orig_timeout, stdout_seq, stderr_seq,
+                       skip_check_and_raise=False):
+        """Convenience for checking if a timeout has expired."""
+        if endtime is None:
+            return
+        if skip_check_and_raise or _time() > endtime:
+>           raise TimeoutExpired(
+                    self.args, orig_timeout,
+                    output=b''.join(stdout_seq) if stdout_seq else None,
+                    stderr=b''.join(stderr_seq) if stderr_seq else None)
+E           subprocess.TimeoutExpired: Command '['/Users/van/Developer/weft/.venv/bin/python', '-m', 'weft.cli', 'run', '--function', 'tests.tasks.sample_targets:echo_payload', '--arg', 'hello']' timed out after 6.0 seconds
+
+/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/Python.framework/Versions/3.13/lib/python3.13/subprocess.py:1269: TimeoutExpired
+__________________________ test_manager_idle_shutdown __________________________
+[gw4] darwin -- Python 3.13.9 /Users/van/Developer/weft/.venv/bin/python3
+
+broker_env = ('/private/var/folders/n8/9s9_46616rx83v03qymlwp3w0000gn/T/pytest-of-van/pytest-424/popen-gw4/test_manager_idle_shutdown0/weft-tests.db', <function broker_env.<locals>.factory at 0x10a883560>)
+unique_tid = '1761166551947378000'
+
+    def test_manager_idle_shutdown(broker_env, unique_tid) -> None:
+        db_path, make_queue = broker_env
+        inbox = f"manager.{unique_tid}.inbox"
+        ctrl_in = f"manager.{unique_tid}.ctrl_in"
+        ctrl_out = f"manager.{unique_tid}.ctrl_out"
+>       spec = make_manager_spec(
+            unique_tid,
+            inbox,
+            ctrl_in,
+            ctrl_out,
+            idle_timeout=0.2,
+        )
+E       TypeError: make_manager_spec() takes 1 positional argument but 4 positional arguments (and 1 keyword-only argument) were given
+
+/Users/van/Developer/weft/tests/core/test_manager.py:144: TypeError
+=========================== short test summary info ============================
+ERROR tests/core/test_manager.py::test_manager_spawns_child - TypeError: make...
+ERROR tests/core/test_manager.py::test_manager_registry_entries - TypeError: ...
+ERROR tests/core/test_manager.py::test_manager_respects_supplied_tid - TypeEr...
+FAILED tests/cli/test_cli_worker.py::test_worker_start_and_status - assert False
+FAILED tests/cli/test_cli_run.py::test_cli_run_command_inline - subprocess.Ti...
+FAILED tests/cli/test_cli_run.py::test_cli_run_reads_stdin - subprocess.Timeo...
+FAILED tests/cli/test_cli_run.py::test_cli_run_function_inline - subprocess.T...
+FAILED tests/cli/test_cli_run.py::test_cli_run_spec_path - subprocess.Timeout...
+FAILED tests/commands/test_status.py::test_cmd_status_json_output - KeyError:...
+FAILED tests/cli/test_cli_run.py::test_cli_run_interactive_json_conflict - su...
+FAILED tests/cli/test_cli_run.py::test_cli_run_interactive_command_streams - ...
+FAILED tests/cli/test_cli_run.py::test_cli_run_function_with_kwargs - subproc...
+FAILED tests/cli/test_cli_run.py::test_cli_run_function_json_output - subproc...
+FAILED tests/cli/test_cli_run.py::test_cli_run_command_with_env - subprocess....
+FAILED tests/cli/test_cli_run.py::test_cli_run_prunes_stale_manager - subproc...
+FAILED tests/core/test_manager.py::test_manager_idle_shutdown - TypeError: ma...
+13 failed, 201 passed, 3 errors in 18.35s

@@ -45,6 +45,9 @@ PROG_NAME: Final[str] = "weft"
 EXIT_SUCCESS: Final[int] = 0
 """Exit code for successful operations."""
 
+EXIT_ERROR: Final[int] = 1
+"""Exit code for general errors."""
+
 # ==============================================================================
 # TASKSPEC DEFAULTS
 # ==============================================================================
@@ -57,6 +60,9 @@ TASKSPEC_VERSION: Final[str] = "1.0"
 TASKSPEC_TID_LENGTH: Final[int] = 19
 """Required length for Task ID (19 digits from time.time_ns())."""
 
+TASKSPEC_TID_SHORT_LENGTH: Final[int] = 10
+"""Length for short TID display (last N digits for process titles)."""
+
 # Spec Section Defaults
 # ---------------------
 DEFAULT_FUNCTION_TARGET: Final[str] = "weft.tasks:noop"
@@ -64,18 +70,6 @@ DEFAULT_FUNCTION_TARGET: Final[str] = "weft.tasks:noop"
 
 DEFAULT_TIMEOUT: Final[float | None] = None
 """Default timeout in seconds. None means no timeout."""
-
-DEFAULT_MEMORY_LIMIT: Final[int] = 1024
-"""Default memory limit in MB (1GB)."""
-
-DEFAULT_CPU_LIMIT: Final[int | None] = None
-"""Default CPU limit in percent. None means no limit."""
-
-DEFAULT_MAX_FDS: Final[int | None] = None
-"""Default maximum number of open file descriptors. None means no limit."""
-
-DEFAULT_MAX_CONNECTIONS: Final[int | None] = None
-"""Default maximum number of network connections. None means no limit."""
 
 DEFAULT_STREAM_OUTPUT: Final[bool] = False
 """Default for streaming output. False means all output in one message."""
@@ -88,6 +82,29 @@ DEFAULT_POLLING_INTERVAL: Final[float] = 1.0
 
 DEFAULT_REPORTING_INTERVAL: Final[Literal["transition"]] = "transition"
 """Default reporting interval. Either 'poll' or 'transition'."""
+
+DEFAULT_ENABLE_PROCESS_TITLE: Final[bool] = True
+"""Default for enabling OS process title updates for observability."""
+
+DEFAULT_OUTPUT_SIZE_LIMIT_MB: Final[int] = 10
+"""Default max output size before disk spill (SimpleBroker limit)."""
+
+DEFAULT_WEFT_CONTEXT: Final[str | None] = None
+"""Default weft context directory. None means auto-discovery."""
+
+# Limits Section Defaults (moved from individual fields)
+# -------------------------------------------------------
+DEFAULT_MEMORY_MB: Final[int] = 1024
+"""Default memory limit in MB (1GB)."""
+
+DEFAULT_CPU_PERCENT: Final[int | None] = None
+"""Default CPU limit in percent. None means no limit."""
+
+DEFAULT_MAX_FDS: Final[int | None] = None
+"""Default maximum number of open file descriptors. None means no limit."""
+
+DEFAULT_MAX_CONNECTIONS: Final[int | None] = None
+"""Default maximum number of network connections. None means no limit."""
 
 # Queue Naming Conventions
 # ------------------------
@@ -102,6 +119,35 @@ QUEUE_CTRL_IN_SUFFIX: Final[str] = "ctrl_in"
 
 QUEUE_CTRL_OUT_SUFFIX: Final[str] = "ctrl_out"
 """Suffix for control output queue names (T{tid}.ctrl_out)."""
+
+QUEUE_RESERVED_SUFFIX: Final[str] = "reserved"
+"""Suffix for reserved queue names (T{tid}.reserved) used for WIP and recovery."""
+
+# Global Queue Names
+# ------------------
+WEFT_GLOBAL_LOG_QUEUE: Final[str] = "weft.tasks.log"
+"""Global queue for task state changes and events."""
+
+WEFT_TID_MAPPINGS_QUEUE: Final[str] = "weft.tid.mappings"
+"""Global queue for TID short->full mappings for process management."""
+
+WEFT_WORKERS_REGISTRY_QUEUE: Final[str] = "weft.workers.registry"
+"""Queue where workers register their capabilities and status."""
+
+WEFT_SPAWN_REQUESTS_QUEUE: Final[str] = "weft.spawn.requests"
+"""Global queue for worker spawn requests."""
+
+WEFT_MANAGER_CTRL_IN_QUEUE: Final[str] = "weft.manager.ctrl_in"
+"""Control inbox for manager lifecycle commands."""
+
+WEFT_MANAGER_CTRL_OUT_QUEUE: Final[str] = "weft.manager.ctrl_out"
+"""Control response queue for manager status messages."""
+
+WEFT_MANAGER_OUTBOX_QUEUE: Final[str] = "weft.manager.outbox"
+"""Manager output queue (e.g. informational responses)."""
+
+WORK_ENVELOPE_START: Final[dict[str, bool]] = {"__weft_start__": True}
+"""Sentinel payload the Manager uses to trigger Consumer startup."""
 
 # State Section Defaults
 # ----------------------
@@ -152,6 +198,77 @@ MIN_CONNECTIONS_LIMIT: Final[int] = 0
 """Minimum allowed network connections limit."""
 
 
+# Manager behaviour
+# ------------------
+WEFT_MANAGER_LIFETIME_TIMEOUT: Final[float] = 600.0
+"""Default idle-shutdown timeout for the Manager process (seconds)."""
+
+WEFT_MANAGER_REUSE_ENABLED: Final[bool] = True
+"""Whether a Manager started by the CLI should remain running after a task completes."""
+
+
+# ==============================================================================
+# SIMPLEBROKER INTEGRATION MAPPINGS
+# ==============================================================================
+
+# Mapping of WEFT_* environment variables to BROKER_* equivalents
+# This allows weft to use SimpleBroker configuration without conflicts
+SIMPLEBROKER_ENV_MAPPING: Final[dict[str, str]] = {
+    "WEFT_BUSY_TIMEOUT": "BROKER_BUSY_TIMEOUT",
+    "WEFT_CACHE_MB": "BROKER_CACHE_MB",
+    "WEFT_SYNC_MODE": "BROKER_SYNC_MODE",
+    "WEFT_WAL_AUTOCHECKPOINT": "BROKER_WAL_AUTOCHECKPOINT",
+    "WEFT_MAX_MESSAGE_SIZE": "BROKER_MAX_MESSAGE_SIZE",
+    "WEFT_READ_COMMIT_INTERVAL": "BROKER_READ_COMMIT_INTERVAL",
+    "WEFT_GENERATOR_BATCH_SIZE": "BROKER_GENERATOR_BATCH_SIZE",
+    "WEFT_AUTO_VACUUM": "BROKER_AUTO_VACUUM",
+    "WEFT_AUTO_VACUUM_INTERVAL": "BROKER_AUTO_VACUUM_INTERVAL",
+    "WEFT_VACUUM_THRESHOLD": "BROKER_VACUUM_THRESHOLD",
+    "WEFT_VACUUM_BATCH_SIZE": "BROKER_VACUUM_BATCH_SIZE",
+    "WEFT_VACUUM_LOCK_TIMEOUT": "BROKER_VACUUM_LOCK_TIMEOUT",
+    "WEFT_SKIP_IDLE_CHECK": "BROKER_SKIP_IDLE_CHECK",
+    "WEFT_JITTER_FACTOR": "BROKER_JITTER_FACTOR",
+    "WEFT_INITIAL_CHECKS": "BROKER_INITIAL_CHECKS",
+    "WEFT_MAX_INTERVAL": "BROKER_MAX_INTERVAL",
+    "WEFT_BURST_SLEEP": "BROKER_BURST_SLEEP",
+    "WEFT_DEFAULT_DB_LOCATION": "BROKER_DEFAULT_DB_LOCATION",
+    "WEFT_DEFAULT_DB_NAME": "BROKER_DEFAULT_DB_NAME",
+    "WEFT_PROJECT_SCOPE": "BROKER_PROJECT_SCOPE",
+}
+
+# Weft-specific defaults for SimpleBroker integration
+WEFT_SIMPLEBROKER_DEFAULTS: Final[dict[str, str]] = {
+    "BROKER_PROJECT_SCOPE": "true",
+    "BROKER_DEFAULT_DB_NAME": ".weft/broker.db",
+}
+
+
+def _translate_weft_env_vars() -> dict[str, str]:
+    """Translate WEFT_* environment variables to BROKER_* equivalents.
+
+    Returns:
+        Dict with BROKER_* keys and values from corresponding WEFT_* env vars
+    """
+    translated = {}
+
+    for weft_key, broker_key in SIMPLEBROKER_ENV_MAPPING.items():
+        env_value = os.environ.get(weft_key)
+        if env_value is not None:
+            translated[broker_key] = env_value
+
+    return translated
+
+
+def _apply_weft_simplebroker_defaults(config: dict[str, Any]) -> None:
+    """Apply weft-specific defaults for SimpleBroker integration.
+
+    Args:
+        config: Configuration dictionary to modify in-place
+    """
+    for key, default_value in WEFT_SIMPLEBROKER_DEFAULTS.items():
+        config.setdefault(key, default_value)
+
+
 def _parse_bool(value: str | None) -> bool:
     """Parse a boolean value from environment variable string.
 
@@ -159,18 +276,76 @@ def _parse_bool(value: str | None) -> bool:
         value: String value from environment variable
 
     Returns:
-        False if value is None, empty, "0", "f", "F", "false", "False", "FALSE"
+        False if value is None, null, empty, "0", "f", "F", "false", "False", "FALSE"
         True otherwise (for any non-empty string not in the false list)
     """
     if not value:
         return False
 
     # Values that should be considered False
-    false_values = {"0", "f", "F", "false", "False", "FALSE"}
-    return value not in false_values
+    false_values = {"0", "F", "NONE", "NULL", "FALSE"}
+    return value.upper() not in false_values
 
 
-def load_config() -> dict[str, Any]:
+def _load_weft_env_vars() -> dict[str, Any]:
+    """Load weft-specific configuration from environment variables.
+
+    Returns:
+        Dict with WEFT_* configuration values
+    """
+    timeout_value = WEFT_MANAGER_LIFETIME_TIMEOUT
+    raw_timeout = os.environ.get("WEFT_MANAGER_LIFETIME_TIMEOUT")
+    if raw_timeout is not None:
+        try:
+            parsed = float(raw_timeout)
+            if parsed >= 0:
+                timeout_value = parsed
+        except ValueError:
+            timeout_value = WEFT_MANAGER_LIFETIME_TIMEOUT
+
+    reuse_value = os.environ.get("WEFT_MANAGER_REUSE_ENABLED")
+    if reuse_value is None:
+        reuse_enabled = WEFT_MANAGER_REUSE_ENABLED
+    else:
+        reuse_enabled = _parse_bool(reuse_value)
+
+    return {
+        # Debug - uses flexible boolean parsing
+        "WEFT_DEBUG": _parse_bool(os.environ.get("WEFT_DEBUG")),
+        # Logging - strict "1" check for backward compatibility
+        "WEFT_LOGGING_ENABLED": os.environ.get("WEFT_LOGGING_ENABLED", "0") == "1",
+        # Comma-separated redaction paths for TaskSpec logging
+        "WEFT_REDACT_TASKSPEC_FIELDS": os.environ.get(
+            "WEFT_REDACT_TASKSPEC_FIELDS", ""
+        ),
+        "WEFT_MANAGER_LIFETIME_TIMEOUT": timeout_value,
+        "WEFT_MANAGER_REUSE_ENABLED": reuse_enabled,
+    }
+
+
+def _add_simplebroker_env_vars(config: dict[str, Any]) -> None:
+    """Add SimpleBroker configuration to weft config dictionary.
+
+    Args:
+        config: Configuration dictionary to modify in-place
+
+    This function:
+    1. Translates WEFT_* environment variables to BROKER_* equivalents
+    2. Applies weft-specific defaults for SimpleBroker integration
+    """
+    # Translate WEFT_* -> BROKER_* environment variables
+    translated_vars = _translate_weft_env_vars()
+    config.update(translated_vars)
+
+    # Apply weft defaults for SimpleBroker (weft is always project-scoped)
+    _apply_weft_simplebroker_defaults(config)
+
+    # Set SimpleBroker debug/logging settings to match weft
+    config["BROKER_DEBUG"] = config["WEFT_DEBUG"]
+    config["BROKER_LOGGING_ENABLED"] = config["WEFT_LOGGING_ENABLED"]
+
+
+def load_environment() -> dict[str, Any]:
     """Load configuration from environment variables.
 
     This function reads all Weft environment variables and returns
@@ -180,26 +355,51 @@ def load_config() -> dict[str, Any]:
     Returns:
         dict: Configuration dictionary with the following keys:
 
-        Debug:
+        Weft-specific:
             WEFT_DEBUG (bool): Enable debug output.
                 Default: False
                 Shows additional diagnostic information.
                 False for: empty, "0", "f", "F", "false", "False", "FALSE"
                 True for: any other non-empty value (e.g., "1", "true", "yes")
 
-        Logging:
             WEFT_LOGGING_ENABLED (bool): Enable logging output.
                 Default: False (disabled)
                 Set to "1" to enable logging throughout Weft.
                 When enabled, logs will be written using Python's logging module.
                 Configure logging levels and handlers in your application as needed.
 
-    """
-    config = {
-        # Debug - uses flexible boolean parsing
-        "WEFT_DEBUG": _parse_bool(os.environ.get("WEFT_DEBUG")),
-        # Logging - strict "1" check for backward compatibility
-        "WEFT_LOGGING_ENABLED": os.environ.get("WEFT_LOGGING_ENABLED", "0") == "1",
-    }
+        SimpleBroker integration:
+            BROKER_* keys translated from WEFT_* environment variables
+            for seamless SimpleBroker API integration without conflicts.
 
+    """
+    env_vars = _load_weft_env_vars()
+    _add_simplebroker_env_vars(env_vars)
+    return env_vars
+
+
+def load_config() -> dict[str, Any]:
+    """Public entry point for retrieving the current configuration.
+
+    Returns:
+        A fresh configuration dictionary containing both WEFT_* and BROKER_* keys.
+
+    Notes:
+        The returned dictionary is not cached; callers should cache it themselves
+        if repeated lookups are required.
+    """
+    return load_environment()
+
+
+def reload_environment(config: dict[str, Any]) -> dict[str, Any]:
+    """Reload the environment variables and update the configuration.
+
+    Args:
+        config: The current configuration dictionary.
+
+    Returns:
+        The updated configuration dictionary with reloaded environment variables.
+    """
+    new_env_vars = load_environment()
+    config.update(new_env_vars)
     return config

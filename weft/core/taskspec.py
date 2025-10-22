@@ -1,27 +1,34 @@
 """TaskSpec definition for Weft tasks using Pydantic.
 
-This module defines the TaskSpec structure according to the specification
-in docs/specifications/TaskSpec.md with full validation.
+Implements the configuration and state structure described in
+docs/specifications/01-Core_Components.md [CC-1] and
+docs/specifications/02-TaskSpec.md [TS-1].
 """
 
 from __future__ import annotations
 
 import json as json_module
+from collections.abc import Iterator
+from contextlib import contextmanager
+from enum import Enum
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from weft._constants import (
     DEFAULT_CLEANUP_ON_EXIT,
-    DEFAULT_CPU_LIMIT,
+    DEFAULT_CPU_PERCENT,
+    DEFAULT_ENABLE_PROCESS_TITLE,
     DEFAULT_MAX_CONNECTIONS,
     DEFAULT_MAX_FDS,
-    DEFAULT_MEMORY_LIMIT,
+    DEFAULT_MEMORY_MB,
+    DEFAULT_OUTPUT_SIZE_LIMIT_MB,
     DEFAULT_POLLING_INTERVAL,
     DEFAULT_REPORTING_INTERVAL,
     DEFAULT_STATUS,
     DEFAULT_STREAM_OUTPUT,
     DEFAULT_TIMEOUT,
+    DEFAULT_WEFT_CONTEXT,
     MAX_CPU_LIMIT,
     MIN_CONNECTIONS_LIMIT,
     MIN_CPU_LIMIT,
@@ -36,8 +43,58 @@ from weft._constants import (
 )
 
 
+class ReservedPolicy(str, Enum):
+    KEEP = "keep"
+    REQUEUE = "requeue"
+    CLEAR = "clear"
+
+
+class LimitsSection(BaseModel):
+    """Resource limits for task execution (Spec: [CC-1], [TS-1])."""
+
+    memory_mb: int | None = Field(
+        None, ge=MIN_MEMORY_LIMIT, description="Memory limit in MB"
+    )
+    cpu_percent: int | None = Field(
+        None, ge=MIN_CPU_LIMIT, le=MAX_CPU_LIMIT, description="CPU limit in percent"
+    )
+    max_fds: int | None = Field(None, ge=MIN_FDS_LIMIT)
+    max_connections: int | None = Field(None, ge=MIN_CONNECTIONS_LIMIT)
+
+    def model_post_init(self, __context: Any) -> None:
+        super().model_post_init(__context)
+        object.__setattr__(self, "_allow_mutation", False)
+
+    @contextmanager
+    def _mutations_allowed(self) -> Iterator[None]:
+        object.__setattr__(self, "_allow_mutation", True)
+        try:
+            yield
+        finally:
+            object.__setattr__(self, "_allow_mutation", False)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Prevent modification if this instance is frozen."""
+        if name.startswith("_"):
+            super().__setattr__(name, value)
+            return
+        if getattr(self, "_frozen", False) and not getattr(
+            self, "_allow_mutation", False
+        ):
+            raise AttributeError(
+                f"Cannot modify field '{name}' on frozen LimitsSection. "
+                "LimitsSection is immutable after TaskSpec creation."
+            )
+        super().__setattr__(name, value)
+
+    def _freeze(self) -> None:
+        """Mark this instance as frozen."""
+        object.__setattr__(self, "_frozen", True)
+        object.__setattr__(self, "_allow_mutation", False)
+
+
 class SpecSection(BaseModel):
-    """Spec section of TaskSpec with execution configuration."""
+    """Execution configuration (Spec: [CC-1], [TS-1])."""
 
     type: Literal["function", "command"]
     function_target: str | None = None
@@ -45,23 +102,30 @@ class SpecSection(BaseModel):
     args: list[Any] = Field(default_factory=list)
     keyword_args: dict[str, Any] = Field(default_factory=dict)
     timeout: float | None = None
-    memory_limit: int | None = Field(
-        None, ge=MIN_MEMORY_LIMIT, description="Memory limit in MB"
-    )
-    cpu_limit: int | None = Field(
-        None, ge=MIN_CPU_LIMIT, le=MAX_CPU_LIMIT, description="CPU limit in percent"
-    )
-    max_fds: int | None = Field(None, ge=MIN_FDS_LIMIT)
-    max_connections: int | None = Field(None, ge=MIN_CONNECTIONS_LIMIT)
+
+    # Resource limits (grouped for clarity) - NEW STRUCTURE
+    limits: LimitsSection = Field(default_factory=LimitsSection)
+
+    # Environment and execution behavior
     env: dict[str, str] | None = None
     working_dir: str | None = None
+    interactive: bool = False
     stream_output: bool = DEFAULT_STREAM_OUTPUT
     cleanup_on_exit: bool = DEFAULT_CLEANUP_ON_EXIT
+
+    # Monitoring configuration
     polling_interval: float = Field(
         DEFAULT_POLLING_INTERVAL, gt=0, description="Polling interval in seconds"
     )
     reporting_interval: Literal["poll", "transition"] = DEFAULT_REPORTING_INTERVAL
-    monitor_class: str = "weft.core.monitor.ResourceMonitor"  # Per spec line 30
+    monitor_class: str = "weft.core.resource_monitor.ResourceMonitor"
+
+    # NEW FIELDS from specification
+    enable_process_title: bool = DEFAULT_ENABLE_PROCESS_TITLE
+    output_size_limit_mb: int | None = DEFAULT_OUTPUT_SIZE_LIMIT_MB
+    weft_context: str | None = DEFAULT_WEFT_CONTEXT
+    reserved_policy_on_stop: ReservedPolicy = ReservedPolicy.KEEP
+    reserved_policy_on_error: ReservedPolicy = ReservedPolicy.KEEP
 
     @model_validator(mode="after")
     def validate_target(self) -> SpecSection:
@@ -76,14 +140,51 @@ class SpecSection(BaseModel):
             raise ValueError("function_target should not be set when type is 'command'")
         return self
 
+    def model_post_init(self, __context: Any) -> None:
+        super().model_post_init(__context)
+        object.__setattr__(self, "_allow_mutation", False)
+
+    @contextmanager
+    def _mutations_allowed(self) -> Iterator[None]:
+        object.__setattr__(self, "_allow_mutation", True)
+        try:
+            if hasattr(self, "limits") and hasattr(self.limits, "_mutations_allowed"):
+                with self.limits._mutations_allowed():
+                    yield
+            else:
+                yield
+        finally:
+            object.__setattr__(self, "_allow_mutation", False)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Prevent modification if this instance is frozen."""
+        if name.startswith("_"):
+            super().__setattr__(name, value)
+            return
+        if getattr(self, "_frozen", False) and not getattr(
+            self, "_allow_mutation", False
+        ):
+            raise AttributeError(
+                f"Cannot modify field '{name}' on frozen SpecSection. "
+                "SpecSection is immutable after TaskSpec creation."
+            )
+        super().__setattr__(name, value)
+
+    def _freeze(self) -> None:
+        """Mark this instance as frozen."""
+        object.__setattr__(self, "_frozen", True)
+        object.__setattr__(self, "_allow_mutation", False)
+        # Also freeze nested LimitsSection
+        if hasattr(self.limits, "_freeze"):
+            self.limits._freeze()
+
 
 class IOSection(BaseModel):
-    """IO section of TaskSpec with queue definitions.
+    """IO queue definitions (Spec: [CC-1], [TS-1], [MF-2], [MF-3]).
 
     According to the spec:
     - inputs: REQUIRED element (can be empty dict)
     - outputs: REQUIRED element, must include 'outbox'
-    - control: REQUIRED element, must include 'ctrl_in' and 'ctrl_out'
     """
 
     inputs: dict[str, str] = Field(default_factory=dict)  # REQUIRED, can be empty
@@ -99,7 +200,13 @@ class IOSection(BaseModel):
         Per spec:
         - outputs MUST include 'outbox'
         - control MUST include 'ctrl_in' and 'ctrl_out'
+
+        Note: Validation is skipped if all sections are empty (defaults will be applied later)
         """
+        # Skip validation if this is an empty default (will be populated by apply_defaults)
+        if not self.outputs and not self.control and not self.inputs:
+            return self
+
         # Outputs must have outbox
         if "outbox" not in self.outputs:
             raise ValueError("outputs must include 'outbox'")
@@ -112,9 +219,22 @@ class IOSection(BaseModel):
 
         return self
 
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Prevent modification if this instance is frozen."""
+        if hasattr(self, "_frozen") and getattr(self, "_frozen", False):
+            raise AttributeError(
+                f"Cannot modify field '{name}' on frozen IOSection. "
+                "IOSection is immutable after TaskSpec creation."
+            )
+        super().__setattr__(name, value)
+
+    def _freeze(self) -> None:
+        """Mark this instance as frozen."""
+        object.__setattr__(self, "_frozen", True)
+
 
 class StateSection(BaseModel):
-    """State section of TaskSpec with runtime state and metrics.
+    """Runtime state and metrics (Spec: [CC-1], [TS-1], [MF-1], [MF-5]).
 
     According to the spec, the following are REQUIRED:
     - status: REQUIRED (defaults to 'created')
@@ -212,11 +332,11 @@ class StateSection(BaseModel):
 
 
 class TaskSpec(BaseModel):
-    """Complete TaskSpec structure with validation.
+    """Complete TaskSpec structure with validation (Spec: [CC-1], [TS-1]).
 
     Args (via model_validate or __init__):
         auto_expand: If True (default), automatically calls apply_defaults() after initialization.
-                    Set to False to skip automatic expansion.
+            Set to False to skip automatic expansion.
     """
 
     tid: str = Field(
@@ -228,7 +348,7 @@ class TaskSpec(BaseModel):
     name: str = Field(..., min_length=1)
     description: str | None = None
     spec: SpecSection
-    io: IOSection = Field(default_factory=lambda: IOSection())
+    io: IOSection = Field(default_factory=IOSection)
     state: StateSection = Field(default_factory=lambda: StateSection())
     metadata: dict[str, Any] = Field(
         default_factory=dict
@@ -237,9 +357,42 @@ class TaskSpec(BaseModel):
     @field_validator("tid")
     @classmethod
     def validate_tid(cls, v: str) -> str:
-        """Validate TID is a {TASKSPEC_TID_LENGTH}-digit timestamp."""
+        """Validate TID is a {TASKSPEC_TID_LENGTH}-digit SimpleBroker timestamp.
+
+        Validates:
+        1. Exactly 19 digits
+        2. Represents a valid nanosecond timestamp
+        3. Within reasonable bounds (not too far in future/past)
+        """
+        import time
+
         if not v.isdigit() or len(v) != TASKSPEC_TID_LENGTH:
             raise ValueError(f"tid must be exactly {TASKSPEC_TID_LENGTH} digits")
+
+        # Convert to integer for timestamp validation
+        try:
+            tid_int = int(v)
+        except ValueError as e:
+            raise ValueError("tid must be a valid integer") from e
+
+        # Validate timestamp is within reasonable bounds
+        # SimpleBroker uses time.time_ns() which is nanoseconds since epoch
+        current_ns = time.time_ns()
+
+        # Allow timestamps from 2020 onwards (reasonable lower bound)
+        min_timestamp_ns = (
+            1577836800_000_000_000  # 2020-01-01 00:00:00 UTC in nanoseconds
+        )
+
+        # Allow timestamps up to 1 year in the future (reasonable upper bound)
+        max_timestamp_ns = current_ns + (365 * 24 * 60 * 60 * 1_000_000_000)
+
+        if tid_int < min_timestamp_ns:
+            raise ValueError(f"tid timestamp too old (before 2020): {v}")
+
+        if tid_int > max_timestamp_ns:
+            raise ValueError(f"tid timestamp too far in future: {v}")
+
         return v
 
     @model_validator(mode="after")
@@ -257,7 +410,8 @@ class TaskSpec(BaseModel):
     def model_post_init(self, __context: Any) -> None:
         """Called after the model is initialized.
 
-        Automatically applies defaults unless auto_expand=False was passed.
+        Automatically applies defaults unless auto_expand=False was passed,
+        then enforces partial immutability.
         """
         # Check if auto_expand was set in context (defaults to True)
         auto_expand = __context.get("auto_expand", True) if __context else True
@@ -265,6 +419,46 @@ class TaskSpec(BaseModel):
         # Apply defaults automatically unless disabled
         if auto_expand:
             self.apply_defaults()
+
+        # Enforce partial immutability after initialization
+        self._freeze_spec()
+
+    def _freeze_spec(self) -> None:
+        """Make spec and io sections immutable after TaskSpec creation.
+
+        This implements the partial immutability design pattern where:
+        - tid, spec and io sections become frozen after initialization
+        - state and metadata remain mutable for runtime updates
+        """
+        # Mark the instance as having frozen fields
+        # This is checked in __setattr__ to prevent modification
+        object.__setattr__(self, "_frozen_fields", {"tid", "spec", "io"})
+
+        # Freeze the nested sections
+        if hasattr(self.spec, "_freeze"):
+            self.spec._freeze()
+        if hasattr(self.io, "_freeze"):
+            self.io._freeze()
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Override setattr to enforce partial immutability.
+
+        Prevents modification of frozen fields (tid, spec, io) after initialization,
+        while allowing modification of mutable fields (state, metadata, etc.).
+        """
+        # During initialization, _frozen_fields won't exist yet
+        frozen_fields: set[str] = getattr(self, "_frozen_fields", set[str]())
+
+        # If this field is frozen and we're not in initialization, prevent modification
+        if name in frozen_fields:
+            raise AttributeError(
+                f"Cannot modify immutable field '{name}'. "
+                f"Per invariant I{1 if name == 'spec' else 2 if name == 'io' else 3}, "
+                f"'{name}' is immutable after TaskSpec creation."
+            )
+
+        # Allow normal assignment for mutable fields and during initialization
+        super().__setattr__(name, value)
 
     def get_default_queues(self) -> tuple[dict[str, str], dict[str, str]]:
         """Generate default queue names based on TID.
@@ -299,26 +493,40 @@ class TaskSpec(BaseModel):
         - The TaskSpec will be fully expanded and pass strict validation
 
         Raises:
-            ValueError: If the TaskSpec doesn't pass strict validation after defaults are applied
+            ValueError: If the TaskSpec does not pass strict validation after defaults are applied
         """
-        # === Optimized Spec Section Defaults ===
-        # Use bulk update pattern for better performance
-        spec_defaults: dict[str, Any] = {
-            "args": [],
-            "keyword_args": {},
-            "timeout": DEFAULT_TIMEOUT,
-            "memory_limit": DEFAULT_MEMORY_LIMIT,
-            "cpu_limit": DEFAULT_CPU_LIMIT,
-            "max_fds": DEFAULT_MAX_FDS,
-            "max_connections": DEFAULT_MAX_CONNECTIONS,
-            "env": {},
-            "working_dir": None,
-        }
+        with self.spec._mutations_allowed():
+            # === Optimized Spec Section Defaults ===
+            # Use bulk update pattern for better performance
+            spec_defaults: dict[str, Any] = {
+                "args": [],
+                "keyword_args": {},
+                "timeout": DEFAULT_TIMEOUT,
+                "env": {},
+                "working_dir": None,
+            }
 
-        # Apply defaults in bulk - only if field is None
-        for field, default_value in spec_defaults.items():
-            if getattr(self.spec, field, None) is None:
-                setattr(self.spec, field, default_value)
+            # Apply defaults in bulk - only if field is None
+            for field, default_value in spec_defaults.items():
+                if getattr(self.spec, field, None) is None:
+                    setattr(self.spec, field, default_value)
+
+            # === Limits Section Defaults ===
+            # Apply defaults to nested limits section - only apply non-None defaults
+            limits_defaults: dict[str, Any] = {
+                "memory_mb": DEFAULT_MEMORY_MB,
+                "cpu_percent": DEFAULT_CPU_PERCENT,
+                "max_fds": DEFAULT_MAX_FDS,
+                "max_connections": DEFAULT_MAX_CONNECTIONS,
+            }
+
+            for field, default_value in limits_defaults.items():
+                # Only set defaults if field is None AND default is not None
+                if (
+                    getattr(self.spec.limits, field, None) is None
+                    and default_value is not None
+                ):
+                    setattr(self.spec.limits, field, default_value)
 
         # === IO Section Defaults ===
         # Generate queue names if needed
@@ -460,7 +668,14 @@ class TaskSpec(BaseModel):
         # Validate forward-only transitions
         valid_transitions = {
             "created": {"spawning", "failed", "cancelled", "killed"},
-            "spawning": {"running", "failed", "timeout", "cancelled", "killed"},
+            "spawning": {
+                "running",
+                "completed",
+                "failed",
+                "timeout",
+                "cancelled",
+                "killed",
+            },
             "running": {"completed", "failed", "timeout", "cancelled", "killed"},
         }
 
@@ -665,35 +880,35 @@ class TaskSpec(BaseModel):
             and reason describes which limit was exceeded.
         """
         # Check memory limit
-        if self.spec.memory_limit and self.state.memory:
-            if self.state.memory > self.spec.memory_limit:
+        if self.spec.limits.memory_mb and self.state.memory:
+            if self.state.memory > self.spec.limits.memory_mb:
                 return (
                     True,
-                    f"Memory limit exceeded: {self.state.memory:.1f}MB > {self.spec.memory_limit}MB",
+                    f"Memory limit exceeded: {self.state.memory:.1f}MB > {self.spec.limits.memory_mb}MB",
                 )
 
         # Check CPU limit (sustained usage)
-        if self.spec.cpu_limit and self.state.cpu:
-            if self.state.cpu > self.spec.cpu_limit:
+        if self.spec.limits.cpu_percent and self.state.cpu:
+            if self.state.cpu > self.spec.limits.cpu_percent:
                 return (
                     True,
-                    f"CPU limit exceeded: {self.state.cpu}% > {self.spec.cpu_limit}%",
+                    f"CPU limit exceeded: {self.state.cpu}% > {self.spec.limits.cpu_percent}%",
                 )
 
         # Check file descriptor limit
-        if self.spec.max_fds and self.state.fds:
-            if self.state.fds > self.spec.max_fds:
+        if self.spec.limits.max_fds and self.state.fds:
+            if self.state.fds > self.spec.limits.max_fds:
                 return (
                     True,
-                    f"File descriptor limit exceeded: {self.state.fds} > {self.spec.max_fds}",
+                    f"File descriptor limit exceeded: {self.state.fds} > {self.spec.limits.max_fds}",
                 )
 
         # Check network connections limit
-        if self.spec.max_connections and self.state.net_connections:
-            if self.state.net_connections > self.spec.max_connections:
+        if self.spec.limits.max_connections and self.state.net_connections:
+            if self.state.net_connections > self.spec.limits.max_connections:
                 return (
                     True,
-                    f"Network connection limit exceeded: {self.state.net_connections} > {self.spec.max_connections}",
+                    f"Network connection limit exceeded: {self.state.net_connections} > {self.spec.limits.max_connections}",
                 )
 
         return False, None
