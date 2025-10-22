@@ -30,7 +30,7 @@ import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from simplebroker import Queue
 from weft._constants import (
@@ -87,10 +87,11 @@ class BaseTask(MultiQueueWatcher, ABC):
 
     def _interactive_handle_control(self, command: str) -> bool:
         """Hook for subclasses supporting interactive mode; default is non-interactive."""
-        try:
-            return super()._interactive_handle_control(command)  # type: ignore[attr-defined]
-        except AttributeError:
+        parent = super()
+        handler = getattr(parent, "_interactive_handle_control", None)
+        if handler is None:
             return False
+        return bool(cast(Callable[[str], bool], handler)(command))
 
     def __init__(
         self,

@@ -7,8 +7,8 @@ import sys
 from pathlib import Path
 
 from tests.conftest import run_cli
-from weft.context import build_context
 from weft._constants import WEFT_SPAWN_REQUESTS_QUEUE, WEFT_WORKERS_REGISTRY_QUEUE
+from weft.context import build_context
 
 PROCESS_SCRIPT = Path(__file__).resolve().parents[1] / "tasks" / "process_target.py"
 INTERACTIVE_SCRIPT = (

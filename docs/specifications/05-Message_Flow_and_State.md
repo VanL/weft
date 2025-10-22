@@ -2,7 +2,11 @@
 
 This document describes how messages flow through the Weft system and how state is managed through queue-based communication.
 
-_Implementation snapshot_: Reservation and control flows ([MF-2], [MF-3]) are implemented within `BaseTask`/`Consumer` (`weft/core/tasks/base.py`). Worker spawning/bootstrap flows ([MF-6], [MF-7]) and Client orchestration remain unimplemented.
+_Implementation snapshot_: Reservation and control flows ([MF-2], [MF-3]) are
+implemented within `BaseTask`/`Consumer` (`weft/core/tasks/base.py`,
+`weft/core/tasks/consumer.py`). Worker spawning and bootstrap flows ([MF-6],
+[MF-7]) are handled by the Manager (`weft/core/manager.py`) and the CLI helpers
+in `weft/commands/run.py`.
 
 ## Message Flow Patterns [MF-0]
 
@@ -15,7 +19,7 @@ User -> Client -> TaskSpec -> Queue(T{tid}.inbox) -> Task
 ```
 
 ### 2. Message Processing Flow with Reservation [MF-2]
-_Implementation_: `Consumer` (`weft/core/tasks/base.py`) moves inbox messages to reserved queues, executes work, and applies reserved policies per this flow.
+_Implementation_: `Consumer` (`weft/core/tasks/consumer.py`) moves inbox messages to reserved queues, executes work, and applies reserved policies per this flow.
 ```
 T{tid}.inbox -> move -> T{tid}.reserved -> process -> T{tid}.outbox
                               |                          |
@@ -54,7 +58,10 @@ Task3 ─┘                           |
 ```
 
 ### 6. Worker Spawn Flow [MF-6]
-_Implementation status_: Worker-driven spawning is not yet available pending completion of the recursive worker architecture.
+_Implementation_: Managers (`weft/core/manager.py`) consume spawn requests from
+`weft.spawn.requests`, validate/expand the embedded TaskSpec, launch child
+Consumers via `launch_task_process`, seed initial inbox messages when provided,
+and emit lifecycle events to `weft.tasks.log`.
 ```
 Client -> weft.spawn.requests -> Worker.inbox -> Worker validates
                                       |              |
@@ -68,16 +75,18 @@ Client -> weft.spawn.requests -> Worker.inbox -> Worker validates
 ```
 
 ### 7. Worker Bootstrap Flow [MF-7]
-_Implementation status_: Bootstrap/worker hierarchy remains a future milestone; no `Manager` implementation exists yet.
+_Implementation_: `weft run` and `weft worker start` use the helper in
+`weft/commands/run.py` to mint a manager TaskSpec, launch
+`weft.manager_process`, and wait for the manager to register itself before
+returning control to the user.
 ```
-weft (CLI) -> Create primordial TaskSpec -> Task(worker_spec).run()
-                    |                             |
-                    └─> timeout=None              └─> Manager.run_forever()
-                        target=run_forever              |
-                                                        ├─> First queue write creates DB
-                                                        ├─> Register in weft.workers.registry
-                                                        ├─> Monitor weft.spawn.requests
-                                                        └─> Spawn children as needed
+weft CLI -> build manager TaskSpec -> spawn weft.manager_process
+      |                  |                     |
+      |                  |                     ├─> Manager registers in weft.workers.registry
+      |                  |                     ├─> Begins watching weft.spawn.requests
+      |                  |                     └─> Awaits control messages on ctrl queues
+      |                  └─> Includes idle_timeout & queue bindings
+      └─> Wait for registry entry, then exit (manager keeps running)
 ```
 
 ### 8. Failure Recovery Flow

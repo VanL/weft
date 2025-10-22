@@ -49,7 +49,6 @@ dmypy.json
 .pytest_cache/
 
 # SimpleBroker specific
-*.db
 *.db-shm
 *.db-wal
 .broker.db*

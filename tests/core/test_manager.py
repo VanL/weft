@@ -7,7 +7,14 @@ import time
 
 import pytest
 
-from weft._constants import WEFT_GLOBAL_LOG_QUEUE, WEFT_WORKERS_REGISTRY_QUEUE
+from weft._constants import (
+    WEFT_GLOBAL_LOG_QUEUE,
+    WEFT_MANAGER_CTRL_IN_QUEUE,
+    WEFT_MANAGER_CTRL_OUT_QUEUE,
+    WEFT_MANAGER_OUTBOX_QUEUE,
+    WEFT_SPAWN_REQUESTS_QUEUE,
+    WEFT_WORKERS_REGISTRY_QUEUE,
+)
 from weft.core.manager import Manager
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 
@@ -29,6 +36,9 @@ def drain(queue):
 
 def make_manager_spec(
     tid: str,
+    inbox: str = WEFT_SPAWN_REQUESTS_QUEUE,
+    ctrl_in: str = WEFT_MANAGER_CTRL_IN_QUEUE,
+    ctrl_out: str = WEFT_MANAGER_CTRL_OUT_QUEUE,
     *,
     idle_timeout: float | None = None,
 ) -> TaskSpec:
@@ -44,11 +54,11 @@ def make_manager_spec(
             timeout=None,
         ),
         io=IOSection(
-            inputs={"inbox": WEFT_SPAWN_REQUESTS_QUEUE},
+            inputs={"inbox": inbox},
             outputs={"outbox": WEFT_MANAGER_OUTBOX_QUEUE},
             control={
-                "ctrl_in": WEFT_MANAGER_CTRL_IN_QUEUE,
-                "ctrl_out": WEFT_MANAGER_CTRL_OUT_QUEUE,
+                "ctrl_in": ctrl_in,
+                "ctrl_out": ctrl_out,
             },
         ),
         state=StateSection(),
@@ -133,7 +143,7 @@ def test_manager_registry_entries(manager_setup) -> None:
     assert entries and entries[0]["status"] == "active"
     manager.cleanup()
     entries = [json.loads(item) for item in drain(registry_queue)]
-    assert entries == []
+    assert entries and entries[-1]["status"] == "stopped"
 
 
 def test_manager_idle_shutdown(broker_env, unique_tid) -> None:

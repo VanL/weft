@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 
 from simplebroker import Queue
-
 from tests.conftest import run_cli
 from weft._constants import WEFT_SPAWN_REQUESTS_QUEUE, WEFT_WORKERS_REGISTRY_QUEUE
 from weft.context import build_context

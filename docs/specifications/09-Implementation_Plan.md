@@ -50,14 +50,15 @@ This document outlines the development roadmap for the Weft system, with a focus
 - [x] Add convenience methods for state management
 - [x] Optimize apply_defaults() with idempotency
 
-**Tests**: `tests/test_taskspec.py`
+**Tests**: `tests/taskspec/test_taskspec.py`
 - [x] Immutability tests (spec cannot be modified after creation)
 - [x] State transition tests (forward-only validation)
 - [x] Limits validation tests
 - [x] Convenience method tests
 
 #### 1.2 Core Task Commands and Engine
-**Files**: `weft/commands.py`, `weft/core/tasks.py`, `weft/core/manager.py`
+**Files**: `weft/commands/run.py`, `weft/commands/status.py`,
+`weft/core/tasks/base.py`, `weft/core/manager.py`
 
 **CLI Commands**: `weft run`, `weft status`, `weft result`
 **Dependencies**: Task, Client, TaskMonitor

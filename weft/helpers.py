@@ -11,6 +11,7 @@ import logging
 import math
 import os
 import shutil
+import sqlite3
 import sys
 import tempfile
 import time
@@ -18,6 +19,8 @@ from collections.abc import Sequence
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
+
+from simplebroker.db import DBConnection
 
 from weft._constants import load_config
 
@@ -203,6 +206,46 @@ def log_critical(message: str, **kwargs: Any) -> None:
         **kwargs: Additional keyword arguments for logging
     """
     send_log(message, level=logging.CRITICAL, **kwargs)
+
+
+def sqlite_wal_checkpoint_truncate(database_path: Path | str) -> None:
+    """Run ``PRAGMA wal_checkpoint(TRUNCATE);`` against *database_path*.
+
+    Uses the standard library sqlite3 module to execute the checkpoint in a
+    best-effort fashion. Any exception will be logged at DEBUG level and
+    swallowed so callers can treat this as a maintenance convenience.
+    """
+
+    db = Path(database_path)
+    if not db.exists():
+        logger.debug("Database %s does not exist; skipping WAL checkpoint", db)
+        return
+
+    try:
+        with sqlite3.connect(db) as conn:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+    except Exception:  # pragma: no cover - maintenance best effort
+        logger.debug("Failed to run WAL checkpoint on %s", db, exc_info=True)
+
+
+def simplebroker_vacuum(
+    database_path: Path | str, *, config: dict[str, Any] | None = None
+) -> None:
+    """Compact the broker database using SimpleBroker's vacuum routine."""
+
+    db_path = Path(database_path)
+    if not db_path.exists():
+        logger.debug("Database %s does not exist; skipping vacuum", db_path)
+        return
+
+    cfg = config or _config
+
+    try:
+        with DBConnection(str(db_path)) as connection:
+            broker_db = connection.get_connection(config=cfg)
+            broker_db.vacuum()
+    except Exception:  # pragma: no cover - maintenance best effort
+        logger.debug("simplebroker vacuum failed for %s", db_path, exc_info=True)
 
 
 def log_exception(message: str, **kwargs: Any) -> None:

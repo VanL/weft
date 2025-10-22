@@ -104,6 +104,7 @@ weft status --context /path/to/project
 - `total_messages` – Total messages across all queues
 - `last_timestamp` – Highest SimpleBroker timestamp observed (text output also shows the relative age)
 - `db_size` – Size of the broker database file in bytes (text output also shows a human-friendly unit)
+- JSON payload nests these under `broker` and includes a `managers` array summarising active registry entries.
 
 **Options:**
 - `--json` – Emit the payload as JSON

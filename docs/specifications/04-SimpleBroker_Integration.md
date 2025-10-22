@@ -121,19 +121,32 @@ SimpleBroker optimizations Weft inherits:
 
 **Weft Usage Pattern**:
 ```python
-# Task extends SimpleBroker's MultiQueueWatcher
-class Task(MultiQueueWatcher):
-    def __init__(self, taskspec: TaskSpec):
-        task_queues = [f"T{self.tid}.ctrl_in", f"T{self.tid}.inbox", f"T{self.tid}.reserved"]
-        queue_handlers = {
-            f"T{self.tid}.ctrl_in": self._handle_control_message,
-            f"T{self.tid}.inbox": self._handle_work_message, 
-            f"T{self.tid}.reserved": self._handle_reserved_message,
+# BaseTask composes queue configurations for MultiQueueWatcher
+class BaseTask(MultiQueueWatcher):
+    def __init__(self, taskspec: TaskSpec, db: str, config: dict[str, Any]):
+        queue_configs = {
+            self._queue_names["inbox"]: self._reserve_queue_config(
+                self._handle_work_message,
+                reserved_queue=self._queue_names["reserved"],
+            ),
+            self._queue_names["ctrl_in"]: self._peek_queue_config(
+                self._handle_control_message
+            ),
+            self._queue_names["reserved"]: self._peek_queue_config(
+                self._handle_reserved_message
+            ),
         }
-        super().__init__(queues=task_queues, queue_handlers=queue_handlers, db=db_path)
+        super().__init__(
+            queue_configs=queue_configs,
+            db=db,
+            persistent=True,
+            config=config,
+        )
 ```
 
-This eliminates custom queue monitoring code while providing sophisticated multi-queue capabilities.
+This wrapper keeps Weft’s queue policy logic in Python while delegating the
+polling, error handling, and database coordination to SimpleBroker’s
+`MultiQueueWatcher`.
 
 ### Built-in Safety Features
 

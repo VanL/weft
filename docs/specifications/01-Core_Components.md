@@ -138,7 +138,7 @@ focus on the semantics of message handling rather than process orchestration.
 ### 2.3 Specialised Task Types [CC-2.3]
 Concrete task types extend `BaseTask` to express different queue behaviours.
 
-_Implementation_: `Consumer`, `Observer`, `SelectiveConsumer`, `Monitor`, and `SamplingObserver` are implemented in `weft/core/tasks/base.py` with the queue modes shown below.
+_Implementation_: `Consumer` (`weft/core/tasks/consumer.py`), `Observer` (`weft/core/tasks/observer.py`), `SelectiveConsumer` (`weft/core/tasks/observer.py`), `Monitor` (`weft/core/tasks/monitor.py`), and `SamplingObserver` (`weft/core/tasks/monitor.py`) provide the queue modes shown below while reusing the helpers exported from `weft/core/tasks/base.py`.
 
 Interactive command sessions reuse `Consumer` with `spec.interactive=True`, streaming stdin/stdout via JSON envelopes rather than per-message execution.
 
@@ -155,8 +155,9 @@ its queue helpers (`_reserve_queue_config`, `_peek_queue_config`, `_read_queue_c
 to maintain consistency.
 
 ### 2.4 Control and State Expectations [CC-2.4]
-- **Control commands**: STOP, PAUSE, RESUME, STATUS remain mandatory. Additional
-  commands may be layered on via `_handle_control_command` overrides.
+- **Control commands**: STOP, PAUSE, RESUME, STATUS, and the health-check `PING`
+  round-trip remain mandatory. Additional commands may be layered on via
+  `_handle_control_command` overrides.
 - **State emission**: Each transition (start, completion, failure, timeout,
   reserved-policy event, etc.) must call `_report_state_change`.  Periodic
   (poll-based) reporting is still part of the roadmap even if the current
@@ -169,7 +170,9 @@ to maintain consistency.
   enforced by `BaseTask._apply_reserved_policy` and must continue to behave as
   documented in `TaskSpec`.
 
-_Implementation status_: STOP/PAUSE/RESUME/STATUS handling, state emission, and reserved policies are present in `BaseTask`. Context-aware process title formatting remains to be completed.
+_Implementation status_: STOP/PAUSE/RESUME/STATUS/PING handling, state emission,
+reserved policies, and context-aware process title formatting are implemented in
+`BaseTask`.
 
 ### 2.5 Execution Flow [CC-2.5]
 At a high level a `Consumer` (and derivatives) execute the following steps:
@@ -189,7 +192,7 @@ At a high level a `Consumer` (and derivatives) execute the following steps:
 The CLI command `weft run` already demonstrates both usage patterns: `--once`
 invokes `process_once()`, while the default mode loops until interrupted.
 
-_Implementation_: `Consumer._handle_work_message` (`weft/core/tasks/base.py`) and `cmd_run` (`weft/commands/run.py`) follow this flow.
+_Implementation_: `Consumer._handle_work_message` (`weft/core/tasks/consumer.py`) and `cmd_run` (`weft/commands/run.py`) follow this flow.
 
 ## 3. TaskRunner (weft/core/tasks/runner.py) [CC-3]
 **Purpose**: Managed wrapper around Python’s multiprocessing primitives for

@@ -92,9 +92,18 @@ no_implicit_optional = true
 warn_redundant_casts = true
 warn_unused_ignores = true
 plugins = ["pydantic.mypy"]
+exclude = "(^tests/|^simplebroker/(tests|examples)/)"
 
 [[tool.mypy.overrides]]
 module = "tests.*"
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = "simplebroker.tests.*"
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = "simplebroker.examples.*"
 ignore_errors = true
 
 [[tool.mypy.overrides]]

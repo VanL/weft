@@ -4,14 +4,32 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Mapping
+from typing import Any, cast
 
 from simplebroker import Queue
 from simplebroker.db import BrokerDB
 from weft._constants import WEFT_SPAWN_REQUESTS_QUEUE, WEFT_WORKERS_REGISTRY_QUEUE
 from weft.context import WeftContext, build_context
 from weft.helpers import format_byte_size, format_timestamp_ns_relative
+
+StatusMapping = Mapping[str, int | float | str | None]
+
+
+def _to_int(value: object) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return 0
+    return 0
 
 
 @dataclass(frozen=True)
@@ -23,12 +41,12 @@ class BrokerStatusSnapshot:
     db_size: int
 
     @classmethod
-    def from_mapping(cls, data: Mapping[str, object]) -> "BrokerStatusSnapshot":
+    def from_mapping(cls, data: StatusMapping) -> BrokerStatusSnapshot:
         """Create a snapshot from a generic mapping."""
         return cls(
-            total_messages=int(data.get("total_messages", 0) or 0),
-            last_timestamp=int(data.get("last_timestamp", 0) or 0),
-            db_size=int(data.get("db_size", 0) or 0),
+            total_messages=_to_int(data.get("total_messages")),
+            last_timestamp=_to_int(data.get("last_timestamp")),
+            db_size=_to_int(data.get("db_size")),
         )
 
     def to_dict(self) -> dict[str, int]:
@@ -80,7 +98,7 @@ def collect_status(ctx: WeftContext) -> BrokerStatusSnapshot:
     return BrokerStatusSnapshot.from_mapping(metrics)
 
 
-def _collect_manager_records(ctx: WeftContext) -> list[dict[str, object]]:
+def _collect_manager_records(ctx: WeftContext) -> list[dict[str, Any]]:
     queue = Queue(
         WEFT_WORKERS_REGISTRY_QUEUE,
         db_path=str(ctx.database_path),
@@ -88,14 +106,20 @@ def _collect_manager_records(ctx: WeftContext) -> list[dict[str, object]]:
         config=ctx.broker_config,
     )
     try:
-        records_raw = queue.peek_many(limit=1000, with_timestamps=True)
+        records_raw = cast(
+            Sequence[tuple[str, int]] | None,
+            queue.peek_many(limit=1000, with_timestamps=True),
+        )
     except Exception:
         return []
 
-    records: dict[str, dict[str, object]] = {}
-    for entry, timestamp in records_raw or []:
+    if not records_raw:
+        return []
+
+    records: dict[str, dict[str, Any]] = {}
+    for entry, timestamp in records_raw:
         try:
-            data = json.loads(entry)
+            data = cast(dict[str, Any], json.loads(entry))
         except json.JSONDecodeError:
             continue
         tid = data.get("tid")
@@ -103,12 +127,13 @@ def _collect_manager_records(ctx: WeftContext) -> list[dict[str, object]]:
             continue
         data["_timestamp"] = timestamp
         existing = records.get(tid)
-        if existing is None or existing.get("_timestamp", 0) < timestamp:
+        previous_timestamp = _to_int(existing.get("_timestamp")) if existing else -1
+        if existing is None or previous_timestamp < timestamp:
             records[tid] = data
 
-    formatted: list[dict[str, object]] = []
+    formatted: list[dict[str, Any]] = []
     for record in records.values():
-        timestamp = int(record.get("_timestamp", 0))
+        timestamp = _to_int(record.get("_timestamp"))
         record.pop("_timestamp", None)
         record["timestamp"] = timestamp
         record.setdefault("requests", WEFT_SPAWN_REQUESTS_QUEUE)
@@ -116,7 +141,7 @@ def _collect_manager_records(ctx: WeftContext) -> list[dict[str, object]]:
     return formatted
 
 
-def _format_manager_summary(records: list[dict[str, object]]) -> str:
+def _format_manager_summary(records: list[dict[str, Any]]) -> str:
     if not records:
         return "Managers: none registered"
 
@@ -128,7 +153,7 @@ def _format_manager_summary(records: list[dict[str, object]]) -> str:
         pid = record.get("pid")
         requests = record.get("requests", WEFT_SPAWN_REQUESTS_QUEUE)
         outbox = record.get("outbox", "")
-        timestamp = int(record.get("timestamp", 0))
+        timestamp = _to_int(record.get("timestamp"))
         relative_ts = format_timestamp_ns_relative(timestamp)
         ts_line = f"timestamp: {timestamp}"
         if relative_ts:
@@ -164,10 +189,7 @@ def cmd_status(
 
     if json_output:
         payload = json.dumps(
-            {
-                "broker": snapshot.to_dict(),
-                "managers": managers,
-            },
+            {"broker": snapshot.to_dict(), "managers": managers},
             ensure_ascii=False,
         )
     else:
