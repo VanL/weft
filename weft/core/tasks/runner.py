@@ -20,13 +20,13 @@ from multiprocessing.queues import Queue as MPQueue
 from typing import Any, TextIO
 
 from weft.core.resource_monitor import (
-    BaseResourceMonitor,
     ResourceMetrics,
     load_resource_monitor,
 )
 from weft.core.targets import execute_command_target, execute_function_target
 
 from .sessions import CommandSession
+
 
 @dataclass(slots=True)
 class RunnerOutcome:

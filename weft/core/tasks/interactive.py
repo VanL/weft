@@ -224,6 +224,8 @@ class InteractiveTaskMixin(ABC):
             return
 
         session = self._interactive_session
+        if session is None:
+            return
         returncode = session.returncode()
 
         current_status = self.taskspec.state.status

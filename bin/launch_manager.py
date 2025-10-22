@@ -6,14 +6,15 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import subprocess
 import sys
 import time
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from simplebroker import Queue
 from simplebroker.db import BrokerDB
-
 from weft._constants import (
     QUEUE_CTRL_IN_SUFFIX,
     QUEUE_CTRL_OUT_SUFFIX,
@@ -23,8 +24,6 @@ from weft._constants import (
 )
 from weft.context import WeftContext, build_context
 from weft.core.taskspec import TaskSpec
-
-import subprocess
 
 
 def _generate_tid(context: WeftContext) -> str:
@@ -71,14 +70,17 @@ def _wait_for_registry(context: WeftContext, tid: str, timeout: float = 5.0) -> 
     latest: dict[str, Any] | None = None
     while time.time() < deadline:
         try:
-            raw_entries = queue.peek_many(limit=1000, with_timestamps=True)
+            raw_entries = cast(
+                Sequence[tuple[str, int]] | None,
+                queue.peek_many(limit=1000, with_timestamps=True),
+            )
         except Exception:
             raw_entries = None
 
         if raw_entries:
             for entry, _timestamp in raw_entries:
                 try:
-                    data = json.loads(entry)
+                    data = cast(dict[str, Any], json.loads(entry))
                 except json.JSONDecodeError:
                     continue
                 if data.get("tid") == tid:

@@ -42,8 +42,9 @@ def test_queue_read_json(workdir):
         cwd=workdir,
     )
     assert rc == 0
-    payload = json.loads(out)
-    assert payload == [{"message": "data", "timestamp": None}]
+    lines = [json.loads(line) for line in out.splitlines() if line]
+    assert lines[0]["message"] == "data"
+    assert isinstance(lines[0]["timestamp"], int)
     assert err == ""
 
 
@@ -76,10 +77,11 @@ def test_queue_move(workdir):
         "move",
         "from.queue",
         "dest.queue",
+        "--all",
         cwd=workdir,
     )
     assert rc == 0
-    assert "Moved 2" in out
+    assert "first" in out and "second" in out
     assert err == ""
 
     rc, out, err = run_cli(
@@ -119,7 +121,7 @@ def test_queue_watch(workdir):
     )
     assert rc == 0
     assert "payload" in out
-    assert err == ""
+    assert "Watching queue 'watch.queue'" in err
 
 
 def test_queue_read_with_timestamps(workdir):
@@ -135,7 +137,7 @@ def test_queue_read_with_timestamps(workdir):
     )
     assert rc == 0
     assert err == ""
-    timestamp, message = out.split(" ", 1)
+    timestamp, message = out.split("\t", 1)
     assert timestamp.isdigit()
     assert message == "payload"
 

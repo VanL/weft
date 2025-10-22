@@ -6,7 +6,7 @@ from typing import Annotated
 import typer
 
 from ._constants import PROG_NAME, __version__
-from .commands import cmd_init, cmd_status, cmd_validate_taskspec
+from .commands import cmd_init, cmd_status, cmd_tidy, cmd_validate_taskspec
 from .commands import queue as queue_cmd
 from .commands import worker as worker_cmd
 from .commands.run import cmd_run
@@ -21,6 +21,16 @@ app = typer.Typer(
 
 queue_app = typer.Typer(help="Queue passthrough operations")
 worker_app = typer.Typer(help="Worker lifecycle management")
+
+
+def _emit_queue_result(result: tuple[int, str, str]) -> None:
+    """Echo stdout/stderr from queue helpers, then exit."""
+    exit_code, stdout, stderr = result
+    if stdout:
+        typer.echo(stdout)
+    if stderr:
+        typer.echo(stderr, err=True)
+    raise typer.Exit(code=exit_code)
 
 
 @queue_app.command("read")
@@ -38,16 +48,25 @@ def queue_read(
         bool,
         typer.Option("--json", help="Output as JSON"),
     ] = False,
+    message_id: Annotated[
+        str | None,
+        typer.Option("--message", "-m", help="Read specific message by ID"),
+    ] = None,
+    since: Annotated[
+        str | None,
+        typer.Option("--since", help="Only return messages newer than timestamp"),
+    ] = None,
 ) -> None:
-    exit_code, payload = queue_cmd.read_command(
-        name,
-        all_messages=all_messages,
-        with_timestamps=timestamps,
-        json_output=json_output,
+    _emit_queue_result(
+        queue_cmd.read_command(
+            name,
+            all_messages=all_messages,
+            with_timestamps=timestamps,
+            json_output=json_output,
+            message_id=message_id,
+            since=since,
+        )
     )
-    if payload:
-        typer.echo(payload)
-    raise typer.Exit(code=exit_code)
 
 
 @queue_app.command("write")
@@ -55,12 +74,7 @@ def queue_write(
     name: Annotated[str, typer.Argument(help="Queue name to write to")],
     message: str | None = typer.Argument(None, help="Message to write"),
 ) -> None:
-    try:
-        queue_cmd.write_command(name, message)
-    except ValueError as exc:
-        typer.echo(str(exc), err=True)
-        raise typer.Exit(code=2) from exc
-    raise typer.Exit(code=0)
+    _emit_queue_result(queue_cmd.write_command(name, message))
 
 
 @queue_app.command("peek")
@@ -78,16 +92,25 @@ def queue_peek(
         bool,
         typer.Option("--json", help="Output as JSON"),
     ] = False,
+    message_id: Annotated[
+        str | None,
+        typer.Option("--message", "-m", help="Peek specific message by ID"),
+    ] = None,
+    since: Annotated[
+        str | None,
+        typer.Option("--since", help="Only return messages newer than timestamp"),
+    ] = None,
 ) -> None:
-    exit_code, payload = queue_cmd.peek_command(
-        name,
-        all_messages=all_messages,
-        with_timestamps=timestamps,
-        json_output=json_output,
+    _emit_queue_result(
+        queue_cmd.peek_command(
+            name,
+            all_messages=all_messages,
+            with_timestamps=timestamps,
+            json_output=json_output,
+            message_id=message_id,
+            since=since,
+        )
     )
-    if payload:
-        typer.echo(payload)
-    raise typer.Exit(code=exit_code)
 
 
 @queue_app.command("move")
@@ -98,11 +121,39 @@ def queue_move(
         int | None,
         typer.Option("--limit", "-n", help="Maximum number of messages to move"),
     ] = None,
+    all_messages: Annotated[
+        bool,
+        typer.Option("--all", help="Move all available messages"),
+    ] = False,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Output moved messages as JSON"),
+    ] = False,
+    timestamps: Annotated[
+        bool,
+        typer.Option("--timestamps", help="Include timestamps in output"),
+    ] = False,
+    message_id: Annotated[
+        str | None,
+        typer.Option("--message", "-m", help="Move specific message by ID"),
+    ] = None,
+    since: Annotated[
+        str | None,
+        typer.Option("--since", help="Only move messages newer than timestamp"),
+    ] = None,
 ) -> None:
-    exit_code, payload = queue_cmd.move_command(source, destination, limit=limit)
-    if payload:
-        typer.echo(payload)
-    raise typer.Exit(code=exit_code)
+    _emit_queue_result(
+        queue_cmd.move_command(
+            source,
+            destination,
+            limit=limit,
+            all_messages=all_messages,
+            json_output=json_output,
+            with_timestamps=timestamps,
+            message_id=message_id,
+            since=since,
+        )
+    )
 
 
 @queue_app.command("list")
@@ -111,11 +162,12 @@ def queue_list(
         bool,
         typer.Option("--json", help="Output queue information as JSON"),
     ] = False,
+    stats: Annotated[
+        bool,
+        typer.Option("--stats", help="Include claimed message statistics"),
+    ] = False,
 ) -> None:
-    exit_code, payload = queue_cmd.list_command(json_output=json_output)
-    if payload:
-        typer.echo(payload)
-    raise typer.Exit(code=exit_code)
+    _emit_queue_result(queue_cmd.list_command(json_output=json_output, stats=stats))
 
 
 @queue_app.command("watch")
@@ -137,16 +189,76 @@ def queue_watch(
         bool,
         typer.Option("--json", help="Output each message as JSON"),
     ] = False,
+    peek: Annotated[
+        bool,
+        typer.Option("--peek", help="Monitor without consuming messages"),
+    ] = False,
+    since: Annotated[
+        str | None,
+        typer.Option("--since", help="Start watching after timestamp"),
+    ] = None,
+    quiet: Annotated[
+        bool,
+        typer.Option("--quiet", help="Suppress startup message"),
+    ] = False,
+    move_to: Annotated[
+        str | None,
+        typer.Option("--move", help="Drain messages into another queue"),
+    ] = None,
 ) -> None:
-    for line in queue_cmd.watch_command(
-        name,
-        interval=interval,
-        max_messages=limit,
-        with_timestamps=timestamps,
-        json_output=json_output,
-    ):
-        typer.echo(line)
-    raise typer.Exit(code=0)
+    if peek and move_to is not None:
+        raise typer.BadParameter("--peek cannot be used together with --move")
+
+    _emit_queue_result(
+        queue_cmd.watch_command(
+            name,
+            limit=limit,
+            interval=interval,
+            with_timestamps=timestamps,
+            json_output=json_output,
+            peek=peek,
+            since=since,
+            quiet=quiet,
+            move_to=move_to,
+        )
+    )
+
+
+@queue_app.command("delete")
+def queue_delete(
+    name: Annotated[
+        str | None,
+        typer.Argument(help="Queue to delete", show_default=False),
+    ] = None,
+    all_queues: Annotated[
+        bool,
+        typer.Option("--all", help="Delete all queues"),
+    ] = False,
+    message_id: Annotated[
+        str | None,
+        typer.Option("--message", "-m", help="Delete specific message by ID"),
+    ] = None,
+) -> None:
+    if not all_queues and name is None:
+        raise typer.BadParameter("Provide a queue name or use --all", param_hint="name")
+
+    _emit_queue_result(
+        queue_cmd.delete_command(
+            name,
+            delete_all=all_queues,
+            message_id=message_id,
+        )
+    )
+
+
+@queue_app.command("broadcast")
+def queue_broadcast(
+    message: Annotated[
+        str | None,
+        typer.Argument(help="Message to broadcast ('-' for stdin)"),
+    ] = None,
+) -> None:
+    _emit_queue_result(queue_cmd.broadcast_command(message))
 
 
 def version_callback(value: bool) -> None:
@@ -215,6 +327,20 @@ def init(
     """Initialise a new Weft project."""
 
     exit_code = cmd_init(directory, quiet=quiet)
+    raise typer.Exit(code=exit_code)
+
+
+@app.command("tidy")
+def tidy(
+    context: Annotated[
+        Path | None,
+        typer.Option("--context", help="Run maintenance against a specific project root"),
+    ] = None,
+) -> None:
+    """Compact the SimpleBroker database (vacuum + WAL checkpoint)."""
+    exit_code, payload = cmd_tidy(context)
+    if payload:
+        typer.echo(payload)
     raise typer.Exit(code=exit_code)
 
 

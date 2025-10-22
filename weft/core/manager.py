@@ -14,11 +14,7 @@ from typing import Any, cast
 
 from simplebroker import Queue
 from weft._constants import (
-    WEFT_MANAGER_CTRL_IN_QUEUE,
-    WEFT_MANAGER_CTRL_OUT_QUEUE,
     WEFT_MANAGER_LIFETIME_TIMEOUT,
-    WEFT_MANAGER_OUTBOX_QUEUE,
-    WEFT_SPAWN_REQUESTS_QUEUE,
     WEFT_WORKERS_REGISTRY_QUEUE,
     WORK_ENVELOPE_START,
 )
@@ -93,29 +89,55 @@ class Manager(BaseTask):
             "status": "active",
             "pid": multiprocessing.current_process().pid,
             "timestamp": timestamp,
-            "inbox": WEFT_SPAWN_REQUESTS_QUEUE,
-            "requests": WEFT_SPAWN_REQUESTS_QUEUE,
-            "ctrl_in": WEFT_MANAGER_CTRL_IN_QUEUE,
-            "ctrl_out": WEFT_MANAGER_CTRL_OUT_QUEUE,
-            "outbox": WEFT_MANAGER_OUTBOX_QUEUE,
+            "inbox": self._queue_names["inbox"],
+            "requests": self._queue_names["inbox"],
+            "ctrl_in": self._queue_names["ctrl_in"],
+            "ctrl_out": self._queue_names["ctrl_out"],
+            "outbox": self._queue_names["outbox"],
             "role": self.taskspec.metadata.get("role", "manager"),
         }
         try:
-            self._registry_message_id = registry_queue.write(json.dumps(payload))
+            message_id = cast(
+                int | None, registry_queue.write(json.dumps(payload))
+            )
         except Exception:
             logger.debug("Failed to register worker", exc_info=True)
+        else:
+            self._registry_message_id = message_id
 
     def _unregister_worker(self) -> None:
         if self._unregistered:
             return
         registry_queue = self._queue(WEFT_WORKERS_REGISTRY_QUEUE)
+        stopped_timestamp = registry_queue.generate_timestamp()
+
         try:
             if self._registry_message_id is not None:
                 registry_queue.delete(message_id=self._registry_message_id)
         except Exception:
-            logger.debug("Failed to unregister worker", exc_info=True)
-        finally:
-            self._unregistered = True
+            logger.debug("Failed to prune active registry entry", exc_info=True)
+
+        payload = {
+            "tid": self.tid,
+            "name": self.taskspec.name,
+            "capabilities": self.taskspec.metadata.get("capabilities", []),
+            "status": "stopped",
+            "pid": multiprocessing.current_process().pid,
+            "timestamp": stopped_timestamp,
+            "inbox": self._queue_names["inbox"],
+            "requests": self._queue_names["inbox"],
+            "ctrl_in": self._queue_names["ctrl_in"],
+            "ctrl_out": self._queue_names["ctrl_out"],
+            "outbox": self._queue_names["outbox"],
+            "role": self.taskspec.metadata.get("role", "manager"),
+        }
+        try:
+            registry_queue.write(json.dumps(payload))
+        except Exception:
+            logger.debug("Failed to record stopped manager state", exc_info=True)
+
+        self._registry_message_id = None
+        self._unregistered = True
 
     # ------------------------------------------------------------------
     # Helpers

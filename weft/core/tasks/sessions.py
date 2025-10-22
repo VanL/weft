@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import queue
 import subprocess
-from typing import Any
 from collections.abc import Callable
+from typing import Any
+
 from weft.core.resource_monitor import (
     BaseResourceMonitor,
     ResourceMetrics,

@@ -16,7 +16,7 @@ import sys
 import time
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import typer
 
@@ -33,7 +33,6 @@ from weft._constants import (
     WEFT_MANAGER_CTRL_OUT_QUEUE,
     WEFT_MANAGER_LIFETIME_TIMEOUT,
     WEFT_MANAGER_OUTBOX_QUEUE,
-    WEFT_MANAGER_REUSE_ENABLED,
     WEFT_SPAWN_REQUESTS_QUEUE,
     WEFT_WORKERS_REGISTRY_QUEUE,
     WORK_ENVELOPE_START,
@@ -180,7 +179,10 @@ def _snapshot_registry(
 ) -> dict[str, dict[str, Any]]:
     queue = _registry_queue(context)
     try:
-        records_raw = queue.peek_many(limit=1000, with_timestamps=True)
+        records_raw = cast(
+            Sequence[tuple[str, int]] | None,
+            queue.peek_many(limit=1000, with_timestamps=True),
+        )
     except Exception:
         records_raw = None
 
@@ -191,7 +193,7 @@ def _snapshot_registry(
 
     for entry, timestamp in records_raw:
         try:
-            data = json.loads(entry)
+            data = cast(dict[str, Any], json.loads(entry))
         except json.JSONDecodeError:
             continue
         tid = data.get("tid")
@@ -208,7 +210,8 @@ def _snapshot_registry(
                 stale_timestamps.append(timestamp)
                 continue
         existing = snapshot.get(tid)
-        if existing is None or existing["_timestamp"] < timestamp:
+        existing_ts = int(existing.get("_timestamp", 0)) if existing else -1
+        if existing is None or existing_ts < timestamp:
             snapshot[tid] = data
 
     for ts in stale_timestamps:
@@ -369,7 +372,7 @@ def _stop_manager(
     while time.time() < deadline:
         snapshot = _snapshot_registry(context)
         current = snapshot.get(record["tid"])
-        if current and current.get("status") == "stopped":
+        if current is None or current.get("status") == "stopped":
             if process is not None:
                 try:
                     process.wait(timeout=timeout)
@@ -475,7 +478,10 @@ def _poll_log_events(
     target_tid: str,
 ) -> tuple[list[tuple[dict[str, Any], int]], int | None]:
     try:
-        records = log_queue.peek_many(limit=512, with_timestamps=True)
+        records = cast(
+            Sequence[tuple[str, int]] | None,
+            log_queue.peek_many(limit=512, with_timestamps=True),
+        )
     except Exception:
         return [], last_timestamp
 
@@ -487,7 +493,7 @@ def _poll_log_events(
         if last_timestamp is not None and timestamp <= last_timestamp:
             continue
         try:
-            data = json.loads(entry)
+            data = cast(dict[str, Any], json.loads(entry))
         except json.JSONDecodeError:
             continue
         if data.get("tid") != target_tid:
@@ -510,6 +516,11 @@ def _wait_for_task_completion(
     config = context.broker_config
     outbox_name = taskspec.io.outputs.get("outbox")
     ctrl_out_name = taskspec.io.control.get("ctrl_out")
+
+    if outbox_name is None:
+        outbox_name = f"T{taskspec.tid}.{QUEUE_OUTBOX_SUFFIX}"
+    if ctrl_out_name is None:
+        ctrl_out_name = f"T{taskspec.tid}.{QUEUE_CTRL_OUT_SUFFIX}"
 
     outbox_queue = Queue(
         outbox_name,
@@ -541,11 +552,15 @@ def _wait_for_task_completion(
             ctrl_raw = ctrl_queue.read_one()
             if ctrl_raw is None:
                 break
-            _handle_ctrl_stream(ctrl_raw)
+            ctrl_payload = ctrl_raw[0] if isinstance(ctrl_raw, tuple) else ctrl_raw
+            _handle_ctrl_stream(str(ctrl_payload))
 
         outbox_raw = outbox_queue.read_one()
         if outbox_raw is not None:
-            final, value = _process_outbox_message(outbox_raw, stream_buffer)
+            outbox_payload = (
+                outbox_raw[0] if isinstance(outbox_raw, tuple) else outbox_raw
+            )
+            final, value = _process_outbox_message(str(outbox_payload), stream_buffer)
             if final:
                 result_value = value
                 status = "completed"

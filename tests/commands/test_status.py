@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from weft.commands.status import collect_status, cmd_status
+from weft.commands.status import cmd_status, collect_status
 from weft.context import build_context
 
 
@@ -51,5 +51,6 @@ def test_cmd_status_json_output(tmp_path):
     assert exit_code == 0
     assert payload is not None
     data = json.loads(payload)
-    assert data["total_messages"] >= 1
-    assert "db_size" in data
+    assert data["broker"]["total_messages"] >= 1
+    assert "db_size" in data["broker"]
+    assert isinstance(data["managers"], list)

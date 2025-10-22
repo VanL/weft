@@ -9,7 +9,7 @@ import time
 from typing import Any, cast
 
 from .consumer import Consumer
-from .sessions import InProcessCommandSession
+from .sessions import CommandSession, InProcessCommandSession
 
 
 class Debugger(Consumer):
@@ -17,18 +17,18 @@ class Debugger(Consumer):
 
     _COMMANDS = ("menu", "help", "ping", "info", "queues")
 
-    def _interactive_ensure_session(self, message_id: int) -> InProcessCommandSession:
+    def _interactive_ensure_session(self, message_id: int) -> CommandSession:
         if getattr(self, "_interactive_session", None) is not None:
-            return cast(InProcessCommandSession, self._interactive_session)
+            return cast(CommandSession, self._interactive_session)
 
         session = InProcessCommandSession(self._handle_session_input)
-        self._interactive_session = session
+        self._interactive_session = cast(CommandSession, session)
         self._interactive_runner = None
         self._interactive_started = True
         self.taskspec.mark_running(pid=os.getpid())
         self._update_process_title("running")
         self._report_state_change(event="work_started", message_id=message_id)
-        return session
+        return self._interactive_session
 
     def _handle_session_input(self, raw: str) -> tuple[str | None, str | None, bool]:
         responses: list[str] = []
