@@ -2,8 +2,10 @@
 
 This document details the fundamental components of the Weft system architecture.
 
-## 1. TaskSpec (weft/core/taskspec.py)
+## 1. TaskSpec (weft/core/taskspec.py) [CC-1]
 **Purpose**: Task configuration with partial immutability - immutable spec, mutable state
+
+_Implementation_: `weft/core/taskspec.py` (`TaskSpec`, `SpecSection`, `IOSection`, `StateSection`) implements these behaviours, including default expansion and partial immutability.
 
 **Key Responsibilities**:
 - Validate task configuration at creation
@@ -84,238 +86,133 @@ def _freeze_spec(self):
 - Required queues (outbox, ctrl_in, ctrl_out) always present
 - All optional fields expanded to explicit values via apply_defaults()
 
-## 2. Task (weft/core/tasks.py and weft/core/multiqueue_watcher.py)
-**Purpose**: Task execution and lifecycle management with OS-level observability
+## 2. Task Execution Architecture
+Weft tasks build on top of SimpleBroker’s multi-queue watcher and are organised
+as a small hierarchy of classes rather than a single monolithic `Task`.  This
+section captures the responsibilities of each layer while preserving the
+behaviour promised in the original design (multiprocess isolation, rich control
+channels, and queue-based state reporting).
+
+### 2.1 MultiQueueWatcher (weft/core/tasks/multiqueue_watcher.py) [CC-2.1]
+**Purpose**: Provide a scheduler that can monitor multiple SimpleBroker queues,
+each with its own processing semantics.
+
+_Implementation_: `weft/core/tasks/multiqueue_watcher.py` supplies `MultiQueueWatcher` with per-mode handling, queue registration, and shared database wiring aligned with this description.
+
+**Capabilities**:
+- Configurable per-queue processing modes (`READ`, `PEEK`, `RESERVE`).
+- Round-robin scheduling with automatic detection of inactive queues.
+- Queue-specific error handlers and reserved-queue plumbing.
+- A `process_once()` / `_drain_queue()` primitive used by higher layers to run
+  one scheduling cycle at a time.
+
+This watcher remains the foundation for every task subtype; nothing in this
+document changes the requirement to keep it feature-compatible with the original
+SimpleBroker example while extending it for Weft’s needs.
+
+### 2.2 BaseTask (weft/core/tasks/base.py) [CC-2.2]
+**Purpose**: Bind a `TaskSpec` to the watcher, manage control/state reporting,
+and provide shared utilities for concrete task types.
+
+_Implementation_: `BaseTask` in `weft/core/tasks/base.py` handles queue wiring, control commands, state reporting, and emits process titles with the required context prefix.
 
 **Key Responsibilities**:
-- Execute task targets (function/command)
-- Monitor resource usage  
-- Handle queue communication
-- Manage state transitions
-- Provide OS-level visibility via process titles
-- Report / clean up resources on target completion/exit
-- Self-terminate
+- Translate `TaskSpec.io` into queue configurations (inbox reserve mode,
+  reserved/control peek mode, outbox read/write).
+- Maintain control-channel semantics (STOP, PAUSE, RESUME, STATUS) and emit JSON
+  responses on `ctrl_out`.
+- Update process titles and TID mappings (still expected to include the context
+  prefix as described later in this spec).
+- Record state transitions to `weft.tasks.log`, including a full `TaskSpec`
+  snapshot to support event-sourced reconstruction.
+- Expose `process_once()` and `run_until_stopped()` helpers; long-running
+  workers are expected to loop on `run_until_stopped`, while single-shot CLI
+  invocations may call `process_once()` directly.
+- Honour future enhancements such as periodic reporting when
+  `TaskSpec.spec.reporting_interval == "poll"` (not yet implemented).
 
-**Architecture Decision: Process vs Thread Isolation**
-Tasks use multiprocessing for target execution rather than threading:
-- **Process isolation**: True resource limits, crash isolation, signal-based termination
-- **Text-based interface**: All inputs/outputs are strings (Unix pipe model), eliminating serialization complexity
-- **OS-level control**: Main process can terminate target via SIGTERM/SIGKILL
-- **Resource monitoring**: Target process has separate PID, visible in system tools
-- **Performance trade-off**: ~50-100ms process startup overhead vs ~1-5ms threading
-- **Memory trade-off**: ~8MB baseline per process vs shared address space for threads
+BaseTask purposefully does *not* execute work itself.  Instead it delegates to
+`TaskRunner` (see §3) from within `_handle_work_message`, allowing subclasses to
+focus on the semantics of message handling rather than process orchestration.
 
-**Core Architecture** (Extends SimpleBroker's MultiQueueWatcher example):
-```python
-from weft/core/multiqueue_watcher import MultiQueueWatcher # copied/modified from SimpleBroker's example code
+### 2.3 Specialised Task Types [CC-2.3]
+Concrete task types extend `BaseTask` to express different queue behaviours.
 
-class Task(MultiQueueWatcher):
-    """Task extends SimpleBroker's MultiQueueWatcher to monitor task-specific queues."""
-    
-    # Class constants
-    TID_SHORT_LENGTH = 10  # Last N digits of TID for display
-    PROCESS_TITLE_PREFIX = "weft"
-    TID_MAPPING_QUEUE = "weft.tid.mappings"
-    
-    def __init__(self, 
-                 taskspec: TaskSpec,
-                 enable_process_title: bool = True,
-                 db: str|Path = None):
-        """Initialize task using SimpleBroker's MultiQueueWatcher."""
-        self.taskspec = taskspec
-        self.tid = taskspec.tid
-        self.tid_short = self._compute_short_tid()
-        self.enable_process_title = enable_process_title and self._check_setproctitle()
-        
-        # Define task queues to monitor
-        task_queues = [
-            f"T{self.tid}.ctrl_in",    # Control messages (peek mode via error handler)
-            f"T{self.tid}.inbox",      # Work messages (consume mode)
-            f"T{self.tid}.reserved",   # Reserved/failed messages (peek mode)
-        ]
-        
-        # Define queue-specific handlers
-        queue_handlers = {
-            f"T{self.tid}.ctrl_in": self._handle_control_message,
-            f"T{self.tid}.inbox": self._handle_work_message,
-            f"T{self.tid}.reserved": self._handle_reserved_message,
-        }
-        
-        # Define queue-specific error handlers for peek behavior
-        queue_error_handlers = {
-            f"T{self.tid}.ctrl_in": self._control_error_handler,  # Don't consume on peek
-            f"T{self.tid}.reserved": self._reserved_error_handler,  # Don't consume on peek
-        }
-        
-        # Use weft_context from TaskSpec if specified
-        db_path = db or taskspec.spec.weft_context or os.getcwd()
-        
-        # Initialize SimpleBroker's MultiQueueWatcher
-        super().__init__(
-            queues=task_queues,
-            queue_handlers=queue_handlers,
-            queue_error_handlers=queue_error_handlers,
-            db=db_path,
-            check_interval=5  # Check inactive queues every 5 iterations
-        )
-        
-        if self.enable_process_title:
-            self._update_process_title("init")
-            self._register_tid_mapping()
-    
-    def _handle_control_message(self, message: str, timestamp: int) -> None:
-        """Handle control messages (STOP, PAUSE, etc.)."""
-        self.handle_control_message({"message": message, "timestamp": timestamp})
-    
-    def _handle_work_message(self, message: str, timestamp: int) -> None:
-        """Handle work messages from inbox."""
-        self.handle_work_message({"message": message, "timestamp": timestamp})
-    
-    def _handle_reserved_message(self, message: str, timestamp: int) -> None:
-        """Handle reserved/failed messages for recovery."""
-        self.handle_reserved_message({"message": message, "timestamp": timestamp})
-    
-    def _control_error_handler(self, exc: Exception, message: str, timestamp: int) -> bool:
-        """Error handler for control messages - implement peek behavior."""
-        # Log error but don't consume message (peek behavior)
-        logger.warning(f"Error peeking control message: {exc}")
-        return True  # Continue processing
-    
-    def _reserved_error_handler(self, exc: Exception, message: str, timestamp: int) -> bool:
-        """Error handler for reserved messages - implement peek behavior."""
-        # Log error but don't consume message (peek behavior)
-        logger.warning(f"Error peeking reserved message: {exc}")
-        return True  # Continue processing
-    
-    def run(self) -> None:
-        """Run task - main thread monitors queues, target thread executes work."""
-        if self.taskspec.spec.timeout is None:
-            # Long-running task (worker) - target IS the queue monitoring
-            self._update_process_title("running")
-            self.start()  # Start SimpleBroker's MultiQueueWatcher (blocking)
-        else:
-            # Ephemeral task - main thread monitors, target thread executes
-            self._execute_with_control()
-    
-    def _execute_with_control(self) -> None:
-        """Main thread monitors queues with control authority over target thread."""
-        import threading
-        from simplebroker import Queue
-        
-        self._update_process_title("running")
-        self.target_thread = None
-        self.target_result = None
-        self.target_exception = None
-        self.stop_requested = False
-        
-        try:
-            # Start target execution in separate process
-            import multiprocessing as mp
-            self.target_process = mp.Process(
-                target=self._target_wrapper, 
-                daemon=False  # Don't want target to be killed on main exit
-            )
-            self.target_process.start()
-            
-            # Main thread runs queue monitoring with control authority
-            self.start()  # Blocking - handles control messages, timeouts, etc.
-            
-            # Target completed or was stopped - collect result
-            if self.target_process.is_alive():
-                # Control message requested stop - terminate target
-                self._terminate_target()
-            
-            self.target_process.join()  # Wait for clean target shutdown
-            
-            # Process final result
-            if self.target_exception:
-                raise self.target_exception
-            
-            if self.target_result is not None:
-                # Write result to outbox
-                outbox = Queue(f"T{self.tid}.outbox", 
-                              db_path=self.taskspec.spec.weft_context or os.getcwd())
-                outbox.write(self.target_result)
-                
-            self.taskspec.mark_completed()
-            self._update_process_title("completed")
-            
-        except Exception as e:
-            self.taskspec.mark_failed(error=str(e))
-            self._update_process_title("failed", str(e)[:50])
-            raise
-        finally:
-            self._cleanup_target_thread()
-            self._report_state_change()
-    
-    def _target_wrapper(self) -> None:
-        """Wrapper for target execution in separate process (text-based output)."""
-        from simplebroker import Queue
-        
-        try:
-            # Set process title for target process
-            self._update_process_title("running", "target")
-            
-            # Execute target and get text result
-            result = self._execute_target()  # Returns string/text
-            
-            # Write result directly to outbox queue from target process
-            outbox = Queue(f"T{self.tid}.outbox", 
-                          db_path=self.taskspec.spec.weft_context or os.getcwd())
-            outbox.write(str(result) if result is not None else "")
-            
-            # Signal success via control queue
-            ctrl_out = Queue(f"T{self.tid}.ctrl_out",
-                           db_path=self.taskspec.spec.weft_context or os.getcwd())
-            ctrl_out.write("TARGET_COMPLETED")
-            
-        except Exception as e:
-            # Signal failure via control queue  
-            ctrl_out = Queue(f"T{self.tid}.ctrl_out",
-                           db_path=self.taskspec.spec.weft_context or os.getcwd())
-            ctrl_out.write(f"TARGET_FAILED:{str(e)}")
-    
-    def _terminate_target(self) -> None:
-        """Terminate target process (called from main thread on control messages)."""
-        if self.target_process and self.target_process.is_alive():
-            # Try graceful shutdown first
-            self.target_process.terminate()  # SIGTERM
-            self.target_process.join(timeout=5.0)
-            
-            # If still alive, force kill
-            if self.target_process.is_alive():
-                self.target_process.kill()  # SIGKILL
-                self.target_process.join()
-    
-    def handle_control_message(self, msg_data: dict) -> None:
-        """Handle control messages with authority over target thread."""
-        message = msg_data.get("message", "")
-        
-        if message == "STOP":
-            self._terminate_target()
-        elif message == "PAUSE":
-            # Pause implementation would signal target thread
-            pass
-        # ... other control messages
-    
-    # Message handlers
-    def handle_control_message(self, msg_data: dict) -> None
-    def handle_work_message(self, msg_data: dict) -> None  
-    def handle_reserved_message(self, msg_data: dict) -> None
-    
-    # Core execution
-    def _execute_target(self) -> Any        # Run function/command
-    def _monitor_resources(self) -> None    # Track usage
-    
-    # Process title methods
-    def _compute_short_tid(self) -> str
-    def _check_setproctitle(self) -> bool
-    def _update_process_title(self, status: str, details: str = None) -> None
-    def _register_tid_mapping(self) -> None
-    def _format_process_title(self, status: str, details: str = None) -> str
-```
+_Implementation_: `Consumer`, `Observer`, `SelectiveConsumer`, `Monitor`, and `SamplingObserver` are implemented in `weft/core/tasks/base.py` with the queue modes shown below.
 
-**Process Title Management**:
+Interactive command sessions reuse `Consumer` with `spec.interactive=True`, streaming stdin/stdout via JSON envelopes rather than per-message execution.
+
+| Class | Purpose | Queue Modes |
+|-------|---------|-------------|
+| `Consumer` | Default worker that reserves inbox messages, executes the target, and writes to the outbox. Applies reserved queue policies on success/failure. | Inbox `RESERVE`, Reserved `PEEK`, Control `PEEK` |
+| `Observer` | Peeks at inbox messages without consuming them; useful for monitoring pipelines. | Inbox `PEEK`, Control `PEEK` |
+| `SelectiveConsumer` | Peeks inbox messages and consumes them only when a selector predicate returns true. Optional callback for side effects. | Inbox `PEEK`, Control `PEEK` |
+| `Monitor` | Forwards messages to a downstream queue while observing them (reserve mode to ensure at-most-once forwarding). | Inbox `RESERVE` → downstream, Control `PEEK` |
+| `SamplingObserver` | Observer variant that invokes its callback at fixed intervals based on elapsed time. | Inherits `Observer` behaviour |
+
+Future worker/task variants should continue to derive from `BaseTask` and reuse
+its queue helpers (`_reserve_queue_config`, `_peek_queue_config`, `_read_queue_config`)
+to maintain consistency.
+
+### 2.4 Control and State Expectations [CC-2.4]
+- **Control commands**: STOP, PAUSE, RESUME, STATUS remain mandatory. Additional
+  commands may be layered on via `_handle_control_command` overrides.
+- **State emission**: Each transition (start, completion, failure, timeout,
+  reserved-policy event, etc.) must call `_report_state_change`.  Periodic
+  (poll-based) reporting is still part of the roadmap even if the current
+  implementation only reports on transitions.
+- **Process titles**: The shell-friendly format
+  `weft-{context_short}-{tid_short}:{name}:{status}[:details]` remains the target
+  behaviour.  Implementations that currently omit the context must be updated to
+  meet this requirement.
+- **Reserved queue policies**: `KEEP`, `CLEAR`, and `REQUEUE` policies are
+  enforced by `BaseTask._apply_reserved_policy` and must continue to behave as
+  documented in `TaskSpec`.
+
+_Implementation status_: STOP/PAUSE/RESUME/STATUS handling, state emission, and reserved policies are present in `BaseTask`. Context-aware process title formatting remains to be completed.
+
+### 2.5 Execution Flow [CC-2.5]
+At a high level a `Consumer` (and derivatives) execute the following steps:
+
+1. Instantiate `BaseTask` with a fully validated `TaskSpec`.
+2. Register queue handlers and initialise process-title/TID mapping.
+3. On each inbox message:
+   - Mark the task as running and emit `work_started`.
+   - Delegate execution to `TaskRunner` (multiprocess isolation, resource
+     monitoring, timeout enforcement).
+   - Apply reserved-queue policy and emit state events (`work_completed`,
+     `work_failed`, `work_timeout`, `work_limit_violation`, etc.).
+4. Emit control responses for any control commands encountered.
+5. Loop via `process_once()` / `run_until_stopped()` until `STOP` is received or
+   the CLI/controller decides to exit.
+
+The CLI command `weft run` already demonstrates both usage patterns: `--once`
+invokes `process_once()`, while the default mode loops until interrupted.
+
+_Implementation_: `Consumer._handle_work_message` (`weft/core/tasks/base.py`) and `cmd_run` (`weft/commands/run.py`) follow this flow.
+
+## 3. TaskRunner (weft/core/tasks/runner.py) [CC-3]
+**Purpose**: Managed wrapper around Python’s multiprocessing primitives for
+executing TaskSpec targets with resource monitoring.
+
+_Implementation_: `weft/core/tasks/runner.py` provides `TaskRunner` and `_worker_entry`, coordinating subprocess execution, timeout handling, and `ResourceMonitor` integration.
+
+**Highlights**:
+- Uses the `"spawn"` context to avoid inheriting state from the parent process.
+- Executes either Python callables (`type="function"`) or external commands
+  (`type="command"`) with optional args/kwargs overrides from the work item.
+- Integrates with `weft.core.resource_monitor` to enforce limits defined in
+  `TaskSpec.spec.limits`; returns `RunnerOutcome` statuses of `"ok"`, `"error"`,
+  `"timeout"`, or `"limit"`.
+- Captures stdout/stderr for command targets and returns structured metrics for
+  logging.
+- Designed to be invoked per work item from the `Consumer`’s `_handle_work_message`.
+
+The long-term contract remains the same: tasks must run in isolated processes,
+terminate cleanly on timeout or STOP, and surface sufficient telemetry for
+operators to understand what happened.
+
+### Process Title Expectations
 ```python
 class ProcessTitleMixin:
     """Mixin for process title management functionality."""
@@ -357,14 +254,14 @@ class ProcessTitleMixin:
             details: Optional additional details (e.g., "50% complete")
             
         Format:
-            weft-{tid_short}:{name}:{status}
-            weft-{tid_short}:{name}:{status}:{details}
+            weft-{context_short}-{tid_short}:{name}:{status}
+            weft-{context_short}-{tid_short}:{name}:{status}:{details}
             
         Examples:
-            weft-0161024:git-clone:init
-            weft-0161024:git-clone:running
-            weft-0161024:analyze:failed:timeout
-            weft-0161025:process:running:50
+            weft-proj1-0161024:git-clone:init
+            weft-proj1-0161024:git-clone:running
+            weft-myapi-0161024:analyze:failed:timeout
+            weft-webui-0161025:process:running:50
             
         Note: Format avoids shell special characters for easier scripting.
         No brackets, parentheses, or other characters requiring escaping.
@@ -392,14 +289,26 @@ class ProcessTitleMixin:
             
         Format Design:
             - Hyphen after prefix for clear boundary
+            - Context included for multi-project distinguishability
             - Colons separate logical sections
             - No special shell characters requiring escaping
             - Easy to parse with standard tools (cut, awk, grep)
         """
         import re
+        from pathlib import Path
         
-        # Start with prefix-tid format (hyphen separates prefix from ID)
-        parts = [f"{self.PROCESS_TITLE_PREFIX}-{self.tid_short}"]
+        # Extract context short name from weft_context path
+        context_short = "unknown"
+        if hasattr(self.taskspec.spec, 'weft_context') and self.taskspec.spec.weft_context:
+            context_path = Path(self.taskspec.spec.weft_context)
+            context_short = context_path.name[:8]  # Max 8 chars for context
+            # Sanitize context name
+            context_short = re.sub(r'[^a-zA-Z0-9_-]', '', context_short)
+            if not context_short:
+                context_short = "proj"  # Fallback
+        
+        # Start with prefix-context-tid format (hyphens separate components)
+        parts = [f"{self.PROCESS_TITLE_PREFIX}-{context_short}-{self.tid_short}"]
         
         # Sanitize task name (remove special chars, spaces)
         max_name_length = 20
@@ -437,15 +346,16 @@ class ProcessTitleMixin:
         """
         try:
             import socket
+            mapping_queue = Queue(self.TID_MAPPING_QUEUE)
             mapping = {
                 "short": self.tid_short,
                 "full": self.tid,
                 "pid": os.getpid(),
                 "name": self.taskspec.name,
-                "started": time.time_ns(),
+                "started": mapping_queue.generate_timestamp(),
                 "hostname": socket.gethostname()
             }
-            Queue(self.TID_MAPPING_QUEUE).write(json.dumps(mapping))
+            mapping_queue.write(json.dumps(mapping))
             logger.debug(f"Registered TID mapping: {self.tid_short} -> {self.tid}")
         except Exception as e:
             logger.warning(f"Failed to register TID mapping: {e}")
@@ -453,7 +363,7 @@ class ProcessTitleMixin:
 
 **Execution Flow**:
 1. Initialize with TaskSpec
-2. Set initial process title "weft-{tid_short}:name:init"
+2. Set initial process title "weft-{context_short}-{tid_short}:name:init"
 3. Register TID mapping to weft.tid.mappings queue
 4. Mark status as "spawning" and update process title
 5. Start monitoring thread
@@ -495,8 +405,18 @@ class CommandExecutor(Executor):
         def set_subprocess_title():
             """Set title in child process after fork but before exec."""
             import setproctitle
+            from pathlib import Path
             tid_short = tid[-10:]
-            setproctitle.setproctitle(f"weft-worker-{tid_short}:{target[0]}")
+            
+            # Extract context short name (same logic as main process)
+            context_short = "unknown"
+            if hasattr(taskspec.spec, 'weft_context') and taskspec.spec.weft_context:
+                context_path = Path(taskspec.spec.weft_context)
+                context_short = context_path.name[:8]
+                import re
+                context_short = re.sub(r'[^a-zA-Z0-9_-]', '', context_short) or "proj"
+            
+            setproctitle.setproctitle(f"weft-worker-{context_short}-{tid_short}:{target[0]}")
         
         # Execute with title
         if os.name != 'nt':  # Unix/Linux/macOS
@@ -517,9 +437,19 @@ class CommandExecutor(Executor):
 import setproctitle
 import subprocess
 import sys
+from pathlib import Path
+import re
 
 tid_short = "{tid[-10:]}"
-setproctitle.setproctitle(f"weft-worker-{{tid_short}}:{target[0]}")
+
+# Extract context short name 
+context_short = "unknown"
+if hasattr(taskspec.spec, 'weft_context') and taskspec.spec.weft_context:
+    context_path = Path(taskspec.spec.weft_context)
+    context_short = context_path.name[:8]
+    context_short = re.sub(r'[^a-zA-Z0-9_-]', '', context_short) or "proj"
+
+setproctitle.setproctitle(f"weft-worker-{{context_short}}-{{tid_short}}:{target[0]}")
 sys.exit(subprocess.call({target!r}))
 """
         # Write wrapper and execute
@@ -536,8 +466,19 @@ class FunctionExecutor(Executor):
         def wrapped_target(*args, **kwargs):
             """Wrapper that sets process title before executing."""
             import setproctitle
+            from pathlib import Path
+            import re
+            
             tid_short = tid[-10:]
-            setproctitle.setproctitle(f"weft-func-{tid_short}:{name}")
+            
+            # Extract context short name
+            context_short = "unknown"
+            if hasattr(taskspec.spec, 'weft_context') and taskspec.spec.weft_context:
+                context_path = Path(taskspec.spec.weft_context)
+                context_short = context_path.name[:8]
+                context_short = re.sub(r'[^a-zA-Z0-9_-]', '', context_short) or "proj"
+            
+            setproctitle.setproctitle(f"weft-func-{context_short}-{tid_short}:{name}")
             return target(*args, **kwargs)
         
         # Use multiprocessing for true process isolation
@@ -548,10 +489,10 @@ class FunctionExecutor(Executor):
 
 This ensures that both the main task process and any subprocesses it spawns are identifiable in system tools.
 
-## 4. ResourceMonitor (weft/core/monitor.py)
+## 4. ResourceMonitor (weft/core.resource_monitor.py)
 **Purpose**: Track and enforce resource limits using psutil as the default implementation
 
-**Default Implementation**: The system uses psutil for cross-platform resource monitoring. The `monitor_class` field in TaskSpec defaults to `"weft.core.monitor.ResourceMonitor"` which is psutil-based.
+**Default Implementation**: The system uses psutil for cross-platform resource monitoring. The `monitor_class` field in TaskSpec defaults to `"weft.core.resource_monitor.ResourceMonitor"` which is psutil-based.
 
 **Monitored Resources** (via psutil):
 - Memory usage (RSS) - `psutil.Process.memory_info().rss` in bytes, reported in MB
@@ -638,15 +579,16 @@ The `weft.tid.mappings` queue maintains a persistent record of TID mappings for 
 This enables reverse lookup when managing tasks via OS commands:
 ```bash
 # Find full TID from process (no escaping needed!)
-ps aux | grep "weft-0161024"     # Shows: weft-0161024:git-clone:running
-# Lookup full TID
+ps aux | grep "weft-proj1-0161024"     # Shows: weft-proj1-0161024:git-clone:running
+# Lookup full TID  
 weft tid-lookup 0161024          # Returns: 1837025672140161024
 # Use full TID for queue operations
 weft queue read T1837025672140161024.outbox
 
-# Shell-friendly operations
-tid=$(ps aux | grep weft- | cut -d- -f2 | cut -d: -f1)  # Extract TID
-pkill -f "weft-.*:failed"        # Kill failed tasks (no escaping!)
+# Shell-friendly operations with context awareness
+tid=$(ps aux | grep weft- | cut -d- -f3 | cut -d: -f1)  # Extract TID (3rd field after context)
+pkill -f "weft-proj1-.*:failed"        # Kill failed tasks in specific project
+pkill -f "weft-.*:failed"              # Kill failed tasks in any project
 ```
 
 **The Unified Reservation Pattern**:
@@ -664,6 +606,10 @@ inbox → reserved → [fail] → stays in reserved + state.error=true
 # Recovery flow
 reserved → [retry] → outbox + delete from reserved
 ```
+
+`reserved_policy_on_stop` and `reserved_policy_on_error` in the TaskSpec let
+operators decide whether messages stay in `reserved`, get pushed back to
+`inbox`, or are cleared automatically when a task stops or fails.
 
 **Queue Lifecycle and Durability**:
 - **Creation**: Queues created automatically on first use (no pre-registration)
@@ -696,10 +642,10 @@ Weft follows a structured module organization that separates concerns while main
 weft/core/                        # Core system components
 ├── taskspec.py                   # TaskSpec data model ✅
 ├── tasks.py                      # Task execution engine
-├── worker.py                     # WorkerTask (recursive architecture)  
+├── worker.py                     # Manager (recursive architecture)  
 ├── executor.py                   # Target execution (function/command)
 ├── monitor.py                    # Resource monitoring with psutil
-└── manager.py                    # TaskManager for submission/querying
+└── manager.py                    # Client for submission/querying
 
 weft/                             # Root package components
 ├── context.py                    # Context discovery and initialization ✅
@@ -726,9 +672,9 @@ weft/integration/                 # External system integration
 |-----------|--------|---------|
 | **TaskSpec** | `weft.core.taskspec` | Task configuration and validation |
 | **Task** | `weft.core.tasks` | Task execution extending MultiQueueWatcher |
-| **WorkerTask** | `weft.core.worker` | Recursive worker implementation |
-| **TaskManager** | `weft.core.manager` | Task submission and lifecycle management |
-| **ResourceMonitor** | `weft.core.monitor` | psutil-based resource monitoring |
+| **Manager** | `weft.core.manager` | Recursive worker implementation |
+| **Client** | `weft.core.manager` | Task submission and lifecycle management |
+| **ResourceMonitor** | `weft.core.resource_monitor` | psutil-based resource monitoring |
 | **WeftContext** | `weft.context` | Git-like project discovery and initialization |
 | **FunctionExecutor** | `weft.core.executor` | Python function execution |
 | **CommandExecutor** | `weft.core.executor` | System command execution |
@@ -745,8 +691,8 @@ weft/integration/                 # External system integration
 from weft import TaskSpec, Task, WeftContext
 
 # Core components (internal use)
-from weft.core.manager import TaskManager
-from weft.core.worker import WorkerTask
+from weft.core.manager import Client
+from weft.core.manager import Manager
 from weft.core.executor import FunctionExecutor, CommandExecutor
 
 # Administrative tools

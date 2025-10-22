@@ -24,7 +24,7 @@ This document defines the fundamental invariants, constraints, and guarantees th
 - **I13**: Queue names are unique per task (prefixed with "T{tid}.")
 - **I14**: Messages are delivered exactly once (via claim/move semantics)
 - **I15**: Reserved queue contains at most one message per inbox message
-- **I16**: Failed messages remain in reserved queue with state.error set
+- **I16**: Failed messages remain in reserved queue with state.error set (unless TaskSpec `reserved_policy_on_error` is set to `requeue` or `clear`)
 
 ### 4. Resource Invariants
 - **I17**: Limits are grouped in spec.limits subsection
@@ -39,7 +39,7 @@ This document defines the fundamental invariants, constraints, and guarantees th
 - **I24**: Timeouts are enforced within 1 second precision
 - **I25**: PID is set only when process/thread starts
 - **I26**: Return code is set only on process completion
-- **I27**: Failed tasks leave messages in reserved for recovery
+- **I27**: Failed tasks leave messages in reserved for recovery (configurable via reserved queue policies)
 
 ### 6. Observability Invariants
 - **I28**: All state transitions logged to weft.tasks.log
@@ -240,7 +240,7 @@ class InvariantEnforcer:
         # I5: Forward-only transitions
         valid_transitions = {
             "created": {"spawning", "failed", "cancelled"},
-            "spawning": {"running", "failed", "timeout", "cancelled", "killed"},
+            "spawning": {"running", "completed", "failed", "timeout", "cancelled", "killed"},
             "running": {"completed", "failed", "timeout", "cancelled", "killed"},
         }
         

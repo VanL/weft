@@ -3,7 +3,7 @@
 
 This document defines the complete TaskSpec format - the core configuration structure for all tasks in Weft. Understanding TaskSpec structure is essential for task creation, validation, and system integration.
 
-## Design Context
+## Design Context [TS-0]
 
 TaskSpec serves dual purposes:
 - **Task Definition**: Specifies what work to execute and how to execute it
@@ -11,7 +11,11 @@ TaskSpec serves dual purposes:
 
 The specification uses **partial immutability**: configuration sections (spec, io) become frozen after task creation to prevent accidental changes, while state and metadata remain mutable for runtime updates.
 
-## JSON Schema v1.0
+_Implementation_: `weft/core/taskspec.py` implements this structure, including frozen sections, defaults, and validation helpers.
+
+## JSON Schema v1.0 [TS-1]
+
+_Implementation coverage_: Field validation and defaults correspond to Pydantic models in `weft/core/taskspec.py`. Runtime behaviour honours `stream_output` (chunked, base64-encoded messages), `output_size_limit_mb` (disk spillover), and `interactive` (long-lived command sessions with streaming stdin/stdout).
 
 ```jsonc
 {
@@ -37,11 +41,14 @@ The specification uses **partial immutability**: configuration sections (spec, i
     
     "env": { "DEBUG": "1" } | null,          // OPTIONAL. Environment variables to set in the task's process. These update, not replace, the existing environment.
     "working_dir": "/tmp" | null,            // OPTIONAL. Working directory. null means not applicable or not set.
+    "interactive": false,                     // OPTIONAL. Keep command processes alive and stream stdin/stdout.
     "stream_output": false,                  // OPTIONAL. Stream stdout/stderr to queues. If false, all output will be written in one message.
     "cleanup_on_exit": true,                 // OPTIONAL. Delete task queues on completion
+    "reserved_policy_on_stop": "keep",      // OPTIONAL. Behaviour for messages left in T{tid}.reserved when STOP is received. Options: "keep", "requeue", "clear". Default is "keep".
+    "reserved_policy_on_error": "keep",     // OPTIONAL. Behaviour for messages left in T{tid}.reserved when execution fails. Same options and default as above.
     "polling_interval": 1,                   // OPTIONAL. psutil polling interval in seconds. Defaults to 1 second.
     "reporting_interval": "poll" | "transition",  // OPTIONAL. Send reports to weft.tasks.log either on each transition or on each polling interval. Defaults to "transition"
-    "monitor_class": "weft.core.monitor.ResourceMonitor",   // OPTIONAL. Default value is "weft.core.monitor.ResourceMonitor". A class conforming to the ResourceMonitor spec that will be used to wrap the target. NOTE: Module will be created at weft/core/monitor.py
+    "monitor_class": "weft.core.resource_monitor.ResourceMonitor",   // OPTIONAL. Default value is "weft.core.resource_monitor.ResourceMonitor". A class conforming to the ResourceMonitor spec that will be used to wrap the target. NOTE: Module will be created at weft/core.resource_monitor.py
     
     "enable_process_title": true,            // OPTIONAL. Enable OS process title updates for observability. Defaults to true.
     "output_size_limit_mb": 10,              // OPTIONAL. Max output size before disk spill. Defaults to 10MB (SimpleBroker limit).
@@ -63,8 +70,8 @@ The specification uses **partial immutability**: configuration sections (spec, i
     "status": "created|running|[...]",       // REQUIRED, Current process state
     "pid": null,                             // OPTIONAL. Process ID when running
     "return_code": null,                     // REQUIRED. null means no return code yet (probably still running).
-    "started_at": null,                      // REQUIRED. Nanosecond/simplebroker timestamp (time.time_ns())
-    "completed_at": null,                    // REQUIRED. Nanosecond/simplebroker timestamp (time.time_ns())
+    "started_at": null,                      // REQUIRED. Nanosecond timestamp (e.g. time.time_ns())
+    "completed_at": null,                    // REQUIRED. Nanosecond timestamp (e.g. time.time_ns())
     "error": null,                           // OPTIONAL. Error message if failed
     "time": 60.0 | null,                     // OPTIONAL. Time spent running so far (wall-clock in seconds). null = not started/measured yet, 0.0+ = actual measurement
     "memory": 4.8 | null,                    // OPTIONAL. Last memory measurement from psutil in MB. null = not measured yet, 0.0+ = actual measurement
@@ -85,4 +92,14 @@ The specification uses **partial immutability**: configuration sections (spec, i
 }
 ```
 
+### Reserved queue policies [TS-1.1]
 
+_Implementation_: `BaseTask._apply_reserved_policy` (`weft/core/tasks/base.py`) enforces these policies for inbox reserved handling.
+
+Both `reserved_policy_on_stop` and `reserved_policy_on_error` accept one of three values:
+
+- `keep` (default): leave the message in `T{tid}.reserved` so operators can inspect or retry manually.
+- `requeue`: move the message back to the inbox (`T{tid}.inbox`) so it can be picked up again automatically.
+- `clear`: acknowledge and delete the reserved message.
+
+The STOP and error policies are configured independently so teams can keep error payloads for post-mortem analysis while automatically requeuing work that was cancelled intentionally.

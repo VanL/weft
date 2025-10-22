@@ -8,11 +8,11 @@ from weft._constants import (
     CONTROL_RESUME,
     CONTROL_STOP,
     DEFAULT_CLEANUP_ON_EXIT,
-    DEFAULT_CPU_LIMIT,
+    DEFAULT_CPU_PERCENT,  # RENAMED from DEFAULT_CPU_LIMIT
     DEFAULT_FUNCTION_TARGET,
     DEFAULT_MAX_CONNECTIONS,
     DEFAULT_MAX_FDS,
-    DEFAULT_MEMORY_LIMIT,
+    DEFAULT_MEMORY_MB,  # RENAMED from DEFAULT_MEMORY_LIMIT
     DEFAULT_POLLING_INTERVAL,
     DEFAULT_REPORTING_INTERVAL,
     DEFAULT_STATUS,
@@ -29,6 +29,8 @@ from weft._constants import (
     QUEUE_CTRL_OUT_SUFFIX,
     QUEUE_INBOX_SUFFIX,
     QUEUE_OUTBOX_SUFFIX,
+    WEFT_MANAGER_LIFETIME_TIMEOUT,
+    WEFT_MANAGER_REUSE_ENABLED,
     STATUS_CANCELLED,
     STATUS_COMPLETED,
     STATUS_CREATED,
@@ -52,7 +54,7 @@ class TestConstants:
         import re
         from pathlib import Path
 
-        pyproject_path = Path(__file__).parent.parent / "pyproject.toml"
+        pyproject_path = Path(__file__).parent.parent.parent / "pyproject.toml"
         with open(pyproject_path, encoding="utf-8") as f:
             content = f.read()
 
@@ -93,10 +95,10 @@ class TestConstants:
 
         assert DEFAULT_TIMEOUT is None
 
-        assert DEFAULT_MEMORY_LIMIT == 1024
-        assert isinstance(DEFAULT_MEMORY_LIMIT, int)
+        assert DEFAULT_MEMORY_MB == 1024
+        assert isinstance(DEFAULT_MEMORY_MB, int)
 
-        assert DEFAULT_CPU_LIMIT is None
+        assert DEFAULT_CPU_PERCENT is None
         assert DEFAULT_MAX_FDS is None
         assert DEFAULT_MAX_CONNECTIONS is None
 
@@ -236,18 +238,49 @@ class TestLoadConfig:
             config = load_config()
             assert config["WEFT_LOGGING_ENABLED"] is False
 
+    def test_manager_reuse_env(self) -> None:
+        with patch.dict(os.environ, {"WEFT_MANAGER_REUSE_ENABLED": "0"}):
+            config = load_config()
+            assert config["WEFT_MANAGER_REUSE_ENABLED"] is False
+
+        with patch.dict(os.environ, {"WEFT_MANAGER_REUSE_ENABLED": "true"}):
+            config = load_config()
+            assert config["WEFT_MANAGER_REUSE_ENABLED"] is True
+
+    def test_manager_timeout_env(self) -> None:
+        """Manager timeout honours the environment variable."""
+        with patch.dict(os.environ, {"WEFT_MANAGER_LIFETIME_TIMEOUT": "42.5"}):
+            config = load_config()
+            assert config["WEFT_MANAGER_LIFETIME_TIMEOUT"] == 42.5
+
+        with patch.dict(os.environ, {"WEFT_MANAGER_LIFETIME_TIMEOUT": "-1"}):
+            config = load_config()
+            assert config["WEFT_MANAGER_LIFETIME_TIMEOUT"] == WEFT_MANAGER_LIFETIME_TIMEOUT
+
     def test_all_config_keys_present(self) -> None:
         """Test that all expected configuration keys are present."""
         config = load_config()
 
         expected_keys = {
-            # Debug
             "WEFT_DEBUG",
-            # Logging
             "WEFT_LOGGING_ENABLED",
+            "WEFT_REDACT_TASKSPEC_FIELDS",
+            "WEFT_MANAGER_REUSE_ENABLED",
+            "WEFT_MANAGER_LIFETIME_TIMEOUT",
+            "BROKER_PROJECT_SCOPE",
+            "BROKER_DEFAULT_DB_NAME",
+            "BROKER_DEBUG",
+            "BROKER_LOGGING_ENABLED",
         }
 
         assert set(config.keys()) == expected_keys
+        assert config["BROKER_PROJECT_SCOPE"] in {"true", "True", True}
+        assert config["BROKER_DEFAULT_DB_NAME"] == ".weft/broker.db"
+        assert config["BROKER_DEBUG"] == config["WEFT_DEBUG"]
+        assert config["BROKER_LOGGING_ENABLED"] == config["WEFT_LOGGING_ENABLED"]
+        assert config["WEFT_REDACT_TASKSPEC_FIELDS"] == ""
+        assert config["WEFT_MANAGER_LIFETIME_TIMEOUT"] == WEFT_MANAGER_LIFETIME_TIMEOUT
+        assert config["WEFT_MANAGER_REUSE_ENABLED"] == WEFT_MANAGER_REUSE_ENABLED
 
     def test_config_immutability(self) -> None:
         """Test that modifying returned config doesn't affect subsequent calls."""

@@ -2,6 +2,7 @@
 
 import subprocess
 import sys
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -91,6 +92,35 @@ class TestModuleExecution:
         # Help output may be in stdout or stderr depending on version
         output = result.stdout or result.stderr
         assert "Weft: The Multi-Agent Weaving Toolkit" in output
+
+
+class TestInitCommand:
+    """Black-box tests for the `weft init` command."""
+
+    def test_cli_init_creates_project(self, tmp_path: Path) -> None:
+        project_root = tmp_path / "project"
+
+        result = runner.invoke(app, ["init", str(project_root)])
+
+        assert result.exit_code == 0
+        assert (project_root / ".weft").is_dir()
+        assert (project_root / ".weft" / "broker.db").exists()
+        assert (project_root / ".weft" / "outputs").is_dir()
+        assert (project_root / ".weft" / "logs").is_dir()
+
+    def test_module_init_command(self, tmp_path: Path) -> None:
+        project_root = tmp_path / "module-project"
+
+        result = subprocess.run(
+            [sys.executable, "-m", "weft", "init", str(project_root)],
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0
+        assert (project_root / ".weft" / "broker.db").exists()
+        # Should print a friendly message mentioning the project root
+        assert str(project_root) in result.stdout
 
 
 class TestCLIConstants:
