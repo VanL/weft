@@ -21,7 +21,6 @@ from pathlib import Path
 from typing import Any
 
 from simplebroker.db import DBConnection
-
 from weft._constants import load_config
 
 # Load configuration once at module level for efficiency

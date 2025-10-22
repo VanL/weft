@@ -301,6 +301,9 @@ def test_cli_run_prunes_stale_manager(workdir) -> None:
     )
 
     assert rc == 0
-    payloads = [json.loads(item) for item, _ in registry.peek_many(limit=100, with_timestamps=True)]
+    payloads = [
+        json.loads(item)
+        for item, _ in registry.peek_many(limit=100, with_timestamps=True)
+    ]
     assert all(record.get("pid") != stale_pid for record in payloads)
     assert any(record.get("role") == "manager" for record in payloads)

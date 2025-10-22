@@ -4,8 +4,8 @@ from . import worker
 from .init import cmd_init
 from .run import cmd_run
 from .status import cmd_status
-from .validate_taskspec import cmd_validate_taskspec
 from .tidy import cmd_tidy
+from .validate_taskspec import cmd_validate_taskspec
 
 __all__ = [
     "cmd_init",

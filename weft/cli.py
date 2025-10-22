@@ -334,7 +334,9 @@ def init(
 def tidy(
     context: Annotated[
         Path | None,
-        typer.Option("--context", help="Run maintenance against a specific project root"),
+        typer.Option(
+            "--context", help="Run maintenance against a specific project root"
+        ),
     ] = None,
 ) -> None:
     """Compact the SimpleBroker database (vacuum + WAL checkpoint)."""
