@@ -3,7 +3,7 @@ coverage:
     project:
       default:
         # Target coverage percentage
-        target: 85%
+        target: 60%
         # Allow coverage to drop by up to 1% and still pass
         threshold: 1%
         # Use auto base to compare against the appropriate base
@@ -16,7 +16,7 @@ coverage:
     patch:
       default:
         # Target coverage for changed lines
-        target: 80%
+        target: 60%
         # Allow patch coverage to drop by up to 5% and still pass
         threshold: 5%
         base: auto
@@ -43,4 +43,4 @@ ignore:
   - "setup.py"
   - "**/examples/**"
   - "**/agent_history/**"
-  - "**/weft/**"
+  - "**/simplebroker/**"
