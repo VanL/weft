@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import typer
+import psutil
 
 from simplebroker import Queue
 from simplebroker.db import BrokerDB
@@ -241,10 +242,10 @@ def _select_active_manager(context: WeftContext) -> dict[str, Any] | None:
 
 def _is_pid_alive(pid: int) -> bool:
     try:
-        os.kill(pid, 0)
-    except OSError:
+        process = psutil.Process(pid)
+        return process.is_running()
+    except psutil.NoSuchProcess:
         return False
-    return True
 
 
 def _build_manager_spec(context: WeftContext, tid: str) -> TaskSpec:
