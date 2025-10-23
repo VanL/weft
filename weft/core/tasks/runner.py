@@ -272,7 +272,7 @@ class TaskRunner:
             raise TypeError("Spec env must be a mapping of string keys to values")
 
         process_target_obj = self._spec_data.get("process_target")
-        if not isinstance(process_target_obj, (list, tuple)):
+        if not isinstance(process_target_obj, list | tuple):
             raise TypeError("process_target must be a sequence of command arguments")
         command: list[str] = [str(part) for part in process_target_obj]
 

@@ -241,9 +241,13 @@ def _select_active_manager(context: WeftContext) -> dict[str, Any] | None:
 
 def _is_pid_alive(pid: int) -> bool:
     try:
+        if not psutil.pid_exists(pid):
+            return False
         process = psutil.Process(pid)
-        return process.is_running()
-    except psutil.NoSuchProcess:
+        return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
+    except (psutil.NoSuchProcess, psutil.ZombieProcess):
+        return False
+    except (psutil.AccessDenied, psutil.Error, OSError, ValueError):
         return False
 
 
@@ -818,7 +822,7 @@ def _run_inline(
                 )
             )
         else:
-            if isinstance(result_value, (dict, list)):
+            if isinstance(result_value, dict | list):
                 typer.echo(json.dumps(result_value, ensure_ascii=False))
             elif result_value not in (None, ""):
                 typer.echo(str(result_value))
@@ -896,7 +900,7 @@ def _run_spec_via_manager(
                 )
             )
         else:
-            if isinstance(result_value, (dict, list)):
+            if isinstance(result_value, dict | list):
                 typer.echo(json.dumps(result_value, ensure_ascii=False))
             elif result_value not in (None, ""):
                 typer.echo(str(result_value))

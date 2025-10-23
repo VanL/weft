@@ -69,7 +69,7 @@ def _resolve_db_path(db: BrokerDB | str | Path | None, fallback: str) -> str:
     """Derive a database path shared across Queue instances (Spec: [SB-0.1], [SB-0.4])."""
     if isinstance(db, BrokerDB):
         return str(db.db_path)
-    if isinstance(db, (str, Path)):
+    if isinstance(db, str | Path):
         return str(db)
     return fallback
 

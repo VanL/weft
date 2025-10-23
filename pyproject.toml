@@ -27,7 +27,6 @@ classifiers = [
     "Topic :: Utilities",
 ]
 dependencies = [
-    "aider-chat>=0.85.2",
     "llm>=0.26",
     "psutil>=7.0.0",
     "pydantic>=2.0.0",
