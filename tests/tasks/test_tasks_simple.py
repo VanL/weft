@@ -1,5 +1,6 @@
 """Simplified tests for the Task class that work with current implementation."""
 
+import os
 import tempfile
 import threading
 from pathlib import Path
@@ -32,12 +33,16 @@ class TestTaskSimple:
 
     def test_task_initialization_with_brokerdb(self):
         """Test Task initialization with BrokerDB instance."""
-        with tempfile.NamedTemporaryFile(suffix=".db") as tmp:
-            db = BrokerDB(tmp.name)
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+            tmp_path = tmp.name
+        try:
+            db = BrokerDB(tmp_path)
             taskspec = fixtures.create_minimal_taskspec()
             task = Consumer(db, taskspec)
             assert task.tid == taskspec.tid
             assert hasattr(task, "taskspec")
+        finally:
+            os.unlink(tmp_path)
 
     def test_task_with_stop_event(self):
         """Test Task with custom stop event."""

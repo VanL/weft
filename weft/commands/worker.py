@@ -143,7 +143,8 @@ def stop_command(
         if pid is not None:
             try:
                 os.kill(pid, signal.SIGTERM)
-            except ProcessLookupError:
+            except (ProcessLookupError, OSError):
+                # Process doesn't exist - consider it successfully stopped
                 return 0, None
             except PermissionError:  # pragma: no cover - unlikely in tests
                 return 1, f"Permission denied sending SIGTERM to PID {pid}"

@@ -110,6 +110,7 @@ def test_cli_run_interactive_command_streams(workdir) -> None:
         "--interactive",
         "--",
         sys.executable,
+        "-u",  # Unbuffered mode for proper interactive I/O
         str(INTERACTIVE_SCRIPT),
         cwd=workdir,
         stdin="hello\nquit\n",

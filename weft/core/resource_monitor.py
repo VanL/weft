@@ -6,6 +6,7 @@ docs/specifications/06-Resource_Management.md [RM-0] – [RM-5.1].
 
 from __future__ import annotations
 
+import sys
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -98,12 +99,18 @@ class PsutilResourceMonitor(BaseResourceMonitor):
             cpu_percent = 0.0
 
         try:
+            # On Unix systems, use num_fds()
             open_files = self._process.num_fds()
         except (AttributeError, psutil.AccessDenied):  # pragma: no cover
             try:
-                open_files = len(self._process.open_files())
-            except (psutil.AccessDenied, AttributeError):
-                open_files = 0
+                # On Windows, use num_handles() which is the equivalent concept
+                open_files = self._process.num_handles()
+            except (AttributeError, psutil.AccessDenied):
+                try:
+                    # Final fallback: count open files (limited scope)
+                    open_files = len(self._process.open_files())
+                except (psutil.AccessDenied, AttributeError):
+                    open_files = 0
 
         try:
             connections = len(self._process.net_connections())
@@ -146,7 +153,11 @@ class PsutilResourceMonitor(BaseResourceMonitor):
 
         fd_limit = getattr(limits, "max_fds", None)
         if fd_limit and metrics.open_files > fd_limit:
-            violations.append(f"Open files {metrics.open_files} > {fd_limit}")
+            # Use platform-appropriate terminology in error messages
+            descriptor_type = "handles" if sys.platform == "win32" else "files"
+            violations.append(
+                f"Open {descriptor_type} {metrics.open_files} > {fd_limit}"
+            )
 
         conn_limit = getattr(limits, "max_connections", None)
         if conn_limit and metrics.connections > conn_limit:

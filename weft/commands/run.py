@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import base64
 import json
-import os
 import subprocess
 import sys
 import time
@@ -18,8 +17,8 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, cast
 
-import typer
 import psutil
+import typer
 
 from simplebroker import Queue
 from simplebroker.db import BrokerDB
