@@ -2597,7 +2597,6 @@ dependencies = [
     { name = "setproctitle" },
     { name = "simplebroker" },
     { name = "typer" },
-    { name = "typing-extensions" },
 ]
 
 [package.optional-dependencies]
@@ -2609,6 +2608,7 @@ dev = [
     { name = "pytest-xdist" },
     { name = "ruff" },
     { name = "types-psutil" },
+    { name = "typing-extensions" },
 ]
 
 [package.metadata]
@@ -2628,7 +2628,7 @@ requires-dist = [
     { name = "simplebroker", specifier = ">=2.5.1" },
     { name = "typer", specifier = ">=0.16.0" },
     { name = "types-psutil", marker = "extra == 'dev'", specifier = ">=5.9.5" },
-    { name = "typing-extensions", specifier = ">=4.0.0" },
+    { name = "typing-extensions", marker = "extra == 'dev'", specifier = ">=4.0.0" },
 ]
 provides-extras = ["dev"]
 

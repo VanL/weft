@@ -35,6 +35,8 @@ class TestTaskSimple:
         """Test Task initialization with BrokerDB instance."""
         with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
             tmp_path = tmp.name
+        task = None
+        db = None
         try:
             db = BrokerDB(tmp_path)
             taskspec = fixtures.create_minimal_taskspec()
@@ -42,6 +44,16 @@ class TestTaskSimple:
             assert task.tid == taskspec.tid
             assert hasattr(task, "taskspec")
         finally:
+            try:
+                if task is not None:
+                    task.cleanup()
+            except Exception:  # pragma: no cover - defensive cleanup
+                pass
+            try:
+                if db is not None:
+                    db.close()
+            except Exception:  # pragma: no cover - defensive cleanup
+                pass
             os.unlink(tmp_path)
 
     def test_task_with_stop_event(self):

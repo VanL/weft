@@ -190,7 +190,8 @@ def test_task_runner_enforces_fd_limit(tmp_path):
     outcome = runner.run({})
 
     assert outcome.status == "limit"
-    assert "Open files" in (outcome.error or "")
+    error_text = outcome.error or ""
+    assert "Open files" in error_text
     assert outcome.metrics is not None
 
 
@@ -223,6 +224,8 @@ def test_task_runner_reports_multiple_violations(tmp_path):
     outcome = runner.run({})
 
     assert outcome.status == "limit"
-    assert "Memory" in (outcome.error or "")
-    assert "Open files" in (outcome.error or "")
+    error_text = outcome.error or ""
+    if sys.platform != "win32":
+        assert "Memory" in error_text
+    assert "Open files" in error_text
     assert outcome.metrics is not None

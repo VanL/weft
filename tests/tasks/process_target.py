@@ -31,7 +31,12 @@ def run_task(
 
     if memory_mb > 0:
         try:
-            buffers.append(bytearray(memory_mb * 1024 * 1024))
+            buf = bytearray(memory_mb * 1024 * 1024)
+            # Touch each page so that the allocation is committed on all platforms
+            page_size = 4096
+            for index in range(0, len(buf), page_size):
+                buf[index] = 1
+            buffers.append(buf)
         except MemoryError:
             pass
 
