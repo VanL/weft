@@ -11,6 +11,7 @@ import multiprocessing
 import os
 import queue
 import subprocess
+import sys
 import threading
 import time
 import traceback
@@ -278,6 +279,11 @@ class TaskRunner:
         working_dir_obj = self._spec_data.get("working_dir")
         cwd_value: str | None = str(working_dir_obj) if working_dir_obj else None
 
+        # Windows-specific subprocess flags for proper console handling
+        creation_flags = 0
+        if sys.platform == "win32":
+            creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP
+
         process = subprocess.Popen(
             command,
             stdin=subprocess.PIPE,
@@ -288,7 +294,8 @@ class TaskRunner:
             errors="replace",
             cwd=cwd_value,
             env=env_vars,
-            bufsize=1,
+            bufsize=0,  # Unbuffered for interactive communication
+            creationflags=creation_flags,
         )
 
         stdout_queue: queue.Queue[str | None] = queue.Queue()
