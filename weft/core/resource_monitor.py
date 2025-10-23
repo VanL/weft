@@ -154,9 +154,7 @@ class PsutilResourceMonitor(BaseResourceMonitor):
         fd_limit = getattr(limits, "max_fds", None)
         if fd_limit and metrics.open_files > fd_limit:
             suffix = " (handles)" if sys.platform == "win32" else ""
-            violations.append(
-                f"Open files{suffix} {metrics.open_files} > {fd_limit}"
-            )
+            violations.append(f"Open files{suffix} {metrics.open_files} > {fd_limit}")
 
         conn_limit = getattr(limits, "max_connections", None)
         if conn_limit and metrics.connections > conn_limit:
