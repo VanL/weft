@@ -373,12 +373,13 @@ def delete_command(
 def broadcast_command(
     message: str | None,
     *,
+    pattern: str | None = None,
     spec_context: str | None = None,
 ) -> tuple[int, str, str]:
     ctx = _context(spec_context)
     payload = message if message is not None else "-"
     return _run_simplebroker_command(
-        sb_commands.cmd_broadcast, str(ctx.database_path), payload
+        sb_commands.cmd_broadcast, str(ctx.database_path), payload, pattern=pattern
     )
 
 
@@ -445,6 +446,49 @@ def watch_command(
     return 0, "\n".join(stdout_lines), "\n".join(stderr_lines)
 
 
+def alias_add_command(
+    alias: str,
+    target: str,
+    *,
+    quiet: bool = False,
+    spec_context: str | None = None,
+) -> tuple[int, str, str]:
+    ctx = _context(spec_context)
+    return _run_simplebroker_command(
+        sb_commands.cmd_alias_add,
+        str(ctx.database_path),
+        alias,
+        target,
+        quiet=quiet,
+    )
+
+
+def alias_list_command(
+    *,
+    target: str | None = None,
+    spec_context: str | None = None,
+) -> tuple[int, str, str]:
+    ctx = _context(spec_context)
+    return _run_simplebroker_command(
+        sb_commands.cmd_alias_list,
+        str(ctx.database_path),
+        target=target,
+    )
+
+
+def alias_remove_command(
+    alias: str,
+    *,
+    spec_context: str | None = None,
+) -> tuple[int, str, str]:
+    ctx = _context(spec_context)
+    return _run_simplebroker_command(
+        sb_commands.cmd_alias_remove,
+        str(ctx.database_path),
+        alias,
+    )
+
+
 __all__ = [
     "QueueMessage",
     "QueueInfo",
@@ -462,4 +506,7 @@ __all__ = [
     "delete_command",
     "broadcast_command",
     "watch_command",
+    "alias_add_command",
+    "alias_list_command",
+    "alias_remove_command",
 ]

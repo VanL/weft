@@ -258,8 +258,46 @@ def queue_broadcast(
         str | None,
         typer.Argument(help="Message to broadcast ('-' for stdin)"),
     ] = None,
+    pattern: Annotated[
+        str | None,
+        typer.Option("--pattern", "-p", help="fnmatch-style pattern to limit target queues"),
+    ] = None,
 ) -> None:
-    _emit_queue_result(queue_cmd.broadcast_command(message))
+    _emit_queue_result(queue_cmd.broadcast_command(message, pattern=pattern))
+
+
+# Alias commands
+alias_app = typer.Typer(help="Queue alias management")
+queue_app.add_typer(alias_app, name="alias")
+
+
+@alias_app.command("add")
+def alias_add(
+    alias: Annotated[str, typer.Argument(help="Alias name")],
+    target: Annotated[str, typer.Argument(help="Target queue name")],
+    quiet: Annotated[
+        bool,
+        typer.Option("--quiet", "-q", help="Suppress confirmation output"),
+    ] = False,
+) -> None:
+    _emit_queue_result(queue_cmd.alias_add_command(alias, target, quiet=quiet))
+
+
+@alias_app.command("list")
+def alias_list(
+    target: Annotated[
+        str | None,
+        typer.Option("--target", "-t", help="Show aliases for specific target queue"),
+    ] = None,
+) -> None:
+    _emit_queue_result(queue_cmd.alias_list_command(target=target))
+
+
+@alias_app.command("remove")
+def alias_remove(
+    alias: Annotated[str, typer.Argument(help="Alias name to remove")],
+) -> None:
+    _emit_queue_result(queue_cmd.alias_remove_command(alias))
 
 
 def version_callback(value: bool) -> None:
@@ -473,6 +511,7 @@ def run_command(
     interactive: Annotated[
         bool,
         typer.Option(
+            "-i",
             "--interactive/--non-interactive",
             help="Enable interactive stdin/stdout streaming for commands",
         ),
