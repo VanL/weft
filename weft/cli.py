@@ -10,6 +10,7 @@ from .commands import cmd_init, cmd_status, cmd_tidy, cmd_validate_taskspec
 from .commands import queue as queue_cmd
 from .commands import worker as worker_cmd
 from .commands.run import cmd_run
+from .commands.result import cmd_result
 
 app = typer.Typer(
     name=PROG_NAME,
@@ -367,6 +368,57 @@ def status_command(
         spec_context=context_dir,
     )
 
+    if payload:
+        typer.echo(payload, err=exit_code != 0)
+    raise typer.Exit(code=exit_code)
+
+
+@app.command("result")
+def result_command(
+    tid: Annotated[
+        str | None,
+        typer.Argument(help="Task ID to fetch the result for"),
+    ] = None,
+    timeout: Annotated[
+        float | None,
+        typer.Option("--timeout", help="Maximum seconds to wait for completion"),
+    ] = None,
+    stream: Annotated[
+        bool,
+        typer.Option(
+            "--stream",
+            help="Stream incremental output events instead of waiting for completion",
+        ),
+    ] = False,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Emit structured JSON output"),
+    ] = False,
+    error_stream: Annotated[
+        bool,
+        typer.Option(
+            "--error",
+            help="Show stderr instead of stdout when both are present",
+        ),
+    ] = False,
+    context_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--context",
+            help="Directory to treat as the Weft context (defaults to discovery)",
+        ),
+    ] = None,
+) -> None:
+    """Fetch the result payload for a completed task."""
+
+    exit_code, payload = cmd_result(
+        tid=tid,
+        timeout=timeout,
+        stream=stream,
+        json_output=json_output,
+        show_stderr=error_stream,
+        context_path=context_dir,
+    )
     if payload:
         typer.echo(payload, err=exit_code != 0)
     raise typer.Exit(code=exit_code)
