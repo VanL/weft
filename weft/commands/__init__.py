@@ -6,10 +6,12 @@ from .run import cmd_run
 from .status import cmd_status
 from .tidy import cmd_tidy
 from .validate_taskspec import cmd_validate_taskspec
+from .result import cmd_result
 
 __all__ = [
     "cmd_init",
     "cmd_run",
+    "cmd_result",
     "cmd_status",
     "cmd_tidy",
     "cmd_validate_taskspec",
