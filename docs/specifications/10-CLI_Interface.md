@@ -182,6 +182,8 @@ weft kill T1837025672140161024
 weft kill --pattern "analyze"  # Kill matching tasks
 ```
 
+Patterned invocations reuse `queue broadcast --pattern 'T*.ctrl_in'` to fan control messages to every matching task. Patterns match canonical queue names; use `@alias` when you want alias resolution before broadcast.
+
 #### `pause` / `resume` - Pause and resume tasks
 
 ```bash
@@ -222,7 +224,7 @@ Direct queue access using SimpleBroker commands:
 
 #### `queue` - Queue operations
 
-_Implementation_: Implemented via `weft/commands/queue.py` (read, write, peek, move, list, watch).
+_Implementation_: Implemented via `weft/commands/queue.py` (read, write, peek, move, list, watch) with additional helpers for selective broadcast and alias management.
 
 ```bash
 # Read from queue
@@ -242,9 +244,21 @@ weft queue list
 
 # Watch queue for messages
 weft queue watch T1837025672140161024.outbox
+
+# Broadcast to matching queues using fnmatch-style pattern
+weft queue broadcast STOP --pattern 'T*.ctrl_in'
+
+# Manage aliases for pipeline wiring
+weft queue alias add agent1.outbox T1837025672140161024.outbox
+weft queue alias add agent2.inbox T1837025672140161024.outbox
+weft queue alias list --target T1837025672140161024.outbox
+weft queue alias remove agent1.outbox
 ```
 
-These commands delegate directly to SimpleBroker's Queue API.
+**Notes:**
+- Queue commands delegate directly to SimpleBroker's Queue API while respecting Weft context discovery.
+- Broadcast patterns apply to canonical queue names (`T*.ctrl_in`). Use `@alias` when invoking other commands to resolve-friendly names first.
+- Alias commands create durable mappings so multiple agents can rendezvous on a shared queue without extra move steps.
 
 ## Worker Management
 

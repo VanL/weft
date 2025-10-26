@@ -76,10 +76,10 @@ def test_interactive_python_repl_outputs(tty_workdir: Path) -> None:
     cmd = ["weft", "run", "-i", "python"]
     proc, master_fd = _spawn_with_pty(cmd, cwd=tty_workdir)
     try:
-        banner = _read_until(master_fd, ">>> ")
-        if ">>>" not in banner:
+        banner = _read_until(master_fd, "weft>")
+        if "weft>" not in banner:
             _shutdown(proc, master_fd)
-            pytest.fail(f"python prompt not detected; got {banner!r}")
+            pytest.fail(f"weft prompt not detected; got {banner!r}")
 
         _write_line(master_fd, "print(2+2)\n")
         output = _read_until(master_fd, "4")

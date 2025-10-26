@@ -181,6 +181,8 @@ def ps(failed, pattern, json_output):
 - `weft.core.manager.Client` (for graceful stop)
 - `weft.tools.tid_tools.TIDResolver`
 
+Pattern-based invocations delegate to `queue broadcast --pattern 'T*.ctrl_in'`, so the CLI simply emits a control payload to all matching tasks via SimpleBroker’s selective broadcast.
+
 #### `weft top`
 **Purpose**: Live task monitoring (like Unix top)
 **Dependencies**:
@@ -231,39 +233,31 @@ def stop(ctx, tid, force):
 ### Phase 4: Queue Operations Commands → SimpleBroker Integration
 
 #### `weft queue`
-**Purpose**: Direct queue manipulation (delegates to SimpleBroker)
+**Purpose**: Direct queue manipulation with selective broadcast and alias management (delegates to SimpleBroker)
 **Dependencies**:
 - SimpleBroker Queue API (external)
 - `weft.core.context.WeftContext`
 
-**Implementation Location**: `weft/commands.py:queue_group()`
+**Implementation Location**: `weft/cli.py:queue_app`, `weft/commands/queue.py`
+
+**Key Features**:
+- **Basic Operations**: read, write, peek, move, list, watch, delete
+- **Selective Broadcast**: `broadcast MESSAGE --pattern GLOB` for fanout messaging
+- **Alias Management**: `alias add/list/remove` for queue name shortcuts
+
+**Example Implementation**:
 ```python
-@cli.group()
-def queue():
-    """Queue operations (delegates to SimpleBroker)."""
-    pass
+@queue_app.command("broadcast")
+def queue_broadcast(
+    message: str | None = None,
+    pattern: str | None = typer.Option(None, "--pattern", "-p",
+                                     help="fnmatch-style pattern to limit target queues"),
+) -> None:
+    _emit_queue_result(queue_cmd.broadcast_command(message, pattern=pattern))
 
-@queue.command()
-@click.argument('queue_name')
-@click.option('--json', 'json_output', is_flag=True, help='JSON output')
-@click.pass_context
-def read(ctx, queue_name, json_output):
-    """Read from queue."""
-    context = ctx.obj['context']
-    queue = context.get_queue(queue_name)
-    msg = queue.read_one(json_output=json_output)
-    click.echo(msg if msg else '')
-
-@queue.command()
-@click.argument('queue_name')
-@click.argument('message')
-@click.pass_context
-def write(ctx, queue_name, message):
-    """Write to queue."""
-    context = ctx.obj['context']
-    queue = context.get_queue(queue_name)
-    timestamp = queue.write(message)
-    click.echo(timestamp)
+@alias_app.command("add")
+def alias_add(alias: str, target: str, quiet: bool = False) -> None:
+    _emit_queue_result(queue_cmd.alias_add_command(alias, target, quiet=quiet))
 ```
 
 ---
@@ -424,9 +418,16 @@ def test_all_commands_json_output():
 | `worker stop` | `commands.py` | `Manager` | 0, 2 | ❌ |
 | `worker list` | `commands.py` | `TaskMonitor` | 0 | ✅ |
 | `queue read` | `commands.py` | SimpleBroker | 0, 2 | ✅ |
-| `queue write` | `commands.py` | SimpleBroker | 0, 1 | ❌ |
+| `queue write` | `commands.py` | SimpleBroker | 0, 1 | ✅ |
 | `queue peek` | `commands.py` | SimpleBroker | 0, 2 | ✅ |
-| `queue move` | `commands.py` | SimpleBroker | 0, 1, 2 | ❌ |
+| `queue move` | `commands.py` | SimpleBroker | 0, 1, 2 | ✅ |
+| `queue list` | `commands.py` | SimpleBroker | 0 | ✅ |
+| `queue watch` | `commands.py` | SimpleBroker | 0, 130 | ✅ |
+| `queue delete` | `commands.py` | SimpleBroker | 0, 1, 2 | ✅ |
+| `queue broadcast` | `commands.py` | SimpleBroker | 0, 2 | ✅ |
+| `queue alias add` | `commands.py` | SimpleBroker | 0, 1 | ✅ |
+| `queue alias list` | `commands.py` | SimpleBroker | 0 | ✅ |
+| `queue alias remove` | `commands.py` | SimpleBroker | 0, 1, 2 | ✅ |
 | `tid` | `commands.py` | `TIDResolver` | 0, 2 | ✅ |
 | `template create` | `commands.py` | `TaskTemplate` | 0, 1 | ❌ |
 | `template list` | `commands.py` | `TaskTemplate` | 0 | ✅ |

@@ -38,6 +38,7 @@ from weft._constants import (
     WORK_ENVELOPE_START,
 )
 from weft.context import WeftContext, build_context
+from weft.commands.interactive import InteractiveStreamClient
 from weft.core.taskspec import TaskSpec
 
 # -----------------------------------------------------------------------------
@@ -599,6 +600,168 @@ def _wait_for_task_completion(
     return status, result_value, error_message
 
 
+def _run_interactive_session(
+    context: WeftContext,
+    taskspec: TaskSpec,
+    *,
+    stdin_data: str | None,
+    auto_close: bool = True,
+    use_prompt: bool = False,
+) -> tuple[str, Any | None, str | None]:
+    db_path = str(context.database_path)
+    config = context.broker_config
+    outbox_name = taskspec.io.outputs.get("outbox") or f"T{taskspec.tid}.{QUEUE_OUTBOX_SUFFIX}"
+    ctrl_out_name = taskspec.io.control.get("ctrl_out") or f"T{taskspec.tid}.{QUEUE_CTRL_OUT_SUFFIX}"
+    inbox_name = taskspec.io.inputs.get("inbox") or f"T{taskspec.tid}.{QUEUE_INBOX_SUFFIX}"
+
+    status_holder: dict[str, str | None] = {"status": None, "error": None}
+    stdout_chunks: list[str] = []
+
+    def _stdout_callback(chunk: str, final: bool) -> None:
+        if use_prompt:
+            if chunk:
+                typer.echo(chunk, nl=False)
+            if final and (not chunk or not chunk.endswith("\n")):
+                typer.echo()
+        else:
+            if chunk:
+                stdout_chunks.append(chunk)
+
+    def _stderr_callback(chunk: str, final: bool) -> None:
+        if chunk:
+            typer.echo(chunk, err=True, nl=False)
+        if final and (not chunk or not chunk.endswith("\n")):
+            typer.echo(err=True)
+
+    def _state_callback(event: dict[str, Any]) -> None:
+        evt = event.get("event")
+        if evt in {"work_failed", "work_timeout", "work_limit_violation"}:
+            status_holder["status"] = "failed"
+            status_holder["error"] = event.get("error") or evt.replace("_", " ")
+        elif evt == "work_completed":
+            status_holder["status"] = "completed"
+
+    client = InteractiveStreamClient(
+        db_path=db_path,
+        config=config,
+        tid=taskspec.tid,
+        inbox=inbox_name,
+        outbox=outbox_name,
+        ctrl_out=ctrl_out_name,
+        on_stdout=_stdout_callback,
+        on_stderr=_stderr_callback,
+        on_state=_state_callback,
+    )
+
+    client.start()
+    try:
+        if use_prompt:
+            try:
+                from prompt_toolkit import PromptSession
+                from prompt_toolkit.patch_stdout import patch_stdout
+            except ImportError as exc:  # pragma: no cover - optional dependency guard
+                raise typer.BadParameter(
+                    "prompt_toolkit is required for interactive mode when stdin is a TTY"
+                ) from exc
+
+            import threading
+
+            session = PromptSession("weft> ")
+            completion_event = threading.Event()
+
+            def _await_completion() -> None:
+                client.wait()
+                completion_event.set()
+                try:
+                    session.app.exit(result=None)
+                except Exception:  # pragma: no cover - defensive
+                    pass
+
+            waiter = threading.Thread(target=_await_completion, daemon=True)
+            waiter.start()
+
+            # Trigger the downstream prompt to render once before entering the loop.
+            client.send_input("\n")
+
+            with patch_stdout():
+                while not completion_event.is_set():
+                    try:
+                        line = session.prompt("weft> ")
+                    except EOFError:
+                        client.close_input()
+                        break
+                    except KeyboardInterrupt:
+                        typer.echo()
+                        continue
+
+                    if line is None:  # Completion triggered while waiting for input
+                        break
+
+                    stripped = line.strip()
+                    if stripped in {":quit", ":exit"}:
+                        client.close_input()
+                        break
+
+                    payload = line if line.endswith("\n") else f"{line}\n"
+                    client.send_input(payload)
+
+            waiter.join(timeout=0.5)
+            client.wait()
+        else:
+            if stdin_data:
+                client.send_input(stdin_data)
+                time.sleep(0.05)
+            if auto_close:
+                client.close_input()
+
+            client.wait()
+        status = status_holder["status"] or client.status or "completed"
+        error = status_holder["error"] or client.error
+        result: Any | None = None
+        if not use_prompt and stdout_chunks:
+            result = "".join(stdout_chunks)
+    finally:
+        client.stop()
+
+    if not use_prompt:
+        collected: list[str] = []
+        outbox_queue = Queue(
+            outbox_name,
+            db_path=db_path,
+            persistent=True,
+            config=config,
+        )
+        while True:
+            item = outbox_queue.read_one()
+            if item is None:
+                break
+            payload_raw = item[0] if isinstance(item, tuple) else item
+            try:
+                payload_obj = json.loads(payload_raw)
+            except json.JSONDecodeError:
+                collected.append(str(payload_raw))
+                continue
+
+            if isinstance(payload_obj, dict) and payload_obj.get("type") == "stream":
+                data = payload_obj.get("data", "")
+                encoding = payload_obj.get("encoding", "text")
+                if encoding == "base64":
+                    try:
+                        chunk_bytes = base64.b64decode(data)
+                        collected.append(chunk_bytes.decode("utf-8", errors="replace"))
+                    except Exception:
+                        collected.append(str(data))
+                else:
+                    collected.append(str(data))
+            else:
+                collected.append(json.dumps(payload_obj, ensure_ascii=False))
+
+        if collected and not result:
+            result = "".join(collected)
+
+    return status, result, error
+
+
 def _build_taskspec_dict(
     *,
     tid: str,
@@ -669,8 +832,11 @@ def _initial_work_payload(
     *,
     target_type: str,
     stdin_data: str | None,
+    interactive: bool,
 ) -> Any:
     if target_type == "command":
+        if interactive:
+            return {}
         if stdin_data:
             return {"stdin": stdin_data}
         return {}
@@ -722,9 +888,14 @@ def _run_inline(
     metadata["source"] = "weft.cli"
 
     stdin_data = _read_stdin()
+    try:
+        stdin_is_tty = bool(sys.stdin and sys.stdin.isatty())
+    except Exception:  # pragma: no cover - defensive for mocked stdin
+        stdin_is_tty = False
     work_payload = _initial_work_payload(
         target_type=target_type,
         stdin_data=stdin_data,
+        interactive=interactive,
     )
     tid = _generate_tid(context)
 
@@ -790,12 +961,27 @@ def _run_inline(
                 typer.echo(tid)
             return 0
 
-        status, result_value, error_message = _wait_for_task_completion(
-            context,
-            taskspec,
-            json_output=json_output,
-            verbose=verbose,
-        )
+        if interactive:
+            use_prompt = stdin_data is None and stdin_is_tty
+            status, result_value, error_message = _run_interactive_session(
+                context,
+                taskspec,
+                stdin_data=stdin_data,
+                auto_close=not use_prompt,
+                use_prompt=use_prompt,
+            )
+            if not use_prompt and result_value:
+                typer.echo(result_value, nl=False)
+                if not str(result_value).endswith("\n"):
+                    typer.echo()
+                result_value = ""
+        else:
+            status, result_value, error_message = _wait_for_task_completion(
+                context,
+                taskspec,
+                json_output=json_output,
+                verbose=verbose,
+            )
     except Exception as exc:
         if started_here:
             _stop_manager(context, manager_record, process_handle)

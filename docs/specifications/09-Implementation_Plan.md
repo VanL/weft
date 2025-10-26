@@ -112,6 +112,9 @@ This document outlines the development roadmap for the Weft system, with a focus
 - [ ] `weft top [--interval N] [--sort FIELD]`
 - [ ] `weft tid SHORT_TID` / `weft tid --pid PID`
 
+**Implementation Notes**:
+- Pattern-based `kill`/`stop` reuse `queue broadcast --pattern 'T*.ctrl_in'` to fan control messages to matching tasks, keeping the CLI thin over SimpleBroker’s selective broadcast.
+
 **Tool Components**:
 - [ ] Implement ProcessManager using ps/kill OS commands
 - [ ] Process discovery via ps aux | grep weft-
@@ -189,30 +192,38 @@ This document outlines the development roadmap for the Weft system, with a focus
 #### 3.2 Queue Operations Commands
 **Files**: `weft/commands.py` (queue subcommands)
 
-**CLI Commands**: `weft queue read/write/peek/move/list/watch`
+**CLI Commands**: `weft queue read/write/peek/move/list/watch/broadcast/alias`
 **Dependencies**: SimpleBroker Queue API, WeftContext
 
 **CLI Implementation**:
-- [ ] `weft queue read QUEUE [--json] [--timeout N]`
-- [ ] `weft queue write QUEUE MESSAGE`
-- [ ] `weft queue peek QUEUE [--json] [--all]`
-- [ ] `weft queue move SOURCE TARGET [--all]`
-- [ ] `weft queue list [--pattern PATTERN] [--json]`
-- [ ] `weft queue watch QUEUE [--json]`
+- [x] `weft queue read QUEUE [--json] [--timeout N]`
+- [x] `weft queue write QUEUE MESSAGE`
+- [x] `weft queue peek QUEUE [--json] [--all]`
+- [x] `weft queue move SOURCE TARGET [--all]`
+- [x] `weft queue list [--pattern PATTERN] [--json]`
+- [x] `weft queue watch QUEUE [--json]`
+- [x] `weft queue broadcast MESSAGE [--pattern GLOB]`
+- [x] `weft queue alias add ALIAS TARGET`
+- [x] `weft queue alias remove ALIAS`
+- [x] `weft queue alias list [--target QUEUE]`
 
 **Queue Integration**:
-- [ ] Direct SimpleBroker delegation
-- [ ] Context-aware queue access
-- [ ] Safety validation and error handling
-- [ ] Emergency queue operations
+- [x] Direct SimpleBroker delegation
+- [x] Context-aware queue access
+- [x] Safety validation and error handling
+- [x] Emergency queue operations
+- [x] Pattern-based fan-out for control messaging
+- [x] Alias management for pipeline shortcuts
 
 **CLI Integration**: Direct delegation to SimpleBroker with context management
 
 **Tests**: `tests/test_cli/test_queue_commands.py`, `tests/test_cli_integration/test_queue_operations.py`
-- [ ] All queue operations via CLI
-- [ ] Context isolation in queue access
-- [ ] Error handling and exit codes
-- [ ] Emergency recovery scenarios
+- [x] All queue operations via CLI
+- [x] Broadcast fan-out (match/no-match) semantics and exit codes
+- [x] Alias add/list/remove, duplicate/cycle validation, cache refresh
+- [x] Context isolation in queue access
+- [x] Error handling and exit codes
+- [x] Emergency recovery scenarios
 
 #### 3.3 Enhanced Observability
 **Files**: `weft/tools/observability.py`, `weft/commands.py` (enhanced status/list)
