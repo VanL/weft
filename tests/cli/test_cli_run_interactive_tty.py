@@ -11,7 +11,6 @@ from pathlib import Path
 
 import pytest
 
-
 READ_SLICE = 0.05
 DEFAULT_TIMEOUT = 5.0
 
@@ -22,7 +21,9 @@ def tty_workdir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path
 
 
-def _spawn_with_pty(args: list[str], *, cwd: Path) -> tuple[subprocess.Popen[bytes], int]:
+def _spawn_with_pty(
+    args: list[str], *, cwd: Path
+) -> tuple[subprocess.Popen[bytes], int]:
     master_fd, slave_fd = pty.openpty()
     proc = subprocess.Popen(
         args,

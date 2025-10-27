@@ -16,15 +16,14 @@ from __future__ import annotations
 import json
 import threading
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 from simplebroker import Queue
-
 from weft._constants import WEFT_GLOBAL_LOG_QUEUE
 from weft.core.tasks.multiqueue_watcher import (
     MultiQueueWatcher,
-    QueueMode,
     QueueMessageContext,
+    QueueMode,
 )
 
 
@@ -215,14 +214,20 @@ class InteractiveStreamClient:
         # only act on entries newer than the last one we processed.
         queue = context.queue
         try:
-            entries = queue.peek_many(limit=128, with_timestamps=True)
+            entries = cast(
+                list[tuple[str, int]] | None,
+                queue.peek_many(limit=128, with_timestamps=True),
+            )
         except Exception:
             entries = None
 
         processed = False
-        if entries:
+        if entries is not None:
             for body, entry_ts in entries:
-                if self._log_last_timestamp is not None and entry_ts <= self._log_last_timestamp:
+                if (
+                    self._log_last_timestamp is not None
+                    and entry_ts <= self._log_last_timestamp
+                ):
                     continue
 
                 payload = self._maybe_parse_json(body)
