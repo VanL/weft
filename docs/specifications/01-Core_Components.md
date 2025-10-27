@@ -135,7 +135,7 @@ BaseTask purposefully does *not* execute work itself.  Instead it delegates to
 `TaskRunner` (see §3) from within `_handle_work_message`, allowing subclasses to
 focus on the semantics of message handling rather than process orchestration.
 
-### 2.3 Specialised Task Types [CC-2.3]
+### 2.3 Specialized Task Types [CC-2.3]
 Concrete task types extend `BaseTask` to express different queue behaviours.
 
 _Implementation_: `Consumer` (`weft/core/tasks/consumer.py`), `Observer` (`weft/core/tasks/observer.py`), `SelectiveConsumer` (`weft/core/tasks/observer.py`), `Monitor` (`weft/core/tasks/monitor.py`), and `SamplingObserver` (`weft/core/tasks/monitor.py`) provide the queue modes shown below while reusing the helpers exported from `weft/core/tasks/base.py`.
@@ -178,7 +178,7 @@ reserved policies, and context-aware process title formatting are implemented in
 At a high level a `Consumer` (and derivatives) execute the following steps:
 
 1. Instantiate `BaseTask` with a fully validated `TaskSpec`.
-2. Register queue handlers and initialise process-title/TID mapping.
+2. Register queue handlers and initialize process-title/TID mapping.
 3. On each inbox message:
    - Mark the task as running and emit `work_started`.
    - Delegate execution to `TaskRunner` (multiprocess isolation, resource

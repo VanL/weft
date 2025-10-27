@@ -97,6 +97,8 @@ class Consumer(BaseTask, InteractiveTaskMixin):
 
     def _execute_work_item(self, work_item: Any, timestamp: int | None) -> Any:
         outcome = self._run_task(work_item)
+        if getattr(outcome, "worker_pid", None):
+            self.register_managed_pid(outcome.worker_pid)
         metrics_payload = self._extract_metrics(outcome)
         self._ensure_outcome_ok(outcome, timestamp, metrics_payload)
         result_bytes = self._emit_result(outcome.value)

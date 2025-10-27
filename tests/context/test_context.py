@@ -17,7 +17,7 @@ from weft.context import build_context  # noqa: E402
 
 
 def test_build_context_creates_structure(tmp_path: Path) -> None:
-    """Building a context for a fresh directory materialises all assets."""
+    """Building a context for a fresh directory materializes all assets."""
     ctx = build_context(spec_context=tmp_path)
 
     assert ctx.root == tmp_path.resolve()

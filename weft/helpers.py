@@ -507,7 +507,7 @@ def format_byte_size(size: int, *, precision: int = 1) -> str:
     return f"{formatted} {units[unit_index]}"
 
 
-def _pluralise(value: int, unit: str) -> str:
+def _pluralize(value: int, unit: str) -> str:
     suffix = "s" if value != 1 else ""
     return f"{value} {unit}{suffix}"
 
@@ -548,13 +548,13 @@ def _format_duration(seconds: float, *, max_units: int = 2) -> str:
             break
         value, remaining = divmod(remaining, unit_seconds)
         if value:
-            parts.append(_pluralise(value, name))
+            parts.append(_pluralize(value, name))
 
     if len(parts) < max_units and remaining and components[-1][0] != "second":
-        parts.append(_pluralise(remaining, "second"))
+        parts.append(_pluralize(remaining, "second"))
 
     if not parts:
-        parts.append(_pluralise(int(round(seconds)), "second"))
+        parts.append(_pluralize(int(round(seconds)), "second"))
 
     return ", ".join(parts)
 

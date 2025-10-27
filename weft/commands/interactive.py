@@ -67,6 +67,8 @@ class InteractiveStreamClient:
         self._stdout_cb = on_stdout or (lambda _chunk, _final: None)
         self._stderr_cb = on_stderr or (lambda _chunk, _final: None)
         self._state_cb = on_state or (lambda _event: None)
+        self._stdout_history: list[str] = []
+        self._stderr_history: list[str] = []
 
         self._inbox_queue = Queue(
             inbox,
@@ -164,6 +166,14 @@ class InteractiveStreamClient:
         with self._status_lock:
             return self._error
 
+    @property
+    def stdout_history(self) -> list[str]:
+        return list(self._stdout_history)
+
+    @property
+    def stderr_history(self) -> list[str]:
+        return list(self._stderr_history)
+
     # ------------------------------------------------------------------
     # Queue handlers (run on watcher thread)
     # ------------------------------------------------------------------
@@ -176,10 +186,12 @@ class InteractiveStreamClient:
             chunk = payload.get("data", "")
             is_final = bool(payload.get("final"))
             if stream == "stdout":
+                self._stdout_history.append(str(chunk))
                 self._stdout_cb(str(chunk), is_final)
                 if is_final:
                     self._mark_completion(status="completed")
             elif stream == "stderr":
+                self._stderr_history.append(str(chunk))
                 self._stderr_cb(str(chunk), is_final)
             else:
                 # Unknown stream type; surface via stderr callback for visibility
@@ -187,7 +199,9 @@ class InteractiveStreamClient:
             return
 
         # Non-stream payloads fallback to stdout
-        self._stdout_cb(str(payload), True)
+        text_payload = str(payload)
+        self._stdout_history.append(text_payload)
+        self._stdout_cb(text_payload, True)
         self._mark_completion(status="completed")
 
     def _handle_ctrl_message(
@@ -199,13 +213,18 @@ class InteractiveStreamClient:
             chunk = payload.get("data", "")
             is_final = bool(payload.get("final"))
             if stream == "stderr":
+                self._stderr_history.append(str(chunk))
                 self._stderr_cb(str(chunk), is_final)
             else:
+                text_payload = json.dumps(payload)
+                self._stdout_history.append(text_payload)
                 self._stdout_cb(json.dumps(payload), is_final)
             return
 
         # Control responses (STATUS/INFO) are surfaced to stderr for visibility
-        self._stderr_cb(str(payload), False)
+        text_payload = str(payload)
+        self._stderr_history.append(text_payload)
+        self._stderr_cb(text_payload, False)
 
     def _handle_log_message(
         self, message: str, timestamp: int, context: QueueMessageContext

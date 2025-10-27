@@ -19,7 +19,7 @@ Key behaviours
   `weft_context`, we consult SimpleBroker's project-search helper to locate an
   existing database that matches the configured default filename (typically
   `.weft/broker.db`).  If nothing is found we fall back to the current working
-  directory and initialise a fresh database there.
+  directory and initialize a fresh database there.
 * **Explicit overrides** – If `weft_context` *is* provided we treat it as the
   authoritative project root, expand the path, and place the SimpleBroker
   database inside that directory using the configured relative filename.

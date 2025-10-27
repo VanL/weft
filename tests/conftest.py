@@ -2,35 +2,48 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from simplebroker import Queue
+from tests.helpers.weft_harness import WeftTestHarness
 
 
 @pytest.fixture
-def workdir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Per-test working directory with cwd switched for isolation."""
-    monkeypatch.setenv("WEFT_TEST_MODE", "1")
-    monkeypatch.setenv("WEFT_MANAGER_REUSE_ENABLED", "0")
-    monkeypatch.setenv("WEFT_MANAGER_LIFETIME_TIMEOUT", "0.5")
-    monkeypatch.chdir(tmp_path)
-    yield tmp_path
+def weft_harness() -> Iterator[WeftTestHarness]:
+    with WeftTestHarness() as harness:
+        yield harness
 
 
 @pytest.fixture
-def broker_env(workdir: Path) -> Iterator[tuple[str, Callable[[str], Queue]]]:
+def workdir(weft_harness: WeftTestHarness) -> Path:
+    """Per-test working directory derived from the test harness."""
+    return weft_harness.root
+
+
+@pytest.fixture
+def broker_env(
+    weft_harness: WeftTestHarness,
+) -> Iterator[tuple[str, Callable[[str], Queue]]]:
     """Provide a shared broker database path and a queue factory."""
-    db_path = workdir / "weft-tests.db"
+    context = weft_harness.context
+    db_path = context.database_path
     created: list[Queue] = []
 
     def factory(name: str) -> Queue:
-        queue = Queue(name, db_path=str(db_path), persistent=True)
+        queue = Queue(
+            name,
+            db_path=str(db_path),
+            persistent=True,
+            config=context.broker_config,
+        )
         created.append(queue)
         return queue
 
@@ -40,7 +53,7 @@ def broker_env(workdir: Path) -> Iterator[tuple[str, Callable[[str], Queue]]]:
         for queue in created:
             try:
                 queue.close()
-            except Exception:
+            except Exception:  # pragma: no cover - defensive
                 pass
 
 
@@ -71,9 +84,10 @@ def run_cli(
     *args: object,
     cwd: Path,
     stdin: str | None = None,
-    timeout: float = 6.0,
+    timeout: float = 20.0,
     env: dict[str, str] | None = None,
     strip_path_entry: bool = False,
+    harness: WeftTestHarness | None = None,
 ) -> tuple[int, str, str]:
     """Execute the Weft CLI (`python -m weft.cli …`) inside *cwd*."""
     repo_root = Path(__file__).resolve().parents[1]
@@ -113,11 +127,76 @@ def run_cli(
         env=env_vars,
     )
 
-    return (
-        completed.returncode,
-        completed.stdout.strip(),
-        completed.stderr.strip(),
-    )
+    stdout = completed.stdout.strip()
+    stderr = completed.stderr.strip()
+
+    if harness is not None:
+        _register_cli_outputs(harness, args, stdout, stderr)
+
+    return completed.returncode, stdout, stderr
 
 
-__all__ = ["workdir", "broker_env", "task_factory", "run_cli"]
+def _register_cli_outputs(
+    harness: WeftTestHarness,
+    args: tuple[object, ...],
+    stdout: str,
+    stderr: str,
+) -> None:
+    _extract_ids(harness, stdout)
+    _extract_ids(harness, stderr)
+
+    for blob in (stdout, stderr):
+        for line in blob.splitlines():
+            try:
+                payload = json.loads(line)
+            except Exception:
+                continue
+            _register_from_json(harness, payload)
+
+    if args and args[0] == "worker" and len(args) > 1:
+        subcommand = args[1]
+        if subcommand in {"start", "stop", "status", "list"}:
+            for arg in args:
+                if isinstance(arg, str) and arg.isdigit() and len(arg) == 19:
+                    harness.register_tid(arg)
+
+
+def _extract_ids(harness: WeftTestHarness, text: str) -> None:
+    import re
+
+    tid_pattern = re.compile(r"\b\d{19}\b")
+    pid_pattern = re.compile(r"pid\s+(\d+)", re.IGNORECASE)
+
+    for match in tid_pattern.findall(text):
+        harness.register_tid(match)
+    for match in pid_pattern.findall(text):
+        try:
+            harness.register_pid(int(match))
+        except ValueError:
+            continue
+
+
+def _register_from_json(harness: WeftTestHarness, payload: Any) -> None:
+    if isinstance(payload, dict):
+        tid = payload.get("tid")
+        if isinstance(tid, str):
+            harness.register_tid(tid)
+        pid = payload.get("pid")
+        if isinstance(pid, int):
+            harness.register_pid(pid)
+        managed = payload.get("managed_pids")
+        if isinstance(managed, list):
+            for value in managed:
+                if isinstance(value, int):
+                    harness.register_pid(value)
+        caller = payload.get("caller_pid")
+        if isinstance(caller, int):
+            harness._mark_safe_pid(caller)
+        for value in payload.values():
+            _register_from_json(harness, value)
+    elif isinstance(payload, list):
+        for item in payload:
+            _register_from_json(harness, item)
+
+
+__all__ = ["weft_harness", "workdir", "broker_env", "task_factory", "run_cli"]

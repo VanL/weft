@@ -41,6 +41,7 @@ class RunnerOutcome:
     returncode: int | None
     duration: float
     metrics: ResourceMetrics | None = None
+    worker_pid: int | None = None
 
     @property
     def ok(self) -> bool:
@@ -152,16 +153,16 @@ class TaskRunner:
             daemon=True,
         )
         process.start()
+        worker_pid = process.pid
         monitor = None
         last_metrics: ResourceMetrics | None = None
         outcome: RunnerOutcome | None = None
         if self._monitor_class:
             monitor = load_resource_monitor(self._monitor_class)
             try:
-                pid = process.pid
-                if pid is None:
+                if worker_pid is None:
                     raise RuntimeError("Worker process has no PID")
-                monitor.start(pid)
+                monitor.start(worker_pid)
             except Exception:  # pragma: no cover
                 monitor = None
 
@@ -185,6 +186,7 @@ class TaskRunner:
                     returncode=None,
                     duration=self._timeout,
                     metrics=last_metrics,
+                    worker_pid=worker_pid,
                 )
 
             remaining: float | None = None
@@ -225,6 +227,7 @@ class TaskRunner:
                         returncode=None,
                         duration=time.monotonic() - start_time,
                         metrics=last_metrics,
+                        worker_pid=worker_pid,
                     )
 
         process.join()
@@ -251,9 +254,11 @@ class TaskRunner:
                     returncode=None,
                     duration=time.monotonic() - start_time,
                     metrics=last_metrics,
+                    worker_pid=worker_pid,
                 )
 
         outcome.metrics = outcome.metrics or last_metrics
+        outcome.worker_pid = worker_pid
         return outcome
 
     def start_session(self) -> CommandSession:

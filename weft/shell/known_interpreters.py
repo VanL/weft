@@ -36,7 +36,7 @@ KNOWN_INTERPRETERS: Mapping[str, InterpreterHit] = {
 }
 
 
-def _normalise(entry: str) -> str:
+def _normalize(entry: str) -> str:
     base = Path(entry).name.lower()
     return base
 
@@ -46,7 +46,7 @@ def recognise_interpreter(command: Sequence[str]) -> InterpreterHit | None:
 
     if not command:
         return None
-    candidate = _normalise(command[0])
+    candidate = _normalize(command[0])
     if candidate in KNOWN_INTERPRETERS:
         return KNOWN_INTERPRETERS[candidate]
 

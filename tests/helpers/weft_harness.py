@@ -8,8 +8,11 @@ import tempfile
 import time
 from pathlib import Path
 
+import psutil
+
 from simplebroker import Queue
 from weft._constants import (
+    WEFT_GLOBAL_LOG_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
     WEFT_WORKERS_REGISTRY_QUEUE,
 )
@@ -32,6 +35,8 @@ class WeftTestHarness:
         self._registered_pids: set[int] = set()
         self._registered_tids: set[str] = set()
         self._closed = False
+        self._self_pid = os.getpid()
+        self._safe_pids = self._compute_safe_pid_set()
 
     # ------------------------------------------------------------------
     # Context management
@@ -40,7 +45,7 @@ class WeftTestHarness:
         self._orig_cwd = Path.cwd()
         self._patch_environment()
         os.chdir(self.root)
-        # Ensure context and database are initialised early.
+        # Ensure context and database are initialized early.
         _ = self.context
         return self
 
@@ -60,7 +65,7 @@ class WeftTestHarness:
     # Resource tracking
     # ------------------------------------------------------------------
     def register_pid(self, pid: int, tid: str | None = None) -> None:
-        if pid > 0:
+        if pid > 0 and not self._should_skip_pid(pid):
             self._registered_pids.add(pid)
         if tid:
             self._registered_tids.add(tid)
@@ -68,6 +73,41 @@ class WeftTestHarness:
     def register_tid(self, tid: str) -> None:
         if tid:
             self._registered_tids.add(tid)
+
+    def registered_tids(self) -> set[str]:
+        return set(self._registered_tids)
+
+    def wait_for_completion(self, tid: str, timeout: float = 5.0) -> None:
+        log_queue = Queue(
+            WEFT_GLOBAL_LOG_QUEUE,
+            db_path=str(self.context.database_path),
+            persistent=False,
+            config=self.context.broker_config,
+        )
+        deadline = time.time() + timeout
+        last_seen: int | None = None
+        try:
+            while time.time() < deadline:
+                records = log_queue.peek_many(limit=512, with_timestamps=True) or []
+                for payload, ts in records:
+                    if last_seen is not None and ts <= last_seen:
+                        continue
+                    try:
+                        data = json.loads(payload)
+                    except json.JSONDecodeError:
+                        continue
+                    if data.get("tid") != tid:
+                        continue
+                    event = data.get("event")
+                    if event == "work_completed":
+                        return
+                    if event in {"work_failed", "work_timeout"}:
+                        raise RuntimeError(f"Task {tid} reported {event}")
+                    last_seen = ts
+                time.sleep(0.05)
+        finally:
+            log_queue.close()
+        raise TimeoutError(f"Timed out waiting for task {tid}")
 
     # ------------------------------------------------------------------
     # Cleanup
@@ -188,13 +228,30 @@ class WeftTestHarness:
                 data = json.loads(payload)
             except json.JSONDecodeError:
                 continue
-            pid = data.get("pid")
-            if isinstance(pid, int):
-                self._registered_pids.add(pid)
+            caller_pid = data.get("caller_pid")
+            if isinstance(caller_pid, int):
+                self._mark_safe_pid(caller_pid)
+
+            pid_candidates: list[int] = []
+            for key in ("task_pid", "pid"):
+                candidate = data.get(key)
+                if isinstance(candidate, int):
+                    pid_candidates.append(candidate)
+
+            managed = data.get("managed_pids")
+            if isinstance(managed, list):
+                for value in managed:
+                    if isinstance(value, int):
+                        pid_candidates.append(value)
+
+            for candidate in pid_candidates:
+                self.register_pid(candidate)
         queue.close()
 
     def _terminate_registered_pids(self) -> None:
         for pid in list(self._registered_pids):
+            if self._should_skip_pid(pid):
+                continue
             self._terminate_pid(pid)
         self._registered_pids.clear()
 
@@ -231,6 +288,61 @@ class WeftTestHarness:
         except PermissionError:
             return True
         return True
+
+    def _mark_safe_pid(self, pid: int) -> None:
+        if pid > 0:
+            self._safe_pids.add(pid)
+
+    def _compute_safe_pid_set(self) -> set[int]:
+        safe_pids: set[int] = {self._self_pid}
+
+        override = os.environ.get("WEFT_TEST_SAFE_PIDS")
+        if override:
+            for token in override.split(","):
+                token = token.strip()
+                if not token:
+                    continue
+                try:
+                    safe_pids.add(int(token))
+                except ValueError:
+                    continue
+
+        try:
+            process = psutil.Process(self._self_pid)
+        except psutil.Error:  # pragma: no cover - defensive
+            return safe_pids
+
+        for ancestor in process.parents():
+            safe_pids.add(ancestor.pid)
+
+        parent_pid = process.ppid()
+        if parent_pid and parent_pid > 0:
+            safe_pids.add(parent_pid)
+
+        return safe_pids
+
+    def _should_skip_pid(self, pid: int) -> bool:
+        if pid <= 0:
+            return True
+        if pid in self._safe_pids:
+            return True
+        if self._is_ancestor_pid(pid):
+            self._safe_pids.add(pid)
+            return True
+        return False
+
+    def _is_ancestor_pid(self, pid: int) -> bool:
+        if pid in {self._self_pid, 0}:
+            return True
+        try:
+            process = psutil.Process(self._self_pid)
+        except psutil.Error:  # pragma: no cover - defensive
+            return False
+
+        for ancestor in process.parents():
+            if ancestor.pid == pid:
+                return True
+        return False
 
     def _remove_database_files(self) -> None:
         if self._context is None:
