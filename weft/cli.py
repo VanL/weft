@@ -9,8 +9,10 @@ from ._constants import PROG_NAME, __version__
 from .commands import cmd_init, cmd_status, cmd_tidy, cmd_validate_taskspec
 from .commands import queue as queue_cmd
 from .commands import worker as worker_cmd
-from .commands.run import cmd_run
+from .commands.dump import cmd_dump
+from .commands.load import cmd_load
 from .commands.result import cmd_result
+from .commands.run import cmd_run
 
 app = typer.Typer(
     name=PROG_NAME,
@@ -260,7 +262,9 @@ def queue_broadcast(
     ] = None,
     pattern: Annotated[
         str | None,
-        typer.Option("--pattern", "-p", help="fnmatch-style pattern to limit target queues"),
+        typer.Option(
+            "--pattern", "-p", help="fnmatch-style pattern to limit target queues"
+        ),
     ] = None,
 ) -> None:
     _emit_queue_result(queue_cmd.broadcast_command(message, pattern=pattern))
@@ -455,7 +459,7 @@ def result_command(
         stream=stream,
         json_output=json_output,
         show_stderr=error_stream,
-        context_path=context_dir,
+        context_path=str(context_dir) if context_dir else None,
     )
     if payload:
         typer.echo(payload, err=exit_code != 0)
@@ -678,6 +682,64 @@ def worker_status_command(
     )
     if payload:
         typer.echo(payload)
+    raise typer.Exit(code=exit_code)
+
+
+@app.command("dump")
+def dump_command(
+    output: Annotated[
+        str | None,
+        typer.Option(
+            "--output", "-o", help="Output file path (default: .weft/weft_export.jsonl)"
+        ),
+    ] = None,
+    context_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--context",
+            help="Directory to treat as the Weft context (defaults to discovery)",
+        ),
+    ] = None,
+) -> None:
+    """Export database state to JSONL format."""
+    exit_code, payload = cmd_dump(
+        output=output, context_path=str(context_dir) if context_dir else None
+    )
+    if payload:
+        typer.echo(payload, err=exit_code != 0)
+    raise typer.Exit(code=exit_code)
+
+
+@app.command("load")
+def load_command(
+    input_file: Annotated[
+        str | None,
+        typer.Option(
+            "--input", help="Input file path (default: .weft/weft_export.jsonl)"
+        ),
+    ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run", help="Preview what would be imported without making changes"
+        ),
+    ] = False,
+    context_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--context",
+            help="Directory to treat as the Weft context (defaults to discovery)",
+        ),
+    ] = None,
+) -> None:
+    """Import database state from JSONL format."""
+    exit_code, payload = cmd_load(
+        input_file=input_file,
+        dry_run=dry_run,
+        context_path=str(context_dir) if context_dir else None,
+    )
+    if payload:
+        typer.echo(payload, err=exit_code != 0)
     raise typer.Exit(code=exit_code)
 
 

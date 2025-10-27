@@ -7,43 +7,62 @@ import json
 from tests.conftest import run_cli
 
 
-def _submit_task(workdir, *run_args: str) -> str:
+def _submit_task(workdir, harness, *run_args: str) -> str:
     rc, out, err = run_cli(
         "run",
         "--no-wait",
         *run_args,
         cwd=workdir,
+        harness=harness,
     )
     assert rc == 0, err
     tid = out.strip()
     assert tid.startswith("1"), tid
+    harness.register_tid(tid)
     return tid
 
 
-def test_result_returns_payload_for_completed_task(workdir) -> None:
+def test_result_returns_payload_for_completed_task(workdir, weft_harness) -> None:
     tid = _submit_task(
         workdir,
+        weft_harness,
         "--function",
         "tests.tasks.sample_targets:echo_payload",
         "--arg",
         "cli-result",
     )
 
-    rc, out, err = run_cli("result", tid, "--timeout", "5", cwd=workdir)
+    rc, out, err = run_cli(
+        "result",
+        tid,
+        "--timeout",
+        "5",
+        cwd=workdir,
+        harness=weft_harness,
+    )
 
     assert rc == 0
     assert out == "cli-result"
     assert err == ""
 
 
-def test_result_json_output(workdir) -> None:
+def test_result_json_output(workdir, weft_harness) -> None:
     tid = _submit_task(
         workdir,
+        weft_harness,
         "--function",
         "tests.tasks.sample_targets:provide_payload",
     )
 
-    rc, out, err = run_cli("result", tid, "--timeout", "5", "--json", cwd=workdir)
+    rc, out, err = run_cli(
+        "result",
+        tid,
+        "--timeout",
+        "5",
+        "--json",
+        cwd=workdir,
+        harness=weft_harness,
+    )
 
     assert rc == 0
     assert err == ""
@@ -53,8 +72,13 @@ def test_result_json_output(workdir) -> None:
     assert payload["result"]["data"] == "payload"
 
 
-def test_result_missing_task_reports_error(workdir) -> None:
-    rc, out, err = run_cli("result", "999", cwd=workdir)
+def test_result_missing_task_reports_error(workdir, weft_harness) -> None:
+    rc, out, err = run_cli(
+        "result",
+        "999",
+        cwd=workdir,
+        harness=weft_harness,
+    )
 
     assert rc == 2
     assert out == ""

@@ -16,7 +16,7 @@ INTERACTIVE_SCRIPT = (
 )
 
 
-def test_cli_run_function_inline(workdir) -> None:
+def test_cli_run_function_inline(workdir, weft_harness) -> None:
     rc, out, err = run_cli(
         "run",
         "--function",
@@ -24,6 +24,7 @@ def test_cli_run_function_inline(workdir) -> None:
         "--arg",
         "hello",
         cwd=workdir,
+        harness=weft_harness,
     )
 
     assert rc == 0
@@ -31,7 +32,7 @@ def test_cli_run_function_inline(workdir) -> None:
     assert err == ""
 
 
-def test_cli_run_command_inline(workdir) -> None:
+def test_cli_run_command_inline(workdir, weft_harness) -> None:
     rc, out, err = run_cli(
         "run",
         "--",
@@ -40,6 +41,7 @@ def test_cli_run_command_inline(workdir) -> None:
         "--result",
         "cmd-output",
         cwd=workdir,
+        harness=weft_harness,
     )
 
     assert rc == 0
@@ -47,7 +49,7 @@ def test_cli_run_command_inline(workdir) -> None:
     assert err == ""
 
 
-def test_cli_run_reads_stdin(workdir) -> None:
+def test_cli_run_reads_stdin(workdir, weft_harness) -> None:
     script = workdir / "stdin_script.py"
     script.write_text(
         "import sys\ndata = sys.stdin.read()\nprint(data.upper(), end='')\n",
@@ -60,6 +62,7 @@ def test_cli_run_reads_stdin(workdir) -> None:
         sys.executable,
         str(script),
         cwd=workdir,
+        harness=weft_harness,
         stdin="piped data",
     )
 
@@ -68,7 +71,7 @@ def test_cli_run_reads_stdin(workdir) -> None:
     assert err == ""
 
 
-def test_cli_run_spec_path(workdir) -> None:
+def test_cli_run_spec_path(workdir, weft_harness) -> None:
     context = build_context(spec_context=workdir)
 
     inbox = context.queue("cli_spec.inbox", persistent=True)
@@ -97,14 +100,20 @@ def test_cli_run_spec_path(workdir) -> None:
     }
     spec_path.write_text(json.dumps(spec_payload, indent=2), encoding="utf-8")
 
-    rc, out, err = run_cli("run", "--spec", spec_path, cwd=workdir)
+    rc, out, err = run_cli(
+        "run",
+        "--spec",
+        spec_path,
+        cwd=workdir,
+        harness=weft_harness,
+    )
 
     assert rc == 0
     assert out == "from-spec"
     assert err == ""
 
 
-def test_cli_run_interactive_command_streams(workdir) -> None:
+def test_cli_run_interactive_command_streams(workdir, weft_harness) -> None:
     rc, out, err = run_cli(
         "run",
         "--interactive",
@@ -113,6 +122,7 @@ def test_cli_run_interactive_command_streams(workdir) -> None:
         "-u",  # Unbuffered mode for proper interactive I/O
         str(INTERACTIVE_SCRIPT),
         cwd=workdir,
+        harness=weft_harness,
         stdin="hello\nquit\n",
     )
 
@@ -122,14 +132,14 @@ def test_cli_run_interactive_command_streams(workdir) -> None:
     assert err == ""
 
 
-def test_cli_run_requires_target(workdir) -> None:
-    rc, out, err = run_cli("run", cwd=workdir)
+def test_cli_run_requires_target(workdir, weft_harness) -> None:
+    rc, out, err = run_cli("run", cwd=workdir, harness=weft_harness)
     assert rc != 0
     combined = f"{out}\n{err}"
     assert "Provide a command" in combined
 
 
-def test_cli_run_command_and_function_conflict(workdir) -> None:
+def test_cli_run_command_and_function_conflict(workdir, weft_harness) -> None:
     rc, out, err = run_cli(
         "run",
         "--function",
@@ -139,13 +149,14 @@ def test_cli_run_command_and_function_conflict(workdir) -> None:
         "-c",
         "print('hi')",
         cwd=workdir,
+        harness=weft_harness,
     )
     assert rc != 0
     combined = f"{out}\n{err}"
     assert "Cannot execute a shell command and --function simultaneously." in combined
 
 
-def test_cli_run_monitor_requires_spec(workdir) -> None:
+def test_cli_run_monitor_requires_spec(workdir, weft_harness) -> None:
     rc, out, err = run_cli(
         "run",
         "--monitor",
@@ -154,13 +165,14 @@ def test_cli_run_monitor_requires_spec(workdir) -> None:
         "--arg",
         "payload",
         cwd=workdir,
+        harness=weft_harness,
     )
     assert rc != 0
     combined = f"{out}\n{err}"
     assert "--monitor is only supported together with --spec." in combined
 
 
-def test_cli_run_interactive_json_conflict(workdir) -> None:
+def test_cli_run_interactive_json_conflict(workdir, weft_harness) -> None:
     rc, out, err = run_cli(
         "run",
         "--interactive",
@@ -170,19 +182,21 @@ def test_cli_run_interactive_json_conflict(workdir) -> None:
         "-c",
         "print('hi')",
         cwd=workdir,
+        harness=weft_harness,
     )
     assert rc != 0
     combined = f"{out}\n{err}"
     assert "--json is not supported together with --interactive" in combined
 
 
-def test_cli_run_function_json_output(workdir) -> None:
+def test_cli_run_function_json_output(workdir, weft_harness) -> None:
     rc, out, err = run_cli(
         "run",
         "--function",
         "tests.tasks.sample_targets:provide_payload",
         "--json",
         cwd=workdir,
+        harness=weft_harness,
     )
 
     assert rc == 0
@@ -192,7 +206,7 @@ def test_cli_run_function_json_output(workdir) -> None:
     assert payload["result"]["data"] == "payload"
 
 
-def test_cli_run_command_with_env(workdir) -> None:
+def test_cli_run_command_with_env(workdir, weft_harness) -> None:
     script = workdir / "env_script.py"
     script.write_text(
         "import os\nprint(os.environ['RUN_ENV_VALUE'])\n",
@@ -207,6 +221,7 @@ def test_cli_run_command_with_env(workdir) -> None:
         sys.executable,
         str(script),
         cwd=workdir,
+        harness=weft_harness,
     )
 
     assert rc == 0
@@ -214,7 +229,7 @@ def test_cli_run_command_with_env(workdir) -> None:
     assert out == "via-cli"
 
 
-def test_cli_run_function_with_kwargs(workdir) -> None:
+def test_cli_run_function_with_kwargs(workdir, weft_harness) -> None:
     rc, out, err = run_cli(
         "run",
         "--function",
@@ -224,6 +239,7 @@ def test_cli_run_function_with_kwargs(workdir) -> None:
         "--kw",
         'suffix="!"',
         cwd=workdir,
+        harness=weft_harness,
     )
 
     assert rc == 0
@@ -231,7 +247,7 @@ def test_cli_run_function_with_kwargs(workdir) -> None:
     assert out == "base!"
 
 
-def test_cli_run_cpu_limit_validation(workdir) -> None:
+def test_cli_run_cpu_limit_validation(workdir, weft_harness) -> None:
     rc, out, err = run_cli(
         "run",
         "--function",
@@ -241,6 +257,7 @@ def test_cli_run_cpu_limit_validation(workdir) -> None:
         "--cpu",
         "200",
         cwd=workdir,
+        harness=weft_harness,
     )
 
     assert rc != 0
@@ -248,18 +265,24 @@ def test_cli_run_cpu_limit_validation(workdir) -> None:
     assert "CPU limit must be between 1 and 100 percent" in combined
 
 
-def test_cli_run_spec_invalid_json(workdir) -> None:
+def test_cli_run_spec_invalid_json(workdir, weft_harness) -> None:
     spec_path = workdir / "invalid_taskspec.json"
     spec_path.write_text("{ invalid json", encoding="utf-8")
 
-    rc, out, err = run_cli("run", "--spec", spec_path, cwd=workdir)
+    rc, out, err = run_cli(
+        "run",
+        "--spec",
+        spec_path,
+        cwd=workdir,
+        harness=weft_harness,
+    )
 
     assert rc == 2
     assert out == ""
     assert err == ""
 
 
-def test_cli_run_no_wait_returns_tid(workdir) -> None:
+def test_cli_run_no_wait_returns_tid(workdir, weft_harness) -> None:
     rc, out, err = run_cli(
         "run",
         "--function",
@@ -275,7 +298,7 @@ def test_cli_run_no_wait_returns_tid(workdir) -> None:
     assert len(out) == 19 and out.isdigit()
 
 
-def test_cli_run_prunes_stale_manager(workdir) -> None:
+def test_cli_run_prunes_stale_manager(workdir, weft_harness) -> None:
     context = build_context(spec_context=workdir)
     registry = context.queue(WEFT_WORKERS_REGISTRY_QUEUE, persistent=False)
     stale_pid = 999_999

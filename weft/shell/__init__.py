@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Sequence
+from collections.abc import Sequence
 
 from .known_interpreters import InterpreterHit, recognise_interpreter
 

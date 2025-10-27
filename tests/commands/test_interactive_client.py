@@ -11,7 +11,6 @@ from weft.commands.interactive import InteractiveStreamClient
 from weft.core.tasks import Consumer
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 
-
 INTERACTIVE_SCRIPT = str(
     (Path(__file__).resolve().parents[1] / "tasks" / "interactive_echo.py").resolve()
 )

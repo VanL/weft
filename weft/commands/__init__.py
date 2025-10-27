@@ -2,11 +2,11 @@
 
 from . import worker
 from .init import cmd_init
+from .result import cmd_result
 from .run import cmd_run
 from .status import cmd_status
 from .tidy import cmd_tidy
 from .validate_taskspec import cmd_validate_taskspec
-from .result import cmd_result
 
 __all__ = [
     "cmd_init",

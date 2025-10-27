@@ -8,16 +8,14 @@ from typing import Any, cast
 
 from simplebroker import Queue
 from simplebroker.db import BrokerDB
-
 from weft._constants import (
     QUEUE_CTRL_OUT_SUFFIX,
     QUEUE_OUTBOX_SUFFIX,
     WEFT_GLOBAL_LOG_QUEUE,
 )
-from weft.context import build_context
+from weft.context import WeftContext, build_context
 
 from .run import (
-    _decode_result_payload,
     _handle_ctrl_stream,
     _poll_log_events,
     _process_outbox_message,
@@ -54,7 +52,7 @@ def _queue_names_for_tid(
     return outbox, ctrl_out
 
 
-def _load_taskspec_payload(context, tid: str) -> dict[str, Any] | None:
+def _load_taskspec_payload(context: WeftContext, tid: str) -> dict[str, Any] | None:
     log_queue = Queue(
         WEFT_GLOBAL_LOG_QUEUE,
         db_path=str(context.database_path),
@@ -85,7 +83,7 @@ def _load_taskspec_payload(context, tid: str) -> dict[str, Any] | None:
     return None
 
 
-def _queue_exists(context, queue_name: str) -> bool:
+def _queue_exists(context: WeftContext, queue_name: str) -> bool:
     with BrokerDB(str(context.database_path)) as db:
         try:
             queues = list(db.list_queues())
@@ -95,7 +93,7 @@ def _queue_exists(context, queue_name: str) -> bool:
 
 
 def _collect_all_results(
-    context,
+    context: WeftContext,
     *,
     json_output: bool,
     show_stderr: bool,
@@ -145,7 +143,7 @@ def _collect_all_results(
 
 
 def _await_single_result(
-    context,
+    context: WeftContext,
     tid: str,
     *,
     timeout: float | None,
@@ -204,16 +202,17 @@ def _await_single_result(
                 break
             continue
 
+        events: list[tuple[dict[str, Any], int]]
         events, log_last_timestamp = _poll_log_events(
             log_queue,
             log_last_timestamp,
             tid,
         )
-        for payload, _ts in events:
-            event = payload.get("event")
+        for event_payload, _ts in events:
+            event = event_payload.get("event")
             if event in {"work_failed", "work_timeout", "work_limit_violation"}:
                 status = "timeout" if event == "work_timeout" else "failed"
-                error_message = payload.get("error") or event.replace("_", " ")
+                error_message = event_payload.get("error") or event.replace("_", " ")
                 break
             if event == "task_cancelled":
                 status = "failed"
@@ -224,9 +223,7 @@ def _await_single_result(
 
         if deadline is not None and time.monotonic() >= deadline:
             status = "timeout"
-            error_message = (
-                f"Timed out after {timeout} seconds waiting for task {tid}"
-            )
+            error_message = f"Timed out after {timeout} seconds waiting for task {tid}"
             break
 
         time.sleep(0.05)

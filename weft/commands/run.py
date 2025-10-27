@@ -37,8 +37,8 @@ from weft._constants import (
     WEFT_WORKERS_REGISTRY_QUEUE,
     WORK_ENVELOPE_START,
 )
-from weft.context import WeftContext, build_context
 from weft.commands.interactive import InteractiveStreamClient
+from weft.context import WeftContext, build_context
 from weft.core.taskspec import TaskSpec
 
 # -----------------------------------------------------------------------------
@@ -610,9 +610,16 @@ def _run_interactive_session(
 ) -> tuple[str, Any | None, str | None]:
     db_path = str(context.database_path)
     config = context.broker_config
-    outbox_name = taskspec.io.outputs.get("outbox") or f"T{taskspec.tid}.{QUEUE_OUTBOX_SUFFIX}"
-    ctrl_out_name = taskspec.io.control.get("ctrl_out") or f"T{taskspec.tid}.{QUEUE_CTRL_OUT_SUFFIX}"
-    inbox_name = taskspec.io.inputs.get("inbox") or f"T{taskspec.tid}.{QUEUE_INBOX_SUFFIX}"
+    outbox_name = (
+        taskspec.io.outputs.get("outbox") or f"T{taskspec.tid}.{QUEUE_OUTBOX_SUFFIX}"
+    )
+    ctrl_out_name = (
+        taskspec.io.control.get("ctrl_out")
+        or f"T{taskspec.tid}.{QUEUE_CTRL_OUT_SUFFIX}"
+    )
+    inbox_name = (
+        taskspec.io.inputs.get("inbox") or f"T{taskspec.tid}.{QUEUE_INBOX_SUFFIX}"
+    )
 
     status_holder: dict[str, str | None] = {"status": None, "error": None}
     stdout_chunks: list[str] = []
@@ -666,14 +673,14 @@ def _run_interactive_session(
 
             import threading
 
-            session = PromptSession("weft> ")
+            session: PromptSession[str] = PromptSession("weft> ")
             completion_event = threading.Event()
 
             def _await_completion() -> None:
                 client.wait()
                 completion_event.set()
                 try:
-                    session.app.exit(result=None)
+                    session.app.exit()
                 except Exception:  # pragma: no cover - defensive
                     pass
 
