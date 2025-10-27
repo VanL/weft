@@ -285,20 +285,18 @@ def test_load_with_alias_conflicts(tmp_path):
         input_file=str(export_path), dry_run=True, context_path=str(ctx.root)
     )
 
-    assert exit_code == 0
-    assert "Aliases to update: 1" in message
+    assert exit_code == 3
+    assert "alias conflicts" in (message or "").lower()
+    assert "existing_alias" in (message or "")
 
-    # Actual import should update the alias
+    # Actual import should also fail with the same conflict error
     exit_code, message = cmd_load(
         input_file=str(export_path), context_path=str(ctx.root)
     )
 
-    assert exit_code == 0
-
-    # Verify alias was updated
-    with BrokerDB(str(ctx.database_path)) as db:
-        aliases = dict(db.list_aliases())
-        assert aliases["existing_alias"] == "new_target"
+    assert exit_code == 3
+    assert "alias conflicts" in (message or "").lower()
+    assert "existing_alias" in (message or "")
 
 
 def test_export_large_message_data(tmp_path):
