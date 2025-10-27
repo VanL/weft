@@ -22,6 +22,7 @@ class ImportReport:
     aliases_to_update: dict[str, tuple[str, str]] = field(
         default_factory=dict
     )  # old -> new target
+    alias_conflicts: set[str] = field(default_factory=set)
     queues_to_create: list[str] = field(default_factory=list)
     message_counts_by_queue: dict[str, int] = field(default_factory=dict)
     total_messages: int = 0
@@ -196,7 +197,7 @@ def _analyze_import_data(input_file: TextIO, context: WeftContext) -> ImportRepo
 
             if alias in existing_aliases:
                 if existing_aliases[alias] != target:
-                    report.aliases_to_update[alias] = (existing_aliases[alias], target)
+                    report.alias_conflicts.add(alias)
             else:
                 report.aliases_to_create[alias] = target
 
@@ -294,14 +295,11 @@ def _execute_import(input_file: TextIO, context: WeftContext) -> ImportReport:
                         # Track changes
                         if alias in existing_aliases:
                             if existing_aliases[alias] != target:
-                                report.aliases_to_update[alias] = (
-                                    existing_aliases[alias],
-                                    target,
-                                )
+                                report.alias_conflicts.add(alias)
+                                continue
                         else:
                             report.aliases_to_create[alias] = target
 
-                        # Add/update alias
                         db.add_alias(alias, target)
 
                 elif record_type == "message":
@@ -402,9 +400,23 @@ def cmd_load(
         with open(input_path, encoding="utf-8") as f:
             if dry_run:
                 report = _analyze_import_data(f, context)
+                if report.alias_conflicts:
+                    conflict_list = ", ".join(sorted(report.alias_conflicts))
+                    return (
+                        3,
+                        "weft load: alias conflicts detected; resolve and rerun\n"
+                        f"Conflicting aliases: {conflict_list}",
+                    )
                 return 0, report.format_preview()
             else:
                 report = _execute_import(f, context)
+                if report.alias_conflicts:
+                    conflict_list = ", ".join(sorted(report.alias_conflicts))
+                    return (
+                        3,
+                        "weft load: alias conflicts detected; resolve and rerun\n"
+                        f"Conflicting aliases: {conflict_list}",
+                    )
                 return 0, report.format_completion()
 
     except ImportError as exc:
