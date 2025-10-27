@@ -725,10 +725,16 @@ def _run_interactive_session(
         status = status_holder["status"] or client.status or "completed"
         error = status_holder["error"] or client.error
         result: Any | None = None
-        if not use_prompt and stdout_chunks:
-            result = "".join(stdout_chunks)
     finally:
         client.stop()
+        if not use_prompt:
+            if stdout_chunks:
+                result = "".join(stdout_chunks)
+            else:
+                history = client.stdout_history
+                if history:
+                    result = "".join(history)
+                    stdout_chunks.extend(history)
 
     if not use_prompt:
         collected: list[str] = []
@@ -738,30 +744,36 @@ def _run_interactive_session(
             persistent=True,
             config=config,
         )
-        while True:
-            item = outbox_queue.read_one()
-            if item is None:
-                break
-            payload_raw = item[0] if isinstance(item, tuple) else item
-            try:
-                payload_obj = json.loads(payload_raw)
-            except json.JSONDecodeError:
-                collected.append(str(payload_raw))
-                continue
+        try:
+            records = outbox_queue.peek_many(limit=512) or []
+            for item in records:
+                payload_raw = item[0] if isinstance(item, tuple) else item
+                try:
+                    payload_obj = json.loads(payload_raw)
+                except json.JSONDecodeError:
+                    collected.append(str(payload_raw))
+                    continue
 
-            if isinstance(payload_obj, dict) and payload_obj.get("type") == "stream":
-                data = payload_obj.get("data", "")
-                encoding = payload_obj.get("encoding", "text")
-                if encoding == "base64":
-                    try:
-                        chunk_bytes = base64.b64decode(data)
-                        collected.append(chunk_bytes.decode("utf-8", errors="replace"))
-                    except Exception:
+                if (
+                    isinstance(payload_obj, dict)
+                    and payload_obj.get("type") == "stream"
+                ):
+                    data = payload_obj.get("data", "")
+                    encoding = payload_obj.get("encoding", "text")
+                    if encoding == "base64":
+                        try:
+                            chunk_bytes = base64.b64decode(data)
+                            collected.append(
+                                chunk_bytes.decode("utf-8", errors="replace")
+                            )
+                        except Exception:
+                            collected.append(str(data))
+                    else:
                         collected.append(str(data))
                 else:
-                    collected.append(str(data))
-            else:
-                collected.append(json.dumps(payload_obj, ensure_ascii=False))
+                    collected.append(json.dumps(payload_obj, ensure_ascii=False))
+        finally:
+            outbox_queue.close()
 
         if collected and not result:
             result = "".join(collected)

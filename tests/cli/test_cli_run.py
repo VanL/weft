@@ -7,13 +7,37 @@ import sys
 from pathlib import Path
 
 from tests.conftest import run_cli
-from weft._constants import WEFT_SPAWN_REQUESTS_QUEUE, WEFT_WORKERS_REGISTRY_QUEUE
+from weft._constants import (
+    WEFT_GLOBAL_LOG_QUEUE,
+    WEFT_SPAWN_REQUESTS_QUEUE,
+    WEFT_WORKERS_REGISTRY_QUEUE,
+)
 from weft.context import build_context
 
 PROCESS_SCRIPT = Path(__file__).resolve().parents[1] / "tasks" / "process_target.py"
 INTERACTIVE_SCRIPT = (
     Path(__file__).resolve().parents[1] / "tasks" / "interactive_echo.py"
 )
+
+
+def _latest_completed_record(harness, limit: int = 512) -> tuple[str, dict] | None:
+    queue = harness.context.queue(
+        WEFT_GLOBAL_LOG_QUEUE,
+        persistent=False,
+    )
+    try:
+        records = queue.peek_many(limit=limit, with_timestamps=True) or []
+    finally:
+        queue.close()
+    for payload, _ in reversed(records):
+        try:
+            data = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+        tid = data.get("tid")
+        if isinstance(tid, str) and data.get("event") == "work_completed":
+            return tid, data
+    return None
 
 
 def test_cli_run_function_inline(workdir, weft_harness) -> None:
@@ -127,8 +151,34 @@ def test_cli_run_interactive_command_streams(workdir, weft_harness) -> None:
     )
 
     assert rc == 0
-    assert "echo: hello" in out
-    assert "goodbye" in out
+    record = _latest_completed_record(weft_harness)
+    assert record is not None
+    latest_tid, completion = record
+    assert completion.get("result_bytes", 0) > 0
+    outbox = weft_harness.context.queue(
+        f"T{latest_tid}.outbox",
+        persistent=True,
+    )
+    try:
+        records = outbox.peek_many(limit=100) or []
+    finally:
+        outbox.close()
+    messages = []
+    for payload in records:
+        if isinstance(payload, tuple):
+            payload = payload[0]
+        try:
+            data = json.loads(payload)
+        except json.JSONDecodeError:
+            messages.append(payload)
+            continue
+        if isinstance(data, dict) and data.get("type") == "stream":
+            messages.append(data.get("data", ""))
+    combined = "".join(messages)
+    if not combined:
+        combined = out
+    assert "echo: hello" in combined
+    assert "goodbye" in combined
     assert err == ""
 
 
@@ -291,15 +341,17 @@ def test_cli_run_no_wait_returns_tid(workdir, weft_harness) -> None:
         "payload",
         "--no-wait",
         cwd=workdir,
+        harness=weft_harness,
     )
 
     assert rc == 0
     assert err == ""
     assert len(out) == 19 and out.isdigit()
+    weft_harness.wait_for_completion(out)
 
 
 def test_cli_run_prunes_stale_manager(workdir, weft_harness) -> None:
-    context = build_context(spec_context=workdir)
+    context = weft_harness.context
     registry = context.queue(WEFT_WORKERS_REGISTRY_QUEUE, persistent=False)
     stale_pid = 999_999
     registry.write(
@@ -322,6 +374,7 @@ def test_cli_run_prunes_stale_manager(workdir, weft_harness) -> None:
         "--arg",
         "hello",
         cwd=workdir,
+        harness=weft_harness,
     )
 
     assert rc == 0

@@ -1,6 +1,6 @@
 # Manager Architecture: The Recursive Model
 
-This document describes how Weft realises the “workers are tasks” concept. A
+This document describes how Weft realizes the “workers are tasks” concept. A
 Manager is implemented as a long-running `BaseTask` that consumes spawn requests
 from SimpleBroker queues, launches child tasks, and reports lifecycle events.
 The CLI component that submits work is referred to as the **Client**.
@@ -29,7 +29,7 @@ requests, launch child Consumers via `launch_task_process`, and emit
 Key responsibilities implemented in `weft/core/manager.py`:
 
 1. **Spawn queue consumption** – A manager’s inbox is bound to
-   `weft.spawn.requests`. Each message contains a serialised child TaskSpec and
+   `weft.spawn.requests`. Each message contains a serialized child TaskSpec and
    an optional `inbox_message`. Messages are reserved, parsed, and acknowledged
    via the `BaseTask` helpers.
 2. **Child process launch** – Validated TaskSpecs are executed via
@@ -66,7 +66,7 @@ Operators can also manage managers explicitly via `weft worker start|stop|list|s
 ## Specialisation and Future Work [WA-4]
 
 The current implementation favours a single-manager pattern where child tasks
-are all Consumers. Specialised worker pools (for example, dedicated AI workers
+are all Consumers. Specialized worker pools (for example, dedicated AI workers
 or pipeline orchestrators) can be introduced by publishing alternative TaskSpecs
 through the same spawn queue or by running multiple managers with distinct
 metadata and capabilities lists.

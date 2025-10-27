@@ -43,7 +43,7 @@ _Implementation today_: `weft/commands/run.py` always routes execution through t
 1. Collects CLI options and builds a canonical `TaskSpec` dictionary (including generated queue names and metadata).
 2. Validates it locally with `TaskSpec.model_validate(...)` so user errors fail fast.
 3. Obtains a TID by calling `generate_timestamp()` on the SimpleBroker database or queue.
-4. Serialises the `TaskSpec` to JSON and enqueues it on the manager request queue.
+4. Serializes the `TaskSpec` to JSON and enqueues it on the manager request queue.
 
 If `--wait` (current default) is provided the Client then tails `weft.tasks.log` and the task outbox queue until it observes a terminal event, streaming output as it arrives. When `--no-wait` is implemented it will simply enqueue the request, report the TID, and return; the Manager is unaware of the distinction.
 

@@ -2,7 +2,7 @@
 
 This document covers resource monitoring, limit enforcement, and comprehensive error handling strategies.
 
-_Implementation snapshot_: `weft/core.resource_monitor.py` and `TaskRunner` provide psutil-based measurements and limit enforcement. The specialised manager classes illustrated below are design references and are not yet implemented as standalone components.
+_Implementation snapshot_: `weft/core.resource_monitor.py` and `TaskRunner` provide psutil-based measurements and limit enforcement. The specialized manager classes illustrated below are design references and are not yet implemented as standalone components.
 
 ## Resource Management [RM-0]
 

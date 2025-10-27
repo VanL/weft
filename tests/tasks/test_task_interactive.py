@@ -74,7 +74,7 @@ def test_interactive_command_streams_output(broker_env, unique_tid: str) -> None
     _spin(task)
 
     inbox.write(json.dumps({"stdin": "quit\n"}))
-    # Allow process to exit and finalise
+    # Allow process to exit and finalize
     _spin(task, iterations=30)
 
     stdout_messages = []

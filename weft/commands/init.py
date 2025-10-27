@@ -11,7 +11,7 @@ from weft.context import build_context
 
 
 def cmd_init(directory: Path | None = None, *, quiet: bool = False) -> int:
-    """Initialise a Weft project rooted at *directory*.
+    """Initialize a Weft project rooted at *directory*.
 
     Returns the SimpleBroker exit code.  When successful the project structure
     (``.weft/`` directories, config metadata, database) is ensured.
@@ -21,7 +21,7 @@ def cmd_init(directory: Path | None = None, *, quiet: bool = False) -> int:
     if not default_db_name:
         if not quiet:
             print(
-                "weft: BROKER_DEFAULT_DB_NAME not set in global config; cannot initialise project",
+                "weft: BROKER_DEFAULT_DB_NAME not set in global config; cannot initialize project",
                 file=sys.stderr,
             )
         return EXIT_ERROR
@@ -37,7 +37,7 @@ def cmd_init(directory: Path | None = None, *, quiet: bool = False) -> int:
     except Exception as exc:  # pragma: no cover - defensive
         if not quiet:
             print(
-                f"weft: failed to initialise SimpleBroker database: {exc}",
+                f"weft: failed to initialize SimpleBroker database: {exc}",
                 file=sys.stderr,
             )
         return 1
@@ -48,6 +48,6 @@ def cmd_init(directory: Path | None = None, *, quiet: bool = False) -> int:
     build_context(spec_context=root, create_dirs=True, create_database=False)
 
     if not quiet:
-        print(f"Initialised Weft project in {root}")
+        print(f"Initialized Weft project in {root}")
 
     return EXIT_SUCCESS

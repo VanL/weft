@@ -2,7 +2,7 @@
 
 The classes in this module translate ``TaskSpec`` definitions into runnable
 watchers that understand Weft's control messages, reserved-queue policies, and
-logging/reporting conventions. Each concrete subclass specialises how work
+logging/reporting conventions. Each concrete subclass specializes how work
 messages are interpreted while sharing the queue wiring handled by
 ``BaseTask``.
 
@@ -100,7 +100,7 @@ class BaseTask(MultiQueueWatcher, ABC):
         stop_event: threading.Event | None = None,
         config: Mapping[str, Any] | None = None,
     ) -> None:
-        """Initialise the task with queues, configuration, and bookkeeping state.
+        """Initialize the task with queues, configuration, and bookkeeping state.
 
         Spec: [CC-2.2], [CC-2.5], [MF-2], [MF-5], [SB-0.1]
         """
@@ -127,6 +127,9 @@ class BaseTask(MultiQueueWatcher, ABC):
         )
         self._queue_cache: dict[str, Queue] = {}
         self._owned_queue_names: set[str] = set()
+        self._task_pid = os.getpid()
+        self._caller_pid = os.getppid()
+        self._managed_pids: set[int] = set()
 
         super().__init__(
             queue_configs=queue_configs,
@@ -549,6 +552,11 @@ class BaseTask(MultiQueueWatcher, ABC):
             ),
         }
         payload.update(extra)
+        payload.setdefault("task_pid", self._task_pid)
+        payload.setdefault(
+            "caller_pid", self._caller_pid if self._caller_pid > 0 else None
+        )
+        payload.setdefault("managed_pids", sorted(self._managed_pids))
 
         try:
             self._queue(WEFT_GLOBAL_LOG_QUEUE).write(json.dumps(payload))
@@ -682,18 +690,35 @@ class BaseTask(MultiQueueWatcher, ABC):
 
         Spec: [CC-2.4], [WA-2]
         """
-        mapping = {
-            "short": self.tid_short,
-            "full": self.tid,
-            "pid": os.getpid(),
-            "name": self.taskspec.name,
-            "started": time.time_ns(),
-            "hostname": socket.gethostname(),
-        }
+        mapping = self._build_tid_mapping_payload()
         try:
             self._queue(WEFT_TID_MAPPINGS_QUEUE).write(json.dumps(mapping))
         except Exception:
             logger.debug("Failed to register TID mapping %s", mapping, exc_info=True)
+
+    def register_managed_pid(self, pid: int | None) -> None:
+        """Track a subprocess PID owned by this task for cleanup/observability."""
+        if pid is None or pid <= 0:
+            return
+        if pid in (self._task_pid, self._caller_pid):
+            return
+        if pid in self._managed_pids:
+            return
+        self._managed_pids.add(pid)
+        self._register_tid_mapping()
+
+    def _build_tid_mapping_payload(self) -> dict[str, Any]:
+        return {
+            "short": self.tid_short,
+            "full": self.tid,
+            "pid": self._task_pid,
+            "task_pid": self._task_pid,
+            "caller_pid": self._caller_pid if self._caller_pid > 0 else None,
+            "managed_pids": sorted(self._managed_pids),
+            "name": self.taskspec.name,
+            "started": time.time_ns(),
+            "hostname": socket.gethostname(),
+        }
 
     def _write_streaming_result(
         self, outbox_queue: Queue, data: bytes, limit_bytes: int

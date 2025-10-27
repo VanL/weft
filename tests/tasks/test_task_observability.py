@@ -88,6 +88,31 @@ def test_tid_mapping_written(broker_env, task_factory, unique_tid) -> None:
     assert data["short"] == unique_tid[-TASKSPEC_TID_SHORT_LENGTH:]
     assert data["name"] == "observability-task"
     assert isinstance(data["pid"], int)
+    assert data["pid"] == data["task_pid"]
+    assert isinstance(data.get("caller_pid"), int)
+    assert data.get("managed_pids") == []
+
+
+def test_tid_mapping_records_worker_pid(broker_env, task_factory, unique_tid) -> None:
+    db_path, make_queue = broker_env
+    mapping_queue = make_queue(WEFT_TID_MAPPINGS_QUEUE)
+    drain_queue(mapping_queue)
+
+    spec = build_function_spec(unique_tid)
+    task = task_factory(spec)
+    inbox = make_queue(spec.io.inputs["inbox"])
+    inbox.write(json.dumps({"args": ["payload"]}))
+
+    task._drain_queue()
+
+    records = [json.loads(msg) for msg in drain_queue(mapping_queue)]
+    assert records, "expected at least one mapping record"
+
+    managed_pid_lists = [record.get("managed_pids") or [] for record in records]
+    flattened = [pid for sublist in managed_pid_lists for pid in sublist]
+    assert any(isinstance(pid, int) for pid in flattened), "managed pid missing"
+    for pid in flattened:
+        assert isinstance(pid, int)
 
 
 def test_process_titles_update(

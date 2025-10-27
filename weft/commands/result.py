@@ -22,7 +22,7 @@ from .run import (
 )
 
 
-def _normalise_tid(raw_tid: str) -> str:
+def _normalize_tid(raw_tid: str) -> str:
     candidate = raw_tid.strip()
     if not candidate:
         raise ValueError("empty TID")
@@ -256,7 +256,7 @@ def cmd_result(
         )
 
     try:
-        full_tid = _normalise_tid(tid)
+        full_tid = _normalize_tid(tid)
     except ValueError as exc:
         return 2, f"weft result: {exc}"
 

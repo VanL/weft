@@ -354,7 +354,7 @@ def init(
     directory: Annotated[
         Path,
         typer.Argument(
-            help="Directory where the project should be initialised",
+            help="Directory where the project should be initialized",
             exists=False,
             file_okay=False,
             dir_okay=True,
@@ -367,7 +367,7 @@ def init(
         typer.Option("--quiet", "-q", help="Suppress informational output"),
     ] = False,
 ) -> None:
-    """Initialise a new Weft project."""
+    """Initialize a new Weft project."""
 
     exit_code = cmd_init(directory, quiet=quiet)
     raise typer.Exit(code=exit_code)

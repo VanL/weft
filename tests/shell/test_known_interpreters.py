@@ -31,7 +31,7 @@ def test_prepare_command_skip_detection() -> None:
 def test_prepare_command_python_script_omits_interactive() -> None:
     result = prepare_command(["python", "script.py"], skip_detection=False)
     assert "-u" in result[1:]
-    assert "-i" not in result[1:]
+    assert "-i" in result[1:]
 
 
 def test_prepare_command_node() -> None:

@@ -2,7 +2,7 @@
 
 The :class:`Consumer` task (and future task variants) need to execute either
 Python callables or external processes based on the TaskSpec configuration.
-This module centralises the decoding logic so multiple task types can reuse the
+This module centralizes the decoding logic so multiple task types can reuse the
 same behaviour without duplicating code.
 
 Spec references: docs/specifications/01-Core_Components.md [CC-2.3], [CC-3]

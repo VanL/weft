@@ -68,11 +68,17 @@ class InteractiveTaskMixin(ABC):
     ) -> None:  # pragma: no cover - interface definition
         """Publish a state-change event."""
 
+    @abstractmethod
+    def register_managed_pid(
+        self, pid: int | None
+    ) -> None:  # pragma: no cover - interface definition
+        """Register a subprocess PID managed by the task."""
+
     # ------------------------------------------------------------------
     # Initialisation
     # ------------------------------------------------------------------
     def _init_interactive(self) -> None:
-        """Initialise per-task interactive state."""
+        """Initialize per-task interactive state."""
         self._interactive_mode = bool(getattr(self.taskspec.spec, "interactive", False))
         self._interactive_runner: TaskRunner | None = None
         self._interactive_session: CommandSession | None = None
@@ -147,6 +153,9 @@ class InteractiveTaskMixin(ABC):
         self._interactive_runner = runner
         self._interactive_session = session
         self._interactive_started = True
+
+        if session.pid is not None:
+            self.register_managed_pid(session.pid)
 
         self.taskspec.mark_running(pid=session.pid)
         self._update_process_title("running")
