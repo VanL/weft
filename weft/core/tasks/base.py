@@ -240,6 +240,22 @@ class BaseTask(MultiQueueWatcher, ABC):
 
         return self._queue_cache[name]
 
+    def _get_connected_queue(self) -> Queue:
+        """Return any queue object backed by this task's shared DB connection.
+
+        Useful for helper logic (metrics, metadata lookups, timestamp checks)
+        that only needs a live Queue handle without caring about which logical
+        queue is used.
+        """
+
+        queue_name = self._queue_names.get("inbox")
+        if not queue_name:
+            try:
+                queue_name = next(iter(self._queue_names.values()))
+            except StopIteration as exc:  # pragma: no cover - construction bug guard
+                raise RuntimeError("Task is missing configured queues") from exc
+        return self._queue(queue_name)
+
     def _outputs_base_dir(self) -> Path:
         spec_context = getattr(self.taskspec.spec, "weft_context", None)
         if spec_context:

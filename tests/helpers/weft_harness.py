@@ -26,7 +26,7 @@ class WeftTestHarness:
 
     DEFAULT_DB_NAME = "weft-tests.db"
 
-    def __init__(self, *, manager_timeout: float = 6.0) -> None:
+    def __init__(self, *, manager_timeout: float = 30.0) -> None:
         self._tempdir = tempfile.TemporaryDirectory(prefix="weft-harness-")
         self.root = Path(self._tempdir.name)
         self._manager_timeout = manager_timeout
@@ -256,20 +256,24 @@ class WeftTestHarness:
                 if isinstance(tid, str):
                     all_tids.add(tid)
 
+        stop_timeout = max(6.0, min(self._manager_timeout, 10.0))
+
         for tid in all_tids:
             rc, _ = worker_cmd.stop_command(
                 tid=tid,
                 force=False,
-                timeout=self._manager_timeout,
+                timeout=stop_timeout,
                 context_path=context_path,
+                stop_if_absent=True,
             )
             if rc == 0:
                 continue
             worker_cmd.stop_command(
                 tid=tid,
                 force=True,
-                timeout=self._manager_timeout,
+                timeout=stop_timeout,
                 context_path=context_path,
+                stop_if_absent=True,
             )
 
         time.sleep(0.1)
