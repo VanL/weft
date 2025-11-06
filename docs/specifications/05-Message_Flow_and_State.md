@@ -62,6 +62,12 @@ _Implementation_: Managers (`weft/core/manager.py`) consume spawn requests from
 `weft.spawn.requests`, validate/expand the embedded TaskSpec, launch child
 Consumers via `launch_task_process`, seed initial inbox messages when provided,
 and emit lifecycle events to `weft.tasks.log`.
+
+When `WEFT_AUTOSTART_TASKS` is enabled the Manager also synthesizes spawn
+requests locally by loading every `.json` file in `.weft/autostart/`, minting a
+fresh TID, and running the same validation/launch pipeline. Templates are only
+launched once per manager boot and existing running tasks are detected via the
+task log to avoid duplication.
 ```
 Client -> weft.spawn.requests -> Worker.inbox -> Worker validates
                                       |              |

@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from simplebroker import Queue
 from tests.tasks import (
     sample_targets as targets,  # noqa: F401 - ensure module importable
 )
@@ -18,8 +19,10 @@ from weft._constants import (
     QUEUE_OUTBOX_SUFFIX,
     QUEUE_RESERVED_SUFFIX,
     WEFT_GLOBAL_LOG_QUEUE,
+    WEFT_STREAMING_SESSIONS_QUEUE,
 )
 from weft.core.tasks import Consumer
+from weft.core.tasks.base import BaseTask
 from weft.core.taskspec import (
     IOSection,
     ReservedPolicy,
@@ -76,6 +79,75 @@ def make_function_taskspec(
         ),
         state=StateSection(),
     )
+
+
+def make_command_taskspec(
+    tid: str,
+    process_target: list[str],
+    *,
+    cleanup_on_exit: bool = False,
+    reserved_stop: ReservedPolicy = ReservedPolicy.KEEP,
+    reserved_error: ReservedPolicy = ReservedPolicy.KEEP,
+) -> TaskSpec:
+    """Create a TaskSpec for command execution with explicit queue mappings."""
+    return TaskSpec(
+        tid=tid,
+        name="task-command",
+        spec=SpecSection(
+            type="command",
+            process_target=process_target,
+            cleanup_on_exit=cleanup_on_exit,
+            reserved_policy_on_stop=reserved_stop,
+            reserved_policy_on_error=reserved_error,
+        ),
+        io=IOSection(
+            inputs={"inbox": f"T{tid}.inbox"},
+            outputs={"outbox": f"T{tid}.{QUEUE_OUTBOX_SUFFIX}"},
+            control={
+                "ctrl_in": f"T{tid}.{QUEUE_CTRL_IN_SUFFIX}",
+                "ctrl_out": f"T{tid}.ctrl_out",
+            },
+        ),
+        state=StateSection(),
+    )
+
+
+def _instrument_streaming_queue(monkeypatch):
+    writes: list[dict[str, object]] = []
+    deletes: list[int | None] = []
+    original_queue = BaseTask._queue
+    proxies: dict[int, Queue] = {}
+
+    class QueueProxy:
+        def __init__(self, delegate: Queue) -> None:
+            self._delegate = delegate
+
+        def write(self, message: str) -> None:
+            writes.append(json.loads(message))
+            return self._delegate.write(message)
+
+        def delete(self, *args, **kwargs) -> None:
+            message_id = kwargs.get("message_id")
+            if message_id is None and args:
+                message_id = args[0]
+            deletes.append(message_id)
+            return self._delegate.delete(*args, **kwargs)
+
+        def __getattr__(self, attr: str):
+            return getattr(self._delegate, attr)
+
+    def instrument(self, name: str) -> Queue:
+        queue = original_queue(self, name)
+        if name != WEFT_STREAMING_SESSIONS_QUEUE:
+            return queue
+        proxy = proxies.get(id(queue))
+        if proxy is None:
+            proxy = QueueProxy(queue)
+            proxies[id(queue)] = proxy
+        return proxy
+
+    monkeypatch.setattr(BaseTask, "_queue", instrument, raising=False)
+    return writes, deletes
 
 
 @pytest.fixture
@@ -174,6 +246,30 @@ def test_task_failure_leaves_message_in_reserved(broker_env, unique_tid: str) ->
     assert peeked is not None
     assert peeked[0] is not None
     assert task.taskspec.state.status == "failed"
+
+
+def test_start_token_cleared_on_failure(broker_env, unique_tid: str) -> None:
+    db_path, make_queue = broker_env
+    spec = make_command_taskspec(
+        unique_tid,
+        [sys.executable, "-c", "import sys; sys.exit(2)"],
+    )
+    task = Consumer(db_path, spec)
+
+    inbox = make_queue(spec.io.inputs["inbox"])
+    reserved_name = f"T{unique_tid}.{QUEUE_RESERVED_SUFFIX}"
+    reserved = make_queue(reserved_name)
+    outbox = make_queue(spec.io.outputs["outbox"])
+    ctrl_out = make_queue(spec.io.control["ctrl_out"])
+
+    inbox.write(json.dumps({}))
+
+    task._drain_queue()
+
+    assert task.taskspec.state.status == "failed"
+    assert reserved.peek_one() is None
+    assert outbox.peek_one() is None
+    assert ctrl_out.peek_one() is None
 
 
 def test_task_handles_stop_control_message(broker_env, unique_tid: str) -> None:
@@ -379,6 +475,36 @@ def test_stream_output_small_payload_single_chunk(broker_env, unique_tid: str) -
     assert decoded == "payload"
 
 
+def test_streaming_session_records_and_clears(
+    monkeypatch, broker_env, unique_tid: str
+) -> None:
+    writes, deletes = _instrument_streaming_queue(monkeypatch)
+
+    db_path, make_queue = broker_env
+    spec = make_function_taskspec(
+        unique_tid,
+        "tests.tasks.sample_targets:echo_payload",
+        stream_output=True,
+    )
+    task = Consumer(db_path, spec)
+
+    inbox = make_queue(spec.io.inputs["inbox"])
+    inbox.write(json.dumps({"args": ["payload"]}))
+
+    task._drain_queue()
+    task.cleanup()
+
+    assert writes, "expected streaming session entry"
+    session = writes[0]
+    assert session["tid"] == unique_tid
+    assert session["mode"] == "stream"
+    assert session["queue"] == spec.io.outputs["outbox"]
+    assert session["session_id"].startswith(
+        f"{unique_tid}:{spec.io.outputs['outbox']}:"
+    )
+    assert deletes, "expected streaming session deletion"
+
+
 def test_cleanup_on_exit_removes_output_queue(broker_env, unique_tid: str) -> None:
     db_path, make_queue = broker_env
     spec = make_function_taskspec(
@@ -567,33 +693,3 @@ def test_reserved_policy_requeue_on_error(broker_env, unique_tid: str) -> None:
     assert reserved.has_pending() is False
     assert inbox.read_one() is not None
     assert task.taskspec.state.status == "failed"
-
-
-def make_command_taskspec(
-    tid: str,
-    process_target: list[str],
-    *,
-    cleanup_on_exit: bool = False,
-    reserved_stop: ReservedPolicy = ReservedPolicy.KEEP,
-    reserved_error: ReservedPolicy = ReservedPolicy.KEEP,
-) -> TaskSpec:
-    return TaskSpec(
-        tid=tid,
-        name="task-command",
-        spec=SpecSection(
-            type="command",
-            process_target=process_target,
-            cleanup_on_exit=cleanup_on_exit,
-            reserved_policy_on_stop=reserved_stop,
-            reserved_policy_on_error=reserved_error,
-        ),
-        io=IOSection(
-            inputs={"inbox": f"T{tid}.inbox"},
-            outputs={"outbox": f"T{tid}.{QUEUE_OUTBOX_SUFFIX}"},
-            control={
-                "ctrl_in": f"T{tid}.{QUEUE_CTRL_IN_SUFFIX}",
-                "ctrl_out": f"T{tid}.ctrl_out",
-            },
-        ),
-        state=StateSection(),
-    )

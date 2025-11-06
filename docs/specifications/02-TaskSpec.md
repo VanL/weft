@@ -92,6 +92,16 @@ _Implementation coverage_: Field validation and defaults correspond to Pydantic 
 }
 ```
 
+### Autostart Templates [TS-1.2]
+
+TaskSpec templates stored under `.weft/autostart/` are treated as blueprints. They
+do not need to include `tid`, queue names, or runtime `state`. When the Manager
+boots it loads each template, mints a unique SimpleBroker timestamp ID, expands
+the queues via `TaskSpec.apply_defaults()`, and injects metadata linking the
+running task back to the source file (`metadata.autostart_source`). Templates
+should still define a stable `name`, `spec`, and any desired metadata so that
+operators can identify the resulting background tasks.
+
 ### Reserved queue policies [TS-1.1]
 
 _Implementation_: `BaseTask._apply_reserved_policy` (`weft/core/tasks/base.py`) enforces these policies for inbox reserved handling.

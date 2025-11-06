@@ -128,11 +128,14 @@ QUEUE_RESERVED_SUFFIX: Final[str] = "reserved"
 WEFT_GLOBAL_LOG_QUEUE: Final[str] = "weft.tasks.log"
 """Global queue for task state changes and events."""
 
-WEFT_TID_MAPPINGS_QUEUE: Final[str] = "weft.tid.mappings"
+WEFT_TID_MAPPINGS_QUEUE: Final[str] = "weft.state.process.tid_mappings"
 """Global queue for TID short->full mappings for process management."""
 
 WEFT_WORKERS_REGISTRY_QUEUE: Final[str] = "weft.workers.registry"
 """Queue where workers register their capabilities and status."""
+
+WEFT_STREAMING_SESSIONS_QUEUE: Final[str] = "weft.state.streaming.sessions"
+"""Queue tracking active streaming sessions (interactive/streaming outputs)."""
 
 WEFT_SPAWN_REQUESTS_QUEUE: Final[str] = "weft.spawn.requests"
 """Global queue for worker spawn requests."""
@@ -205,6 +208,15 @@ WEFT_MANAGER_LIFETIME_TIMEOUT: Final[float] = 600.0
 
 WEFT_MANAGER_REUSE_ENABLED: Final[bool] = True
 """Whether a Manager started by the CLI should remain running after a task completes."""
+
+
+# Autostart behaviour
+# -------------------
+WEFT_AUTOSTART_DIRECTORY_NAME: Final[str] = "autostart"
+"""Name of the directory under .weft/ that stores auto-start TaskSpec templates."""
+
+WEFT_AUTOSTART_TASKS_DEFAULT: Final[bool] = True
+"""Default for enabling auto-start TaskSpec templates when a Manager boots."""
 
 
 # ==============================================================================
@@ -309,6 +321,12 @@ def _load_weft_env_vars() -> dict[str, Any]:
     else:
         reuse_enabled = _parse_bool(reuse_value)
 
+    autostart_value = os.environ.get("WEFT_AUTOSTART_TASKS")
+    if autostart_value is None:
+        autostart_enabled = WEFT_AUTOSTART_TASKS_DEFAULT
+    else:
+        autostart_enabled = _parse_bool(autostart_value)
+
     return {
         # Debug - uses flexible boolean parsing
         "WEFT_DEBUG": _parse_bool(os.environ.get("WEFT_DEBUG")),
@@ -320,6 +338,9 @@ def _load_weft_env_vars() -> dict[str, Any]:
         ),
         "WEFT_MANAGER_LIFETIME_TIMEOUT": timeout_value,
         "WEFT_MANAGER_REUSE_ENABLED": reuse_enabled,
+        "WEFT_AUTOSTART_TASKS": autostart_enabled,
+        # Test diagnostics: emit additional CLI traces when set to "1"
+        "WEFT_TEST_TRACE": os.environ.get("WEFT_TEST_TRACE", "0") == "1",
     }
 
 
@@ -371,6 +392,11 @@ def load_environment() -> dict[str, Any]:
         SimpleBroker integration:
             BROKER_* keys translated from WEFT_* environment variables
             for seamless SimpleBroker API integration without conflicts.
+
+        Test diagnostics:
+            WEFT_TEST_TRACE (bool): When True, enable verbose CLI tracing that
+                prints executed commands and timeout diagnostics. Default: False
+                (set via WEFT_TEST_TRACE="1"). Intended for automated test runs.
 
     """
     env_vars = _load_weft_env_vars()

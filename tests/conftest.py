@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 from collections.abc import Callable, Iterator
@@ -115,17 +116,53 @@ def run_cli(
             part for part in env_vars["PYTHONPATH"].split(":") if part
         )
 
-    completed = subprocess.run(
-        cmd,
-        cwd=cwd,
-        input=stdin,
-        text=True,
-        capture_output=True,
-        timeout=timeout,
-        encoding="utf-8",
-        errors="replace",
-        env=env_vars,
+    trace_enabled = (
+        env_vars.get("WEFT_TEST_TRACE") == "1"
+        or os.environ.get("WEFT_TEST_TRACE") == "1"
     )
+    cmd_display = " ".join(shlex.quote(part) for part in cmd)
+
+    try:
+        if trace_enabled:
+            sys.stderr.write(f"[run_cli] executing: {cmd_display} (cwd={cwd})\n")
+        completed = subprocess.run(
+            cmd,
+            cwd=cwd,
+            input=stdin,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            encoding="utf-8",
+            errors="replace",
+            env=env_vars,
+        )
+    except subprocess.TimeoutExpired as exc:
+        debug_lines = [
+            "run_cli timeout diagnostics:",
+            f"  command={cmd_display}",
+            f"  cwd={cwd}",
+            f"  timeout={timeout!r}",
+        ]
+        if harness is not None:
+            try:
+                debug_lines.append(harness.dump_debug_state())
+            except Exception as dump_exc:  # pragma: no cover - defensive
+                debug_lines.append(f"WeftTestHarness dump failed: {dump_exc!r}")
+        else:
+            debug_lines.append("No WeftTestHarness provided.")
+        debug_text = "\n".join(debug_lines)
+        if trace_enabled:
+            sys.stderr.write(debug_text + "\n")
+        existing_stderr = exc.stderr or ""
+        combined_stderr = (
+            f"{existing_stderr}\n{debug_text}" if existing_stderr else debug_text
+        )
+        raise subprocess.TimeoutExpired(
+            exc.cmd,
+            exc.timeout,
+            output=exc.output,
+            stderr=combined_stderr,
+        ) from exc
 
     stdout = completed.stdout.strip()
     stderr = completed.stderr.strip()

@@ -6,6 +6,7 @@ import json
 import logging
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from typing import Any
 
 from simplebroker import Queue
@@ -73,6 +74,19 @@ class InteractiveTaskMixin(ABC):
         self, pid: int | None
     ) -> None:  # pragma: no cover - interface definition
         """Register a subprocess PID managed by the task."""
+
+    @abstractmethod
+    def _begin_streaming_session(
+        self,
+        *,
+        mode: str,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> None:  # pragma: no cover - interface definition
+        """Record that a streaming session has started."""
+
+    @abstractmethod
+    def _end_streaming_session(self) -> None:  # pragma: no cover - interface definition
+        """Record that a streaming session has completed."""
 
     # ------------------------------------------------------------------
     # Initialisation
@@ -160,6 +174,14 @@ class InteractiveTaskMixin(ABC):
         self.taskspec.mark_running(pid=session.pid)
         self._update_process_title("running")
         self._report_state_change(event="work_started", message_id=message_id)
+        self._begin_streaming_session(
+            mode="interactive",
+            metadata={
+                "session_pid": session.pid,
+                "queue": self._queue_names.get("outbox"),
+                "ctrl_queue": self._queue_names.get("ctrl_out"),
+            },
+        )
         return session
 
     def _interactive_flush_outputs(self) -> None:
@@ -299,6 +321,7 @@ class InteractiveTaskMixin(ABC):
         self._interactive_completion_reported = True
         self._interactive_session = None
         self._interactive_runner = None
+        self._end_streaming_session()
 
     def _interactive_shutdown(self, *, reason: str | None = None) -> None:
         session_obj = getattr(self, "_interactive_session", None)

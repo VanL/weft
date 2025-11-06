@@ -115,6 +115,34 @@ def test_tid_mapping_records_worker_pid(broker_env, task_factory, unique_tid) ->
         assert isinstance(pid, int)
 
 
+def test_tid_mapping_deduplicates_identical_payloads(
+    broker_env, task_factory, unique_tid
+) -> None:
+    db_path, make_queue = broker_env
+    mapping_queue = make_queue(WEFT_TID_MAPPINGS_QUEUE)
+    drain_queue(mapping_queue)
+
+    spec = build_function_spec(unique_tid)
+    task = task_factory(spec)
+
+    def _peek_payloads() -> list[dict[str, object]]:
+        return [json.loads(msg) for msg in mapping_queue.peek_many(limit=10) or []]
+
+    initial = _peek_payloads()
+    assert len(initial) == 1
+
+    task._register_tid_mapping()
+    after_duplicate = _peek_payloads()
+    assert len(after_duplicate) == 1
+
+    task.register_managed_pid(99999)
+    after_update = _peek_payloads()
+    assert len(after_update) == 2
+    assert any(99999 in payload.get("managed_pids", []) for payload in after_update)
+
+    drain_queue(mapping_queue)
+
+
 def test_process_titles_update(
     monkeypatch, broker_env, task_factory, unique_tid
 ) -> None:

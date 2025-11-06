@@ -7,11 +7,16 @@ import threading
 from collections.abc import Callable, Mapping
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
-from weft._constants import CONTROL_STOP, DEFAULT_OUTPUT_SIZE_LIMIT_MB
+from weft._constants import (
+    CONTROL_STOP,
+    DEFAULT_CLEANUP_ON_EXIT,
+    DEFAULT_OUTPUT_SIZE_LIMIT_MB,
+    WORK_ENVELOPE_START,
+)
 from weft.core.targets import decode_work_message, serialize_result
-from weft.core.taskspec import TaskSpec
+from weft.core.taskspec import ReservedPolicy, TaskSpec
 
 from .base import BaseTask
 from .interactive import InteractiveTaskMixin
@@ -34,6 +39,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
     ) -> None:
         super().__init__(db, taskspec, stop_event=stop_event, config=config)
         self._init_interactive()
+        self._active_raw_message: str | None = None
 
     def process_once(self) -> None:
         super().process_once()
@@ -87,13 +93,17 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         if self._interactive_maybe_handle_message(message, timestamp, context):
             return
 
-        self.taskspec.mark_running(pid=os.getpid())
-        self._update_process_title("running")
-        self._report_state_change(event="work_started", message_id=timestamp)
+        self._active_raw_message = message
+        try:
+            self.taskspec.mark_running(pid=os.getpid())
+            self._update_process_title("running")
+            self._report_state_change(event="work_started", message_id=timestamp)
 
-        work_item = decode_work_message(message)
+            work_item = decode_work_message(message)
 
-        self._execute_work_item(work_item, timestamp)
+            self._execute_work_item(work_item, timestamp)
+        finally:
+            self._active_raw_message = None
 
     def _execute_work_item(self, work_item: Any, timestamp: int | None) -> Any:
         outcome = self._run_task(work_item)
@@ -160,6 +170,10 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         )
         self._update_process_title("completed")
         self._cleanup_spilled_outputs_if_needed()
+        self._end_streaming_session()
+        self.should_stop = True
+        if self._stop_event:
+            self._stop_event.set()
 
     def _emit_result(self, result: Any) -> int:
         serialized = serialize_result(result)
@@ -221,9 +235,13 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             )
             if timestamp is not None:
                 self._apply_reserved_policy(
-                    self.taskspec.spec.reserved_policy_on_error,
+                    self._resolve_policy(self.taskspec.spec.reserved_policy_on_error),
                     message_timestamp=timestamp,
                 )
+            self._end_streaming_session()
+            self.should_stop = True
+            if self._stop_event:
+                self._stop_event.set()
             raise timeout_exc
 
         if outcome.status == "limit":
@@ -238,9 +256,13 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             )
             if timestamp is not None:
                 self._apply_reserved_policy(
-                    self.taskspec.spec.reserved_policy_on_error,
+                    self._resolve_policy(self.taskspec.spec.reserved_policy_on_error),
                     message_timestamp=timestamp,
                 )
+            self._end_streaming_session()
+            self.should_stop = True
+            if self._stop_event:
+                self._stop_event.set()
             raise limit_exc
 
         if outcome.status == "error":
@@ -255,9 +277,13 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             )
             if timestamp is not None:
                 self._apply_reserved_policy(
-                    self.taskspec.spec.reserved_policy_on_error,
+                    self._resolve_policy(self.taskspec.spec.reserved_policy_on_error),
                     message_timestamp=timestamp,
                 )
+            self._end_streaming_session()
+            self.should_stop = True
+            if self._stop_event:
+                self._stop_event.set()
             raise error_exc
 
     def stop(self, *, join: bool = True, timeout: float = 2.0) -> None:
@@ -266,9 +292,108 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         super().stop(join=join, timeout=timeout)
 
     def cleanup(self) -> None:
+        cleanup_enabled = getattr(
+            self.taskspec.spec, "cleanup_on_exit", DEFAULT_CLEANUP_ON_EXIT
+        )
+
         if self._interactive_mode:
             self._interactive_shutdown()
+
+        if cleanup_enabled:
+            self._purge_start_tokens()
+            self._purge_stream_markers()
+
         super().cleanup()
+
+    # ------------------------------------------------------------------
+    # Sentinel helpers
+    # ------------------------------------------------------------------
+    def _resolve_policy(self, policy: ReservedPolicy) -> ReservedPolicy:
+        """Override reserved policy when handling start tokens."""
+        if not self._is_start_token(self._active_raw_message):
+            return policy
+        # CLEAR is safest when the envelope is purely structural
+        return ReservedPolicy.CLEAR
+
+    @staticmethod
+    def _is_start_token(raw: str | None) -> bool:
+        if raw is None:
+            return False
+        stripped = raw.strip()
+        if stripped in {"", "{}"}:
+            return True
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            return False
+        if payload == WORK_ENVELOPE_START or payload == {}:
+            return True
+        if (
+            isinstance(payload, dict)
+            and payload.get("close") is True
+            and len(payload) == 1
+        ):
+            return True
+        return False
+
+    @staticmethod
+    def _is_stream_final_marker(raw: str) -> bool:
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            return False
+        if not isinstance(payload, dict):
+            return False
+        return (
+            payload.get("type") == "stream"
+            and payload.get("final") is True
+            and payload.get("data") in ("", None)
+        )
+
+    def _purge_start_tokens(self) -> None:
+        reserved_queue = self._get_reserved_queue()
+        try:
+            entries = reserved_queue.peek_many(limit=256, with_timestamps=True)
+        except Exception:
+            return
+        if not entries:
+            return
+        typed_entries = [cast(tuple[str, int], entry) for entry in entries]
+        for body, ts in typed_entries:
+            if self._is_start_token(body):
+                try:
+                    reserved_queue.delete(message_id=ts)
+                except Exception:
+                    logger.debug(
+                        "Failed to purge start token %s from reserved queue",
+                        ts,
+                        exc_info=True,
+                    )
+
+    def _purge_stream_markers(self) -> None:
+        for queue_key in ("outbox", "ctrl_out"):
+            queue_name = self._queue_names.get(queue_key)
+            if not queue_name:
+                continue
+            queue = self._queue(queue_name)
+            try:
+                entries = queue.peek_many(limit=256, with_timestamps=True)
+            except Exception:
+                continue
+            if not entries:
+                continue
+            typed_entries = [cast(tuple[str, int], entry) for entry in entries]
+            for body, ts in typed_entries:
+                if self._is_stream_final_marker(body):
+                    try:
+                        queue.delete(message_id=ts)
+                    except Exception:
+                        logger.debug(
+                            "Failed to purge stream sentinel %s from %s",
+                            ts,
+                            queue_name,
+                            exc_info=True,
+                        )
 
 
 class Observer(BaseTask):

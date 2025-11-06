@@ -59,7 +59,11 @@ from typing import Any
 from simplebroker import Queue
 from simplebroker.db import BrokerDB
 from simplebroker.helpers import _find_project_database
-from weft._constants import load_config
+from weft._constants import (
+    WEFT_AUTOSTART_DIRECTORY_NAME,
+    WEFT_AUTOSTART_TASKS_DEFAULT,
+    load_config,
+)
 
 __all__ = ["WeftContext", "build_context", "get_context"]
 
@@ -98,6 +102,12 @@ class WeftContext:
     discovered: bool
     """True if the database was found via upward project search."""
 
+    autostart_dir: Path
+    """Directory containing auto-start TaskSpec templates."""
+
+    autostart_enabled: bool
+    """True when auto-start templates should be considered during manager boot."""
+
     def queue(self, name: str, *, persistent: bool = False) -> Queue:
         """Create a SimpleBroker queue bound to this context's database (Spec: [SB-0.1], [SB-0.4])."""
         return Queue(
@@ -113,6 +123,7 @@ def build_context(
     *,
     create_dirs: bool = True,
     create_database: bool = True,
+    autostart: bool | None = None,
 ) -> WeftContext:
     """Construct a :class:`WeftContext` for the requested directory.
 
@@ -120,10 +131,12 @@ def build_context(
         spec_context: Optional override for the project root (equivalent to
             TaskSpec.spec.weft_context).  When omitted we discover an existing
             project by searching upward from :func:`Path.cwd`.
-        create_dirs: When True (default) ensure `.weft/`, `outputs/`, and
-            `logs/` directories exist.
+        create_dirs: When True (default) ensure `.weft/`, `outputs/`,
+            `logs/`, and (when enabled) `autostart/` directories exist.
         create_database: When True (default) create the SQLite database if it
             does not already exist.
+        autostart: Optional override for enabling auto-start TaskSpecs. When
+            ``None`` the value is taken from the configuration/environment.
 
     Returns:
         Fully-populated :class:`WeftContext`.
@@ -139,10 +152,21 @@ def build_context(
     outputs_dir = weft_dir / "outputs"
     logs_dir = weft_dir / "logs"
     config_path = weft_dir / "config.json"
+    autostart_dir = weft_dir / WEFT_AUTOSTART_DIRECTORY_NAME
+
+    autostart_enabled = (
+        autostart
+        if autostart is not None
+        else bool(config.get("WEFT_AUTOSTART_TASKS", WEFT_AUTOSTART_TASKS_DEFAULT))
+    )
+    config["WEFT_AUTOSTART_TASKS"] = autostart_enabled
+    config["WEFT_AUTOSTART_DIR"] = str(autostart_dir)
 
     if create_dirs:
         for path in {weft_dir, outputs_dir, logs_dir, database_path.parent}:
             path.mkdir(parents=True, exist_ok=True)
+        if autostart_enabled:
+            autostart_dir.mkdir(parents=True, exist_ok=True)
 
     if create_database:
         _ensure_database(database_path)
@@ -164,6 +188,8 @@ def build_context(
         broker_config=broker_config,
         project_config=project_config,
         discovered=discovered,
+        autostart_dir=autostart_dir,
+        autostart_enabled=autostart_enabled,
     )
 
 

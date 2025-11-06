@@ -65,7 +65,7 @@ Bootstrap ──creates──> Primordial Worker (Task)
                                                              │
                                                              └──> Ephemeral execution
 
-Worker (Task) ──monitors──> weft.spawn.requests
+Manager (Dispatcher Task) ──monitors──> weft.spawn.requests
      │                           │
      └──validates──> Registry    └──> Uses msg._timestamp as child TID
                         │                    │

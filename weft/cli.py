@@ -169,8 +169,22 @@ def queue_list(
         bool,
         typer.Option("--stats", help="Include claimed message statistics"),
     ] = False,
+    pattern: Annotated[
+        str | None,
+        typer.Option(
+            "--pattern",
+            "-p",
+            help="fnmatch-style pattern limiting queues in the result",
+        ),
+    ] = None,
 ) -> None:
-    _emit_queue_result(queue_cmd.list_command(json_output=json_output, stats=stats))
+    _emit_queue_result(
+        queue_cmd.list_command(
+            json_output=json_output,
+            stats=stats,
+            pattern=pattern,
+        )
+    )
 
 
 @queue_app.command("watch")
@@ -366,10 +380,17 @@ def init(
         bool,
         typer.Option("--quiet", "-q", help="Suppress informational output"),
     ] = False,
+    autostart: Annotated[
+        bool,
+        typer.Option(
+            "--autostart/--no-autostart",
+            help="Create the autostart directory and enable auto-start tasks",
+        ),
+    ] = True,
 ) -> None:
     """Initialize a new Weft project."""
 
-    exit_code = cmd_init(directory, quiet=quiet)
+    exit_code = cmd_init(directory, quiet=quiet, autostart=autostart)
     raise typer.Exit(code=exit_code)
 
 
@@ -391,10 +412,26 @@ def tidy(
 
 @app.command("status")
 def status_command(
+    tid: Annotated[
+        str | None,
+        typer.Argument(help="Optional task ID (full or short) to filter"),
+    ] = None,
+    all_tasks: Annotated[
+        bool,
+        typer.Option("--all", help="Include completed/terminal tasks in the summary"),
+    ] = False,
     json_output: Annotated[
         bool,
-        typer.Option("--json", help="Emit broker status as JSON"),
+        typer.Option("--json", help="Emit status information as JSON"),
     ] = False,
+    watch: Annotated[
+        bool,
+        typer.Option("--watch", help="Stream task events as they occur"),
+    ] = False,
+    interval: Annotated[
+        float,
+        typer.Option("--interval", help="Polling interval for --watch in seconds"),
+    ] = 1.0,
     context_dir: Annotated[
         Path | None,
         typer.Option(
@@ -403,10 +440,14 @@ def status_command(
         ),
     ] = None,
 ) -> None:
-    """Display the underlying SimpleBroker status metrics."""
+    """Display task, manager, and broker status information."""
 
     exit_code, payload = cmd_status(
+        tid=tid,
+        include_terminal=all_tasks,
         json_output=json_output,
+        watch=watch,
+        watch_interval=interval,
         spec_context=context_dir,
     )
 
@@ -421,6 +462,17 @@ def result_command(
         str | None,
         typer.Argument(help="Task ID to fetch the result for"),
     ] = None,
+    all_results: Annotated[
+        bool,
+        typer.Option("--all", help="Fetch completed results for all tasks"),
+    ] = False,
+    peek: Annotated[
+        bool,
+        typer.Option(
+            "--peek",
+            help="Inspect results without consuming them (requires --all)",
+        ),
+    ] = False,
     timeout: Annotated[
         float | None,
         typer.Option("--timeout", help="Maximum seconds to wait for completion"),
@@ -455,6 +507,8 @@ def result_command(
 
     exit_code, payload = cmd_result(
         tid=tid,
+        all_results=all_results,
+        peek=peek,
         timeout=timeout,
         stream=stream,
         json_output=json_output,
@@ -572,6 +626,13 @@ def run_command(
             "--continuous/--once", help="Continuously process messages for --spec"
         ),
     ] = False,
+    autostart: Annotated[
+        bool,
+        typer.Option(
+            "--autostart/--no-autostart",
+            help="Enable or disable auto-start tasks for this invocation",
+        ),
+    ] = True,
 ) -> None:
     """Execute a command, function, or TaskSpec using the built-in runner."""
 
@@ -595,6 +656,7 @@ def run_command(
         verbose=verbose,
         monitor=monitor,
         once=not continuous,
+        autostart_enabled=autostart,
     )
     raise typer.Exit(code=exit_code)
 

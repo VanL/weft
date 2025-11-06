@@ -48,7 +48,7 @@ This document defines the fundamental invariants, constraints, and guarantees th
 - **I31**: Tasks set process title with shell-friendly format "weft-{tid_short}:{name}:{status}"
 - **I32**: TID short form uses last 10 digits for uniqueness
 - **I33**: Process title updates on every state transition
-- **I34**: TID mappings saved to weft.tid.mappings queue
+- **I34**: TID mappings saved to weft.state.process.tid_mappings queue
 - **I35**: Process titles sanitized to remove shell special characters
 - **I36**: Process titles use only alphanumeric, hyphen, colon, and underscore characters
 

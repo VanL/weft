@@ -334,7 +334,7 @@ class ProcessTitleMixin:
     def _register_tid_mapping(self) -> None:
         """Register TID mapping for reverse lookup.
         
-        Saves mapping to weft.tid.mappings queue for tools that need
+        Saves mapping to weft.state.process.tid_mappings queue for tools that need
         to resolve short TIDs to full TIDs.
         
         Message format:
@@ -343,8 +343,7 @@ class ProcessTitleMixin:
                 "full": "1837025672140161024",
                 "pid": 12345,
                 "name": "git-clone",
-                "started": 1837025672140161024,
-                "hostname": "server1"
+                "started": 1837025672140161024
             }
         """
         try:
@@ -355,8 +354,7 @@ class ProcessTitleMixin:
                 "full": self.tid,
                 "pid": os.getpid(),
                 "name": self.taskspec.name,
-                "started": mapping_queue.generate_timestamp(),
-                "hostname": socket.gethostname()
+                "started": mapping_queue.generate_timestamp()
             }
             mapping_queue.write(json.dumps(mapping))
             logger.debug(f"Registered TID mapping: {self.tid_short} -> {self.tid}")
@@ -367,7 +365,7 @@ class ProcessTitleMixin:
 **Execution Flow**:
 1. Initialize with TaskSpec
 2. Set initial process title "weft-{context_short}-{tid_short}:name:init"
-3. Register TID mapping to weft.tid.mappings queue
+3. Register TID mapping to weft.state.process.tid_mappings queue
 4. Mark status as "spawning" and update process title
 5. Start monitoring thread
 6. Execute target (function or command)
@@ -557,26 +555,63 @@ T{tid}.ctrl_out   # Status updates from task
 
 # Global visibility queues
 weft.tasks.log       # Aggregates state from ALL tasks
-weft.tid.mappings    # Maps short TIDs to full TIDs for process management
+
+# Ephemeral system state (excluded from weft dump)
+weft.state.process.tid_mappings    # Maps short TIDs to full TIDs for process management
+weft.state.worker.registry         # Worker liveness tracking (includes PIDs)
+weft.state.streaming.sessions      # Active streaming operations (self-managed by tasks)
 
 # Worker coordination queues
-weft.workers.registry   # Registry of active workers and their capabilities
 weft.spawn.requests     # Global queue for task spawn requests
 ```
 
 **TID Mapping Queue Structure**:
-The `weft.tid.mappings` queue maintains a persistent record of TID mappings for process management:
+The `weft.state.process.tid_mappings` queue maintains a persistent record of TID mappings for process management:
 
 ```python
-# Message format in weft.tid.mappings
+# Message format in weft.state.process.tid_mappings
 {
     "short": "0161024",              # Last 10 digits of TID
     "full": "1837025672140161024",   # Complete 19-digit TID
     "pid": 12345,                     # Process ID
     "name": "git-clone",              # Task name
-    "started": 1837025672140161024,  # Start timestamp (nanoseconds)
-    "hostname": "server1"             # Host where task is running
+    "started": 1837025672140161024  # Start timestamp (nanoseconds)
 }
+```
+
+**Worker Registry Queue Structure**:
+The `weft.state.worker.registry` queue tracks worker liveness for system management:
+
+```python
+# Message format in weft.state.worker.registry
+{
+    "worker_id": "W1837025672140161025",  # Worker TID
+    "pid": 12345,                         # Process ID
+    "last_heartbeat": 1837025672140161026 # Last activity timestamp
+}
+```
+
+**Streaming Sessions Queue Structure**:
+The `weft.state.streaming.sessions` queue tracks active streaming/interactive operations. Entries are appended when a task begins streaming and deleted when the session ends. (Implementation: `weft/core/tasks/base.py` `_begin_streaming_session`, `_end_streaming_session`.)
+
+```python
+# Message format in weft.state.streaming.sessions (self-managed by tasks)
+{
+    "session_id": "1837025672140161024:T1837025672140161024.outbox:1837025672140162024",
+    "tid": "1837025672140161024",       # Task performing streaming
+    "mode": "stream" | "interactive",   # Streaming mode
+    "queue": "T1837025672140161024.outbox",        # Primary outbox receiving streamed data
+    "ctrl_queue": "T1837025672140161024.ctrl_out", # Interactive stderr/control stream (when present)
+    "started_at": 1837025672140162024,   # Nanosecond timestamp when session began
+    "bytes": 1048576,                    # Optional total bytes (stream mode)
+    "chunks": 4,                         # Optional chunk count (stream mode)
+    "session_pid": 55123                 # Optional subprocess PID (interactive mode)
+}
+
+# Simple lifecycle (presence = active, absence = done):
+# 1. Task starts streaming/interactive output and enqueues the session record.
+# 2. Task emits stream chunks to its queues while the session is active.
+# 3. Task deletes the specific session message when streaming completes or the interaction closes.
 ```
 
 This enables reverse lookup when managing tasks via OS commands:

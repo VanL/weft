@@ -10,12 +10,13 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import subprocess
 import sys
 import time
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, cast
+from typing import IO, Any, cast
 
 import psutil
 import typer
@@ -102,13 +103,23 @@ def _read_stdin() -> str | None:
     except Exception:  # pragma: no cover - StringIO during tests
         is_tty = False
 
+    trace_enabled = os.environ.get("WEFT_TEST_TRACE") == "1"
+
     if is_tty:
+        if trace_enabled:
+            typer.echo("[weft.cli] stdin detected as TTY; skipping read", err=True)
         return None
 
     try:
         data = stream.read()
     except OSError:  # pytest capture may block reading stdin
         return None
+
+    if trace_enabled:
+        typer.echo(
+            f"[weft.cli] stdin read bytes={len(data) if data else 0}",
+            err=True,
+        )
 
     return data if data else None
 
@@ -305,9 +316,19 @@ def _start_manager(
         "0.05",
     ]
 
-    stdout = None if verbose else subprocess.DEVNULL
-    stderr = None if verbose else subprocess.DEVNULL
-    process = subprocess.Popen(cmd, stdout=stdout, stderr=stderr)
+    trace_enabled = os.environ.get("WEFT_TEST_TRACE") == "1"
+
+    # Always detach manager stdio so the CLI does not inherit open pipes that would
+    # keep subprocess.run() callers from observing EOF (important for --no-wait).
+    stdout_target: IO[str] | int = subprocess.DEVNULL
+    stderr_target: IO[str] | int = subprocess.DEVNULL
+    if trace_enabled:
+        debug_dir = Path(os.environ.get("WEFT_TEST_TRACE_DIR", context.root))
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        stdout_target = open(debug_dir / "manager-stdout.log", "a", encoding="utf-8")
+        stderr_target = open(debug_dir / "manager-stderr.log", "a", encoding="utf-8")
+
+    process = subprocess.Popen(cmd, stdout=stdout_target, stderr=stderr_target)
 
     if verbose:
         typer.echo(
@@ -317,7 +338,7 @@ def _start_manager(
                     "pid": process.pid,
                     "db": str(context.database_path),
                 },
-                indent=2,
+                ensure_ascii=False,
             )
         )
 
@@ -327,8 +348,15 @@ def _start_manager(
             break
         record = _select_active_manager(context)
         if record and record.get("tid") == manager_tid:
+            if verbose:
+                _emit_manager_registry_snapshot(record)
             return record, process
         time.sleep(0.1)
+
+    if trace_enabled:
+        typer.echo(
+            f"[weft.cli] manager start failed; returncode={process.poll()}", err=True
+        )
 
     if process.poll() is None:
         process.terminate()
@@ -339,11 +367,34 @@ def _start_manager(
     raise typer.Exit(code=1)
 
 
+def _emit_manager_registry_snapshot(record: dict[str, Any]) -> None:
+    """Emit a manager_started event mirroring legacy verbose output."""
+
+    payload = {
+        "event": "manager_started",
+        "manager_tid": record.get("tid"),
+        "pid": record.get("pid"),
+        "queues": {
+            key: record.get(key)
+            for key in ("requests", "outbox", "ctrl_in", "ctrl_out")
+            if record.get(key)
+        },
+        "timestamp": record.get("timestamp"),
+    }
+    typer.echo(json.dumps(payload, ensure_ascii=False))
+
+
 def _ensure_manager(
     context: WeftContext, *, verbose: bool
 ) -> tuple[dict[str, Any], bool, subprocess.Popen[bytes] | None]:
     record = _select_active_manager(context)
     if record:
+        if os.environ.get("WEFT_TEST_TRACE") == "1":
+            typer.echo(
+                f"[weft.cli] found existing manager {record.get('tid')}"
+                f" pid={record.get('pid')}",
+                err=True,
+            )
         pid = record.get("pid")
         if not (isinstance(pid, int) and _is_pid_alive(pid)):
             _snapshot_registry(context)  # prune stale entries
@@ -354,6 +405,11 @@ def _ensure_manager(
         if record:
             return record, False, None
     record, process = _start_manager(context, verbose=verbose)
+    if os.environ.get("WEFT_TEST_TRACE") == "1":
+        typer.echo(
+            f"[weft.cli] started manager {record.get('tid')} pid={record.get('pid')}",
+            err=True,
+        )
     return record, True, process
 
 
@@ -403,6 +459,7 @@ def _enqueue_taskspec(
     taskspec: TaskSpec,
     work_payload: Any,
 ) -> None:
+    trace_enabled = os.environ.get("WEFT_TEST_TRACE") == "1"
     inbox_name = manager_record.get("requests") or WEFT_SPAWN_REQUESTS_QUEUE
     queue = Queue(
         inbox_name,
@@ -414,7 +471,10 @@ def _enqueue_taskspec(
         "taskspec": taskspec.model_dump(mode="json"),
         "inbox_message": WORK_ENVELOPE_START if work_payload is None else work_payload,
     }
-    queue.write(json.dumps(message))
+    payload = json.dumps(message)
+    queue.write(payload)
+    if trace_enabled:
+        typer.echo(f"[weft.cli] enqueued taskspec to {inbox_name}: {payload}", err=True)
 
 
 def _decode_result_payload(raw: str) -> Any:
@@ -597,6 +657,12 @@ def _wait_for_task_completion(
 
         time.sleep(0.05)
 
+    if os.environ.get("WEFT_TEST_TRACE") == "1":
+        typer.echo(
+            f"[weft.cli] wait loop exiting: status={status} value={result_value}"
+            f" error={error_message}",
+            err=True,
+        )
     return status, result_value, error_message
 
 
@@ -882,6 +948,7 @@ def _run_inline(
     wait: bool,
     json_output: bool,
     verbose: bool,
+    autostart_enabled: bool,
 ) -> int:
     target_type = "command" if command else "function"
     if target_type == "command" and not command:
@@ -893,7 +960,8 @@ def _run_inline(
             )
 
     context = build_context(
-        spec_context=str(context_dir) if context_dir is not None else None
+        spec_context=str(context_dir) if context_dir is not None else None,
+        autostart=autostart_enabled,
     )
 
     parsed_args = [_parse_cli_value(item) for item in args]
@@ -1051,9 +1119,10 @@ def _run_spec_via_manager(
     verbose: bool,
     wait: bool,
     json_output: bool,
+    autostart_enabled: bool,
 ) -> int:
     spec = _load_taskspec(spec_path)
-    context = build_context(spec.spec.weft_context)
+    context = build_context(spec.spec.weft_context, autostart=autostart_enabled)
     manager_record, started_here, process_handle = _ensure_manager(
         context, verbose=verbose
     )
@@ -1149,6 +1218,7 @@ def cmd_run(
     verbose: bool,
     monitor: bool,
     once: bool,
+    autostart_enabled: bool,
 ) -> int:
     """Execute an inline target or a TaskSpec JSON file."""
     if spec is not None:
@@ -1171,6 +1241,7 @@ def cmd_run(
             verbose=verbose,
             wait=wait,
             json_output=json_output,
+            autostart_enabled=autostart_enabled,
         )
 
     if monitor:
@@ -1206,6 +1277,7 @@ def cmd_run(
         wait=wait,
         json_output=json_output,
         verbose=verbose,
+        autostart_enabled=autostart_enabled,
     )
 
 

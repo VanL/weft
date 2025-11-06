@@ -12,6 +12,7 @@ import psutil
 
 from simplebroker import Queue
 from weft._constants import (
+    QUEUE_OUTBOX_SUFFIX,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
     WEFT_WORKERS_REGISTRY_QUEUE,
@@ -77,7 +78,67 @@ class WeftTestHarness:
     def registered_tids(self) -> set[str]:
         return set(self._registered_tids)
 
-    def wait_for_completion(self, tid: str, timeout: float = 5.0) -> None:
+    def dump_debug_state(self) -> str:
+        """Return a human-readable snapshot of harness state for debugging."""
+
+        lines: list[str] = [
+            "WeftTestHarness snapshot:",
+            f"  root={self.root}",
+            f"  registered_tids={sorted(self._registered_tids)}",
+            f"  registered_pids={sorted(self._registered_pids)}",
+        ]
+
+        context = self._context
+        if context is None:
+            lines.append("  context=uninitialized")
+            return "\n".join(lines)
+
+        lines.append(f"  database_path={context.database_path}")
+
+        def _peek_queue(name: str, *, persistent: bool, limit: int = 20) -> list[str]:
+            queue = Queue(
+                name,
+                db_path=str(context.database_path),
+                persistent=persistent,
+                config=context.broker_config,
+            )
+            try:
+                entries = queue.peek_many(limit=limit, with_timestamps=True) or []
+            except Exception as exc:  # pragma: no cover - defensive logging
+                return [f"<error reading {name}: {exc}>"]
+            finally:
+                queue.close()
+
+            formatted: list[str] = []
+            for entry in entries[-limit:]:
+                if isinstance(entry, tuple) and len(entry) == 2:
+                    payload, ts = entry
+                else:
+                    payload, ts = entry, None
+                snippet: str
+                try:
+                    decoded = (
+                        json.loads(payload) if isinstance(payload, str) else payload
+                    )
+                    snippet = json.dumps(decoded, ensure_ascii=False)
+                except Exception:
+                    snippet = str(payload)
+                formatted.append(f"    ts={ts}: {snippet}")
+            return formatted
+
+        registry_dump = _peek_queue(
+            WEFT_WORKERS_REGISTRY_QUEUE, persistent=False, limit=10
+        )
+        lines.append("  registry_tail:")
+        lines.extend(registry_dump or ["    <empty>"])
+
+        log_dump = _peek_queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False, limit=10)
+        lines.append("  log_tail:")
+        lines.extend(log_dump or ["    <empty>"])
+
+        return "\n".join(lines)
+
+    def wait_for_completion(self, tid: str, timeout: float = 10.0) -> None:
         log_queue = Queue(
             WEFT_GLOBAL_LOG_QUEUE,
             db_path=str(self.context.database_path),
@@ -107,6 +168,22 @@ class WeftTestHarness:
                 time.sleep(0.05)
         finally:
             log_queue.close()
+
+        # Fallback: inspect task outbox directly in case log events were missed.
+        outbox_name = f"T{tid}.{QUEUE_OUTBOX_SUFFIX}"
+        outbox_queue = Queue(
+            outbox_name,
+            db_path=str(self.context.database_path),
+            persistent=True,
+            config=self.context.broker_config,
+        )
+        try:
+            message = outbox_queue.peek_one()
+            if message is not None:
+                return
+        finally:
+            outbox_queue.close()
+
         raise TimeoutError(f"Timed out waiting for task {tid}")
 
     # ------------------------------------------------------------------

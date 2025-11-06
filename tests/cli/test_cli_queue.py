@@ -151,3 +151,53 @@ def test_queue_list_json(workdir):
     assert err == ""
     data = json.loads(out or "[]")
     assert any(entry["queue"] == "jsonlist.queue" for entry in data)
+
+
+def test_queue_list_pattern(workdir):
+    build_context(spec_context=workdir)
+    assert run_cli("queue", "write", "alpha.queue", "item", cwd=workdir)[0] == 0
+    assert run_cli("queue", "write", "beta.queue", "item", cwd=workdir)[0] == 0
+
+    rc, out, err = run_cli(
+        "queue",
+        "list",
+        "--pattern",
+        "alpha.*",
+        cwd=workdir,
+    )
+    assert rc == 0
+    assert "alpha.queue" in out
+    assert "beta.queue" not in out
+    assert err == ""
+
+    rc, out, err = run_cli(
+        "queue",
+        "list",
+        "--json",
+        "--pattern",
+        "beta.*",
+        cwd=workdir,
+    )
+    assert rc == 0
+    assert err == ""
+    data = json.loads(out or "[]")
+    assert all(entry["queue"].startswith("beta") for entry in data)
+
+
+def test_queue_list_json_stats_includes_totals(workdir):
+    build_context(spec_context=workdir)
+    assert run_cli("queue", "write", "stat.queue", "item", cwd=workdir)[0] == 0
+
+    rc, out, err = run_cli(
+        "queue",
+        "list",
+        "--json",
+        "--stats",
+        cwd=workdir,
+    )
+    assert rc == 0
+    assert err == ""
+    data = json.loads(out or "[]")
+    stat_entry = next(entry for entry in data if entry["queue"] == "stat.queue")
+    assert "total_messages" in stat_entry
+    assert "claimed_messages" in stat_entry

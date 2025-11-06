@@ -36,6 +36,7 @@ from weft._constants import (
     STATUS_RUNNING,
     TASKSPEC_TID_LENGTH,
     TASKSPEC_VERSION,
+    WEFT_AUTOSTART_TASKS_DEFAULT,
     WEFT_MANAGER_LIFETIME_TIMEOUT,
     WEFT_MANAGER_REUSE_ENABLED,
     __version__,
@@ -269,6 +270,8 @@ class TestLoadConfig:
             "WEFT_REDACT_TASKSPEC_FIELDS",
             "WEFT_MANAGER_REUSE_ENABLED",
             "WEFT_MANAGER_LIFETIME_TIMEOUT",
+            "WEFT_AUTOSTART_TASKS",
+            "WEFT_TEST_TRACE",
             "BROKER_PROJECT_SCOPE",
             "BROKER_DEFAULT_DB_NAME",
             "BROKER_DEBUG",
@@ -283,6 +286,8 @@ class TestLoadConfig:
         assert config["WEFT_REDACT_TASKSPEC_FIELDS"] == ""
         assert config["WEFT_MANAGER_LIFETIME_TIMEOUT"] == WEFT_MANAGER_LIFETIME_TIMEOUT
         assert config["WEFT_MANAGER_REUSE_ENABLED"] == WEFT_MANAGER_REUSE_ENABLED
+        assert config["WEFT_AUTOSTART_TASKS"] == WEFT_AUTOSTART_TASKS_DEFAULT
+        assert config["WEFT_TEST_TRACE"] is False
 
     def test_config_immutability(self) -> None:
         """Test that modifying returned config doesn't affect subsequent calls."""

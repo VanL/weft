@@ -179,6 +179,9 @@ class MultiQueueWatcher(BaseWatcher):
                 )
             )
 
+            if hasattr(queue_obj, "set_stop_event"):
+                queue_obj.set_stop_event(self._stop_event)
+
             error_handler_obj = raw_config.get("error_handler")
             if error_handler_obj is not None and not callable(error_handler_obj):
                 raise TypeError(
@@ -269,6 +272,9 @@ class MultiQueueWatcher(BaseWatcher):
             persistent=self._persistent,
             config=self._config,
         )
+
+        if hasattr(queue_obj, "set_stop_event"):
+            queue_obj.set_stop_event(self._stop_event)
 
         self._queues[queue_name] = QueueRuntimeConfig(
             name=queue_name,

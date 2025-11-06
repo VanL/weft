@@ -11,10 +11,12 @@ from __future__ import annotations
 import io
 import json
 import os
+import sys
 import time
 from collections.abc import Callable, Iterator
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
+from fnmatch import fnmatchcase
 from typing import Any, cast
 
 from simplebroker import commands as sb_commands
@@ -40,7 +42,21 @@ class QueueMessage:
 @dataclass
 class QueueInfo:
     name: str
-    count: int
+    unclaimed: int
+    total: int | None = None
+
+    def to_payload(self, include_stats: bool) -> dict[str, int | str]:
+        payload: dict[str, int | str] = {
+            "queue": self.name,
+            "messages": self.unclaimed,
+        }
+
+        if include_stats and self.total is not None:
+            claimed = max(self.total - self.unclaimed, 0)
+            payload["total_messages"] = self.total
+            payload["claimed_messages"] = claimed
+
+        return payload
 
 
 def _context(spec_context: str | None = None) -> WeftContext:
@@ -152,11 +168,33 @@ def move_messages(
     return len(moved)
 
 
-def list_queues(ctx: WeftContext) -> list[QueueInfo]:
+def list_queues(
+    ctx: WeftContext,
+    *,
+    include_stats: bool = False,
+    pattern: str | None = None,
+) -> list[QueueInfo]:
     queues: list[QueueInfo] = []
     with BrokerDB(str(ctx.database_path)) as db:
-        for name, count in db.list_queues():
-            queues.append(QueueInfo(name=name, count=int(count)))
+        stats = db.get_queue_stats()
+
+    for name, unclaimed, total in stats:
+        if pattern and not fnmatchcase(name, pattern):
+            continue
+
+        unclaimed_count = int(unclaimed)
+        total_count = int(total)
+
+        if not include_stats and unclaimed_count <= 0:
+            continue
+
+        queues.append(
+            QueueInfo(
+                name=name,
+                unclaimed=unclaimed_count,
+                total=total_count,
+            )
+        )
     return queues
 
 
@@ -330,26 +368,24 @@ def list_command(
     *,
     json_output: bool = False,
     stats: bool = False,
+    pattern: str | None = None,
     spec_context: str | None = None,
 ) -> tuple[int, str, str]:
     ctx = _context(spec_context)
 
     if json_output:
-        queues = list_queues(ctx)
+        queues = list_queues(ctx, include_stats=stats, pattern=pattern)
         payload = json.dumps(
-            [
-                {
-                    "queue": info.name,
-                    "messages": info.count,
-                }
-                for info in queues
-            ],
+            [info.to_payload(include_stats=stats) for info in queues],
             ensure_ascii=False,
         )
         return 0, payload, ""
 
     return _run_simplebroker_command(
-        sb_commands.cmd_list, str(ctx.database_path), show_stats=stats
+        sb_commands.cmd_list,
+        str(ctx.database_path),
+        show_stats=stats,
+        pattern=pattern,
     )
 
 
@@ -399,8 +435,7 @@ def watch_command(
     ctx = _context(spec_context)
 
     if limit is None:
-        return _run_simplebroker_command(
-            sb_commands.cmd_watch,
+        exit_code = sb_commands.cmd_watch(
             str(ctx.database_path),
             queue_name,
             peek=peek,
@@ -410,6 +445,7 @@ def watch_command(
             quiet=quiet,
             move_to=move_to,
         )
+        return exit_code, "", ""
 
     try:
         since_timestamp = (
@@ -418,14 +454,15 @@ def watch_command(
     except ValueError as exc:
         return 1, "", str(exc)
 
-    stdout_lines: list[str] = []
-    stderr_lines: list[str] = []
-
     if not quiet:
         mode = "peek" if peek else "consume"
         if move_to:
             mode = f"move to {move_to}"
-        stderr_lines.append(f"Watching queue '{queue_name}' ({mode} mode)...")
+        print(
+            f"Watching queue '{queue_name}' ({mode} mode)...",
+            file=sys.stderr,
+            flush=True,
+        )
 
     for message in watch_queue(
         ctx,
@@ -439,11 +476,12 @@ def watch_command(
         move_to=move_to,
     ):
         if json_output:
-            stdout_lines.append(json.dumps(message.as_dict(), ensure_ascii=False))
+            payload = json.dumps(message.as_dict(), ensure_ascii=False)
         else:
-            stdout_lines.append(message.as_text(with_timestamps))
+            payload = message.as_text(with_timestamps)
+        print(payload, flush=True)
 
-    return 0, "\n".join(stdout_lines), "\n".join(stderr_lines)
+    return 0, "", ""
 
 
 def alias_add_command(

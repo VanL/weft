@@ -45,7 +45,12 @@ Key responsibilities implemented in `weft/core/manager.py`:
 5. **Idle timeout** – Managers honour the `idle_timeout` metadata field (default
    `WEFT_MANAGER_LIFETIME_TIMEOUT`) and will self-terminate after prolonged
    inactivity while ensuring all child processes are reaped.
-6. **Control channel** – In addition to STOP/PAUSE/RESUME/STATUS, managers reply
+6. **Autostart templates** – When `WEFT_AUTOSTART_TASKS` is enabled the manager
+   scans `.weft/autostart/` for TaskSpec templates, mints new TIDs via
+   SimpleBroker, and launches each task using the same spawn pipeline as queue
+   submissions. Active templates are de-duplicated using the task log, and the
+   manager issues `STOP` on shutdown so background daemons exit cleanly.
+7. **Control channel** – In addition to STOP/PAUSE/RESUME/STATUS, managers reply
    `PONG` to `PING` messages on `ctrl_out`, supporting simple health checks.
 
 ## TID Correlation [WA-2]
