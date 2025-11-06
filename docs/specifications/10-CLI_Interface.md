@@ -75,6 +75,13 @@ weft run --memory 512 --cpu 50 heavy-task
 - `--env KEY=VALUE` - Set environment variable
 - `--tag TAG` - Add tag for filtering
 - `--wait` - Wait for completion before returning
+- `--autostart/--no-autostart` - Enable or disable loading templates from `.weft/autostart/` when the Manager boots for this invocation
+
+Auto-start templates live in `.weft/autostart/`. `weft init` materializes the
+directory (unless `--no-autostart` is supplied) so operators can drop TaskSpec
+JSON files that should be launched whenever a manager starts. `weft run
+--no-autostart` temporarily disables the feature, allowing one-off runs without
+booting background daemons.
 
 **Exit codes:**
 - `0` - TaskSpec enqueued successfully (or completed if `--wait`)
@@ -122,8 +129,11 @@ weft result T1837025672140161024 --timeout 30
 # Stream output as it arrives
 weft result T1837025672140161024 --stream
 
-# Get all completed results
+# Get all completed results (ignores queues still streaming)
 weft result --all
+
+# Peek at all results without consuming them
+weft result --all --peek
 
 # JSON output with metadata
 weft result T1837025672140161024 --json
@@ -132,9 +142,12 @@ weft result T1837025672140161024 --json
 **Options:**
 - `--timeout SECONDS` - Maximum wait time
 - `--stream` - Stream output as it arrives
-- `--all` - Get all available results
+- `--all` - Get all available (non-streaming) results
+- `--peek` - Inspect `--all` output without consuming queue messages
 - `--json` - Include metadata in JSON format
 - `--error` - Show stderr instead of stdout
+
+When `--all` is provided, the CLI enumerates task outbox queues and filters out any queues that are still listed in `weft.state.streaming.sessions` (Implementation: `weft/commands/result.py` `_collect_all_results`).
 
 #### `list` - List tasks
 
@@ -715,7 +728,7 @@ class TIDResolver:
     
     def __init__(self, context: WeftContext):
         self.context = context
-        self.mapping_queue = context.get_queue("weft.tid.mappings")
+        self.mapping_queue = context.get_queue("weft.state.process.tid_mappings")
     
     def resolve_short_tid(self, tid_short: str) -> str:
         """Resolve short TID to full TID."""

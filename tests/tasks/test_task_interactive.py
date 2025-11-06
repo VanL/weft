@@ -9,8 +9,10 @@ from pathlib import Path
 
 import pytest
 
-from weft._constants import WEFT_GLOBAL_LOG_QUEUE
+from simplebroker import Queue
+from weft._constants import WEFT_GLOBAL_LOG_QUEUE, WEFT_STREAMING_SESSIONS_QUEUE
 from weft.core.tasks import Consumer
+from weft.core.tasks.base import BaseTask
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 
 INTERACTIVE_SCRIPT = str(
@@ -59,6 +61,58 @@ def _spin(task: Consumer, iterations: int = 10, delay: float = 0.05) -> None:
         time.sleep(delay)
 
 
+def _instrument_streaming_queue(monkeypatch):
+    writes: list[dict[str, object]] = []
+    deletes: list[int | None] = []
+    original_queue = BaseTask._queue
+    proxies: dict[int, Queue] = {}
+
+    class QueueProxy:
+        def __init__(self, delegate: Queue) -> None:
+            self._delegate = delegate
+
+        def write(self, message: str) -> None:
+            writes.append(json.loads(message))
+            return self._delegate.write(message)
+
+        def delete(self, *args, **kwargs) -> None:
+            message_id = kwargs.get("message_id")
+            if message_id is None and args:
+                message_id = args[0]
+            deletes.append(message_id)
+            return self._delegate.delete(*args, **kwargs)
+
+        def __getattr__(self, attr: str):
+            return getattr(self._delegate, attr)
+
+    def instrument(self, name: str) -> Queue:
+        queue = original_queue(self, name)
+        if name != WEFT_STREAMING_SESSIONS_QUEUE:
+            return queue
+        proxy = proxies.get(id(queue))
+        if proxy is None:
+            proxy = QueueProxy(queue)
+            proxies[id(queue)] = proxy
+        return proxy
+
+    monkeypatch.setattr(BaseTask, "_queue", instrument, raising=False)
+    return writes, deletes
+
+
+def _is_final_marker(raw: str) -> bool:
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    return (
+        payload.get("type") == "stream"
+        and payload.get("final") is True
+        and payload.get("data") in ("", None)
+    )
+
+
 def test_interactive_command_streams_output(broker_env, unique_tid: str) -> None:
     db_path, make_queue = broker_env
     spec = make_interactive_spec(unique_tid)
@@ -104,6 +158,7 @@ def test_interactive_command_streams_output(broker_env, unique_tid: str) -> None
     events = [json.loads(e) for e in _drain(log_queue)]
     assert any(event["event"] == "work_completed" for event in events)
     assert task.taskspec.state.status == "completed"
+    assert task.should_stop is True
     task.stop(join=False)
 
 
@@ -133,3 +188,66 @@ def test_interactive_command_stop_cancels(broker_env, unique_tid: str) -> None:
     assert final_messages[-1]["final"] is True
     assert task.taskspec.state.status == "cancelled"
     task.stop(join=False)
+
+
+def test_interactive_close_sentinel_purged_on_cleanup(
+    broker_env, unique_tid: str
+) -> None:
+    db_path, make_queue = broker_env
+    spec = make_interactive_spec(unique_tid)
+    task = Consumer(db_path, spec)
+
+    inbox = make_queue(spec.io.inputs["inbox"])
+    outbox = make_queue(spec.io.outputs["outbox"])
+    ctrl_out = make_queue(spec.io.control["ctrl_out"])
+
+    inbox.write(json.dumps({"stdin": "hello\\n"}))
+    _spin(task)
+
+    inbox.write(json.dumps({"close": True}))
+    _spin(task, iterations=40)
+
+    outbox_before = outbox.peek_many(limit=50) or []
+    ctrl_before = ctrl_out.peek_many(limit=50) or []
+    assert any(_is_final_marker(msg) for msg in outbox_before)
+    assert any(_is_final_marker(msg) for msg in ctrl_before)
+
+    task.cleanup()
+
+    outbox_after = outbox.peek_many(limit=50) or []
+    ctrl_after = ctrl_out.peek_many(limit=50) or []
+    assert not any(_is_final_marker(msg) for msg in outbox_after)
+    assert not any(_is_final_marker(msg) for msg in ctrl_after)
+
+    task.stop(join=False)
+
+
+def test_interactive_streaming_session_records(
+    monkeypatch, broker_env, unique_tid: str
+) -> None:
+    writes, deletes = _instrument_streaming_queue(monkeypatch)
+
+    db_path, make_queue = broker_env
+    spec = make_interactive_spec(unique_tid)
+    task = Consumer(db_path, spec)
+
+    inbox = make_queue(spec.io.inputs["inbox"])
+
+    inbox.write(json.dumps({"stdin": "hello\\n"}))
+    _spin(task)
+
+    inbox.write(json.dumps({"close": True}))
+    _spin(task, iterations=40)
+
+    task.cleanup()
+
+    assert writes, "expected streaming session entry"
+    session = writes[0]
+    assert session["tid"] == unique_tid
+    assert session["mode"] == "interactive"
+    assert session["queue"] == spec.io.outputs["outbox"]
+    assert session["ctrl_queue"] == spec.io.control["ctrl_out"]
+    assert session["session_id"].startswith(
+        f"{unique_tid}:{spec.io.outputs['outbox']}:"
+    )
+    assert deletes, "expected streaming session deletion"

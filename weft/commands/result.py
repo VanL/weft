@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Iterator
+from fnmatch import fnmatchcase
 from typing import Any, cast
 
 from simplebroker import Queue
@@ -12,6 +14,7 @@ from weft._constants import (
     QUEUE_CTRL_OUT_SUFFIX,
     QUEUE_OUTBOX_SUFFIX,
     WEFT_GLOBAL_LOG_QUEUE,
+    WEFT_STREAMING_SESSIONS_QUEUE,
 )
 from weft.context import WeftContext, build_context
 
@@ -92,23 +95,77 @@ def _queue_exists(context: WeftContext, queue_name: str) -> bool:
     return any(name == queue_name for name, _count in queues)
 
 
+def _active_streaming_queues(context: WeftContext) -> set[str]:
+    """Return outbox names currently marked as streaming (Spec: [CC-2.4])."""
+    queue = Queue(
+        WEFT_STREAMING_SESSIONS_QUEUE,
+        db_path=str(context.database_path),
+        persistent=False,
+        config=context.broker_config,
+    )
+    try:
+        entries = queue.peek_many(limit=512)
+    except Exception:
+        return set()
+    if not entries:
+        return set()
+
+    active: set[str] = set()
+    for entry in entries:
+        body = entry[0] if isinstance(entry, tuple) else entry
+        try:
+            payload = json.loads(body)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        queue_name = payload.get("queue")
+        if isinstance(queue_name, str):
+            active.add(queue_name)
+    return active
+
+
+def _iter_queue_messages(queue: Queue, *, peek: bool) -> Iterator[str]:
+    if peek:
+        for peek_item in queue.peek_generator():
+            if isinstance(peek_item, tuple):
+                yield str(peek_item[0])
+            else:
+                yield str(peek_item)
+    else:
+        while True:
+            next_item = queue.read_one()
+            if next_item is None:
+                break
+            if isinstance(next_item, tuple):
+                yield str(next_item[0])
+            else:
+                yield str(next_item)
+
+
 def _collect_all_results(
     context: WeftContext,
     *,
     json_output: bool,
     show_stderr: bool,
+    peek_only: bool,
 ) -> tuple[int, str | None]:
+    """Aggregate results from completed task outboxes (Spec: [CLI-1.1.1])."""
     with BrokerDB(str(context.database_path)) as db:
         try:
-            queue_entries = list(db.list_queues())
+            queue_stats = db.get_queue_stats()
         except Exception as exc:
             return 1, f"weft: failed to enumerate queues: {exc}"
 
+    outbox_names = [
+        name
+        for name, _unclaimed, _total in queue_stats
+        if fnmatchcase(name, f"T*.{QUEUE_OUTBOX_SUFFIX}")
+    ]
+
+    streaming = _active_streaming_queues(context)
+
     aggregated: list[dict[str, Any]] = []
-    for name, _count in queue_entries:
-        if not name.endswith(QUEUE_OUTBOX_SUFFIX):
-            continue
-        if not name.startswith("T"):
+    for name in outbox_names:
+        if name in streaming:
             continue
         tid = name.split(".", 1)[0][1:]
         queue = Queue(
@@ -118,12 +175,8 @@ def _collect_all_results(
             config=context.broker_config,
         )
         stream_buffer: list[str] = []
-        while True:
-            raw_item = queue.read_one()
-            if raw_item is None:
-                break
-            payload = raw_item[0] if isinstance(raw_item, tuple) else raw_item
-            final, value = _process_outbox_message(str(payload), stream_buffer)
+        for payload in _iter_queue_messages(queue, peek=peek_only):
+            final, value = _process_outbox_message(payload, stream_buffer)
             if not final:
                 continue
             if show_stderr and isinstance(value, dict) and "stderr" in value:
@@ -234,6 +287,8 @@ def _await_single_result(
 def cmd_result(
     *,
     tid: str | None,
+    all_results: bool,
+    peek: bool,
     timeout: float | None,
     stream: bool,
     json_output: bool,
@@ -245,15 +300,26 @@ def cmd_result(
     except Exception as exc:
         return 1, f"weft: failed to resolve context: {exc}"
 
-    if tid is None and not stream:
-        return 2, "weft result: task id required"
-
-    if tid is None:
-        return _collect_all_results(
+    if all_results:
+        if tid is not None:
+            return 2, "weft result: task id not expected with --all"
+        if stream:
+            return 2, "weft result: --stream cannot be used with --all"
+        if timeout:
+            return 2, "weft result: --timeout is not supported with --all"
+        exit_code, payload = _collect_all_results(
             context,
             json_output=json_output,
             show_stderr=show_stderr,
+            peek_only=peek,
         )
+        return exit_code, payload
+
+    if peek:
+        return 2, "weft result: --peek requires --all"
+
+    if tid is None:
+        return 2, "weft result: task id required"
 
     try:
         full_tid = _normalize_tid(tid)
@@ -275,8 +341,8 @@ def cmd_result(
 
     if status == "completed":
         if json_output:
-            payload = {"tid": full_tid, "status": status, "result": value}
-            return 0, json.dumps(payload, ensure_ascii=False)
+            json_payload = {"tid": full_tid, "status": status, "result": value}
+            return 0, json.dumps(json_payload, ensure_ascii=False)
         if value is None:
             return 0, ""
         return 0, str(value)

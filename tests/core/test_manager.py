@@ -4,16 +4,19 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
 
 import pytest
 
 from weft._constants import (
+    CONTROL_STOP,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MANAGER_CTRL_IN_QUEUE,
     WEFT_MANAGER_CTRL_OUT_QUEUE,
     WEFT_MANAGER_OUTBOX_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
     WEFT_WORKERS_REGISTRY_QUEUE,
+    load_config,
 )
 from weft.core.manager import Manager
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
@@ -140,10 +143,108 @@ def test_manager_registry_entries(manager_setup) -> None:
     manager, make_queue = manager_setup
     registry_queue = make_queue(WEFT_WORKERS_REGISTRY_QUEUE)
     entries = [json.loads(item) for item in drain(registry_queue)]
-    assert entries and entries[0]["status"] == "active"
+    relevant = [entry for entry in entries if entry.get("tid") == manager.tid]
+    assert len(relevant) == 1
+    assert relevant[0]["status"] == "active"
     manager.cleanup()
     entries = [json.loads(item) for item in drain(registry_queue)]
-    assert entries and entries[-1]["status"] == "stopped"
+    relevant = [entry for entry in entries if entry.get("tid") == manager.tid]
+    assert len(relevant) == 1
+    assert relevant[0]["status"] == "stopped"
+
+
+def test_manager_cleanup_sends_stop_to_children(manager_setup) -> None:
+    manager, make_queue = manager_setup
+    inbox_queue = make_queue(manager._queue_names["inbox"])
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    drain(log_queue)
+
+    inbox_queue.write(
+        json.dumps(
+            {
+                "name": "long-running",
+                "spec": {
+                    "type": "function",
+                    "function_target": "tests.tasks.sample_targets:simulate_work",
+                    "keyword_args": {"duration": 5.0},
+                },
+            }
+        )
+    )
+
+    manager.process_once()
+    start = time.time()
+    while not manager._child_processes and time.time() - start < 5.0:
+        manager.process_once()
+        time.sleep(0.05)
+
+    assert manager._child_processes, "child process should be running"
+    child_tid, child_info = next(iter(manager._child_processes.items()))
+    ctrl_queue = make_queue(child_info.ctrl_queue or f"T{child_tid}.ctrl_in")
+    assert child_info.process.is_alive()
+
+    manager.cleanup()
+
+    messages: list[str] = []
+    while True:
+        raw = ctrl_queue.read_one()
+        if raw is None:
+            break
+        messages.append(raw)
+
+    assert any(message == CONTROL_STOP for message in messages)
+    assert not child_info.process.is_alive()
+
+
+def test_manager_autostart_templates(tmp_path: Path, broker_env, unique_tid) -> None:
+    db_path, make_queue = broker_env
+
+    autostart_dir = tmp_path / "autostart"
+    autostart_dir.mkdir()
+    template_path = autostart_dir / "watcher.json"
+    template_path.write_text(
+        json.dumps(
+            {
+                "name": "autostart-simulate",
+                "spec": {
+                    "type": "function",
+                    "function_target": "tests.tasks.sample_targets:simulate_work",
+                    "keyword_args": {"duration": 0.2},
+                },
+                "metadata": {"tags": ["autostart"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config()
+    config["WEFT_AUTOSTART_TASKS"] = True
+    config["WEFT_AUTOSTART_DIR"] = str(autostart_dir)
+
+    inbox = f"manager.{unique_tid}.inbox"
+    ctrl_in = f"manager.{unique_tid}.ctrl_in"
+    ctrl_out = f"manager.{unique_tid}.ctrl_out"
+    spec = make_manager_spec(unique_tid, inbox, ctrl_in, ctrl_out)
+
+    manager = Manager(db_path, spec, config=config)
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    try:
+        start = time.time()
+        while not manager._child_processes and time.time() - start < 5.0:
+            manager.process_once()
+            time.sleep(0.05)
+
+        assert manager._child_processes, "expected autostart child"
+        child_info = next(iter(manager._child_processes.values()))
+        assert child_info.autostart_source == str(template_path.resolve())
+
+        events = [json.loads(item) for item in drain(log_queue)]
+        assert any(
+            event.get("autostart_source") == str(template_path.resolve())
+            for event in events
+        ), "autostart launch should be logged"
+    finally:
+        manager.cleanup()
 
 
 def test_manager_idle_shutdown(broker_env, unique_tid) -> None:
@@ -206,3 +307,103 @@ def test_manager_respects_supplied_tid(manager_setup, unique_tid) -> None:
     spawn_events = [e for e in events if e["event"] == "task_spawned"]
     assert spawn_events, "Expected spawn event"
     assert spawn_events[-1]["child_tid"] == supplied_tid
+
+
+def test_manager_forces_shutdown_of_idle_children(broker_env, unique_tid) -> None:
+    db_path, make_queue = broker_env
+    inbox = f"manager.{unique_tid}.inbox"
+    ctrl_in = f"manager.{unique_tid}.ctrl_in"
+    ctrl_out = f"manager.{unique_tid}.ctrl_out"
+    spec = make_manager_spec(
+        unique_tid,
+        inbox,
+        ctrl_in,
+        ctrl_out,
+        idle_timeout=0.2,
+    )
+    manager = Manager(db_path, spec)
+    try:
+        inbox_queue = make_queue(manager._queue_names["inbox"])
+        inbox_queue.write(
+            json.dumps(
+                {
+                    "spec": {
+                        "type": "function",
+                        "function_target": "tests.tasks.sample_targets:simulate_work",
+                        "keyword_args": {"duration": 5.0},
+                    },
+                }
+            )
+        )
+
+        start = time.time()
+        while not manager._child_processes and time.time() - start < 2.0:
+            manager.process_once()
+            time.sleep(0.05)
+        assert manager._child_processes
+
+        time.sleep(0.4)
+        start = time.time()
+        while not manager.should_stop and time.time() - start < 2.0:
+            manager.process_once()
+            time.sleep(0.05)
+
+        assert manager.should_stop is True
+        assert not manager._child_processes
+    finally:
+        manager.cleanup()
+
+
+def test_manager_autostart_skips_active_templates(
+    tmp_path: Path, broker_env, unique_tid
+) -> None:
+    db_path, make_queue = broker_env
+
+    autostart_dir = tmp_path / "autostart"
+    autostart_dir.mkdir()
+    template_path = autostart_dir / "observer.json"
+    template_path.write_text(
+        json.dumps(
+            {
+                "name": "autostart-observer",
+                "spec": {
+                    "type": "function",
+                    "function_target": "tests.tasks.sample_targets:simulate_work",
+                    "keyword_args": {"duration": 0.1},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    log_queue.write(
+        json.dumps(
+            {
+                "event": "task_spawned",
+                "status": "running",
+                "taskspec": {
+                    "metadata": {
+                        "autostart_source": str(template_path.resolve()),
+                    }
+                },
+            }
+        )
+    )
+
+    config = load_config()
+    config["WEFT_AUTOSTART_TASKS"] = True
+    config["WEFT_AUTOSTART_DIR"] = str(autostart_dir)
+
+    inbox = f"manager.{unique_tid}.inbox"
+    ctrl_in = f"manager.{unique_tid}.ctrl_in"
+    ctrl_out = f"manager.{unique_tid}.ctrl_out"
+    spec = make_manager_spec(unique_tid, inbox, ctrl_in, ctrl_out)
+
+    manager = Manager(db_path, spec, config=config)
+    try:
+        manager.process_once()
+        assert not manager._child_processes
+        assert not manager._autostart_launched
+    finally:
+        manager.cleanup()

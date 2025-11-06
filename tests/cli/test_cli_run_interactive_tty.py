@@ -25,6 +25,10 @@ def _spawn_with_pty(
     args: list[str], *, cwd: Path
 ) -> tuple[subprocess.Popen[bytes], int]:
     master_fd, slave_fd = pty.openpty()
+    env = os.environ.copy()
+    env.setdefault("WEFT_MANAGER_LIFETIME_TIMEOUT", "1.0")
+    env.setdefault("WEFT_MANAGER_REUSE_ENABLED", "0")
+    env.setdefault("WEFT_AUTOSTART_TASKS", "0")
     proc = subprocess.Popen(
         args,
         cwd=cwd,
@@ -33,6 +37,7 @@ def _spawn_with_pty(
         stderr=slave_fd,
         close_fds=True,
         preexec_fn=os.setsid,
+        env=env,
     )
     os.close(slave_fd)
     return proc, master_fd

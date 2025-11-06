@@ -31,7 +31,15 @@ def run_task(
 
     if memory_mb > 0:
         try:
-            buffers.append(bytearray(memory_mb * 1024 * 1024))
+            import mmap
+
+            size_bytes = memory_mb * 1024 * 1024
+            mm = mmap.mmap(-1, size_bytes)
+            page_size = mmap.PAGESIZE
+            for offset in range(0, size_bytes, page_size):
+                mm.seek(offset)
+                mm.write_byte(1)
+            buffers.append(mm)
         except MemoryError:
             pass
 

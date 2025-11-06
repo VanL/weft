@@ -77,7 +77,7 @@ This document outlines the development roadmap for the Weft system, with a focus
 - [ ] Add recovery from reserved queue on startup
 - [ ] Implement process title management with setproctitle
 - [ ] Add TID short form computation (last 10 digits)
-- [ ] Register TID mappings to weft.tid.mappings queue
+- [ ] Register TID mappings to weft.state.process.tid_mappings queue
 - [ ] Update process titles on state transitions
 
 **CLI Integration**: Commands are thin wrappers around Client/TaskMonitor
@@ -236,7 +236,7 @@ This document outlines the development roadmap for the Weft system, with a focus
 - [ ] Create log replay for state reconstruction
 - [ ] Add summary/reporting utilities
 - [ ] NO separate state database needed
-- [ ] Implement TID lookup service from weft.tid.mappings
+- [ ] Implement TID lookup service from weft.state.process.tid_mappings
 - [ ] Add process discovery tools (find tasks by pattern)
 - [ ] Create OS integration utilities (ps/top wrappers)
 

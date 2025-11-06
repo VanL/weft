@@ -24,6 +24,8 @@ def test_build_context_creates_structure(tmp_path: Path) -> None:
     assert ctx.weft_dir.is_dir()
     assert ctx.outputs_dir.is_dir()
     assert ctx.logs_dir.is_dir()
+    assert ctx.autostart_dir.is_dir()
+    assert ctx.autostart_enabled is True
     assert ctx.database_path.exists()
     assert ctx.config_path.is_file()
 
@@ -33,6 +35,16 @@ def test_build_context_creates_structure(tmp_path: Path) -> None:
     queue = ctx.queue("context.test.queue")
     queue.write("payload")
     assert queue.read() == "payload"
+
+
+def test_build_context_can_disable_autostart(tmp_path: Path) -> None:
+    root = tmp_path / "disable-autostart"
+    root.mkdir()
+
+    ctx = build_context(spec_context=root, autostart=False)
+
+    assert ctx.autostart_enabled is False
+    assert not ctx.autostart_dir.exists()
 
 
 def test_build_context_discovers_existing_project(tmp_path: Path) -> None:

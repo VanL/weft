@@ -10,7 +10,9 @@ from weft._constants import EXIT_ERROR, EXIT_SUCCESS, load_config
 from weft.context import build_context
 
 
-def cmd_init(directory: Path | None = None, *, quiet: bool = False) -> int:
+def cmd_init(
+    directory: Path | None = None, *, quiet: bool = False, autostart: bool = True
+) -> int:
     """Initialize a Weft project rooted at *directory*.
 
     Returns the SimpleBroker exit code.  When successful the project structure
@@ -45,7 +47,12 @@ def cmd_init(directory: Path | None = None, *, quiet: bool = False) -> int:
     if result != 0:
         return result
 
-    build_context(spec_context=root, create_dirs=True, create_database=False)
+    build_context(
+        spec_context=root,
+        create_dirs=True,
+        create_database=False,
+        autostart=autostart,
+    )
 
     if not quiet:
         print(f"Initialized Weft project in {root}")

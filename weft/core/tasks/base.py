@@ -43,6 +43,7 @@ from weft._constants import (
     QUEUE_RESERVED_SUFFIX,
     TASKSPEC_TID_SHORT_LENGTH,
     WEFT_GLOBAL_LOG_QUEUE,
+    WEFT_STREAMING_SESSIONS_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
     load_config,
 )
@@ -145,10 +146,16 @@ class BaseTask(MultiQueueWatcher, ABC):
             self._queue(queue_name)
 
         # Ensure global observability queues reuse cached handles
-        for global_name in (WEFT_GLOBAL_LOG_QUEUE, WEFT_TID_MAPPINGS_QUEUE):
+        for global_name in (
+            WEFT_GLOBAL_LOG_QUEUE,
+            WEFT_TID_MAPPINGS_QUEUE,
+            WEFT_STREAMING_SESSIONS_QUEUE,
+        ):
             self._queue(global_name)
 
         self._ctrl_out_queue = self._queue(self._queue_names["ctrl_out"])
+        self._streaming_session_info: dict[str, Any] | None = None
+        self._streaming_session_message_id: int | None = None
 
         # Cache for optional setproctitle module so we avoid repeated imports.
         self._setproctitle_module: Any | None = None
@@ -216,6 +223,8 @@ class BaseTask(MultiQueueWatcher, ABC):
 
         managed = self.get_queue(name)
         if managed is not None:
+            if hasattr(managed, "set_stop_event"):
+                managed.set_stop_event(self._stop_event)
             self._queue_cache[name] = managed
         else:
             queue_obj = Queue(
@@ -224,6 +233,8 @@ class BaseTask(MultiQueueWatcher, ABC):
                 persistent=True,
                 config=self._config,
             )
+            if hasattr(queue_obj, "set_stop_event"):
+                queue_obj.set_stop_event(self._stop_event)
             self._queue_cache[name] = queue_obj
             self._owned_queue_names.add(name)
 
@@ -273,6 +284,7 @@ class BaseTask(MultiQueueWatcher, ABC):
 
         Spec: [CC-2.5], [SB-0.1]
         """
+        self._end_streaming_session()
         for name in list(self._owned_queue_names):
             queue = self._queue_cache.pop(name, None)
             if queue is None:
@@ -643,6 +655,12 @@ class BaseTask(MultiQueueWatcher, ABC):
             title = self._format_process_title(status, details)
             assert self._setproctitle_module is not None  # typing guard
             self._setproctitle_module.setproctitle(title)
+            setthreadtitle = getattr(self._setproctitle_module, "setthreadtitle", None)
+            if callable(setthreadtitle):
+                try:
+                    setthreadtitle(title)
+                except Exception:
+                    logger.debug("Failed to update thread title", exc_info=True)
         except Exception:
             logger.debug("Failed to update process title", exc_info=True)
 
@@ -691,8 +709,15 @@ class BaseTask(MultiQueueWatcher, ABC):
         Spec: [CC-2.4], [WA-2]
         """
         mapping = self._build_tid_mapping_payload()
+        queue = self._queue(WEFT_TID_MAPPINGS_QUEUE)
+        latest = self._latest_tid_mapping(queue, mapping["full"])
+        if latest is not None:
+            latest_payload, _ = latest
+            if self._tid_mapping_equivalent(latest_payload, mapping):
+                return
+
         try:
-            self._queue(WEFT_TID_MAPPINGS_QUEUE).write(json.dumps(mapping))
+            queue.write(json.dumps(mapping))
         except Exception:
             logger.debug("Failed to register TID mapping %s", mapping, exc_info=True)
 
@@ -719,6 +744,134 @@ class BaseTask(MultiQueueWatcher, ABC):
             "started": time.time_ns(),
             "hostname": socket.gethostname(),
         }
+
+    def _locate_streaming_session(self, queue: Queue, session_id: str) -> int | None:
+        """Look up the message id for an active streaming record (Spec: [CC-2.4])."""
+        try:
+            entries = queue.peek_many(limit=256, with_timestamps=True)
+        except Exception:
+            return None
+        if not entries:
+            return None
+        typed_entries: list[tuple[str, int]] = [
+            cast(tuple[str, int], entry) for entry in entries
+        ]
+        for body, ts in reversed(typed_entries):
+            try:
+                payload = json.loads(body)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if payload.get("session_id") == session_id:
+                return int(ts)
+        return None
+
+    def _begin_streaming_session(
+        self,
+        *,
+        mode: str,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Record the start of a streaming session (Spec: [CC-2.4])."""
+        if self._streaming_session_info is not None:
+            return
+
+        queue = self._queue(WEFT_STREAMING_SESSIONS_QUEUE)
+        queue_name = metadata.get("queue") if metadata else None
+        identifier_parts = [self.tid]
+        if queue_name:
+            identifier_parts.append(queue_name)
+        started_at = time.time_ns()
+        identifier_parts.append(str(started_at))
+        session_id = ":".join(identifier_parts)
+
+        payload: dict[str, Any] = {
+            "session_id": session_id,
+            "tid": self.tid,
+            "mode": mode,
+            "started_at": started_at,
+        }
+        if metadata:
+            payload.update(metadata)
+
+        try:
+            queue.write(json.dumps(payload, ensure_ascii=False))
+        except Exception:
+            logger.debug("Failed to register streaming session", exc_info=True)
+            return
+
+        message_id = self._locate_streaming_session(queue, session_id)
+        self._streaming_session_info = payload
+        self._streaming_session_message_id = message_id
+
+    def _end_streaming_session(self) -> None:
+        """Remove any streaming session marker once streaming completes (Spec: [CC-2.4])."""
+        if self._streaming_session_info is None:
+            return
+
+        queue = self._queue(WEFT_STREAMING_SESSIONS_QUEUE)
+        session_id = self._streaming_session_info.get("session_id")
+        message_id = self._streaming_session_message_id
+        if message_id is None and session_id:
+            message_id = self._locate_streaming_session(queue, session_id)
+
+        if message_id is not None:
+            try:
+                queue.delete(message_id=message_id)
+            except Exception:
+                logger.debug(
+                    "Failed to clear streaming session %s",
+                    message_id,
+                    exc_info=True,
+                )
+
+        self._streaming_session_info = None
+        self._streaming_session_message_id = None
+
+    def _latest_tid_mapping(
+        self, queue: Queue, full_tid: str
+    ) -> tuple[dict[str, Any], int] | None:
+        """Return the most recent mapping entry for ``full_tid`` if present."""
+        latest: tuple[dict[str, Any], int] | None = None
+        try:
+            generator = queue.peek_generator(with_timestamps=True)
+        except Exception:
+            return None
+
+        for entry in generator:
+            if not isinstance(entry, tuple) or len(entry) != 2:
+                continue
+            body, timestamp = entry
+            if not isinstance(timestamp, int):
+                continue
+            try:
+                payload = json.loads(body)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            if payload.get("full") == full_tid:
+                latest = (payload, timestamp)
+        return latest
+
+    @staticmethod
+    def _tid_mapping_equivalent(
+        current: Mapping[str, Any], incoming: Mapping[str, Any]
+    ) -> bool:
+        """Return True if ``incoming`` does not change any observable fields."""
+        comparable_keys = {
+            "short",
+            "full",
+            "pid",
+            "task_pid",
+            "caller_pid",
+            "managed_pids",
+            "name",
+            "hostname",
+        }
+        for key in comparable_keys:
+            if current.get(key) != incoming.get(key):
+                return False
+        return True
 
     def _write_streaming_result(
         self, outbox_queue: Queue, data: bytes, limit_bytes: int
@@ -750,16 +903,29 @@ class BaseTask(MultiQueueWatcher, ABC):
         else:
             chunks = [data[i : i + chunk_size] for i in range(0, total, chunk_size)]
 
-        for index, chunk in enumerate(chunks):
-            envelope = {
-                "type": "stream",
-                "chunk": index,
-                "final": index == len(chunks) - 1,
-                "encoding": "base64",
-                "size": len(chunk),
-                "data": base64.b64encode(chunk).decode("ascii"),
-            }
-            outbox_queue.write(json.dumps(envelope))
+        self._begin_streaming_session(
+            mode="stream",
+            metadata={
+                "chunks": len(chunks),
+                "bytes": total,
+                "queue": outbox_queue.name,
+            },
+        )
+
+        try:
+            for index, chunk in enumerate(chunks):
+                envelope = {
+                    "type": "stream",
+                    "chunk": index,
+                    "final": index == len(chunks) - 1,
+                    "encoding": "base64",
+                    "size": len(chunk),
+                    "data": base64.b64encode(chunk).decode("ascii"),
+                }
+                outbox_queue.write(json.dumps(envelope))
+        except Exception:
+            self._end_streaming_session()
+            raise
 
         return total
 
