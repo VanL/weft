@@ -21,7 +21,6 @@ import psutil
 import typer
 
 from simplebroker import Queue
-from simplebroker.db import BrokerDB
 from weft._constants import (
     DEFAULT_STREAM_OUTPUT,
     QUEUE_CTRL_IN_SUFFIX,
@@ -162,8 +161,13 @@ def _drain_stream_queue(queue: Queue, *, to_stderr: bool = False) -> None:
 
 
 def _generate_tid(context: WeftContext) -> str:
-    with BrokerDB(str(context.database_path)) as db:
-        return str(db.generate_timestamp())
+    queue = Queue(
+        WEFT_SPAWN_REQUESTS_QUEUE,
+        db_path=str(context.database_path),
+        persistent=False,
+        config=context.broker_config,
+    )
+    return str(queue.generate_timestamp())
 
 
 def _registry_queue(context: WeftContext) -> Queue:

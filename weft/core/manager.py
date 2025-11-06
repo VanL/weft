@@ -77,8 +77,8 @@ class Manager(BaseTask):
         self._broker_probe_interval_ns = 1_000_000_000  # probe at most once per second
         self._last_broker_probe_ns = 0
         try:
-            # Reuse the inbox queue so watcher-driven updates also refresh last_ts.
-            self._broker_activity_queue = self._queue(self._queue_names["inbox"])
+            # Reuse any connected queue so watcher-driven updates also refresh last_ts.
+            self._broker_activity_queue = self._get_connected_queue()
         except Exception:
             logger.debug("Failed to prime broker activity queue", exc_info=True)
         self._last_broker_timestamp = self._read_broker_timestamp(force=True)
@@ -358,7 +358,7 @@ class Manager(BaseTask):
         queue = getattr(self, "_broker_activity_queue", None)
         if queue is None:
             try:
-                queue = self._queue(self._queue_names["inbox"])
+                queue = self._get_connected_queue()
             except Exception:
                 logger.debug(
                     "Broker activity queue unavailable for idle tracking",
@@ -485,7 +485,7 @@ class Manager(BaseTask):
     # ------------------------------------------------------------------
     def _generate_child_tid(self) -> str:
         # TaskSpec enforces string tids; SimpleBroker emits ints.
-        return str(self._get_reserved_queue().generate_timestamp())
+        return str(self._get_connected_queue().generate_timestamp())
 
     def _load_autostart_template(self, template_path: Path) -> TaskSpec | None:
         try:

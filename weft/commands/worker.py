@@ -9,6 +9,8 @@ import time
 from pathlib import Path
 from typing import Any, cast
 
+import psutil
+
 from simplebroker import Queue
 from weft._constants import (
     WEFT_TID_MAPPINGS_QUEUE,
@@ -53,6 +55,42 @@ def _registry_snapshot(
         if tid:
             snapshot[tid] = data
     return snapshot
+
+
+def _registry_entry_for_tid(
+    db_path: str, config: dict[str, Any], tid: str
+) -> dict[str, Any] | None:
+    queue = Queue(
+        WEFT_WORKERS_REGISTRY_QUEUE,
+        db_path=db_path,
+        persistent=False,
+        config=config,
+    )
+    try:
+        generator = queue.peek_generator(with_timestamps=True)
+    except Exception:  # pragma: no cover - queue errors
+        queue.close()
+        return None
+
+    latest: tuple[dict[str, Any], int] | None = None
+    try:
+        for entry in generator:
+            if isinstance(entry, tuple) and len(entry) == 2:
+                body, timestamp = entry
+            else:
+                body, timestamp = entry, 0
+            try:
+                data = json.loads(body)
+            except json.JSONDecodeError:
+                continue
+            if data.get("tid") != tid:
+                continue
+            if latest is None or timestamp >= latest[1]:
+                latest = (data, timestamp)
+    finally:
+        queue.close()
+
+    return None if latest is None else latest[0]
 
 
 def start_command(
@@ -118,12 +156,25 @@ def _lookup_pid(db_path: str, config: dict[str, Any], tid: str) -> int | None:
     return None
 
 
+def _pid_alive(pid: int | None) -> bool:
+    """Cross-platform liveness probe using psutil (avoids os.kill(0) on Windows)."""
+
+    if pid is None or pid <= 0:
+        return False
+    try:
+        process = psutil.Process(pid)
+        return process.is_running()
+    except psutil.Error:
+        return False
+
+
 def stop_command(
     *,
     tid: str,
     force: bool,
     timeout: float,
     context_path: Path | None = None,
+    stop_if_absent: bool = False,
 ) -> tuple[int, str | None]:
     context = build_context(context_path)
     db_path = str(context.database_path)
@@ -131,25 +182,43 @@ def stop_command(
     _send_stop(db_path, context.broker_config, tid)
 
     deadline = time.time() + timeout
+    entry_observed = False
+    last_entry: dict[str, Any] | None = None
+    pid_checked_at: float = 0.0
+
     while time.time() < deadline:
-        snapshot = _registry_snapshot(db_path, context.broker_config)
-        status = snapshot.get(tid, {}).get("status")
-        if status == "stopped":
-            return 0, None
+        entry = _registry_entry_for_tid(db_path, context.broker_config, tid)
+        if entry is None:
+            if stop_if_absent or entry_observed:
+                return 0, None
+        else:
+            entry_observed = True
+            last_entry = entry
+            status = entry.get("status")
+            if status == "stopped":
+                return 0, None
+            if stop_if_absent:
+                pid = entry.get("pid")
+                now = time.time()
+                if now - pid_checked_at >= 0.5:
+                    pid_checked_at = now
+                    if not _pid_alive(pid):
+                        return 0, None
         time.sleep(0.1)
 
     if force:
-        pid = _lookup_pid(db_path, context.broker_config, tid)
-        if pid is not None:
-            try:
-                os.kill(pid, signal.SIGTERM)
-            except (ProcessLookupError, OSError):
-                # Process doesn't exist - consider it successfully stopped
-                return 0, None
-            except PermissionError:  # pragma: no cover - unlikely in tests
-                return 1, f"Permission denied sending SIGTERM to PID {pid}"
+        if last_entry is None:
             return 0, None
-        return 1, "Worker PID not found for force stop"
+        pid = _lookup_pid(db_path, context.broker_config, tid)
+        if pid is None or not _pid_alive(pid):
+            return 0, None
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, OSError):
+            return 0, None
+        except PermissionError:  # pragma: no cover - unlikely in tests
+            return 1, f"Permission denied sending SIGTERM to PID {pid}"
+        return 0, None
 
     return 1, f"Worker {tid} did not stop within {timeout:.1f}s"
 
