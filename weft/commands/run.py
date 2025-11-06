@@ -10,13 +10,12 @@ from __future__ import annotations
 
 import base64
 import json
-import os
 import subprocess
 import sys
 import time
 from collections.abc import Sequence
 from pathlib import Path
-from typing import IO, Any, cast
+from typing import Any, cast
 
 import psutil
 import typer
@@ -103,23 +102,13 @@ def _read_stdin() -> str | None:
     except Exception:  # pragma: no cover - StringIO during tests
         is_tty = False
 
-    trace_enabled = os.environ.get("WEFT_TEST_TRACE") == "1"
-
     if is_tty:
-        if trace_enabled:
-            typer.echo("[weft.cli] stdin detected as TTY; skipping read", err=True)
         return None
 
     try:
         data = stream.read()
     except OSError:  # pytest capture may block reading stdin
         return None
-
-    if trace_enabled:
-        typer.echo(
-            f"[weft.cli] stdin read bytes={len(data) if data else 0}",
-            err=True,
-        )
 
     return data if data else None
 
@@ -316,19 +305,11 @@ def _start_manager(
         "0.05",
     ]
 
-    trace_enabled = os.environ.get("WEFT_TEST_TRACE") == "1"
-
     # Always detach manager stdio so the CLI does not inherit open pipes that would
     # keep subprocess.run() callers from observing EOF (important for --no-wait).
-    stdout_target: IO[str] | int = subprocess.DEVNULL
-    stderr_target: IO[str] | int = subprocess.DEVNULL
-    if trace_enabled:
-        debug_dir = Path(os.environ.get("WEFT_TEST_TRACE_DIR", context.root))
-        debug_dir.mkdir(parents=True, exist_ok=True)
-        stdout_target = open(debug_dir / "manager-stdout.log", "a", encoding="utf-8")
-        stderr_target = open(debug_dir / "manager-stderr.log", "a", encoding="utf-8")
-
-    process = subprocess.Popen(cmd, stdout=stdout_target, stderr=stderr_target)
+    process = subprocess.Popen(
+        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
 
     if verbose:
         typer.echo(
@@ -352,11 +333,6 @@ def _start_manager(
                 _emit_manager_registry_snapshot(record)
             return record, process
         time.sleep(0.1)
-
-    if trace_enabled:
-        typer.echo(
-            f"[weft.cli] manager start failed; returncode={process.poll()}", err=True
-        )
 
     if process.poll() is None:
         process.terminate()
@@ -389,12 +365,6 @@ def _ensure_manager(
 ) -> tuple[dict[str, Any], bool, subprocess.Popen[bytes] | None]:
     record = _select_active_manager(context)
     if record:
-        if os.environ.get("WEFT_TEST_TRACE") == "1":
-            typer.echo(
-                f"[weft.cli] found existing manager {record.get('tid')}"
-                f" pid={record.get('pid')}",
-                err=True,
-            )
         pid = record.get("pid")
         if not (isinstance(pid, int) and _is_pid_alive(pid)):
             _snapshot_registry(context)  # prune stale entries
@@ -405,11 +375,6 @@ def _ensure_manager(
         if record:
             return record, False, None
     record, process = _start_manager(context, verbose=verbose)
-    if os.environ.get("WEFT_TEST_TRACE") == "1":
-        typer.echo(
-            f"[weft.cli] started manager {record.get('tid')} pid={record.get('pid')}",
-            err=True,
-        )
     return record, True, process
 
 
@@ -459,7 +424,6 @@ def _enqueue_taskspec(
     taskspec: TaskSpec,
     work_payload: Any,
 ) -> None:
-    trace_enabled = os.environ.get("WEFT_TEST_TRACE") == "1"
     inbox_name = manager_record.get("requests") or WEFT_SPAWN_REQUESTS_QUEUE
     queue = Queue(
         inbox_name,
@@ -471,10 +435,7 @@ def _enqueue_taskspec(
         "taskspec": taskspec.model_dump(mode="json"),
         "inbox_message": WORK_ENVELOPE_START if work_payload is None else work_payload,
     }
-    payload = json.dumps(message)
-    queue.write(payload)
-    if trace_enabled:
-        typer.echo(f"[weft.cli] enqueued taskspec to {inbox_name}: {payload}", err=True)
+    queue.write(json.dumps(message))
 
 
 def _decode_result_payload(raw: str) -> Any:
@@ -657,12 +618,6 @@ def _wait_for_task_completion(
 
         time.sleep(0.05)
 
-    if os.environ.get("WEFT_TEST_TRACE") == "1":
-        typer.echo(
-            f"[weft.cli] wait loop exiting: status={status} value={result_value}"
-            f" error={error_message}",
-            err=True,
-        )
     return status, result_value, error_message
 
 

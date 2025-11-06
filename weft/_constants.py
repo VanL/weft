@@ -339,8 +339,6 @@ def _load_weft_env_vars() -> dict[str, Any]:
         "WEFT_MANAGER_LIFETIME_TIMEOUT": timeout_value,
         "WEFT_MANAGER_REUSE_ENABLED": reuse_enabled,
         "WEFT_AUTOSTART_TASKS": autostart_enabled,
-        # Test diagnostics: emit additional CLI traces when set to "1"
-        "WEFT_TEST_TRACE": os.environ.get("WEFT_TEST_TRACE", "0") == "1",
     }
 
 
@@ -392,11 +390,6 @@ def load_environment() -> dict[str, Any]:
         SimpleBroker integration:
             BROKER_* keys translated from WEFT_* environment variables
             for seamless SimpleBroker API integration without conflicts.
-
-        Test diagnostics:
-            WEFT_TEST_TRACE (bool): When True, enable verbose CLI tracing that
-                prints executed commands and timeout diagnostics. Default: False
-                (set via WEFT_TEST_TRACE="1"). Intended for automated test runs.
 
     """
     env_vars = _load_weft_env_vars()

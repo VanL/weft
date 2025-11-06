@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import shlex
 import subprocess
 import sys
 from collections.abc import Callable, Iterator
@@ -116,15 +115,7 @@ def run_cli(
             part for part in env_vars["PYTHONPATH"].split(":") if part
         )
 
-    trace_enabled = (
-        env_vars.get("WEFT_TEST_TRACE") == "1"
-        or os.environ.get("WEFT_TEST_TRACE") == "1"
-    )
-    cmd_display = " ".join(shlex.quote(part) for part in cmd)
-
     try:
-        if trace_enabled:
-            sys.stderr.write(f"[run_cli] executing: {cmd_display} (cwd={cwd})\n")
         completed = subprocess.run(
             cmd,
             cwd=cwd,
@@ -139,7 +130,7 @@ def run_cli(
     except subprocess.TimeoutExpired as exc:
         debug_lines = [
             "run_cli timeout diagnostics:",
-            f"  command={cmd_display}",
+            f"  command={' '.join(map(str, cmd))}",
             f"  cwd={cwd}",
             f"  timeout={timeout!r}",
         ]
@@ -151,8 +142,6 @@ def run_cli(
         else:
             debug_lines.append("No WeftTestHarness provided.")
         debug_text = "\n".join(debug_lines)
-        if trace_enabled:
-            sys.stderr.write(debug_text + "\n")
         existing_stderr = exc.stderr or ""
         combined_stderr = (
             f"{existing_stderr}\n{debug_text}" if existing_stderr else debug_text

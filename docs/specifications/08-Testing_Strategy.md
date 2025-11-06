@@ -12,13 +12,6 @@ This document outlines the comprehensive testing approach for the Weft system, c
 
 ## 1. Unit Testing
 
-### Diagnostic Environment Flags
-
-- `WEFT_TEST_TRACE=1` &rarr; enable verbose CLI tracing during tests. When set, the
-  test harness prints every `python -m weft.cli …` invocation and appends queue/log
-  snapshots to timeout errors to speed up flake investigations. Leave unset during
-  normal runs to avoid noisy output.
-
 ### TaskSpec Tests (`tests/test_taskspec.py`)
 ```python
 class TestTaskSpec:
