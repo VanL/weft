@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Any, cast
 
 from simplebroker import Queue
-from simplebroker.db import BrokerDB
 from weft._constants import (
     CONTROL_STOP,
     QUEUE_CTRL_IN_SUFFIX,
@@ -74,7 +73,15 @@ class Manager(BaseTask):
         autostart_dir = self._config.get("WEFT_AUTOSTART_DIR")
         self._autostart_dir = Path(autostart_dir) if autostart_dir else None
         self._autostart_launched: set[str] = set()
-        self._last_broker_timestamp = self._read_broker_timestamp()
+        self._broker_activity_queue: Queue | None = None
+        self._broker_probe_interval_ns = 1_000_000_000  # probe at most once per second
+        self._last_broker_probe_ns = 0
+        try:
+            # Reuse the inbox queue so watcher-driven updates also refresh last_ts.
+            self._broker_activity_queue = self._queue(self._queue_names["inbox"])
+        except Exception:
+            logger.debug("Failed to prime broker activity queue", exc_info=True)
+        self._last_broker_timestamp = self._read_broker_timestamp(force=True)
         self._register_worker()
         self.taskspec.mark_running(pid=multiprocessing.current_process().pid)
         self._update_process_title("running")
@@ -337,25 +344,54 @@ class Manager(BaseTask):
         except Exception:
             logger.debug("Failed to send STOP to %s", queue_name, exc_info=True)
 
-    def _read_broker_timestamp(self) -> int:
-        try:
-            with BrokerDB(self._db_path) as db:
-                status = db.status()
-        except Exception:
-            return getattr(self, "_last_broker_timestamp", 0)
-        value = status.get("last_timestamp")
-        if isinstance(value, int):
-            return value
-        if isinstance(value, str):
+    def _read_broker_timestamp(self, *, force: bool = False) -> int:
+        last_known = getattr(self, "_last_broker_timestamp", 0)
+        now_ns = time.time_ns()
+        if not force:
+            last_probe = getattr(self, "_last_broker_probe_ns", 0)
+            interval = getattr(self, "_broker_probe_interval_ns", 1_000_000_000)
+            if now_ns - last_probe < interval:
+                return last_known
+
+        self._last_broker_probe_ns = now_ns
+
+        queue = getattr(self, "_broker_activity_queue", None)
+        if queue is None:
             try:
-                return int(value)
-            except ValueError:
-                return 0
-        return 0
+                queue = self._queue(self._queue_names["inbox"])
+            except Exception:
+                logger.debug(
+                    "Broker activity queue unavailable for idle tracking",
+                    exc_info=True,
+                )
+                return last_known
+            else:
+                self._broker_activity_queue = queue
+
+        try:
+            candidate = queue.last_ts
+        except Exception:
+            logger.debug(
+                "Failed to read queue.last_ts for idle tracking",
+                exc_info=True,
+            )
+            return last_known
+
+        if candidate is None:
+            return last_known
+
+        if not isinstance(candidate, int):
+            try:
+                candidate = int(candidate)
+            except (TypeError, ValueError):
+                return last_known
+
+        return candidate
 
     def _update_idle_activity_from_broker(self) -> None:
+        previous_timestamp = self._last_broker_timestamp
         new_timestamp = self._read_broker_timestamp()
-        if new_timestamp > self._last_broker_timestamp:
+        if new_timestamp > previous_timestamp:
             self._last_broker_timestamp = new_timestamp
             now_ns = time.time_ns()
             # Broker timestamps are nanosecond-based; ensure we track activity using
@@ -448,8 +484,8 @@ class Manager(BaseTask):
     # Autostart handling
     # ------------------------------------------------------------------
     def _generate_child_tid(self) -> str:
-        with BrokerDB(self._db_path) as db:
-            return str(db.generate_timestamp())
+        # TaskSpec enforces string tids; SimpleBroker emits ints.
+        return str(self._get_reserved_queue().generate_timestamp())
 
     def _load_autostart_template(self, template_path: Path) -> TaskSpec | None:
         try:
