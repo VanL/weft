@@ -414,6 +414,7 @@ def _watch_task_events(
     ctx: WeftContext,
     *,
     tid_filters: set[str] | None,
+    status_filter: str | None,
     json_output: bool,
     interval: float,
 ) -> int:
@@ -440,6 +441,8 @@ def _watch_task_events(
                 status = payload.get("status") or taskspec.get("state", {}).get(
                     "status"
                 )
+                if status_filter and status != status_filter:
+                    continue
                 event = payload.get("event") or "event"
                 record = {
                     "timestamp": timestamp,
@@ -474,6 +477,7 @@ def cmd_status(
     *,
     tid: str | None = None,
     include_terminal: bool = False,
+    status_filter: str | None = None,
     json_output: bool = False,
     watch: bool = False,
     watch_interval: float = 1.0,
@@ -491,6 +495,7 @@ def cmd_status(
         exit_code = _watch_task_events(
             context,
             tid_filters=tid_filters,
+            status_filter=status_filter,
             json_output=json_output,
             interval=watch_interval,
         )
@@ -501,6 +506,8 @@ def cmd_status(
         include_terminal=include_terminal,
         tid_filters=tid_filters,
     )
+    if status_filter:
+        tasks = [snap for snap in tasks if snap.status == status_filter]
 
     if tid and not tasks:
         return 2, f"weft: task {tid} not found"

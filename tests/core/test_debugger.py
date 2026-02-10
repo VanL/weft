@@ -16,7 +16,7 @@ def make_debugger_spec(tid: str) -> TaskSpec:
         name="debugger",
         spec=SpecSection(
             type="command",
-            process_target=["debugger"],
+            process_target="debugger",
             interactive=True,
             stream_output=True,
             cleanup_on_exit=True,

@@ -8,15 +8,20 @@ implemented within `BaseTask`/`Consumer` (`weft/core/tasks/base.py`,
 [MF-7]) are handled by the Manager (`weft/core/manager.py`) and the CLI helpers
 in `weft/commands/run.py`.
 
+Queue names and control message constants are summarized in
+[00-Quick_Reference.md](00-Quick_Reference.md).
+
 ## Message Flow Patterns [MF-0]
 
 ### 1. Task Submission Flow [MF-1]
-_Implementation status_: The Client/Queue submission pipeline described here is pending; current CLI commands operate on pre-created TaskSpec files.
+_Implementation_: `weft run` enqueues a spawn request on `weft.spawn.requests`; the Manager expands the TaskSpec template, assigns the spawn-request message ID as the task TID, seeds `T{tid}.inbox`, and reports the initial state to `weft.log.tasks`.
 ```
-User -> Client -> TaskSpec -> Queue(T{tid}.inbox) -> Task
-                           |
-                           └-> Queue(weft.tasks.log) [initial state]
+User -> CLI -> Queue(weft.spawn.requests) -> Manager -> Queue(T{tid}.inbox)
+                                             |
+                                             └-> Queue(weft.log.tasks) [initial state]
 ```
+
+_Implementation mapping_: `weft/commands/run.py` (`_enqueue_taskspec`), `weft/core/manager.py` (spawn handling).
 
 ### 2. Message Processing Flow with Reservation [MF-2]
 _Implementation_: `Consumer` (`weft/core/tasks/consumer.py`) moves inbox messages to reserved queues, executes work, and applies reserved policies per this flow.
@@ -29,15 +34,26 @@ T{tid}.inbox -> move -> T{tid}.reserved -> process -> T{tid}.outbox
                                       |                           |
                                       └───────────┬───────────────┘
                                                   v
-                                          Queue(weft.tasks.log)
+                                        Queue(weft.log.tasks)
 ```
 
+**Reservation semantics**
+- **Reserve = move**: Work is reserved by moving from `T{tid}.inbox` to `T{tid}.reserved` (message ID preserved).
+- **Success = delete reserved**: On success, the reserved message is deleted by ID.
+- **Failure/STOP = policy**: On error or STOP, apply `reserved_policy_on_error` / `reserved_policy_on_stop` (`keep`, `requeue`, `clear`).
+- **Crash = keep**: If the task crashes mid-work, the message remains in `T{tid}.reserved` for manual recovery or explicit requeue.
+
+**Idempotency guidance**
+- **Single-message tasks** may use `tid` as an idempotency key.
+- **Multi-message tasks** should use the inbox/reserved `message_id` (timestamp) as the idempotency key.
+- **Recommended key**: `tid:message_id` to avoid cross-task collisions.
+
 ### 3. Control Flow [MF-3]
-_Implementation_: Control queues are monitored by `BaseTask._handle_control_message`, emitting responses on `ctrl_out`.
+_Implementation_: Control queues are consumed by `BaseTask._handle_control_message`, emitting responses on `ctrl_out`.
 ```
 Controller -> Queue(T{tid}.ctrl_in) -> Task -> Queue(T{tid}.ctrl_out)
                                          |
-                                         └-> Queue(weft.tasks.log)
+                                         └-> Queue(weft.log.tasks)
 ```
 
 ### 4. Pipeline Flow [MF-4]
@@ -49,10 +65,10 @@ T{tid1}.outbox -> T{tid2}.inbox -> T{tid2}.reserved -> process
 ```
 
 ### 5. State Observation Flow [MF-5]
-_Implementation_: State change events are written to `weft.tasks.log` by `BaseTask._report_state_change`. Observers can attach via `Monitor`/`SamplingObserver`.
+_Implementation_: State change events are written to `weft.log.tasks` by `BaseTask._report_state_change`. Observers can attach via `Monitor`/`SamplingObserver`.
 ```
 Task1 ─┐
-Task2 ──┼─> weft.tasks.log -> Observer/Monitor -> Aggregated View
+Task2 ──┼─> weft.log.tasks -> Observer/Monitor -> Aggregated View
 Task3 ─┘                           |
                                    └-> Summary/Alert/Report
 ```
@@ -61,13 +77,14 @@ Task3 ─┘                           |
 _Implementation_: Managers (`weft/core/manager.py`) consume spawn requests from
 `weft.spawn.requests`, validate/expand the embedded TaskSpec, launch child
 Consumers via `launch_task_process`, seed initial inbox messages when provided,
-and emit lifecycle events to `weft.tasks.log`.
+and emit lifecycle events to `weft.log.tasks`.
 
 When `WEFT_AUTOSTART_TASKS` is enabled the Manager also synthesizes spawn
-requests locally by loading every `.json` file in `.weft/autostart/`, minting a
-fresh TID, and running the same validation/launch pipeline. Templates are only
-launched once per manager boot and existing running tasks are detected via the
-task log to avoid duplication.
+requests locally by loading autostart manifests in `.weft/autostart/` that
+reference stored task specs or pipelines, then writing spawn requests that follow
+the same validation/launch pipeline. Manifest lifecycle policy (`once`/`ensure`)
+controls whether tasks are restarted while the manager is running. Tasks launched
+by the manager are stopped cleanly when the manager exits.
 ```
 Client -> weft.spawn.requests -> Worker.inbox -> Worker validates
                                       |              |
@@ -75,10 +92,12 @@ Client -> weft.spawn.requests -> Worker.inbox -> Worker validates
                                       |                      |
                                       |                      └─> Spawn child Task
                                       |                             |
-                                      └─> Use msg._timestamp as child TID
+                                      └─> Use spawn-request message ID as child TID
                                                 |
                                                 └─> Correlation throughout lifecycle
 ```
+
+_Implementation mapping_: `weft/core/manager.py` (spawn handling, autostart manifests), `weft/commands/run.py` (spawn request timestamps).
 
 ### 7. Worker Bootstrap Flow [MF-7]
 _Implementation_: `weft run` and `weft worker start` use the helper in
@@ -88,7 +107,7 @@ returning control to the user.
 ```
 weft CLI -> build manager TaskSpec -> spawn weft.manager_process
       |                  |                     |
-      |                  |                     ├─> Manager registers in weft.workers.registry
+      |                  |                     ├─> Manager registers in weft.state.workers
       |                  |                     ├─> Begins watching weft.spawn.requests
       |                  |                     └─> Awaits control messages on ctrl queues
       |                  └─> Includes idle_timeout & queue bindings
@@ -96,7 +115,7 @@ weft CLI -> build manager TaskSpec -> spawn weft.manager_process
 ```
 
 ### 8. Failure Recovery Flow
-_Implementation_: Reserved queue policies (`KEEP`, `REQUEUE`, `CLEAR`) are enforced by `BaseTask._apply_reserved_policy`.
+_Implementation_: Reserved queue policies (`keep`, `requeue`, `clear`) are enforced by `BaseTask._apply_reserved_policy`.
 ```
 Failed Task (messages in T{tid}.reserved + state.error=true)
      |
@@ -112,6 +131,14 @@ Failed Task (messages in T{tid}.reserved + state.error=true)
 Reserved queue policies (`reserved_policy_on_stop` and
 `reserved_policy_on_error`) determine whether the task keeps, requeues, or
 clears these messages automatically.
+
+**Policy matrix**
+
+| Event | Policy key | keep | requeue | clear |
+|------|------------|------|---------|-------|
+| STOP | reserved_policy_on_stop | leave in reserved | move back to inbox | delete from reserved |
+| Error/Exception | reserved_policy_on_error | leave in reserved | move back to inbox | delete from reserved |
+| Crash | (implicit) | leave in reserved | n/a | n/a |
 ```
 
 ## State Machine
@@ -149,7 +176,7 @@ _Implementation_: `TaskSpec.state` (`weft/core/taskspec.py`) tracks the lifecycl
 | completed | Successful completion | Return code 0 | Terminal state |
 | failed | Execution error | Exception/non-zero code | Terminal state |
 | timeout | Time limit exceeded | Timeout elapsed | Terminal state |
-| cancelled | User cancellation | CANCEL control message | Terminal state |
+| cancelled | User cancellation | STOP control message | Terminal state |
 | killed | Force terminated | KILL signal/memory limit | Terminal state |
 
 ### Transition Rules
@@ -163,10 +190,14 @@ VALID_TRANSITIONS = {
 }
 ```
 
+**Fast-path completion**: `spawning -> completed` is permitted for tasks that
+finish within the first scheduling tick (e.g., very short commands). Long-running
+tasks are expected to emit `running` before a terminal state.
+
 ### State Persistence
 
 **Queue-Based State Storage**:
-- **No separate database**: State lives in `weft.tasks.log` queue
+- **No separate database**: State lives in `weft.log.tasks` queue
 - **Event sourcing**: State reconstructed from log events
 - **Global visibility**: All state changes flow through single queue
 - **Durability**: State persists across task/system restarts
@@ -180,7 +211,7 @@ class StateTracker:
     
     def __init__(self, context: WeftContext):
         self.context = context
-        self.log_queue = context.get_queue("weft.tasks.log")
+        self.log_queue = context.get_queue("weft.log.tasks")
     
     def update_state(self, tid: str, state_update: dict) -> None:
         """Update task state by writing to log queue."""
@@ -220,11 +251,11 @@ class StateTracker:
         return states
 ```
 
-## Future Considerations
+## TaskSpec Redaction
 
-- Add a redaction layer for the `taskspec` payload written to `weft.tasks.log` so
-  secrets embedded in environment variables or metadata can be removed before
-  persistence.
+_Implementation_: `weft/helpers.py` (`redact_taskspec_dump`) is applied by
+`BaseTask._report_state_change` and `Manager._report_state_change` to remove
+secret fields from the `taskspec` payloads written to `weft.log.tasks`.
 
 ## Large Output Handling
 
@@ -238,7 +269,7 @@ When task output exceeds SimpleBroker's 10MB message limit, the system automatic
 class LargeOutputHandler:
     """Handle outputs that exceed SimpleBroker's message size limit."""
     
-    OUTPUT_DIR = "/tmp/weft/outputs"
+    OUTPUT_DIR = ".weft/outputs"
     MAX_MESSAGE_SIZE = 10 * 1024 * 1024  # 10MB
     PREVIEW_SIZE = 1024  # 1KB preview
     
@@ -274,7 +305,7 @@ class LargeOutputHandler:
         Queue(f"T{tid}.outbox").write(json.dumps(reference))
         
         # Log the spill event
-        log_queue = Queue("weft.tasks.log")
+        log_queue = Queue("weft.log.tasks")
         log_queue.write(json.dumps({
             "event": "output_spilled",
             "tid": tid,
@@ -346,14 +377,14 @@ class OutputCleaner:
         if not cleanup_on_exit:
             return
         
-        output_dir = Path(f"/tmp/weft/outputs/{tid}")
+        output_dir = Path(f".weft/outputs/{tid}")
         if output_dir.exists():
             shutil.rmtree(output_dir)
             logger.info(f"Cleaned up output directory for task {tid}")
     
     def cleanup_old_outputs(self, max_age_seconds: int = 86400) -> int:
         """Clean up outputs older than max_age."""
-        base_dir = Path("/tmp/weft/outputs")
+        base_dir = Path(".weft/outputs")
         cleaned = 0
         
         for tid_dir in base_dir.iterdir():
@@ -407,7 +438,7 @@ class ReservationManager:
     
     def _log_failure(self, msg: dict, error: str) -> None:
         """Log failure to global task log."""
-        log_queue = self.context.get_queue("weft.tasks.log")
+        log_queue = self.context.get_queue("weft.log.tasks")
         log_entry = {
             "tid": self.tid,
             "event": "message_failed",
@@ -463,6 +494,8 @@ class QueueLifecycleManager:
             queue_name = f"T{tid}.{queue_type}"
             queue = self.context.get_queue(queue_name)
             
+            if queue_type == "outbox" and queue.has_pending():
+                continue  # Preserve results unless consumed
             if force or not queue.has_pending():
                 # SimpleBroker auto-deletes empty queues
                 # Force deletion by removing all messages
@@ -518,4 +551,7 @@ class QueueLifecycleManager:
 
 ## Inline CLI Task Initialization
 
-- `weft run` calls `Queue.generate_timestamp()` to allocate Task IDs for inline runs. The initial work payload is written directly to `T{tid}.inbox` using this timestamp.
+- When running without a manager, the message ID returned by the initial inbox
+  write is treated as the task TID.
+- When using the manager (default), the spawn-request message ID is the TID and
+  the Manager expands the TaskSpec before writing to `T{tid}.inbox`.

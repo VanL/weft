@@ -14,6 +14,9 @@ System overview, design principles, and high-level architecture. Start here for 
 - Layered architecture diagram
 - Performance targets and security model
 
+### **[00-Quick_Reference.md](00-Quick_Reference.md)**
+Tables of queue names, state values, control messages, and environment variables.
+
 ### **[01-Core_Components.md](01-Core_Components.md)**
 Detailed architecture of the fundamental system components.
 
@@ -31,7 +34,7 @@ Complete specification of the TaskSpec format - the core configuration structure
 - JSON schema with examples
 - Field descriptions and validation rules
 - Limits structure (memory, CPU, file descriptors, connections)
-- weft_context for directory scoping
+- Project context discovery and directory scoping
 - Process title and output handling configuration
 
 ### **[03-Worker_Architecture.md](03-Worker_Architecture.md)**
@@ -51,7 +54,7 @@ How Weft leverages SimpleBroker's features without reimplementation.
 - Queue operations and message management
 - Safe patterns (reservation, peek-and-delete)
 - Database management and performance features
-- weft_context and directory scoping
+- Project context discovery and directory scoping
 - Context isolation and management
 
 ### **[05-Message_Flow_and_State.md](05-Message_Flow_and_State.md)**
@@ -78,7 +81,7 @@ Resource monitoring, limit enforcement, and comprehensive error handling.
 Fundamental guarantees and constraints that the system maintains.
 
 **Key Topics:**
-- 54 system invariants across 9 categories
+- 54 system invariants across 9 categories (defined in [07-System_Invariants.md](07-System_Invariants.md))
 - Invariant checking and enforcement
 - Runtime validation and error classes
 - Testing invariants and monitoring
@@ -110,15 +113,21 @@ Complete command-line interface specification following SimpleBroker patterns.
 - Task execution, monitoring, and control commands
 - Queue operations and worker management
 - Process management with OS integration
-- Pipeline operations and template management
+- Pipeline operations and task spec management
+
+### **[12-Future_Ideas.md](12-Future_Ideas.md)**
+Deferred ideas and follow-ups that are intentionally out of scope for the
+current implementation.
 
 ## Quick Navigation by Topic
 
-### **Getting Started**
+### **Reading Order**
+For a hands-on quick start, see the top-level README. For spec orientation:
 1. Read [00-Overview_and_Architecture.md](00-Overview_and_Architecture.md) for system understanding
-2. Review [01-Core_Components.md](01-Core_Components.md) for component architecture
-3. Study [02-TaskSpec.md](02-TaskSpec.md) for configuration format
-4. Check [09-Implementation_Plan.md](09-Implementation_Plan.md) for development roadmap
+2. Skim [00-Quick_Reference.md](00-Quick_Reference.md) for runtime names and values
+3. Review [01-Core_Components.md](01-Core_Components.md) for component architecture
+4. Study [02-TaskSpec.md](02-TaskSpec.md) for configuration format
+5. Check [09-Implementation_Plan.md](09-Implementation_Plan.md) for development roadmap
 
 ### **Core Architecture**
 - **Components**: [01-Core_Components.md](01-Core_Components.md)
@@ -138,13 +147,20 @@ Complete command-line interface specification following SimpleBroker patterns.
 - **Testing Strategy**: [08-Testing_Strategy.md](08-Testing_Strategy.md)
 - **System Invariants**: [07-System_Invariants.md](07-System_Invariants.md)
 
+## Reference Codes
+
+Specs use reference codes like `[TS-1]`, `[CC-2.1]`, `[MF-3]`, and `[CLI-1]` to
+anchor requirements. When adding or updating text, prefer these codes over
+plain prose so cross-references stay consistent. If a section lacks codes, add
+them rather than introducing a new style.
+
 ## Key Design Wins
 
 ### **1. Recursive Architecture**
 Workers are Tasks that run long-lived targets, using the same primitive throughout the system. All entities follow identical lifecycle, observability, and control patterns.
 
 ### **2. TID Correlation** 
-Message timestamps from SimpleBroker become Task IDs, providing end-to-end correlation. A single identifier follows each task from request to completion with chronological ordering.
+Spawn-request message IDs become Task IDs, providing end-to-end correlation. A single identifier follows each task from request to completion with chronological ordering.
 
 ### **3. Partial Immutability**
 TaskSpec configuration (spec/io sections) becomes immutable after creation, while state and metadata remain mutable. This prevents accidental configuration changes while allowing runtime state updates.
@@ -153,13 +169,13 @@ TaskSpec configuration (spec/io sections) becomes immutable after creation, whil
 The `.reserved` queue serves dual purposes: work-in-progress tracking and dead-letter storage. This reduces queue proliferation while enabling failure recovery.
 
 ### **5. Queue-Based State**
-State management uses `weft.tasks.log` queue rather than a separate database. This event sourcing approach eliminates state synchronization complexity.
+State management uses `weft.log.tasks` queue rather than a separate database. This event sourcing approach eliminates state synchronization complexity.
 
 ### **6. Observable Failures**
 Failed messages remain in reserved queues with error state tracking. This provides complete failure visibility for debugging and recovery operations.
 
 ### **7. Process Title Integration**
-Process titles use shell-friendly format (`weft-{tid_short}:{name}:{status}`) that works with standard Unix tools (ps, grep, kill) without requiring shell escaping.
+Process titles use shell-friendly format (`weft-{context_short}-{tid_short}:{name}:{status}[:details]`) that works with standard Unix tools (ps, grep, kill) without requiring shell escaping.
 
 ## Architecture Principles
 

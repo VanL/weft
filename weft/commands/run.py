@@ -37,6 +37,7 @@ from weft._constants import (
     WORK_ENVELOPE_START,
 )
 from weft.commands.interactive import InteractiveStreamClient
+from weft.commands import specs as spec_cmd
 from weft.context import WeftContext, build_context
 from weft.core.taskspec import TaskSpec
 
@@ -48,9 +49,37 @@ from weft.core.taskspec import TaskSpec
 def _load_taskspec(path: Path) -> TaskSpec:
     """Load and validate a TaskSpec JSON file (Spec: [TS-1], [CLI-1.1.1])."""
     try:
-        return TaskSpec.model_validate_json(path.read_text(encoding="utf-8"))
+        return TaskSpec.model_validate_json(
+            path.read_text(encoding="utf-8"),
+            context={"template": True, "auto_expand": False},
+        )
     except Exception as exc:  # pragma: no cover - validation tested elsewhere
         raise typer.Exit(code=2) from exc
+
+
+def _load_pipeline_spec(
+    pipeline: str | Path,
+    *,
+    context_dir: Path | None,
+) -> dict[str, Any]:
+    path = Path(pipeline)
+    if path.exists():
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:  # pragma: no cover - defensive
+            raise typer.BadParameter(f"Failed to read pipeline: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise typer.BadParameter("Pipeline spec must be a JSON object")
+        return payload
+
+    kind, _path, payload = spec_cmd.load_spec(
+        str(pipeline),
+        spec_type=spec_cmd.SPEC_TYPE_PIPELINE,
+        context_path=context_dir,
+    )
+    if kind != spec_cmd.SPEC_TYPE_PIPELINE:
+        raise typer.BadParameter("Pipeline name must reference a pipeline spec")
+    return payload
 
 
 # -----------------------------------------------------------------------------
@@ -427,19 +456,22 @@ def _enqueue_taskspec(
     manager_record: dict[str, Any],
     taskspec: TaskSpec,
     work_payload: Any,
-) -> None:
+) -> int:
+    # Spec: docs/specifications/03-Worker_Architecture.md#tid-correlation-wa-2
     inbox_name = manager_record.get("requests") or WEFT_SPAWN_REQUESTS_QUEUE
+    taskspec_payload = taskspec.model_dump(mode="json")
+    message: dict[str, Any] = {
+        "taskspec": taskspec_payload,
+        "inbox_message": WORK_ENVELOPE_START if work_payload is None else work_payload,
+    }
+    message_json = json.dumps(message)
     queue = Queue(
         inbox_name,
         db_path=str(context.database_path),
         persistent=True,
         config=context.broker_config,
     )
-    message: dict[str, Any] = {
-        "taskspec": taskspec.model_dump(mode="json"),
-        "inbox_message": WORK_ENVELOPE_START if work_payload is None else work_payload,
-    }
-    queue.write(json.dumps(message))
+    return int(queue.write(message_json))
 
 
 def _decode_result_payload(raw: str) -> Any:
@@ -742,11 +774,15 @@ def _run_interactive_session(
         else:
             if stdin_data:
                 client.send_input(stdin_data)
-                time.sleep(0.05)
-            if auto_close:
-                client.close_input()
-
-            client.wait()
+                if auto_close and not client.wait(timeout=0.2):
+                    client.close_input()
+                    client.wait()
+                else:
+                    client.wait()
+            else:
+                if auto_close:
+                    client.close_input()
+                client.wait()
         status = status_holder["status"] or client.status or "completed"
         error = status_holder["error"] or client.error
         result: Any | None = None
@@ -808,7 +844,7 @@ def _run_interactive_session(
 
 def _build_taskspec_dict(
     *,
-    tid: str,
+    tid: str | None,
     context: WeftContext,
     name: str,
     target_type: str,
@@ -824,9 +860,13 @@ def _build_taskspec_dict(
     stream_output: bool,
     metadata: dict[str, Any],
 ) -> dict[str, Any]:
+    command_target = list(command_target or [])
+    command_args = [str(part) for part in command_target[1:]]
+    spec_args: list[Any] = list(base_args)
+
     spec_section: dict[str, Any] = {
         "type": target_type,
-        "args": list(base_args),
+        "args": spec_args,
         "keyword_args": base_kwargs,
         "env": env,
         "interactive": interactive,
@@ -837,7 +877,10 @@ def _build_taskspec_dict(
     if target_type == "function":
         spec_section["function_target"] = function_target
     else:
-        spec_section["process_target"] = list(command_target or [])
+        if command_target:
+            spec_section["process_target"] = str(command_target[0])
+            if command_args:
+                spec_section["args"] = [*command_args, *spec_args]
 
     if timeout is not None:
         spec_section["timeout"] = timeout
@@ -852,14 +895,16 @@ def _build_taskspec_dict(
     if limits:
         spec_section["limits"] = limits
 
-    io_section = {
-        "inputs": {"inbox": f"T{tid}.{QUEUE_INBOX_SUFFIX}"},
-        "outputs": {"outbox": f"T{tid}.{QUEUE_OUTBOX_SUFFIX}"},
-        "control": {
-            "ctrl_in": f"T{tid}.{QUEUE_CTRL_IN_SUFFIX}",
-            "ctrl_out": f"T{tid}.{QUEUE_CTRL_OUT_SUFFIX}",
-        },
-    }
+    io_section: dict[str, Any] = {}
+    if tid is not None:
+        io_section = {
+            "inputs": {"inbox": f"T{tid}.{QUEUE_INBOX_SUFFIX}"},
+            "outputs": {"outbox": f"T{tid}.{QUEUE_OUTBOX_SUFFIX}"},
+            "control": {
+                "ctrl_in": f"T{tid}.{QUEUE_CTRL_IN_SUFFIX}",
+                "ctrl_out": f"T{tid}.{QUEUE_CTRL_OUT_SUFFIX}",
+            },
+        }
 
     taskspec_dict = {
         "tid": tid,
@@ -872,6 +917,21 @@ def _build_taskspec_dict(
     return taskspec_dict
 
 
+def _rewrite_tid_in_io(io_section: dict[str, Any], old_tid: str, new_tid: str) -> None:
+    """Rewrite default queue names that embed an old TID prefix."""
+    if not old_tid or not new_tid or old_tid == new_tid:
+        return
+    old_prefix = f"T{old_tid}."
+    new_prefix = f"T{new_tid}."
+    for key in ("inputs", "outputs", "control"):
+        section = io_section.get(key)
+        if not isinstance(section, dict):
+            continue
+        for name, value in list(section.items()):
+            if isinstance(value, str) and old_prefix in value:
+                section[name] = value.replace(old_prefix, new_prefix)
+
+
 def _initial_work_payload(
     *,
     target_type: str,
@@ -880,6 +940,8 @@ def _initial_work_payload(
 ) -> Any:
     if target_type == "command":
         if interactive:
+            if stdin_data:
+                return {"stdin": stdin_data, "close": True}
             return {}
         if stdin_data:
             return {"stdin": stdin_data}
@@ -943,16 +1005,14 @@ def _run_inline(
         stdin_data=stdin_data,
         interactive=interactive,
     )
-    tid = _generate_tid(context)
-
     effective_stream_output = (
         stream_output
         if stream_output is not None
         else (True if interactive else DEFAULT_STREAM_OUTPUT)
     )
 
-    taskspec_dict = _build_taskspec_dict(
-        tid=tid,
+    template_dict = _build_taskspec_dict(
+        tid=None,
         context=context,
         name=task_name,
         target_type=target_type,
@@ -969,21 +1029,15 @@ def _run_inline(
         metadata=metadata,
     )
 
-    taskspec = TaskSpec.model_validate(taskspec_dict, context={"auto_expand": True})
+    taskspec = TaskSpec.model_validate(
+        template_dict, context={"auto_expand": False, "template": True}
+    )
     manager_record, started_here, process_handle = _ensure_manager(
         context, verbose=verbose
     )
     reuse_enabled = bool(context.config.get("WEFT_MANAGER_REUSE_ENABLED", True))
 
     try:
-        if verbose:
-            typer.echo(
-                json.dumps(
-                    {"tid": tid, "task": task_name, "db": str(context.database_path)},
-                    indent=2,
-                )
-            )
-
         if interactive:
             if target_type != "command":
                 raise typer.BadParameter(
@@ -993,7 +1047,35 @@ def _run_inline(
                 raise typer.BadParameter(
                     "--json is not supported together with --interactive"
                 )
-        _enqueue_taskspec(context, manager_record, taskspec, work_payload)
+        tid = str(_enqueue_taskspec(context, manager_record, taskspec, work_payload))
+        if verbose:
+            typer.echo(
+                json.dumps(
+                    {"tid": tid, "task": task_name, "db": str(context.database_path)},
+                    indent=2,
+                )
+            )
+
+        resolved_dict = _build_taskspec_dict(
+            tid=tid,
+            context=context,
+            name=task_name,
+            target_type=target_type,
+            function_target=function_target,
+            command_target=command,
+            base_args=parsed_args,
+            base_kwargs=parsed_kwargs,
+            env=env_map,
+            timeout=timeout,
+            memory=memory,
+            cpu=cpu,
+            interactive=interactive,
+            stream_output=effective_stream_output,
+            metadata=metadata,
+        )
+        resolved_spec = TaskSpec.model_validate(
+            resolved_dict, context={"auto_expand": True}
+        )
 
         if not wait:
             if json_output:
@@ -1009,11 +1091,16 @@ def _run_inline(
 
         if interactive:
             use_prompt = stdin_data is None and stdin_is_tty
+            session_stdin = stdin_data
+            session_auto_close = not use_prompt
+            if isinstance(work_payload, dict) and "stdin" in work_payload:
+                session_stdin = None
+                session_auto_close = False
             status, result_value, error_message = _run_interactive_session(
                 context,
-                taskspec,
-                stdin_data=stdin_data,
-                auto_close=not use_prompt,
+                resolved_spec,
+                stdin_data=session_stdin,
+                auto_close=session_auto_close,
                 use_prompt=use_prompt,
             )
             if not use_prompt and result_value:
@@ -1024,7 +1111,7 @@ def _run_inline(
         else:
             status, result_value, error_message = _wait_for_task_completion(
                 context,
-                taskspec,
+                resolved_spec,
                 json_output=json_output,
                 verbose=verbose,
             )
@@ -1088,22 +1175,29 @@ def _run_spec_via_manager(
     reuse_enabled = bool(context.config.get("WEFT_MANAGER_REUSE_ENABLED", True))
 
     try:
-        _enqueue_taskspec(context, manager_record, spec, None)
+        tid = str(_enqueue_taskspec(context, manager_record, spec, None))
+        resolved_payload = spec.model_dump(mode="json")
+        resolved_payload["tid"] = tid
+        if spec.tid and spec.tid != tid:
+            _rewrite_tid_in_io(resolved_payload.get("io", {}), str(spec.tid), tid)
+        resolved_spec = TaskSpec.model_validate(
+            resolved_payload, context={"auto_expand": True}
+        )
         if not wait:
             if json_output:
                 typer.echo(
                     json.dumps(
-                        {"tid": spec.tid, "status": "queued"},
+                        {"tid": tid, "status": "queued"},
                         ensure_ascii=False,
                     )
                 )
             else:
-                typer.echo(spec.tid)
+                typer.echo(tid)
             return 0
 
         status, result_value, error_message = _wait_for_task_completion(
             context,
-            spec,
+            resolved_spec,
             json_output=json_output,
             verbose=verbose,
         )
@@ -1121,7 +1215,7 @@ def _run_spec_via_manager(
             typer.echo(
                 json.dumps(
                     {
-                        "tid": spec.tid,
+                        "tid": tid,
                         "status": status,
                         "result": result_value,
                     },
@@ -1139,7 +1233,7 @@ def _run_spec_via_manager(
         typer.echo(
             json.dumps(
                 {
-                    "tid": spec.tid,
+                    "tid": tid,
                     "status": status,
                     "error": error_message,
                 },
@@ -1151,6 +1245,182 @@ def _run_spec_via_manager(
     return 1
 
 
+def _run_pipeline(
+    pipeline: str | Path,
+    *,
+    pipeline_input: str | None,
+    context_dir: Path | None,
+    wait: bool,
+    json_output: bool,
+    verbose: bool,
+    autostart_enabled: bool,
+) -> int:
+    if not wait:
+        raise typer.BadParameter("--no-wait is not supported for pipelines")
+
+    pipeline_spec = _load_pipeline_spec(pipeline, context_dir=context_dir)
+    stages = pipeline_spec.get("stages")
+    if not isinstance(stages, list) or not stages:
+        raise typer.BadParameter("Pipeline spec must include stages")
+
+    context = build_context(spec_context=context_dir, autostart=autostart_enabled)
+    manager_record, started_here, process_handle = _ensure_manager(
+        context, verbose=verbose
+    )
+    reuse_enabled = bool(context.config.get("WEFT_MANAGER_REUSE_ENABLED", True))
+
+    stage_input: Any = None
+    if pipeline_input is not None:
+        stage_input = _parse_cli_value(pipeline_input)
+
+    try:
+        for stage in stages:
+            if not isinstance(stage, dict):
+                raise typer.BadParameter("Pipeline stages must be objects")
+            task_name = stage.get("task")
+            if not isinstance(task_name, str) or not task_name:
+                raise typer.BadParameter("Pipeline stage missing task name")
+
+            _kind, _path, taskspec_payload = spec_cmd.load_spec(
+                task_name,
+                spec_type=spec_cmd.SPEC_TYPE_TASK,
+                context_path=context_dir,
+            )
+
+            candidate = dict(taskspec_payload)
+            candidate.pop("tid", None)
+            candidate.setdefault("spec", {})
+            candidate.setdefault("metadata", {})
+
+            defaults = stage.get("defaults")
+            if not isinstance(defaults, dict):
+                defaults = stage
+
+            spec_section = candidate.get("spec")
+            if not isinstance(spec_section, dict):
+                spec_section = {}
+                candidate["spec"] = spec_section
+
+            args = defaults.get("args") if isinstance(defaults, dict) else None
+            if isinstance(args, list):
+                spec_section.setdefault("args", [])
+                if isinstance(spec_section["args"], list):
+                    spec_section["args"].extend(args)
+
+            keyword_args = (
+                defaults.get("keyword_args") if isinstance(defaults, dict) else None
+            )
+            if isinstance(keyword_args, dict):
+                spec_section.setdefault("keyword_args", {})
+                if isinstance(spec_section["keyword_args"], dict):
+                    spec_section["keyword_args"].update(keyword_args)
+
+            env = defaults.get("env") if isinstance(defaults, dict) else None
+            if isinstance(env, dict):
+                spec_section.setdefault("env", {})
+                if isinstance(spec_section["env"], dict):
+                    spec_section["env"].update(env)
+
+            io_overrides = stage.get("io_overrides")
+            if isinstance(io_overrides, dict):
+                candidate.setdefault("io", {})
+                io_section = candidate.get("io")
+                if isinstance(io_section, dict):
+                    for key in ("inputs", "outputs", "control"):
+                        overrides = io_overrides.get(key)
+                        if isinstance(overrides, dict):
+                            io_section.setdefault(key, {})
+                            if isinstance(io_section[key], dict):
+                                io_section[key].update(overrides)
+
+            taskspec = TaskSpec.model_validate(
+                candidate, context={"auto_expand": False, "template": True}
+            )
+            work_payload = stage_input
+            if isinstance(defaults, dict) and "input" in defaults:
+                work_payload = defaults.get("input")
+            tid = str(_enqueue_taskspec(context, manager_record, taskspec, work_payload))
+
+            resolved_payload = candidate
+            resolved_payload["tid"] = tid
+            resolved_spec = TaskSpec.model_validate(
+                resolved_payload, context={"auto_expand": True}
+            )
+
+            status, result_value, error_message = _wait_for_task_completion(
+                context,
+                resolved_spec,
+                json_output=json_output,
+                verbose=verbose,
+            )
+            if status == "completed" and result_value is None:
+                outbox_name = (
+                    resolved_spec.io.outputs.get("outbox")
+                    or f"T{resolved_spec.tid}.{QUEUE_OUTBOX_SUFFIX}"
+                )
+                outbox_queue = Queue(
+                    outbox_name,
+                    db_path=str(context.database_path),
+                    persistent=True,
+                    config=context.broker_config,
+                )
+                try:
+                    while True:
+                        outbox_raw = outbox_queue.read_one()
+                        if outbox_raw is None:
+                            break
+                        outbox_payload = (
+                            outbox_raw[0]
+                            if isinstance(outbox_raw, tuple)
+                            else outbox_raw
+                        )
+                        final, value = _process_outbox_message(
+                            str(outbox_payload), []
+                        )
+                        if final:
+                            result_value = value
+                            break
+                finally:
+                    outbox_queue.close()
+            if status != "completed":
+                if json_output:
+                    typer.echo(
+                        json.dumps(
+                            {
+                                "tid": tid,
+                                "status": status,
+                                "error": error_message,
+                            },
+                            ensure_ascii=False,
+                        )
+                    )
+                else:
+                    typer.echo(f"Pipeline stage failed: {error_message}", err=True)
+                return 1
+            stage_input = result_value
+
+    finally:
+        if started_here and wait and not reuse_enabled:
+            _stop_manager(context, manager_record, process_handle)
+
+    if json_output:
+        typer.echo(
+            json.dumps(
+                {
+                    "status": "completed",
+                    "result": stage_input,
+                },
+                ensure_ascii=False,
+            )
+        )
+    else:
+        if isinstance(stage_input, (dict, list)):
+            typer.echo(json.dumps(stage_input, ensure_ascii=False))
+        elif stage_input not in (None, ""):
+            typer.echo(str(stage_input))
+    return 0
+
+
 # -----------------------------------------------------------------------------
 # Public entry point
 # -----------------------------------------------------------------------------
@@ -1160,6 +1430,8 @@ def cmd_run(
     command: Sequence[str],
     *,
     spec: Path | None,
+    pipeline: str | Path | None,
+    pipeline_input: str | None,
     function: str | None,
     args: Sequence[str],
     kwargs: Sequence[str],
@@ -1180,6 +1452,30 @@ def cmd_run(
     autostart_enabled: bool,
 ) -> int:
     """Execute an inline target or a TaskSpec JSON file."""
+    if pipeline is not None:
+        if spec is not None or command or function:
+            raise typer.BadParameter(
+                "--pipeline cannot be combined with --spec, --function, or commands"
+            )
+        if args or kwargs or env or tags:
+            raise typer.BadParameter(
+                "--arg/--kw/--env/--tag are not compatible with --pipeline."
+            )
+        if monitor:
+            raise typer.BadParameter("--monitor is not supported with pipelines.")
+        if once is False:
+            raise typer.BadParameter(
+                "--continuous/--no-once is not yet supported with pipelines."
+            )
+        return _run_pipeline(
+            pipeline,
+            pipeline_input=pipeline_input,
+            context_dir=context_dir,
+            wait=wait,
+            json_output=json_output,
+            verbose=verbose,
+            autostart_enabled=autostart_enabled,
+        )
     if spec is not None:
         if command:
             raise typer.BadParameter("Provide either a TaskSpec file or a command.")

@@ -25,6 +25,9 @@ class Debugger(Consumer):
         self._interactive_session = cast(CommandSession, session)
         self._interactive_runner = None
         self._interactive_started = True
+        self.taskspec.mark_started(pid=os.getpid())
+        self._update_process_title("spawning")
+        self._report_state_change(event="work_spawning", message_id=message_id)
         self.taskspec.mark_running(pid=os.getpid())
         self._update_process_title("running")
         self._report_state_change(event="work_started", message_id=message_id)

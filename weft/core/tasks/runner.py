@@ -74,6 +74,7 @@ def _worker_entry(
             completed = execute_command_target(
                 spec_data["process_target"],
                 work_item,
+                args=spec_data.get("args"),
                 env=spec_data.get("env") or {},
                 working_dir=spec_data.get("working_dir"),
                 timeout=spec_data.get("command_timeout"),
@@ -115,7 +116,7 @@ class TaskRunner:
         *,
         target_type: str,
         function_target: str | None,
-        process_target: Sequence[str] | None,
+        process_target: str | None,
         args: Sequence[Any] | None,
         kwargs: Mapping[str, Any] | None,
         env: Mapping[str, str] | None,
@@ -124,11 +125,13 @@ class TaskRunner:
         limits: Any | None,
         monitor_class: str | None,
         monitor_interval: float | None,
+        db_path: str | None = None,
+        config: dict[str, Any] | None = None,
     ) -> None:
         self._spec_data = {
             "type": target_type,
             "function_target": function_target,
-            "process_target": list(process_target or []),
+            "process_target": process_target,
             "args": list(args or []),
             "kwargs": dict(kwargs or {}),
             "env": dict(env or {}),
@@ -139,7 +142,9 @@ class TaskRunner:
         self._ctx = multiprocessing.get_context("spawn")
         self._limits = limits
         self._monitor_class = monitor_class
-        self._monitor_interval = monitor_interval or 0.5
+        self._monitor_interval = monitor_interval or 1.0
+        self._db_path = db_path
+        self._config = dict(config) if config is not None else None
 
     def run(self, work_item: Any) -> RunnerOutcome:
         """Execute *work_item* with resource monitoring and timeout handling.
@@ -158,7 +163,13 @@ class TaskRunner:
         last_metrics: ResourceMetrics | None = None
         outcome: RunnerOutcome | None = None
         if self._monitor_class:
-            monitor = load_resource_monitor(self._monitor_class)
+            monitor = load_resource_monitor(
+                self._monitor_class,
+                limits=self._limits,
+                polling_interval=self._monitor_interval,
+                db_path=self._db_path,
+                config=self._config,
+            )
             try:
                 if worker_pid is None:
                     raise RuntimeError("Worker process has no PID")
@@ -209,7 +220,7 @@ class TaskRunner:
 
             if monitor:
                 try:
-                    ok, violation = monitor.check_limits(self._limits)
+                    ok, violation = monitor.check_limits()
                 except Exception:  # pragma: no cover - process may have exited
                     ok, violation = True, None
                 last_metrics = monitor.last_metrics()
@@ -277,9 +288,10 @@ class TaskRunner:
             raise TypeError("Spec env must be a mapping of string keys to values")
 
         process_target_obj = self._spec_data.get("process_target")
-        if not isinstance(process_target_obj, (list, tuple)):
-            raise TypeError("process_target must be a sequence of command arguments")
-        command: list[str] = [str(part) for part in process_target_obj]
+        if not isinstance(process_target_obj, str) or not process_target_obj:
+            raise TypeError("process_target must be a non-empty command string")
+        command: list[str] = [process_target_obj]
+        command.extend(str(item) for item in self._spec_data.get("args") or [])
 
         working_dir_obj = self._spec_data.get("working_dir")
         cwd_value: str | None = str(working_dir_obj) if working_dir_obj else None
@@ -332,7 +344,13 @@ class TaskRunner:
 
         monitor = None
         if self._monitor_class:
-            monitor = load_resource_monitor(self._monitor_class)
+            monitor = load_resource_monitor(
+                self._monitor_class,
+                limits=self._limits,
+                polling_interval=self._monitor_interval,
+                db_path=self._db_path,
+                config=self._config,
+            )
             try:
                 pid = process.pid
                 if pid is None:

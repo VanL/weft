@@ -4,29 +4,37 @@
 
 The Weft CLI follows SimpleBroker's design philosophy: simple, intuitive commands that work with Unix pipes and require zero configuration. The CLI provides straightforward access to task management, queue operations, and system monitoring.
 
-_Implementation snapshot_: Current code implements the queue helpers (`weft/commands/queue.py`), task submission via `weft run` (`weft/commands/run.py`), and manager lifecycle helpers (`weft/commands/worker.py`). Task submission always flows through SimpleBroker queues: the CLI **Client** builds a validated `TaskSpec`, obtains a TID via `generate_timestamp()`, enqueues the JSON for the Manager, and optionally waits for completion by watching the task log/outbox queues. Additional commands described below remain planned.
+_Implementation snapshot_: Current code implements queue helpers (`weft/commands/queue.py`), task submission via `weft run` (`weft/commands/run.py`), status/list/result reporting, spec/task/system management, and sequential pipeline execution. Task submission always flows through SimpleBroker queues: the CLI **Client** builds a validated TaskSpec template, enqueues it for the Manager, and the spawn-request message ID becomes the task TID. The Client can optionally wait for completion by watching the task log/outbox queues.
+
+_Implementation mapping_: `weft/cli.py` (command registration), `weft/commands/run.py`, `weft/commands/status.py`, `weft/commands/result.py`, `weft/commands/queue.py`, `weft/commands/worker.py`, `weft/commands/tasks.py`, `weft/commands/specs.py`, `weft/commands/init.py`, `weft/commands/dump.py`, `weft/commands/load.py`, `weft/commands/tidy.py`, `weft/commands/validate_taskspec.py` (spec validate).
+
+_Implemented commands_: `init`, `run`, `status`, `result`, `list`, `queue *`, `worker *`, `task *`, `spec *`, `system *`, `pipeline`.
 
 ## Design Principles [CLI-0.1]
 
-1. **Zero Configuration** - Works immediately with `.broker.db` in current directory
+1. **Zero Configuration** - Works immediately with `.weft/broker.db` in the project root
 2. **Simple Verbs** - Use familiar commands: run, status, result, list
 3. **Pipe-Friendly** - Input/output works with standard Unix tools
 4. **JSON Safety** - All commands support `--json` for safe handling
 5. **Exit Codes** - Meaningful codes for scripting (0=success, 1=error, 2=not found)
 6. **SimpleBroker Integration** - Queue operations delegate to SimpleBroker
+7. **Progressive Disclosure** - Power features (pipelines, stored task specs, control) are opt-in; the default path stays minimal.
 
 ## Command Structure [CLI-0.2]
 
 ```
 weft [global-options] <command> [command-options] [arguments]
+weft [global-options] task <subcommand> [arguments]
+weft [global-options] spec <subcommand> [arguments]
+weft [global-options] system <subcommand> [arguments]
 ```
 
 ## Global Options [CLI-0.3]
 
 | Option | Description |
 |--------|-------------|
-| `-d, --dir PATH` | Use PATH for database instead of current directory |
-| `-f, --file NAME` | Database filename (default: `.broker.db`) |
+| `-d, --dir PATH` | Use PATH as the project root (where `.weft/` lives) |
+| `-f, --file NAME` | Database filename (default: `.weft/broker.db`) |
 | `-q, --quiet` | Suppress non-error output |
 | `--cleanup` | Delete database and exit |
 | `--vacuum` | Clean up completed tasks and exit |
@@ -40,22 +48,25 @@ weft [global-options] <command> [command-options] [arguments]
 #### `run` - Execute a task [CLI-1.1.1]
 _Implementation today_: `weft/commands/run.py` always routes execution through the Manager. The Client:
 
-1. Collects CLI options and builds a canonical `TaskSpec` dictionary (including generated queue names and metadata).
+1. Collects CLI options and builds a canonical TaskSpec template (no `tid`, `io`, or `state`).
 2. Validates it locally with `TaskSpec.model_validate(...)` so user errors fail fast.
-3. Obtains a TID by calling `generate_timestamp()` on the SimpleBroker database or queue.
-4. Serializes the `TaskSpec` to JSON and enqueues it on the manager request queue.
+3. Enqueues the template on the manager request queue.
+4. Uses the spawn-request message ID returned by SimpleBroker as the task TID.
 
-If `--wait` (current default) is provided the Client then tails `weft.tasks.log` and the task outbox queue until it observes a terminal event, streaming output as it arrives. When `--no-wait` is implemented it will simply enqueue the request, report the TID, and return; the Manager is unaware of the distinction.
+If `--wait` (current default) is provided the Client then tails `weft.log.tasks` and the task outbox queue until it observes a terminal event, streaming output as it arrives. When `--no-wait` is provided it simply enqueues the request, reports the TID, and returns; the Manager is unaware of the distinction.
 
 ```bash
 # Run a command
 weft run ls -la /tmp
 
-# Run from template
-weft run git-clone --repo https://github.com/user/repo
+# Run from stored task spec
+weft run --spec git-clone
 
 # Run from JSON spec
 weft run --spec task.json
+
+# Run a Python function
+weft run --function mymodule:process_data --arg input.csv --kw mode=fast
 
 # Pipe input
 echo "data" | weft run process -
@@ -68,33 +79,67 @@ weft run --memory 512 --cpu 50 heavy-task
 ```
 
 **Options:**
-- `--spec FILE` - Read TaskSpec from JSON file
+- `-s, --spec NAME|PATH` - Execute a task spec by name or JSON file
+- `-p, --pipeline NAME|PATH` - Execute a pipeline by name or JSON file
+- `--function MODULE:FUNC` - Execute a Python function by import path
+- `--arg VALUE` - Positional argument for `--function` (repeatable)
+- `--kw KEY=VALUE` - Keyword argument for `--function` (repeatable)
+- `--outbox QUEUE|@alias` - Route final output to the specified queue (implies `--no-wait`)
 - `--timeout SECONDS` - Set execution timeout
 - `--memory MB` - Set memory limit
 - `--cpu PERCENT` - Set CPU limit (0-100)
 - `--env KEY=VALUE` - Set environment variable
-- `--tag TAG` - Add tag for filtering
 - `--wait` - Wait for completion before returning
-- `--autostart/--no-autostart` - Enable or disable loading templates from `.weft/autostart/` when the Manager boots for this invocation
+- `--autostart/--no-autostart` - Enable or disable loading autostart manifests from `.weft/autostart/` when the Manager boots for this invocation
 
-Auto-start templates live in `.weft/autostart/`. `weft init` materializes the
-directory (unless `--no-autostart` is supplied) so operators can drop TaskSpec
-JSON files that should be launched whenever a manager starts. `weft run
+`--spec`, `--pipeline`, and `--function` are mutually exclusive with explicit
+command arguments. `weft run` selects exactly one execution target. When
+invoking `--function`, `--arg`/`--kw` may be repeated and can be interleaved;
+`--arg` values preserve order, `--kw` values merge into a dict (last write wins).
+
+**Resolution rules for NAME|PATH**
+1. If the argument contains a path separator (`/`, `./`, `../`, `~`) or ends
+   with `.json`, treat it as a file path.
+2. Otherwise, treat it as a saved spec name.
+3. If both a saved spec and a file exist with the same bare name, the saved
+   spec wins. This avoids accidentally shadowing vetted saved specs with
+   arbitrary local files. To force a file, use an explicit path (`./name.json`).
+
+When `--outbox` is supplied, the CLI resolves `@alias` values to canonical
+queue names before submission. The task writes its final output to the resolved
+outbox queue, `weft run` returns the task TID, and no local result is printed.
+
+Autostart manifests live in `.weft/autostart/`. `weft init` materializes the
+directory (unless `--no-autostart` is supplied) so operators can drop manifest
+JSON files that should be launched whenever a manager starts. Manifests declare
+`once` or `ensure` lifecycle policy and point at task specs/pipelines. `weft run
 --no-autostart` temporarily disables the feature, allowing one-off runs without
-booting background daemons.
+booting background agents.
 
 **Exit codes:**
 - `0` - TaskSpec enqueued successfully (or completed if `--wait`)
 - `1` - Worker unavailable or enqueue failure
 - `2` - Invalid arguments or TaskSpec JSON
 
-> **Note:** Template shortcuts (for example `weft run git-clone ...`) and additional convenience flags remain planned; today only direct command/function/spec submission is implemented.
+> **Note:** Bare-name shortcuts (for example `weft run git-clone ...`) and additional convenience flags remain planned; today only direct command/function/spec submission is implemented.
+
+#### `init` - Initialize a project
+
+```bash
+# Initialize .weft/ in the current directory
+weft init
+
+# Initialize a specific directory
+weft init /path/to/project
+```
 
 ### Task Monitoring [CLI-1.2]
 
 #### `status` - Broker status snapshot [CLI-1.2.1]
 
-_Implementation today_: `weft status` surfaces SimpleBroker's `--status` metrics for the active project database. The command queries the broker directly and formats the response itself so additional Weft-specific diagnostics can be layered in later. Task-level filtering remains planned.
+`weft status` answers "how is the system doing?" and can optionally filter task snapshots by TID or status. For detailed per-task inspection use `weft task status`.
+
+_Implementation today_: `weft status` surfaces SimpleBroker metrics for the active project database, manager registry entries, and recent task snapshots from `weft.log.tasks`. Optional filters include TID (full or short), `--status`, and `--all` to include terminal tasks. `--watch` streams task events as they arrive.
 
 ```bash
 # Default human-readable output
@@ -103,19 +148,26 @@ weft status
 # JSON payload for scripting
 weft status --json
 
-# Inspect a different context directory
-weft status --context /path/to/project
+# Filter to running tasks
+weft status --status running
+
+# Watch a single task
+weft status T1837025672140161024 --watch
+
 ```
 
 **Output fields:**
 - `total_messages` – Total messages across all queues
 - `last_timestamp` – Highest SimpleBroker timestamp observed (text output also shows the relative age)
 - `db_size` – Size of the broker database file in bytes (text output also shows a human-friendly unit)
-- JSON payload nests these under `broker` and includes a `managers` array summarising active registry entries.
+- JSON payload nests these under `broker` and includes `managers` and `tasks` arrays summarising registry entries and task snapshots.
 
 **Options:**
-- `--json` – Emit the payload as JSON
-- `--context PATH` – Resolve the Weft project from a specific directory
+- `-j, --json` – Emit the payload as JSON
+- `--all` – Include terminal tasks in snapshots
+- `--status STATUS` – Filter task snapshots by status
+- `--watch` – Stream task events as they arrive
+- `--interval SECONDS` – Polling interval for `--watch`
 
 #### `result` - Get task output
 
@@ -142,12 +194,12 @@ weft result T1837025672140161024 --json
 **Options:**
 - `--timeout SECONDS` - Maximum wait time
 - `--stream` - Stream output as it arrives
-- `--all` - Get all available (non-streaming) results
+- `-a, --all` - Get all available (non-streaming) results
 - `--peek` - Inspect `--all` output without consuming queue messages
-- `--json` - Include metadata in JSON format
+- `-j, --json` - Include metadata in JSON format
 - `--error` - Show stderr instead of stdout
 
-When `--all` is provided, the CLI enumerates task outbox queues and filters out any queues that are still listed in `weft.state.streaming.sessions` (Implementation: `weft/commands/result.py` `_collect_all_results`).
+When `--all` is provided, the CLI enumerates task outbox queues and filters out any queues that are still listed in `weft.state.streaming` (Implementation: `weft/commands/result.py` `_collect_all_results`).
 
 #### `list` - List tasks
 
@@ -158,8 +210,8 @@ weft list
 # With statistics
 weft list --stats
 
-# Group by status
-weft list --by-status
+# Filter by status
+weft list --status failed
 
 # Show workers only
 weft list --workers
@@ -178,58 +230,36 @@ analyze-spec       failed      2024-01-15 14:20  00:00:12
 Summary: 1 running, 1 completed, 1 failed
 ```
 
-### Task Control
+**Options:**
+- `--stats` - Include per-status summary counts
+- `--status STATUS` - Filter by status
+- `--workers` - Show managers/workers only
+- `-j, --json` - Emit the payload as JSON
 
-#### `stop` - Stop a task gracefully
+### Task Operations (`weft task …`)
 
-```bash
-weft stop T1837025672140161024
-weft stop 0161024  # Short TID
-weft stop --all     # Stop all tasks
-```
+Task lifecycle and operator tooling live under the `task` namespace to keep a
+clear separation between read-only status (`weft status`, `weft list`) and
+state-changing controls. The spec standard is `weft task <subcommand>`.
 
-#### `kill` - Force terminate a task
-
-```bash
-weft kill T1837025672140161024
-weft kill --pattern "analyze"  # Kill matching tasks
-```
-
-Patterned invocations reuse `queue broadcast --pattern 'T*.ctrl_in'` to fan control messages to every matching task. Patterns match canonical queue names; use `@alias` when you want alias resolution before broadcast.
-
-#### `pause` / `resume` - Pause and resume tasks
+#### `task stop` - Stop a task gracefully
 
 ```bash
-weft pause T1837025672140161024
-weft resume T1837025672140161024
+weft task stop T1837025672140161024
+weft task stop 0161024  # Short TID
+weft task stop --all    # Stop all tasks
 ```
 
-### Recovery Operations
-
-#### `retry` - Retry a failed task
+#### `task kill` - Force terminate a task
 
 ```bash
-# Retry with same parameters
-weft retry T1837025672140161024
-
-# Retry with modifications
-weft retry T1837025672140161024 --timeout 60
+weft task kill T1837025672140161024
+weft task kill --pattern "analyze"  # Kill matching tasks
 ```
 
-#### `recover` - Recover from reserved queue
-
-_Implementation status_: Not yet implemented; manual queue commands must be used for recovery today.
-
-```bash
-# Inspect reserved queue
-weft recover T1837025672140161024 --inspect
-
-# Process reserved messages
-weft recover T1837025672140161024 --process
-
-# Abandon reserved messages
-weft recover T1837025672140161024 --abandon
-```
+Patterned invocations reuse `queue broadcast --pattern 'T*.ctrl_in'` to fan
+control messages to every matching task. Patterns match canonical queue names;
+use `@alias` when you want alias resolution before broadcast.
 
 ## Queue Operations
 
@@ -310,170 +340,162 @@ weft worker list --json
 weft worker status W1837025672140161024
 weft worker status W1837025672140161024 --json
 
-All worker subcommands accept `--context PATH` to target a specific project directory when automatic discovery is insufficient.
+Worker subcommands operate on the current project context.
 ```
 
-#### `bootstrap` - System initialization
+#### Manager lifecycle (implicit)
+
+`weft run` ensures a manager is available, starting one automatically when
+needed. Operators who want explicit control can use `weft worker start|stop`.
+
+## Task Process Tools (`weft task …`)
+
+#### `task status` - Task details (optional process view)
+
+`weft task status` answers "how is this task doing?" It always targets a
+specific TID.
 
 ```bash
-# Start the primordial worker
-weft bootstrap
+# Show a task status snapshot
+weft task status T1837025672140161024
 
-# Start with custom configuration
-weft bootstrap --config weft.toml
+# Include process metrics (PID/CPU/MEM)
+weft task status T1837025672140161024 --process
 
-# Recovery mode
-weft bootstrap --recover
+# Watch status updates
+weft task status T1837025672140161024 --watch
 ```
 
-## Process Management
-
-_Implementation status_: `ps`, `tid`, `top`, and related tooling remain to be implemented.
-
-#### `ps` - List weft processes
-
-```bash
-# List all weft processes
-weft ps
-
-# Filter by status
-weft ps --failed
-weft ps --running
-
-# Filter by pattern
-weft ps --pattern "analyze"
-
-# Tree view
-weft ps --tree
-```
-
-**Output format:**
+**Output format (with --process):**
 ```
 PID    TID_SHORT  NAME           STATUS    CPU   MEM    TIME
 12345  0161024    git-clone      running   12%   45MB   00:02:31
-12346  0161025    analyze        running   78%   120MB  00:00:15
-12347  0161026    compress       failed    0%    0MB    00:01:43
 ```
 
-#### `tid` - TID operations
+#### `task tid` - TID operations
 
 ```bash
 # Lookup full TID from short form
-weft tid 0161024
+weft task tid 0161024
 
 # Find TID for process
-weft tid --pid 12345
+weft task tid --pid 12345
 
 # Reverse lookup
-weft tid --reverse T1837025672140161024
+weft task tid --reverse T1837025672140161024
 ```
 
-#### `top` - Live monitoring
+## Spec Management (`weft spec …`)
+
+Task specs (single-task) and pipeline specs (multi-stage) are managed under a
+single namespace so authoring/validation stay discoverable without adding
+top-level verbs. Running a stored spec still happens through `weft run`.
+
+#### `spec create` - Store a task or pipeline spec
 
 ```bash
-# Interactive task monitor (like Unix top)
-weft top
+# Create from a TaskSpec JSON
+weft spec create git-clone --type task --file git_clone.json
 
-# Specific refresh rate
-weft top --interval 2
-
-# Sort by different fields
-weft top --sort cpu
-weft top --sort memory
-```
-
-## Pipeline Operations
-
-#### `pipe` - Create task pipelines
-
-```bash
-# Unix-style pipeline
-weft pipe grep "error" "|" sort "|" uniq -c
-
-# From file
-weft pipe --file pipeline.txt
-
-# With intermediate results
-weft pipe --save-intermediate process1 "|" process2
-```
-
-#### `pipeline` - Manage saved pipelines
-
-```bash
-# Create pipeline
-weft pipeline create etl-job \
+# Create a pipeline
+weft spec create etl-job --type pipeline \
   --stage extract:s3_download \
   --stage transform:clean_data \
   --stage load:db_insert
 
-# Run pipeline
-weft pipeline run etl-job --input data.csv
+# List / show / delete (all types)
+weft spec list
+weft spec show git-clone --type task
+weft spec delete etl-job --type pipeline
 
-# List pipelines
-weft pipeline list
-
-# Show pipeline
-weft pipeline show etl-job
+# Run stored specs
+weft run --spec git-clone --arg https://github.com/org/repo
+weft run --pipeline etl-job --input data.csv
 ```
 
-## Template Management
+`weft spec list` shows both tasks and pipelines. Use `--type` to filter the
+list or disambiguate collisions.
 
-#### `template` - Manage task templates
+**Queue aliases in pipelines**
 
-```bash
-# Create template
-weft template create git-clone --spec git_clone.json
+Pipeline stages may reference SimpleBroker queue aliases using the `@alias`
+syntax when wiring inbox/outbox overrides or when supplying explicit queue
+names for stage inputs.
 
-# List templates
-weft template list
+Stage definitions may include an optional `io_overrides` object with
+`inputs`/`outputs`/`control` keys. Queue values can use `@alias` and are resolved
+before task submission.
 
-# Show template
-weft template show git-clone
-
-# Delete template
-weft template delete git-clone
-
-# Export/import templates
-weft template export --all > templates.json
-weft template import templates.json
+```jsonc
+{
+  "name": "etl-job",
+  "stages": [
+    {
+      "name": "extract",
+      "task": "s3_download",
+      "io_overrides": {
+        "inputs": {"inbox": "@ingest.inbox"}
+      }
+    }
+  ]
+}
 ```
 
-## Batch Operations
-
-#### `batch` - Submit multiple tasks
+#### `spec validate` - Validate a TaskSpec or pipeline spec
 
 ```bash
-# From file (one JSON spec per line)
-weft batch --file tasks.jsonl
+weft spec validate task.json
+weft spec validate pipeline.json
+```
 
-# From stdin
-cat urls.txt | weft batch fetch-url
+#### `spec generate` - Generate skeleton specs
+
+```bash
+weft spec generate --type task > task.json
+weft spec generate --type pipeline > pipeline.json
+```
+
+## Batch Processing (Composition)
+
+Weft composes with standard Unix tools for batch submission:
+
+```bash
+# Run a command per line
+cat urls.txt | xargs -n1 weft run fetch-url
 
 # Parallel execution
-weft batch --parallel 4 process file1.txt file2.txt file3.txt
+cat files.txt | xargs -P4 -n1 weft run process-file
 
-# With common options
-weft batch --timeout 30 --tag batch-001 --file tasks.jsonl
+# JSON TaskSpecs from a file
+cat tasks.jsonl | while read -r line; do weft run --spec <(echo "$line"); done
 ```
 
 ## Configuration
 
-#### `config` - Manage configuration
+Configuration is stored in `.weft/config.json` and environment variables
+(`WEFT_*`, `BROKER_*`). Operators can edit the file directly or set env vars
+for ephemeral overrides.
+
+## System Maintenance (`weft system …`)
+
+Maintenance commands live under a system namespace to keep the core surface
+area minimal.
+
+System dumps exclude `weft.state.*` queues by default (runtime-only state).
 
 ```bash
-# Show current configuration
-weft config show
+# Compact the broker database
+weft system tidy
 
-# Set configuration value
-weft config set workers.max 10
-weft config set monitoring.interval 5
+# Dump broker state
+weft system dump --output weft.dump
 
-# Load from file
-weft config load weft.toml
-
-# Reset to defaults
-weft config reset
+# Load broker state
+weft system load --input weft.dump
 ```
+
+**Exit codes:** `system load` returns `3` on alias conflicts (existing alias points
+to a different target) so callers can distinguish conflicts from general errors.
 
 ## Example Workflows
 
@@ -502,50 +524,30 @@ $ weft result T1837025672140161025 --json
 
 ```bash
 # Check failed tasks
-$ weft status --failed
+$ weft list --status failed
 T1837025672140161026: failed (timeout after 30s)
 
 # Inspect the failure
 $ weft queue peek T1837025672140161026.reserved
 
 # Retry with longer timeout
-$ weft retry T1837025672140161026 --timeout 60
 ```
 
-### Batch Processing
+### Batch Processing (Composition)
 
 ```bash
-# Process multiple files
-$ ls *.csv | weft batch process-csv
-Started 10 tasks
+# Process multiple files in parallel
+$ ls *.csv | xargs -P4 -n1 weft run process-csv
 
-$ weft status --tag batch-001
-10 tasks: 8 completed, 2 running
-```
-
-### Live Monitoring
-
-```bash
-# Monitor system
-$ weft top
-TID_SHORT  NAME         STATUS    CPU   MEM    TIME     QUEUES
-0161024    worker-main  running   5%    120MB  12:34:56 in:10 out:45
-0161025    git-clone    running   23%   89MB   00:02:15 in:0  out:12
-0161026    analyze      running   67%   340MB  00:00:45 in:3  out:0
-
-Tasks: 3 running, 0 pending, 15 completed
-Workers: 1 active, 0 idle
-Queues: 25 active, 142 messages
+$ weft list --stats
+Summary: 8 completed, 2 running
 ```
 
 ### Emergency Management
 
 ```bash
-# Find stuck tasks
-$ weft ps --running | grep -E "[0-9]{2}:[0-9]{2}:[0-9]{2}"
-
 # Kill all failed tasks (shell-friendly!)
-$ weft ps --failed | awk '{print $2}' | xargs weft kill
+$ weft list --status failed | awk '{print $1}' | xargs weft task kill
 
 # Or use standard Unix tools directly
 $ pkill -f "weft-.*:failed"
@@ -553,17 +555,14 @@ $ pkill -f "weft-.*:failed"
 
 ## Environment Variables
 
-- `WEFT_DIR` - Default database directory
-- `WEFT_DB` - Default database filename
-- `WEFT_TIMEOUT` - Default task timeout
-- `WEFT_WORKERS` - Default number of workers
-- `WEFT_LOG_LEVEL` - Logging level (DEBUG, INFO, WARN, ERROR)
+Environment variables are listed in
+[00-Quick_Reference.md](00-Quick_Reference.md).
 
 ## Exit Codes
 
 - `0` - Success
 - `1` - General error
-- `2` - Not found (task, queue, template)
+- `2` - Not found (task, queue, spec)
 - `124` - Timeout (follows GNU coreutils convention)
 - `130` - Interrupted (Ctrl+C)
 
@@ -594,17 +593,14 @@ All commands support `--json` for structured output:
 
 ## Shell Completion
 
-Install shell completions:
+Typer provides completion helpers automatically. Use the built-in flags:
 
 ```bash
-# Bash
-weft completion bash > /etc/bash_completion.d/weft
+# Install completion for the current shell
+weft --install-completion
 
-# Zsh
-weft completion zsh > ~/.zsh/completions/_weft
-
-# Fish
-weft completion fish > ~/.config/fish/completions/weft.fish
+# Show completion script for the current shell
+weft --show-completion
 ```
 
 ## CLI Implementation Architecture
@@ -621,7 +617,7 @@ class WeftCLI:
     @click.group()
     @click.option('-d', '--dir', 'context_dir', 
                   help='Database directory')
-    @click.option('-f', '--file', 'db_file', default='.broker.db',
+    @click.option('-f', '--file', 'db_file', default='.weft/broker.db',
                   help='Database filename')
     @click.option('-q', '--quiet', is_flag=True,
                   help='Suppress non-error output')
@@ -728,7 +724,7 @@ class TIDResolver:
     
     def __init__(self, context: WeftContext):
         self.context = context
-        self.mapping_queue = context.get_queue("weft.state.process.tid_mappings")
+        self.mapping_queue = context.get_queue("weft.state.tid_mappings")
     
     def resolve_short_tid(self, tid_short: str) -> str:
         """Resolve short TID to full TID."""

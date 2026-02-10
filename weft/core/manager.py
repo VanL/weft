@@ -28,7 +28,7 @@ from weft.helpers import redact_taskspec_dump
 from .launcher import launch_task_process
 from .tasks import Consumer
 from .tasks.base import BaseTask, QueueMessageContext
-from .taskspec import TaskSpec
+from .taskspec import ReservedPolicy, TaskSpec
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +73,9 @@ class Manager(BaseTask):
         autostart_dir = self._config.get("WEFT_AUTOSTART_DIR")
         self._autostart_dir = Path(autostart_dir) if autostart_dir else None
         self._autostart_launched: set[str] = set()
+        self._autostart_state: dict[str, dict[str, Any]] = {}
+        self._autostart_last_scan_ns = 0
+        self._autostart_scan_interval_ns = 1_000_000_000
         self._broker_activity_queue: Queue | None = None
         self._broker_probe_interval_ns = 1_000_000_000  # probe at most once per second
         self._last_broker_probe_ns = 0
@@ -83,10 +86,14 @@ class Manager(BaseTask):
             logger.debug("Failed to prime broker activity queue", exc_info=True)
         self._last_broker_timestamp = self._read_broker_timestamp(force=True)
         self._register_worker()
+        self.taskspec.mark_started(pid=multiprocessing.current_process().pid)
+        self._update_process_title("spawning")
+        self._report_state_change(event="task_spawning")
         self.taskspec.mark_running(pid=multiprocessing.current_process().pid)
         self._update_process_title("running")
+        self._report_state_change(event="task_started")
         if self._autostart_enabled:
-            self._launch_autostart_templates()
+            self._tick_autostart(force=True)
         atexit.register(self._atexit_unregister)
 
     # ------------------------------------------------------------------
@@ -412,12 +419,20 @@ class Manager(BaseTask):
             payload = json.loads(message) if message else {}
         except json.JSONDecodeError:
             logger.warning("Worker received non-JSON spawn request: %s", message)
-            self._ack_control_message(context.queue_name, context.timestamp)
+            policy = self.taskspec.spec.reserved_policy_on_error
+            self._apply_reserved_policy(policy, message_timestamp=timestamp)
+            if policy is not ReservedPolicy.KEEP:
+                self._ensure_reserved_empty()
+                self._cleanup_reserved_if_needed()
             return
 
         child_spec = self._build_child_spec(payload, timestamp)
         if child_spec is None:
-            self._ack_control_message(context.queue_name, context.timestamp)
+            policy = self.taskspec.spec.reserved_policy_on_error
+            self._apply_reserved_policy(policy, message_timestamp=timestamp)
+            if policy is not ReservedPolicy.KEEP:
+                self._ensure_reserved_empty()
+                self._cleanup_reserved_if_needed()
             return
 
         inbox_message = payload.get("inbox_message", WORK_ENVELOPE_START)
@@ -455,22 +470,28 @@ class Manager(BaseTask):
                 "metadata": payload.get("metadata", {}),
             }
 
-        provided_tid = candidate.get("tid") or payload.get("tid")
-        if provided_tid:
-            candidate["tid"] = str(provided_tid)
-        else:
-            candidate["tid"] = str(timestamp)
+        original_tid = candidate.get("tid")
+        candidate["tid"] = str(timestamp)
         candidate.setdefault("version", "1.0")
         candidate.setdefault("io", {})
         candidate.setdefault("state", {})
         candidate.setdefault("metadata", {})
         candidate["metadata"].setdefault("parent_tid", self.tid)
 
+        if original_tid:
+            self._rewrite_tid_in_io(candidate["io"], str(original_tid), candidate["tid"])
+
+        spec_section = candidate.get("spec")
+        if isinstance(spec_section, dict):
+            if not spec_section.get("weft_context"):
+                spec_section["weft_context"] = getattr(
+                    self.taskspec.spec, "weft_context", None
+                )
+
         try:
             child_spec = TaskSpec.model_validate(
                 candidate, context={"auto_expand": True}
             )
-            child_spec.apply_defaults()
             child_spec.io.inputs.setdefault("inbox", f"T{child_spec.tid}.inbox")
         except Exception:
             logger.exception(
@@ -480,59 +501,127 @@ class Manager(BaseTask):
 
         return child_spec
 
+    @staticmethod
+    def _rewrite_tid_in_io(io_section: dict[str, Any], old_tid: str, new_tid: str) -> None:
+        if not old_tid or not new_tid or old_tid == new_tid:
+            return
+        old_prefix = f"T{old_tid}."
+        new_prefix = f"T{new_tid}."
+        for key in ("inputs", "outputs", "control"):
+            section = io_section.get(key)
+            if not isinstance(section, dict):
+                continue
+            for name, value in list(section.items()):
+                if isinstance(value, str) and old_prefix in value:
+                    section[name] = value.replace(old_prefix, new_prefix)
+
     # ------------------------------------------------------------------
     # Autostart handling
     # ------------------------------------------------------------------
-    def _generate_child_tid(self) -> str:
-        # TaskSpec enforces string tids; SimpleBroker emits ints.
-        return str(self._get_connected_queue().generate_timestamp())
+    def _autostart_root_dir(self) -> Path | None:
+        if self._autostart_dir:
+            return self._autostart_dir.parent
+        spec_context = getattr(self.taskspec.spec, "weft_context", None)
+        if spec_context:
+            return Path(spec_context) / ".weft"
+        return None
 
-    def _load_autostart_template(self, template_path: Path) -> TaskSpec | None:
+    @staticmethod
+    def _load_autostart_manifest(template_path: Path) -> dict[str, Any] | None:
         try:
             raw = template_path.read_text(encoding="utf-8")
             payload = json.loads(raw)
         except Exception:
-            logger.warning("Failed to read autostart template %s", template_path)
+            logger.warning("Failed to read autostart manifest %s", template_path)
             return None
 
         if not isinstance(payload, dict):
             logger.warning(
-                "Autostart template %s must contain a JSON object", template_path
+                "Autostart manifest %s must contain a JSON object", template_path
             )
             return None
+        return payload
 
-        candidate = dict(payload)
+    def _load_autostart_taskspec(self, name: str) -> dict[str, Any] | None:
+        root_dir = self._autostart_root_dir()
+        if root_dir is None:
+            return None
+        path = root_dir / "tasks" / f"{name}.json"
+        try:
+            raw = path.read_text(encoding="utf-8")
+            payload = json.loads(raw)
+        except Exception:
+            logger.warning("Failed to read stored task spec %s", path)
+            return None
+        if not isinstance(payload, dict):
+            logger.warning("Stored task spec %s must contain a JSON object", path)
+            return None
+        return payload
+
+    def _build_autostart_spawn_payload(
+        self, manifest: dict[str, Any], source: str
+    ) -> tuple[dict[str, Any], Any] | None:
+        target = manifest.get("target")
+        if not isinstance(target, dict):
+            logger.warning("Autostart manifest %s missing target", source)
+            return None
+        target_type = target.get("type")
+        target_name = target.get("name")
+        if not isinstance(target_name, str) or not target_name:
+            logger.warning("Autostart manifest %s missing target name", source)
+            return None
+
+        if target_type == "task":
+            taskspec_payload = self._load_autostart_taskspec(target_name)
+            if taskspec_payload is None:
+                return None
+        elif target_type == "pipeline":
+            logger.warning("Autostart pipeline target %s not yet supported", source)
+            return None
+        else:
+            logger.warning("Autostart manifest %s has invalid target type", source)
+            return None
+
+        candidate = dict(taskspec_payload)
         candidate.pop("tid", None)
         candidate.setdefault("version", "1.0")
-        candidate.setdefault("name", template_path.stem)
+        candidate.setdefault("name", target_name)
         candidate.setdefault("spec", {})
-        candidate.setdefault("io", {})
-        candidate.setdefault("state", {})
         candidate.setdefault("metadata", {})
-        candidate["tid"] = self._generate_child_tid()
 
-        spec_section = candidate.get("spec")
-        if isinstance(spec_section, dict):
-            spec_section.setdefault(
-                "weft_context", getattr(self.taskspec.spec, "weft_context", None)
-            )
+        defaults = manifest.get("defaults")
+        if isinstance(defaults, dict):
+            spec_section = candidate.get("spec")
+            if not isinstance(spec_section, dict):
+                spec_section = {}
+                candidate["spec"] = spec_section
 
-        try:
-            child_spec = TaskSpec.model_validate(
-                candidate, context={"auto_expand": True}
-            )
-        except Exception:
-            logger.warning(
-                "Failed to validate autostart TaskSpec from %s",
-                template_path,
-                exc_info=True,
-            )
-            return None
+            args = defaults.get("args")
+            if isinstance(args, list):
+                spec_section.setdefault("args", [])
+                if isinstance(spec_section["args"], list):
+                    spec_section["args"].extend(args)
 
-        source = str(template_path.resolve())
-        child_spec.metadata.setdefault("autostart_source", source)
-        child_spec.metadata.setdefault("autostart", True)
-        return child_spec
+            keyword_args = defaults.get("keyword_args")
+            if isinstance(keyword_args, dict):
+                spec_section.setdefault("keyword_args", {})
+                if isinstance(spec_section["keyword_args"], dict):
+                    spec_section["keyword_args"].update(keyword_args)
+
+            env = defaults.get("env")
+            if isinstance(env, dict):
+                spec_section.setdefault("env", {})
+                if isinstance(spec_section["env"], dict):
+                    spec_section["env"].update(env)
+
+        candidate["metadata"]["autostart_source"] = source
+        candidate["metadata"]["autostart"] = True
+
+        inbox_message = WORK_ENVELOPE_START
+        if isinstance(defaults, dict) and "input" in defaults:
+            inbox_message = defaults.get("input")
+
+        return candidate, inbox_message
 
     def _active_autostart_sources(self) -> set[str]:
         queue = self._queue(WEFT_GLOBAL_LOG_QUEUE)
@@ -571,7 +660,26 @@ class Manager(BaseTask):
             source for source, (status, _ts) in active.items() if status not in terminal
         }
 
-    def _launch_autostart_templates(self) -> None:
+    def _enqueue_autostart_request(self, payload: dict[str, Any], inbox_message: Any) -> None:
+        spawn_payload = {
+            "taskspec": payload,
+            "inbox_message": inbox_message,
+        }
+        try:
+            self._queue(self._queue_names["inbox"]).write(
+                json.dumps(spawn_payload, ensure_ascii=False)
+            )
+        except Exception:
+            logger.warning("Failed to enqueue autostart spawn request", exc_info=True)
+
+    def _tick_autostart(self, *, force: bool = False) -> None:
+        if not self._autostart_enabled:
+            return
+        now_ns = time.time_ns()
+        if not force and now_ns - self._autostart_last_scan_ns < self._autostart_scan_interval_ns:
+            return
+        self._autostart_last_scan_ns = now_ns
+
         directory = self._autostart_dir
         if not directory or not directory.exists():
             return
@@ -579,31 +687,61 @@ class Manager(BaseTask):
         active_sources = self._active_autostart_sources()
 
         try:
-            templates = sorted(
+            manifests = sorted(
                 path for path in directory.glob("*.json") if path.is_file()
             )
         except Exception:
             logger.debug(
-                "Failed to enumerate autostart templates in %s",
+                "Failed to enumerate autostart manifests in %s",
                 directory,
                 exc_info=True,
             )
             return
 
-        for template in templates:
-            source = str(template.resolve())
-            if source in self._autostart_launched or source in active_sources:
+        for manifest_path in manifests:
+            source = str(manifest_path.resolve())
+            manifest = self._load_autostart_manifest(manifest_path)
+            if manifest is None:
                 continue
 
-            child_spec = self._load_autostart_template(template)
-            if child_spec is None:
-                continue
-
-            logger.debug("Auto-start launching task from %s", template)
-            self._launch_child_task(
-                child_spec, WORK_ENVELOPE_START, autostart_source=source
+            policy = manifest.get("policy") if isinstance(manifest.get("policy"), dict) else {}
+            mode = policy.get("mode", "once") if isinstance(policy, dict) else "once"
+            state = self._autostart_state.setdefault(
+                source, {"restarts": 0, "next_allowed_ns": 0}
             )
+
+            if mode == "once":
+                if source in self._autostart_launched or source in active_sources:
+                    continue
+            elif mode == "ensure":
+                if source in active_sources:
+                    continue
+                max_restarts = policy.get("max_restarts") if isinstance(policy, dict) else None
+                if max_restarts is not None and state["restarts"] >= max_restarts:
+                    continue
+                next_allowed = state.get("next_allowed_ns", 0)
+                if next_allowed and now_ns < next_allowed:
+                    continue
+            else:
+                logger.warning("Unknown autostart policy mode %s for %s", mode, source)
+                continue
+
+            spawn_payload = self._build_autostart_spawn_payload(manifest, source)
+            if spawn_payload is None:
+                continue
+            taskspec_payload, inbox_message = spawn_payload
+
+            logger.debug("Auto-start enqueuing spawn request from %s", manifest_path)
+            self._enqueue_autostart_request(taskspec_payload, inbox_message)
             self._autostart_launched.add(source)
+
+            if mode == "ensure":
+                state["restarts"] += 1
+                backoff = policy.get("backoff_seconds") if isinstance(policy, dict) else None
+                if isinstance(backoff, (int, float)) and backoff > 0:
+                    multiplier = max(0, state["restarts"] - 1)
+                    delay = float(backoff) * (2**multiplier)
+                    state["next_allowed_ns"] = now_ns + int(delay * 1_000_000_000)
 
     # ------------------------------------------------------------------
     # Cleanup
@@ -616,6 +754,7 @@ class Manager(BaseTask):
     def process_once(self) -> None:
         super().process_once()
         self._cleanup_children()
+        self._tick_autostart()
         self._update_idle_activity_from_broker()
         now_ns = time.time_ns()
         idle_timeout_ns = int(float(self._idle_timeout) * 1_000_000_000)

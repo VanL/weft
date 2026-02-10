@@ -83,8 +83,9 @@ def make_function_taskspec(
 
 def make_command_taskspec(
     tid: str,
-    process_target: list[str],
+    process_target: str,
     *,
+    args: list[str] | None = None,
     cleanup_on_exit: bool = False,
     reserved_stop: ReservedPolicy = ReservedPolicy.KEEP,
     reserved_error: ReservedPolicy = ReservedPolicy.KEEP,
@@ -96,6 +97,7 @@ def make_command_taskspec(
         spec=SpecSection(
             type="command",
             process_target=process_target,
+            args=list(args or []),
             cleanup_on_exit=cleanup_on_exit,
             reserved_policy_on_stop=reserved_stop,
             reserved_policy_on_error=reserved_error,
@@ -252,7 +254,8 @@ def test_start_token_cleared_on_failure(broker_env, unique_tid: str) -> None:
     db_path, make_queue = broker_env
     spec = make_command_taskspec(
         unique_tid,
-        [sys.executable, "-c", "import sys; sys.exit(2)"],
+        sys.executable,
+        args=["-c", "import sys; sys.exit(2)"],
     )
     task = Consumer(db_path, spec)
 
@@ -334,7 +337,8 @@ def test_command_target_executes_process(broker_env, unique_tid: str) -> None:
     db_path, make_queue = broker_env
     spec = make_command_taskspec(
         unique_tid,
-        [sys.executable, PROCESS_SCRIPT],
+        sys.executable,
+        args=[PROCESS_SCRIPT],
     )
     task = Consumer(db_path, spec)
 
@@ -527,7 +531,8 @@ def test_cleanup_on_exit_process_target(broker_env, unique_tid: str) -> None:
     db_path, make_queue = broker_env
     spec = make_command_taskspec(
         unique_tid,
-        [sys.executable, PROCESS_SCRIPT, "--output-size", "1024"],
+        sys.executable,
+        args=[PROCESS_SCRIPT, "--output-size", "1024"],
         cleanup_on_exit=True,
     )
     task = Consumer(db_path, spec)

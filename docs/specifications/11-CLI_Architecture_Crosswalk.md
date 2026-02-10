@@ -8,6 +8,10 @@ The Weft CLI serves as the primary interface to all system functionality. Each C
 
 **Key Principle**: CLI commands are thin wrappers around core components, not independent implementations.
 
+_Implementation mapping_: `weft/cli.py` (Typer app), `weft/commands/*.py` (command handlers), `weft/context.py` (context discovery), `weft/core/manager.py` (manager runtime).
+
+_Implemented command set_: `init`, `run`, `status`, `result`, `list`, `queue *`, `worker *`, `task *`, `spec *`, `system *`, `pipeline`.
+
 ## Core Architecture Mapping
 
 ### Phase 0: Bootstrap Commands → Core Infrastructure
@@ -36,32 +40,24 @@ def init(force):
 
 **Development Order**: Must be implemented early for project setup
 
-#### `weft bootstrap` 
-**Purpose**: Initialize Weft system with primordial worker
-**Dependencies**: 
+#### Implicit manager startup (via `weft run`)
+**Purpose**: Ensure a manager is available when tasks are submitted
+**Dependencies**:
 - `weft.core.manager.Manager` ✅ **CRITICAL PATH**
 - `weft.core.taskspec.TaskSpec` ✅ **EXISTS**
 - `weft.context.get_context` ✅ **CRITICAL PATH**
 - SimpleBroker Queue (external)
 
-**Implementation Location**: `weft/commands.py:bootstrap()`
+**Implementation Location**: `weft/commands/run.py` (manager bootstrap helper)
 ```python
-@cli.command()
-@click.option('--config', type=click.Path(exists=True), help='Config file')
-@click.option('--recover', is_flag=True, help='Recovery mode')
-@click.pass_context
-def bootstrap(ctx, config, recover):
-    """Start the primordial worker."""
-    from weft.context import get_context
-    from weft.core.manager import Manager
-    
-    context = get_context()  # Auto-discovery
-    worker_spec = create_primordial_worker_spec(config, context)
-    worker = Manager(worker_spec, context=context)
-    worker.run()  # Blocks until shutdown
+def ensure_manager(context):
+    """Start a manager on-demand if none is running."""
+    record = select_active_manager(context)
+    if record is None:
+        start_manager(context)
 ```
 
-**Development Order**: Must be first - everything else requires bootstrap
+**Development Order**: Must be first - everything else depends on manager availability
 
 ---
 
@@ -73,9 +69,9 @@ def bootstrap(ctx, config, recover):
 - `weft.core.manager.Client` ✅ **CRITICAL PATH**
 - `weft.core.tasks.Task` ✅ **CRITICAL PATH**
 - `weft.core.executor.FunctionExecutor` / `CommandExecutor`
-- `weft.integration.templates.TaskTemplate`
+- `weft.specs.store.TaskSpecStore`
 
-**Implementation Location**: `weft/commands.py:run()`
+**Implementation Location**: `weft/commands/run.py`
 ```python
 @cli.command()
 @click.argument('command_args', nargs=-1)
@@ -100,6 +96,11 @@ def run(ctx, command_args, spec, timeout, wait):
         result = manager.wait_for_completion(tid)
         click.echo(result)
 ```
+
+**Current implementation notes (2026-01-24)**:
+- `weft/commands/run.py` builds TaskSpec templates (`tid=None`) and enqueues spawn requests; the SimpleBroker message ID becomes the task TID.
+- `weft/core/manager.py` ignores provided tids and expands TaskSpecs with the spawn message ID, default queues, and `spec.weft_context` when missing.
+- Interactive stdin provided via pipes is seeded in the spawn payload to avoid message ordering races.
 
 #### `weft status`
 **Purpose**: Check task status and system state
@@ -148,33 +149,29 @@ def status(ctx, tid, all, json_output, watch):
 
 ### Phase 2: Process Management Commands → OS Integration Tools
 
-#### `weft ps`
-**Purpose**: List weft processes via OS tools
+#### `weft task status`
+**Purpose**: Task status with optional process metrics
 **Dependencies**:
 - `weft.tools.process_tools.ProcessManager` ✅ **CRITICAL PATH**
 - `weft.tools.tid_tools.TIDResolver`
 
-**Implementation Location**: `weft/commands.py:ps()`
+**Implementation Location**: `weft/commands.py:task_ps()`
 ```python
-@cli.command()
-@click.option('--failed', is_flag=True, help='Show only failed tasks')
-@click.option('--pattern', help='Filter by pattern')
+@task.command("status")
+@click.option('--process', is_flag=True, help='Include PID/CPU/MEM info')
+@click.option('--watch', is_flag=True, help='Stream status updates')
 @click.option('--json', 'json_output', is_flag=True, help='JSON output')
-def ps(failed, pattern, json_output):
-    """List weft processes."""
-    process_mgr = ProcessManager()
-    processes = process_mgr.find_weft_processes(pattern)
-    
-    if failed:
-        processes = [p for p in processes if 'failed' in p.get('status', '')]
-    
+def status(tid, process, watch, json_output):
+    """Show task status details."""
+    monitor = TaskMonitor()
+    data = monitor.get_task(tid, include_process=process, watch=watch)
     if json_output:
-        click.echo(json.dumps(processes))
+        click.echo(json.dumps(data))
     else:
-        click.echo(format_process_table(processes))
+        click.echo(format_status_table([data]))
 ```
 
-#### `weft kill` / `weft stop`
+#### `weft task kill` / `weft task stop`
 **Purpose**: Terminate tasks gracefully or forcefully
 **Dependencies**:
 - `weft.tools.process_tools.ProcessManager`
@@ -182,13 +179,6 @@ def ps(failed, pattern, json_output):
 - `weft.tools.tid_tools.TIDResolver`
 
 Pattern-based invocations delegate to `queue broadcast --pattern 'T*.ctrl_in'`, so the CLI simply emits a control payload to all matching tasks via SimpleBroker’s selective broadcast.
-
-#### `weft top`
-**Purpose**: Live task monitoring (like Unix top)
-**Dependencies**:
-- `weft.tools.process_tools.ProcessManager`
-- `weft.tools.observability.TaskMonitor`
-- `weft.core.resource_monitor.ResourceMonitor` (data source)
 
 ---
 
@@ -199,7 +189,7 @@ Pattern-based invocations delegate to `queue broadcast --pattern 'T*.ctrl_in'`, 
 **Dependencies**:
 - `weft.core.manager.Manager` ✅ **CRITICAL PATH**
 - `weft.core.manager.Client`
-- `weft.integration.templates.TaskRegistry`
+- `weft.integration.specs.TaskRegistry`
 
 **Implementation Location**: `weft/commands.py:worker_group()`
 ```python
@@ -262,26 +252,15 @@ def alias_add(alias: str, target: str, quiet: bool = False) -> None:
 
 ---
 
-### Phase 5: Advanced Features Commands → Integration Layer
+### Phase 5: Advanced Features Commands → Spec Layer
 
-#### `weft pipe` / `weft pipeline`
-**Purpose**: Task pipeline management
+#### `weft spec create/list/show/delete`
+**Purpose**: Stored spec management (task + pipeline)
 **Dependencies**:
-- `weft.integration.pipelines.PipelineBuilder` ✅ **CRITICAL PATH**
-- `weft.core.manager.Client`
-- `weft.integration.templates.TaskTemplate`
-
-#### `weft template`
-**Purpose**: Task template management
-**Dependencies**:
-- `weft.integration.templates.TaskTemplate` ✅ **CRITICAL PATH**
+- `weft.specs.store.TaskSpecStore` ✅ **CRITICAL PATH**
+- `weft.specs.pipelines.PipelineBuilder` ✅ **CRITICAL PATH**
 - `weft.core.context.WeftContext`
-
-#### `weft batch`
-**Purpose**: Submit multiple tasks
-**Dependencies**:
 - `weft.core.manager.Client`
-- `weft.integration.templates.TaskTemplate`
 
 ---
 
@@ -300,13 +279,13 @@ def alias_add(alias: str, target: str, quiet: bool = False) -> None:
 8. **`weft.tools.tid_tools.TIDResolver`**
 
 ### Integration Components (Build After Core Stable)
-9. **`weft.integration.templates.TaskTemplate`**
-10. **`weft.integration.pipelines.PipelineBuilder`**
+9. **`weft.specs.store.TaskSpecStore`**
+10. **`weft.specs.pipelines.PipelineBuilder`**
 
 ## CLI Development Order
 
-### Phase 0: Bootstrap (Week 1)
-**Commands**: `weft bootstrap`
+### Phase 0: Manager Startup (Week 1)
+**Commands**: `weft run` (implicit manager startup), `weft worker start`
 **Required Components**:
 - `Manager` basic implementation
 - `WeftContext` directory scoping
@@ -323,9 +302,8 @@ def cli(ctx, context_dir, db_file):
     ctx.ensure_object(dict)
     ctx.obj['context'] = WeftContext(context_dir)
 
-# weft/commands.py - Bootstrap command
-@cli.command()
-def bootstrap():
+# weft/commands/run.py - Implicit manager startup
+def ensure_manager(context):
     # Implementation
 ```
 
@@ -337,7 +315,7 @@ def bootstrap():
 - `TaskMonitor` for status
 
 ### Phase 2: Process Management (Week 2-3)
-**Commands**: `weft ps`, `weft kill`, `weft stop`, `weft top`
+**Commands**: `weft task status`, `weft task kill`, `weft task stop`
 **Required Components**:
 - `ProcessManager` for OS integration
 - `TIDResolver` for TID mapping
@@ -355,7 +333,7 @@ def bootstrap():
 - Queue validation and safety
 
 ### Phase 5: Advanced Features (Week 4+)
-**Commands**: `weft pipe`, `weft template`, `weft batch`
+**Commands**: `weft spec create`, `weft spec list`, `weft spec show`, `weft spec delete`, `weft spec validate`, `weft spec generate`
 **Required Components**:
 - Pipeline builder
 - Template management
@@ -381,9 +359,9 @@ def test_run_command_integration():
 
 2. **Error Code Mapping**:
 ```python
-def test_status_command_not_found():
-    """Test that 'weft status nonexistent' returns exit code 2."""
-    result = runner.invoke(cli, ['status', 'T999999999999999999'])
+def test_task_status_not_found():
+    """Test that 'weft task status' returns exit code 2 for unknown TID."""
+    result = runner.invoke(cli, ['task', 'status', 'T999999999999999999'])
     assert result.exit_code == 2
     assert "not found" in result.output
 ```
@@ -392,7 +370,7 @@ def test_status_command_not_found():
 ```python
 def test_all_commands_json_output():
     """Verify all commands support --json and produce valid JSON."""
-    commands_with_json = ['status', 'ps', 'result', 'list']
+    commands_with_json = ['status', 'task status', 'result', 'list']
     for cmd in commands_with_json:
         result = runner.invoke(cli, [cmd, '--json'])
         assert result.exit_code in [0, 2]  # Success or not found
@@ -405,15 +383,13 @@ def test_all_commands_json_output():
 | Command | Module | Component | Exit Codes | JSON Support |
 |---------|--------|-----------|------------|--------------|
 | `init` | `commands.py` | `weft.context` | 0, 1 | ❌ |
-| `bootstrap` | `commands.py` | `Manager` | 0, 1 | ❌ |
 | `run` | `commands.py` | `Client` | 0, 1, 2 | ❌ |
 | `status` | `commands.py` | `TaskMonitor` | 0, 2 | ✅ |
 | `result` | `commands.py` | `Client` | 0, 2, 124 | ✅ |
 | `list` | `commands.py` | `TaskMonitor` | 0 | ✅ |
-| `ps` | `commands.py` | `ProcessManager` | 0 | ✅ |
-| `kill` | `commands.py` | `ProcessManager` | 0, 2 | ❌ |
-| `stop` | `commands.py` | `Client` | 0, 2 | ❌ |
-| `top` | `commands.py` | `ProcessManager`, `TaskMonitor` | 0, 130 | ❌ |
+| `task status` | `commands.py` | `TaskMonitor`, `ProcessManager` | 0 | ✅ |
+| `task kill` | `commands.py` | `ProcessManager` | 0, 2 | ❌ |
+| `task stop` | `commands.py` | `Client` | 0, 2 | ❌ |
 | `worker start` | `commands.py` | `Manager` | 0, 1 | ❌ |
 | `worker stop` | `commands.py` | `Manager` | 0, 2 | ❌ |
 | `worker list` | `commands.py` | `TaskMonitor` | 0 | ✅ |
@@ -428,11 +404,16 @@ def test_all_commands_json_output():
 | `queue alias add` | `commands.py` | SimpleBroker | 0, 1 | ✅ |
 | `queue alias list` | `commands.py` | SimpleBroker | 0 | ✅ |
 | `queue alias remove` | `commands.py` | SimpleBroker | 0, 1, 2 | ✅ |
-| `tid` | `commands.py` | `TIDResolver` | 0, 2 | ✅ |
-| `template create` | `commands.py` | `TaskTemplate` | 0, 1 | ❌ |
-| `template list` | `commands.py` | `TaskTemplate` | 0 | ✅ |
-| `pipe` | `commands.py` | `PipelineBuilder` | 0, 1, 2 | ❌ |
-| `batch` | `commands.py` | `Client` | 0, 1 | ✅ |
+| `task tid` | `commands.py` | `TIDResolver` | 0, 2 | ✅ |
+| `spec create` | `commands.py` | `TaskSpecStore`, `PipelineBuilder` | 0, 1, 2 | ❌ |
+| `spec list` | `commands.py` | `TaskSpecStore` | 0 | ✅ |
+| `spec show` | `commands.py` | `TaskSpecStore` | 0, 2 | ✅ |
+| `spec delete` | `commands.py` | `TaskSpecStore` | 0, 1, 2 | ✅ |
+| `spec validate` | `commands.py` | `TaskSpec` | 0, 1, 2 | ✅ |
+| `spec generate` | `commands.py` | `TaskSpec` | 0 | ✅ |
+| `system tidy` | `weft/commands/tidy.py` | `weft.context` | 0 | ❌ |
+| `system dump` | `weft/commands/dump.py` | `weft.commands.dump` | 0, 1 | ❌ |
+| `system load` | `weft/commands/load.py` | `weft.commands.load` | 0, 1, 2, 3 | ❌ |
 
 ## Error Handling Crosswalk
 
@@ -481,7 +462,7 @@ def status(tid):
 | `TaskSpec` | `run` | Valid/invalid spec handling |
 | `Task` | `run`, `status` | Execution state tracking |
 | `Client` | `run`, `status`, `result` | Submission and querying |
-| `Manager` | `bootstrap`, `worker` | Lifecycle management |
+| `Manager` | `run` (implicit), `worker` | Lifecycle management |
 | `ProcessManager` | `ps`, `kill`, `top` | OS integration accuracy |
 | `TaskMonitor` | `status`, `list` | State aggregation |
 | `TIDResolver` | `status`, `tid` | TID mapping consistency |
@@ -510,7 +491,7 @@ jobs:
         run: |
           pytest tests/test_cli_integration/ -v
           # Test actual CLI commands work
-          weft bootstrap --help
+          weft worker --help
           weft run --help
           # Test that all commands have proper exit codes
           python scripts/test_exit_codes.py

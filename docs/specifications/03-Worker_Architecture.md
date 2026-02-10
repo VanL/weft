@@ -5,13 +5,19 @@ Manager is implemented as a long-running `BaseTask` that consumes spawn requests
 from SimpleBroker queues, launches child tasks, and reports lifecycle events.
 The CLI component that submits work is referred to as the **Client**.
 
+**Terminology**
+- **Task**: Any executable unit described by a TaskSpec.
+- **Consumer**: The default task executor for command/function targets.
+- **Manager**: A long-lived task that spawns child tasks and manages autostart.
+- **Worker (CLI)**: The CLI namespace for managing Managers (not a distinct runtime).
+
 _Implementation status_: `Manager` (`weft/core/manager.py`), the spawn registry
 queue, and the CLI wrappers (`weft worker …`, `weft run`) are fully
-implemented. The Client (`weft/commands/run.py`) builds TaskSpecs, mints TIDs via
-`generate_timestamp()`, enqueues them on `weft.spawn.requests`, and optionally
-waits for completion by tailing task logs/outboxes. Managers consume those
-requests, launch child Consumers via `launch_task_process`, and emit
-`weft.tasks.log` events just like any other task.
+implemented. The Client (`weft/commands/run.py`) builds TaskSpec templates,
+enqueues them on `weft.spawn.requests`, and optionally waits for completion by
+tailing task logs/outboxes. The spawn-request message ID becomes the task TID.
+Managers consume those requests, expand the TaskSpec, launch child Consumers via
+`launch_task_process`, and emit `weft.log.tasks` events just like any other task.
 
 ## Conceptual Model: Everything is a Task [WA-0]
 
@@ -19,10 +25,12 @@ requests, launch child Consumers via `launch_task_process`, and emit
   queue wiring, process-title formatting, and control semantics as regular
   tasks.
 - **Uniform observability** – Managers register themselves in
-  `weft.workers.registry`, participate in the task log, and respond on the
-  control channel (`STOP`, `PAUSE`, `RESUME`, `PING`, `STATUS`).
+  `weft.state.workers`, participate in the task log, and respond on the
+  control channel (`STOP`, `PING`, `STATUS`).
 - **Self-hosting** – Managers spawn child Consumers by writing back into the
   same SimpleBroker database they are monitoring.
+
+_Implementation mapping_: `weft/core/manager.py` (`Manager`), `weft/core/tasks/base.py` (`BaseTask` control/queue wiring).
 
 ## Manager Behaviour [WA-1]
 
@@ -39,26 +47,30 @@ Key responsibilities implemented in `weft/core/manager.py`:
    `inbox_message`, the manager writes it into the child’s inbox queue before the
    child starts processing.
 4. **Registry heartbeat** – Managers publish an `active` record to
-   `weft.workers.registry` on startup (including queue names, PID, role, and
+   `weft.state.workers` on startup (including queue names, PID, role, and
    capabilities) and replace it with a `stopped` record during shutdown. The
    active record is pruned when the manager exits cleanly.
 5. **Idle timeout** – Managers honour the `idle_timeout` metadata field (default
    `WEFT_MANAGER_LIFETIME_TIMEOUT`) and will self-terminate after prolonged
    inactivity while ensuring all child processes are reaped.
-6. **Autostart templates** – When `WEFT_AUTOSTART_TASKS` is enabled the manager
-   scans `.weft/autostart/` for TaskSpec templates, mints new TIDs via
-   SimpleBroker, and launches each task using the same spawn pipeline as queue
-   submissions. Active templates are de-duplicated using the task log, and the
-   manager issues `STOP` on shutdown so background daemons exit cleanly.
-7. **Control channel** – In addition to STOP/PAUSE/RESUME/STATUS, managers reply
-   `PONG` to `PING` messages on `ctrl_out`, supporting simple health checks.
+6. **Autostart manifests** – When `WEFT_AUTOSTART_TASKS` is enabled the manager
+   scans `.weft/autostart/` for manifests that reference stored task specs or
+   pipelines and launches each target using the same spawn pipeline as queue
+   submissions. Manifest lifecycle policy (`once`/`ensure`) governs restarts
+   while the manager is running.
+7. **Control channel** – In addition to STOP/STATUS, managers reply `PONG` to
+  `PING` messages on `ctrl_out`, supporting simple health checks.
+
+_Implementation mapping_: `weft/core/manager.py` (spawn/registry/autostart), `weft/core/tasks/base.py` (control channel handling).
 
 ## TID Correlation [WA-2]
 
-Clients obtain task IDs by calling `BrokerDB.generate_timestamp()` before
-enqueuing spawn requests. The timestamp is embedded in both the message ID on
-`weft.spawn.requests` and the child TaskSpec `tid`, enabling correlation across
-registry entries, task logs, and outbox/control messages.
+Task IDs are the message IDs assigned when spawn requests are written to
+`weft.spawn.requests`. The Manager copies that ID into the expanded TaskSpec
+`tid`, enabling correlation across registry entries, task logs, and
+outbox/control messages.
+
+_Implementation mapping_: `weft/commands/run.py` (`_generate_tid`, `_enqueue_taskspec`).
 
 ## Bootstrap and Lifecycle [WA-3]
 

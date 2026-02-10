@@ -2,6 +2,15 @@
 
 This document outlines the comprehensive testing approach for the Weft system, covering unit tests, integration tests, system tests, and performance validation.
 
+_Implementation mapping_: implemented suites live under `tests/taskspec/`, `tests/tasks/`, `tests/core/`, `tests/cli/`, `tests/commands/`, `tests/context/`, and `tests/system/`.
+
+## Test Harness
+
+Weft tests use `WeftTestHarness` (`tests/helpers/weft_harness.py`) to provision
+isolated `.weft` contexts, spawn managers, and clean up queues/databases. The
+`weft_harness` fixture in `tests/conftest.py` provides a ready-to-use harness for
+CLI and integration tests.
+
 ## Testing Philosophy
 
 - **Correctness First**: Verify all system invariants and guarantees
@@ -12,7 +21,7 @@ This document outlines the comprehensive testing approach for the Weft system, c
 
 ## 1. Unit Testing
 
-### TaskSpec Tests (`tests/test_taskspec.py`)
+### TaskSpec Tests (`tests/taskspec/test_taskspec.py`)
 ```python
 class TestTaskSpec:
     # Validation Tests
@@ -44,7 +53,7 @@ class TestTaskSpec:
     def test_fd_limit_validation()
 ```
 
-### Task Tests (`tests/test_tasks.py`)
+### Task Tests (`tests/tasks/`)
 ```python
 class TestTask:
     # Initialization Tests
@@ -79,7 +88,7 @@ class TestTask:
     def test_worker_registers_capabilities()
 ```
 
-### Process Title Tests (`tests/test_process_titles.py`)
+### Process Title Tests (`tests/cli/test_manager_proctitle.py`, `tests/tasks/test_task_observability.py`)
 ```python
 class TestProcessTitles:
     # TID Management
@@ -112,7 +121,7 @@ class TestProcessTitles:
     def test_pid_in_mapping_correct()
 ```
 
-### Executor Tests (`tests/test_executor.py`)
+### Executor Tests (`tests/test_executor.py`) — _planned_
 ```python
 class TestExecutor:
     # Function Execution
@@ -151,7 +160,7 @@ class TestWorker:
     
     # Worker Hierarchy
     def test_worker_spawns_another_worker()
-    def test_primordial_worker_bootstrap()
+    def test_manager_startup_bootstrap()
     def test_worker_registration_in_global_queue()
     
     # TID Correlation
@@ -211,8 +220,6 @@ class TestContextIntegration:
     def test_context_cleanup()
     def test_database_auto_creation()
     def test_concurrent_contexts()
-    
-    def test_weft_context_field_usage()
     def test_context_discovery()
     def test_context_switching()
 ```
@@ -257,7 +264,7 @@ class TestScenarios:
     def test_task_failure_recovery()
     def test_system_shutdown_graceful()
     
-    def test_worker_hierarchy_bootstrap()
+    def test_manager_hierarchy_bootstrap()
     def test_primordial_worker_recovery()
     def test_emergency_task_management()
     

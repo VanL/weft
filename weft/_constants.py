@@ -125,17 +125,21 @@ QUEUE_RESERVED_SUFFIX: Final[str] = "reserved"
 
 # Global Queue Names
 # ------------------
-WEFT_GLOBAL_LOG_QUEUE: Final[str] = "weft.tasks.log"
+# Spec: docs/specifications/00-Quick_Reference.md#queue-names
+WEFT_GLOBAL_LOG_QUEUE: Final[str] = "weft.log.tasks"
 """Global queue for task state changes and events."""
 
-WEFT_TID_MAPPINGS_QUEUE: Final[str] = "weft.state.process.tid_mappings"
+WEFT_TID_MAPPINGS_QUEUE: Final[str] = "weft.state.tid_mappings"
 """Global queue for TID short->full mappings for process management."""
 
-WEFT_WORKERS_REGISTRY_QUEUE: Final[str] = "weft.workers.registry"
+WEFT_WORKERS_REGISTRY_QUEUE: Final[str] = "weft.state.workers"
 """Queue where workers register their capabilities and status."""
 
-WEFT_STREAMING_SESSIONS_QUEUE: Final[str] = "weft.state.streaming.sessions"
+WEFT_STREAMING_SESSIONS_QUEUE: Final[str] = "weft.state.streaming"
 """Queue tracking active streaming sessions (interactive/streaming outputs)."""
+
+WEFT_STATE_QUEUE_PREFIX: Final[str] = "weft.state."
+"""Prefix for runtime-only state queues excluded from system dumps."""
 
 WEFT_SPAWN_REQUESTS_QUEUE: Final[str] = "weft.spawn.requests"
 """Global queue for worker spawn requests."""

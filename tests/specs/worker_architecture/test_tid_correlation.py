@@ -1,0 +1,45 @@
+"""Spec checks for spawn-request TID correlation (WA-2)."""
+
+from __future__ import annotations
+
+import json
+
+from simplebroker import Queue
+
+from weft._constants import WEFT_SPAWN_REQUESTS_QUEUE
+from weft.commands import run as run_cmd
+from weft.context import build_context
+from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
+
+
+def test_spawn_request_timestamp_matches_tid(tmp_path) -> None:
+    context = build_context(spec_context=tmp_path)
+    tid = run_cmd._generate_tid(context)
+
+    taskspec = TaskSpec(
+        tid=tid,
+        name="spawn-test",
+        spec=SpecSection(
+            type="function",
+            function_target="tests.tasks.sample_targets:echo_payload",
+        ),
+        io=IOSection(
+            outputs={"outbox": f"T{tid}.outbox"},
+            control={"ctrl_in": f"T{tid}.ctrl_in", "ctrl_out": f"T{tid}.ctrl_out"},
+        ),
+        state=StateSection(),
+    )
+
+    manager_record = {"requests": WEFT_SPAWN_REQUESTS_QUEUE}
+    run_cmd._enqueue_taskspec(context, manager_record, taskspec, None)
+
+    queue = Queue(
+        WEFT_SPAWN_REQUESTS_QUEUE,
+        db_path=str(context.database_path),
+        persistent=True,
+        config=context.broker_config,
+    )
+    payload, timestamp = queue.read_one(with_timestamps=True)
+    assert isinstance(payload, str)
+    assert json.loads(payload)["taskspec"]["tid"] == tid
+    assert timestamp == int(tid)
