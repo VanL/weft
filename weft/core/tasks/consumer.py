@@ -95,6 +95,9 @@ class Consumer(BaseTask, InteractiveTaskMixin):
 
         self._active_raw_message = message
         try:
+            self.taskspec.mark_started(pid=os.getpid())
+            self._update_process_title("spawning")
+            self._report_state_change(event="work_spawning", message_id=timestamp)
             self.taskspec.mark_running(pid=os.getpid())
             self._update_process_title("running")
             self._report_state_change(event="work_started", message_id=timestamp)
@@ -117,6 +120,9 @@ class Consumer(BaseTask, InteractiveTaskMixin):
 
     def run_work_item(self, work_item: Any) -> Any:
         """Execute *work_item* without relying on queue plumbing."""
+        self.taskspec.mark_started(pid=os.getpid())
+        self._update_process_title("spawning")
+        self._report_state_change(event="work_spawning", message_id=None)
         self.taskspec.mark_running(pid=os.getpid())
         self._update_process_title("running")
         self._report_state_change(event="work_started", message_id=None)
@@ -139,6 +145,8 @@ class Consumer(BaseTask, InteractiveTaskMixin):
                 "weft.core.resource_monitor.ResourceMonitor",
             ),
             monitor_interval=self.taskspec.spec.polling_interval,
+            db_path=str(self._db_path),
+            config=self._config,
         )
         return runner.run(work_item)
 
@@ -233,11 +241,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
                 error=str(timeout_exc),
                 metrics=metrics_payload,
             )
-            if timestamp is not None:
-                self._apply_reserved_policy(
-                    self._resolve_policy(self.taskspec.spec.reserved_policy_on_error),
-                    message_timestamp=timestamp,
-                )
+            self._apply_reserved_policy_on_error(timestamp)
             self._end_streaming_session()
             self.should_stop = True
             if self._stop_event:
@@ -246,19 +250,16 @@ class Consumer(BaseTask, InteractiveTaskMixin):
 
         if outcome.status == "limit":
             limit_exc = RuntimeError(outcome.error or "Resource limits exceeded")
-            self.taskspec.mark_failed(error=str(limit_exc))
-            self._update_process_title("failed", "limit")
+            # Spec: docs/specifications/06-Resource_Management.md#error-categories
+            self.taskspec.mark_killed(reason=str(limit_exc))
+            self._update_process_title("killed", "limit")
             self._report_state_change(
                 event="work_limit_violation",
                 message_id=timestamp,
                 error=str(limit_exc),
                 metrics=metrics_payload,
             )
-            if timestamp is not None:
-                self._apply_reserved_policy(
-                    self._resolve_policy(self.taskspec.spec.reserved_policy_on_error),
-                    message_timestamp=timestamp,
-                )
+            self._apply_reserved_policy_on_error(timestamp)
             self._end_streaming_session()
             self.should_stop = True
             if self._stop_event:
@@ -275,11 +276,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
                 error=str(error_exc),
                 metrics=metrics_payload,
             )
-            if timestamp is not None:
-                self._apply_reserved_policy(
-                    self._resolve_policy(self.taskspec.spec.reserved_policy_on_error),
-                    message_timestamp=timestamp,
-                )
+            self._apply_reserved_policy_on_error(timestamp)
             self._end_streaming_session()
             self.should_stop = True
             if self._stop_event:
@@ -314,6 +311,15 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             return policy
         # CLEAR is safest when the envelope is purely structural
         return ReservedPolicy.CLEAR
+
+    def _apply_reserved_policy_on_error(self, timestamp: int | None) -> None:
+        if timestamp is None:
+            return
+        policy = self._resolve_policy(self.taskspec.spec.reserved_policy_on_error)
+        self._apply_reserved_policy(policy, message_timestamp=timestamp)
+        if policy is not ReservedPolicy.KEEP:
+            self._ensure_reserved_empty()
+            self._cleanup_reserved_if_needed()
 
     @staticmethod
     def _is_start_token(raw: str | None) -> bool:

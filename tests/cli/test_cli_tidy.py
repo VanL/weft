@@ -14,7 +14,7 @@ def test_tidy_runs_vacuum_and_checkpoint(workdir):
     queue.write("payload")
     queue.close()
 
-    rc, out, err = run_cli("tidy", cwd=workdir)
+    rc, out, err = run_cli("system", "tidy", cwd=workdir)
     assert rc == 0
     assert err == ""
     assert "Tidied" in out

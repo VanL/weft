@@ -84,7 +84,7 @@ def handle_control_message(msg: str, timestamp: int):
 watcher = QueueWatcher(
     queue=Queue(f"T{self.tid}.ctrl_in"),
     handler=handle_control_message,
-    peek=True  # Don't consume control messages
+    peek=False  # Consume control messages after handling
 )
 
 # Run in background thread (SimpleBroker feature)
@@ -94,7 +94,8 @@ thread = watcher.run_in_thread()
 ### Database Management
 
 SimpleBroker handles all database concerns:
-- **Auto-creation**: `.broker.db` created on first queue write
+- **Auto-creation**: SimpleBroker defaults to `.broker.db` on first queue write
+  (Weft uses `.weft/broker.db` via context discovery)
 - **Connection pooling**: Handled internally
 - **Concurrent access**: WAL mode for multiple readers/writers
 - **Cleanup**: Empty queues auto-deleted
@@ -129,7 +130,7 @@ class BaseTask(MultiQueueWatcher):
                 self._handle_work_message,
                 reserved_queue=self._queue_names["reserved"],
             ),
-            self._queue_names["ctrl_in"]: self._peek_queue_config(
+            self._queue_names["ctrl_in"]: self._read_queue_config(
                 self._handle_control_message
             ),
             self._queue_names["reserved"]: self._peek_queue_config(
@@ -167,11 +168,14 @@ broker move T{tid}.reserved T{tid}.inbox  # Retry failed task
 broker --vacuum                       # Cleanup deleted messages
 ```
 
-## Weft Context and Directory Scoping
-
-### The weft_context Concept: Git-like Project Scoping
+## Project Context and Directory Scoping
 
 Weft uses **git-like project scoping** where a `.weft/` directory marks the project root. Commands executed anywhere in the project tree discover and use the same centralized broker database.
+
+_Implementation_: Context discovery and `.weft/` directory management live in
+`weft/context.py` (`build_context`, `_resolve_project_paths`). CLI entry points
+call `build_context` (`weft/commands/queue.py`, `weft/commands/status.py`,
+`weft/commands/run.py`).
 
 #### Project Discovery Algorithm
 1. Start from current working directory
@@ -199,25 +203,6 @@ project-root/
 2. **Project Isolation**: Different projects have separate task systems
 3. **Developer Familiarity**: Follows git's well-understood model
 4. **Emergency Access**: Always know where the database is located
-
-#### TaskSpec Context Field
-
-The `weft_context` field now represents the discovered project root:
-
-```python
-# TaskSpec with discovered context
-{
-    "spec": {
-        "weft_context": "/path/to/project",  # Discovered .weft/ parent directory
-        # ... other fields
-    }
-}
-```
-
-**Discovery Behavior**:
-- If `weft_context` is `null`: Use discovery algorithm from current directory
-- If `weft_context` is specified: Use that directory as project root
-- All tasks in the same context share the centralized `.weft/broker.db`
 
 ### Context Management API
 
@@ -361,7 +346,7 @@ class WeftContextError(Exception):
 Weft queue commands delegate directly to SimpleBroker's command functions, automatically injecting the discovered database path:
 
 ```python
-# weft/commands.py - SimpleBroker integration pattern
+# weft/commands/queue.py - SimpleBroker integration pattern
 from simplebroker import commands as sb_commands
 from weft.context import get_context
 from typing import Optional
@@ -444,8 +429,7 @@ def create_task_in_context(context_path: str, task_config: dict) -> str:
     context = WeftContext(context_path)
     context.ensure_context()
     
-    # Create TaskSpec with explicit context
-    task_config["spec"]["weft_context"] = str(context.path)
+    # Create TaskSpec in the resolved context
     taskspec = TaskSpec.model_validate(task_config)
     
     # Create and run task
@@ -502,7 +486,7 @@ class ContextMonitor:
     
     def get_context_tasks(self, context: WeftContext) -> list[dict]:
         """Get all tasks in a specific context."""
-        log_queue = context.get_queue("weft.tasks.log")
+        log_queue = context.get_queue("weft.log.tasks")
         return [json.loads(msg) for msg in log_queue.peek_all()]
 ```
 
@@ -549,7 +533,7 @@ class QueueConnectionPool:
 ## Related Documents
 
 - **[00-Overview_and_Architecture.md](00-Overview_and_Architecture.md)** - System overview and design principles
-- **[01-TaskSpec.md](01-TaskSpec.md)** - Task configuration specification including weft_context
+- **[01-TaskSpec.md](01-TaskSpec.md)** - Task configuration specification and runtime expansion
 - **[02-Core_Components.md](02-Core_Components.md)** - Detailed component architecture
 - **[03-Worker_Architecture.md](03-Worker_Architecture.md)** - Recursive worker model
 - **[05-Message_Flow_and_State.md](05-Message_Flow_and_State.md)** - Communication patterns

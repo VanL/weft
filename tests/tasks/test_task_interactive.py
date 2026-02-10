@@ -31,7 +31,8 @@ def make_interactive_spec(tid: str) -> TaskSpec:
         name="interactive-task",
         spec=SpecSection(
             type="command",
-            process_target=[sys.executable, "-u", INTERACTIVE_SCRIPT],
+            process_target=sys.executable,
+            args=["-u", INTERACTIVE_SCRIPT],
             interactive=True,
             stream_output=True,
             cleanup_on_exit=True,

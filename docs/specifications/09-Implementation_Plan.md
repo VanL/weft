@@ -4,41 +4,42 @@ This document outlines the development roadmap for the Weft system, with a focus
 
 ## Implementation Schedule
 
-### Phase 0: Bootstrap and Worker Foundation (Days 1-2)
+### Phase 0: Manager Foundation (Days 1-2)
 
-#### 0.1 CLI Framework and Bootstrap Command
-**Files**: `weft/cli.py`, `weft/commands.py`
-- [ ] Set up Click-based CLI framework with global options
-- [ ] Implement `weft bootstrap` command
+#### 0.1 CLI Framework and Implicit Manager Startup
+**Files**: `weft/cli.py`, `weft/commands/run.py`
+- [ ] Set up CLI framework with global options
+- [ ] Ensure `weft run` implicitly starts a manager when needed
 - [ ] Add context management (-d, -f flags)
 - [ ] Error handling and exit code mapping
 
-**CLI Command**: `weft bootstrap [--config FILE] [--recover]`
+**Behavior**: Manager bootstraps automatically on first `weft run` (or via
+explicit `weft worker start` for operators).
 **Dependencies**: WeftContext, Manager, TaskSpec ✅
 
-**Tests**: `tests/test_cli/test_bootstrap.py`
-- [ ] CLI argument parsing for bootstrap
+**Tests**: `tests/test_cli/test_run_bootstrap.py`
+- [ ] Implicit manager startup
 - [ ] Context directory handling
 - [ ] Error exit codes (0=success, 1=error)
 
-#### 0.2 Core Bootstrap Components
+#### 0.2 Core Manager Components
 **Files**: `weft/core/context.py`, `weft/core.manager.py`
 - [ ] Implement WeftContext for directory scoping
 - [ ] Implement Manager with run_forever target
 - [ ] Add spawn_child method using message TID
 - [ ] Implement task registry validation
-- [ ] Add worker registration to weft.workers.registry
-- [ ] Handle control messages (STOP, PAUSE)
+- [ ] Add worker registration to weft.state.workers
+- [ ] Handle control messages (STOP, STATUS, PING)
 
-**CLI Integration**: Bootstrap command calls Manager.run()
+**CLI Integration**: `weft run` and `weft worker start` call Manager.run()
 **Dependencies**: TaskSpec ✅, SimpleBroker Queue API
 
-**Tests**: `tests/test_core/test_worker.py`, `tests/test_cli_integration/test_bootstrap.py`
+**Tests**: `tests/test_core/test_worker.py`, `tests/test_cli_integration/test_manager_startup.py`
 - [ ] Worker lifecycle tests
 - [ ] Spawn functionality tests
 - [ ] Registry validation tests
 - [ ] TID correlation tests
-- [ ] CLI-Worker integration test (actual `weft bootstrap` execution)
+- [ ] CLI-Manager integration test (actual `weft run` startup)
 
 ### Phase 1: Core Infrastructure (Week 1)
 
@@ -65,7 +66,8 @@ This document outlines the development roadmap for the Weft system, with a focus
 
 **CLI Implementation**:
 - [ ] `weft run COMMAND [--timeout N] [--wait] [--json]`
-- [ ] `weft status [TID] [--all] [--json] [--watch]`  
+- [ ] `weft run --function MODULE:FUNC [--arg VALUE] [--kw KEY=VALUE]`
+- [ ] `weft status [--json]`  
 - [ ] `weft result TID [--timeout N] [--stream] [--json]`
 
 **Core Components**:
@@ -73,11 +75,11 @@ This document outlines the development roadmap for the Weft system, with a focus
 - [ ] Integrate with SimpleBroker Queue API  
 - [ ] Add BaseWatcher inheritance for queue monitoring
 - [ ] Implement Client for submission/querying
-- [ ] Implement state reporting to weft.tasks.log
+- [ ] Implement state reporting to weft.log.tasks
 - [ ] Add recovery from reserved queue on startup
 - [ ] Implement process title management with setproctitle
 - [ ] Add TID short form computation (last 10 digits)
-- [ ] Register TID mappings to weft.state.process.tid_mappings queue
+- [ ] Register TID mappings to weft.state.tid_mappings queue
 - [ ] Update process titles on state transitions
 
 **CLI Integration**: Commands are thin wrappers around Client/TaskMonitor
@@ -91,7 +93,7 @@ This document outlines the development roadmap for the Weft system, with a focus
 - [ ] Reservation flow tests (move, process, clear)
 - [ ] Failure handling tests (message stays in reserved)
 - [ ] Recovery tests (resume from reserved)
-- [ ] State reporting tests (weft.tasks.log updates)
+- [ ] State reporting tests (weft.log.tasks updates)
 - [ ] Process title format and update tests
 - [ ] TID short form uniqueness tests
 - [ ] TID mapping registration tests
@@ -102,15 +104,14 @@ This document outlines the development roadmap for the Weft system, with a focus
 #### 2.1 Process Management Commands and Tools
 **Files**: `weft/commands.py`, `weft/tools/process_tools.py`, `weft/tools/tid_tools.py`
 
-**CLI Commands**: `weft ps`, `weft kill`, `weft stop`, `weft top`, `weft tid`
+**CLI Commands**: `weft task status`, `weft task kill`, `weft task stop`, `weft task tid`
 **Dependencies**: ProcessManager, TIDResolver
 
 **CLI Implementation**:
-- [ ] `weft ps [--failed] [--pattern PATTERN] [--json]`
-- [ ] `weft kill TID [--pattern PATTERN] [--force]`
-- [ ] `weft stop TID [--graceful]`
-- [ ] `weft top [--interval N] [--sort FIELD]`
-- [ ] `weft tid SHORT_TID` / `weft tid --pid PID`
+- [ ] `weft task status TID [--process] [--watch] [--json]`
+- [ ] `weft task kill TID [--pattern PATTERN] [--force]`
+- [ ] `weft task stop TID [--graceful]`
+- [ ] `weft task tid SHORT_TID` / `weft task tid --pid PID`
 
 **Implementation Notes**:
 - Pattern-based `kill`/`stop` reuse `queue broadcast --pattern 'T*.ctrl_in'` to fan control messages to matching tasks, keeping the CLI thin over SimpleBroker’s selective broadcast.
@@ -217,6 +218,15 @@ This document outlines the development roadmap for the Weft system, with a focus
 
 **CLI Integration**: Direct delegation to SimpleBroker with context management
 
+### Phase 4: System Maintenance (Week 4)
+
+**CLI Commands**: `weft system tidy`, `weft system dump`, `weft system load`
+
+**Notes**:
+- Maintenance operations are grouped under the `system` namespace.
+- `system tidy` compacts the broker database.
+- `system dump/load` are for backup/restore and debugging.
+
 **Tests**: `tests/test_cli/test_queue_commands.py`, `tests/test_cli_integration/test_queue_operations.py`
 - [x] All queue operations via CLI
 - [x] Broadcast fan-out (match/no-match) semantics and exit codes
@@ -231,12 +241,12 @@ This document outlines the development roadmap for the Weft system, with a focus
 **CLI Enhancement**: Enhanced `weft status`, `weft list` with full observability
 
 **Observability Components**:
-- [ ] Implement weft.tasks.log aggregator
+- [ ] Implement weft.log.tasks aggregator
 - [ ] Add TaskMonitor for querying state  
 - [ ] Create log replay for state reconstruction
 - [ ] Add summary/reporting utilities
 - [ ] NO separate state database needed
-- [ ] Implement TID lookup service from weft.state.process.tid_mappings
+- [ ] Implement TID lookup service from weft.state.tid_mappings
 - [ ] Add process discovery tools (find tasks by pattern)
 - [ ] Create OS integration utilities (ps/top wrappers)
 
@@ -251,37 +261,35 @@ This document outlines the development roadmap for the Weft system, with a focus
 - [ ] Process discovery tests
 - [ ] OS command integration tests
 
-### Phase 4: Advanced Integration Features (Week 4)
+### Phase 4: Spec Authoring Features (Week 4)
 
-#### 4.1 Pipeline and Template Commands
-**Files**: `weft/commands.py`, `weft/integration/pipelines.py`, `weft/integration/templates.py`
+#### 4.1 Spec Authoring and Validation
+**Files**: `weft/commands.py`, `weft/specs/pipelines.py`, `weft/specs/store.py`
 
-**CLI Commands**: `weft pipe`, `weft template`, `weft batch`
-**Dependencies**: PipelineBuilder, TaskTemplate, enhanced Client
+**CLI Commands**: `weft spec create`, `weft spec list`, `weft spec show`, `weft spec delete`, `weft spec validate`, `weft spec generate`
+**Dependencies**: PipelineBuilder, TaskSpecStore, enhanced Client
 
 **CLI Implementation**:
-- [ ] `weft pipe STAGE1 "|" STAGE2 [--save-intermediate]`
-- [ ] `weft template create NAME --spec FILE`
-- [ ] `weft template list [--json]`
-- [ ] `weft template run NAME [--params JSON]`
-- [ ] `weft batch --file TASKS.jsonl [--parallel N]`
+- [ ] `weft spec create NAME --type task --file FILE`
+- [ ] `weft spec create NAME --type pipeline --stage name:task`
+- [ ] `weft spec list [--type task|pipeline] [--json]`
+- [ ] `weft spec show NAME [--type task|pipeline]`
+- [ ] `weft spec delete NAME [--type task|pipeline]`
+- [ ] `weft spec validate FILE`
+- [ ] `weft spec generate --type task|pipeline`
 
-**Integration Components**:
+**Spec Components**:
 - [ ] StreamAdapter for stdin/stdout to queues
 - [ ] Pre-defined task registry for AI agents
 - [ ] Pipeline builder for task chaining
-- [ ] Template management and instantiation
-- [ ] Batch task processing
+- [ ] Task spec storage and instantiation
 - [ ] Timeout handling for variable latencies
-- [ ] Example Unix tool wrappers (grep, awk, etc.)
 
 **CLI Integration**: Advanced workflows through structured commands
 
-**Tests**: `tests/test_cli/test_integration_commands.py`, `tests/test_integration/`, `tests/test_cli_integration/test_pipelines.py`
+**Tests**: `tests/test_cli/test_spec_commands.py`, `tests/test_integration/`, `tests/test_cli_integration/test_pipelines.py`
 - [ ] Pipeline creation and execution via CLI
-- [ ] Template management lifecycle
-- [ ] Batch processing with error handling
-- [ ] Unix command integration tests
+- [ ] Task spec management lifecycle
 - [ ] AI agent task restrictions
 - [ ] Pipeline execution tests
 - [ ] Variable latency handling
@@ -319,23 +327,25 @@ class TIDResolver:
 **Complete CLI Reference**:
 ```bash
 # Bootstrap and system management
-weft bootstrap [--config FILE] [--recover]
+weft worker start [--config FILE] [--recover]
 
 # Core task management  
 weft run COMMAND [--timeout N] [--wait] [--json]
-weft status [TID] [--all] [--json] [--watch]
+weft run --function MODULE:FUNC [--arg VALUE] [--kw KEY=VALUE]
+weft run --spec NAME|PATH [--timeout N] [--wait] [--json]
+weft run --pipeline NAME|PATH [--timeout N] [--wait] [--json]
+weft status [--json]
 weft result TID [--timeout N] [--stream] [--json]
-weft list [--stats] [--by-status] [--json]
+weft list [--stats] [--status STATUS] [--json]
 
 # Process management (no escaping needed!)
-weft ps [--failed] [--pattern PATTERN] [--json]
-weft kill TID [--pattern PATTERN] [--force]
-weft stop TID [--graceful]
-weft top [--interval N] [--sort FIELD]
+weft task status TID [--process] [--watch] [--json]
+weft task kill TID [--pattern PATTERN] [--force]
+weft task stop TID [--graceful]
 
 # TID management  
-weft tid SHORT_TID                # Lookup full TID
-weft tid --pid PID                # Find TID for process
+weft task tid SHORT_TID           # Lookup full TID
+weft task tid --pid PID           # Find TID for process
 
 # Worker management
 weft worker start [--type TYPE] [--registry FILE]
@@ -351,12 +361,15 @@ weft queue move SOURCE TARGET [--all]
 weft queue list [--pattern PATTERN] [--json]
 weft queue watch QUEUE [--json]
 
-# Advanced integration
-weft pipe STAGE1 "|" STAGE2 [--save-intermediate]
-weft template create NAME --spec FILE
-weft template list [--json]
-weft template run NAME [--params JSON]
-weft batch --file TASKS.jsonl [--parallel N]
+# Spec management
+weft spec create NAME --type task --file FILE
+weft spec create NAME --type pipeline --stage name:task
+weft spec list [--type task|pipeline] [--json]
+weft spec show NAME [--type task|pipeline]
+weft spec delete NAME [--type task|pipeline]
+weft spec validate FILE
+weft spec generate --type task|pipeline
+cat TASKS.jsonl | xargs -P4 -n1 weft run --spec
 
 # Emergency operations (shell-friendly!)
 ps aux | grep weft-               # Find all weft tasks
@@ -408,19 +421,18 @@ weft/
 │   ├── tid_tools.py              # TID resolution, short<->full mapping
 │   └── observability.py         # Log aggregation, state querying
 
-├── integration/                   # External system integration
-│   ├── __init__.py               # Integration exports
+├── specs/                         # Task spec authoring utilities
+│   ├── __init__.py               # Spec exports
 │   ├── streams.py                # Stream adapters (stdin/stdout <-> queues)
-│   ├── unix.py                   # Unix command wrappers
 │   ├── pipelines.py              # Task pipeline builders
-│   └── templates.py              # Task template management
+│   └── store.py                  # Task spec storage and instantiation
 
 tests/                             # Test suite (mirrors module structure)
 ├── __init__.py
 ├── fixtures/                     # Test fixtures and data
 ├── test_core/                    # Core component tests
 ├── test_tools/                   # Tools tests
-├── test_integration/             # Integration tests
+├── test_spec/                    # Spec-related integration tests
 └── test_cli/                     # CLI tests
 ```
 
@@ -446,11 +458,10 @@ tests/                             # Test suite (mirrors module structure)
 - `tid_tools.py`: TID resolution between short and full forms
 - `observability.py`: Log aggregation and system state querying
 
-**Integration Package (`weft/integration/`)**:
+**Spec Package (`weft/specs/`)**:
 - `streams.py`: StreamAdapter for stdin/stdout to queue routing
-- `unix.py`: Unix command wrappers and pipeline compatibility
 - `pipelines.py`: Task pipeline creation and management
-- `templates.py`: Task template storage and instantiation
+- `store.py`: Task spec storage and instantiation
 
 ### Design Rationale
 
@@ -459,7 +470,7 @@ This structure follows SimpleBroker's successful patterns while organizing Weft'
 1. **Flat Root**: Simple CLI and utility functions stay at the root level
 2. **Core Separation**: Complex system components grouped under `core/`
 3. **Tool Isolation**: OS integration tools separated from core logic
-4. **Integration Boundary**: External system integrations clearly separated
+4. **Spec Boundary**: Task spec authoring utilities separated from core logic
 5. **Test Mirroring**: Test structure mirrors source for easy navigation
 
 ### Import Patterns
@@ -476,9 +487,9 @@ from weft.core.manager import Manager
 from weft.tools import ProcessManager, TIDResolver
 from weft.tools.observability import TaskMonitor
 
-# Integration utilities
-from weft.integration import StreamAdapter, PipelineBuilder
-from weft.integration.templates import TaskTemplate
+# Spec utilities
+from weft.specs import StreamAdapter, PipelineBuilder
+from weft.specs.store import TaskSpecStore
 ```
 
 ## Dependencies and Installation

@@ -79,21 +79,24 @@ def execute_function_target(
 
 
 def execute_command_target(
-    process_target: Sequence[str],
+    process_target: str,
     work_item: Any,
     *,
+    args: Sequence[Any] | None = None,
     env: Mapping[str, str] | None = None,
     working_dir: str | None = None,
     timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Execute an external command described by the TaskSpec (Spec: [CC-3], [TS-1], [RM-5])."""
-    args = list(process_target)
+    command = [process_target]
+    if args:
+        command.extend(str(item) for item in args)
     stdin_data = None
 
     if isinstance(work_item, dict):
         extra_args = work_item.get("args")
         if isinstance(extra_args, Iterable):
-            args.extend(str(item) for item in extra_args)
+            command.extend(str(item) for item in extra_args)
         stdin_data = work_item.get("stdin")
     elif isinstance(work_item, str) and work_item:
         stdin_data = work_item
@@ -103,7 +106,7 @@ def execute_command_target(
         env_vars.update(env)
 
     return subprocess.run(
-        args,
+        command,
         input=stdin_data,
         capture_output=True,
         text=True,

@@ -56,7 +56,8 @@ VALID_COMMAND_TASKSPEC = {
     "version": "1.0",
     "spec": {
         "type": "command",
-        "process_target": ["echo", "hello"],
+        "process_target": "echo",
+        "args": ["hello"],
         "timeout": 30.0,
         "limits": {
             "memory_mb": 256,

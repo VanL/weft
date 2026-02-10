@@ -67,11 +67,11 @@ def create_valid_function_taskspec(
 def create_valid_command_taskspec(
     tid: str = VALID_TEST_TID,
     name: str = "test-command",
-    process_target: list[str] | None = None,
+    process_target: str | None = None,
 ) -> TaskSpec:
     """Create a valid command TaskSpec with common fields."""
     if process_target is None:
-        process_target = ["echo", "hello"]
+        process_target = "echo"
 
     return TaskSpec(
         tid=tid,
@@ -79,6 +79,7 @@ def create_valid_command_taskspec(
         spec=SpecSection(
             type="command",
             process_target=process_target,
+            args=["hello"],
             timeout=30.0,
             limits=LimitsSection(memory_mb=256),
             env={"TEST_VAR": "test_value"},
@@ -181,7 +182,8 @@ VALID_COMMAND_TASKSPEC_DICT: dict[str, Any] = {
     "version": "1.0",
     "spec": {
         "type": "command",
-        "process_target": ["echo", "hello"],
+        "process_target": "echo",
+        "args": ["hello"],
         "timeout": 30.0,
         "limits": {
             "memory_mb": 256,

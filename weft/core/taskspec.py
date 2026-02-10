@@ -13,7 +13,14 @@ from contextlib import contextmanager
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    ValidationError,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 from weft._constants import (
     DEFAULT_CLEANUP_ON_EXIT,
@@ -98,7 +105,8 @@ class SpecSection(BaseModel):
 
     type: Literal["function", "command"]
     function_target: str | None = None
-    process_target: list[str] | None = None
+    # Spec: process_target is a single executable path; args are appended. [TS-1]
+    process_target: str | None = Field(default=None, min_length=1)
     args: list[Any] = Field(default_factory=list)
     keyword_args: dict[str, Any] = Field(default_factory=dict)
     timeout: float | None = None
@@ -139,6 +147,17 @@ class SpecSection(BaseModel):
         if self.type == "command" and self.function_target:
             raise ValueError("function_target should not be set when type is 'command'")
         return self
+
+    @field_validator("process_target")
+    @classmethod
+    def validate_process_target(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        if not isinstance(value, str):
+            raise TypeError("process_target must be a string")
+        if not value.strip():
+            raise ValueError("process_target must be a non-empty string")
+        return value
 
     def model_post_init(self, __context: Any) -> None:
         super().model_post_init(__context)
@@ -266,10 +285,10 @@ class StateSection(BaseModel):
     cpu: int | None = Field(None, ge=0, le=100, description="CPU percentage")
     fds: int | None = Field(None, ge=0)
     net_connections: int | None = Field(None, ge=0)
-    max_memory: float | None = Field(None, ge=0, description="Peak memory in MB")
-    max_cpu: int | None = Field(None, ge=0, le=100, description="Peak CPU percentage")
-    max_fds: int | None = Field(None, ge=0)
-    max_net_connections: int | None = Field(None, ge=0)
+    peak_memory: float | None = Field(None, ge=0, description="Peak memory in MB")
+    peak_cpu: int | None = Field(None, ge=0, le=100, description="Peak CPU percentage")
+    peak_fds: int | None = Field(None, ge=0)
+    peak_net_connections: int | None = Field(None, ge=0)
 
     @model_validator(mode="after")
     def validate_state_consistency(self) -> StateSection:
@@ -339,10 +358,9 @@ class TaskSpec(BaseModel):
             Set to False to skip automatic expansion.
     """
 
-    tid: str = Field(
-        ...,
-        pattern=rf"^\d{{{TASKSPEC_TID_LENGTH}}}$",
-        description=f"{TASKSPEC_TID_LENGTH}-digit timestamp ID",
+    tid: str | None = Field(
+        None,
+        description=f"{TASKSPEC_TID_LENGTH}-digit timestamp ID (None for templates)",
     )
     version: str = Field(TASKSPEC_VERSION, pattern=r"^\d+\.\d+$")
     name: str = Field(..., min_length=1)
@@ -356,7 +374,7 @@ class TaskSpec(BaseModel):
 
     @field_validator("tid")
     @classmethod
-    def validate_tid(cls, v: str) -> str:
+    def validate_tid(cls, v: str | None, info: ValidationInfo) -> str | None:
         """Validate TID is a {TASKSPEC_TID_LENGTH}-digit SimpleBroker timestamp.
 
         Validates:
@@ -365,6 +383,11 @@ class TaskSpec(BaseModel):
         3. Within reasonable bounds (not too far in future/past)
         """
         import time
+
+        if v is None or v == "":
+            if info.context and info.context.get("template"):
+                return v
+            raise ValueError("tid is required for resolved TaskSpec")
 
         if not v.isdigit() or len(v) != TASKSPEC_TID_LENGTH:
             raise ValueError(f"tid must be exactly {TASKSPEC_TID_LENGTH} digits")
@@ -375,8 +398,8 @@ class TaskSpec(BaseModel):
         except ValueError as e:
             raise ValueError("tid must be a valid integer") from e
 
-        # Validate timestamp is within reasonable bounds
-        # SimpleBroker uses time.time_ns() which is nanoseconds since epoch
+        # Validate timestamp is within reasonable bounds.
+        # SimpleBroker uses a hybrid timestamp format compatible with time.time_ns().
         current_ns = time.time_ns()
 
         # Allow timestamps from 2020 onwards (reasonable lower bound)
@@ -415,13 +438,18 @@ class TaskSpec(BaseModel):
         """
         # Check if auto_expand was set in context (defaults to True)
         auto_expand = __context.get("auto_expand", True) if __context else True
+        is_template = self.is_template()
 
         # Apply defaults automatically unless disabled
-        if auto_expand:
+        if auto_expand and not is_template:
             self.apply_defaults()
 
         # Enforce partial immutability after initialization
         self._freeze_spec()
+
+    def is_template(self) -> bool:
+        """Return True if this TaskSpec is a template (tid is unset)."""
+        return self.tid in (None, "")
 
     def _freeze_spec(self) -> None:
         """Make spec and io sections immutable after TaskSpec creation.
@@ -466,6 +494,8 @@ class TaskSpec(BaseModel):
         Returns:
             Tuple of (input_queues, control_queues)
         """
+        if self.is_template():
+            raise ValueError("cannot derive default queues from template TaskSpec")
         default_inputs = {}
         default_control = {}
 
@@ -495,6 +525,8 @@ class TaskSpec(BaseModel):
         Raises:
             ValueError: If the TaskSpec does not pass strict validation after defaults are applied
         """
+        if self.is_template():
+            raise ValueError("cannot apply defaults to a template TaskSpec")
         with self.spec._mutations_allowed():
             # === Optimized Spec Section Defaults ===
             # Use bulk update pattern for better performance
@@ -559,6 +591,9 @@ class TaskSpec(BaseModel):
             ValueError: If any required fields are missing or invalid
         """
         errors = []
+
+        if self.is_template():
+            return
 
         # Check required top-level fields
         if not self.tid:
@@ -649,6 +684,8 @@ class TaskSpec(BaseModel):
     ) -> None:
         """Set the task status and optionally an error message.
 
+        Spec: [MF-5], [STATE.1]
+
         Args:
             status: New status (created, spawning, running, completed, failed, timeout, cancelled, killed)
             error: Optional error message for failed states
@@ -667,7 +704,7 @@ class TaskSpec(BaseModel):
 
         # Validate forward-only transitions
         valid_transitions = {
-            "created": {"spawning", "failed", "cancelled", "killed"},
+            "created": {"spawning", "failed", "cancelled"},
             "spawning": {
                 "running",
                 "completed",
@@ -709,13 +746,7 @@ class TaskSpec(BaseModel):
         Args:
             pid: Process ID of the spawned task
         """
-        import time
-
-        if self.state.status == "created":
-            self.state.status = "spawning"
-
-        if not self.state.started_at:
-            self.state.started_at = time.time_ns()
+        self.set_status("spawning")
 
         if pid is not None:
             self.state.pid = pid
@@ -726,12 +757,9 @@ class TaskSpec(BaseModel):
         Args:
             pid: Process ID of the running task
         """
-        import time
-
-        self.state.status = "running"
-
-        if not self.state.started_at:
-            self.state.started_at = time.time_ns()
+        if self.state.status == "created":
+            self.set_status("spawning")
+        self.set_status("running")
 
         if pid is not None:
             self.state.pid = pid
@@ -742,13 +770,8 @@ class TaskSpec(BaseModel):
         Args:
             return_code: Process return code (default 0 for success)
         """
-        import time
-
-        self.state.status = "completed"
+        self.set_status("completed")
         self.state.return_code = return_code
-
-        if not self.state.completed_at:
-            self.state.completed_at = time.time_ns()
 
     def mark_failed(
         self, error: str | None = None, return_code: int | None = None
@@ -759,18 +782,9 @@ class TaskSpec(BaseModel):
             error: Error message describing the failure
             return_code: Process return code if available
         """
-        import time
-
-        self.state.status = "failed"
-
-        if error:
-            self.state.error = error
-
+        self.set_status("failed", error=error)
         if return_code is not None:
             self.state.return_code = return_code
-
-        if not self.state.completed_at:
-            self.state.completed_at = time.time_ns()
 
     def mark_timeout(self, error: str | None = None) -> None:
         """Mark the task as timed out.
@@ -778,17 +792,11 @@ class TaskSpec(BaseModel):
         Args:
             error: Optional timeout error message
         """
-        import time
-
-        self.state.status = "timeout"
-
-        if error:
-            self.state.error = error
-        else:
-            self.state.error = f"Task timed out after {self.spec.timeout} seconds"
-
-        if not self.state.completed_at:
-            self.state.completed_at = time.time_ns()
+        # Spec: docs/specifications/06-Resource_Management.md#error-handling
+        if error is None:
+            error = f"Task timed out after {self.spec.timeout} seconds"
+        self.set_status("timeout", error=error)
+        self.state.return_code = 124
 
     def mark_cancelled(self, reason: str | None = None) -> None:
         """Mark the task as cancelled.
@@ -796,15 +804,8 @@ class TaskSpec(BaseModel):
         Args:
             reason: Optional cancellation reason
         """
-        import time
-
-        self.state.status = "cancelled"
-
-        if reason:
-            self.state.error = f"Cancelled: {reason}"
-
-        if not self.state.completed_at:
-            self.state.completed_at = time.time_ns()
+        error = f"Cancelled: {reason}" if reason else None
+        self.set_status("cancelled", error=error)
 
     def mark_killed(self, reason: str | None = None) -> None:
         """Mark the task as killed.
@@ -812,15 +813,8 @@ class TaskSpec(BaseModel):
         Args:
             reason: Optional kill reason (e.g., "Memory limit exceeded")
         """
-        import time
-
-        self.state.status = "killed"
-
-        if reason:
-            self.state.error = f"Killed: {reason}"
-
-        if not self.state.completed_at:
-            self.state.completed_at = time.time_ns()
+        error = f"Killed: {reason}" if reason else None
+        self.set_status("killed", error=error)
 
     # === Convenience Methods for Metrics Updates ===
 
@@ -848,29 +842,29 @@ class TaskSpec(BaseModel):
         if memory is not None:
             self.state.memory = memory
             # Track maximum
-            if self.state.max_memory is None or memory > self.state.max_memory:
-                self.state.max_memory = memory
+            if self.state.peak_memory is None or memory > self.state.peak_memory:
+                self.state.peak_memory = memory
 
         if cpu is not None:
             self.state.cpu = cpu
             # Track maximum
-            if self.state.max_cpu is None or cpu > self.state.max_cpu:
-                self.state.max_cpu = cpu
+            if self.state.peak_cpu is None or cpu > self.state.peak_cpu:
+                self.state.peak_cpu = cpu
 
         if fds is not None:
             self.state.fds = fds
             # Track maximum
-            if self.state.max_fds is None or fds > self.state.max_fds:
-                self.state.max_fds = fds
+            if self.state.peak_fds is None or fds > self.state.peak_fds:
+                self.state.peak_fds = fds
 
         if net_connections is not None:
             self.state.net_connections = net_connections
             # Track maximum
             if (
-                self.state.max_net_connections is None
-                or net_connections > self.state.max_net_connections
+                self.state.peak_net_connections is None
+                or net_connections > self.state.peak_net_connections
             ):
-                self.state.max_net_connections = net_connections
+                self.state.peak_net_connections = net_connections
 
     def check_limits_exceeded(self) -> tuple[bool, str | None]:
         """Check if any resource limits have been exceeded.
@@ -1070,8 +1064,10 @@ def validate_taskspec(json_str: str) -> tuple[bool, dict[str, Any]]:
         except json_module.JSONDecodeError as e:
             return False, {"_json": f"Invalid JSON: {e}"}
 
-        # Then validate with Pydantic - it will enforce all strict requirements
-        TaskSpec.model_validate_json(json_str)
+        # Then validate with Pydantic - templates are permitted
+        TaskSpec.model_validate_json(
+            json_str, context={"template": True, "auto_expand": False}
+        )
         return True, {}
     except ValidationError as e:
         errors = {}

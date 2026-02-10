@@ -18,7 +18,7 @@ _Implementation_: `weft/core/taskspec.py` (`TaskSpec`, `SpecSection`, `IOSection
 ```python
 class TaskSpec:
     # Identity (immutable)
-    tid: str              # 19-digit timestamp ID (nanosecond precision)
+    tid: str              # 64-bit SimpleBroker timestamp (microseconds + counter)
     name: str             # Human-readable identifier
     version: str          # Schema version (e.g., "1.0")
     
@@ -31,13 +31,18 @@ class TaskSpec:
     metadata: dict        # User-defined key-value pairs - flexible updates
 ```
 
+**Template vs resolved**:
+- Stored TaskSpec templates omit `tid`, `io`, and `state` (or use `tid=null`).
+- The Manager expands templates at spawn time, setting `tid`, `io`, `state`, and
+  `spec.weft_context` for the resolved runtime TaskSpec.
+
 **SpecSection Structure with Limits Subsection**:
 ```python
 class SpecSection:
     # Execution configuration
     type: Literal["function", "command"]
     function_target: str | None      # For type="function"
-    process_target: list[str] | None # For type="command"
+    process_target: str | None       # For type="command"
     args: list[Any]
     keyword_args: dict[str, Any]
     
@@ -48,8 +53,14 @@ class SpecSection:
     timeout: float | None
     env: dict[str, str]
     working_dir: str | None
+    interactive: bool
     stream_output: bool
     cleanup_on_exit: bool
+    reserved_policy_on_stop: Literal["keep", "requeue", "clear"]
+    reserved_policy_on_error: Literal["keep", "requeue", "clear"]
+    output_size_limit_mb: int
+    enable_process_title: bool
+    weft_context: str | None
     
     # Monitoring configuration
     polling_interval: float
@@ -73,16 +84,14 @@ def __init__(self, **data):
     
 def _freeze_spec(self):
     """Make spec and io sections immutable."""
-    # Pydantic v2 approach
-    self.model_fields['spec'].frozen = True
-    self.model_fields['io'].frozen = True
+    self._frozen_fields = {"tid", "spec", "io"}
 ```
 
 **Key Invariants**:
 - TID is immutable and unique across all tasks
 - spec and io sections become immutable after TaskSpec creation
 - state section remains mutable for runtime updates
-- State transitions are forward-only (enforced by convenience methods)
+- State transitions are forward-only (enforced by TaskSpec.set_status)
 - Required queues (outbox, ctrl_in, ctrl_out) always present
 - All optional fields expanded to explicit values via apply_defaults()
 
@@ -118,18 +127,18 @@ _Implementation_: `BaseTask` in `weft/core/tasks/base.py` handles queue wiring, 
 
 **Key Responsibilities**:
 - Translate `TaskSpec.io` into queue configurations (inbox reserve mode,
-  reserved/control peek mode, outbox read/write).
-- Maintain control-channel semantics (STOP, PAUSE, RESUME, STATUS) and emit JSON
+  reserved peek mode, control consume mode, outbox read/write).
+- Maintain control-channel semantics (STOP, STATUS, PING) and emit JSON
   responses on `ctrl_out`.
 - Update process titles and TID mappings (still expected to include the context
   prefix as described later in this spec).
-- Record state transitions to `weft.tasks.log`, including a full `TaskSpec`
+- Record state transitions to `weft.log.tasks`, including a full `TaskSpec`
   snapshot to support event-sourced reconstruction.
 - Expose `process_once()` and `run_until_stopped()` helpers; long-running
   workers are expected to loop on `run_until_stopped`, while single-shot CLI
   invocations may call `process_once()` directly.
-- Honour future enhancements such as periodic reporting when
-  `TaskSpec.spec.reporting_interval == "poll"` (not yet implemented).
+- Honour periodic reporting when `TaskSpec.spec.reporting_interval == "poll"`,
+  emitting `poll_report` events at the configured `polling_interval`.
 
 BaseTask purposefully does *not* execute work itself.  Instead it delegates to
 `TaskRunner` (see §3) from within `_handle_work_message`, allowing subclasses to
@@ -144,10 +153,10 @@ Interactive command sessions reuse `Consumer` with `spec.interactive=True`, stre
 
 | Class | Purpose | Queue Modes |
 |-------|---------|-------------|
-| `Consumer` | Default worker that reserves inbox messages, executes the target, and writes to the outbox. Applies reserved queue policies on success/failure. | Inbox `RESERVE`, Reserved `PEEK`, Control `PEEK` |
-| `Observer` | Peeks at inbox messages without consuming them; useful for monitoring pipelines. | Inbox `PEEK`, Control `PEEK` |
-| `SelectiveConsumer` | Peeks inbox messages and consumes them only when a selector predicate returns true. Optional callback for side effects. | Inbox `PEEK`, Control `PEEK` |
-| `Monitor` | Forwards messages to a downstream queue while observing them (reserve mode to ensure at-most-once forwarding). | Inbox `RESERVE` → downstream, Control `PEEK` |
+| `Consumer` | Default worker that reserves inbox messages, executes the target, and writes to the outbox. Applies reserved queue policies on success/failure. | Inbox `RESERVE`, Reserved `PEEK`, Control `READ` |
+| `Observer` | Peeks at inbox messages without consuming them; useful for monitoring pipelines. | Inbox `PEEK`, Control `READ` |
+| `SelectiveConsumer` | Peeks inbox messages and consumes them only when a selector predicate returns true. Optional callback for side effects. | Inbox `PEEK`, Control `READ` |
+| `Monitor` | Forwards messages to a downstream queue while observing them (reserve mode to ensure at-most-once forwarding). | Inbox `RESERVE` → downstream, Control `READ` |
 | `SamplingObserver` | Observer variant that invokes its callback at fixed intervals based on elapsed time. | Inherits `Observer` behaviour |
 
 Future worker/task variants should continue to derive from `BaseTask` and reuse
@@ -155,22 +164,22 @@ its queue helpers (`_reserve_queue_config`, `_peek_queue_config`, `_read_queue_c
 to maintain consistency.
 
 ### 2.4 Control and State Expectations [CC-2.4]
-- **Control commands**: STOP, PAUSE, RESUME, STATUS, and the health-check `PING`
+- **Control commands**: STOP, STATUS, and the health-check `PING`
   round-trip remain mandatory. Additional commands may be layered on via
   `_handle_control_command` overrides.
 - **State emission**: Each transition (start, completion, failure, timeout,
-  reserved-policy event, etc.) must call `_report_state_change`.  Periodic
-  (poll-based) reporting is still part of the roadmap even if the current
-  implementation only reports on transitions.
+  reserved-policy event, etc.) must call `_report_state_change`. When
+  `reporting_interval == "poll"`, tasks also emit `poll_report` events at the
+  configured `polling_interval`.
 - **Process titles**: The shell-friendly format
   `weft-{context_short}-{tid_short}:{name}:{status}[:details]` remains the target
   behaviour.  Implementations that currently omit the context must be updated to
   meet this requirement.
-- **Reserved queue policies**: `KEEP`, `CLEAR`, and `REQUEUE` policies are
+- **Reserved queue policies**: `keep`, `clear`, and `requeue` policies are
   enforced by `BaseTask._apply_reserved_policy` and must continue to behave as
   documented in `TaskSpec`.
 
-_Implementation status_: STOP/PAUSE/RESUME/STATUS/PING handling, state emission,
+_Implementation status_: STOP/STATUS/PING handling, state emission,
 reserved policies, and context-aware process title formatting are implemented in
 `BaseTask`.
 
@@ -227,7 +236,7 @@ class ProcessTitleMixin:
             String of last TID_SHORT_LENGTH digits
             
         Rationale:
-            Last digits change most frequently (nanosecond precision),
+            Low bits change most frequently (hybrid timestamp counter),
             providing better uniqueness for contemporary tasks.
         """
         return self.tid[-self.TID_SHORT_LENGTH:]
@@ -298,17 +307,11 @@ class ProcessTitleMixin:
             - Easy to parse with standard tools (cut, awk, grep)
         """
         import re
-        from pathlib import Path
         
-        # Extract context short name from weft_context path
-        context_short = "unknown"
-        if hasattr(self.taskspec.spec, 'weft_context') and self.taskspec.spec.weft_context:
-            context_path = Path(self.taskspec.spec.weft_context)
-            context_short = context_path.name[:8]  # Max 8 chars for context
-            # Sanitize context name
-            context_short = re.sub(r'[^a-zA-Z0-9_-]', '', context_short)
-            if not context_short:
-                context_short = "proj"  # Fallback
+        # Extract context short name from project root
+        context_path = self.context.path
+        context_short = context_path.name[:8]  # Max 8 chars for context
+        context_short = re.sub(r'[^a-zA-Z0-9_-]', '', context_short) or "proj"
         
         # Start with prefix-context-tid format (hyphens separate components)
         parts = [f"{self.PROCESS_TITLE_PREFIX}-{context_short}-{self.tid_short}"]
@@ -334,7 +337,7 @@ class ProcessTitleMixin:
     def _register_tid_mapping(self) -> None:
         """Register TID mapping for reverse lookup.
         
-        Saves mapping to weft.state.process.tid_mappings queue for tools that need
+        Saves mapping to weft.state.tid_mappings queue for tools that need
         to resolve short TIDs to full TIDs.
         
         Message format:
@@ -365,16 +368,16 @@ class ProcessTitleMixin:
 **Execution Flow**:
 1. Initialize with TaskSpec
 2. Set initial process title "weft-{context_short}-{tid_short}:name:init"
-3. Register TID mapping to weft.state.process.tid_mappings queue
+3. Register TID mapping to weft.state.tid_mappings queue
 4. Mark status as "spawning" and update process title
 5. Start monitoring thread
 6. Execute target (function or command)
 7. Update process title to "running"
 8. Process queues continuously
-   - Handle control messages (STOP, PAUSE, etc.)
+   - Handle control messages (STOP, STATUS, PING)
    - Handle input queues (if provided), routing input to target stdin
    - Write output from target to identified output queue (default outbox)
-   - Update state from monitoring thread and send to global task log queue (weft.tasks.log)
+   - Update state from monitoring thread and send to global task log queue (weft.log.tasks)
    - Periodically update process title with progress if available
 9. Write final output/accumulated output to outbox
 10. Update process title to terminal state (completed/failed/timeout/killed)
@@ -406,16 +409,9 @@ class CommandExecutor(Executor):
         def set_subprocess_title():
             """Set title in child process after fork but before exec."""
             import setproctitle
-            from pathlib import Path
+            import re
             tid_short = tid[-10:]
-            
-            # Extract context short name (same logic as main process)
-            context_short = "unknown"
-            if hasattr(taskspec.spec, 'weft_context') and taskspec.spec.weft_context:
-                context_path = Path(taskspec.spec.weft_context)
-                context_short = context_path.name[:8]
-                import re
-                context_short = re.sub(r'[^a-zA-Z0-9_-]', '', context_short) or "proj"
+            context_short = re.sub(r'[^a-zA-Z0-9_-]', '', self.context.path.name[:8]) or "proj"
             
             setproctitle.setproctitle(f"weft-worker-{context_short}-{tid_short}:{target[0]}")
         
@@ -434,6 +430,8 @@ class CommandExecutor(Executor):
     
     def _execute_with_wrapper(self, target: list[str], tid: str, name: str):
         """Windows wrapper for process title setting."""
+        import re
+        context_short = re.sub(r'[^a-zA-Z0-9_-]', '', self.context.path.name[:8]) or "proj"
         wrapper_script = f"""
 import setproctitle
 import subprocess
@@ -442,15 +440,9 @@ from pathlib import Path
 import re
 
 tid_short = "{tid[-10:]}"
+context_short = "{context_short}"
 
-# Extract context short name 
-context_short = "unknown"
-if hasattr(taskspec.spec, 'weft_context') and taskspec.spec.weft_context:
-    context_path = Path(taskspec.spec.weft_context)
-    context_short = context_path.name[:8]
-    context_short = re.sub(r'[^a-zA-Z0-9_-]', '', context_short) or "proj"
-
-setproctitle.setproctitle(f"weft-worker-{{context_short}}-{{tid_short}}:{target[0]}")
+setproctitle.setproctitle(f"weft-worker-{context_short}-{tid_short}:{target[0]}")
 sys.exit(subprocess.call({target!r}))
 """
         # Write wrapper and execute
@@ -463,7 +455,9 @@ sys.exit(subprocess.call({target!r}))
 class FunctionExecutor(Executor):
     def execute(self, target: Callable, tid: str, name: str) -> ExecutionResult:
         """Execute function with process title in multiprocessing."""
-        
+        import re
+        context_short = re.sub(r'[^a-zA-Z0-9_-]', '', self.context.path.name[:8]) or "proj"
+
         def wrapped_target(*args, **kwargs):
             """Wrapper that sets process title before executing."""
             import setproctitle
@@ -472,12 +466,7 @@ class FunctionExecutor(Executor):
             
             tid_short = tid[-10:]
             
-            # Extract context short name
-            context_short = "unknown"
-            if hasattr(taskspec.spec, 'weft_context') and taskspec.spec.weft_context:
-                context_path = Path(taskspec.spec.weft_context)
-                context_short = context_path.name[:8]
-                context_short = re.sub(r'[^a-zA-Z0-9_-]', '', context_short) or "proj"
+            context_short = "{context_short}"
             
             setproctitle.setproctitle(f"weft-func-{context_short}-{tid_short}:{name}")
             return target(*args, **kwargs)
@@ -507,10 +496,14 @@ This ensures that both the main task process and any subprocesses it spawns are 
 class ResourceMonitor:
     """Default psutil-based resource monitor."""
     
-    def __init__(self):
+    def __init__(self, limits: LimitsSection, polling_interval: float = 1.0):
+        self.limits = limits
+        self.polling_interval = polling_interval
         self.process = None  # psutil.Process instance
+        self.history = []
+        self.max_history = 100
         
-    def start_monitoring(self, pid: int, interval: float = 1.0):
+    def start_monitoring(self, pid: int):
         """Begin monitoring process using psutil."""
         self.process = psutil.Process(pid)
         
@@ -523,15 +516,15 @@ class ResourceMonitor:
             connections=len(self.process.connections())
         )
         
-    def check_limits(self, limits: LimitsSection) -> tuple[bool, str]:
+    def check_limits(self) -> tuple[bool, str | None]:
         """Check if limits exceeded using psutil metrics."""
         metrics = self.get_current_metrics()
         
-        if limits.memory_mb and metrics.memory_mb > limits.memory_mb:
-            return False, f"Memory {metrics.memory_mb}MB > {limits.memory_mb}MB"
+        if self.limits.memory_mb and metrics.memory_mb > self.limits.memory_mb:
+            return False, f"Memory {metrics.memory_mb}MB > {self.limits.memory_mb}MB"
             
-        if limits.cpu_limit and metrics.cpu_percent > limits.cpu_limit:
-            return False, f"CPU {metrics.cpu_percent}% > {limits.cpu_limit}%"
+        if self.limits.cpu_percent and metrics.cpu_percent > self.limits.cpu_percent:
+            return False, f"CPU {metrics.cpu_percent}% > {self.limits.cpu_percent}%"
             
         return True, None
         
@@ -544,46 +537,52 @@ class ResourceMonitor:
 
 ## 5. Queue System Integration
 
+Queue names and global queues are defined in
+[00-Quick_Reference.md](00-Quick_Reference.md). This section focuses on
+structure and message formats.
+
 **Queue Structure Per Task**:
 ```python
 # Standard queues for each task (using TID prefix)
 T{tid}.inbox      # New messages to process
 T{tid}.reserved   # Messages claimed for processing (includes failed)
 T{tid}.outbox     # Completed results
-T{tid}.ctrl_in    # Control commands (STOP, PAUSE, etc.)
+T{tid}.ctrl_in    # Control commands (STOP, STATUS, PING)
 T{tid}.ctrl_out   # Status updates from task
 
 # Global visibility queues
-weft.tasks.log       # Aggregates state from ALL tasks
+weft.log.tasks       # Aggregates state from ALL tasks
 
 # Ephemeral system state (excluded from weft dump)
-weft.state.process.tid_mappings    # Maps short TIDs to full TIDs for process management
-weft.state.worker.registry         # Worker liveness tracking (includes PIDs)
-weft.state.streaming.sessions      # Active streaming operations (self-managed by tasks)
+weft.state.tid_mappings    # Maps short TIDs to full TIDs for process management
+weft.state.workers         # Worker liveness tracking (includes PIDs)
+weft.state.streaming       # Active streaming operations (self-managed by tasks)
 
 # Worker coordination queues
 weft.spawn.requests     # Global queue for task spawn requests
 ```
 
 **TID Mapping Queue Structure**:
-The `weft.state.process.tid_mappings` queue maintains a persistent record of TID mappings for process management:
+The `weft.state.tid_mappings` queue maintains a runtime record of TID mappings for process management:
 
 ```python
-# Message format in weft.state.process.tid_mappings
+# Message format in weft.state.tid_mappings
 {
     "short": "0161024",              # Last 10 digits of TID
     "full": "1837025672140161024",   # Complete 19-digit TID
     "pid": 12345,                     # Process ID
     "name": "git-clone",              # Task name
-    "started": 1837025672140161024  # Start timestamp (nanoseconds)
+    "started": 1837025672140161024  # Start timestamp (SimpleBroker format)
 }
 ```
 
+_Implementation mapping_: `weft/core/tasks/base.py` (`_register_tid_mapping`, additional fields like task_pid/managed_pids are included).
+
 **Worker Registry Queue Structure**:
-The `weft.state.worker.registry` queue tracks worker liveness for system management:
+The `weft.state.workers` queue tracks worker liveness for system management:
 
 ```python
-# Message format in weft.state.worker.registry
+# Message format in weft.state.workers
 {
     "worker_id": "W1837025672140161025",  # Worker TID
     "pid": 12345,                         # Process ID
@@ -591,11 +590,13 @@ The `weft.state.worker.registry` queue tracks worker liveness for system managem
 }
 ```
 
+_Implementation mapping_: `weft/core/manager.py` (registry payloads; additional keys permitted).
+
 **Streaming Sessions Queue Structure**:
-The `weft.state.streaming.sessions` queue tracks active streaming/interactive operations. Entries are appended when a task begins streaming and deleted when the session ends. (Implementation: `weft/core/tasks/base.py` `_begin_streaming_session`, `_end_streaming_session`.)
+The `weft.state.streaming` queue tracks active streaming/interactive operations. Entries are appended when a task begins streaming and deleted when the session ends. (Implementation: `weft/core/tasks/base.py` `_begin_streaming_session`, `_end_streaming_session`.)
 
 ```python
-# Message format in weft.state.streaming.sessions (self-managed by tasks)
+# Message format in weft.state.streaming (self-managed by tasks)
 {
     "session_id": "1837025672140161024:T1837025672140161024.outbox:1837025672140162024",
     "tid": "1837025672140161024",       # Task performing streaming
@@ -618,8 +619,8 @@ This enables reverse lookup when managing tasks via OS commands:
 ```bash
 # Find full TID from process (no escaping needed!)
 ps aux | grep "weft-proj1-0161024"     # Shows: weft-proj1-0161024:git-clone:running
-# Lookup full TID  
-weft tid-lookup 0161024          # Returns: 1837025672140161024
+# Lookup full TID
+weft task tid 0161024            # Returns: 1837025672140161024
 # Use full TID for queue operations
 weft queue read T1837025672140161024.outbox
 
@@ -701,7 +702,7 @@ weft/integration/                 # External system integration
 ├── streams.py                    # Stream adapters (stdin/stdout)
 ├── unix.py                       # Unix command wrappers
 ├── pipelines.py                  # Task pipeline builders
-└── templates.py                  # Task template management
+└── specs.py                      # Task spec storage and instantiation
 ```
 
 ### Component Locations
@@ -719,8 +720,8 @@ weft/integration/                 # External system integration
 | **ProcessManager** | `weft.tools.process_tools` | OS process discovery and control |
 | **TIDResolver** | `weft.tools.tid_tools` | TID mapping and resolution |
 | **TaskMonitor** | `weft.tools.observability` | System state observation |
-| **StreamAdapter** | `weft.integration.streams` | Stream routing to queues |
-| **PipelineBuilder** | `weft.integration.pipelines` | Task chain construction |
+| **StreamAdapter** | `weft.specs.streams` | Stream routing to queues |
+| **PipelineBuilder** | `weft.specs.pipelines` | Task chain construction |
 
 ### Import Guidelines
 
@@ -737,9 +738,9 @@ from weft.core.executor import FunctionExecutor, CommandExecutor
 from weft.tools.process_tools import ProcessManager
 from weft.tools.tid_tools import TIDResolver
 
-# Integration utilities
-from weft.integration.streams import StreamAdapter
-from weft.integration.pipelines import PipelineBuilder
+# Spec utilities
+from weft.specs.streams import StreamAdapter
+from weft.specs.pipelines import PipelineBuilder
 ```
 
 ## 6. WeftContext (weft/context.py)

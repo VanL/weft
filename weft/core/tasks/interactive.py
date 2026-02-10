@@ -12,7 +12,7 @@ from typing import Any
 from simplebroker import Queue
 from weft._constants import CONTROL_STOP
 from weft.core.targets import decode_work_message
-from weft.core.taskspec import TaskSpec
+from weft.core.taskspec import ReservedPolicy, TaskSpec
 
 from .multiqueue_watcher import QueueMessageContext
 from .runner import CommandSession, TaskRunner
@@ -145,6 +145,10 @@ class InteractiveTaskMixin(ABC):
         if self._interactive_session is not None:
             return self._interactive_session
 
+        self.taskspec.mark_started()
+        self._update_process_title("spawning")
+        self._report_state_change(event="work_spawning", message_id=message_id)
+
         runner = TaskRunner(
             target_type=self.taskspec.spec.type,
             function_target=self.taskspec.spec.function_target,
@@ -161,6 +165,8 @@ class InteractiveTaskMixin(ABC):
                 "weft.core.resource_monitor.ResourceMonitor",
             ),
             monitor_interval=self.taskspec.spec.polling_interval,
+            db_path=getattr(self, "_db_path", None),
+            config=getattr(self, "_config", None),
         )
 
         session = runner.start_session()
@@ -191,7 +197,39 @@ class InteractiveTaskMixin(ABC):
         session = session_obj
 
         outbox_queue = self._queue(self._queue_names["outbox"])
+        self._interactive_emit_chunks(session, outbox_queue)
 
+        ok, violation = session.poll_limits()
+        if not ok and violation:
+            self.taskspec.mark_failed(error=violation)
+            self._report_state_change(
+                event="work_limit_violation",
+                message_id=time.time_ns(),
+                error=violation,
+            )
+            session.terminate()
+            session.stop_monitor()
+            self._interactive_finalize_session(failure_reason=violation)
+            return
+
+        metrics = session.last_metrics
+        if metrics is not None:
+            cpu_percent = int(round(metrics.cpu_percent))
+            self.taskspec.update_metrics(
+                memory=metrics.memory_mb,
+                cpu=cpu_percent,
+                fds=metrics.open_files,
+                net_connections=metrics.connections,
+            )
+
+        if not session.is_alive():
+            self._interactive_drain_remaining(session, outbox_queue)
+            session.stop_monitor()
+            self._interactive_finalize_session()
+
+    def _interactive_emit_chunks(
+        self, session: CommandSession, outbox_queue: Queue
+    ) -> None:
         stdout_chunks = session.poll_stdout()
         for chunk in stdout_chunks:
             envelope = {
@@ -221,32 +259,17 @@ class InteractiveTaskMixin(ABC):
             self._interactive_stderr_index += 1
             self._interactive_stderr_final_sent = False
 
-        ok, violation = session.poll_limits()
-        if not ok and violation:
-            self.taskspec.mark_failed(error=violation)
-            self._report_state_change(
-                event="work_limit_violation",
-                message_id=time.time_ns(),
-                error=violation,
-            )
-            session.terminate()
-            session.stop_monitor()
-            self._interactive_finalize_session(failure_reason=violation)
-            return
-
-        metrics = session.last_metrics
-        if metrics is not None:
-            cpu_percent = int(round(metrics.cpu_percent))
-            self.taskspec.update_metrics(
-                memory=metrics.memory_mb,
-                cpu=cpu_percent,
-                fds=metrics.open_files,
-                net_connections=metrics.connections,
-            )
-
-        if not session.is_alive():
-            session.stop_monitor()
-            self._interactive_finalize_session()
+    def _interactive_drain_remaining(
+        self, session: CommandSession, outbox_queue: Queue
+    ) -> None:
+        deadline = time.time() + 0.25
+        while time.time() < deadline:
+            self._interactive_emit_chunks(session, outbox_queue)
+            if getattr(session, "_stdout_closed", False) and getattr(
+                session, "_stderr_closed", False
+            ):
+                break
+            time.sleep(0.01)
 
     def _interactive_finalize_session(self, failure_reason: str | None = None) -> None:
         if getattr(self, "_interactive_session", None) is None:
@@ -278,6 +301,11 @@ class InteractiveTaskMixin(ABC):
                     message_id=time.time_ns(),
                     error=message,
                 )
+                policy = self.taskspec.spec.reserved_policy_on_error
+                self._apply_reserved_policy(policy)
+                if policy is not ReservedPolicy.KEEP:
+                    self._ensure_reserved_empty()
+                    self._cleanup_reserved_if_needed()
                 self._update_process_title("failed")
         else:
             if terminal_override_allowed:
@@ -355,6 +383,14 @@ class InteractiveTaskMixin(ABC):
             self.taskspec.mark_cancelled(reason="STOP command received")
             self._report_state_change(event="control_stop", message_id=time.time_ns())
             self._update_process_title("cancelled")
+            policy = self.taskspec.spec.reserved_policy_on_stop
+            self._apply_reserved_policy(policy)
+            if policy is not ReservedPolicy.KEEP:
+                self._ensure_reserved_empty()
+                self._cleanup_reserved_if_needed()
+            if self._stop_event:
+                self._stop_event.set()
+            self._send_control_response("STOP", "ack")
             self._interactive_shutdown(reason="cancelled")
             return True
         return False

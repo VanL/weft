@@ -6,12 +6,11 @@
 $ weft run echo "hello world"
 hello world
 
-$ weft run --spec task.json --wait
-Task completed: 1234567890
+$ weft run --spec task.json
+# streams task output and returns when complete
 
 $ weft status
-Manager: Running (PID 1234, idle timeout: 600s)
-Tasks: 3 total (2 running, 1 completed)
+System: OK
 ```
 
 Weft is a queue-based task execution system focused on enabling interaction between AI agents, user-provided functions, and existing CLI tools. It combines the simplicity of direct command execution with the power of durable task queues, multiprocess isolation, and comprehensive state tracking.
@@ -34,13 +33,18 @@ $ weft run --memory 100 --cpu 50 python script.py
 # Run and wait for completion
 $ weft run --wait --timeout 30 ./long-task.sh
 
-# Run Python function
-$ weft run --function mymodule:process_data --arg input.csv
+# Run a saved task spec (from .weft/tasks/)
+$ weft run --spec data-cleanup
+
+# Run a pipeline spec (from .weft/pipelines/)
+$ weft run --pipeline etl-job
+
+# Run a Python function
+$ weft run --function mymodule:process_data --arg input.csv --kw mode=fast
 
 # Check system status
 $ weft status
-Manager: Running (PID 12345)
-Tasks: 5 total (3 running, 2 completed)
+System: OK
 
 # Get task result
 $ weft result 1234567890
@@ -57,7 +61,9 @@ Weft uses `.weft/` directories for project isolation, similar to git repositorie
 myproject/
   .weft/
     broker.db        # SimpleBroker database
-    autostart/       # Auto-starting task templates
+    tasks/           # Saved task specs
+    pipelines/       # Saved pipeline specs
+    autostart/       # Autostart manifests (lifecycle + defaults)
     outputs/         # Large output spillover
     logs/            # Centralized logging
     ...
@@ -67,12 +73,13 @@ Run `weft` commands from anywhere in the project tree - it searches upward to fi
 
 ### Task IDs (TIDs)
 
-Every task receives a unique 19-digit TID:
+Every task receives a unique 64-bit SimpleBroker timestamp (hybrid microseconds + logical counter), typically 19 digits:
 
 - **Full TID**: `1837025672140161024` (Unique task ID)
 - **Short TID**: `0161024` (last 10 digits for convenience)
 - Used for correlation across queues and process titles
-- Chronologically ordered, format-compatible with time.time_ns()
+- Monotonic within a context, format-compatible with time.time_ns()
+- The spawn-request message ID becomes the task TID for the full lifecycle
 
 ### Queue Structure
 
@@ -82,13 +89,17 @@ Each task gets its own queues:
 T{tid}.inbox      # Work messages to process
 T{tid}.reserved   # Messages being processed (reservation pattern)
 T{tid}.outbox     # Results and output
-T{tid}.ctrl_in    # Control commands (STOP, PAUSE, etc.)
+T{tid}.ctrl_in    # Control commands (STOP, STATUS, PING)
 T{tid}.ctrl_out   # Status responses
 
-weft.tasks.log           # Global state log (all tasks)
+weft.log.tasks           # Global state log (all tasks)
 weft.spawn.requests      # Task spawn requests to manager
-weft.workers.registry    # Manager liveness tracking
+weft.state.workers       # Manager liveness tracking (runtime state)
+weft.state.tid_mappings  # Short->full TID mappings (runtime state)
+weft.state.streaming     # Active streaming sessions (runtime state)
 ```
+
+Queues under `weft.state.*` are runtime-only and excluded from dumps by default.
 
 ### Reservation Pattern
 
@@ -97,6 +108,13 @@ Weft implements inbox -> reserved -> outbox flow for reliable message processing
 1. **Reserve**: Move message from inbox to reserved
 2. **Process**: Execute work while message is in reserved
 3. **Complete**: Write output to outbox, delete from reserved (or apply policy)
+
+If a task crashes mid-work, the message remains in reserved for manual recovery or explicit requeue.
+
+**Idempotency guidance**
+- Single-message tasks may use `tid` as an idempotency key.
+- Multi-message tasks should use the inbox/reserved message ID (timestamp).
+- Recommended composite key: `tid:message_id`.
 
 Configurable policies (`keep`, `requeue`, `clear`) control reserved queue behavior on errors.
 
@@ -119,7 +137,7 @@ weft-proj-0161024:mytask:running
 weft-proj-0161025:worker:completed
 ```
 
-Format: `weft-{context}-{short_tid}:{name}:{status}`
+Format: `weft-{context_short}-{short_tid}:{name}:{status}[:details]`
 
 ## Command Reference
 
@@ -130,11 +148,18 @@ Format: `weft-{context}-{short_tid}:{name}:{status}`
 weft init [--autostart/--no-autostart]
 
 # Show system status
-weft status [TID] [--all] [--json] [--watch]
+weft status [--json]
 
-# Dump/load database
-weft dump [-o FILE]
-weft load [-i FILE]
+# Task detail view
+weft task status TID [--process] [--watch] [--json]
+
+# List tasks
+weft list [--stats] [--status STATUS] [--json]
+
+# System maintenance
+weft system tidy
+weft system dump -o FILE
+weft system load -i FILE
 ```
 
 ### Task Execution
@@ -142,7 +167,8 @@ weft load [-i FILE]
 ```bash
 # Run command
 weft run COMMAND [args...]
-weft run --spec taskspec.json
+weft run --spec NAME|PATH
+weft run --pipeline NAME|PATH
 weft run --function module:func [--arg VALUE] [--kw KEY=VALUE]
 
 # Execution options
@@ -150,9 +176,10 @@ weft run --function module:func [--arg VALUE] [--kw KEY=VALUE]
 --timeout N         # Timeout in seconds
 --memory N          # Memory limit in MB
 --cpu N            # CPU limit (percentage)
---interactive, -i   # Interactive mode (stdin/stdout)
---stream-output     # Stream output in real-time
---tag KEY=VALUE     # Add metadata tags
+--env KEY=VALUE      # Environment variable
+--autostart/--no-autostart  # Enable/disable autostart manifests
+--arg VALUE          # Positional arg for --function (repeatable)
+--kw KEY=VALUE       # Keyword arg for --function (repeatable)
 
 # Get results
 weft result TID [--timeout N] [--stream] [--json]
@@ -179,27 +206,32 @@ weft queue alias list [--target QUEUE]
 
 ### Autostart Tasks
 
-Template files in `.weft/autostart/*.json` are automatically launched when the manager starts:
+Manifest files in `.weft/autostart/*.json` are automatically launched when the manager starts. Autostart targets must reference stored task specs or pipelines (no inline TaskSpecs).
 
 ```bash
-# Create autostart template
-$ cat > .weft/autostart/monitor.json <<EOF
+# Save a task spec
+$ cat > .weft/tasks/queue-monitor.json <<EOF
 {
   "name": "queue-monitor",
   "spec": {
     "type": "function",
     "function_target": "monitoring.watch_queues",
     "timeout": null
-  },
-  "io": {
-    "inputs": {},
-    "outputs": {"metrics": "monitoring.queue.metrics"}
   }
 }
 EOF
 
+# Create autostart manifest
+$ cat > .weft/autostart/monitor.json <<EOF
+{
+  "name": "queue-monitor",
+  "target": { "type": "task", "name": "queue-monitor" },
+  "policy": { "mode": "ensure" }
+}
+EOF
+
 # Next manager start will launch it automatically
-$ weft run --wait echo "trigger manager"
+$ weft run echo "trigger manager"
 ```
 
 Control autostart behavior:
@@ -216,7 +248,8 @@ Tasks are configured with JSON specifications:
   "name": "process-data",
   "spec": {
     "type": "command",
-    "process_target": ["python", "process.py"],
+    "process_target": "python",
+    "args": ["process.py"],
     "timeout": 300,
     "limits": {
       "memory_mb": 512,
@@ -226,34 +259,30 @@ Tasks are configured with JSON specifications:
     "env": {"LOG_LEVEL": "debug"},
     "stream_output": true,
     "cleanup_on_exit": true
-  },
-  "io": {
-    "inputs": {"data": "input.queue"},
-    "outputs": {"results": "output.queue"}
-  },
-  "metadata": {
-    "tags": ["production", "critical"]
   }
 }
 ```
 
 **Spec fields:**
 - `type`: `"command"` or `"function"`
-- `process_target`: Command array (for commands)
+- `process_target`: Command executable (for commands)
 - `function_target`: Module:function string (for functions)
+- `args`: Additional argv items (appended for commands, *args for functions)
+- `keyword_args`: Keyword args for function targets
 - `timeout`: Seconds (null for no timeout)
 - `limits`: Resource constraints
 - `env`: Environment variables
 - `stream_output`: Enable output streaming
-- `cleanup_on_exit`: Delete queues on completion
+- `cleanup_on_exit`: Delete empty queues on completion (outbox retained until consumed)
+- `weft_context`: Runtime-expanded project context (set by Manager)
 
-**IO fields:**
-- `inputs`: Map of name -> queue for reading
-- `outputs`: Map of name -> queue for writing
+**Runtime expansion:**
+- TaskSpec templates omit `tid`, `io`, `state`, and `spec.weft_context`.
+- The Manager expands these at spawn time. The spawn-request message ID becomes the task TID.
 
 ## State Tracking
 
-All state changes are logged to `weft.tasks.log`:
+All state changes are logged to `weft.log.tasks`:
 
 ```json
 {
@@ -299,7 +328,7 @@ Violations trigger `work_limit_violation` events and task termination.
 ```bash
 0   - Success
 1   - General error
-2   - Not found / Queue empty
+2   - Not found (task, queue, spec)
 124 - Timeout
 ```
 
@@ -336,8 +365,8 @@ $ weft queue read output.queue
 ### Persistent Watchers
 
 ```bash
-# Create autostart watcher
-$ cat > .weft/autostart/file-watcher.json <<EOF
+# Save task spec
+$ cat > .weft/tasks/file-watcher.json <<EOF
 {
   "name": "file-watcher",
   "spec": {
@@ -345,6 +374,15 @@ $ cat > .weft/autostart/file-watcher.json <<EOF
     "function_target": "watchers.watch_directory",
     "timeout": null
   }
+}
+EOF
+
+# Create autostart manifest
+$ cat > .weft/autostart/file-watcher.json <<EOF
+{
+  "name": "file-watcher",
+  "target": { "type": "task", "name": "file-watcher" },
+  "policy": { "mode": "ensure" }
 }
 EOF
 
@@ -382,13 +420,13 @@ $ weft run --timeout 60 --memory 500 ./task.sh
 ```
 1. CLI: weft run COMMAND
 2. Manager auto-started if needed
-3. TaskSpec created and validated
-4. Queued to weft.spawn.requests
-5. Manager spawns Consumer process
+3. TaskSpec template created and validated
+4. Spawn request written to weft.spawn.requests (message ID becomes TID)
+5. Manager expands TaskSpec and spawns Consumer process
 6. Consumer reserves work from inbox
 7. TaskRunner executes in child process
 8. Output written to outbox
-9. State logged to weft.tasks.log
+9. State logged to weft.log.tasks
 10. CLI retrieves result
 ```
 

@@ -4,77 +4,80 @@ This document defines the fundamental invariants, constraints, and guarantees th
 
 ## System Invariants
 
-### 1. Immutability Invariants
-- **I1**: TaskSpec.spec section is immutable after creation
-- **I2**: TaskSpec.io section is immutable after creation
-- **I3**: TaskSpec.tid is immutable and unique
-- **I4**: TaskSpec.state and metadata remain mutable for runtime updates
+_Implementation mapping_: `weft/core/taskspec.py` (immutability/state validation), `weft/core/tasks/base.py` (process titles/logging), `weft/core/manager.py` (worker registry), `weft/_constants.py` (queue names).
 
-### 2. State Machine Invariants
-- **I5**: States transition forward only (no rollback)
-- **I6**: Terminal states are immutable (completed, failed, timeout, cancelled, killed)
-- **I7**: Running state requires started_at timestamp
-- **I8**: Terminal states require completed_at timestamp
-- **I9**: completed_at > started_at when both present
-- **I10**: State changes are reported to weft.tasks.log
+### Immutability Invariants
+- **IMMUT.1**: TaskSpec.spec section is immutable after creation
+- **IMMUT.2**: TaskSpec.io section is immutable after creation (runtime-expanded)
+- **IMMUT.3**: Resolved TaskSpec.tid is immutable and unique (templates may omit tid)
+- **IMMUT.4**: TaskSpec.state and metadata remain mutable for runtime updates
 
-### 3. Queue Invariants
-- **I11**: Every task has exactly one inbox, reserved, and outbox queue
-- **I12**: Every task has exactly one ctrl_in and ctrl_out queue
-- **I13**: Queue names are unique per task (prefixed with "T{tid}.")
-- **I14**: Messages are delivered exactly once (via claim/move semantics)
-- **I15**: Reserved queue contains at most one message per inbox message
-- **I16**: Failed messages remain in reserved queue with state.error set (unless TaskSpec `reserved_policy_on_error` is set to `requeue` or `clear`)
+### State Machine Invariants
+- **STATE.1**: States transition forward only (no rollback)
+- **STATE.2**: Terminal states are immutable (completed, failed, timeout, cancelled, killed)
+- **STATE.3**: Running state requires started_at timestamp
+- **STATE.4**: Terminal states require completed_at timestamp
+- **STATE.5**: completed_at > started_at when both present
 
-### 4. Resource Invariants
-- **I17**: Limits are grouped in spec.limits subsection
-- **I18**: Memory limit > 0 MB when specified
-- **I19**: 0 <= CPU limit <= 100% when specified
-- **I20**: File descriptor limit >= 1 when specified
-- **I21**: Current metrics <= maximum metrics tracked
-- **I22**: Resource violations trigger task termination
+### Queue Invariants
+- **QUEUE.1**: Every task has exactly one inbox, reserved, and outbox queue
+- **QUEUE.2**: Every task has exactly one ctrl_in and ctrl_out queue
+- **QUEUE.3**: Queue names default to the "T{tid}." prefix when not overridden
+- **QUEUE.4**: Messages are delivered exactly once (via claim/move semantics)
+- **QUEUE.5**: Reserved queue contains at most one message per inbox message
+- **QUEUE.6**: Failed messages remain in reserved queue with state.error set (unless reserved policy requeues or clears)
 
-### 5. Execution Invariants
-- **I23**: Task executes target exactly once per run
-- **I24**: Timeouts are enforced within 1 second precision
-- **I25**: PID is set only when process/thread starts
-- **I26**: Return code is set only on process completion
-- **I27**: Failed tasks leave messages in reserved for recovery (configurable via reserved queue policies)
+### Resource Invariants
+- **RES.1**: Limits are grouped in spec.limits subsection
+- **RES.2**: Memory limit > 0 MB when specified
+- **RES.3**: 0 <= CPU limit <= 100% when specified
+- **RES.4**: File descriptor limit >= 1 when specified
+- **RES.5**: Current metrics <= peak metrics tracked
+- **RES.6**: Resource violations trigger task termination
 
-### 6. Observability Invariants
-- **I28**: All state transitions logged to weft.tasks.log
-- **I29**: No separate state database (queue-based state only)
-- **I30**: State visible through both task queues and global log
-- **I31**: Tasks set process title with shell-friendly format "weft-{tid_short}:{name}:{status}"
-- **I32**: TID short form uses last 10 digits for uniqueness
-- **I33**: Process title updates on every state transition
-- **I34**: TID mappings saved to weft.state.process.tid_mappings queue
-- **I35**: Process titles sanitized to remove shell special characters
-- **I36**: Process titles use only alphanumeric, hyphen, colon, and underscore characters
+### Execution Invariants
+- **EXEC.1**: Task executes target exactly once per run
+- **EXEC.2**: Timeouts are enforced within 1 second precision
+- **EXEC.3**: PID is set only when process/thread starts
+- **EXEC.4**: Return code is set only on process completion
 
-### 7. Implementation Invariants
-- **I37**: Exit code 124 indicates timeout (GNU coreutils standard)
-- **I38**: Messages limited to 10MB by SimpleBroker
-- **I39**: Outputs >10MB written to `/tmp/weft/outputs/{tid}/` with reference message
-- **I40**: Large output reference includes path, size, and 1KB preview
-- **I41**: Queue connections must be recreated in child processes (no sharing)
-- **I42**: Use multiprocessing.get_context("spawn") for process creation
+### Idempotency Invariants
+- **IDEMP.1**: Single-message tasks may use `tid` as an idempotency key
+- **IDEMP.2**: Multi-message tasks must use inbox/reserved message IDs for idempotency
+- **IDEMP.3**: Recommended idempotency key format is `tid:message_id`
 
-### 8. Worker Invariants
-- **I43**: Workers are Tasks with long-running targets (timeout=None)
-- **I44**: Worker TIDs follow same format as regular Task TIDs
-- **I45**: Workers register capabilities in weft.workers.registry
-- **I46**: Message timestamp becomes child Task TID for correlation
-- **I47**: Workers can spawn other workers (recursive architecture)
-- **I48**: Primordial worker bootstraps the system
-- **I49**: Workers respond to same control messages as Tasks
+### Observability Invariants
+- **OBS.1**: All state transitions logged to weft.log.tasks
+- **OBS.2**: No separate state database (queue-based state only)
+- **OBS.3**: State visible through both task queues and global log
+- **OBS.4**: Process titles follow the format in `01-Core_Components.md` and update on transitions
+- **OBS.5**: TID short form uses last 10 digits for uniqueness
+- **OBS.6**: TID mappings saved to weft.state.tid_mappings queue
+- **OBS.7**: Process titles sanitized to remove shell special characters
+- **OBS.8**: Process titles use only alphanumeric, hyphen, colon, and underscore characters
 
-### 9. Context Invariants
-- **I50**: Each weft context corresponds to one SimpleBroker database
-- **I51**: weft_context defaults to current working directory when null
-- **I52**: Tasks cannot communicate across different contexts
-- **I53**: Context cleanup removes all associated queues and data
-- **I54**: .broker.db auto-created on first queue operation in context
+### Implementation Invariants
+- **IMPL.1**: Exit code 124 indicates timeout (GNU coreutils standard)
+- **IMPL.2**: Messages limited to 10MB by SimpleBroker
+- **IMPL.3**: Outputs >10MB written to `.weft/outputs/{tid}/` when `spec.weft_context` is set (runtime-expanded); otherwise to a temporary directory, with a reference message
+- **IMPL.4**: Large output reference includes path, size, preview, and sha256
+- **IMPL.5**: Queue connections must be recreated in child processes (no sharing)
+- **IMPL.6**: Use multiprocessing.get_context("spawn") for process creation
+
+### Worker Invariants
+- **WORKER.1**: Workers are Tasks with long-running targets (timeout=None)
+- **WORKER.2**: Worker TIDs follow same format as regular Task TIDs
+- **WORKER.3**: Workers register capabilities in weft.state.workers
+- **WORKER.4**: Spawn-request message ID becomes child Task TID for correlation
+- **WORKER.5**: Workers can spawn other workers (recursive architecture)
+- **WORKER.6**: Primordial manager bootstraps the system
+- **WORKER.7**: Workers respond to the same control messages as Tasks (STOP/STATUS/PING)
+
+### Context Invariants
+- **CTX.1**: Each project context corresponds to one SimpleBroker database
+- **CTX.2**: Tasks cannot communicate across different contexts
+- **CTX.3**: Context cleanup removes all associated queues and data
+- **CTX.4**: .weft/broker.db auto-created on first queue operation in context
 
 ## Validation and Enforcement
 
@@ -91,26 +94,26 @@ class InvariantChecker:
         """Check TaskSpec-related invariants."""
         violations = []
         
-        # I1, I2: spec and io immutability (checked by Pydantic)
+        # IMMUT.1/IMMUT.2: spec and io immutability (checked by Pydantic)
         if not hasattr(taskspec, '_spec_frozen'):
-            violations.append("I1/I2: TaskSpec.spec/io not marked as frozen")
+            violations.append("IMMUT.1/IMMUT.2: TaskSpec.spec/io not marked as frozen")
         
-        # I3: TID uniqueness and immutability
-        if not taskspec.tid or len(taskspec.tid) != 19:
-            violations.append("I3: Invalid TID format")
+        # IMMUT.3: TID uniqueness and immutability (resolved specs only)
+        if taskspec.tid is not None and len(taskspec.tid) != 19:
+            violations.append("IMMUT.3: Invalid TID format")
         
-        # I17-I20: Resource limit validation
+        # RES.1-RES.4: Resource limit validation
         if taskspec.spec.limits:
             limits = taskspec.spec.limits
             if limits.memory_mb is not None and limits.memory_mb <= 0:
-                violations.append("I18: Memory limit must be > 0 MB")
+                violations.append("RES.2: Memory limit must be > 0 MB")
             
             if (limits.cpu_percent is not None and 
                 not 0 <= limits.cpu_percent <= 100):
-                violations.append("I19: CPU limit must be 0-100%")
+                violations.append("RES.3: CPU limit must be 0-100%")
             
             if limits.max_fds is not None and limits.max_fds < 1:
-                violations.append("I20: FD limit must be >= 1")
+                violations.append("RES.4: FD limit must be >= 1")
         
         return violations
     
@@ -119,19 +122,19 @@ class InvariantChecker:
         violations = []
         state = taskspec.state
         
-        # I7: Running state requires started_at
+        # STATE.3: Running state requires started_at
         if state.status == "running" and not state.started_at:
-            violations.append("I7: Running state missing started_at")
+            violations.append("STATE.3: Running state missing started_at")
         
-        # I8: Terminal states require completed_at
+        # STATE.4: Terminal states require completed_at
         terminal_states = {"completed", "failed", "timeout", "cancelled", "killed"}
         if state.status in terminal_states and not state.completed_at:
-            violations.append("I8: Terminal state missing completed_at")
+            violations.append("STATE.4: Terminal state missing completed_at")
         
-        # I9: completed_at > started_at
+        # STATE.5: completed_at > started_at
         if (state.started_at and state.completed_at and 
             state.completed_at <= state.started_at):
-            violations.append("I9: completed_at must be > started_at")
+            violations.append("STATE.5: completed_at must be > started_at")
         
         return violations
     
@@ -139,18 +142,18 @@ class InvariantChecker:
         """Check queue-related invariants."""
         violations = []
         
-        # I11, I12: Required queues exist
+        # QUEUE.1/QUEUE.2: Required queues exist
         required_queues = ["inbox", "reserved", "outbox", "ctrl_in", "ctrl_out"]
         for queue_type in required_queues:
             queue_name = f"T{tid}.{queue_type}"
             if not self._queue_exists(queue_name):
-                violations.append(f"I11/I12: Missing required queue {queue_name}")
+                violations.append(f"QUEUE.1/QUEUE.2: Missing required queue {queue_name}")
         
-        # I15: Reserved queue has at most one message per inbox message
+        # QUEUE.5: Reserved queue has at most one message per inbox message
         reserved_count = self._count_messages(f"T{tid}.reserved")
         inbox_total = self._count_processed_messages(tid)  # From logs
         if reserved_count > inbox_total:
-            violations.append("I15: More reserved than processed messages")
+            violations.append("QUEUE.5: More reserved than processed messages")
         
         return violations
     
@@ -158,36 +161,34 @@ class InvariantChecker:
         """Check process title format invariants."""
         violations = []
         
-        # I31: Shell-friendly format
+        # OBS.4: Shell-friendly format
         if not title.startswith("weft-"):
-            violations.append("I31: Process title must start with 'weft-'")
+            violations.append("OBS.4: Process title must start with 'weft-'")
         
-        # I32: TID short form (last 10 digits)
+        # OBS.5: TID short form (last 10 digits)
         parts = title.split(":")
         if len(parts) < 2:
-            violations.append("I31: Invalid process title format")
+            violations.append("OBS.4: Invalid process title format")
         else:
             tid_part = parts[0].split("-")[-1]  # Extract TID from weft-{tid}
             if len(tid_part) != 10 or not tid_part.isdigit():
-                violations.append("I32: TID short form must be 10 digits")
+                violations.append("OBS.5: TID short form must be 10 digits")
             
             if tid_part != tid[-10:]:
-                violations.append("I32: TID short form mismatch")
+                violations.append("OBS.5: TID short form mismatch")
         
-        # I35, I36: Character restrictions
+        # OBS.7/OBS.8: Character restrictions
         allowed_chars = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-:_")
         if not set(title).issubset(allowed_chars):
-            violations.append("I35/I36: Process title contains forbidden characters")
+            violations.append("OBS.7/OBS.8: Process title contains forbidden characters")
         
         return violations
     
     def _queue_exists(self, queue_name: str) -> bool:
         """Check if queue exists in context."""
         try:
-            queue = self.context.get_queue(queue_name)
-            # Try to access queue (will create if doesn't exist)
-            queue.has_pending()
-            return True
+            # Requires a broker list call; implement via SimpleBroker list API.
+            return queue_name in self.context.list_queues()
         except Exception:
             return False
     
@@ -202,7 +203,7 @@ class InvariantChecker:
     def _count_processed_messages(self, tid: str) -> int:
         """Count total messages processed by task (from logs)."""
         try:
-            log_queue = self.context.get_queue("weft.tasks.log")
+            log_queue = self.context.get_queue("weft.log.tasks")
             count = 0
             for msg_str in log_queue.peek_all():
                 entry = json.loads(msg_str)
@@ -237,7 +238,7 @@ class InvariantEnforcer:
     def enforce_on_state_transition(self, taskspec: TaskSpec, 
                                    old_status: str, new_status: str) -> None:
         """Enforce invariants during state transitions."""
-        # I5: Forward-only transitions
+        # STATE.1: Forward-only transitions
         valid_transitions = {
             "created": {"spawning", "failed", "cancelled"},
             "spawning": {"running", "completed", "failed", "timeout", "cancelled", "killed"},
@@ -247,14 +248,14 @@ class InvariantEnforcer:
         if old_status in valid_transitions:
             if new_status not in valid_transitions[old_status]:
                 raise InvariantViolationError(
-                    f"I5: Invalid transition {old_status} -> {new_status}"
+                    f"STATE.1: Invalid transition {old_status} -> {new_status}"
                 )
         
-        # I6: Terminal states are immutable
+        # STATE.2: Terminal states are immutable
         terminal_states = {"completed", "failed", "timeout", "cancelled", "killed"}
         if old_status in terminal_states and old_status != new_status:
             raise InvariantViolationError(
-                f"I6: Cannot transition from terminal state {old_status}"
+                f"STATE.2: Cannot transition from terminal state {old_status}"
             )
         
         # Check other state invariants
@@ -271,19 +272,19 @@ class InvariantEnforcer:
     def enforce_resource_limits(self, metrics: ResourceMetrics, 
                                limits: LimitsSection) -> None:
         """Enforce resource limit invariants."""
-        # I21: Current <= maximum
-        if hasattr(metrics, 'max_memory_mb'):
-            if metrics.memory_mb > metrics.max_memory_mb:
+        # RES.5: Current <= peak
+        if hasattr(metrics, 'peak_memory_mb'):
+            if metrics.memory_mb > metrics.peak_memory_mb:
                 raise InvariantViolationError(
-                    "I21: Current memory exceeds tracked maximum"
+                    "RES.5: Current memory exceeds tracked peak"
                 )
         
-        # I22: Resource violations trigger termination
+        # RES.6: Resource violations trigger termination
         violations = metrics.exceeds_limits(limits)
         if violations:
             # This should trigger task termination
             raise ResourceLimitExceededError(
-                f"I22: Resource limits exceeded: {violations}"
+                f"RES.6: Resource limits exceeded: {violations}"
             )
 ```
 
@@ -294,7 +295,7 @@ class TestInvariants:
     """Test suite for invariant checking and enforcement."""
     
     def test_taskspec_immutability(self):
-        """Test I1, I2: TaskSpec.spec/io immutability."""
+        """Test IMMUT.1/IMMUT.2: TaskSpec.spec/io immutability."""
         taskspec = create_test_taskspec()
         
         # Should not be able to modify spec after creation
@@ -305,7 +306,7 @@ class TestInvariants:
             taskspec.io.inputs["new_queue"] = "test"
     
     def test_state_transitions(self):
-        """Test I5, I6: State transition rules."""
+        """Test STATE.1/STATE.2: State transition rules."""
         taskspec = create_test_taskspec()
         enforcer = InvariantEnforcer(test_context)
         
@@ -321,7 +322,7 @@ class TestInvariants:
             enforcer.enforce_on_state_transition(taskspec, "completed", "running")
     
     def test_queue_structure(self):
-        """Test I11, I12: Required queue structure."""
+        """Test QUEUE.1/QUEUE.2: Required queue structure."""
         tid = "1234567890123456789"
         checker = InvariantChecker(test_context)
         
@@ -338,7 +339,7 @@ class TestInvariants:
         assert not any("Missing required queue" in v for v in violations)
     
     def test_process_title_format(self):
-        """Test I31, I32, I35, I36: Process title format."""
+        """Test OBS.4/OBS.5/OBS.7/OBS.8: Process title format."""
         tid = "1234567890123456789"
         checker = InvariantChecker(test_context)
         
@@ -358,7 +359,7 @@ class TestInvariants:
         assert any("forbidden characters" in v for v in violations)
     
     def test_resource_limits(self):
-        """Test I17-I22: Resource limit invariants."""
+        """Test RES.1-RES.6: Resource limit invariants."""
         # Valid limits
         limits = LimitsSection(
             memory_mb=512,
@@ -384,7 +385,7 @@ class TestInvariants:
         assert len(violations) >= 3  # Should catch all three violations
     
     def test_worker_invariants(self):
-        """Test I43-I49: Worker-specific invariants."""
+        """Test WORKER.1-WORKER.7: Worker-specific invariants."""
         # Worker should be a Task with timeout=None
         worker_spec = create_worker_taskspec()
         assert worker_spec.spec.timeout is None
@@ -403,7 +404,7 @@ class InvariantViolationError(Exception):
     pass
 
 class ResourceLimitExceededError(Exception):
-    """Raised when resource limits are exceeded (I22)."""
+    """Raised when resource limits are exceeded (RES.6)."""
     pass
 
 class ProcessGoneError(Exception):
@@ -478,7 +479,7 @@ class InvariantMonitor:
     
     def load_taskspec(self, tid: str) -> TaskSpec:
         """Load TaskSpec from state log."""
-        # Reconstruct from weft.tasks.log
+        # Reconstruct from weft.log.tasks
         pass
 ```
 

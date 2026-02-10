@@ -201,17 +201,29 @@ def test_manager_autostart_templates(tmp_path: Path, broker_env, unique_tid) -> 
 
     autostart_dir = tmp_path / "autostart"
     autostart_dir.mkdir()
-    template_path = autostart_dir / "watcher.json"
-    template_path.write_text(
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "simulate.json").write_text(
         json.dumps(
             {
                 "name": "autostart-simulate",
                 "spec": {
                     "type": "function",
                     "function_target": "tests.tasks.sample_targets:simulate_work",
-                    "keyword_args": {"duration": 0.2},
                 },
                 "metadata": {"tags": ["autostart"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    template_path = autostart_dir / "watcher.json"
+    template_path.write_text(
+        json.dumps(
+            {
+                "name": "autostart-simulate",
+                "target": {"type": "task", "name": "simulate"},
+                "policy": {"mode": "once"},
+                "defaults": {"keyword_args": {"duration": 0.2}},
             }
         ),
         encoding="utf-8",
@@ -271,7 +283,7 @@ def test_manager_idle_shutdown(broker_env, unique_tid) -> None:
         manager.cleanup()
 
 
-def test_manager_respects_supplied_tid(manager_setup, unique_tid) -> None:
+def test_manager_overrides_supplied_tid(manager_setup, unique_tid) -> None:
     manager, make_queue = manager_setup
     inbox_queue = make_queue(manager._queue_names["inbox"])
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
@@ -298,7 +310,7 @@ def test_manager_respects_supplied_tid(manager_setup, unique_tid) -> None:
         "metadata": {},
     }
 
-    inbox_queue.write(json.dumps({"taskspec": child_spec}))
+    message_id = inbox_queue.write(json.dumps({"taskspec": child_spec}))
 
     manager.process_once()
     wait_for_children(manager)
@@ -306,7 +318,8 @@ def test_manager_respects_supplied_tid(manager_setup, unique_tid) -> None:
     events = [json.loads(item) for item in drain(log_queue)]
     spawn_events = [e for e in events if e["event"] == "task_spawned"]
     assert spawn_events, "Expected spawn event"
-    assert spawn_events[-1]["child_tid"] == supplied_tid
+    assert spawn_events[-1]["child_tid"] == str(message_id)
+    assert spawn_events[-1]["child_taskspec"]["tid"] == str(message_id)
 
 
 def test_manager_forces_shutdown_of_idle_children(broker_env, unique_tid) -> None:
@@ -361,16 +374,28 @@ def test_manager_autostart_skips_active_templates(
 
     autostart_dir = tmp_path / "autostart"
     autostart_dir.mkdir()
-    template_path = autostart_dir / "observer.json"
-    template_path.write_text(
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "observer.json").write_text(
         json.dumps(
             {
                 "name": "autostart-observer",
                 "spec": {
                     "type": "function",
                     "function_target": "tests.tasks.sample_targets:simulate_work",
-                    "keyword_args": {"duration": 0.1},
                 },
+            }
+        ),
+        encoding="utf-8",
+    )
+    template_path = autostart_dir / "observer.json"
+    template_path.write_text(
+        json.dumps(
+            {
+                "name": "autostart-observer",
+                "target": {"type": "task", "name": "observer"},
+                "policy": {"mode": "once"},
+                "defaults": {"keyword_args": {"duration": 0.1}},
             }
         ),
         encoding="utf-8",
@@ -405,5 +430,65 @@ def test_manager_autostart_skips_active_templates(
         manager.process_once()
         assert not manager._child_processes
         assert not manager._autostart_launched
+    finally:
+        manager.cleanup()
+
+
+def test_manager_autostart_ensure_restarts(
+    tmp_path: Path, broker_env, unique_tid
+) -> None:
+    db_path, make_queue = broker_env
+
+    autostart_dir = tmp_path / "autostart"
+    autostart_dir.mkdir()
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "restart.json").write_text(
+        json.dumps(
+            {
+                "name": "autostart-restart",
+                "spec": {
+                    "type": "function",
+                    "function_target": "tests.tasks.sample_targets:simulate_work",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifest_path = autostart_dir / "restart.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "name": "autostart-restart",
+                "target": {"type": "task", "name": "restart"},
+                "policy": {"mode": "ensure", "max_restarts": 2, "backoff_seconds": 0},
+                "defaults": {"keyword_args": {"duration": 0.05}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config()
+    config["WEFT_AUTOSTART_TASKS"] = True
+    config["WEFT_AUTOSTART_DIR"] = str(autostart_dir)
+
+    spec = make_manager_spec(unique_tid, idle_timeout=1.5)
+    manager = Manager(db_path, spec, config=config)
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    drain(log_queue)
+    try:
+        start = time.time()
+        while time.time() - start < 2.0:
+            manager.process_once()
+            time.sleep(0.05)
+
+        events = [json.loads(item) for item in drain(log_queue)]
+        spawn_events = [
+            event
+            for event in events
+            if event.get("event") == "task_spawned"
+            and event.get("autostart_source") == str(manifest_path.resolve())
+        ]
+        assert len(spawn_events) >= 2
     finally:
         manager.cleanup()

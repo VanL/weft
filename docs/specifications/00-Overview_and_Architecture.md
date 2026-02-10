@@ -7,14 +7,22 @@ The Weft Task System is a lightweight task execution framework built on SimpleBr
 ### Core Mission
 The system enables **structured interaction between Unix tools and AI agents** with variable latencies (milliseconds to minutes). It acts as "durable Unix pipes" - providing persistent, observable, and resource-controlled process coordination through message queues. The design prioritizes **correctness and concurrency handling** over massive scale, focusing on multiplexing and coordinating a relatively small (usually <200) number of independent, mostly ephemeral processes.
 
+Weft is optimized for **asynchronous multi-agent workflows**: background agents
+can subscribe to queues or file events, report back via queues/logs, and shut
+down cleanly when the manager exits. Operators enable these services by placing
+autostart manifests in `.weft/autostart/` that reference stored task specs or
+pipelines—no extra commands required.
+
 ### SimpleBroker Foundation
 SimpleBroker provides features that align with the ephemeral task model:
 - **No queue pre-registration**: Queues are created on first use
 - **Self-cleaning**: Empty queues automatically disappear  
 - **SQLite-backed**: Simple, reliable, single-node persistence
-- **Exactly-once delivery**: Built-in message claim semantics
+- **Exactly-once delivery**: Queue read/move operations are exactly-once; task
+  processing is at-least-once depending on reserved queue policy
 - **Auto-initialization**: Database created automatically on first message write
-- **Timestamp IDs**: Every message gets a unique 64-bit timestamp ID (nanosecond precision)
+- **Timestamp IDs**: Every message gets a unique 64-bit hybrid timestamp ID
+  (microseconds + logical counter; treat as opaque)
 
 ### Key Design Principles
 - **Queue-First Architecture**: All communication via persistent message queues
@@ -22,10 +30,12 @@ SimpleBroker provides features that align with the ephemeral task model:
 - **Partial Immutability**: Task configuration (spec) is immutable after creation; state and metadata are mutable for runtime updates
 - **Forward-Only State Transitions**: No rollback, only progression through states
 - **Unified Reservation Pattern**: Single `.reserved` queue serves as both work-in-progress and dead-letter queue
-- **Observable State**: All state changes flow through `weft.tasks.log` for global visibility
-- **TID Correlation**: Message IDs become Task IDs, providing end-to-end correlation
+- **Observable State**: All state changes flow through `weft.log.tasks` for global visibility
+- **TID Correlation**: Spawn-request message IDs become Task IDs, providing end-to-end correlation
 - **Resource Monitoring**: Continuous tracking with configurable limits
 - **Fail-Safe Defaults**: Conservative resource limits and timeout behaviors
+- **Progressive Disclosure UX**: Default workflows stay as simple as SimpleBroker (e.g., `weft run <command>`), while advanced orchestration is opt-in.
+- **Operator-Intent Autostart**: Background agents are launched only when manifests exist in `.weft/autostart/`, and they stop cleanly when the manager exits.
 
 ## System Architecture
 
@@ -67,7 +77,7 @@ Bootstrap ──creates──> Primordial Worker (Task)
 
 Manager (Dispatcher Task) ──monitors──> weft.spawn.requests
      │                           │
-     └──validates──> Registry    └──> Uses msg._timestamp as child TID
+     └──validates──> Registry    └──> Uses spawn-request message ID as Task TID
                         │                    │
                         └──creates──> TaskSpec with TID correlation
                                           │
@@ -77,7 +87,7 @@ Manager (Dispatcher Task) ──monitors──> weft.spawn.requests
 ## Performance Targets
 
 ### Throughput Metrics (for <200 ephemeral tasks)
-- Task creation: 50 tasks/second (sufficient for scale)
+- Task creation: 100 tasks/second (design target)
 - Queue messages: 1000 messages/second (SimpleBroker capability)
 - Concurrent tasks: 200 (design target)
 - Pipeline stages: 10 stages typical, 20 maximum
@@ -106,10 +116,10 @@ Manager (Dispatcher Task) ──monitors──> weft.spawn.requests
 - **User-level permissions**: Tasks run as user (not adversarial)
 - **No privilege escalation**: Standard Unix permissions apply
 - **AI agent restrictions**: Pre-defined task registry only
-- **Audit trail**: All actions logged to weft.tasks.log
+- **Audit trail**: All actions logged to weft.log.tasks
 
 ### Observable Security
-- All state changes in weft.tasks.log
+- All state changes in weft.log.tasks
 - Failed tasks visible in reserved queues
 - Resource violations tracked in state
 - Complete audit trail for debugging
@@ -119,6 +129,8 @@ Manager (Dispatcher Task) ──monitors──> weft.spawn.requests
 - No hidden or untrackable processes
 
 ## Related Documents
+
+_Implementation mapping_: `weft/cli.py` (CLI entry points), `weft/core/manager.py` (manager/worker), `weft/core/tasks/base.py` (task runtime), `weft/core/tasks/runner.py` (execution), `weft/context.py` (context discovery).
 
 - **[01-Core_Components.md](01-Core_Components.md)** - Detailed component architecture
 - **[02-TaskSpec.md](02-TaskSpec.md)** - Task configuration specification

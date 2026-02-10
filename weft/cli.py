@@ -1,13 +1,16 @@
 """CLI entry point for Weft."""
 
+import json
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 
 from ._constants import PROG_NAME, __version__
 from .commands import cmd_init, cmd_status, cmd_tidy, cmd_validate_taskspec
 from .commands import queue as queue_cmd
+from .commands import specs as spec_cmd
+from .commands import tasks as task_cmd
 from .commands import worker as worker_cmd
 from .commands.dump import cmd_dump
 from .commands.load import cmd_load
@@ -24,6 +27,9 @@ app = typer.Typer(
 
 queue_app = typer.Typer(help="Queue passthrough operations")
 worker_app = typer.Typer(help="Worker lifecycle management")
+spec_app = typer.Typer(help="Spec management")
+task_app = typer.Typer(help="Task management")
+system_app = typer.Typer(help="System maintenance")
 
 
 def _emit_queue_result(result: tuple[int, str, str]) -> None:
@@ -363,6 +369,373 @@ def validate_taskspec(
     cmd_validate_taskspec(file)
 
 
+@app.command("list")
+def list_tasks(
+    status_filter: Annotated[
+        str | None,
+        typer.Option("--status", help="Filter by task status"),
+    ] = None,
+    include_terminal: Annotated[
+        bool,
+        typer.Option("--all", help="Include completed/failed tasks"),
+    ] = False,
+    workers: Annotated[
+        bool,
+        typer.Option("--workers", help="List managers instead of tasks"),
+    ] = False,
+    stats: Annotated[
+        bool,
+        typer.Option("--stats", help="Summarize counts by status"),
+    ] = False,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Output as JSON"),
+    ] = False,
+    context_dir: Annotated[
+        Path | None,
+        typer.Option("--context", help="Project root (defaults to auto-discovery)"),
+    ] = None,
+) -> None:
+    if workers:
+        from .commands import status as status_cmd
+
+        context = status_cmd._resolve_context(context_dir)
+        managers = status_cmd._collect_manager_records(
+            context, include_stopped=include_terminal
+        )
+        if json_output:
+            typer.echo(json.dumps(managers, ensure_ascii=False))
+            return
+        if not managers:
+            typer.echo("Managers: none registered")
+            return
+        for mgr in managers:
+            tid = mgr.get("tid")
+            status = mgr.get("status")
+            name = mgr.get("name", "manager")
+            typer.echo(f"{tid} {status} {name}")
+        return
+
+    snapshots = task_cmd.list_tasks(
+        status_filter=status_filter,
+        include_terminal=include_terminal,
+        context_path=context_dir,
+    )
+    if stats:
+        counts: dict[str, int] = {}
+        for snap in snapshots:
+            counts[snap.status] = counts.get(snap.status, 0) + 1
+        if json_output:
+            typer.echo(json.dumps(counts, ensure_ascii=False))
+        else:
+            for status, count in sorted(counts.items()):
+                typer.echo(f"{status}: {count}")
+        return
+
+    if json_output:
+        typer.echo(json.dumps([snap.to_dict() for snap in snapshots], ensure_ascii=False))
+        return
+    if not snapshots:
+        typer.echo("Tasks: none")
+        return
+    for snap in snapshots:
+        typer.echo(f"{snap.tid} {snap.status} {snap.name}")
+
+
+@spec_app.command("create")
+def spec_create(
+    name: Annotated[str, typer.Argument(help="Spec name")],
+    file: Annotated[Path, typer.Option("--file", "-f", help="Spec JSON file")],
+    spec_type: Annotated[
+        str,
+        typer.Option("--type", help="Spec type: task or pipeline"),
+    ] = "task",
+    context_dir: Annotated[
+        Path | None,
+        typer.Option("--context", help="Project root (defaults to auto-discovery)"),
+    ] = None,
+    force: Annotated[
+        bool,
+        typer.Option("--force", help="Overwrite existing spec"),
+    ] = False,
+) -> None:
+    try:
+        normalized = spec_cmd.normalize_spec_type(spec_type)
+        dest = spec_cmd.create_spec(
+            name,
+            spec_type=normalized,
+            source_path=file,
+            context_path=context_dir,
+            force=force,
+        )
+    except Exception as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    typer.echo(str(dest))
+
+
+@spec_app.command("list")
+def spec_list(
+    spec_type: Annotated[
+        str | None,
+        typer.Option("--type", help="Filter by spec type (task or pipeline)"),
+    ] = None,
+    context_dir: Annotated[
+        Path | None,
+        typer.Option("--context", help="Project root (defaults to auto-discovery)"),
+    ] = None,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Output as JSON"),
+    ] = False,
+) -> None:
+    try:
+        normalized = spec_cmd.normalize_spec_type(spec_type) if spec_type else None
+        specs = spec_cmd.list_specs(spec_type=normalized, context_path=context_dir)
+    except Exception as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    if json_output:
+        typer.echo(json.dumps(specs, ensure_ascii=False))
+        return
+    if not specs:
+        typer.echo("No stored specs found")
+        return
+    for item in specs:
+        typer.echo(f"{item['type']}: {item['name']}")
+
+
+@spec_app.command("show")
+def spec_show(
+    name: Annotated[str, typer.Argument(help="Spec name")],
+    spec_type: Annotated[
+        str | None,
+        typer.Option("--type", help="Spec type (task or pipeline)"),
+    ] = None,
+    context_dir: Annotated[
+        Path | None,
+        typer.Option("--context", help="Project root (defaults to auto-discovery)"),
+    ] = None,
+) -> None:
+    try:
+        normalized = spec_cmd.normalize_spec_type(spec_type) if spec_type else None
+        _kind, _path, payload = spec_cmd.load_spec(
+            name, spec_type=normalized, context_path=context_dir
+        )
+    except Exception as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+@spec_app.command("delete")
+def spec_delete(
+    name: Annotated[str, typer.Argument(help="Spec name")],
+    spec_type: Annotated[
+        str | None,
+        typer.Option("--type", help="Spec type (task or pipeline)"),
+    ] = None,
+    context_dir: Annotated[
+        Path | None,
+        typer.Option("--context", help="Project root (defaults to auto-discovery)"),
+    ] = None,
+) -> None:
+    try:
+        normalized = spec_cmd.normalize_spec_type(spec_type) if spec_type else None
+        path = spec_cmd.delete_spec(
+            name, spec_type=normalized, context_path=context_dir
+        )
+    except Exception as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    typer.echo(f"Deleted {path}")
+
+
+@spec_app.command("validate")
+def spec_validate(
+    file: Annotated[Path, typer.Argument(help="Spec JSON file")],
+    spec_type: Annotated[
+        str | None,
+        typer.Option("--type", help="Spec type (task or pipeline)"),
+    ] = None,
+) -> None:
+    try:
+        normalized = spec_cmd.normalize_spec_type(spec_type) if spec_type else None
+        ok, errors = spec_cmd.validate_spec(file, spec_type=normalized)
+    except Exception as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    if ok:
+        typer.echo("Spec is valid")
+        return
+    typer.echo("Spec validation failed")
+    for field, error in errors.items():
+        typer.echo(f"- {field}: {error}")
+    raise typer.Exit(code=2)
+
+
+@spec_app.command("generate")
+def spec_generate(
+    spec_type: Annotated[
+        str,
+        typer.Option("--type", help="Spec type (task or pipeline)"),
+    ] = "task",
+) -> None:
+    try:
+        normalized = spec_cmd.normalize_spec_type(spec_type)
+        payload = spec_cmd.generate_spec(normalized)
+    except Exception as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+@task_app.command("status")
+def task_status(
+    tid: Annotated[str, typer.Argument(help="Task ID or short ID")],
+    process: Annotated[
+        bool,
+        typer.Option("--process", help="Include process identifiers"),
+    ] = False,
+    watch: Annotated[
+        bool,
+        typer.Option("--watch", help="Stream task state updates"),
+    ] = False,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Output as JSON"),
+    ] = False,
+    context_dir: Annotated[
+        Path | None,
+        typer.Option("--context", help="Project root (defaults to auto-discovery)"),
+    ] = None,
+) -> None:
+    if watch:
+        exit_code, payload = cmd_status(
+            tid=tid,
+            include_terminal=True,
+            json_output=json_output,
+            watch=True,
+            spec_context=context_dir,
+        )
+        if payload:
+            typer.echo(payload)
+        raise typer.Exit(code=exit_code)
+
+    snapshot = task_cmd.task_status(tid, context_path=context_dir)
+    if snapshot is None:
+        typer.echo(f"Task {tid} not found", err=True)
+        raise typer.Exit(code=2)
+    payload: dict[str, Any] = snapshot.to_dict()
+    if process:
+        ctx = task_cmd._resolve_context(context_dir)
+        mapping = task_cmd.mapping_for_tid(ctx, snapshot.tid) or {}
+        payload["pid"] = mapping.get("pid") or mapping.get("task_pid")
+        payload["managed_pids"] = mapping.get("managed_pids") or []
+    if json_output:
+        typer.echo(json.dumps(payload, ensure_ascii=False))
+        return
+    typer.echo(
+        f"{snapshot.tid} {snapshot.status} {snapshot.name} ({snapshot.event})"
+    )
+    if process:
+        pid = payload.get("pid")
+        managed = payload.get("managed_pids")
+        typer.echo(f"pid: {pid} managed_pids: {managed}")
+
+
+@task_app.command("stop")
+def task_stop(
+    tid: Annotated[str | None, typer.Argument(help="Task ID", show_default=False)] = None,
+    all_tasks: Annotated[
+        bool,
+        typer.Option("--all", help="Stop all active tasks"),
+    ] = False,
+    pattern: Annotated[
+        str | None,
+        typer.Option("--pattern", help="Stop tasks matching name pattern"),
+    ] = None,
+    context_dir: Annotated[
+        Path | None,
+        typer.Option("--context", help="Project root (defaults to auto-discovery)"),
+    ] = None,
+) -> None:
+    tids: list[str] = []
+    if all_tasks or pattern:
+        snapshots = task_cmd.list_tasks(
+            include_terminal=False, context_path=context_dir
+        )
+        tids = task_cmd.filter_tids_by_pattern(snapshots, pattern or "")
+    elif tid:
+        tids = [tid]
+    else:
+        typer.echo("Provide a task id or use --all", err=True)
+        raise typer.Exit(code=2)
+
+    count = task_cmd.stop_tasks(tids, context_path=context_dir)
+    typer.echo(f"Stopped {count} task(s)")
+
+
+@task_app.command("kill")
+def task_kill(
+    tid: Annotated[str | None, typer.Argument(help="Task ID", show_default=False)] = None,
+    all_tasks: Annotated[
+        bool,
+        typer.Option("--all", help="Kill all active tasks"),
+    ] = False,
+    pattern: Annotated[
+        str | None,
+        typer.Option("--pattern", help="Kill tasks matching name pattern"),
+    ] = None,
+    context_dir: Annotated[
+        Path | None,
+        typer.Option("--context", help="Project root (defaults to auto-discovery)"),
+    ] = None,
+) -> None:
+    tids: list[str] = []
+    if all_tasks or pattern:
+        snapshots = task_cmd.list_tasks(
+            include_terminal=False, context_path=context_dir
+        )
+        tids = task_cmd.filter_tids_by_pattern(snapshots, pattern or "")
+    elif tid:
+        tids = [tid]
+    else:
+        typer.echo("Provide a task id or use --all", err=True)
+        raise typer.Exit(code=2)
+
+    count = task_cmd.kill_tasks(tids, context_path=context_dir)
+    typer.echo(f"Killed {count} process(es)")
+
+
+@task_app.command("tid")
+def task_tid(
+    tid: Annotated[str | None, typer.Argument(help="Short or full TID", show_default=False)] = None,
+    pid: Annotated[
+        int | None,
+        typer.Option("--pid", help="Lookup TID for a PID"),
+    ] = None,
+    reverse: Annotated[
+        str | None,
+        typer.Option("--reverse", help="Return short TID for a full TID"),
+    ] = None,
+    context_dir: Annotated[
+        Path | None,
+        typer.Option("--context", help="Project root (defaults to auto-discovery)"),
+    ] = None,
+) -> None:
+    result = task_cmd.task_tid(
+        tid=tid,
+        pid=pid,
+        reverse=reverse,
+        context_path=context_dir,
+    )
+    if not result:
+        typer.echo("No matching TID found", err=True)
+        raise typer.Exit(code=2)
+    typer.echo(result)
+
+
 @app.command("init")
 def init(
     directory: Annotated[
@@ -394,7 +767,7 @@ def init(
     raise typer.Exit(code=exit_code)
 
 
-@app.command("tidy")
+@system_app.command("tidy")
 def tidy(
     context: Annotated[
         Path | None,
@@ -420,6 +793,10 @@ def status_command(
         bool,
         typer.Option("--all", help="Include completed/terminal tasks in the summary"),
     ] = False,
+    status_filter: Annotated[
+        str | None,
+        typer.Option("--status", help="Filter tasks by status"),
+    ] = None,
     json_output: Annotated[
         bool,
         typer.Option("--json", help="Emit status information as JSON"),
@@ -445,6 +822,7 @@ def status_command(
     exit_code, payload = cmd_status(
         tid=tid,
         include_terminal=all_tasks,
+        status_filter=status_filter,
         json_output=json_output,
         watch=watch,
         watch_interval=interval,
@@ -539,6 +917,18 @@ def run_command(
             dir_okay=False,
             readable=True,
         ),
+    ] = None,
+    pipeline: Annotated[
+        str | None,
+        typer.Option(
+            "--pipeline",
+            "-p",
+            help="Execute a stored pipeline name or JSON file",
+        ),
+    ] = None,
+    pipeline_input: Annotated[
+        str | None,
+        typer.Option("--input", help="Initial payload for pipelines"),
     ] = None,
     function: Annotated[
         str | None,
@@ -639,6 +1029,8 @@ def run_command(
     exit_code = cmd_run(
         command or [],
         spec=spec,
+        pipeline=pipeline,
+        pipeline_input=pipeline_input,
         function=function,
         args=list(arg or ()),
         kwargs=list(kw or ()),
@@ -747,7 +1139,7 @@ def worker_status_command(
     raise typer.Exit(code=exit_code)
 
 
-@app.command("dump")
+@system_app.command("dump")
 def dump_command(
     output: Annotated[
         str | None,
@@ -772,7 +1164,7 @@ def dump_command(
     raise typer.Exit(code=exit_code)
 
 
-@app.command("load")
+@system_app.command("load")
 def load_command(
     input_file: Annotated[
         str | None,
@@ -807,6 +1199,9 @@ def load_command(
 
 app.add_typer(queue_app, name="queue")
 app.add_typer(worker_app, name="worker")
+app.add_typer(spec_app, name="spec")
+app.add_typer(task_app, name="task")
+app.add_typer(system_app, name="system")
 
 
 if __name__ == "__main__":

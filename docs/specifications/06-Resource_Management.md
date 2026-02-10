@@ -57,6 +57,8 @@ class NetworkManager:
 ### Default psutil-Based Monitor [RM-5.1]
 _Implementation_: `PsutilResourceMonitor` in `weft/core.resource_monitor.py` corresponds to this section and is used by `TaskRunner`.
 
+_Implementation mapping_: `weft/core/resource_monitor.py` (monitor/metrics API), `weft/core/tasks/runner.py` (monitor wiring).
+
 ```python
 class ResourceMonitor:
     """Default resource monitor using psutil for cross-platform support."""
@@ -248,6 +250,8 @@ class ResourceMetrics:
         return violations
 ```
 
+_Implementation mapping_: `weft/core/resource_monitor.py` (`ResourceMetrics`).
+
 ## Error Handling
 
 ### 1. Unified Reservation Pattern for Error Handling
@@ -275,7 +279,7 @@ class Task:
             # Message naturally becomes "dead letter" in reserved queue
             
         # 5. Report state change
-        Queue("weft.tasks.log").write(self.taskspec.to_log_dict())
+        Queue("weft.log.tasks").write(self.taskspec.to_log_dict())
 ```
 
 ### 2. Error Categories and State Tracking
@@ -336,7 +340,7 @@ def inspect_failed_task(tid: str):
 
 ### 4. Error Visibility Through State
 
-All errors are tracked in TaskSpec state and reported to `weft.tasks.log`:
+All errors are tracked in TaskSpec state and reported to `weft.log.tasks`:
 
 ```python
 # Error tracking in state
@@ -348,11 +352,13 @@ class StateSection:
 # Global visibility
 def monitor_failures():
     """Monitor all task failures from global log."""
-    for entry in Queue("weft.tasks.log").peek_all():
+    for entry in Queue("weft.log.tasks").peek_all():
         task = json.loads(entry)
         if task['status'] in ['failed', 'timeout', 'killed']:
             alert(f"Task {task['tid']} failed: {task['error']}")
 ```
+
+_Implementation mapping_: `weft/core/tasks/consumer.py` (limit/timeout handling), `weft/core/taskspec.py` (`mark_timeout`).
 
 ### 5. Resilience Patterns
 
@@ -385,7 +391,7 @@ class ResilientTask(Task):
 ```python
 def should_process_task(tid: str) -> bool:
     """Check if task should be processed based on failure history."""
-    failures = count_recent_failures(tid)  # From weft.tasks.log
+    failures = count_recent_failures(tid)  # From weft.log.tasks
     if failures > 5:
         # Circuit open - skip processing
         return False
@@ -473,7 +479,7 @@ def prepare_environment(base_env: dict, task_env: dict) -> dict:
 ### AI Agent Constraints
 - **Pre-defined task registry**: Only registered tasks can be created
 - **No dynamic execution**: Agents cannot create arbitrary commands
-- **Audit trail**: All operations logged to weft.tasks.log
+- **Audit trail**: All operations logged to weft.log.tasks
 
 ```python
 class TaskRegistry:
@@ -482,27 +488,27 @@ class TaskRegistry:
     def __init__(self):
         self._allowed_tasks = {}
         
-    def register_task(self, name: str, spec_template: dict) -> None:
-        """Register an allowed task template."""
-        # Validate spec_template is safe
-        if spec_template.get("spec", {}).get("type") == "command":
+    def register_task(self, name: str, spec_payload: dict) -> None:
+        """Register an allowed task spec payload."""
+        # Validate spec_payload is safe
+        if spec_payload.get("spec", {}).get("type") == "command":
             # Validate command is in allowlist
-            self._validate_command_spec(spec_template)
+            self._validate_command_spec(spec_payload)
         
-        self._allowed_tasks[name] = spec_template
+        self._allowed_tasks[name] = spec_payload
     
     def create_task(self, name: str, params: dict) -> TaskSpec:
-        """Create task from registered template."""
+        """Create task from registered spec payload."""
         if name not in self._allowed_tasks:
             raise ValueError(f"Task not registered: {name}")
         
-        # Apply parameters to template
+        # Apply parameters to spec payload
         spec = self._apply_params(self._allowed_tasks[name], params)
         return TaskSpec.model_validate(spec)
 ```
 
 ### Large Output Security
-- **Path validation**: Output paths confined to /tmp/weft/outputs/
+- **Path validation**: Output paths confined to .weft/outputs/
 - **Size limits**: Enforce maximum output size per task
 - **Cleanup policy**: Automatic removal of old outputs
 
@@ -510,7 +516,7 @@ class TaskRegistry:
 def validate_output_path(path: str, tid: str) -> None:
     """Ensure output path is within allowed directory."""
     resolved = Path(path).resolve()
-    allowed_base = Path(f"/tmp/weft/outputs/{tid}").resolve()
+    allowed_base = Path(f".weft/outputs/{tid}").resolve()
     
     if not str(resolved).startswith(str(allowed_base)):
         raise ValueError(f"Invalid output path: {path}")

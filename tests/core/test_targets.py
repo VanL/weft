@@ -38,7 +38,10 @@ def test_execute_function_target_invokes_callable():
 def test_execute_command_target_runs_subprocess(tmp_path):
     script = "import sys; print('ok'); sys.exit(0)"
     completed = execute_command_target(
-        [sys.executable, "-c", script], {}, working_dir=str(tmp_path)
+        sys.executable,
+        {},
+        args=["-c", script],
+        working_dir=str(tmp_path),
     )
     assert completed.returncode == 0
     assert completed.stdout.strip() == "ok"
@@ -52,6 +55,9 @@ def test_serialize_result_prefers_json():
 def test_execute_command_target_failure_returns_nonzero(tmp_path):
     script = "import sys; sys.exit(3)"
     completed = execute_command_target(
-        [sys.executable, "-c", script], {}, working_dir=str(tmp_path)
+        sys.executable,
+        {},
+        args=["-c", script],
+        working_dir=str(tmp_path),
     )
     assert completed.returncode == 3

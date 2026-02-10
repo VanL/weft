@@ -70,8 +70,13 @@ def _display_taskspec_summary(data: dict[str, Any]) -> None:
         if spec.get("type") == "function":
             table.add_row("Function", spec.get("function_target", "N/A"))
         elif spec.get("type") == "command":
-            target = spec.get("process_target", [])
-            table.add_row("Command", " ".join(target) if target else "N/A")
+            target = spec.get("process_target")
+            args = spec.get("args") or []
+            if isinstance(target, str):
+                command = " ".join([target, *[str(arg) for arg in args]]) if args else target
+                table.add_row("Command", command)
+            else:
+                table.add_row("Command", "N/A")
 
     console.print()
     console.print(table)

@@ -61,6 +61,41 @@ class TestValidation:
             )
 
 
+class TestTemplates:
+    """Template TaskSpecs allow missing tids and skip auto-expansion."""
+
+    def test_template_allows_missing_tid(self) -> None:
+        template = TaskSpec.model_validate(
+            {
+                "name": "template-task",
+                "spec": {"type": "function", "function_target": "pkg:fn"},
+                "io": {},
+                "state": {},
+                "metadata": {},
+            },
+            context={"template": True, "auto_expand": False},
+        )
+
+        assert template.tid is None
+        assert template.io.outputs == {}
+        assert template.io.control == {}
+        assert template.io.inputs == {}
+
+    def test_template_apply_defaults_raises(self) -> None:
+        template = TaskSpec.model_validate(
+            {
+                "name": "template-task",
+                "spec": {"type": "function", "function_target": "pkg:fn"},
+                "io": {},
+                "state": {},
+                "metadata": {},
+            },
+            context={"template": True, "auto_expand": False},
+        )
+        with pytest.raises(ValueError):
+            template.apply_defaults()
+
+
 class TestPartialImmutability:
     """Spec and IO sections become immutable after creation."""
 

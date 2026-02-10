@@ -34,7 +34,7 @@ class InteractiveStreamClient:
 
     * ``outbox`` – streaming stdout envelopes (JSON) emitted by the task
     * ``ctrl_out`` – stderr and control notifications
-    * ``weft.tasks.log`` – state transitions for the task
+    * ``weft.log.tasks`` – state transitions for the task
 
     Callbacks are invoked from the watcher thread, so they must be
     thread-safe.  The CLI supplies lightweight closures that forward messages
@@ -140,10 +140,12 @@ class InteractiveStreamClient:
     # ------------------------------------------------------------------
     # Public helpers
     # ------------------------------------------------------------------
-    def send_input(self, data: str) -> None:
+    def send_input(self, data: str, *, close: bool = False) -> None:
         """Send stdin data to the task."""
 
-        payload = {"stdin": data}
+        payload: dict[str, Any] = {"stdin": data}
+        if close:
+            payload["close"] = True
         self._inbox_queue.write(json.dumps(payload))
 
     def close_input(self) -> None:

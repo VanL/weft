@@ -11,6 +11,7 @@ from typing import Any, TextIO
 
 from simplebroker import Queue
 from simplebroker.db import BrokerDB
+from weft._constants import WEFT_STATE_QUEUE_PREFIX
 from weft.context import WeftContext, build_context
 
 
@@ -154,6 +155,8 @@ def _analyze_import_data(input_file: TextIO, context: WeftContext) -> ImportRepo
     # Read all lines to analyze
     input_lines = [line.strip() for line in input_file if line.strip()]
 
+    skipped_runtime: set[str] = set()
+
     report = ImportReport()
 
     # Parse metadata
@@ -204,6 +207,14 @@ def _analyze_import_data(input_file: TextIO, context: WeftContext) -> ImportRepo
         elif record_type == "message":
             queue_name = record.get("queue")
             timestamp = record.get("timestamp")
+
+            if queue_name and queue_name.startswith(WEFT_STATE_QUEUE_PREFIX):
+                if queue_name not in skipped_runtime:
+                    report.validation_warnings.append(
+                        f"Skipping runtime queue {queue_name}"
+                    )
+                    skipped_runtime.add(queue_name)
+                continue
 
             if not queue_name:
                 report.validation_warnings.append(
@@ -306,6 +317,9 @@ def _execute_import(input_file: TextIO, context: WeftContext) -> ImportReport:
                     queue_name = record.get("queue")
                     timestamp = record.get("timestamp")
                     body = record.get("body")
+
+                    if queue_name and queue_name.startswith(WEFT_STATE_QUEUE_PREFIX):
+                        continue
 
                     if queue_name and isinstance(timestamp, int) and body is not None:
                         # Track queue creation

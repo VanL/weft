@@ -92,7 +92,7 @@ class TestTaskSimple:
                 tid=fixtures.VALID_TEST_TID,
                 version="1.0",
                 name="test-task",
-                spec=SpecSection(type="command", process_target=["echo"]),
+                spec=SpecSection(type="command", process_target="echo"),
                 io=IOSection(
                     inputs={
                         "data": "custom.data.queue",

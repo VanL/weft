@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import TextIO
 
 from simplebroker.db import BrokerDB
+from weft._constants import WEFT_STATE_QUEUE_PREFIX
 from weft.context import build_context
 
 
@@ -50,6 +51,8 @@ def _export_messages(output: TextIO, db: BrokerDB) -> tuple[int, int]:
 
     exported_queue_names: list[str] = []
     for queue_name, message_count in queues:
+        if queue_name.startswith(WEFT_STATE_QUEUE_PREFIX):
+            continue
         # Skip empty queues
         if message_count == 0:
             continue
