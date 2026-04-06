@@ -52,7 +52,13 @@ POSTUPDATE_COMMANDS: Final[tuple[tuple[str, ...], ...]] = (
     ("uv", "run", "pytest", "tests/system/test_constants.py", "-q"),
     ("uv", "build"),
 )
-TagAction = Literal["create", "push_local", "replace_local", "reuse_remote"]
+TagAction = Literal[
+    "create",
+    "push_local",
+    "replace_local",
+    "replace_remote",
+    "reuse_remote",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -400,25 +406,31 @@ def plan_tag_action(
     *,
     head_commit: str,
     version_changed: bool,
+    allow_retag: bool,
 ) -> TagAction:
     """Plan how the helper should handle the target tag safely."""
 
     if version_changed:
         if state.remote_tag_commit is not None:
+            if allow_retag:
+                return "replace_remote"
             raise RuntimeError(
                 f"Tag {state.tag_name} already exists on origin at "
-                f"{_short_commit(state.remote_tag_commit)}. Choose a different version."
+                f"{_short_commit(state.remote_tag_commit)}. Choose a different version "
+                "or pass --retag."
             )
         if state.local_tag_commit is not None:
             return "replace_local"
         return "create"
 
     if state.remote_tag_commit is not None and state.remote_tag_commit != head_commit:
+        if allow_retag:
+            return "replace_remote"
         raise RuntimeError(
             f"Tag {state.tag_name} already exists on origin at "
             f"{_short_commit(state.remote_tag_commit)}, but HEAD is "
             f"{_short_commit(head_commit)}. Reusing this unpublished version "
-            "would move the remote tag; choose a new version or retag manually."
+            "would move the remote tag; choose a new version or pass --retag."
         )
 
     if state.local_tag_commit is not None and state.local_tag_commit != head_commit:
@@ -473,6 +485,14 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Print planned actions without modifying files or running commands",
     )
+    parser.add_argument(
+        "--retag",
+        action="store_true",
+        help=(
+            "Delete and recreate the remote tag when the target version is still "
+            "unpublished but the existing tag points at the wrong commit."
+        ),
+    )
     return parser
 
 
@@ -497,6 +517,7 @@ def main(argv: list[str] | None = None) -> int:
         release_state,
         head_commit=head_commit,
         version_changed=version_changed,
+        allow_retag=args.retag,
     )
 
     print(f"current: {current_version}")
@@ -540,10 +561,14 @@ def main(argv: list[str] | None = None) -> int:
             )
         if tag_action == "replace_local":
             run_command(("git", "tag", "-d", tag_name), dry_run=True)
-        if tag_action in {"create", "replace_local"}:
+        if tag_action == "replace_remote":
+            if release_state.local_tag_commit is not None:
+                run_command(("git", "tag", "-d", tag_name), dry_run=True)
+            run_command(("git", "push", "--delete", "origin", tag_name), dry_run=True)
+        if tag_action in {"create", "replace_local", "replace_remote"}:
             run_command(("git", "tag", tag_name), dry_run=True)
         run_command(("git", "push"), dry_run=True)
-        if tag_action in {"create", "push_local", "replace_local"}:
+        if tag_action in {"create", "push_local", "replace_local", "replace_remote"}:
             run_command(("git", "push", "origin", tag_name), dry_run=True)
         else:
             print(f"dry-run: {_remote_tag_reuse_note(tag_name)}")
@@ -591,13 +616,18 @@ def main(argv: list[str] | None = None) -> int:
     if tag_action == "replace_local":
         run_command(("git", "tag", "-d", tag_name))
 
-    if tag_action in {"create", "replace_local"}:
+    if tag_action == "replace_remote":
+        if release_state.local_tag_commit is not None:
+            run_command(("git", "tag", "-d", tag_name))
+        run_command(("git", "push", "--delete", "origin", tag_name))
+
+    if tag_action in {"create", "replace_local", "replace_remote"}:
         run_command(("git", "tag", tag_name))
 
     for command in (("git", "push"),):
         run_command(command)
 
-    if tag_action in {"create", "push_local", "replace_local"}:
+    if tag_action in {"create", "push_local", "replace_local", "replace_remote"}:
         run_command(("git", "push", "origin", tag_name))
     else:
         print(_remote_tag_reuse_note(tag_name))

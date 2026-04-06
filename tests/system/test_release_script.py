@@ -191,6 +191,7 @@ def test_plan_tag_action_rejects_existing_tag_on_different_commit() -> None:
             state,
             head_commit="b" * 40,
             version_changed=False,
+            allow_retag=False,
         )
 
 
@@ -211,8 +212,32 @@ def test_plan_tag_action_replaces_stale_local_tag() -> None:
             state,
             head_commit="b" * 40,
             version_changed=False,
+            allow_retag=False,
         )
         == "replace_local"
+    )
+
+
+def test_plan_tag_action_replaces_remote_tag_only_with_retag() -> None:
+    """A stale remote tag should require explicit `--retag`."""
+    release = _load_release_module()
+    state = release.ReleaseState(
+        version="0.1.0",
+        tag_name="v0.1.0",
+        github_release_exists=False,
+        pypi_release_exists=False,
+        local_tag_commit="a" * 40,
+        remote_tag_commit="a" * 40,
+    )
+
+    assert (
+        release.plan_tag_action(
+            state,
+            head_commit="b" * 40,
+            version_changed=False,
+            allow_retag=True,
+        )
+        == "replace_remote"
     )
 
 
@@ -273,6 +298,37 @@ def test_main_dry_run_deletes_stale_local_tag_before_recreating(
     captured = capsys.readouterr()
 
     assert exit_code == 0
+    assert "$ git tag -d v0.1.0" in captured.out
+    assert "$ git tag v0.1.0" in captured.out
+
+
+def test_main_dry_run_retags_remote_when_requested(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Dry-run should show remote tag deletion only when `--retag` is set."""
+    release = _load_release_module()
+    monkeypatch.setattr(release, "read_current_version", lambda: "0.1.0")
+    monkeypatch.setattr(release, "is_dirty_worktree", lambda: False)
+    monkeypatch.setattr(
+        release,
+        "inspect_release_state",
+        lambda version: release.ReleaseState(
+            version=version,
+            tag_name=f"v{version}",
+            github_release_exists=False,
+            pypi_release_exists=False,
+            local_tag_commit="a" * 40,
+            remote_tag_commit="a" * 40,
+        ),
+    )
+    monkeypatch.setattr(release, "current_head_commit", lambda: "b" * 40)
+
+    exit_code = release.main(["--dry-run", "--retag"])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "$ git push --delete origin v0.1.0" in captured.out
     assert "$ git tag -d v0.1.0" in captured.out
     assert "$ git tag v0.1.0" in captured.out
 
