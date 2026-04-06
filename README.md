@@ -511,7 +511,8 @@ Weft uses a tag-driven release flow in GitHub Actions:
   publishing, signing, and artifact upload.
 
 ```bash
-# Validate, update pyproject.toml + weft/_constants.py, commit, tag, and push
+# Run the SQLite and Postgres release prechecks, then update
+# pyproject.toml + weft/_constants.py, commit, tag, and push
 uv run python bin/release.py --version 0.1.1
 
 # Preview the release steps without changing files or running commands
@@ -522,6 +523,11 @@ The release helper updates both canonical version sources:
 
 - `pyproject.toml`
 - `weft/_constants.py`
+
+Before it tags and pushes, the helper runs:
+
+1. The SQLite release precheck with xdist
+2. The PG-compatible release precheck with `uv run bin/pytest-pg --all`
 
 After the helper pushes `v0.1.1`, the release gate workflow will:
 
