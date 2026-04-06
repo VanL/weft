@@ -29,6 +29,10 @@ _BROKER_HEAVY_FIXTURES = frozenset(
     }
 )
 _BROKER_HEAVY_GROUP = "weft_broker_serial"
+_PRIORITY_TEST_NODEIDS = (
+    "tests/cli/test_cli_long_session.py::"
+    "test_cli_long_session_produces_identical_transcript_across_backends",
+)
 _SHARED_MODULES = frozenset(
     {
         "tests/system/test_constants.py",
@@ -426,6 +430,12 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
             "Unaudited test module must be marked 'shared' or 'sqlite_only', or "
             f"listed in the temporary allowlist: {relative_path}"
         )
+
+    items.sort(
+        key=lambda item: (
+            0 if any(nodeid in item.nodeid for nodeid in _PRIORITY_TEST_NODEIDS) else 1
+        )
+    )
 
 
 __all__ = ["weft_harness", "workdir", "broker_env", "task_factory", "run_cli"]
