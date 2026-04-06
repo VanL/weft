@@ -496,9 +496,7 @@ def summarize_results(results: list[BenchmarkResult]) -> list[BenchmarkSummary]:
         operations = runs[0].operations
         median_elapsed = statistics.median(run.elapsed_seconds for run in runs)
         median_ms_per_operation = (median_elapsed / operations) * 1000
-        median_us_per_queue = (
-            median_elapsed / (operations * queue_count)
-        ) * 1_000_000
+        median_us_per_queue = (median_elapsed / (operations * queue_count)) * 1_000_000
         summaries.append(
             BenchmarkSummary(
                 backend=backend,
@@ -533,14 +531,12 @@ def compare_backends(summaries: list[BenchmarkSummary]) -> list[BenchmarkCompari
         postgres_ms = postgres_summary.median_ms_per_operation
         if sqlite_ms >= postgres_ms:
             slower_backend = SQLITE_BACKEND
-            slowdown_ratio = sqlite_ms / postgres_ms if postgres_ms > 0 else float(
-                "inf"
+            slowdown_ratio = (
+                sqlite_ms / postgres_ms if postgres_ms > 0 else float("inf")
             )
         else:
             slower_backend = POSTGRES_TEST_BACKEND
-            slowdown_ratio = postgres_ms / sqlite_ms if sqlite_ms > 0 else float(
-                "inf"
-            )
+            slowdown_ratio = postgres_ms / sqlite_ms if sqlite_ms > 0 else float("inf")
         comparisons.append(
             BenchmarkComparison(
                 workload=workload,

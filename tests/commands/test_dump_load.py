@@ -360,6 +360,7 @@ def test_cmd_load_rejects_alias_conflicts_before_any_writes(tmp_path: Path) -> N
     assert after_aliases == before_aliases
     assert after_queues == before_queues
 
+
 def test_export_large_message_data(tmp_path: Path) -> None:
     """Test export with messages containing large JSON payloads."""
 

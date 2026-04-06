@@ -177,7 +177,9 @@ def cleanup_prepared_roots(
         cleaned_schemas.add(schema)
 
     stale_keys = [
-        key for key in _PREPARED_POSTGRES_ROOTS if Path(key[0]).is_relative_to(resolved_root)
+        key
+        for key in _PREPARED_POSTGRES_ROOTS
+        if Path(key[0]).is_relative_to(resolved_root)
     ]
     for key in stale_keys:
         _PREPARED_POSTGRES_ROOTS.discard(key)
