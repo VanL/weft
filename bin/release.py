@@ -530,8 +530,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.publish:
             print(
                 "--publish is ignored: "
-                f"{RELEASE_GATE_WORKFLOW} creates the GitHub Release after "
-                "the pushed tag passes SQLite and Postgres tests"
+                f"{RELEASE_GATE_WORKFLOW} publishes the distributions and "
+                "creates the GitHub Release after the pushed tag passes "
+                "SQLite and Postgres tests"
             )
         if not args.skip_checks:
             for command in PRECHECK_COMMANDS:
@@ -574,8 +575,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"dry-run: {_remote_tag_reuse_note(tag_name)}")
         print(
             "dry-run: next step is to wait for "
-            f"{RELEASE_GATE_WORKFLOW} to run on {tag_name}; it will create the "
-            "GitHub Release after the SQLite and Postgres suites pass"
+            f"{RELEASE_GATE_WORKFLOW} to run on {tag_name}; it will publish "
+            "the distributions and create the GitHub Release after the SQLite "
+            "and Postgres suites pass"
         )
         return 0
 
@@ -583,8 +585,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.publish:
         print(
             "--publish is ignored: "
-            f"{RELEASE_GATE_WORKFLOW} creates the GitHub Release after the "
-            "pushed tag passes SQLite and Postgres tests"
+            f"{RELEASE_GATE_WORKFLOW} publishes the distributions and creates "
+            "the GitHub Release after the pushed tag passes SQLite and "
+            "Postgres tests"
         )
 
     if not args.skip_checks:
@@ -634,8 +637,9 @@ def main(argv: list[str] | None = None) -> int:
 
     print(
         "Next step: wait for "
-        f"{RELEASE_GATE_WORKFLOW} to run on {tag_name}; it will create the "
-        "GitHub Release after the SQLite and Postgres suites pass"
+        f"{RELEASE_GATE_WORKFLOW} to run on {tag_name}; it will publish the "
+        "distributions and create the GitHub Release after the SQLite and "
+        "Postgres suites pass"
     )
 
     return 0

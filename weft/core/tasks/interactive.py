@@ -20,6 +20,10 @@ from .runner import CommandSession, TaskRunner
 
 logger = logging.getLogger(__name__)
 
+_TERMINAL_TASK_STATUSES = frozenset(
+    {"completed", "failed", "timeout", "cancelled", "killed"}
+)
+
 
 class InteractiveTaskMixin(ABC):
     """Mixin providing interactive command session support."""
@@ -142,6 +146,17 @@ class InteractiveTaskMixin(ABC):
     ) -> bool:
         if not getattr(self, "_interactive_mode", False):
             return False
+
+        if self.should_stop or self.taskspec.state.status in _TERMINAL_TASK_STATUSES:
+            try:
+                self._get_reserved_queue().delete(message_id=timestamp)
+            except Exception:
+                logger.debug(
+                    "Failed to drop stale interactive message %s",
+                    timestamp,
+                    exc_info=True,
+                )
+            return True
 
         session = self._interactive_ensure_session(timestamp)
 

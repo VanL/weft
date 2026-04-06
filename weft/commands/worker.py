@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
-import signal
 import time
 from pathlib import Path
 from typing import Any, cast
@@ -19,7 +17,7 @@ from weft._constants import (
 from weft.context import build_context
 from weft.core import Manager, launch_task_process
 from weft.core.taskspec import TaskSpec
-from weft.helpers import iter_queue_json_entries
+from weft.helpers import iter_queue_json_entries, terminate_process_tree
 
 
 def _load_taskspec(path: Path) -> TaskSpec:
@@ -205,8 +203,8 @@ def stop_command(
         if pid is None or not _pid_alive(pid):
             return 0, None
         try:
-            os.kill(pid, signal.SIGTERM)
-        except (ProcessLookupError, OSError):
+            terminate_process_tree(pid, timeout=timeout)
+        except (ProcessLookupError, OSError, psutil.Error):
             return 0, None
         except PermissionError:  # pragma: no cover - unlikely in tests
             return 1, f"Permission denied sending SIGTERM to PID {pid}"

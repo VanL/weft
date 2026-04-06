@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 
 import psutil
@@ -10,6 +11,11 @@ import pytest
 
 from tests.conftest import run_cli
 from tests.helpers.weft_harness import WeftTestHarness
+
+pytestmark = pytest.mark.skipif(
+    os.name == "nt",
+    reason="Windows process names do not expose setproctitle updates reliably",
+)
 
 
 def test_manager_proctitle_updates_to_running(weft_harness: WeftTestHarness) -> None:

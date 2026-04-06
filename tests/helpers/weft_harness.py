@@ -3,7 +3,6 @@ from __future__ import annotations
 import gc
 import json
 import os
-import signal
 import tempfile
 import time
 from pathlib import Path
@@ -20,7 +19,7 @@ from weft._constants import (
 )
 from weft.commands import worker as worker_cmd
 from weft.context import WeftContext, build_context
-from weft.helpers import iter_queue_json_entries
+from weft.helpers import iter_queue_json_entries, terminate_process_tree
 
 
 class WeftTestHarness:
@@ -351,35 +350,21 @@ class WeftTestHarness:
         if pid <= 0:
             return
         try:
-            os.kill(pid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
+            terminated = terminate_process_tree(pid, timeout=self._manager_timeout)
+        except Exception:
             return
-
-        deadline = time.time() + self._manager_timeout
-        while time.time() < deadline:
-            if not self._pid_alive(pid):
-                return
-            time.sleep(0.05)
-
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
+        if pid in terminated or not self._pid_alive(pid):
             return
-
-        for _ in range(10):
-            if not self._pid_alive(pid):
-                return
-            time.sleep(0.05)
 
     @staticmethod
     def _pid_alive(pid: int) -> bool:
         try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
+            process = psutil.Process(pid)
+            return process.is_running()
+        except psutil.NoSuchProcess:
             return False
-        except PermissionError:
-            return True
-        return True
+        except psutil.Error:
+            return False
 
     def _mark_safe_pid(self, pid: int) -> None:
         if pid > 0:
