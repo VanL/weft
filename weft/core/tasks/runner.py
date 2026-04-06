@@ -437,6 +437,9 @@ class TaskRunner:
             env_vars.update({str(k): str(v) for k, v in env_override.items()})
         else:
             raise TypeError("Spec env must be a mapping of string keys to values")
+        # Interactive Python commands often run behind pipes rather than a TTY.
+        # Force unbuffered stdio so REPL-style output is visible immediately.
+        env_vars.setdefault("PYTHONUNBUFFERED", "1")
 
         process_target_obj = self._spec_data.get("process_target")
         if not isinstance(process_target_obj, str) or not process_target_obj:
