@@ -70,6 +70,7 @@ jobs:
     name: Publish to TestPyPI
     needs:
       - build
+    continue-on-error: true
     runs-on: ubuntu-latest
     environment:
       name: testpypi
@@ -97,7 +98,6 @@ jobs:
     needs:
       - build
       - publish-to-pypi
-      - publish-to-testpypi
     runs-on: ubuntu-latest
     permissions:
       contents: write
