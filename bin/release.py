@@ -52,7 +52,7 @@ POSTUPDATE_COMMANDS: Final[tuple[tuple[str, ...], ...]] = (
     ("uv", "run", "pytest", "tests/system/test_constants.py", "-q"),
     ("uv", "build"),
 )
-TagAction = Literal["create", "push_local", "reuse_remote"]
+TagAction = Literal["create", "push_local", "replace_local", "reuse_remote"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -404,26 +404,32 @@ def plan_tag_action(
     """Plan how the helper should handle the target tag safely."""
 
     if version_changed:
-        existing_commit = state.remote_tag_commit or state.local_tag_commit
-        if existing_commit is not None:
-            location = "origin" if state.remote_tag_commit is not None else "local repo"
+        if state.remote_tag_commit is not None:
             raise RuntimeError(
-                f"Tag {state.tag_name} already exists on {location} at "
-                f"{_short_commit(existing_commit)}. Choose a different version."
+                f"Tag {state.tag_name} already exists on origin at "
+                f"{_short_commit(state.remote_tag_commit)}. Choose a different version."
             )
+        if state.local_tag_commit is not None:
+            return "replace_local"
         return "create"
 
-    for location, commit in (
-        ("local repo", state.local_tag_commit),
-        ("origin", state.remote_tag_commit),
-    ):
-        if commit is not None and commit != head_commit:
-            raise RuntimeError(
-                f"Tag {state.tag_name} already exists on {location} at "
-                f"{_short_commit(commit)}, but HEAD is {_short_commit(head_commit)}. "
-                "Reusing this unpublished version would move the tag; choose a "
-                "new version or retag manually."
-            )
+    if state.remote_tag_commit is not None and state.remote_tag_commit != head_commit:
+        raise RuntimeError(
+            f"Tag {state.tag_name} already exists on origin at "
+            f"{_short_commit(state.remote_tag_commit)}, but HEAD is "
+            f"{_short_commit(head_commit)}. Reusing this unpublished version "
+            "would move the remote tag; choose a new version or retag manually."
+        )
+
+    if state.local_tag_commit is not None and state.local_tag_commit != head_commit:
+        if state.remote_tag_commit is None:
+            return "replace_local"
+        raise RuntimeError(
+            f"Tag {state.tag_name} already exists on local repo at "
+            f"{_short_commit(state.local_tag_commit)}, but origin already has "
+            f"{_short_commit(state.remote_tag_commit)}. Fix the local tag or "
+            "delete it manually before retrying."
+        )
 
     if state.remote_tag_commit is not None:
         return "reuse_remote"
@@ -532,10 +538,12 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 "dry-run: no release commit needed because version files already match"
             )
-        if tag_action == "create":
+        if tag_action == "replace_local":
+            run_command(("git", "tag", "-d", tag_name), dry_run=True)
+        if tag_action in {"create", "replace_local"}:
             run_command(("git", "tag", tag_name), dry_run=True)
         run_command(("git", "push"), dry_run=True)
-        if tag_action in {"create", "push_local"}:
+        if tag_action in {"create", "push_local", "replace_local"}:
             run_command(("git", "push", "origin", tag_name), dry_run=True)
         else:
             print(f"dry-run: {_remote_tag_reuse_note(tag_name)}")
@@ -580,13 +588,16 @@ def main(argv: list[str] | None = None) -> int:
         ):
             run_command(command)
 
-    if tag_action == "create":
+    if tag_action == "replace_local":
+        run_command(("git", "tag", "-d", tag_name))
+
+    if tag_action in {"create", "replace_local"}:
         run_command(("git", "tag", tag_name))
 
     for command in (("git", "push"),):
         run_command(command)
 
-    if tag_action in {"create", "push_local"}:
+    if tag_action in {"create", "push_local", "replace_local"}:
         run_command(("git", "push", "origin", tag_name))
     else:
         print(_remote_tag_reuse_note(tag_name))

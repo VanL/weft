@@ -186,12 +186,34 @@ def test_plan_tag_action_rejects_existing_tag_on_different_commit() -> None:
         remote_tag_commit="a" * 40,
     )
 
-    with pytest.raises(RuntimeError, match="move the tag"):
+    with pytest.raises(RuntimeError, match="move the remote tag"):
         release.plan_tag_action(
             state,
             head_commit="b" * 40,
             version_changed=False,
         )
+
+
+def test_plan_tag_action_replaces_stale_local_tag() -> None:
+    """A stale local-only tag should be deleted and recreated automatically."""
+    release = _load_release_module()
+    state = release.ReleaseState(
+        version="0.1.0",
+        tag_name="v0.1.0",
+        github_release_exists=False,
+        pypi_release_exists=False,
+        local_tag_commit="a" * 40,
+        remote_tag_commit=None,
+    )
+
+    assert (
+        release.plan_tag_action(
+            state,
+            head_commit="b" * 40,
+            version_changed=False,
+        )
+        == "replace_local"
+    )
 
 
 def test_main_dry_run_reuses_current_unpublished_version(
@@ -223,6 +245,36 @@ def test_main_dry_run_reuses_current_unpublished_version(
     assert "target:  0.1.0" in captured.out
     assert "would reuse existing version files" in captured.out
     assert "would update pyproject.toml" not in captured.out
+
+
+def test_main_dry_run_deletes_stale_local_tag_before_recreating(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Dry-run should show automatic cleanup of a stale local-only tag."""
+    release = _load_release_module()
+    monkeypatch.setattr(release, "read_current_version", lambda: "0.1.0")
+    monkeypatch.setattr(release, "is_dirty_worktree", lambda: False)
+    monkeypatch.setattr(
+        release,
+        "inspect_release_state",
+        lambda version: release.ReleaseState(
+            version=version,
+            tag_name=f"v{version}",
+            github_release_exists=False,
+            pypi_release_exists=False,
+            local_tag_commit="a" * 40,
+            remote_tag_commit=None,
+        ),
+    )
+    monkeypatch.setattr(release, "current_head_commit", lambda: "b" * 40)
+
+    exit_code = release.main(["--dry-run"])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "$ git tag -d v0.1.0" in captured.out
+    assert "$ git tag v0.1.0" in captured.out
 
 
 def test_precheck_commands_cover_sqlite_and_postgres_release_gate() -> None:
