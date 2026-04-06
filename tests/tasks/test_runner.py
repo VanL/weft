@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -37,6 +38,55 @@ def test_task_runner_executes_function_successfully():
 
 
 PROCESS_SCRIPT = str(Path(__file__).resolve().parent / "process_target.py")
+
+
+def _write_descendant_scripts(tmp_path: Path) -> tuple[Path, Path]:
+    child_script = tmp_path / "child_sleep.py"
+    child_script.write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
+
+    parent_script = tmp_path / "spawn_child.py"
+    parent_script.write_text(
+        """
+from __future__ import annotations
+
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+
+def main() -> None:
+    child = subprocess.Popen([sys.executable, sys.argv[1]])
+    Path(sys.argv[2]).write_text(str(child.pid), encoding="utf-8")
+    time.sleep(30)
+
+
+if __name__ == "__main__":
+    main()
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    return parent_script, child_script
+
+
+def _wait_for_pidfile(pidfile: Path, *, timeout: float = 2.0) -> int:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if pidfile.exists():
+            return int(pidfile.read_text(encoding="utf-8").strip())
+        time.sleep(0.05)
+    raise AssertionError(f"Timed out waiting for pid file {pidfile}")
+
+
+def _wait_for_pid_exit(pid: int, *, timeout: float = 5.0) -> bool:
+    psutil = pytest.importorskip("psutil")
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not psutil.pid_exists(pid):
+            return True
+        time.sleep(0.05)
+    return False
 
 
 def test_task_runner_executes_command_successfully(tmp_path):
@@ -108,6 +158,41 @@ def test_task_runner_times_out(tmp_path):
 
     assert outcome.status == "timeout"
     assert outcome.error is not None
+
+
+def test_task_runner_timeout_terminates_command_descendants(tmp_path: Path) -> None:
+    pytest.importorskip("psutil")
+    parent_script, child_script = _write_descendant_scripts(tmp_path)
+    pidfile = tmp_path / "child.pid"
+    runner = TaskRunner(
+        target_type="command",
+        tid=None,
+        function_target=None,
+        process_target=sys.executable,
+        agent=None,
+        args=[str(parent_script), str(child_script), str(pidfile)],
+        kwargs=None,
+        env={},
+        working_dir=str(tmp_path),
+        timeout=1.0,
+        limits=None,
+        monitor_class=None,
+        monitor_interval=0.05,
+    )
+
+    outcome = runner.run({})
+    child_pid = _wait_for_pidfile(pidfile)
+
+    try:
+        assert outcome.status == "timeout"
+        assert _wait_for_pid_exit(child_pid)
+    finally:
+        if not _wait_for_pid_exit(child_pid, timeout=0.1):
+            psutil = pytest.importorskip("psutil")
+            try:
+                psutil.Process(child_pid).kill()
+            except psutil.Error:
+                pass
 
 
 def test_task_runner_enforces_memory_limit(tmp_path):
@@ -285,3 +370,38 @@ def test_task_runner_agent_session_continues_conversation() -> None:
     assert second.status == "ok"
     assert second.value is not None
     assert second.value.aggregate_public_output() == "history:hello"
+
+
+def test_command_session_terminate_kills_descendants(tmp_path: Path) -> None:
+    pytest.importorskip("psutil")
+    parent_script, child_script = _write_descendant_scripts(tmp_path)
+    pidfile = tmp_path / "interactive-child.pid"
+    runner = TaskRunner(
+        target_type="command",
+        tid=None,
+        function_target=None,
+        process_target=sys.executable,
+        agent=None,
+        args=[str(parent_script), str(child_script), str(pidfile)],
+        kwargs=None,
+        env={},
+        working_dir=str(tmp_path),
+        timeout=5.0,
+        limits=None,
+        monitor_class=None,
+        monitor_interval=0.05,
+    )
+
+    session = runner.start_session()
+    child_pid = _wait_for_pidfile(pidfile)
+    try:
+        session.terminate()
+        assert _wait_for_pid_exit(child_pid)
+    finally:
+        session.stop_monitor()
+        if not _wait_for_pid_exit(child_pid, timeout=0.1):
+            psutil = pytest.importorskip("psutil")
+            try:
+                psutil.Process(child_pid).kill()
+            except psutil.Error:
+                pass

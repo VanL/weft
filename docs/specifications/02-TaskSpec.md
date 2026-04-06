@@ -219,3 +219,4 @@ _Implementation mapping_: `weft/core/tasks/base.py` (`_apply_reserved_policy`), 
 ## Related Plans
 
 - [`docs/plans/piped-input-support-plan.md`](../plans/piped-input-support-plan.md)
+- [`docs/plans/runner-extension-point-plan.md`](../plans/runner-extension-point-plan.md)

@@ -237,12 +237,18 @@ class InteractiveTaskMixin(ABC):
 
         ok, violation = session.poll_limits()
         if not ok and violation:
-            self.taskspec.mark_failed(error=violation)
+            self.taskspec.mark_killed(reason=violation)
             self._report_state_change(
                 event="work_limit_violation",
                 message_id=time.time_ns(),
                 error=violation,
             )
+            policy = self.taskspec.spec.reserved_policy_on_error
+            self._apply_reserved_policy(policy)
+            if policy is not ReservedPolicy.KEEP:
+                self._ensure_reserved_empty()
+                self._cleanup_reserved_if_needed()
+            self._update_process_title("killed", "limit")
             session.terminate()
             session.stop_monitor()
             self._interactive_finalize_session(failure_reason=violation)
@@ -319,7 +325,13 @@ class InteractiveTaskMixin(ABC):
         returncode = session.returncode()
 
         current_status = self.taskspec.state.status
-        terminal_override_allowed = current_status not in {"cancelled", "killed"}
+        terminal_override_allowed = current_status not in {
+            "completed",
+            "failed",
+            "timeout",
+            "cancelled",
+            "killed",
+        }
 
         if failure_reason == "cancelled":
             terminal_override_allowed = False

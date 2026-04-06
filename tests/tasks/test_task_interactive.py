@@ -13,7 +13,13 @@ from simplebroker import Queue
 from weft._constants import WEFT_GLOBAL_LOG_QUEUE, WEFT_STREAMING_SESSIONS_QUEUE
 from weft.core.tasks import Consumer
 from weft.core.tasks.base import BaseTask
-from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
+from weft.core.taskspec import (
+    IOSection,
+    LimitsSection,
+    SpecSection,
+    StateSection,
+    TaskSpec,
+)
 
 INTERACTIVE_SCRIPT = str(
     (Path(__file__).resolve().parent / "interactive_echo.py").resolve()
@@ -25,17 +31,25 @@ def unique_tid() -> str:
     return str(time.time_ns())
 
 
-def make_interactive_spec(tid: str) -> TaskSpec:
+def make_interactive_spec(
+    tid: str,
+    *,
+    script_path: str | None = None,
+    limits: LimitsSection | None = None,
+    polling_interval: float = 1.0,
+) -> TaskSpec:
     return TaskSpec(
         tid=tid,
         name="interactive-task",
         spec=SpecSection(
             type="command",
             process_target=sys.executable,
-            args=["-u", INTERACTIVE_SCRIPT],
+            args=["-u", script_path or INTERACTIVE_SCRIPT],
             interactive=True,
             stream_output=True,
             cleanup_on_exit=True,
+            polling_interval=polling_interval,
+            limits=limits or LimitsSection(),
         ),
         io=IOSection(
             inputs={"inbox": f"T{tid}.inbox"},
@@ -252,3 +266,65 @@ def test_interactive_streaming_session_records(
         f"{unique_tid}:{spec.io.outputs['outbox']}:"
     )
     assert deletes, "expected streaming session deletion"
+
+
+def test_interactive_limit_marks_killed_without_terminal_transition_error(
+    tmp_path: Path, broker_env, unique_tid: str
+) -> None:
+    db_path, make_queue = broker_env
+    script = tmp_path / "interactive_limit.py"
+    script.write_text(
+        """
+from __future__ import annotations
+
+import sys
+import time
+
+
+def main() -> None:
+    sys.stdin.readline()
+    _data = [b"x" * (1024 * 1024) for _ in range(20)]
+    time.sleep(5)
+
+
+if __name__ == "__main__":
+    main()
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    spec = make_interactive_spec(
+        unique_tid,
+        script_path=str(script),
+        limits=LimitsSection(memory_mb=5),
+        polling_interval=0.05,
+    )
+    task = Consumer(db_path, spec)
+    inbox = make_queue(spec.io.inputs["inbox"])
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    _drain(log_queue)
+
+    try:
+        inbox.write(json.dumps({"stdin": "go\n"}))
+        for _ in range(200):
+            task.process_once()
+            if task.taskspec.state.status in {
+                "failed",
+                "killed",
+                "timeout",
+                "cancelled",
+                "completed",
+            }:
+                break
+            time.sleep(0.05)
+
+        for _ in range(5):
+            task.process_once()
+
+        events = [json.loads(e) for e in _drain(log_queue)]
+        assert task.taskspec.state.status == "killed"
+        assert any(event["event"] == "work_limit_violation" for event in events)
+        assert not any(event["event"] == "work_failed" for event in events)
+    finally:
+        task.stop(join=False)

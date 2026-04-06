@@ -111,3 +111,20 @@ def test_project_config_recovers_from_corruption(tmp_path: Path) -> None:
     data = json.loads(refreshed_ctx.config_path.read_text(encoding="utf-8"))
     assert data["project_name"] == tmp_path.name
     assert "created" in data
+
+
+def test_build_context_reports_weft_pg_install_hint_for_missing_plugin(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Postgres backend selection should point users at the Weft extra."""
+
+    def _raise_missing_plugin(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise RuntimeError(
+            "Requested backend 'postgres' is not available. Install simplebroker-pg."
+        )
+
+    monkeypatch.setattr("weft.context.target_for_directory", _raise_missing_plugin)
+
+    with pytest.raises(RuntimeError, match=r"uv add 'weft\[pg\]'"):
+        build_context(spec_context=tmp_path)

@@ -68,7 +68,21 @@ from weft._constants import (
     load_config,
 )
 
-__all__ = ["WeftContext", "build_context", "get_context"]
+POSTGRES_BACKEND_UNAVAILABLE = (
+    "Requested backend 'postgres' is not available. Install simplebroker-pg."
+)
+POSTGRES_BACKEND_INSTALL_HINT = (
+    "Requested backend 'postgres' is not available. "
+    "Install with `uv add 'weft[pg]'` or install `simplebroker-pg` directly."
+)
+
+__all__ = [
+    "POSTGRES_BACKEND_INSTALL_HINT",
+    "WeftContext",
+    "build_context",
+    "get_context",
+    "normalize_backend_resolution_error",
+]
 
 
 @dataclass(frozen=True)
@@ -231,6 +245,18 @@ def get_context(spec_context: str | os.PathLike[str] | None = None) -> WeftConte
     return build_context(spec_context=spec_context)
 
 
+def normalize_backend_resolution_error(exc: Exception) -> Exception:
+    """Rewrite backend-plugin resolution failures into user-facing Weft guidance."""
+
+    message = str(exc).strip()
+    if message in {
+        "Unknown backend plugin: postgres",
+        POSTGRES_BACKEND_UNAVAILABLE,
+    }:
+        return RuntimeError(POSTGRES_BACKEND_INSTALL_HINT)
+    return exc
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
@@ -243,16 +269,25 @@ def _resolve_root_and_target(
     """Determine the project root and broker target."""
     if spec_context is not None:
         root = Path(spec_context).expanduser().resolve()
-        return root, target_for_directory(root, config=config), False
+        try:
+            return root, target_for_directory(root, config=config), False
+        except RuntimeError as exc:
+            raise normalize_backend_resolution_error(exc) from exc
 
     start_dir = Path.cwd().resolve()
-    discovered_target = resolve_broker_target(start_dir, config=config)
+    try:
+        discovered_target = resolve_broker_target(start_dir, config=config)
+    except RuntimeError as exc:
+        raise normalize_backend_resolution_error(exc) from exc
     if discovered_target is not None:
         root = discovered_target.project_root or start_dir
         return root, discovered_target, True
 
     root = start_dir
-    return root, target_for_directory(root, config=config), False
+    try:
+        return root, target_for_directory(root, config=config), False
+    except RuntimeError as exc:
+        raise normalize_backend_resolution_error(exc) from exc
 
 
 def _ensure_database(

@@ -808,6 +808,7 @@ The CLI follows SimpleBroker's command patterns and integrates with standard Uni
 ## Related Plans
 
 - [`docs/plans/piped-input-support-plan.md`](../plans/piped-input-support-plan.md)
+- [`docs/plans/runner-extension-point-plan.md`](../plans/runner-extension-point-plan.md)
 
 ## Related Documents
 

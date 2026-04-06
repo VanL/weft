@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import os
-import pty
 import select
 import subprocess
 import time
 from pathlib import Path
 
 import pytest
+
+pytestmark = pytest.mark.skipif(
+    os.name == "nt",
+    reason="PTY-backed interactive CLI test requires Unix PTY support",
+)
+
+pty = pytest.importorskip("pty")
 
 READ_SLICE = 0.05
 DEFAULT_TIMEOUT = 5.0

@@ -18,6 +18,19 @@ System: OK
 
 Weft is a queue-based task execution system focused on enabling interaction between AI agents, user-provided functions, and existing CLI tools. It combines the simplicity of direct command execution with the power of durable task queues, multiprocess isolation, and comprehensive state tracking.
 
+## Installation
+
+```bash
+# Default SQLite-backed install
+uv add weft
+
+# Install Postgres backend support too
+uv add 'weft[pg]'
+```
+
+Installing `weft[pg]` adds the `simplebroker-pg` backend plugin. Backend
+selection still happens at runtime through project config or environment
+variables; the extra only makes the Postgres backend available.
 
 ## Quick Start
 
@@ -86,6 +99,34 @@ For non-file-backed backends such as Postgres, `.weft/` still holds Weft
 metadata, logs, outputs, and autostart manifests, but the broker target is
 resolved through SimpleBroker project configuration rather than assuming an
 on-disk `.weft/broker.db`.
+
+### Selecting A Backend
+
+SQLite remains the default. To use Postgres, install `weft[pg]` and then
+declare the backend through SimpleBroker project config or Weft environment
+variables.
+
+Project-local `.simplebroker.toml`:
+
+```toml
+version = 1
+backend = "postgres"
+target = "postgresql://user:pass@host:5432/dbname"
+
+[backend_options]
+schema = "weft"
+```
+
+Environment-based selection:
+
+```bash
+export WEFT_BACKEND=postgres
+export WEFT_BACKEND_TARGET='postgresql://user:pass@host:5432/dbname'
+export WEFT_BACKEND_SCHEMA='weft'
+```
+
+If Postgres is selected without the plugin installed, Weft will fail with an
+install hint for `uv add 'weft[pg]'`.
 
 ### Task IDs (TIDs)
 
