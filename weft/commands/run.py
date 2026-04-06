@@ -513,7 +513,12 @@ def _handle_ctrl_stream(raw: str) -> None:
             typer.echo(err=is_stderr)
 
 
-def _process_outbox_message(raw: str, stream_buffer: list[str]) -> tuple[bool, Any]:
+def _process_outbox_message(
+    raw: str,
+    stream_buffer: list[str],
+    *,
+    emit_stream: bool = True,
+) -> tuple[bool, Any]:
     try:
         envelope = json.loads(raw)
     except json.JSONDecodeError:
@@ -531,10 +536,12 @@ def _process_outbox_message(raw: str, stream_buffer: list[str]) -> tuple[bool, A
         else:
             text = str(data)
         if text:
-            typer.echo(text, nl=False)
+            if emit_stream:
+                typer.echo(text, nl=False)
             stream_buffer.append(text)
         if envelope.get("final"):
-            typer.echo()
+            if emit_stream:
+                typer.echo()
             value = "".join(stream_buffer)
             stream_buffer.clear()
             return True, value

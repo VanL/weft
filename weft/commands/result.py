@@ -209,7 +209,11 @@ def _drain_outbox_until_timestamp(
         consumed = queue.read_one(exact_timestamp=timestamp)
         if consumed is None:
             continue
-        final, value = _process_outbox_message(str(consumed), stream_buffer)
+        final, value = _process_outbox_message(
+            str(consumed),
+            stream_buffer,
+            emit_stream=False,
+        )
         if final:
             _append_public_value(values, value, show_stderr=show_stderr)
     return values
@@ -252,7 +256,11 @@ def _collect_all_results(
             stream_buffer: list[str] = []
             result_values: list[Any] = []
             for payload in _iter_queue_messages(queue, peek=peek_only):
-                final, value = _process_outbox_message(payload, stream_buffer)
+                final, value = _process_outbox_message(
+                    payload,
+                    stream_buffer,
+                    emit_stream=False,
+                )
                 if not final:
                     continue
                 _append_public_value(result_values, value, show_stderr=show_stderr)
@@ -346,7 +354,11 @@ def _await_single_result(
                     payload = (
                         outbox_raw[0] if isinstance(outbox_raw, tuple) else outbox_raw
                     )
-                    final, value = _process_outbox_message(str(payload), stream_buffer)
+                    final, value = _process_outbox_message(
+                        str(payload),
+                        stream_buffer,
+                        emit_stream=False,
+                    )
                     if final:
                         _append_public_value(
                             result_values,
