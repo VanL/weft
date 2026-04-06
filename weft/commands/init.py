@@ -8,7 +8,7 @@ from pathlib import Path
 from simplebroker import target_for_directory
 from simplebroker.commands import cmd_init as sb_cmd_init
 from weft._constants import EXIT_ERROR, EXIT_SUCCESS, load_config
-from weft.context import build_context
+from weft.context import build_context, normalize_backend_resolution_error
 
 
 def cmd_init(
@@ -33,14 +33,14 @@ def cmd_init(
                 file=sys.stderr,
             )
         return EXIT_ERROR
-    broker_target = target_for_directory(root, config=config)
-
     try:
+        broker_target = target_for_directory(root, config=config)
         result = int(sb_cmd_init(broker_target, quiet=quiet))
     except Exception as exc:  # pragma: no cover - defensive
+        friendly_exc = normalize_backend_resolution_error(exc)
         if not quiet:
             print(
-                f"weft: failed to initialize SimpleBroker database: {exc}",
+                f"weft: failed to initialize SimpleBroker database: {friendly_exc}",
                 file=sys.stderr,
             )
         return 1

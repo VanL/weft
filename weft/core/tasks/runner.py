@@ -34,6 +34,7 @@ from weft.core.resource_monitor import (
 )
 from weft.core.targets import execute_command_target, execute_function_target
 from weft.core.taskspec import AgentSection
+from weft.helpers import terminate_process_tree
 
 from .agent_session_protocol import (
     make_ready_response,
@@ -403,6 +404,17 @@ class TaskRunner:
 
         if not process.is_alive():
             process.join(timeout=timeout)
+            return
+
+        pid = process.pid
+        if isinstance(pid, int) and pid > 0:
+            terminate_process_tree(pid, timeout=timeout)
+
+        try:
+            process.join(timeout=timeout)
+        except Exception:  # pragma: no cover - defensive
+            pass
+        if not process.is_alive():
             return
 
         process.terminate()

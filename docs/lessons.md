@@ -61,3 +61,10 @@ runbook needs to become stricter.
   `weft run` or `weft worker start`. Using nested `uv` for one-shot commands
   like `init`, `queue`, `status`, or `validate-taskspec` adds material test
   runtime without buying correctness.
+
+## 2026-04-06 Process Trees
+
+- When cancelling, timing out, or limit-killing a task, terminate the full
+  process tree, not just the immediate worker PID. Command targets can spawn
+  grandchildren, and root-only termination leaves orphaned subprocesses behind
+  even though the task itself appears to have stopped cleanly.

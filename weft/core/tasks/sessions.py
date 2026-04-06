@@ -22,6 +22,7 @@ from weft.core.tasks.agent_session_protocol import (
     parse_result_response,
     startup_error_message,
 )
+from weft.helpers import terminate_process_tree
 
 
 class CommandSession:
@@ -88,11 +89,17 @@ class CommandSession:
 
     def terminate(self) -> None:
         if self.is_alive():
-            self._process.terminate()
+            pid = self._process.pid
+            if isinstance(pid, int) and pid > 0:
+                terminate_process_tree(pid, timeout=2.0)
             try:
-                self._process.wait(timeout=2.0)
+                self._process.wait(timeout=0.2)
             except subprocess.TimeoutExpired:
-                self._process.kill()
+                self._process.terminate()
+                try:
+                    self._process.wait(timeout=2.0)
+                except subprocess.TimeoutExpired:
+                    self._process.kill()
 
     def poll_limits(self) -> tuple[bool, str | None]:
         if not self._monitor:
@@ -255,6 +262,17 @@ class AgentSession:
                 self._process.join(timeout=0.2)
             except Exception:  # pragma: no cover - defensive
                 pass
+            return
+
+        pid = self._process.pid
+        if isinstance(pid, int) and pid > 0:
+            terminate_process_tree(pid, timeout=0.5)
+
+        try:
+            self._process.join(timeout=0.2)
+        except Exception:  # pragma: no cover - defensive
+            pass
+        if not self.is_alive():
             return
 
         self._process.terminate()

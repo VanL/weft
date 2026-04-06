@@ -12,6 +12,7 @@ from tests.helpers.test_backend import (
     cleanup_postgres_schema_for_root,
     postgres_env_overrides_for_root,
 )
+from weft.commands.init import cmd_init
 from weft.context import build_context
 
 pytestmark = [pytest.mark.shared]
@@ -123,3 +124,30 @@ def test_cli_init_supports_env_only_postgres_configuration(
         assert queue.read() == "payload"
     finally:
         cleanup_postgres_schema_for_root(project_root, env=env)
+
+
+def test_cmd_init_reports_weft_pg_install_hint_for_missing_plugin(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Init should print a Weft-specific install hint when PG support is absent."""
+
+    def _raise_missing_plugin(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise RuntimeError(
+            "Requested backend 'postgres' is not available. Install simplebroker-pg."
+        )
+
+    monkeypatch.setattr(
+        "weft.commands.init.target_for_directory", _raise_missing_plugin
+    )
+    monkeypatch.setattr(
+        "weft.commands.init.load_config", lambda: {"BROKER_BACKEND": "postgres"}
+    )
+
+    rc = cmd_init(tmp_path, quiet=False)
+    captured = capsys.readouterr()
+
+    assert rc == 1
+    assert "uv add 'weft[pg]'" in captured.err
+    assert "simplebroker-pg" in captured.err
