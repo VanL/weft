@@ -108,3 +108,17 @@ def test_main_dry_run_publish_flag_defers_to_release_gate(
     assert exit_code == 0
     assert release.RELEASE_GATE_WORKFLOW in captured.out
     assert "gh release create" not in captured.out
+
+
+def test_precheck_commands_cover_sqlite_and_postgres_release_gate() -> None:
+    """The helper precheck should cover both release-gate backend suites."""
+    release = _load_release_module()
+    sqlite_command = release.PRECHECK_COMMANDS[0]
+    postgres_command = release.PRECHECK_COMMANDS[1]
+
+    assert sqlite_command[:5] == ("uv", "run", "pytest", "-v", "--tb=short")
+    assert (
+        "--override-ini=addopts=-ra -q --strict-markers -n auto --dist loadgroup"
+        in sqlite_command
+    )
+    assert postgres_command == ("uv", "run", "bin/pytest-pg", "--all")
