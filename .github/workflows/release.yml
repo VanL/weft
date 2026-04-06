@@ -66,33 +66,6 @@ jobs:
       - name: Publish distribution to PyPI
         run: uv publish --trusted-publishing always dist/*
 
-  publish-to-testpypi:
-    name: Publish to TestPyPI
-    needs:
-      - build
-    continue-on-error: true
-    runs-on: ubuntu-latest
-    environment:
-      name: testpypi
-      url: https://test.pypi.org/p/weft
-    permissions:
-      id-token: write
-
-    steps:
-      - name: Download all the dists
-        uses: actions/download-artifact@v4
-        with:
-          name: python-package-distributions
-          path: dist/
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
-        with:
-          enable-cache: true
-
-      - name: Publish distribution to TestPyPI
-        run: uv publish --trusted-publishing always --publish-url https://test.pypi.org/legacy/ dist/*
-
   github-release:
     name: Sign and upload to GitHub Release
     needs:

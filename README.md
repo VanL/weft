@@ -549,8 +549,7 @@ Weft uses a tag-driven release flow in GitHub Actions:
   the publish workflow if both pass.
 - [`.github/workflows/release.yml`](./.github/workflows/release.yml) is a
   reusable workflow that can only be called from the release gate; it handles
-  package build, PyPI publishing, best-effort TestPyPI publishing, signing,
-  and GitHub Release creation.
+  package build, PyPI publishing, signing, and GitHub Release creation.
 
 ```bash
 # Reuse the current version if it has never reached GitHub Release / PyPI;
@@ -592,13 +591,11 @@ After the helper pushes `v0.1.1`, the release gate workflow will:
 3. Invoke the package release workflow only if both suites pass
 4. Build distributions with `uv build`
 5. Publish to PyPI with `uv publish --trusted-publishing always dist/*`
-6. Optionally publish to TestPyPI with `uv publish --trusted-publishing always --publish-url https://test.pypi.org/legacy/ dist/*`
-7. Sign artifacts, create the GitHub Release, and upload the release files once PyPI succeeds
+6. Sign artifacts, create the GitHub Release, and upload the release files once PyPI succeeds
 
 Prerequisite:
 
 - Configure the PyPI Trusted Publisher for this GitHub repository/workflow.
-- Configure the TestPyPI Trusted Publisher too if you want TestPyPI releases; the workflow treats it as best-effort.
 
 ## Configuration
 
