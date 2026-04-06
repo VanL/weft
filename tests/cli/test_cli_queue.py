@@ -46,7 +46,7 @@ def test_queue_write_reads_implicit_stdin(workdir):
 
     rc, out, err = run_cli("queue", "read", "stdin.queue", cwd=workdir)
     assert rc == 0
-    assert out == "line1\nline2"
+    assert [line for line in out.splitlines() if line] == ["line1", "line2"]
     assert err == ""
 
 

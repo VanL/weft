@@ -3,10 +3,9 @@
 ## Goal
 
 Add a tag-driven GitHub Actions workflow that runs the full SQLite release
-suite and the PG-compatible release suite before creating the GitHub Release.
-Keep package publishing anchored on the existing release-published workflow so
-Weft has one publish pipeline, but prevent the normal helper-driven release path
-from bypassing the backend gate.
+suite and the PG-compatible release suite before any package or GitHub
+publication happens. Keep one publish pipeline, but make sure it can only run
+from the backend gate after both release suites succeed.
 
 ## Source Documents
 
@@ -29,6 +28,7 @@ Files to modify:
 - `.github/workflows/release-gate.yml`
 - `README.md`
 - `bin/release.py`
+- `.github/workflows/release.yml`
 - `tests/system/test_release_script.py`
 
 Files to read first:
@@ -43,16 +43,17 @@ Shared paths and behavior to reuse:
 
 - `bin/pytest-pg` is the canonical PG-backed test runner and should stay the
   only workflow entry point for Postgres parity.
-- `.github/workflows/release.yml` is already the canonical package-publish path
-  and should continue to own build / PyPI / TestPyPI / signing steps.
+- `.github/workflows/release.yml` is the canonical package-publish path and
+  should continue to own build / PyPI / TestPyPI / signing steps, but it should
+  only be callable from the release gate.
 - The release helper should still own local version bumping, commit, tag, and
   push behavior.
 
 ## Invariants and Constraints
 
 - Do not create a second package publishing pipeline.
-- The GitHub Release must be created only after the SQLite and Postgres test
-  jobs both succeed.
+- The GitHub Release and PyPI / TestPyPI publication must only happen after the
+  SQLite and Postgres test jobs both succeed.
 - SQLite / file-backed tests must continue to run only in the SQLite suite.
 - Postgres parity must continue to run through `bin/pytest-pg`.
 - Keep changes narrow to release workflow / helper / docs; do not refactor the
@@ -65,13 +66,15 @@ Shared paths and behavior to reuse:
    - Add `.github/workflows/release-gate.yml` for version-tag pushes.
    - Add a SQLite job that runs the full SQLite release suite.
    - Add a Postgres job that runs `uv run bin/pytest-pg --all`.
-   - Create the GitHub Release only after both test jobs succeed.
+   - Call the publish workflow only after both test jobs succeed.
 
-2. Keep the publish pipeline on the existing release-published workflow path.
-   - Leave `.github/workflows/release.yml` as the package build / publish /
+2. Make the publish workflow gate-only.
+   - Keep `.github/workflows/release.yml` as the package build / publish /
      signing workflow.
-   - Ensure the new gate creates the GitHub Release from the tested tag so the
-     existing publish workflow still runs unchanged.
+   - Remove independent triggers so it can only run via `workflow_call` from
+     the release gate.
+   - Let it create the GitHub Release itself after package publication steps
+     finish.
 
 3. Remove the normal helper bypass.
    - Update `bin/release.py` so the helper no longer creates a GitHub Release
@@ -105,7 +108,9 @@ from pathlib import Path
 workflow = yaml.safe_load(Path('.github/workflows/release-gate.yml').read_text())
 assert 'push' in workflow['on']
 assert 'tags' in workflow['on']['push']
-assert workflow['jobs']['create-release']['needs'] == ['test-sqlite', 'test-postgres']
+assert workflow['jobs']['publish-release']['needs'] == ['test-sqlite', 'test-postgres']
+publish = yaml.safe_load(Path('.github/workflows/release.yml').read_text())
+assert 'workflow_call' in publish['on']
 PY
 ```
 

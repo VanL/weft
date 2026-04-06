@@ -136,6 +136,11 @@ class InteractiveStreamClient:
         if thread and thread.is_alive():
             thread.join(timeout=2.0)
 
+        try:
+            self._inbox_queue.close()
+        except Exception:
+            pass
+
         self._completion.set()
 
     # ------------------------------------------------------------------

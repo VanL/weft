@@ -269,7 +269,9 @@ def test_task_runner_enforces_fd_limit(tmp_path):
     outcome = runner.run({})
 
     assert outcome.status == "limit"
-    assert "Open files" in (outcome.error or "")
+    assert any(
+        label in (outcome.error or "") for label in ("Open files", "Open handles")
+    )
     assert outcome.metrics is not None
 
 
@@ -296,7 +298,9 @@ def test_task_runner_reports_multiple_violations(tmp_path):
 
     assert outcome.status == "limit"
     assert outcome.error is not None
-    assert any(label in outcome.error for label in ("Memory", "Open files"))
+    assert any(
+        label in outcome.error for label in ("Memory", "Open files", "Open handles")
+    )
     assert outcome.metrics is not None
 
 

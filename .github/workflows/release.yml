@@ -1,15 +1,24 @@
 name: Release
 
 on:
-  release:
-    types: [published]
-  workflow_dispatch:
+  workflow_call:
+    inputs:
+      tag_name:
+        description: Release tag to publish and attach artifacts to.
+        required: true
+        type: string
+      release_ref:
+        description: Git ref to check out for the release build.
+        required: true
+        type: string
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.release_ref }}
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -85,9 +94,10 @@ jobs:
 
   github-release:
     name: Sign and upload to GitHub Release
-    if: github.event_name == 'release'
     needs:
+      - build
       - publish-to-pypi
+      - publish-to-testpypi
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -107,7 +117,9 @@ jobs:
             ./dist/*.tar.gz
             ./dist/*.whl
 
-      - name: Upload artifact signatures to GitHub Release
+      - name: Create GitHub Release and upload artifacts
         uses: softprops/action-gh-release@v2
         with:
+          generate_release_notes: true
+          tag_name: ${{ inputs.tag_name }}
           files: dist/*

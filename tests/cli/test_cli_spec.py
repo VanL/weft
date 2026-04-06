@@ -40,7 +40,7 @@ def test_spec_create_list_show_delete(workdir) -> None:
         cwd=workdir,
     )
     assert rc == 0
-    assert out.strip().endswith(".weft/tasks/demo.json")
+    assert Path(out.strip()).as_posix().endswith(".weft/tasks/demo.json")
     assert err == ""
 
     rc, out, err = run_cli(
@@ -136,7 +136,7 @@ def test_spec_create_list_show_delete_agent(workdir) -> None:
         cwd=workdir,
     )
     assert rc == 0
-    assert out.strip().endswith(".weft/tasks/demo-agent.json")
+    assert Path(out.strip()).as_posix().endswith(".weft/tasks/demo-agent.json")
     assert err == ""
 
     rc, out, err = run_cli(

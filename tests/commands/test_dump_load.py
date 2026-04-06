@@ -191,19 +191,23 @@ def test_load_missing_file(tmp_path: Path) -> None:
     assert "input file not found" in message
 
 
-def test_load_invalid_context() -> None:
+def test_load_invalid_context(tmp_path: Path) -> None:
     """Test load with invalid context."""
 
-    exit_code, message = cmd_load(context_path="/nonexistent/path")
+    invalid_context = tmp_path / "not-a-directory"
+    invalid_context.write_text("context", encoding="utf-8")
+    exit_code, message = cmd_load(context_path=str(invalid_context))
 
     assert exit_code == 1
     assert "failed to resolve context" in message
 
 
-def test_dump_invalid_context() -> None:
+def test_dump_invalid_context(tmp_path: Path) -> None:
     """Test dump with invalid context."""
 
-    exit_code, message = cmd_dump(context_path="/nonexistent/path")
+    invalid_context = tmp_path / "not-a-directory"
+    invalid_context.write_text("context", encoding="utf-8")
+    exit_code, message = cmd_dump(context_path=str(invalid_context))
 
     assert exit_code == 1
     assert "failed to resolve context" in message
