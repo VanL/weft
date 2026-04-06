@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from tests.conftest import run_cli
 from weft.context import build_context
+
+pytestmark = [pytest.mark.shared]
 
 
 def test_queue_write_and_read(workdir):
@@ -24,6 +28,25 @@ def test_queue_write_and_read(workdir):
     rc, out, err = run_cli("queue", "read", "cli.queue", cwd=workdir)
     assert rc == 0
     assert "hello" in out
+    assert err == ""
+
+
+def test_queue_write_reads_implicit_stdin(workdir):
+    build_context(spec_context=workdir)
+
+    rc, _, err = run_cli(
+        "queue",
+        "write",
+        "stdin.queue",
+        cwd=workdir,
+        stdin="line1\nline2",
+    )
+    assert rc == 0
+    assert err == ""
+
+    rc, out, err = run_cli("queue", "read", "stdin.queue", cwd=workdir)
+    assert rc == 0
+    assert out == "line1\nline2"
     assert err == ""
 
 
@@ -122,6 +145,41 @@ def test_queue_watch(workdir):
     assert rc == 0
     assert "payload" in out
     assert "Watching queue 'watch.queue'" in err
+
+
+def test_queue_broadcast_reads_implicit_stdin_with_pattern(workdir):
+    build_context(spec_context=workdir)
+
+    assert run_cli("queue", "write", "broadcast.alpha", "seed-a", cwd=workdir)[0] == 0
+    assert run_cli("queue", "write", "broadcast.beta", "seed-b", cwd=workdir)[0] == 0
+    assert run_cli("queue", "write", "other.queue", "seed-other", cwd=workdir)[0] == 0
+
+    rc, out, err = run_cli(
+        "queue",
+        "broadcast",
+        "--pattern",
+        "broadcast.*",
+        cwd=workdir,
+        stdin="broadcast-body",
+    )
+    assert rc == 0
+    assert out == ""
+    assert err == ""
+
+    rc, out, err = run_cli("queue", "read", "broadcast.alpha", "--all", cwd=workdir)
+    assert rc == 0
+    assert out.splitlines() == ["seed-a", "broadcast-body"]
+    assert err == ""
+
+    rc, out, err = run_cli("queue", "read", "broadcast.beta", "--all", cwd=workdir)
+    assert rc == 0
+    assert out.splitlines() == ["seed-b", "broadcast-body"]
+    assert err == ""
+
+    rc, out, err = run_cli("queue", "read", "other.queue", "--all", cwd=workdir)
+    assert rc == 0
+    assert out.splitlines() == ["seed-other"]
+    assert err == ""
 
 
 def test_queue_read_with_timestamps(workdir):

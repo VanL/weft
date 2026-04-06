@@ -2,12 +2,22 @@
 
 from __future__ import annotations
 
+import io
+import sys
+from types import SimpleNamespace
+
+import pytest
+
+from tests.helpers.test_backend import prepare_project_root
 from weft.commands import queue as queue_cmd
 from weft.context import build_context
 
+pytestmark = [pytest.mark.shared]
+
 
 def test_read_and_write_messages(tmp_path):
-    ctx = build_context(spec_context=tmp_path)
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
     queue_cmd.write_message(ctx, "unit.queue", "hello")
 
     messages = queue_cmd.read_messages(ctx, "unit.queue")
@@ -15,7 +25,8 @@ def test_read_and_write_messages(tmp_path):
 
 
 def test_peek_messages_preserves_queue(tmp_path):
-    ctx = build_context(spec_context=tmp_path)
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
     queue_cmd.write_message(ctx, "peek.queue", "foo")
 
     first = queue_cmd.peek_messages(ctx, "peek.queue")
@@ -26,7 +37,8 @@ def test_peek_messages_preserves_queue(tmp_path):
 
 
 def test_move_messages(tmp_path):
-    ctx = build_context(spec_context=tmp_path)
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
     queue_cmd.write_message(ctx, "from.queue", "a")
     queue_cmd.write_message(ctx, "from.queue", "b")
 
@@ -38,7 +50,8 @@ def test_move_messages(tmp_path):
 
 
 def test_list_queues(tmp_path):
-    ctx = build_context(spec_context=tmp_path)
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
     queue_cmd.write_message(ctx, "list.queue", "item")
 
     queues = queue_cmd.list_queues(ctx)
@@ -47,7 +60,8 @@ def test_list_queues(tmp_path):
 
 
 def test_watch_queue(tmp_path):
-    ctx = build_context(spec_context=tmp_path)
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
     queue_cmd.write_message(ctx, "watch.queue", "payload")
 
     iterator = queue_cmd.watch_queue(
@@ -56,3 +70,51 @@ def test_watch_queue(tmp_path):
     messages = list(iterator)
     assert len(messages) == 1
     assert messages[0].body == "payload"
+
+
+def test_write_command_reads_omitted_message_from_stdin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_ctx = SimpleNamespace(broker_target="db", config={})
+    captured: dict[str, object] = {}
+
+    def fake_run(fn, *args, **kwargs):
+        captured["fn"] = fn
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return (0, "", "")
+
+    monkeypatch.setattr(queue_cmd, "_context", lambda spec_context=None: fake_ctx)
+    monkeypatch.setattr(queue_cmd, "_run_simplebroker_command", fake_run)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("line1\nline2"))
+
+    result = queue_cmd.write_command("stdin.queue", None)
+
+    assert result == (0, "", "")
+    assert captured["fn"] is queue_cmd.sb_commands.cmd_write
+    assert captured["args"] == ("db", "stdin.queue", "line1\nline2")
+    assert captured["kwargs"] == {}
+
+
+def test_broadcast_command_reads_omitted_message_from_stdin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_ctx = SimpleNamespace(broker_target="db", config={})
+    captured: dict[str, object] = {}
+
+    def fake_run(fn, *args, **kwargs):
+        captured["fn"] = fn
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return (0, "", "")
+
+    monkeypatch.setattr(queue_cmd, "_context", lambda spec_context=None: fake_ctx)
+    monkeypatch.setattr(queue_cmd, "_run_simplebroker_command", fake_run)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("broadcast-body"))
+
+    result = queue_cmd.broadcast_command(None, pattern="jobs.*")
+
+    assert result == (0, "", "")
+    assert captured["fn"] is queue_cmd.sb_commands.cmd_broadcast
+    assert captured["args"] == ("db", "broadcast-body")
+    assert captured["kwargs"] == {"pattern": "jobs.*"}

@@ -6,7 +6,8 @@ import json
 import time
 from typing import Any
 
-from simplebroker import Queue
+import pytest
+
 from tests.conftest import run_cli
 from weft._constants import (
     WEFT_GLOBAL_LOG_QUEUE,
@@ -15,14 +16,11 @@ from weft._constants import (
 )
 from weft.context import build_context
 
+pytestmark = [pytest.mark.shared]
+
 
 def _write_log_event(context, payload: dict[str, Any]) -> None:
-    queue = Queue(
-        WEFT_GLOBAL_LOG_QUEUE,
-        db_path=str(context.database_path),
-        persistent=False,
-        config=context.broker_config,
-    )
+    queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
     queue.write(json.dumps(payload))
 
 
@@ -37,12 +35,7 @@ def test_status_reports_no_managers(workdir) -> None:
 
 def test_status_json_includes_manager_records(workdir) -> None:
     context = build_context(spec_context=workdir)
-    registry = Queue(
-        WEFT_WORKERS_REGISTRY_QUEUE,
-        db_path=str(context.database_path),
-        persistent=False,
-        config=context.broker_config,
-    )
+    registry = context.queue(WEFT_WORKERS_REGISTRY_QUEUE, persistent=False)
 
     record = {
         "tid": "1762000000000000999",
@@ -75,12 +68,7 @@ def test_status_json_includes_manager_records(workdir) -> None:
 
 def test_status_filters_stopped_managers_by_default(workdir) -> None:
     context = build_context(spec_context=workdir)
-    registry = Queue(
-        WEFT_WORKERS_REGISTRY_QUEUE,
-        db_path=str(context.database_path),
-        persistent=False,
-        config=context.broker_config,
-    )
+    registry = context.queue(WEFT_WORKERS_REGISTRY_QUEUE, persistent=False)
 
     stopped_record = {
         "tid": "1762000000000000123",

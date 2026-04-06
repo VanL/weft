@@ -2,21 +2,24 @@
 
 from __future__ import annotations
 
-import json
 import os
-import signal
+import time
+from collections.abc import Iterable
 from fnmatch import fnmatchcase
-from typing import Any, Iterable
+from typing import Any
 
 from simplebroker import Queue
-
 from weft._constants import (
     QUEUE_CTRL_IN_SUFFIX,
     TASKSPEC_TID_SHORT_LENGTH,
-    WEFT_GLOBAL_LOG_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
 )
 from weft.context import WeftContext, build_context
+from weft.helpers import (
+    iter_queue_json_entries,
+    kill_process_tree,
+    terminate_process_tree,
+)
 
 from . import status as status_cmd
 from .result import _load_taskspec_payload
@@ -29,22 +32,12 @@ def _resolve_context(context_path: str | os.PathLike[str] | None) -> WeftContext
 def _read_tid_mapping_entries(ctx: WeftContext) -> list[dict[str, Any]]:
     queue = Queue(
         WEFT_TID_MAPPINGS_QUEUE,
-        db_path=str(ctx.database_path),
+        db_path=ctx.broker_target,
         persistent=False,
         config=ctx.broker_config,
     )
-    try:
-        records = queue.peek_many(limit=2048) or []
-    except Exception:
-        return []
-
     entries: list[dict[str, Any]] = []
-    for raw in records:
-        body = raw[0] if isinstance(raw, tuple) else raw
-        try:
-            payload = json.loads(body)
-        except (TypeError, json.JSONDecodeError):
-            continue
+    for payload, _timestamp in iter_queue_json_entries(queue):
         if isinstance(payload, dict):
             entries.append(payload)
     return entries
@@ -153,7 +146,7 @@ def _send_control(ctx: WeftContext, tid: str, command: str) -> None:
     ctrl_in = _ctrl_in_for_tid(ctx, tid)
     queue = Queue(
         ctrl_in,
-        db_path=str(ctx.database_path),
+        db_path=ctx.broker_target,
         persistent=False,
         config=ctx.broker_config,
     )
@@ -166,12 +159,24 @@ def stop_tasks(
     context_path: str | os.PathLike[str] | None = None,
 ) -> int:
     ctx = _resolve_context(context_path)
+    entries = _read_tid_mapping_entries(ctx)
+    lookup: dict[str, dict[str, Any]] = {}
+    for mapping_entry in entries:
+        full_tid = mapping_entry.get("full")
+        if isinstance(full_tid, str):
+            lookup[full_tid] = mapping_entry
     count = 0
     for tid in tids:
         full = resolve_full_tid(ctx, tid) or tid.strip().lstrip("T")
         if not full:
             continue
         _send_control(ctx, full, "STOP")
+        task_entry: dict[str, Any] | None = lookup.get(full)
+        if task_entry is not None:
+            pid = task_entry.get("pid") or task_entry.get("task_pid")
+            if isinstance(pid, int):
+                time.sleep(0.05)
+                terminate_process_tree(pid, timeout=0.2, kill_after=False)
         count += 1
     return count
 
@@ -183,30 +188,29 @@ def kill_tasks(
 ) -> int:
     ctx = _resolve_context(context_path)
     entries = _read_tid_mapping_entries(ctx)
-    lookup: dict[str, dict[str, Any]] = {
-        entry.get("full"): entry for entry in entries if isinstance(entry.get("full"), str)
-    }
+    lookup: dict[str, dict[str, Any]] = {}
+    for mapping_entry in entries:
+        full_tid = mapping_entry.get("full")
+        if isinstance(full_tid, str):
+            lookup[full_tid] = mapping_entry
     killed = 0
     for tid in tids:
         full = resolve_full_tid(ctx, tid) or tid.strip().lstrip("T")
         if not full:
             continue
-        entry = lookup.get(full)
-        if not entry:
+        task_entry: dict[str, Any] | None = lookup.get(full)
+        if not task_entry:
             continue
         pids: list[int] = []
-        pid = entry.get("pid") or entry.get("task_pid")
+        pid = task_entry.get("pid") or task_entry.get("task_pid")
         if isinstance(pid, int):
             pids.append(pid)
-        managed = entry.get("managed_pids")
+        managed = task_entry.get("managed_pids")
         if isinstance(managed, list):
             pids.extend(pid for pid in managed if isinstance(pid, int))
         for pid in set(pids):
-            try:
-                os.kill(pid, signal.SIGKILL)
+            if kill_process_tree(pid, timeout=0.2):
                 killed += 1
-            except OSError:
-                continue
     return killed
 
 

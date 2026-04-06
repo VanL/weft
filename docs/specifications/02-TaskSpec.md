@@ -15,7 +15,16 @@ _Implementation_: `weft/core/taskspec.py` implements this structure, including f
 
 ## JSON Schema v1.0 [TS-1]
 
-_Implementation coverage_: Field validation and defaults correspond to Pydantic models in `weft/core/taskspec.py`. Runtime behaviour honours `stream_output` (chunked, base64-encoded messages), `output_size_limit_mb` (disk spillover), and `interactive` (long-lived command sessions with streaming stdin/stdout).
+_Implementation coverage_: Field validation and defaults correspond to Pydantic
+models in `weft/core/taskspec.py`. Runtime behaviour honours `stream_output`
+(chunked, base64-encoded messages), `output_size_limit_mb` (disk spillover),
+and `interactive` (long-lived command sessions with streaming stdin/stdout).
+`spec.type="agent"` is implemented with `spec.agent.runtime="llm"`, Python
+tools, `output_mode` values `text`/`json`/`messages`, and persistent
+continuations when `spec.persistent=true` and
+`spec.agent.conversation_scope="per_task"`. The schema below treats one-off vs
+persistent execution as a **task lifecycle concern**, not an agent-specific
+field.
 
 ```jsonc
 {
@@ -25,9 +34,28 @@ _Implementation coverage_: Field validation and defaults correspond to Pydantic 
   "description": "Tool to analyze ...",      // OPTIONAL. Long form human-readable description.
   
   "spec": {                                  // REQUIRED. Defines the work to be done.
-    "type": "function" | "command",          // REQUIRED. The type of execution. 
+    "type": "function" | "command" | "agent", // REQUIRED. The type of execution.
+    "persistent": false,                     // OPTIONAL. Generic task lifecycle flag. false = one-shot, true = keep draining inbox until stopped.
     "function_target": "weft.specs:analyze", // REQUIRED if type is "function". Format: "pkg.module:function_name". Any Python Callable.
     "process_target": "grep",               // REQUIRED if type is "command". Executable path or PATH binary.
+    "agent": {                              // REQUIRED if type is "agent". Static agent runtime config.
+      "runtime": "llm",
+      "model": "openai/gpt-4o-mini" | null,
+      "instructions": "You are a careful reviewer." | null, // Static system/developer prompt.
+      "templates": {
+        "review_patch": {
+          "instructions": "Review the patch carefully.",
+          "prompt": "Patch:\n{{ patch }}"
+        }
+      },
+      "tools": [],
+      "output_mode": "text" | "json" | "messages",
+      "output_schema": null,
+      "max_turns": 20,
+      "options": {},                        // Backend/model-specific prompt options.
+      "conversation_scope": "per_message" | "per_task",
+      "runtime_config": {}
+    },
     "args": [],                              // OPTIONAL. For commands, args are appended to build argv. For functions, args become *args.
     "keyword_args": {},                      // OPTIONAL. Keyword arguments for a function (named differently from Python kwargs due to technical constraints).
     "timeout": 300.0 | null,                 // OPTIONAL. Timeout in seconds. null means no timeout.
@@ -56,10 +84,10 @@ _Implementation coverage_: Field validation and defaults correspond to Pydantic 
   },
   "io": {                                    // REQUIRED (runtime). Defines the communication queues.
     "inputs" : {                             // REQUIRED (runtime). May be empty or have *n* input queues.
-      "inbox": "T183...inbox"                // OPTIONAL. Stdin/input for long-running tasks. If provided, inbox will be routed by the Task to the target stdin.
+      "inbox": "T183...inbox"                // OPTIONAL. Initial input and ongoing work queue. `weft run` seeds this queue from spawn-time input (including piped stdin when provided), and persistent/interactive tasks continue draining it for later stdin/work items.
     },   
     "outputs": {                             // REQUIRED (runtime). Must include at least the "outbox" queue. May include *n* output queues.
-       "outbox": "T183...outbox",            // REQUIRED. For the final result message. Follows naming convention if not provided on task initialization.
+       "outbox": "T183...outbox",            // REQUIRED. Result/output queue. Follows naming convention if not provided on task initialization.
     },
     "control": {                             // REQUIRED (runtime). Must include only the keys for the ctrl_in and ctrl_out queues.
       "ctrl_in": "T183...ctrl_in",           // REQUIRED. INPUT. Control input monitored by the Task. Used for job control/side-channel comms for tasks. 
@@ -94,6 +122,14 @@ _Implementation coverage_: Field validation and defaults correspond to Pydantic 
 **Target semantics**
 - Command tasks build argv as `[process_target] + args`.
 - Function tasks call `function_target(*args, **keyword_args)`.
+- Agent tasks execute `spec.agent` against inbox work items using the configured
+  runtime adapter. Task lifecycle still lives at the task layer: one-off agent
+  tasks are ordinary one-shot tasks, and persistent agent tasks are ordinary
+  long-lived tasks that continue draining inbox messages. In the current
+  implementation the supported backend is `llm`, tools are Python callables
+  only, and agent outputs are written to `outbox` as plain strings or JSON
+  objects. If a single work item yields multiple public outputs, the task
+  writes multiple outbox messages in order.
 
 **TID format**
 - TIDs are SimpleBroker 64-bit hybrid timestamps (microseconds + logical counter). Treat them as opaque, monotonic identifiers that may appear as 19-digit integers in decimal form.
@@ -102,7 +138,8 @@ Note: The field is named `keyword_args` (not `kwargs`) due to a technical
 constraint in the model layer.
 
 **Spec field groupings (for readability)**
-- **Target**: `type`, `function_target`/`process_target`, `args`, `keyword_args`
+- **Target**: `type`, `function_target`/`process_target`/`agent`, `args`, `keyword_args`
+- **Lifecycle**: `persistent`
 - **Limits**: `limits.*`
 - **Environment**: `env`, `working_dir`, `weft_context`
 - **Behavior**: `interactive`, `stream_output`, `cleanup_on_exit`
@@ -117,7 +154,7 @@ constraint in the model layer.
 
 **Templates vs runtime-expanded specs**
 - **TaskSpecTemplate**: Stored specs in `.weft/tasks/` omit `tid`, `io`, `state`, and `spec.weft_context` (or set `tid` to null). These templates declare *what to run*.
-- **Resolved TaskSpec**: The Manager expands templates at spawn time, populating `tid`, `io`, `state`, and `spec.weft_context`.
+- **Resolved TaskSpec**: The Manager expands templates at spawn time, populating `tid`, `io`, `state`, and `spec.weft_context`, then seeds `io.inputs.inbox` with the initial payload when one was supplied by the caller.
 - **TID assignment**: The spawn-request message ID (SimpleBroker 64-bit timestamp) is the task's TID for the full lifecycle.
 
 _Implementation mapping_: `weft/core/taskspec.py` (`TaskSpec`, `SpecSection`, `IOSection`, `StateSection`), `weft/core/targets.py` (command argv construction), `weft/core/tasks/consumer.py` (streaming/output handling).
@@ -178,3 +215,7 @@ TaskSpec exposes `reserved_policy_on_stop` and `reserved_policy_on_error`, each
 accepting `keep` (default), `requeue`, or `clear`.
 
 _Implementation mapping_: `weft/core/tasks/base.py` (`_apply_reserved_policy`), `weft/core/tasks/consumer.py` (error/stop handling).
+
+## Related Plans
+
+- [`docs/plans/piped-input-support-plan.md`](../plans/piped-input-support-plan.md)

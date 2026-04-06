@@ -22,6 +22,7 @@ import logging
 import os
 import re
 import shutil
+import signal
 import socket
 import sys
 import tempfile
@@ -32,7 +33,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, cast
 
-from simplebroker import Queue
+from simplebroker import BrokerTarget, Queue
 from weft._constants import (
     CONTROL_STOP,
     DEFAULT_OUTPUT_SIZE_LIMIT_MB,
@@ -48,7 +49,11 @@ from weft._constants import (
     load_config,
 )
 from weft.core.taskspec import ReservedPolicy, TaskSpec
-from weft.helpers import redact_taskspec_dump
+from weft.helpers import (
+    iter_queue_json_entries,
+    redact_taskspec_dump,
+    terminate_process_tree,
+)
 
 from .multiqueue_watcher import MultiQueueWatcher, QueueMessageContext, QueueMode
 
@@ -108,7 +113,9 @@ class BaseTask(MultiQueueWatcher, ABC):
         taskspec._validate_strict_requirements()
 
         self.taskspec = taskspec
-        self.tid = taskspec.tid
+        tid = taskspec.tid
+        assert tid is not None
+        self.tid: str = tid
         self.tid_short = self.tid[-TASKSPEC_TID_SHORT_LENGTH:]
         self.should_stop = False
         self._paused = False
@@ -131,6 +138,7 @@ class BaseTask(MultiQueueWatcher, ABC):
         self._task_pid = os.getpid()
         self._caller_pid = os.getppid()
         self._managed_pids: set[int] = set()
+        self._external_stop_handled = False
 
         super().__init__(
             queue_configs=queue_configs,
@@ -264,6 +272,7 @@ class BaseTask(MultiQueueWatcher, ABC):
         return Path(tempfile.gettempdir()) / "weft" / "outputs"
 
     def _spill_large_output(self, encoded: bytes) -> dict[str, Any]:
+        assert self.tid is not None
         output_dir = self._outputs_base_dir() / self.tid
         output_dir.mkdir(parents=True, exist_ok=True)
         output_path = output_dir / "output.dat"
@@ -296,15 +305,17 @@ class BaseTask(MultiQueueWatcher, ABC):
     # Lifecycle management
     # ------------------------------------------------------------------
     def cleanup(self) -> None:
-        """Close any cached Queue objects to release SQLite connections.
+        """Close cached Queue objects and release backend resources.
 
         Spec: [CC-2.5], [SB-0.1]
         """
         self._end_streaming_session()
-        for name in list(self._owned_queue_names):
-            queue = self._queue_cache.pop(name, None)
-            if queue is None:
+        seen_queue_ids: set[int] = set()
+        for queue in list(self._queue_cache.values()):
+            queue_id = id(queue)
+            if queue_id in seen_queue_ids:
                 continue
+            seen_queue_ids.add(queue_id)
             try:
                 queue.close()
             except Exception:
@@ -498,19 +509,12 @@ class BaseTask(MultiQueueWatcher, ABC):
             return True
 
         if command == CONTROL_STOP:
-            self.should_stop = True
-            self.taskspec.mark_cancelled(reason="STOP command received")
-            self._report_state_change(
-                event="control_stop", message_id=context.timestamp
+            self._handle_stop_request(
+                reason="STOP command received",
+                event="control_stop",
+                message_id=context.timestamp,
+                apply_reserved_policy=True,
             )
-            self._update_process_title("cancelled")
-            policy = self.taskspec.spec.reserved_policy_on_stop
-            self._apply_reserved_policy(policy)
-            if policy is not ReservedPolicy.KEEP:
-                self._ensure_reserved_empty()
-                self._cleanup_reserved_if_needed()
-            if self._stop_event:
-                self._stop_event.set()
             self._send_control_response("STOP", "ack")
             return True
 
@@ -614,6 +618,51 @@ class BaseTask(MultiQueueWatcher, ABC):
         except Exception:
             logger.debug("Failed to write control response %s", payload, exc_info=True)
 
+    def handle_termination_signal(self, signum: int) -> None:
+        """Handle an external termination signal inside a task process."""
+
+        if self._external_stop_handled:
+            return
+        self._external_stop_handled = True
+
+        for pid in sorted(self._managed_pids):
+            terminate_process_tree(pid, timeout=0.2)
+
+        signal_name = _signal_name(signum)
+        self._handle_stop_request(
+            reason=f"{signal_name} received",
+            event="task_signal_stop",
+            message_id=None,
+            apply_reserved_policy=False,
+        )
+
+    def _handle_stop_request(
+        self,
+        *,
+        reason: str,
+        event: str,
+        message_id: int | None,
+        apply_reserved_policy: bool,
+    ) -> None:
+        """Transition the task into a cancelled state and stop processing."""
+
+        self.should_stop = True
+        terminal_states = {"completed", "failed", "timeout", "cancelled", "killed"}
+        if self.taskspec.state.status not in terminal_states:
+            self.taskspec.mark_cancelled(reason=reason)
+            self._report_state_change(event=event, message_id=message_id)
+            self._update_process_title("cancelled")
+
+        if apply_reserved_policy:
+            policy = self.taskspec.spec.reserved_policy_on_stop
+            self._apply_reserved_policy(policy)
+            if policy is not ReservedPolicy.KEEP:
+                self._ensure_reserved_empty()
+                self._cleanup_reserved_if_needed()
+
+        if self._stop_event:
+            self._stop_event.set()
+
     def _monitor_resource_usage(self) -> None:
         """Invoke a resource-monitor callback if one has been installed.
 
@@ -692,11 +741,8 @@ class BaseTask(MultiQueueWatcher, ABC):
             context_path = Path(spec_context)
         else:
             try:
-                db_path = Path(self._db_path)
-                candidate_path = db_path.parent
-                if candidate_path.name == ".weft":
-                    candidate_path = candidate_path.parent
-                context_path = candidate_path
+                if isinstance(self._db_path, BrokerTarget):
+                    context_path = self._db_path.project_root
             except Exception:
                 context_path = None
 
@@ -763,20 +809,7 @@ class BaseTask(MultiQueueWatcher, ABC):
 
     def _locate_streaming_session(self, queue: Queue, session_id: str) -> int | None:
         """Look up the message id for an active streaming record (Spec: [CC-2.4])."""
-        try:
-            entries = queue.peek_many(limit=256, with_timestamps=True)
-        except Exception:
-            return None
-        if not entries:
-            return None
-        typed_entries: list[tuple[str, int]] = [
-            cast(tuple[str, int], entry) for entry in entries
-        ]
-        for body, ts in reversed(typed_entries):
-            try:
-                payload = json.loads(body)
-            except (TypeError, json.JSONDecodeError):
-                continue
+        for payload, ts in iter_queue_json_entries(queue):
             if payload.get("session_id") == session_id:
                 return int(ts)
         return None
@@ -793,7 +826,8 @@ class BaseTask(MultiQueueWatcher, ABC):
 
         queue = self._queue(WEFT_STREAMING_SESSIONS_QUEUE)
         queue_name = metadata.get("queue") if metadata else None
-        identifier_parts = [self.tid]
+        assert self.tid is not None
+        identifier_parts: list[str] = [self.tid]
         if queue_name:
             identifier_parts.append(queue_name)
         started_at = time.time_ns()
@@ -1085,6 +1119,13 @@ class BaseTask(MultiQueueWatcher, ABC):
                 )
             finally:
                 self._spilled_output_dirs.discard(directory)
+
+
+def _signal_name(signum: int) -> str:
+    try:
+        return signal.Signals(signum).name
+    except ValueError:
+        return f"signal {signum}"
 
 
 # ~

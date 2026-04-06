@@ -9,7 +9,6 @@ from typing import Any
 from weft.context import WeftContext, build_context
 from weft.core.taskspec import validate_taskspec
 
-
 SPEC_TYPE_TASK = "task"
 SPEC_TYPE_PIPELINE = "pipeline"
 
@@ -115,7 +114,9 @@ def create_spec(
 def delete_spec(
     name: str, *, spec_type: str | None = None, context_path: Path | None = None
 ) -> Path:
-    kind, path, _payload = load_spec(name, spec_type=spec_type, context_path=context_path)
+    kind, path, _payload = load_spec(
+        name, spec_type=spec_type, context_path=context_path
+    )
     path.unlink()
     return path
 
@@ -143,7 +144,9 @@ def generate_spec(spec_type: str) -> dict[str, Any]:
     raise ValueError(f"Unknown spec type: {spec_type}")
 
 
-def validate_spec(path: Path, *, spec_type: str | None = None) -> tuple[bool, dict[str, Any]]:
+def validate_spec(
+    path: Path, *, spec_type: str | None = None
+) -> tuple[bool, dict[str, Any]]:
     payload = _read_json(path)
     if spec_type is None:
         spec_type = SPEC_TYPE_PIPELINE if "stages" in payload else SPEC_TYPE_TASK

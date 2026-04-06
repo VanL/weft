@@ -12,7 +12,6 @@ from datetime import UTC, datetime
 from typing import Any, cast
 
 from simplebroker import Queue
-from simplebroker.db import BrokerDB
 from weft._constants import (
     TASKSPEC_TID_SHORT_LENGTH,
     WEFT_GLOBAL_LOG_QUEUE,
@@ -21,7 +20,11 @@ from weft._constants import (
     WEFT_WORKERS_REGISTRY_QUEUE,
 )
 from weft.context import WeftContext, build_context
-from weft.helpers import format_byte_size, format_timestamp_ns_relative
+from weft.helpers import (
+    format_byte_size,
+    format_timestamp_ns_relative,
+    iter_queue_json_entries,
+)
 
 StatusMapping = Mapping[str, int | float | str | None]
 TERMINAL_STATUSES: frozenset[str] = frozenset(
@@ -124,11 +127,11 @@ def _resolve_context(
     if env_context:
         return build_context(spec_context=env_context)
 
-    return build_context(spec_context=os.getcwd())
+    return build_context()
 
 
 def collect_broker_status(ctx: WeftContext) -> BrokerStatusSnapshot:
-    with BrokerDB(str(ctx.database_path)) as db:
+    with ctx.broker() as db:
         metrics = db.status()
     return BrokerStatusSnapshot.from_mapping(metrics)
 
@@ -147,7 +150,7 @@ def _queue(
 ) -> Queue:
     return Queue(
         name,
-        db_path=str(ctx.database_path),
+        db_path=ctx.broker_target,
         persistent=persistent,
         config=ctx.broker_config,
     )
@@ -157,23 +160,8 @@ def _collect_manager_records(
     ctx: WeftContext, *, include_stopped: bool = False
 ) -> list[dict[str, Any]]:
     queue = _queue(ctx, WEFT_WORKERS_REGISTRY_QUEUE)
-    try:
-        records_raw = cast(
-            Sequence[tuple[str, int]] | None,
-            queue.peek_many(limit=2000, with_timestamps=True),
-        )
-    except Exception:
-        return []
-
-    if not records_raw:
-        return []
-
     records: dict[str, dict[str, Any]] = {}
-    for entry, timestamp in records_raw:
-        try:
-            data = cast(dict[str, Any], json.loads(entry))
-        except json.JSONDecodeError:
-            continue
+    for data, timestamp in iter_queue_json_entries(queue):
         tid = data.get("tid")
         if not tid:
             continue
@@ -231,20 +219,8 @@ def _format_manager_summary(records: list[dict[str, Any]]) -> str:
 
 def _read_tid_mappings(ctx: WeftContext) -> dict[str, str]:
     queue = _queue(ctx, WEFT_TID_MAPPINGS_QUEUE)
-    try:
-        raw_records = queue.peek_many(limit=5000)
-    except Exception:
-        raw_records = None
-    records = cast(Sequence[str], raw_records or [])
-    if not records:
-        return {}
-
     mapping: dict[str, str] = {}
-    for raw in records:
-        try:
-            payload = cast(dict[str, Any], json.loads(raw))
-        except (TypeError, json.JSONDecodeError):
-            continue
+    for payload, _timestamp in iter_queue_json_entries(queue):
         full = payload.get("full")
         short = payload.get("short")
         if isinstance(full, str) and isinstance(short, str):

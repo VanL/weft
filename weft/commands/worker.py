@@ -11,7 +11,7 @@ from typing import Any, cast
 
 import psutil
 
-from simplebroker import Queue
+from simplebroker import BrokerTarget, Queue
 from weft._constants import (
     WEFT_TID_MAPPINGS_QUEUE,
     WEFT_WORKERS_REGISTRY_QUEUE,
@@ -19,6 +19,7 @@ from weft._constants import (
 from weft.context import build_context
 from weft.core import Manager, launch_task_process
 from weft.core.taskspec import TaskSpec
+from weft.helpers import iter_queue_json_entries
 
 
 def _load_taskspec(path: Path) -> TaskSpec:
@@ -29,7 +30,7 @@ def _load_taskspec(path: Path) -> TaskSpec:
 
 
 def _registry_snapshot(
-    db_path: str, config: dict[str, Any]
+    db_path: BrokerTarget | str, config: dict[str, Any]
 ) -> dict[str, dict[str, Any]]:
     queue = Queue(
         WEFT_WORKERS_REGISTRY_QUEUE,
@@ -37,19 +38,8 @@ def _registry_snapshot(
         persistent=False,
         config=config,
     )
-    try:
-        records_raw = queue.peek_many(limit=1000, with_timestamps=True)
-    except Exception:  # pragma: no cover - queue errors
-        return {}
-
-    records = cast(list[tuple[str, int]], records_raw)
-
     snapshot: dict[str, dict[str, Any]] = {}
-    for entry, timestamp in records:
-        try:
-            data = json.loads(entry)
-        except json.JSONDecodeError:
-            continue
+    for data, timestamp in iter_queue_json_entries(queue):
         data["_timestamp"] = timestamp
         tid = data.get("tid")
         if tid:
@@ -58,7 +48,7 @@ def _registry_snapshot(
 
 
 def _registry_entry_for_tid(
-    db_path: str, config: dict[str, Any], tid: str
+    db_path: BrokerTarget | str, config: dict[str, Any], tid: str
 ) -> dict[str, Any] | None:
     queue = Queue(
         WEFT_WORKERS_REGISTRY_QUEUE,
@@ -100,7 +90,7 @@ def start_command(
 ) -> tuple[int, str | None]:
     spec = _load_taskspec(taskspec_path)
     context = build_context(spec.spec.weft_context)
-    db_path = str(context.database_path)
+    db_path = context.broker_target
 
     if foreground:
         worker = Manager(db_path, spec, config=context.config)
@@ -118,12 +108,21 @@ def start_command(
 
 
 def _send_stop(
-    db_path: str,
+    db_path: BrokerTarget | str,
     config: dict[str, Any],
     tid: str,
 ) -> None:
+    entry = _registry_entry_for_tid(db_path, config, tid)
+    queue_name = None
+    if isinstance(entry, dict):
+        ctrl_in = entry.get("ctrl_in")
+        if isinstance(ctrl_in, str) and ctrl_in:
+            queue_name = ctrl_in
+    if queue_name is None:
+        queue_name = f"T{tid}.ctrl_in"
+
     ctrl_queue = Queue(
-        f"T{tid}.ctrl_in",
+        queue_name,
         db_path=db_path,
         persistent=False,
         config=config,
@@ -131,25 +130,18 @@ def _send_stop(
     ctrl_queue.write("STOP")
 
 
-def _lookup_pid(db_path: str, config: dict[str, Any], tid: str) -> int | None:
+def _lookup_pid(
+    db_path: BrokerTarget | str,
+    config: dict[str, Any],
+    tid: str,
+) -> int | None:
     queue = Queue(
         WEFT_TID_MAPPINGS_QUEUE,
         db_path=db_path,
         persistent=False,
         config=config,
     )
-    try:
-        mappings_raw = queue.peek_many(limit=1000)
-    except Exception:  # pragma: no cover
-        return None
-
-    mappings = cast(list[str], mappings_raw)
-
-    for entry in mappings:
-        try:
-            data = json.loads(entry)
-        except json.JSONDecodeError:
-            continue
+    for data, _timestamp in iter_queue_json_entries(queue):
         if data.get("full") == tid and "pid" in data:
             pid_value = data["pid"]
             return cast(int, pid_value)
@@ -177,7 +169,7 @@ def stop_command(
     stop_if_absent: bool = False,
 ) -> tuple[int, str | None]:
     context = build_context(context_path)
-    db_path = str(context.database_path)
+    db_path = context.broker_target
 
     _send_stop(db_path, context.broker_config, tid)
 
@@ -229,7 +221,7 @@ def list_command(
     context_path: Path | None = None,
 ) -> tuple[int, str | None]:
     context = build_context(context_path)
-    snapshot = _registry_snapshot(str(context.database_path), context.broker_config)
+    snapshot = _registry_snapshot(context.broker_target, context.broker_config)
 
     if json_output:
         payload = json.dumps(list(snapshot.values()), indent=2)
@@ -253,7 +245,7 @@ def status_command(
     context_path: Path | None = None,
 ) -> tuple[int, str | None]:
     context = build_context(context_path)
-    snapshot = _registry_snapshot(str(context.database_path), context.broker_config)
+    snapshot = _registry_snapshot(context.broker_target, context.broker_config)
     record = snapshot.get(tid)
 
     if not record:

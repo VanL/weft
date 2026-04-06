@@ -5,11 +5,16 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from simplebroker import Queue
+from tests.helpers.test_backend import prepare_project_root
 from weft._constants import WEFT_WORKERS_REGISTRY_QUEUE
 from weft.commands import worker as worker_cmd
 from weft.context import build_context
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
+
+pytestmark = [pytest.mark.shared]
 
 
 def write_worker_spec(path: Path, *, context: Path) -> TaskSpec:
@@ -39,7 +44,7 @@ def write_worker_spec(path: Path, *, context: Path) -> TaskSpec:
 
 
 def test_start_background_invokes_launcher(tmp_path, monkeypatch):
-    context_root = tmp_path / "proj"
+    context_root = prepare_project_root(tmp_path / "proj")
     context = build_context(context_root)
     spec_path = tmp_path / "worker.json"
     spec = write_worker_spec(spec_path, context=context_root)
@@ -64,12 +69,12 @@ def test_start_background_invokes_launcher(tmp_path, monkeypatch):
     assert exit_code == 0
     assert "Started worker" in message
     assert captured["task_cls"].__name__ == "Manager"
-    assert captured["db_path"] == str(context.database_path)
+    assert captured["db_path"] == context.broker_target
     assert captured["spec_tid"] == spec.tid
 
 
 def test_start_foreground_runs_worker(tmp_path, monkeypatch):
-    context_root = tmp_path / "proj"
+    context_root = prepare_project_root(tmp_path / "proj")
     build_context(context_root)
     spec_path = tmp_path / "worker.json"
     write_worker_spec(spec_path, context=context_root)
@@ -96,13 +101,13 @@ def test_start_foreground_runs_worker(tmp_path, monkeypatch):
 
 
 def test_stop_command_writes_stop(tmp_path):
-    context_root = tmp_path / "ctx"
+    context_root = prepare_project_root(tmp_path / "ctx")
     context = build_context(context_root)
     tid = "1761000000000000001"
 
     registry_queue = Queue(
         WEFT_WORKERS_REGISTRY_QUEUE,
-        db_path=str(context.database_path),
+        db_path=context.broker_target,
         persistent=False,
         config=context.config,
     )
@@ -119,7 +124,46 @@ def test_stop_command_writes_stop(tmp_path):
     assert message is None
     ctrl_queue = Queue(
         f"T{tid}.ctrl_in",
-        db_path=str(context.database_path),
+        db_path=context.broker_target,
+        persistent=False,
+        config=context.config,
+    )
+    assert ctrl_queue.read_one() == "STOP"
+
+
+def test_stop_command_uses_registry_control_queue(tmp_path):
+    context_root = prepare_project_root(tmp_path / "ctx")
+    context = build_context(context_root)
+    tid = "1761000000000000002"
+
+    registry_queue = Queue(
+        WEFT_WORKERS_REGISTRY_QUEUE,
+        db_path=context.broker_target,
+        persistent=False,
+        config=context.config,
+    )
+    registry_queue.write(
+        json.dumps(
+            {
+                "tid": tid,
+                "status": "stopped",
+                "ctrl_in": f"worker.{tid}.ctrl_in",
+            }
+        )
+    )
+
+    exit_code, message = worker_cmd.stop_command(
+        tid=tid,
+        force=False,
+        timeout=0.1,
+        context_path=context_root,
+    )
+
+    assert exit_code == 0
+    assert message is None
+    ctrl_queue = Queue(
+        f"worker.{tid}.ctrl_in",
+        db_path=context.broker_target,
         persistent=False,
         config=context.config,
     )
@@ -127,11 +171,11 @@ def test_stop_command_writes_stop(tmp_path):
 
 
 def test_list_command_returns_table(tmp_path):
-    context_root = tmp_path / "ctx"
+    context_root = prepare_project_root(tmp_path / "ctx")
     context = build_context(context_root)
     registry_queue = Queue(
         WEFT_WORKERS_REGISTRY_QUEUE,
-        db_path=str(context.database_path),
+        db_path=context.broker_target,
         persistent=False,
         config=context.config,
     )
@@ -145,7 +189,7 @@ def test_list_command_returns_table(tmp_path):
 
 
 def test_status_command_not_found(tmp_path):
-    context_root = tmp_path / "ctx"
+    context_root = prepare_project_root(tmp_path / "ctx")
     build_context(context_root)
     exit_code, payload = worker_cmd.status_command(
         tid="999", json_output=False, context_path=context_root

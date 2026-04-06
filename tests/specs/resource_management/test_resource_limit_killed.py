@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 
+from tests.taskspec import fixtures
 from weft.core.tasks import Consumer
 from weft.core.tasks.runner import RunnerOutcome
-from tests.taskspec import fixtures
 
 
 def test_resource_limit_marks_killed(broker_env) -> None:

@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import importlib
 import multiprocessing
+import signal
+import sys
 import time
 from multiprocessing.process import BaseProcess
 from typing import Any, cast
+
+from simplebroker import BrokerTarget
 
 from .taskspec import TaskSpec
 
@@ -27,7 +31,7 @@ def _load_task_class(path: str) -> type[Any]:
 
 def _task_process_entry(
     task_cls_path: str,
-    db_path: str,
+    db_path: BrokerTarget | str,
     spec_json: str,
     config: dict[str, Any] | None,
     poll_interval: float,
@@ -35,6 +39,7 @@ def _task_process_entry(
     task_cls = _load_task_class(task_cls_path)
     spec = TaskSpec.model_validate_json(spec_json)
     task = task_cls(db_path, spec, config=config)
+    _install_signal_handlers(task)
 
     try:
         while True:
@@ -44,12 +49,16 @@ def _task_process_entry(
                 break
             time.sleep(poll_interval)
     finally:
-        task.cleanup()
+        stop = getattr(task, "stop", None)
+        if callable(stop):
+            stop(join=False)
+        else:
+            task.cleanup()
 
 
 def launch_task_process(
     task_cls: type[Any],
-    db_path: str,
+    db_path: BrokerTarget | str,
     spec: TaskSpec,
     *,
     config: dict[str, Any] | None = None,
@@ -58,6 +67,7 @@ def launch_task_process(
     """Launch *task_cls* in a new spawn-process and return the Process object."""
 
     ctx = multiprocessing.get_context("spawn")
+    ctx.set_executable(sys.executable)
     task_cls_path = f"{task_cls.__module__}.{task_cls.__qualname__}"
     process = ctx.Process(
         target=_task_process_entry,
@@ -69,3 +79,21 @@ def launch_task_process(
 
 
 __all__ = ["launch_task_process"]
+
+
+def _install_signal_handlers(task: Any) -> None:
+    """Install signal handlers for spawned task processes."""
+
+    def _handle_signal(signum: int, _frame: Any) -> None:
+        handler = getattr(task, "handle_termination_signal", None)
+        if callable(handler):
+            handler(signum)
+            return
+        if hasattr(task, "should_stop"):
+            task.should_stop = True
+
+    for signum in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(signum, _handle_signal)
+        except (OSError, ValueError):  # pragma: no cover - platform/thread guard
+            continue

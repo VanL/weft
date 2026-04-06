@@ -11,6 +11,7 @@ from pathlib import Path
 import psutil
 
 from simplebroker import Queue
+from tests.helpers.test_backend import cleanup_prepared_roots, prepare_project_root
 from weft._constants import (
     QUEUE_OUTBOX_SUFFIX,
     WEFT_GLOBAL_LOG_QUEUE,
@@ -19,6 +20,7 @@ from weft._constants import (
 )
 from weft.commands import worker as worker_cmd
 from weft.context import WeftContext, build_context
+from weft.helpers import iter_queue_json_entries
 
 
 class WeftTestHarness:
@@ -45,6 +47,7 @@ class WeftTestHarness:
     def __enter__(self) -> WeftTestHarness:
         self._orig_cwd = Path.cwd()
         self._patch_environment()
+        prepare_project_root(self.root)
         os.chdir(self.root)
         # Ensure context and database are initialized early.
         _ = self.context
@@ -98,7 +101,7 @@ class WeftTestHarness:
         def _peek_queue(name: str, *, persistent: bool, limit: int = 20) -> list[str]:
             queue = Queue(
                 name,
-                db_path=str(context.database_path),
+                db_path=context.broker_target,
                 persistent=persistent,
                 config=context.broker_config,
             )
@@ -138,10 +141,10 @@ class WeftTestHarness:
 
         return "\n".join(lines)
 
-    def wait_for_completion(self, tid: str, timeout: float = 10.0) -> None:
+    def wait_for_completion(self, tid: str, timeout: float = 20.0) -> None:
         log_queue = Queue(
             WEFT_GLOBAL_LOG_QUEUE,
-            db_path=str(self.context.database_path),
+            db_path=self.context.broker_target,
             persistent=False,
             config=self.context.broker_config,
         )
@@ -149,14 +152,14 @@ class WeftTestHarness:
         last_seen: int | None = None
         try:
             while time.time() < deadline:
-                records = log_queue.peek_many(limit=512, with_timestamps=True) or []
-                for payload, ts in records:
+                next_last_seen = last_seen
+                for data, ts in iter_queue_json_entries(
+                    log_queue,
+                    since_timestamp=last_seen,
+                ):
                     if last_seen is not None and ts <= last_seen:
                         continue
-                    try:
-                        data = json.loads(payload)
-                    except json.JSONDecodeError:
-                        continue
+                    next_last_seen = ts
                     if data.get("tid") != tid:
                         continue
                     event = data.get("event")
@@ -164,7 +167,7 @@ class WeftTestHarness:
                         return
                     if event in {"work_failed", "work_timeout"}:
                         raise RuntimeError(f"Task {tid} reported {event}")
-                    last_seen = ts
+                last_seen = next_last_seen
                 time.sleep(0.05)
         finally:
             log_queue.close()
@@ -173,7 +176,7 @@ class WeftTestHarness:
         outbox_name = f"T{tid}.{QUEUE_OUTBOX_SUFFIX}"
         outbox_queue = Queue(
             outbox_name,
-            db_path=str(self.context.database_path),
+            db_path=self.context.broker_target,
             persistent=True,
             config=self.context.broker_config,
         )
@@ -198,6 +201,7 @@ class WeftTestHarness:
             self._collect_pid_mappings()
             self._terminate_registered_pids()
             self._remove_database_files()
+            cleanup_prepared_roots(self.root)
         finally:
             self._restore_cwd()
             self._restore_environment()
@@ -212,11 +216,16 @@ class WeftTestHarness:
             "WEFT_TEST_MODE": "1",
             "WEFT_MANAGER_REUSE_ENABLED": "0",
             "WEFT_MANAGER_LIFETIME_TIMEOUT": str(self._manager_timeout),
-            "WEFT_DEFAULT_DB_LOCATION": str(self.root),
-            "WEFT_DEFAULT_DB_NAME": self.DEFAULT_DB_NAME,
-            "BROKER_DEFAULT_DB_LOCATION": str(self.root),
-            "BROKER_DEFAULT_DB_NAME": self.DEFAULT_DB_NAME,
         }
+        if os.environ.get("BROKER_TEST_BACKEND", "sqlite") == "sqlite":
+            overrides.update(
+                {
+                    "WEFT_DEFAULT_DB_LOCATION": str(self.root),
+                    "WEFT_DEFAULT_DB_NAME": self.DEFAULT_DB_NAME,
+                    "BROKER_DEFAULT_DB_LOCATION": str(self.root),
+                    "BROKER_DEFAULT_DB_NAME": self.DEFAULT_DB_NAME,
+                }
+            )
         for key, value in overrides.items():
             if key not in self._original_env:
                 self._original_env[key] = os.environ.get(key)
@@ -282,7 +291,7 @@ class WeftTestHarness:
     def _drain_registry_queue(self) -> None:
         queue = Queue(
             WEFT_WORKERS_REGISTRY_QUEUE,
-            db_path=str(self.context.database_path),
+            db_path=self.context.broker_target,
             persistent=False,
             config=self.context.broker_config,
         )
@@ -295,7 +304,7 @@ class WeftTestHarness:
     def _collect_pid_mappings(self) -> None:
         queue = Queue(
             WEFT_TID_MAPPINGS_QUEUE,
-            db_path=str(self.context.database_path),
+            db_path=self.context.broker_target,
             persistent=False,
             config=self.context.broker_config,
         )
@@ -433,6 +442,8 @@ class WeftTestHarness:
 
         gc.collect()
         base = self.context.database_path
+        if base is None:
+            return
         candidates = [base, Path(f"{base}-wal"), Path(f"{base}-shm")]
         for path in candidates:
             try:

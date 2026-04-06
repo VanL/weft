@@ -5,8 +5,11 @@ from __future__ import annotations
 import json
 import time
 
-from simplebroker.db import BrokerDB
+import pytest
+
 from tests.conftest import run_cli
+
+pytestmark = [pytest.mark.shared]
 
 
 def _submit_task(workdir, harness, *run_args: str) -> str:
@@ -28,15 +31,15 @@ def _submit_task(workdir, harness, *run_args: str) -> str:
 def _wait_for_outbox(harness, tid: str, timeout: float = 5.0) -> None:
     queue_name = f"T{tid}.outbox"
     deadline = time.monotonic() + timeout
-    db_path = str(harness.context.database_path)
     while time.monotonic() < deadline:
-        with BrokerDB(db_path) as db:
-            try:
-                queues = dict(db.list_queues())
-            except Exception:
-                queues = {}
-        if queue_name in queues:
-            return
+        queue = harness.context.queue(queue_name, persistent=True)
+        try:
+            if queue.peek_one() is not None:
+                return
+        except Exception:
+            pass
+        finally:
+            queue.close()
         time.sleep(0.05)
 
 

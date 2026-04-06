@@ -9,24 +9,28 @@ from pathlib import Path
 
 import pytest
 
+from tests.helpers.test_backend import prepare_project_root
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from weft.context import build_context  # noqa: E402
 
+pytestmark = [pytest.mark.shared]
+
 
 def test_build_context_creates_structure(tmp_path: Path) -> None:
     """Building a context for a fresh directory materializes all assets."""
-    ctx = build_context(spec_context=tmp_path)
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
 
-    assert ctx.root == tmp_path.resolve()
+    assert ctx.root == root.resolve()
     assert ctx.weft_dir.is_dir()
     assert ctx.outputs_dir.is_dir()
     assert ctx.logs_dir.is_dir()
     assert ctx.autostart_dir.is_dir()
     assert ctx.autostart_enabled is True
-    assert ctx.database_path.exists()
     assert ctx.config_path.is_file()
 
     metadata = json.loads(ctx.config_path.read_text(encoding="utf-8"))
@@ -38,8 +42,7 @@ def test_build_context_creates_structure(tmp_path: Path) -> None:
 
 
 def test_build_context_can_disable_autostart(tmp_path: Path) -> None:
-    root = tmp_path / "disable-autostart"
-    root.mkdir()
+    root = prepare_project_root(tmp_path / "disable-autostart")
 
     ctx = build_context(spec_context=root, autostart=False)
 
@@ -49,7 +52,8 @@ def test_build_context_can_disable_autostart(tmp_path: Path) -> None:
 
 def test_build_context_discovers_existing_project(tmp_path: Path) -> None:
     """Project databases are discovered via SimpleBroker's project scoping."""
-    root_ctx = build_context(spec_context=tmp_path)
+    root = prepare_project_root(tmp_path)
+    root_ctx = build_context(spec_context=root)
     nested_dir = tmp_path / "a" / "b" / "c"
     nested_dir.mkdir(parents=True)
 
@@ -62,6 +66,7 @@ def test_build_context_discovers_existing_project(tmp_path: Path) -> None:
 
     assert discovered_ctx.root == root_ctx.root
     assert discovered_ctx.database_path == root_ctx.database_path
+    assert discovered_ctx.broker_target.target == root_ctx.broker_target.target
     assert discovered_ctx.discovered is True
 
 
@@ -72,15 +77,33 @@ def test_environment_translation(
     monkeypatch.setenv("WEFT_BUSY_TIMEOUT", "2500")
     monkeypatch.setenv("WEFT_PROJECT_SCOPE", "1")
 
-    ctx = build_context(spec_context=tmp_path)
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
 
-    assert ctx.broker_config["BROKER_BUSY_TIMEOUT"] == "2500"
-    assert ctx.broker_config["BROKER_PROJECT_SCOPE"] in {"1", "true", "True", True}
+    assert ctx.broker_config["BROKER_BUSY_TIMEOUT"] == 2500
+    assert isinstance(ctx.broker_config["BROKER_BUSY_TIMEOUT"], int)
+    assert ctx.broker_config["BROKER_PROJECT_SCOPE"] is True
+    assert ctx.broker_config["BROKER_AUTO_VACUUM_INTERVAL"] == 100
+    assert isinstance(ctx.broker_config["BROKER_AUTO_VACUUM_INTERVAL"], int)
+
+
+def test_build_context_keeps_weft_dir_fixed_when_broker_name_changes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The Weft artifact directory stays rooted at ``.weft`` regardless of broker name config."""
+
+    monkeypatch.setenv("WEFT_DEFAULT_DB_NAME", ".custom/weft.db")
+
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+
+    assert ctx.weft_dir == (tmp_path / ".weft").resolve()
 
 
 def test_project_config_recovers_from_corruption(tmp_path: Path) -> None:
     """A corrupt config file is replaced with a fresh default."""
-    ctx = build_context(spec_context=tmp_path)
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
 
     ctx.config_path.write_text("not-json", encoding="utf-8")
 

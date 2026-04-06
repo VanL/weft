@@ -9,24 +9,26 @@ Spec references:
 from __future__ import annotations
 
 import base64
+import copy
 import json
 import subprocess
 import sys
 import time
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import psutil
 import typer
 
-from simplebroker import Queue
+from simplebroker import Queue, serialize_broker_target
 from weft._constants import (
     DEFAULT_STREAM_OUTPUT,
     QUEUE_CTRL_IN_SUFFIX,
     QUEUE_CTRL_OUT_SUFFIX,
     QUEUE_INBOX_SUFFIX,
     QUEUE_OUTBOX_SUFFIX,
+    WEFT_COMPLETED_RESULT_GRACE_SECONDS,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MANAGER_CTRL_IN_QUEUE,
     WEFT_MANAGER_CTRL_OUT_QUEUE,
@@ -36,10 +38,16 @@ from weft._constants import (
     WEFT_WORKERS_REGISTRY_QUEUE,
     WORK_ENVELOPE_START,
 )
-from weft.commands.interactive import InteractiveStreamClient
 from weft.commands import specs as spec_cmd
+from weft.commands.interactive import InteractiveStreamClient
 from weft.context import WeftContext, build_context
-from weft.core.taskspec import TaskSpec
+from weft.core.taskspec import TaskSpec, resolve_taskspec_payload
+from weft.helpers import (
+    iter_queue_json_entries,
+    read_limited_stdin,
+    resolve_broker_max_message_size,
+    stdin_is_tty,
+)
 
 # -----------------------------------------------------------------------------
 # Legacy helpers for --spec execution
@@ -119,26 +127,16 @@ def _parse_env(values: Sequence[str]) -> dict[str, str]:
     return env
 
 
-def _read_stdin() -> str | None:
-    """Read stdin if data is available."""
-    stream = sys.stdin
-    if stream is None or stream.closed:
-        return None
-
-    try:
-        is_tty = stream.isatty()
-    except Exception:  # pragma: no cover - StringIO during tests
-        is_tty = False
-
-    if is_tty:
-        return None
-
-    try:
-        data = stream.read()
-    except OSError:  # pytest capture may block reading stdin
-        return None
-
-    return data if data else None
+def _read_piped_stdin(context: WeftContext) -> str | None:
+    """Read non-interactive stdin using the active broker size limit."""
+    if not stdin_is_tty():
+        try:
+            max_bytes = resolve_broker_max_message_size(context.config)
+            data = read_limited_stdin(max_bytes)
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        return data if data else None
+    return None
 
 
 def _derive_name(
@@ -192,7 +190,7 @@ def _drain_stream_queue(queue: Queue, *, to_stderr: bool = False) -> None:
 def _generate_tid(context: WeftContext) -> str:
     queue = Queue(
         WEFT_SPAWN_REQUESTS_QUEUE,
-        db_path=str(context.database_path),
+        db_path=context.broker_target,
         persistent=False,
         config=context.broker_config,
     )
@@ -202,7 +200,7 @@ def _generate_tid(context: WeftContext) -> str:
 def _registry_queue(context: WeftContext) -> Queue:
     return Queue(
         WEFT_WORKERS_REGISTRY_QUEUE,
-        db_path=str(context.database_path),
+        db_path=context.broker_target,
         persistent=False,
         config=context.broker_config,
     )
@@ -212,24 +210,9 @@ def _snapshot_registry(
     context: WeftContext, *, prune_stale: bool = True
 ) -> dict[str, dict[str, Any]]:
     queue = _registry_queue(context)
-    try:
-        records_raw = cast(
-            Sequence[tuple[str, int]] | None,
-            queue.peek_many(limit=1000, with_timestamps=True),
-        )
-    except Exception:
-        records_raw = None
-
     snapshot: dict[str, dict[str, Any]] = {}
     stale_timestamps: list[int] = []
-    if not records_raw:
-        return snapshot
-
-    for entry, timestamp in records_raw:
-        try:
-            data = cast(dict[str, Any], json.loads(entry))
-        except json.JSONDecodeError:
-            continue
+    for data, timestamp in iter_queue_json_entries(queue):
         tid = data.get("tid")
         if not tid:
             continue
@@ -312,7 +295,8 @@ def _build_manager_spec(context: WeftContext, tid: str) -> TaskSpec:
             "idle_timeout": idle_timeout,
         },
     }
-    return TaskSpec.model_validate(spec_dict, context={"auto_expand": True})
+    resolved_payload = resolve_taskspec_payload(spec_dict)
+    return TaskSpec.model_validate(resolved_payload, context={"auto_expand": False})
 
 
 def _start_manager(
@@ -322,8 +306,12 @@ def _start_manager(
     manager_spec = _build_manager_spec(context, manager_tid)
 
     spec_json = manager_spec.model_dump_json()
+    broker_target_json = serialize_broker_target(context.broker_target)
     config_json = json.dumps(context.config)
 
+    broker_target_b64 = base64.b64encode(broker_target_json.encode("utf-8")).decode(
+        "ascii"
+    )
     spec_b64 = base64.b64encode(spec_json.encode("utf-8")).decode("ascii")
     config_b64 = base64.b64encode(config_json.encode("utf-8")).decode("ascii")
 
@@ -332,7 +320,7 @@ def _start_manager(
         "-m",
         "weft.manager_process",
         "weft.core.manager.Manager",
-        str(context.database_path),
+        broker_target_b64,
         spec_b64,
         config_b64,
         "0.05",
@@ -350,7 +338,7 @@ def _start_manager(
                 {
                     "manager_tid": manager_tid,
                     "pid": process.pid,
-                    "db": str(context.database_path),
+                    "db": context.broker_display_target,
                 },
                 ensure_ascii=False,
             )
@@ -421,7 +409,7 @@ def _stop_manager(
     ctrl_in = record.get("ctrl_in") or f"worker.{record['tid']}.{QUEUE_CTRL_IN_SUFFIX}"
     queue = Queue(
         ctrl_in,
-        db_path=str(context.database_path),
+        db_path=context.broker_target,
         persistent=False,
         config=context.broker_config,
     )
@@ -459,19 +447,34 @@ def _enqueue_taskspec(
 ) -> int:
     # Spec: docs/specifications/03-Worker_Architecture.md#tid-correlation-wa-2
     inbox_name = manager_record.get("requests") or WEFT_SPAWN_REQUESTS_QUEUE
-    taskspec_payload = taskspec.model_dump(mode="json")
+    task_tid = taskspec.tid or _generate_tid(context)
+    taskspec_payload = resolve_taskspec_payload(
+        taskspec.model_dump(mode="json"),
+        tid=task_tid,
+        inherited_weft_context=taskspec.spec.weft_context,
+    )
+    inbox_message = work_payload
+    if inbox_message is None and not bool(
+        taskspec_payload.get("spec", {}).get("persistent")
+    ):
+        inbox_message = WORK_ENVELOPE_START
     message: dict[str, Any] = {
         "taskspec": taskspec_payload,
-        "inbox_message": WORK_ENVELOPE_START if work_payload is None else work_payload,
+        "inbox_message": inbox_message,
     }
     message_json = json.dumps(message)
-    queue = Queue(
-        inbox_name,
-        db_path=str(context.database_path),
-        persistent=True,
-        config=context.broker_config,
-    )
-    return int(queue.write(message_json))
+    message_timestamp = int(task_tid)
+
+    with context.broker() as db:
+        db._run_with_retry(
+            lambda: db._do_write_transaction(
+                inbox_name,
+                message_json,
+                message_timestamp,
+            )
+        )
+
+    return message_timestamp
 
 
 def _decode_result_payload(raw: str) -> Any:
@@ -532,10 +535,20 @@ def _process_outbox_message(raw: str, stream_buffer: list[str]) -> tuple[bool, A
             stream_buffer.append(text)
         if envelope.get("final"):
             typer.echo()
-            return True, "".join(stream_buffer)
+            value = "".join(stream_buffer)
+            stream_buffer.clear()
+            return True, value
         return False, None
 
     return True, envelope
+
+
+def _aggregate_public_outputs(values: list[Any]) -> Any:
+    if not values:
+        return None
+    if len(values) == 1:
+        return values[0]
+    return list(values)
 
 
 def _poll_log_events(
@@ -543,24 +556,12 @@ def _poll_log_events(
     last_timestamp: int | None,
     target_tid: str,
 ) -> tuple[list[tuple[dict[str, Any], int]], int | None]:
-    try:
-        records = cast(
-            Sequence[tuple[str, int]] | None,
-            log_queue.peek_many(limit=512, with_timestamps=True),
-        )
-    except Exception:
-        return [], last_timestamp
-
     events: list[tuple[dict[str, Any], int]] = []
-    if not records:
-        return events, last_timestamp
-
-    for entry, timestamp in records:
+    for data, timestamp in iter_queue_json_entries(
+        log_queue,
+        since_timestamp=last_timestamp,
+    ):
         if last_timestamp is not None and timestamp <= last_timestamp:
-            continue
-        try:
-            data = cast(dict[str, Any], json.loads(entry))
-        except json.JSONDecodeError:
             continue
         if data.get("tid") != target_tid:
             continue
@@ -578,7 +579,7 @@ def _wait_for_task_completion(
     json_output: bool,
     verbose: bool,
 ) -> tuple[str, Any | None, str | None]:
-    db_path = str(context.database_path)
+    db_path = context.broker_target
     config = context.broker_config
     outbox_name = taskspec.io.outputs.get("outbox")
     ctrl_out_name = taskspec.io.control.get("ctrl_out")
@@ -610,49 +611,62 @@ def _wait_for_task_completion(
     stream_buffer: list[str] = []
     log_last_timestamp: int | None = None
     status = "running"
+    result_values: list[Any] = []
     result_value: Any | None = None
     error_message: str | None = None
+    completed_at: float | None = None
 
-    while True:
+    try:
         while True:
-            ctrl_raw = ctrl_queue.read_one()
-            if ctrl_raw is None:
-                break
-            ctrl_payload = ctrl_raw[0] if isinstance(ctrl_raw, tuple) else ctrl_raw
-            _handle_ctrl_stream(str(ctrl_payload))
+            assert taskspec.tid is not None
+            while True:
+                ctrl_raw = ctrl_queue.read_one()
+                if ctrl_raw is None:
+                    break
+                ctrl_payload = ctrl_raw[0] if isinstance(ctrl_raw, tuple) else ctrl_raw
+                _handle_ctrl_stream(str(ctrl_payload))
 
-        outbox_raw = outbox_queue.read_one()
-        if outbox_raw is not None:
-            outbox_payload = (
-                outbox_raw[0] if isinstance(outbox_raw, tuple) else outbox_raw
+            outbox_raw = outbox_queue.read_one()
+            if outbox_raw is not None:
+                outbox_payload = (
+                    outbox_raw[0] if isinstance(outbox_raw, tuple) else outbox_raw
+                )
+                final, value = _process_outbox_message(
+                    str(outbox_payload), stream_buffer
+                )
+                if final:
+                    result_values.append(value)
+                continue
+
+            events, log_last_timestamp = _poll_log_events(
+                log_queue,
+                log_last_timestamp,
+                taskspec.tid,
             )
-            final, value = _process_outbox_message(str(outbox_payload), stream_buffer)
-            if final:
-                result_value = value
+            for payload, _ts in events:
+                event = payload.get("event")
+                if event in {"work_failed", "work_timeout", "work_limit_violation"}:
+                    status = "failed"
+                    error_message = payload.get("error") or event.replace("_", " ")
+                    break
+                if event == "work_completed" and completed_at is None:
+                    completed_at = time.monotonic()
+
+            if status != "running":
+                break
+
+            if completed_at is not None and (
+                time.monotonic() - completed_at >= WEFT_COMPLETED_RESULT_GRACE_SECONDS
+            ):
+                result_value = _aggregate_public_outputs(result_values)
                 status = "completed"
                 break
-            continue
 
-        events, log_last_timestamp = _poll_log_events(
-            log_queue,
-            log_last_timestamp,
-            taskspec.tid,
-        )
-        for payload, _ts in events:
-            event = payload.get("event")
-            if event in {"work_failed", "work_timeout", "work_limit_violation"}:
-                status = "failed"
-                error_message = payload.get("error") or event.replace("_", " ")
-                break
-            if event == "work_completed" and result_value is None:
-                status = "completed"
-                result_value = None
-                break
-
-        if status != "running":
-            break
-
-        time.sleep(0.05)
+            time.sleep(0.05)
+    finally:
+        outbox_queue.close()
+        ctrl_queue.close()
+        log_queue.close()
 
     return status, result_value, error_message
 
@@ -665,7 +679,8 @@ def _run_interactive_session(
     auto_close: bool = True,
     use_prompt: bool = False,
 ) -> tuple[str, Any | None, str | None]:
-    db_path = str(context.database_path)
+    assert taskspec.tid is not None
+    db_path = context.broker_target
     config = context.broker_config
     outbox_name = (
         taskspec.io.outputs.get("outbox") or f"T{taskspec.tid}.{QUEUE_OUTBOX_SUFFIX}"
@@ -917,21 +932,6 @@ def _build_taskspec_dict(
     return taskspec_dict
 
 
-def _rewrite_tid_in_io(io_section: dict[str, Any], old_tid: str, new_tid: str) -> None:
-    """Rewrite default queue names that embed an old TID prefix."""
-    if not old_tid or not new_tid or old_tid == new_tid:
-        return
-    old_prefix = f"T{old_tid}."
-    new_prefix = f"T{new_tid}."
-    for key in ("inputs", "outputs", "control"):
-        section = io_section.get(key)
-        if not isinstance(section, dict):
-            continue
-        for name, value in list(section.items()):
-            if isinstance(value, str) and old_prefix in value:
-                section[name] = value.replace(old_prefix, new_prefix)
-
-
 def _initial_work_payload(
     *,
     target_type: str,
@@ -995,11 +995,8 @@ def _run_inline(
         metadata["tags"] = list(tags)
     metadata["source"] = "weft.cli"
 
-    stdin_data = _read_stdin()
-    try:
-        stdin_is_tty = bool(sys.stdin and sys.stdin.isatty())
-    except Exception:  # pragma: no cover - defensive for mocked stdin
-        stdin_is_tty = False
+    stdin_data = _read_piped_stdin(context)
+    stdin_is_terminal = stdin_is_tty()
     work_payload = _initial_work_payload(
         target_type=target_type,
         stdin_data=stdin_data,
@@ -1051,30 +1048,22 @@ def _run_inline(
         if verbose:
             typer.echo(
                 json.dumps(
-                    {"tid": tid, "task": task_name, "db": str(context.database_path)},
+                    {
+                        "tid": tid,
+                        "task": task_name,
+                        "db": context.broker_display_target,
+                    },
                     indent=2,
                 )
             )
 
-        resolved_dict = _build_taskspec_dict(
+        resolved_payload = resolve_taskspec_payload(
+            taskspec.model_dump(mode="json"),
             tid=tid,
-            context=context,
-            name=task_name,
-            target_type=target_type,
-            function_target=function_target,
-            command_target=command,
-            base_args=parsed_args,
-            base_kwargs=parsed_kwargs,
-            env=env_map,
-            timeout=timeout,
-            memory=memory,
-            cpu=cpu,
-            interactive=interactive,
-            stream_output=effective_stream_output,
-            metadata=metadata,
+            inherited_weft_context=taskspec.spec.weft_context,
         )
         resolved_spec = TaskSpec.model_validate(
-            resolved_dict, context={"auto_expand": True}
+            resolved_payload, context={"auto_expand": False}
         )
 
         if not wait:
@@ -1090,7 +1079,7 @@ def _run_inline(
             return 0
 
         if interactive:
-            use_prompt = stdin_data is None and stdin_is_tty
+            use_prompt = stdin_data is None and stdin_is_terminal
             session_stdin = stdin_data
             session_auto_close = not use_prompt
             if isinstance(work_payload, dict) and "stdin" in work_payload:
@@ -1166,22 +1155,42 @@ def _run_spec_via_manager(
     wait: bool,
     json_output: bool,
     autostart_enabled: bool,
+    persistent_override: bool | None,
 ) -> int:
     spec = _load_taskspec(spec_path)
+    spec_payload = spec.model_dump(mode="json")
+    if persistent_override is not None:
+        spec_payload.setdefault("spec", {})
+        spec_payload["spec"]["persistent"] = persistent_override
+    spec = TaskSpec.model_validate(
+        spec_payload,
+        context={"template": True, "auto_expand": False},
+    )
+    if spec.spec.persistent and wait:
+        raise typer.BadParameter(
+            "--wait is not supported for persistent TaskSpecs; use --no-wait."
+        )
     context = build_context(spec.spec.weft_context, autostart=autostart_enabled)
+    stdin_data = _read_piped_stdin(context)
+    work_payload = _initial_work_payload(
+        target_type=spec.spec.type,
+        stdin_data=stdin_data,
+        interactive=bool(spec.spec.interactive),
+    )
     manager_record, started_here, process_handle = _ensure_manager(
         context, verbose=verbose
     )
     reuse_enabled = bool(context.config.get("WEFT_MANAGER_REUSE_ENABLED", True))
 
     try:
-        tid = str(_enqueue_taskspec(context, manager_record, spec, None))
-        resolved_payload = spec.model_dump(mode="json")
-        resolved_payload["tid"] = tid
-        if spec.tid and spec.tid != tid:
-            _rewrite_tid_in_io(resolved_payload.get("io", {}), str(spec.tid), tid)
+        tid = str(_enqueue_taskspec(context, manager_record, spec, work_payload))
+        resolved_payload = resolve_taskspec_payload(
+            spec.model_dump(mode="json"),
+            tid=tid,
+            inherited_weft_context=spec.spec.weft_context,
+        )
         resolved_spec = TaskSpec.model_validate(
-            resolved_payload, context={"auto_expand": True}
+            resolved_payload, context={"auto_expand": False}
         )
         if not wait:
             if json_output:
@@ -1264,6 +1273,9 @@ def _run_pipeline(
         raise typer.BadParameter("Pipeline spec must include stages")
 
     context = build_context(spec_context=context_dir, autostart=autostart_enabled)
+    stdin_data = _read_piped_stdin(context)
+    if pipeline_input is not None and stdin_data is not None:
+        raise typer.BadParameter("--input cannot be used together with piped stdin")
     manager_record, started_here, process_handle = _ensure_manager(
         context, verbose=verbose
     )
@@ -1272,6 +1284,8 @@ def _run_pipeline(
     stage_input: Any = None
     if pipeline_input is not None:
         stage_input = _parse_cli_value(pipeline_input)
+    elif stdin_data is not None:
+        stage_input = stdin_data
 
     try:
         for stage in stages:
@@ -1287,7 +1301,7 @@ def _run_pipeline(
                 context_path=context_dir,
             )
 
-            candidate = dict(taskspec_payload)
+            candidate = copy.deepcopy(taskspec_payload)
             candidate.pop("tid", None)
             candidate.setdefault("spec", {})
             candidate.setdefault("metadata", {})
@@ -1339,12 +1353,17 @@ def _run_pipeline(
             work_payload = stage_input
             if isinstance(defaults, dict) and "input" in defaults:
                 work_payload = defaults.get("input")
-            tid = str(_enqueue_taskspec(context, manager_record, taskspec, work_payload))
+            tid = str(
+                _enqueue_taskspec(context, manager_record, taskspec, work_payload)
+            )
 
-            resolved_payload = candidate
-            resolved_payload["tid"] = tid
+            resolved_payload = resolve_taskspec_payload(
+                taskspec.model_dump(mode="json"),
+                tid=tid,
+                inherited_weft_context=taskspec.spec.weft_context,
+            )
             resolved_spec = TaskSpec.model_validate(
-                resolved_payload, context={"auto_expand": True}
+                resolved_payload, context={"auto_expand": False}
             )
 
             status, result_value, error_message = _wait_for_task_completion(
@@ -1360,7 +1379,7 @@ def _run_pipeline(
                 )
                 outbox_queue = Queue(
                     outbox_name,
-                    db_path=str(context.database_path),
+                    db_path=context.broker_target,
                     persistent=True,
                     config=context.broker_config,
                 )
@@ -1374,9 +1393,7 @@ def _run_pipeline(
                             if isinstance(outbox_raw, tuple)
                             else outbox_raw
                         )
-                        final, value = _process_outbox_message(
-                            str(outbox_payload), []
-                        )
+                        final, value = _process_outbox_message(str(outbox_payload), [])
                         if final:
                             result_value = value
                             break
@@ -1448,7 +1465,7 @@ def cmd_run(
     json_output: bool,
     verbose: bool,
     monitor: bool,
-    once: bool,
+    persistent_override: bool | None,
     autostart_enabled: bool,
 ) -> int:
     """Execute an inline target or a TaskSpec JSON file."""
@@ -1463,9 +1480,9 @@ def cmd_run(
             )
         if monitor:
             raise typer.BadParameter("--monitor is not supported with pipelines.")
-        if once is False:
+        if persistent_override is not None:
             raise typer.BadParameter(
-                "--continuous/--no-once is not yet supported with pipelines."
+                "--continuous/--once is not supported with pipelines."
             )
         return _run_pipeline(
             pipeline,
@@ -1487,23 +1504,20 @@ def cmd_run(
             )
         if monitor:
             raise typer.BadParameter("--monitor is not yet supported with the Manager.")
-        if once is False:
-            raise typer.BadParameter(
-                "--continuous/--no-once is not yet supported with the Manager."
-            )
         return _run_spec_via_manager(
             spec,
             verbose=verbose,
             wait=wait,
             json_output=json_output,
             autostart_enabled=autostart_enabled,
+            persistent_override=persistent_override,
         )
 
     if monitor:
         raise typer.BadParameter("--monitor is only supported together with --spec.")
-    if once is False:
+    if persistent_override is not None:
         raise typer.BadParameter(
-            "--continuous/--no-once is only supported together with --spec."
+            "--continuous/--once is only supported together with --spec."
         )
 
     if not command and not function:

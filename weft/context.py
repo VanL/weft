@@ -1,10 +1,10 @@
 """Weft context utilities built on SimpleBroker project scoping.
 
-The vNext context design is intentionally small and predictable.  Rather than
-maintaining a parallel discovery system, Weft now delegates database discovery
-to SimpleBroker's `_find_project_database` helper and keeps only the logic that
-is specific to Weft (environment overrides, `.weft/` ancillary directories, and
-project metadata).
+The vNext context design is intentionally small and predictable. Rather than
+maintaining a parallel discovery system, Weft now delegates broker discovery to
+SimpleBroker's public project API and keeps only the logic that is specific to
+Weft (environment overrides, `.weft/` ancillary directories, and project
+metadata).
 
 Spec references: docs/specifications/04-SimpleBroker_Integration.md [SB-0], [SB-0.4]
 and docs/specifications/03-Worker_Architecture.md [WA-3].
@@ -15,14 +15,13 @@ Key behaviours
   :func:`weft._constants.load_config`, which already maps supported values to
   the corresponding BROKER_* keys.  The returned configuration is embedded in
   the context and reused when constructing `simplebroker.Queue` instances.
-* **Database resolution** – When a task or CLI command does not specify
-  `weft_context`, we consult SimpleBroker's project-search helper to locate an
-  existing database that matches the configured default filename (typically
-  `.weft/broker.db`).  If nothing is found we fall back to the current working
-  directory and initialize a fresh database there.
+* **Broker resolution** – When a task or CLI command does not specify
+  `weft_context`, we consult SimpleBroker's public project-scoping API to
+  locate an existing broker target. If nothing is found we fall back to the
+  current working directory and initialize a fresh default target there.
 * **Explicit overrides** – If `weft_context` *is* provided we treat it as the
-  authoritative project root, expand the path, and place the SimpleBroker
-  database inside that directory using the configured relative filename.
+  authoritative project root, expand the path, and ask SimpleBroker for the
+  default target rooted at that directory.
 * **Ancillary structure** – Regardless of how the root is chosen we ensure
   `.weft/`, `.weft/outputs/`, `.weft/logs/`, and a JSON metadata file exist.
   These directories belong to Weft and never influence SimpleBroker itself.
@@ -40,11 +39,9 @@ functions:
     if they need to reuse it.
 
 The resulting :class:`WeftContext` carries resolved paths, the merged Weft
-configuration, the derived SimpleBroker configuration, and the absolute path to
-the backing SQLite database.  The :meth:`WeftContext.queue` helper constructs
-`simplebroker.Queue` instances that are pre-configured with the correct
-database path and configuration dictionary—no global environment state is
-mutated in the process.
+configuration, the derived SimpleBroker configuration, and an opaque broker
+target object that can be passed straight back to SimpleBroker. The optional
+``database_path`` remains available only for file-backed broker operations.
 """
 
 from __future__ import annotations
@@ -52,13 +49,19 @@ from __future__ import annotations
 import json
 import os
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from simplebroker import Queue
-from simplebroker.db import BrokerDB
-from simplebroker.helpers import _find_project_database
+from simplebroker import (
+    BrokerTarget,
+    Queue,
+    open_broker,
+    resolve_broker_target,
+    target_for_directory,
+)
 from weft._constants import (
     WEFT_AUTOSTART_DIRECTORY_NAME,
     WEFT_AUTOSTART_TASKS_DEFAULT,
@@ -87,8 +90,11 @@ class WeftContext:
     config_path: Path
     """.weft/config.json path containing project metadata."""
 
-    database_path: Path
-    """Absolute path to the SimpleBroker SQLite database."""
+    broker_target: BrokerTarget
+    """Opaque SimpleBroker target to pass back into Queue/open_broker."""
+
+    database_path: Path | None
+    """Filesystem path for file-backed targets, else ``None``."""
 
     config: dict[str, Any]
     """Complete configuration dictionary (WEFT_* and BROKER_* keys)."""
@@ -109,13 +115,38 @@ class WeftContext:
     """True when auto-start templates should be considered during manager boot."""
 
     def queue(self, name: str, *, persistent: bool = False) -> Queue:
-        """Create a SimpleBroker queue bound to this context's database (Spec: [SB-0.1], [SB-0.4])."""
+        """Create a SimpleBroker queue bound to this context's broker target."""
         return Queue(
             name,
-            db_path=str(self.database_path),
+            db_path=self.broker_target,
             persistent=persistent,
             config=self.broker_config,
         )
+
+    @contextmanager
+    def broker(self) -> Iterator[Any]:
+        """Yield a backend-agnostic SimpleBroker connection bound to this context."""
+
+        with open_broker(self.broker_target, config=self.broker_config) as broker:
+            yield broker
+
+    @property
+    def broker_display_target(self) -> str:
+        """Return a human-readable target string for logs and CLI output."""
+
+        return self.broker_target.target
+
+    @property
+    def backend_name(self) -> str:
+        """Return the resolved SimpleBroker backend name (Spec: [SB-0.4])."""
+
+        return self.broker_target.backend_name
+
+    @property
+    def is_file_backed(self) -> bool:
+        """Whether the resolved broker target is backed by a filesystem path."""
+
+        return self.database_path is not None
 
 
 def build_context(
@@ -133,8 +164,8 @@ def build_context(
             project by searching upward from :func:`Path.cwd`.
         create_dirs: When True (default) ensure `.weft/`, `outputs/`,
             `logs/`, and (when enabled) `autostart/` directories exist.
-        create_database: When True (default) create the SQLite database if it
-            does not already exist.
+        create_database: When True (default) ensure the configured broker
+            target is initialized if it does not already exist.
         autostart: Optional override for enabling auto-start TaskSpecs. When
             ``None`` the value is taken from the configuration/environment.
 
@@ -144,11 +175,9 @@ def build_context(
     Spec: [SB-0], [SB-0.1], [SB-0.4], [WA-3]
     """
     config = dict(load_config())
-    default_db_name = config.get("BROKER_DEFAULT_DB_NAME", ".weft/broker.db")
-    root, database_path, discovered = _resolve_root_and_database(
-        spec_context, default_db_name
-    )
-    weft_dir = _resolve_weft_dir(root, default_db_name)
+    root, broker_target, discovered = _resolve_root_and_target(spec_context, config)
+    database_path = broker_target.target_path
+    weft_dir = (root / ".weft").resolve(strict=False)
     outputs_dir = weft_dir / "outputs"
     logs_dir = weft_dir / "logs"
     config_path = weft_dir / "config.json"
@@ -162,20 +191,23 @@ def build_context(
     config["WEFT_AUTOSTART_TASKS"] = autostart_enabled
     config["WEFT_AUTOSTART_DIR"] = str(autostart_dir)
 
+    broker_config = {
+        key: value for key, value in config.items() if key.startswith("BROKER_")
+    }
+
     if create_dirs:
-        for path in {weft_dir, outputs_dir, logs_dir, database_path.parent}:
+        paths = {weft_dir, outputs_dir, logs_dir}
+        if database_path is not None:
+            paths.add(database_path.parent)
+        for path in paths:
             path.mkdir(parents=True, exist_ok=True)
         if autostart_enabled:
             autostart_dir.mkdir(parents=True, exist_ok=True)
 
     if create_database:
-        _ensure_database(database_path)
+        _ensure_database(broker_target, broker_config, database_path=database_path)
 
     project_config = _load_project_config(config_path)
-
-    broker_config = {
-        key: value for key, value in config.items() if key.startswith("BROKER_")
-    }
 
     return WeftContext(
         root=root,
@@ -183,6 +215,7 @@ def build_context(
         outputs_dir=outputs_dir,
         logs_dir=logs_dir,
         config_path=config_path,
+        broker_target=broker_target,
         database_path=database_path,
         config=config,
         broker_config=broker_config,
@@ -203,74 +236,38 @@ def get_context(spec_context: str | os.PathLike[str] | None = None) -> WeftConte
 # ---------------------------------------------------------------------------
 
 
-def _resolve_root_and_database(
-    spec_context: str | os.PathLike[str] | None, default_db_name: str
-) -> tuple[Path, Path, bool]:
-    """Determine the project root and absolute database path (Spec: [SB-0])."""
-    default_rel = Path(default_db_name)
-
+def _resolve_root_and_target(
+    spec_context: str | os.PathLike[str] | None,
+    config: dict[str, Any],
+) -> tuple[Path, BrokerTarget, bool]:
+    """Determine the project root and broker target."""
     if spec_context is not None:
         root = Path(spec_context).expanduser().resolve()
-        database_path = _compute_database_path(root, default_rel)
-        return root, database_path, False
+        return root, target_for_directory(root, config=config), False
 
     start_dir = Path.cwd().resolve()
-    discovered = False
+    discovered_target = resolve_broker_target(start_dir, config=config)
+    if discovered_target is not None:
+        root = discovered_target.project_root or start_dir
+        return root, discovered_target, True
 
-    try:
-        found_db = _find_project_database(str(default_rel), start_dir)
-    except ValueError:
-        found_db = None
-
-    if found_db:
-        root = _root_from_database(found_db, default_rel)
-        database_path = found_db.resolve(strict=False)
-        discovered = True
-    else:
-        root = start_dir
-        database_path = _compute_database_path(root, default_rel)
-
-    return root, database_path, discovered
+    root = start_dir
+    return root, target_for_directory(root, config=config), False
 
 
-def _compute_database_path(root: Path, rel_db: Path) -> Path:
-    """Compute the absolute database path for the given root (Spec: [SB-0.1])."""
-    if rel_db.is_absolute():
-        return rel_db.resolve(strict=False)
-    return (root / rel_db).resolve(strict=False)
-
-
-def _root_from_database(db_path: Path, rel_db: Path) -> Path:
-    """Derive the project root from an absolute database path (Spec: [SB-0])."""
-    if rel_db.is_absolute():
-        return db_path.parent.resolve()
-
-    root = db_path
-    for _ in rel_db.parts:
-        root = root.parent
-    return root.resolve()
-
-
-def _resolve_weft_dir(root: Path, default_db_name: str) -> Path:
-    """Determine the .weft directory for the given root (Spec: [SB-0.1])."""
-    rel_db = Path(default_db_name)
-
-    if rel_db.is_absolute():
-        return (root / ".weft").resolve(strict=False)
-
-    if rel_db.parts and rel_db.parts[0].startswith("."):
-        return (root / rel_db.parts[0]).resolve(strict=False)
-
-    return (root / ".weft").resolve(strict=False)
-
-
-def _ensure_database(database_path: Path) -> None:
-    """Create the SQLite database if it does not already exist (Spec: [SB-0.1])."""
-    if database_path.exists():
+def _ensure_database(
+    broker_target: BrokerTarget,
+    broker_config: dict[str, Any],
+    *,
+    database_path: Path | None,
+) -> None:
+    """Ensure the broker target exists."""
+    if database_path is not None and database_path.exists():
         return
 
-    database_path.parent.mkdir(parents=True, exist_ok=True)
-    with BrokerDB(str(database_path)):
+    if database_path is not None:
+        database_path.parent.mkdir(parents=True, exist_ok=True)
+    with open_broker(broker_target, config=broker_config):
         pass
 
 

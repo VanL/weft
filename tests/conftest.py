@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
 import os
 import subprocess
 import sys
@@ -13,7 +14,124 @@ from typing import Any
 import pytest
 
 from simplebroker import Queue
+from tests.helpers.test_backend import active_test_backend, prepare_cli_root
 from tests.helpers.weft_harness import WeftTestHarness
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+_BROKER_HEAVY_FIXTURES = frozenset(
+    {
+        "weft_harness",
+        "workdir",
+        "broker_env",
+        "broker_target",
+        "queue_factory",
+        "task_factory",
+    }
+)
+_BROKER_HEAVY_GROUP = "weft_broker_serial"
+_SHARED_MODULES = frozenset(
+    {
+        "tests/system/test_constants.py",
+        "tests/system/test_test_backend.py",
+        "tests/context/test_context.py",
+        "tests/commands/test_dump_load.py",
+        "tests/commands/test_result.py",
+        "tests/commands/test_run.py",
+        "tests/commands/test_task_commands.py",
+        "tests/cli/test_cli_init.py",
+        "tests/cli/test_cli_queue.py",
+        "tests/cli/test_cli_result.py",
+        "tests/cli/test_cli_system.py",
+        "tests/cli/test_status.py",
+        "tests/commands/test_queue.py",
+        "tests/specs/worker_architecture/test_agent_spawn.py",
+        "tests/specs/worker_architecture/test_tid_correlation.py",
+    }
+)
+_SQLITE_ONLY_MODULES = frozenset(
+    {
+        "tests/context/test_context_sqlite_only.py",
+        "tests/cli/test_cli_init_sqlite_only.py",
+        "tests/commands/test_dump_load_sqlite_only.py",
+    }
+)
+_UNAUDITED_PATH_PREFIXES = frozenset(
+    {
+        "tests/core/",
+        "tests/tasks/",
+        "tests/taskspec/",
+        "tests/specs/message_flow/",
+        "tests/specs/resource_management/",
+        "tests/specs/taskspec/",
+    }
+)
+_UNAUDITED_MODULE_ALLOWLIST = frozenset(
+    {
+        "tests/cli/test_cli_list_task.py",
+        "tests/cli/test_cli_pipeline.py",
+        "tests/cli/test_cli_queue.py",
+        "tests/cli/test_cli_result_all.py",
+        "tests/cli/test_cli_run.py",
+        "tests/cli/test_cli_run_interactive_tty.py",
+        "tests/cli/test_cli_spec.py",
+        "tests/cli/test_cli_tidy.py",
+        "tests/cli/test_commands.py",
+        "tests/cli/test_manager_proctitle.py",
+        "tests/cli/test_rearrange_args.py",
+        "tests/commands/test_interactive_client.py",
+        "tests/commands/test_queue.py",
+        "tests/shell/test_known_interpreters.py",
+        "tests/specs/quick_reference/test_queue_names.py",
+        "tests/specs/worker_architecture/test_manager_state_events.py",
+        "tests/system/test_helpers.py",
+        "tests/system/test_release_script.py",
+    }
+)
+
+
+def _preferred_test_python() -> Path:
+    if os.name == "nt":
+        candidate = REPO_ROOT / ".venv" / "Scripts" / "python.exe"
+    else:
+        candidate = REPO_ROOT / ".venv" / "bin" / "python"
+    return candidate if candidate.exists() else Path(sys.executable)
+
+
+def _pg_cli_requires_active_env(args: tuple[object, ...]) -> bool:
+    """Return whether a PG-backed CLI subprocess must use `uv run --active`.
+
+    Only commands that may launch child processes which outlive the parent CLI
+    need the stable interpreter path provided by `uv run --active`. One-shot
+    commands can use the current interpreter directly, which keeps the PG suite
+    from paying nested-uv startup overhead on every CLI assertion.
+    """
+
+    if not args:
+        return False
+
+    command = str(args[0])
+    if command == "run":
+        return True
+    if command == "worker":
+        return True
+    return False
+
+
+def _normalize_test_python_environment() -> None:
+    python_path = _preferred_test_python()
+    os.environ.setdefault("WEFT_TEST_PYTHON", str(python_path))
+    os.environ.pop("__PYVENV_LAUNCHER__", None)
+
+    python_bin = str(python_path.parent)
+    current_path = os.environ.get("PATH", "")
+    path_parts = [part for part in current_path.split(os.pathsep) if part]
+    if python_bin not in path_parts:
+        os.environ["PATH"] = os.pathsep.join([python_bin, *path_parts])
+
+    multiprocessing.set_executable(str(python_path))
+
+
+_normalize_test_python_environment()
 
 
 @pytest.fixture
@@ -29,26 +147,31 @@ def workdir(weft_harness: WeftTestHarness) -> Path:
 
 
 @pytest.fixture
-def broker_env(
-    weft_harness: WeftTestHarness,
-) -> Iterator[tuple[str, Callable[[str], Queue]]]:
-    """Provide a shared broker database path and a queue factory."""
+def broker_target(weft_harness: WeftTestHarness):
+    """Resolved broker target for the active test backend."""
+
+    return weft_harness.context.broker_target
+
+
+@pytest.fixture
+def queue_factory(weft_harness: WeftTestHarness):
+    """Create queues bound to the active backend for the current harness root."""
+
     context = weft_harness.context
-    db_path = context.database_path
     created: list[Queue] = []
 
-    def factory(name: str) -> Queue:
+    def factory(name: str, *, persistent: bool = True) -> Queue:
         queue = Queue(
             name,
-            db_path=str(db_path),
-            persistent=True,
+            db_path=context.broker_target,
+            persistent=persistent,
             config=context.broker_config,
         )
         created.append(queue)
         return queue
 
     try:
-        yield str(db_path), factory
+        yield factory
     finally:
         for queue in created:
             try:
@@ -58,15 +181,44 @@ def broker_env(
 
 
 @pytest.fixture
-def task_factory(broker_env: tuple[str, Callable[[str], Queue]]):
+def broker_env(
+    weft_harness: WeftTestHarness,
+) -> Iterator[tuple[object, Callable[[str], Queue]]]:
+    """Provide a shared broker target and a queue factory."""
+    context = weft_harness.context
+    broker_target = context.broker_target
+    created: list[Queue] = []
+
+    def factory(name: str) -> Queue:
+        queue = Queue(
+            name,
+            db_path=broker_target,
+            persistent=True,
+            config=context.broker_config,
+        )
+        created.append(queue)
+        return queue
+
+    try:
+        yield broker_target, factory
+    finally:
+        for queue in created:
+            try:
+                queue.close()
+            except Exception:  # pragma: no cover - defensive
+                pass
+
+
+@pytest.fixture
+def task_factory(broker_env: tuple[object, Callable[[str], Queue]]):
     """Create Task objects bound to the shared broker database."""
     from weft.core.tasks import Consumer
 
-    db_path, _ = broker_env
+    broker_target, _ = broker_env
     tasks: list[Consumer] = []
 
     def factory(taskspec):
-        task = Consumer(db_path, taskspec)
+        task = Consumer(broker_target, taskspec)
         tasks.append(task)
         return task
 
@@ -88,24 +240,13 @@ def run_cli(
     env: dict[str, str] | None = None,
     strip_path_entry: bool = False,
     harness: WeftTestHarness | None = None,
+    prepare_root: bool = True,
 ) -> tuple[int, str, str]:
     """Execute the Weft CLI (`python -m weft.cli …`) inside *cwd*."""
-    repo_root = Path(__file__).resolve().parents[1]
-    python_override = os.environ.get("WEFT_TEST_PYTHON")
-    if python_override:
-        python_path = Path(python_override)
-    else:
-        if os.name == "nt":
-            candidate = repo_root / ".venv" / "Scripts" / "python.exe"
-        else:
-            candidate = repo_root / ".venv" / "bin" / "python"
-        python_path = candidate if candidate.exists() else Path(sys.executable)
-
-    cmd = [str(python_path), "-m", "weft.cli", *map(str, args)]
-
     env_vars = os.environ.copy() if env is None else env.copy()
+    env_vars.pop("__PYVENV_LAUNCHER__", None)
     existing_path = env_vars.get("PYTHONPATH", "")
-    path_parts = [str(repo_root)]
+    path_parts = [str(REPO_ROOT)]
     if existing_path:
         path_parts.append(existing_path)
     env_vars["PYTHONPATH"] = os.pathsep.join(path_parts)
@@ -114,6 +255,31 @@ def run_cli(
         env_vars["PYTHONPATH"] = ":".join(
             part for part in env_vars["PYTHONPATH"].split(":") if part
         )
+
+    backend_name = active_test_backend(env_vars)
+    if backend_name == "postgres" and _pg_cli_requires_active_env(args):
+        cmd = [
+            "uv",
+            "run",
+            "--active",
+            "python",
+            "-m",
+            "weft.cli",
+            *map(str, args),
+        ]
+    else:
+        if backend_name == "postgres":
+            python_path = Path(sys.executable)
+        else:
+            python_override = os.environ.get("WEFT_TEST_PYTHON")
+            if python_override:
+                python_path = Path(python_override)
+            else:
+                python_path = _preferred_test_python()
+        cmd = [str(python_path), "-m", "weft.cli", *map(str, args)]
+
+    if prepare_root:
+        prepare_cli_root(args, cwd=cwd, env=env_vars)
 
     try:
         completed = subprocess.run(
@@ -223,6 +389,43 @@ def _register_from_json(harness: WeftTestHarness, payload: Any) -> None:
     elif isinstance(payload, list):
         for item in payload:
             _register_from_json(harness, item)
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Group broker-heavy tests onto one xdist worker and classify backend scope.
+
+    These tests exercise the real SQLite-backed broker, spawn child processes,
+    and rely on teardown cleanup of live workers. Keeping them on one xdist
+    worker matches the containment pattern used in SimpleBroker for
+    concurrency-sensitive suites and avoids cross-worker teardown races.
+
+    The marker must be attached before pytest-xdist's own
+    ``pytest_collection_modifyitems`` hook runs, because xdist reads the
+    ``xdist_group`` marker there to rewrite node IDs for ``--dist loadgroup``.
+    """
+    for item in items:
+        relative_path = item.path.relative_to(REPO_ROOT).as_posix()
+        fixture_names = set(getattr(item, "fixturenames", ()))
+        if fixture_names & _BROKER_HEAVY_FIXTURES:
+            item.add_marker(pytest.mark.xdist_group(name=_BROKER_HEAVY_GROUP))
+
+        if item.get_closest_marker("shared") or item.get_closest_marker("sqlite_only"):
+            continue
+        if relative_path in _SHARED_MODULES:
+            item.add_marker(pytest.mark.shared)
+            continue
+        if relative_path in _SQLITE_ONLY_MODULES:
+            item.add_marker(pytest.mark.sqlite_only)
+            continue
+        if relative_path in _UNAUDITED_MODULE_ALLOWLIST:
+            continue
+        if any(relative_path.startswith(prefix) for prefix in _UNAUDITED_PATH_PREFIXES):
+            continue
+        raise pytest.UsageError(
+            "Unaudited test module must be marked 'shared' or 'sqlite_only', or "
+            f"listed in the temporary allowlist: {relative_path}"
+        )
 
 
 __all__ = ["weft_harness", "workdir", "broker_env", "task_factory", "run_cli"]

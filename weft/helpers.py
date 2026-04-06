@@ -11,16 +11,18 @@ import logging
 import math
 import os
 import shutil
-import sqlite3
 import sys
 import tempfile
 import time
-from collections.abc import Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from copy import deepcopy
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
-from simplebroker.db import DBConnection
+import psutil
+
+from simplebroker import Queue
+from simplebroker import commands as sb_commands
 from weft._constants import load_config
 
 # Load configuration once at module level for efficiency
@@ -42,6 +44,98 @@ class CommandNotFoundError(FileNotFoundError):
         super().__init__(message)
         self.command = command
         self.search_path = search_path
+
+
+def stdin_is_tty(stream: Any | None = None) -> bool:
+    """Return whether *stream* is an interactive terminal."""
+    candidate = sys.stdin if stream is None else stream
+    if candidate is None or getattr(candidate, "closed", False):
+        return False
+    try:
+        return bool(candidate.isatty())
+    except Exception:  # pragma: no cover - defensive for mocked stdin
+        return False
+
+
+def resolve_broker_max_message_size(config: Mapping[str, Any]) -> int:
+    """Return the effective broker message-size limit for the active context."""
+    raw_value = config.get("BROKER_MAX_MESSAGE_SIZE")
+    if raw_value in (None, ""):
+        return int(getattr(sb_commands, "MAX_MESSAGE_SIZE", 10 * 1024 * 1024))
+
+    try:
+        max_bytes = int(str(raw_value))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("BROKER_MAX_MESSAGE_SIZE must be a positive integer") from exc
+    if max_bytes <= 0:
+        raise ValueError("BROKER_MAX_MESSAGE_SIZE must be a positive integer")
+    return max_bytes
+
+
+def read_limited_stdin(max_bytes: int, *, stream: Any | None = None) -> str:
+    """Read stdin in chunks while enforcing a byte limit."""
+    if max_bytes <= 0:
+        raise ValueError("max_bytes must be positive")
+
+    candidate = sys.stdin if stream is None else stream
+    if candidate is None or getattr(candidate, "closed", False):
+        return ""
+
+    chunks: list[bytes] = []
+    total_bytes = 0
+    chunk_size = 4096
+    reader = getattr(candidate, "buffer", None)
+
+    try:
+        if reader is not None:
+            while True:
+                chunk = reader.read(chunk_size)
+                if not chunk:
+                    break
+                if isinstance(chunk, str):
+                    chunk_bytes = chunk.encode("utf-8")
+                else:
+                    chunk_bytes = bytes(chunk)
+                total_bytes += len(chunk_bytes)
+                if total_bytes > max_bytes:
+                    raise ValueError(f"Input exceeds maximum size of {max_bytes} bytes")
+                chunks.append(chunk_bytes)
+        else:
+            while True:
+                chunk_text = candidate.read(chunk_size)
+                if not chunk_text:
+                    break
+                chunk_bytes = str(chunk_text).encode("utf-8")
+                total_bytes += len(chunk_bytes)
+                if total_bytes > max_bytes:
+                    raise ValueError(f"Input exceeds maximum size of {max_bytes} bytes")
+                chunks.append(chunk_bytes)
+    except OSError:
+        return ""
+
+    return b"".join(chunks).decode("utf-8")
+
+
+def resolve_cli_message_content(
+    message: str | None,
+    *,
+    max_bytes: int,
+    stream: Any | None = None,
+) -> str:
+    """Resolve queue message content from argv or piped stdin."""
+    if message == "-":
+        return read_limited_stdin(max_bytes, stream=stream)
+    if message is None:
+        if stdin_is_tty(stream):
+            raise ValueError(
+                "message is required when stdin is a terminal; pass a message or pipe input"
+            )
+        return read_limited_stdin(max_bytes, stream=stream)
+
+    message_bytes = len(message.encode("utf-8"))
+    if message_bytes > max_bytes:
+        raise ValueError(f"Message exceeds maximum size of {max_bytes} bytes")
+    return message
 
 
 def resolve_cli_command(command: str, *, search_path: str | None = None) -> str:
@@ -74,6 +168,161 @@ def resolve_cli_command(command: str, *, search_path: str | None = None) -> str:
     if resolved is None:
         raise CommandNotFoundError(candidate, search_path=search_path)
     return resolved
+
+
+def iter_queue_entries(
+    queue: Queue,
+    *,
+    since_timestamp: int | None = None,
+) -> Iterator[tuple[str, int]]:
+    """Yield queue entries with timestamps using the broker generator API.
+
+    This avoids fixed-size ``peek_many(limit=...)`` reads, which silently miss
+    newer entries once append-only queues grow beyond the chosen limit.
+    """
+
+    try:
+        raw_entries = queue.peek_generator(
+            with_timestamps=True,
+            since_timestamp=since_timestamp,
+        )
+    except Exception:
+        logger.debug("Failed to open queue generator for %s", queue, exc_info=True)
+        return iter(())
+
+    def _generator() -> Iterator[tuple[str, int]]:
+        for entry in cast(Iterable[Any], raw_entries):
+            if not isinstance(entry, tuple) or len(entry) != 2:
+                continue
+            body, timestamp = entry
+            try:
+                timestamp_value = int(timestamp)
+            except (TypeError, ValueError):
+                continue
+            yield str(body), timestamp_value
+
+    return _generator()
+
+
+def iter_queue_json_entries(
+    queue: Queue,
+    *,
+    since_timestamp: int | None = None,
+) -> Iterator[tuple[dict[str, Any], int]]:
+    """Yield decoded JSON objects from a queue, skipping invalid entries."""
+
+    for body, timestamp in iter_queue_entries(
+        queue,
+        since_timestamp=since_timestamp,
+    ):
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            yield payload, timestamp
+
+
+def terminate_process_tree(
+    root_pid: int,
+    *,
+    timeout: float = 0.5,
+    kill_after: bool = True,
+) -> set[int]:
+    """Terminate ``root_pid`` and any descendant processes.
+
+    Descendants receive the signal before the root process to reduce the chance
+    of orphaning subprocesses when the parent exits first.
+    """
+
+    if root_pid <= 0:
+        return set()
+
+    try:
+        root = psutil.Process(root_pid)
+    except psutil.Error:
+        return set()
+
+    descendants = _list_process_descendants(root)
+    targeted = descendants + [root]
+    signaled: list[psutil.Process] = []
+    for proc in targeted:
+        try:
+            proc.terminate()
+        except psutil.Error:
+            continue
+        else:
+            signaled.append(proc)
+
+    if not signaled:
+        return set()
+
+    _gone, alive = psutil.wait_procs(signaled, timeout=timeout)
+    if alive and kill_after:
+        for proc in alive:
+            try:
+                proc.kill()
+            except psutil.Error:
+                continue
+        psutil.wait_procs(alive, timeout=timeout)
+
+    terminated: set[int] = set()
+    for proc in signaled:
+        try:
+            if not proc.is_running():
+                terminated.add(proc.pid)
+        except psutil.Error:
+            terminated.add(proc.pid)
+    return terminated
+
+
+def kill_process_tree(root_pid: int, *, timeout: float = 0.5) -> set[int]:
+    """Force-kill ``root_pid`` and any descendant processes."""
+
+    if root_pid <= 0:
+        return set()
+
+    try:
+        root = psutil.Process(root_pid)
+    except psutil.Error:
+        return set()
+
+    descendants = _list_process_descendants(root)
+    targeted = descendants + [root]
+    killed: list[psutil.Process] = []
+    for proc in targeted:
+        try:
+            proc.kill()
+        except psutil.Error:
+            continue
+        else:
+            killed.append(proc)
+
+    if killed:
+        psutil.wait_procs(killed, timeout=timeout)
+
+    terminated: set[int] = set()
+    for proc in killed:
+        try:
+            if not proc.is_running():
+                terminated.add(proc.pid)
+        except psutil.Error:
+            terminated.add(proc.pid)
+    return terminated
+
+
+def _list_process_descendants(root: psutil.Process) -> list[psutil.Process]:
+    """Return descendant processes for ``root`` with duplicates removed."""
+
+    try:
+        descendants = root.children(recursive=True)
+    except psutil.Error:
+        return []
+
+    unique: dict[int, psutil.Process] = {}
+    for proc in descendants:
+        unique[proc.pid] = proc
+    return list(unique.values())
 
 
 def send_log(
@@ -205,46 +454,6 @@ def log_critical(message: str, **kwargs: Any) -> None:
         **kwargs: Additional keyword arguments for logging
     """
     send_log(message, level=logging.CRITICAL, **kwargs)
-
-
-def sqlite_wal_checkpoint_truncate(database_path: Path | str) -> None:
-    """Run ``PRAGMA wal_checkpoint(TRUNCATE);`` against *database_path*.
-
-    Uses the standard library sqlite3 module to execute the checkpoint in a
-    best-effort fashion. Any exception will be logged at DEBUG level and
-    swallowed so callers can treat this as a maintenance convenience.
-    """
-
-    db = Path(database_path)
-    if not db.exists():
-        logger.debug("Database %s does not exist; skipping WAL checkpoint", db)
-        return
-
-    try:
-        with sqlite3.connect(db) as conn:
-            conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
-    except Exception:  # pragma: no cover - maintenance best effort
-        logger.debug("Failed to run WAL checkpoint on %s", db, exc_info=True)
-
-
-def simplebroker_vacuum(
-    database_path: Path | str, *, config: dict[str, Any] | None = None
-) -> None:
-    """Compact the broker database using SimpleBroker's vacuum routine."""
-
-    db_path = Path(database_path)
-    if not db_path.exists():
-        logger.debug("Database %s does not exist; skipping vacuum", db_path)
-        return
-
-    cfg = config or _config
-
-    try:
-        with DBConnection(str(db_path)) as connection:
-            broker_db = connection.get_connection(config=cfg)
-            broker_db.vacuum()
-    except Exception:  # pragma: no cover - maintenance best effort
-        logger.debug("simplebroker vacuum failed for %s", db_path, exc_info=True)
 
 
 def log_exception(message: str, **kwargs: Any) -> None:

@@ -1,0 +1,29 @@
+schema_version: 1
+updated_at: 2026-04-03
+hub: docs/agent-context
+read_order:
+  - docs/agent-context/decision-hierarchy.md
+  - docs/agent-context/principles.md
+  - docs/agent-context/engineering-principles.md
+  - docs/agent-context/runbooks/
+  - docs/agent-context/lessons.md
+  - docs/lessons.md
+documents:
+  - path: docs/agent-context/README.md
+    role: hub_overview
+  - path: docs/agent-context/decision-hierarchy.md
+    role: conflict_resolution_policy
+  - path: docs/agent-context/principles.md
+    role: execution_principles
+  - path: docs/agent-context/engineering-principles.md
+    role: repo_specific_engineering_principles
+  - path: docs/agent-context/runbooks/runtime-and-context-patterns.md
+    role: operational_runbook
+  - path: docs/agent-context/runbooks/testing-patterns.md
+    role: operational_runbook
+  - path: docs/agent-context/runbooks/writing-plans.md
+    role: operational_runbook
+  - path: docs/agent-context/lessons.md
+    role: lessons_pointer
+  - path: docs/lessons.md
+    role: canonical_lessons_ledger
