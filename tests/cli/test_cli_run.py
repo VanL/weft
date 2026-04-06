@@ -714,6 +714,23 @@ def test_cli_run_interactive_json_conflict(workdir, weft_harness) -> None:
     assert "--json is not supported together with --interactive" in combined
 
 
+def test_cli_run_interactive_requires_command_target(workdir, weft_harness) -> None:
+    rc, out, err = run_cli(
+        "run",
+        "--interactive",
+        "--function",
+        "tests.tasks.sample_targets:echo_payload",
+        "--arg",
+        "payload",
+        cwd=workdir,
+        harness=weft_harness,
+    )
+
+    assert rc != 0
+    combined = f"{out}\n{err}"
+    assert "--interactive is only supported for command targets" in combined
+
+
 def test_cli_run_function_json_output(workdir, weft_harness) -> None:
     rc, out, err = run_cli(
         "run",

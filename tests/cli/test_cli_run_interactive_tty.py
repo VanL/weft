@@ -1,4 +1,4 @@
-"""TTY-backed integration tests for interactive CLI commands."""
+"""Prompt-mode integration tests for interactive CLI commands."""
 
 from __future__ import annotations
 
@@ -84,6 +84,25 @@ def _shutdown(proc: subprocess.Popen[bytes], master_fd: int) -> None:
         pass
 
 
+def _read_until_exit(
+    proc: subprocess.Popen[bytes], fd: int, *, timeout: float = DEFAULT_TIMEOUT
+) -> str:
+    deadline = time.monotonic() + timeout
+    chunks: list[str] = []
+    while time.monotonic() < deadline:
+        rlist, _, _ = select.select([fd], [], [], READ_SLICE)
+        if fd in rlist:
+            try:
+                data = os.read(fd, 4096)
+            except OSError:
+                break
+            if data:
+                chunks.append(data.decode("utf-8", errors="replace"))
+        if proc.poll() is not None:
+            break
+    return "".join(chunks)
+
+
 def test_interactive_python_repl_outputs(tty_workdir: Path) -> None:
     cmd = ["weft", "run", "-i", "python"]
     proc, master_fd = _spawn_with_pty(cmd, cwd=tty_workdir)
@@ -100,6 +119,10 @@ def test_interactive_python_repl_outputs(tty_workdir: Path) -> None:
             pytest.fail(f"expected python output, saw {output!r}")
 
         _write_line(master_fd, "quit()\n")
-        _read_until(master_fd, "")
+        _write_line(master_fd, ":quit\n")
+        trailing = _read_until_exit(proc, master_fd)
+        rc = proc.wait(timeout=5.0)
+        assert rc == 0
+        assert "SyntaxError" not in trailing
     finally:
         _shutdown(proc, master_fd)
