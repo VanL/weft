@@ -346,9 +346,7 @@ def _await_single_result(
                     payload = (
                         outbox_raw[0] if isinstance(outbox_raw, tuple) else outbox_raw
                     )
-                    final, value = _process_outbox_message(
-                        str(payload), stream_buffer
-                    )
+                    final, value = _process_outbox_message(str(payload), stream_buffer)
                     if final:
                         _append_public_value(
                             result_values,

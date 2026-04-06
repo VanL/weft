@@ -963,7 +963,9 @@ def _run_long_session(
                 stdin=f"{interactive_label}-a\n{interactive_label}-b\nquit\n",
             )
             if rc != 0:
-                raise RuntimeError(err or f"interactive task failed: {interactive_label}")
+                raise RuntimeError(
+                    err or f"interactive task failed: {interactive_label}"
+                )
             interactive_outputs.append(out)
             interactive_expected_outputs.append(interactive_expected(interactive_label))
 

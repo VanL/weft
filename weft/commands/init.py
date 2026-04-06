@@ -24,8 +24,7 @@ def cmd_init(
     backend_name = str(config.get("BROKER_BACKEND", "sqlite")).strip().lower()
     if (
         backend_name == "sqlite"
-        and
-        not config.get("BROKER_DEFAULT_DB_NAME")
+        and not config.get("BROKER_DEFAULT_DB_NAME")
         and not (root / ".simplebroker.toml").is_file()
     ):
         if not quiet:

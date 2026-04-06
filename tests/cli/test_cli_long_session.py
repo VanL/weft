@@ -300,7 +300,9 @@ def test_cli_long_session_produces_identical_transcript_across_backends(
             persistent_expected.append(expected_alias_result)
 
         if (round_index + 1) % INTERACTIVE_INTERVAL == 0:
-            interactive_label = f"interactive-{(round_index + 1) // INTERACTIVE_INTERVAL:02d}"
+            interactive_label = (
+                f"interactive-{(round_index + 1) // INTERACTIVE_INTERVAL:02d}"
+            )
             rc, out, err = _run_session_cli(
                 workdir,
                 weft_harness,
@@ -322,9 +324,7 @@ def test_cli_long_session_produces_identical_transcript_across_backends(
             )
             assert rc == 0, err
             interactive_outputs.append(out)
-            interactive_expected_outputs.append(
-                interactive_expected(interactive_label)
-            )
+            interactive_expected_outputs.append(interactive_expected(interactive_label))
 
     assert manager_tid is not None
     assert len(persistent_results) == PERSISTENT_WORK_ITEMS
