@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import sys
 from pathlib import Path
 from types import ModuleType
 
@@ -15,6 +16,7 @@ def _load_release_module() -> ModuleType:
     if spec is None or spec.loader is None:
         raise AssertionError(f"Unable to load release script: {script_path}")
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -100,6 +102,19 @@ def test_main_dry_run_publish_flag_defers_to_release_gate(
     release = _load_release_module()
     monkeypatch.setattr(release, "read_current_version", lambda: "0.1.0")
     monkeypatch.setattr(release, "is_dirty_worktree", lambda: False)
+    monkeypatch.setattr(
+        release,
+        "inspect_release_state",
+        lambda version: release.ReleaseState(
+            version=version,
+            tag_name=f"v{version}",
+            github_release_exists=False,
+            pypi_release_exists=False,
+            local_tag_commit=None,
+            remote_tag_commit=None,
+        ),
+    )
+    monkeypatch.setattr(release, "current_head_commit", lambda: "a" * 40)
 
     exit_code = release.main(["--version", "0.1.1", "--publish", "--dry-run"])
 
@@ -108,6 +123,106 @@ def test_main_dry_run_publish_flag_defers_to_release_gate(
     assert exit_code == 0
     assert release.RELEASE_GATE_WORKFLOW in captured.out
     assert "gh release create" not in captured.out
+
+
+def test_resolve_target_version_reuses_current_when_unpublished(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The helper should reuse the current version until it is externally published."""
+    release = _load_release_module()
+    monkeypatch.setattr(
+        release,
+        "inspect_release_state",
+        lambda version: release.ReleaseState(
+            version=version,
+            tag_name=f"v{version}",
+            github_release_exists=False,
+            pypi_release_exists=False,
+            local_tag_commit=None,
+            remote_tag_commit=None,
+        ),
+    )
+
+    target_version, state = release.resolve_target_version(
+        None,
+        current_version="0.1.0",
+    )
+
+    assert target_version == "0.1.0"
+    assert state.tag_name == "v0.1.0"
+
+
+def test_resolve_target_version_requires_new_version_after_publication(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The current version cannot be reused after a GitHub Release or PyPI publish."""
+    release = _load_release_module()
+    monkeypatch.setattr(
+        release,
+        "inspect_release_state",
+        lambda version: release.ReleaseState(
+            version=version,
+            tag_name=f"v{version}",
+            github_release_exists=True,
+            pypi_release_exists=False,
+            local_tag_commit=None,
+            remote_tag_commit=None,
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="Pass --version with a new version"):
+        release.resolve_target_version(None, current_version="0.1.0")
+
+
+def test_plan_tag_action_rejects_existing_tag_on_different_commit() -> None:
+    """The helper should not silently move an existing unpublished tag."""
+    release = _load_release_module()
+    state = release.ReleaseState(
+        version="0.1.0",
+        tag_name="v0.1.0",
+        github_release_exists=False,
+        pypi_release_exists=False,
+        local_tag_commit=None,
+        remote_tag_commit="a" * 40,
+    )
+
+    with pytest.raises(RuntimeError, match="move the tag"):
+        release.plan_tag_action(
+            state,
+            head_commit="b" * 40,
+            version_changed=False,
+        )
+
+
+def test_main_dry_run_reuses_current_unpublished_version(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Dry-run should allow the current unpublished version without a bump."""
+    release = _load_release_module()
+    monkeypatch.setattr(release, "read_current_version", lambda: "0.1.0")
+    monkeypatch.setattr(release, "is_dirty_worktree", lambda: False)
+    monkeypatch.setattr(
+        release,
+        "inspect_release_state",
+        lambda version: release.ReleaseState(
+            version=version,
+            tag_name=f"v{version}",
+            github_release_exists=False,
+            pypi_release_exists=False,
+            local_tag_commit=None,
+            remote_tag_commit=None,
+        ),
+    )
+    monkeypatch.setattr(release, "current_head_commit", lambda: "a" * 40)
+
+    exit_code = release.main(["--dry-run"])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "target:  0.1.0" in captured.out
+    assert "would reuse existing version files" in captured.out
+    assert "would update pyproject.toml" not in captured.out
 
 
 def test_precheck_commands_cover_sqlite_and_postgres_release_gate() -> None:

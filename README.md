@@ -552,15 +552,24 @@ Weft uses a tag-driven release flow in GitHub Actions:
   publishing, signing, and artifact upload.
 
 ```bash
-# Run the SQLite and Postgres release prechecks, then update
-# pyproject.toml + weft/_constants.py, commit, tag, and push
+# Reuse the current version if it has never reached GitHub Release / PyPI;
+# otherwise pass --version with a new X.Y.Z version
+uv run python bin/release.py
+
+# Explicitly release a new version
 uv run python bin/release.py --version 0.1.1
 
 # Preview the release steps without changing files or running commands
-uv run python bin/release.py --version 0.1.1 --dry-run
+uv run python bin/release.py --dry-run
 ```
 
-The release helper updates both canonical version sources:
+The release helper only requires a new version after that version has produced
+either a GitHub Release or a PyPI publication. If the current repo version is
+still unpublished, the helper can reuse it without rewriting version files.
+It will still refuse to silently move an existing tag to a different commit.
+
+When the helper does need to bump the version, it updates both canonical
+version sources:
 
 - `pyproject.toml`
 - `weft/_constants.py`
