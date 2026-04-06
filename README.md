@@ -546,10 +546,13 @@ Weft uses a tag-driven release flow in GitHub Actions:
 - [`.github/workflows/release-gate.yml`](./.github/workflows/release-gate.yml)
   runs on pushed `v*` tags, executes the full SQLite suite plus the
   PG-compatible suite via [`bin/pytest-pg`](./bin/pytest-pg), and only invokes
-  the publish workflow if both pass.
+  the publish workflow if both pass. If the tag is moved while a gate is
+  running, the older run is canceled and the gate refuses to publish from the
+  stale tag state.
 - [`.github/workflows/release.yml`](./.github/workflows/release.yml) is a
   reusable workflow that can only be called from the release gate; it handles
-  package build, PyPI publishing, signing, and GitHub Release creation.
+  package build, PyPI publishing, signing, and GitHub Release creation from
+  the tested commit SHA rather than re-resolving the mutable tag.
 
 ```bash
 # Reuse the current version if it has never reached GitHub Release / PyPI;
@@ -588,10 +591,11 @@ After the helper pushes `v0.1.1`, the release gate workflow will:
 
 1. Run the full SQLite suite
 2. Run the PG-compatible suite with `uv run bin/pytest-pg --all`
-3. Invoke the package release workflow only if both suites pass
-4. Build distributions with `uv build`
-5. Publish to PyPI with `uv publish --trusted-publishing always dist/*`
-6. Sign artifacts, create the GitHub Release, and upload the release files once PyPI succeeds
+3. Confirm the tag still points at the tested commit
+4. Invoke the package release workflow only if both suites pass
+5. Build distributions with `uv build`
+6. Publish to PyPI with `uv publish --trusted-publishing always dist/*`
+7. Sign artifacts, create the GitHub Release, and upload the release files once PyPI succeeds
 
 Prerequisite:
 

@@ -282,10 +282,13 @@ class InteractiveStreamClient:
     # ------------------------------------------------------------------
     def _mark_completion(self, *, status: str, error: str | None = None) -> None:
         with self._status_lock:
-            if self._status in {"completed", "failed"}:
+            if self._status == "failed":
+                return
+            if self._status == "completed" and status != "failed":
                 return
             self._status = status
-            self._error = error
+            if error is not None or status == "failed":
+                self._error = error
         self._completion.set()
 
     @staticmethod

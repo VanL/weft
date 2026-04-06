@@ -10,7 +10,11 @@ from pathlib import Path
 import pytest
 
 from simplebroker import Queue
-from weft._constants import WEFT_GLOBAL_LOG_QUEUE, WEFT_STREAMING_SESSIONS_QUEUE
+from weft._constants import (
+    QUEUE_RESERVED_SUFFIX,
+    WEFT_GLOBAL_LOG_QUEUE,
+    WEFT_STREAMING_SESSIONS_QUEUE,
+)
 from weft.core.tasks import Consumer
 from weft.core.tasks.base import BaseTask
 from weft.core.taskspec import (
@@ -203,6 +207,148 @@ def test_interactive_command_stop_cancels(broker_env, unique_tid: str) -> None:
     assert final_messages[-1]["final"] is True
     assert task.taskspec.state.status == "cancelled"
     task.stop(join=False)
+
+
+def test_interactive_command_routes_stderr_and_reports_failure(
+    tmp_path: Path, broker_env, unique_tid: str
+) -> None:
+    db_path, make_queue = broker_env
+    script = tmp_path / "interactive_failure.py"
+    script.write_text(
+        """
+from __future__ import annotations
+
+import sys
+
+
+def main() -> int:
+    sys.stdin.readline()
+    sys.stdout.write("stdout-before-fail\\n")
+    sys.stdout.flush()
+    sys.stderr.write("stderr-before-fail\\n")
+    sys.stderr.flush()
+    return 3
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    spec = make_interactive_spec(unique_tid, script_path=str(script))
+    task = Consumer(db_path, spec)
+
+    inbox = make_queue(spec.io.inputs["inbox"])
+    outbox = make_queue(spec.io.outputs["outbox"])
+    ctrl_out = make_queue(spec.io.control["ctrl_out"])
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    _drain(log_queue)
+
+    try:
+        inbox.write(json.dumps({"stdin": "go\n"}))
+        _spin(task, iterations=30)
+
+        stdout_messages = [json.loads(msg) for msg in _drain(outbox)]
+        ctrl_messages = [json.loads(msg) for msg in _drain(ctrl_out)]
+        events = [json.loads(msg) for msg in _drain(log_queue)]
+
+        stdout_combined = "".join(
+            message.get("data", "")
+            for message in stdout_messages
+            if message.get("stream") == "stdout"
+        )
+        stderr_combined = "".join(
+            message.get("data", "")
+            for message in ctrl_messages
+            if message.get("stream") == "stderr"
+        )
+
+        assert "stdout-before-fail" in stdout_combined
+        assert "stderr-before-fail" in stderr_combined
+        assert stdout_messages[-1]["final"] is True
+        assert ctrl_messages[-1]["final"] is True
+        assert task.taskspec.state.status == "failed"
+        assert any(event["event"] == "work_failed" for event in events)
+        assert not any(event["event"] == "work_completed" for event in events)
+    finally:
+        task.stop(join=False)
+
+
+def test_interactive_control_commands_report_live_status(
+    broker_env, unique_tid: str
+) -> None:
+    db_path, make_queue = broker_env
+    spec = make_interactive_spec(unique_tid)
+    task = Consumer(db_path, spec)
+
+    inbox = make_queue(spec.io.inputs["inbox"])
+    ctrl_in = make_queue(spec.io.control["ctrl_in"])
+    ctrl_out = make_queue(spec.io.control["ctrl_out"])
+
+    try:
+        inbox.write(json.dumps({"stdin": "hello\n"}))
+        _spin(task)
+
+        ctrl_in.write("STATUS")
+        ctrl_in.write("PING")
+        _spin(task, iterations=6)
+
+        responses = [json.loads(msg) for msg in _drain(ctrl_out)]
+        status_response = next(r for r in responses if r["command"] == "STATUS")
+        ping_response = next(r for r in responses if r["command"] == "PING")
+
+        assert status_response["status"] == "ok"
+        assert status_response["task_status"] == "running"
+        assert ping_response["status"] == "ok"
+        assert ping_response["message"] == "PONG"
+    finally:
+        inbox.write(json.dumps({"stdin": "quit\n"}))
+        _spin(task, iterations=20)
+        task.stop(join=False)
+
+
+def test_interactive_late_input_is_dropped_after_completion(
+    broker_env, unique_tid: str
+) -> None:
+    db_path, make_queue = broker_env
+    spec = make_interactive_spec(unique_tid)
+    task = Consumer(db_path, spec)
+
+    inbox = make_queue(spec.io.inputs["inbox"])
+    outbox = make_queue(spec.io.outputs["outbox"])
+    reserved = make_queue(f"T{unique_tid}.{QUEUE_RESERVED_SUFFIX}")
+
+    try:
+        inbox.write(json.dumps({"stdin": "hello\n"}))
+        _spin(task)
+        inbox.write(json.dumps({"stdin": "quit\n"}))
+        _spin(task, iterations=30)
+
+        baseline_messages = [json.loads(msg) for msg in _drain(outbox)]
+        baseline_stdout = "".join(
+            message.get("data", "")
+            for message in baseline_messages
+            if message.get("stream") == "stdout"
+        )
+        assert "goodbye" in baseline_stdout
+        assert task.taskspec.state.status == "completed"
+
+        inbox.write(json.dumps({"stdin": "after\n"}))
+        _spin(task, iterations=5)
+
+        late_messages = [json.loads(msg) for msg in _drain(outbox)]
+        late_stdout = "".join(
+            message.get("data", "")
+            for message in late_messages
+            if message.get("stream") == "stdout"
+        )
+        assert "after" not in late_stdout
+        assert reserved.peek_one() is None
+        assert task.taskspec.state.status == "completed"
+    finally:
+        task.stop(join=False)
 
 
 def test_interactive_close_sentinel_purged_on_cleanup(

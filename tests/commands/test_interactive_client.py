@@ -149,3 +149,59 @@ def test_interactive_client_observes_completion_beyond_fixed_log_window(
 
     assert "work_completed" in state_events
     assert client.status == "completed"
+
+
+def test_interactive_client_failure_overrides_stdout_final(broker_env) -> None:
+    db_path, make_queue = broker_env
+    tid = str(time.time_ns())
+    spec = _make_interactive_spec(tid)
+
+    outbox = make_queue(spec.io.outputs["outbox"])
+    make_queue(spec.io.control["ctrl_out"])
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+
+    config = load_config()
+    client = InteractiveStreamClient(
+        db_path=db_path,
+        config=config,
+        tid=tid,
+        inbox=spec.io.inputs["inbox"],
+        outbox=spec.io.outputs["outbox"],
+        ctrl_out=spec.io.control["ctrl_out"],
+    )
+
+    client.start()
+    try:
+        outbox.write(
+            json.dumps(
+                {
+                    "type": "stream",
+                    "stream": "stdout",
+                    "chunk": 0,
+                    "final": True,
+                    "encoding": "text",
+                    "data": "",
+                }
+            )
+        )
+        assert client.wait(timeout=5.0), "client did not observe final stdout marker"
+
+        log_queue.write(
+            json.dumps(
+                {
+                    "event": "work_failed",
+                    "tid": tid,
+                    "status": "failed",
+                    "error": "boom",
+                }
+            )
+        )
+
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and client.status != "failed":
+            time.sleep(0.05)
+    finally:
+        client.stop()
+
+    assert client.status == "failed"
+    assert client.error == "boom"

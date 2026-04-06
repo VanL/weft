@@ -1,4 +1,4 @@
-"""Tests for `weft run` wait helpers."""
+"""Tests for `weft run` wait helpers and interactive result assembly."""
 
 from __future__ import annotations
 
@@ -10,7 +10,10 @@ import pytest
 
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import WEFT_GLOBAL_LOG_QUEUE
-from weft.commands.run import _wait_for_task_completion
+from weft.commands.run import (
+    _collect_interactive_queue_output,
+    _wait_for_task_completion,
+)
 from weft.context import build_context
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 
@@ -126,3 +129,37 @@ def test_wait_for_task_completion_aggregates_multiple_outbox_messages(
     assert status == "completed"
     assert result == ["hello", "world"]
     assert error is None
+
+
+class _FakePeekQueue:
+    def __init__(self, records: list[object]) -> None:
+        self._records = records
+
+    def peek_generator(self):
+        yield from self._records
+
+
+def test_collect_interactive_queue_output_reads_beyond_fixed_window() -> None:
+    records = [
+        (
+            json.dumps(
+                {
+                    "type": "stream",
+                    "stream": "stdout",
+                    "chunk": index,
+                    "final": False,
+                    "encoding": "text",
+                    "data": f"chunk-{index}\n",
+                }
+            ),
+            index,
+        )
+        for index in range(600)
+    ]
+    queue = _FakePeekQueue(records)
+
+    collected = _collect_interactive_queue_output(queue)  # type: ignore[arg-type]
+
+    assert len(collected) == 600
+    assert collected[0] == "chunk-0\n"
+    assert collected[-1] == "chunk-599\n"

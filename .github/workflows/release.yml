@@ -11,6 +11,10 @@ on:
         description: Git ref to check out for the release build.
         required: true
         type: string
+      expected_tag_commit:
+        description: Commit SHA the release tag is expected to reference.
+        required: true
+        type: string
 
 jobs:
   build:
@@ -30,6 +34,10 @@ jobs:
         with:
           enable-cache: true
 
+      - name: Verify checked out commit matches tested release commit
+        run: |
+          test "$(git rev-parse HEAD)" = "${{ inputs.expected_tag_commit }}"
+
       - name: Build package
         run: |
           uv build
@@ -40,10 +48,35 @@ jobs:
           name: python-package-distributions
           path: dist/
 
+  verify-tag-current:
+    runs-on: ubuntu-latest
+    needs:
+      - build
+    steps:
+      - name: Verify release tag still points at tested commit
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_tag_commit }}
+          REPOSITORY: ${{ github.repository }}
+          TAG_NAME: ${{ inputs.tag_name }}
+        run: |
+          set -euo pipefail
+          remote_sha="$(git ls-remote --tags "https://github.com/${REPOSITORY}.git" "refs/tags/${TAG_NAME}" "refs/tags/${TAG_NAME}^{}" | awk 'NR==1 { sha=$1 } END { print $1 ? $1 : sha }')"
+          if [ -z "${remote_sha}" ]; then
+            echo "Tag ${TAG_NAME} no longer exists on origin"
+            exit 1
+          fi
+          if [ "${remote_sha}" != "${EXPECTED_SHA}" ]; then
+            echo "Tag ${TAG_NAME} moved while the publish workflow was running"
+            echo "expected: ${EXPECTED_SHA}"
+            echo "actual:   ${remote_sha}"
+            exit 1
+          fi
+
   publish-to-pypi:
     name: Publish to PyPI
     needs:
       - build
+      - verify-tag-current
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -69,7 +102,6 @@ jobs:
   github-release:
     name: Sign and upload to GitHub Release
     needs:
-      - build
       - publish-to-pypi
     runs-on: ubuntu-latest
     permissions:
