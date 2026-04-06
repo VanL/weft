@@ -153,3 +153,58 @@ def test_result_all_peek_preserves_messages(weft_harness: WeftTestHarness) -> No
     )
     assert rc == 0, err
     assert f"{tid}: keep" not in out
+
+
+def test_result_all_json_output_does_not_prefix_interactive_stream_text(
+    weft_harness: WeftTestHarness,
+) -> None:
+    tid = "1777000000000000001"
+    outbox = weft_harness.context.queue(f"T{tid}.outbox", persistent=True)
+    try:
+        outbox.write(
+            json.dumps(
+                {
+                    "type": "stream",
+                    "stream": "stdout",
+                    "chunk": 0,
+                    "final": False,
+                    "encoding": "text",
+                    "data": "echo: hello\n",
+                }
+            )
+        )
+        outbox.write(
+            json.dumps(
+                {
+                    "type": "stream",
+                    "stream": "stdout",
+                    "chunk": 1,
+                    "final": False,
+                    "encoding": "text",
+                    "data": "goodbye\n",
+                }
+            )
+        )
+        outbox.write(
+            json.dumps(
+                {
+                    "type": "stream",
+                    "stream": "stdout",
+                    "chunk": 2,
+                    "final": True,
+                    "encoding": "text",
+                    "data": "",
+                }
+            )
+        )
+    finally:
+        outbox.close()
+
+    rc, out, err = run_cli(
+        "result", "--all", "--json", cwd=weft_harness.root, harness=weft_harness
+    )
+    assert rc == 0, err
+
+    payload = json.loads(out)
+    assert "results" in payload
+    assert payload["results"] == [{"tid": tid, "result": "echo: hello\ngoodbye\n"}]

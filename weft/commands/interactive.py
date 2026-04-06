@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import threading
 from collections.abc import Callable
-from typing import Any, cast
+from typing import Any
 
 from simplebroker import BrokerTarget, Queue
 from weft._constants import WEFT_GLOBAL_LOG_QUEUE
@@ -25,6 +25,7 @@ from weft.core.tasks.multiqueue_watcher import (
     QueueMessageContext,
     QueueMode,
 )
+from weft.helpers import iter_queue_json_entries
 
 
 class InteractiveStreamClient:
@@ -231,42 +232,37 @@ class InteractiveStreamClient:
     def _handle_log_message(
         self, message: str, timestamp: int, context: QueueMessageContext
     ) -> None:
-        # Peek mode returns the oldest message repeatedly.  We fetch a batch and
-        # only act on entries newer than the last one we processed.
+        # Peek mode returns the oldest message repeatedly. Iterate through the
+        # append-only log using the generator API so large histories do not
+        # strand us on a fixed-size snapshot.
         queue = context.queue
-        try:
-            entries = cast(
-                list[tuple[str, int]] | None,
-                queue.peek_many(limit=128, with_timestamps=True),
-            )
-        except Exception:
-            entries = None
-
+        scan_last_timestamp = self._log_last_timestamp
         processed = False
-        if entries is not None:
-            for body, entry_ts in entries:
-                if (
-                    self._log_last_timestamp is not None
-                    and entry_ts <= self._log_last_timestamp
-                ):
-                    continue
+        for payload, entry_ts in iter_queue_json_entries(
+            queue,
+            since_timestamp=self._log_last_timestamp,
+        ):
+            if (
+                self._log_last_timestamp is not None
+                and entry_ts <= self._log_last_timestamp
+            ):
+                continue
 
-                payload = self._maybe_parse_json(body)
-                if not isinstance(payload, dict):
-                    continue
-                if payload.get("tid") != self._tid:
-                    continue
+            scan_last_timestamp = entry_ts
+            if payload.get("tid") != self._tid:
+                continue
 
-                self._log_last_timestamp = entry_ts
-                processed = True
-                self._state_cb(payload)
+            processed = True
+            self._state_cb(payload)
 
-                event = payload.get("event")
-                if event == "work_completed":
-                    self._mark_completion(status="completed")
-                elif event in {"work_failed", "work_timeout", "work_limit_violation"}:
-                    error = payload.get("error") or event.replace("_", " ")
-                    self._mark_completion(status="failed", error=error)
+            event = payload.get("event")
+            if event == "work_completed":
+                self._mark_completion(status="completed")
+            elif event in {"work_failed", "work_timeout", "work_limit_violation"}:
+                error = payload.get("error") or event.replace("_", " ")
+                self._mark_completion(status="failed", error=error)
+
+        self._log_last_timestamp = scan_last_timestamp
 
         if not processed and self._log_last_timestamp is None:
             # Fallback for the very first message (already provided) so future

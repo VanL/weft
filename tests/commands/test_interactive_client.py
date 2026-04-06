@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import time
 from pathlib import Path
@@ -92,3 +93,59 @@ def test_interactive_client_streams_and_completes(broker_env) -> None:
     assert client.status == "completed"
     assert client.error is None
     assert not [chunk for chunk in stderr_chunks if chunk.strip()]
+
+
+def test_interactive_client_observes_completion_beyond_fixed_log_window(
+    broker_env,
+) -> None:
+    db_path, make_queue = broker_env
+    tid = str(time.time_ns())
+    spec = _make_interactive_spec(tid)
+
+    make_queue(spec.io.inputs["inbox"])
+    make_queue(spec.io.outputs["outbox"])
+    make_queue(spec.io.control["ctrl_out"])
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+
+    state_events: list[str] = []
+
+    config = load_config()
+    client = InteractiveStreamClient(
+        db_path=db_path,
+        config=config,
+        tid=tid,
+        inbox=spec.io.inputs["inbox"],
+        outbox=spec.io.outputs["outbox"],
+        ctrl_out=spec.io.control["ctrl_out"],
+        on_state=lambda event: state_events.append(event.get("event", "")),
+    )
+
+    client.start()
+    try:
+        for index in range(140):
+            log_queue.write(
+                json.dumps(
+                    {
+                        "event": "work_started",
+                        "tid": f"other-{index:03d}",
+                        "status": "running",
+                    }
+                )
+            )
+
+        log_queue.write(
+            json.dumps(
+                {
+                    "event": "work_completed",
+                    "tid": tid,
+                    "status": "completed",
+                }
+            )
+        )
+
+        assert client.wait(timeout=5.0), "client did not observe terminal log event"
+    finally:
+        client.stop()
+
+    assert "work_completed" in state_events
+    assert client.status == "completed"
