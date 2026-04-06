@@ -19,6 +19,7 @@ from urllib import request as urllib_request
 PROJECT_ROOT: Final[Path] = Path(__file__).resolve().parents[1]
 PYPROJECT_PATH: Final[Path] = PROJECT_ROOT / "pyproject.toml"
 CONSTANTS_PATH: Final[Path] = PROJECT_ROOT / "weft" / "_constants.py"
+UV_LOCK_PATH: Final[Path] = PROJECT_ROOT / "uv.lock"
 RELEASE_GATE_WORKFLOW: Final[str] = ".github/workflows/release-gate.yml"
 RELEASE_PROJECT_NAME: Final[str] = "weft"
 GITHUB_API_BASE: Final[str] = "https://api.github.com"
@@ -552,7 +553,7 @@ def main(argv: list[str] | None = None) -> int:
             run_command(command, dry_run=True)
         if version_changed:
             for command in (
-                ("git", "add", "pyproject.toml", "weft/_constants.py"),
+                ("git", "add", "pyproject.toml", "weft/_constants.py", "uv.lock"),
                 ("git", "commit", "-m", f"Release {target_version}"),
             ):
                 run_command(command, dry_run=True)
@@ -611,7 +612,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if version_changed:
         for command in (
-            ("git", "add", "pyproject.toml", "weft/_constants.py"),
+            ("git", "add", "pyproject.toml", "weft/_constants.py", "uv.lock"),
             ("git", "commit", "-m", f"Release {target_version}"),
         ):
             run_command(command)

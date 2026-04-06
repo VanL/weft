@@ -302,6 +302,35 @@ def test_main_dry_run_deletes_stale_local_tag_before_recreating(
     assert "$ git tag v0.1.0" in captured.out
 
 
+def test_main_dry_run_stages_uv_lock_for_release_commit(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Dry-run should include `uv.lock` in the release commit staging set."""
+    release = _load_release_module()
+    monkeypatch.setattr(release, "read_current_version", lambda: "0.1.0")
+    monkeypatch.setattr(release, "is_dirty_worktree", lambda: False)
+    monkeypatch.setattr(
+        release,
+        "inspect_release_state",
+        lambda version: release.ReleaseState(
+            version=version,
+            tag_name=f"v{version}",
+            github_release_exists=False,
+            pypi_release_exists=False,
+            local_tag_commit=None,
+            remote_tag_commit=None,
+        ),
+    )
+    monkeypatch.setattr(release, "current_head_commit", lambda: "a" * 40)
+
+    exit_code = release.main(["--version", "0.1.1", "--dry-run"])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "$ git add pyproject.toml weft/_constants.py uv.lock" in captured.out
+
+
 def test_main_dry_run_retags_remote_when_requested(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
