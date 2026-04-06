@@ -1,0 +1,121 @@
+"""Tests for task stop/kill helpers against launched task processes."""
+
+from __future__ import annotations
+
+import json
+import time
+from multiprocessing.process import BaseProcess
+
+import pytest
+
+from tests.helpers.test_backend import prepare_project_root
+from weft.commands import tasks as task_cmd
+from weft.context import build_context
+from weft.core import (
+    IOSection,
+    SpecSection,
+    StateSection,
+    TaskSpec,
+    launch_task_process,
+)
+from weft.core.tasks import Consumer
+from weft.helpers import kill_process_tree
+
+pytestmark = [pytest.mark.shared]
+
+
+def _make_taskspec(tid: str) -> TaskSpec:
+    return TaskSpec(
+        tid=tid,
+        name="task-func",
+        spec=SpecSection(
+            type="function",
+            function_target="tests.tasks.sample_targets:simulate_work",
+        ),
+        io=IOSection(
+            inputs={"inbox": f"T{tid}.inbox"},
+            outputs={"outbox": f"T{tid}.outbox"},
+            control={"ctrl_in": f"T{tid}.ctrl_in", "ctrl_out": f"T{tid}.ctrl_out"},
+        ),
+        state=StateSection(),
+    )
+
+
+def _wait_for_worker_pid(parent_pid: int, timeout: float = 5.0) -> int | None:
+    psutil = pytest.importorskip("psutil")
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            parent = psutil.Process(parent_pid)
+        except psutil.Error:
+            return None
+        children = parent.children(recursive=True)
+        if children:
+            return children[0].pid
+        time.sleep(0.05)
+    return None
+
+
+def _wait_for_process_exit(
+    pid: int,
+    *,
+    process: BaseProcess | None = None,
+    timeout: float = 5.0,
+) -> bool:
+    psutil = pytest.importorskip("psutil")
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if process is not None:
+            process.join(timeout=0.05)
+            if not process.is_alive():
+                return True
+        try:
+            ps_process = psutil.Process(pid)
+        except psutil.Error:
+            return True
+        if not ps_process.is_running() or ps_process.status() == psutil.STATUS_ZOMBIE:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def _launch_running_task(tmp_path) -> tuple[TaskSpec, BaseProcess, int]:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    spec = _make_taskspec(tid)
+    process = launch_task_process(
+        Consumer,
+        ctx.broker_target,
+        spec,
+        config=ctx.config,
+    )
+    inbox = ctx.queue(spec.io.inputs["inbox"], persistent=True)
+    inbox.write(json.dumps({"kwargs": {"duration": 5.0}}))
+    worker_pid = _wait_for_worker_pid(process.pid)
+    assert worker_pid is not None
+    return spec, process, worker_pid
+
+
+def test_stop_tasks_terminates_active_process_tree(tmp_path) -> None:
+    spec, process, worker_pid = _launch_running_task(tmp_path)
+    try:
+        stopped = task_cmd.stop_tasks([spec.tid], context_path=tmp_path)
+        assert stopped == 1
+        assert _wait_for_process_exit(process.pid, process=process)
+        assert _wait_for_process_exit(worker_pid)
+    finally:
+        kill_process_tree(process.pid)
+        kill_process_tree(worker_pid)
+
+
+def test_kill_tasks_terminates_active_process_tree(tmp_path) -> None:
+    spec, process, worker_pid = _launch_running_task(tmp_path)
+    try:
+        killed = task_cmd.kill_tasks([spec.tid], context_path=tmp_path)
+        assert killed >= 1
+        assert _wait_for_process_exit(process.pid, process=process)
+        assert _wait_for_process_exit(worker_pid)
+    finally:
+        kill_process_tree(process.pid)
+        kill_process_tree(worker_pid)

@@ -81,7 +81,9 @@ def queue_read(
 @queue_app.command("write")
 def queue_write(
     name: Annotated[str, typer.Argument(help="Queue name to write to")],
-    message: str | None = typer.Argument(None, help="Message to write"),
+    message: str | None = typer.Argument(
+        None, help="Message to write (omit or use '-' for stdin)"
+    ),
 ) -> None:
     _emit_queue_result(queue_cmd.write_command(name, message))
 
@@ -278,7 +280,7 @@ def queue_delete(
 def queue_broadcast(
     message: Annotated[
         str | None,
-        typer.Argument(help="Message to broadcast ('-' for stdin)"),
+        typer.Argument(help="Message to broadcast (omit or use '-' for stdin)"),
     ] = None,
     pattern: Annotated[
         str | None,
@@ -433,7 +435,9 @@ def list_tasks(
         return
 
     if json_output:
-        typer.echo(json.dumps([snap.to_dict() for snap in snapshots], ensure_ascii=False))
+        typer.echo(
+            json.dumps([snap.to_dict() for snap in snapshots], ensure_ascii=False)
+        )
         return
     if not snapshots:
         typer.echo("Tasks: none")
@@ -611,42 +615,42 @@ def task_status(
     ] = None,
 ) -> None:
     if watch:
-        exit_code, payload = cmd_status(
+        exit_code, watch_payload = cmd_status(
             tid=tid,
             include_terminal=True,
             json_output=json_output,
             watch=True,
             spec_context=context_dir,
         )
-        if payload:
-            typer.echo(payload)
+        if watch_payload:
+            typer.echo(watch_payload)
         raise typer.Exit(code=exit_code)
 
     snapshot = task_cmd.task_status(tid, context_path=context_dir)
     if snapshot is None:
         typer.echo(f"Task {tid} not found", err=True)
         raise typer.Exit(code=2)
-    payload: dict[str, Any] = snapshot.to_dict()
+    status_payload: dict[str, Any] = snapshot.to_dict()
     if process:
         ctx = task_cmd._resolve_context(context_dir)
         mapping = task_cmd.mapping_for_tid(ctx, snapshot.tid) or {}
-        payload["pid"] = mapping.get("pid") or mapping.get("task_pid")
-        payload["managed_pids"] = mapping.get("managed_pids") or []
+        status_payload["pid"] = mapping.get("pid") or mapping.get("task_pid")
+        status_payload["managed_pids"] = mapping.get("managed_pids") or []
     if json_output:
-        typer.echo(json.dumps(payload, ensure_ascii=False))
+        typer.echo(json.dumps(status_payload, ensure_ascii=False))
         return
-    typer.echo(
-        f"{snapshot.tid} {snapshot.status} {snapshot.name} ({snapshot.event})"
-    )
+    typer.echo(f"{snapshot.tid} {snapshot.status} {snapshot.name} ({snapshot.event})")
     if process:
-        pid = payload.get("pid")
-        managed = payload.get("managed_pids")
+        pid = status_payload.get("pid")
+        managed = status_payload.get("managed_pids")
         typer.echo(f"pid: {pid} managed_pids: {managed}")
 
 
 @task_app.command("stop")
 def task_stop(
-    tid: Annotated[str | None, typer.Argument(help="Task ID", show_default=False)] = None,
+    tid: Annotated[
+        str | None, typer.Argument(help="Task ID", show_default=False)
+    ] = None,
     all_tasks: Annotated[
         bool,
         typer.Option("--all", help="Stop all active tasks"),
@@ -678,7 +682,9 @@ def task_stop(
 
 @task_app.command("kill")
 def task_kill(
-    tid: Annotated[str | None, typer.Argument(help="Task ID", show_default=False)] = None,
+    tid: Annotated[
+        str | None, typer.Argument(help="Task ID", show_default=False)
+    ] = None,
     all_tasks: Annotated[
         bool,
         typer.Option("--all", help="Kill all active tasks"),
@@ -710,7 +716,9 @@ def task_kill(
 
 @task_app.command("tid")
 def task_tid(
-    tid: Annotated[str | None, typer.Argument(help="Short or full TID", show_default=False)] = None,
+    tid: Annotated[
+        str | None, typer.Argument(help="Short or full TID", show_default=False)
+    ] = None,
     pid: Annotated[
         int | None,
         typer.Option("--pid", help="Lookup TID for a PID"),
@@ -776,7 +784,7 @@ def tidy(
         ),
     ] = None,
 ) -> None:
-    """Compact the SimpleBroker database (vacuum + WAL checkpoint)."""
+    """Run backend-native SimpleBroker compaction for the active context."""
     exit_code, payload = cmd_tidy(context)
     if payload:
         typer.echo(payload)
@@ -1011,11 +1019,11 @@ def run_command(
         typer.Option("--monitor", help="Run TaskSpec in monitor mode (with --spec)"),
     ] = False,
     continuous: Annotated[
-        bool,
+        bool | None,
         typer.Option(
             "--continuous/--once", help="Continuously process messages for --spec"
         ),
-    ] = False,
+    ] = None,
     autostart: Annotated[
         bool,
         typer.Option(
@@ -1047,7 +1055,7 @@ def run_command(
         json_output=json_output,
         verbose=verbose,
         monitor=monitor,
-        once=not continuous,
+        persistent_override=continuous,
         autostart_enabled=autostart,
     )
     raise typer.Exit(code=exit_code)

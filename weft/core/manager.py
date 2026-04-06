@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import atexit
+import copy
 import json
 import logging
 import multiprocessing
@@ -20,15 +21,20 @@ from weft._constants import (
     QUEUE_CTRL_IN_SUFFIX,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MANAGER_LIFETIME_TIMEOUT,
+    WEFT_TID_MAPPINGS_QUEUE,
     WEFT_WORKERS_REGISTRY_QUEUE,
     WORK_ENVELOPE_START,
 )
-from weft.helpers import redact_taskspec_dump
+from weft.helpers import (
+    iter_queue_json_entries,
+    redact_taskspec_dump,
+    terminate_process_tree,
+)
 
 from .launcher import launch_task_process
 from .tasks import Consumer
 from .tasks.base import BaseTask, QueueMessageContext
-from .taskspec import ReservedPolicy, TaskSpec
+from .taskspec import ReservedPolicy, TaskSpec, resolve_taskspec_payload
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +45,7 @@ class ManagedChild:
 
     process: BaseProcess
     ctrl_queue: str | None
+    persistent: bool = False
     autostart_source: str | None = None
 
 
@@ -153,9 +160,11 @@ class Manager(BaseTask):
             child_spec,
             config=self._config,
         )
+        assert child_spec.tid is not None
         self._child_processes[child_spec.tid] = ManagedChild(
             process,
             child_spec.io.control.get("ctrl_in"),
+            bool(getattr(child_spec.spec, "persistent", False)),
             autostart_source,
         )
         self._last_activity_ns = time.time_ns()
@@ -313,14 +322,24 @@ class Manager(BaseTask):
     # Helpers
     # ------------------------------------------------------------------
     def _cleanup_children(self) -> None:
+        autostart_child_exited = False
         for tid, child in list(self._child_processes.items()):
             if not child.process.is_alive():
+                for pid in self._managed_pids_for_child(tid):
+                    terminate_process_tree(pid, timeout=0.2)
                 try:
                     child.process.join()
                 except Exception:  # pragma: no cover - defensive
                     pass
                 finally:
                     self._child_processes.pop(tid, None)
+                if child.autostart_source:
+                    autostart_child_exited = True
+
+        if autostart_child_exited:
+            # Re-evaluate ensure-style autostart manifests immediately after an
+            # autostart child exits instead of waiting for the next scan interval.
+            self._autostart_last_scan_ns = 0
 
     def _terminate_children(self) -> None:
         for tid, child in list(self._child_processes.items()):
@@ -332,13 +351,26 @@ class Manager(BaseTask):
                 except Exception:  # pragma: no cover - defensive
                     pass
             if child.process.is_alive():
+                if child.process.pid is not None:
+                    terminate_process_tree(child.process.pid, timeout=0.5)
                 try:
-                    child.process.terminate()
-                except Exception:  # pragma: no cover
+                    child.process.join(timeout=2.0)
+                except Exception:  # pragma: no cover - defensive
                     pass
-                else:
-                    child.process.join(timeout=1.0)
+                if child.process.is_alive():
+                    try:
+                        child.process.kill()
+                    except Exception:  # pragma: no cover - defensive
+                        pass
+                    else:
+                        child.process.join(timeout=1.0)
+            for pid in self._managed_pids_for_child(tid):
+                terminate_process_tree(pid, timeout=0.2)
             self._child_processes.pop(tid, None)
+
+    def handle_termination_signal(self, signum: int) -> None:
+        self._terminate_children()
+        super().handle_termination_signal(signum)
 
     def _send_stop_command(self, queue_name: str) -> None:
         try:
@@ -454,7 +486,7 @@ class Manager(BaseTask):
     ) -> TaskSpec | None:
         provided_spec = payload.get("taskspec")
         if provided_spec is not None:
-            candidate = dict(provided_spec)
+            candidate = copy.deepcopy(provided_spec)
         else:
             spec_section = payload.get("spec")
             if spec_section is None:
@@ -470,29 +502,19 @@ class Manager(BaseTask):
                 "metadata": payload.get("metadata", {}),
             }
 
-        original_tid = candidate.get("tid")
-        candidate["tid"] = str(timestamp)
-        candidate.setdefault("version", "1.0")
-        candidate.setdefault("io", {})
-        candidate.setdefault("state", {})
-        candidate.setdefault("metadata", {})
         candidate["metadata"].setdefault("parent_tid", self.tid)
 
-        if original_tid:
-            self._rewrite_tid_in_io(candidate["io"], str(original_tid), candidate["tid"])
-
-        spec_section = candidate.get("spec")
-        if isinstance(spec_section, dict):
-            if not spec_section.get("weft_context"):
-                spec_section["weft_context"] = getattr(
-                    self.taskspec.spec, "weft_context", None
-                )
-
         try:
-            child_spec = TaskSpec.model_validate(
-                candidate, context={"auto_expand": True}
+            resolved_payload = resolve_taskspec_payload(
+                candidate,
+                tid=str(timestamp),
+                inherited_weft_context=getattr(
+                    self.taskspec.spec, "weft_context", None
+                ),
             )
-            child_spec.io.inputs.setdefault("inbox", f"T{child_spec.tid}.inbox")
+            child_spec = TaskSpec.model_validate(
+                resolved_payload, context={"auto_expand": False}
+            )
         except Exception:
             logger.exception(
                 "Failed to validate child TaskSpec from payload %s", payload
@@ -500,20 +522,6 @@ class Manager(BaseTask):
             return None
 
         return child_spec
-
-    @staticmethod
-    def _rewrite_tid_in_io(io_section: dict[str, Any], old_tid: str, new_tid: str) -> None:
-        if not old_tid or not new_tid or old_tid == new_tid:
-            return
-        old_prefix = f"T{old_tid}."
-        new_prefix = f"T{new_tid}."
-        for key in ("inputs", "outputs", "control"):
-            section = io_section.get(key)
-            if not isinstance(section, dict):
-                continue
-            for name, value in list(section.items()):
-                if isinstance(value, str) and old_prefix in value:
-                    section[name] = value.replace(old_prefix, new_prefix)
 
     # ------------------------------------------------------------------
     # Autostart handling
@@ -582,7 +590,7 @@ class Manager(BaseTask):
             logger.warning("Autostart manifest %s has invalid target type", source)
             return None
 
-        candidate = dict(taskspec_payload)
+        candidate = copy.deepcopy(taskspec_payload)
         candidate.pop("tid", None)
         candidate.setdefault("version", "1.0")
         candidate.setdefault("name", target_name)
@@ -617,7 +625,7 @@ class Manager(BaseTask):
         candidate["metadata"]["autostart_source"] = source
         candidate["metadata"]["autostart"] = True
 
-        inbox_message = WORK_ENVELOPE_START
+        inbox_message: Any = WORK_ENVELOPE_START
         if isinstance(defaults, dict) and "input" in defaults:
             inbox_message = defaults.get("input")
 
@@ -625,25 +633,8 @@ class Manager(BaseTask):
 
     def _active_autostart_sources(self) -> set[str]:
         queue = self._queue(WEFT_GLOBAL_LOG_QUEUE)
-        try:
-            entries = queue.peek_many(limit=2048, with_timestamps=True)
-        except Exception:
-            return set()
-
         active: dict[str, tuple[str | None, int]] = {}
-        if not entries:
-            return set()
-
-        for entry in entries:
-            if isinstance(entry, tuple):
-                body, timestamp = entry
-            else:
-                body, timestamp = entry, 0
-            try:
-                payload = json.loads(body)
-            except (TypeError, json.JSONDecodeError):
-                continue
-
+        for payload, timestamp in iter_queue_json_entries(queue):
             taskspec_dump = payload.get("taskspec")
             if not isinstance(taskspec_dump, dict):
                 continue
@@ -660,7 +651,26 @@ class Manager(BaseTask):
             source for source, (status, _ts) in active.items() if status not in terminal
         }
 
-    def _enqueue_autostart_request(self, payload: dict[str, Any], inbox_message: Any) -> None:
+    def _managed_pids_for_child(self, tid: str) -> set[int]:
+        queue = self._queue(WEFT_TID_MAPPINGS_QUEUE)
+        latest_payload: dict[str, Any] | None = None
+        latest_timestamp = -1
+        for payload, timestamp in iter_queue_json_entries(queue):
+            if payload.get("full") != tid or timestamp < latest_timestamp:
+                continue
+            latest_payload = payload
+            latest_timestamp = timestamp
+        if latest_payload is None:
+            return set()
+
+        managed = latest_payload.get("managed_pids")
+        if not isinstance(managed, list):
+            return set()
+        return {pid for pid in managed if isinstance(pid, int) and pid > 0}
+
+    def _enqueue_autostart_request(
+        self, payload: dict[str, Any], inbox_message: Any
+    ) -> None:
         spawn_payload = {
             "taskspec": payload,
             "inbox_message": inbox_message,
@@ -676,7 +686,10 @@ class Manager(BaseTask):
         if not self._autostart_enabled:
             return
         now_ns = time.time_ns()
-        if not force and now_ns - self._autostart_last_scan_ns < self._autostart_scan_interval_ns:
+        if (
+            not force
+            and now_ns - self._autostart_last_scan_ns < self._autostart_scan_interval_ns
+        ):
             return
         self._autostart_last_scan_ns = now_ns
 
@@ -704,7 +717,11 @@ class Manager(BaseTask):
             if manifest is None:
                 continue
 
-            policy = manifest.get("policy") if isinstance(manifest.get("policy"), dict) else {}
+            policy = (
+                manifest.get("policy")
+                if isinstance(manifest.get("policy"), dict)
+                else {}
+            )
             mode = policy.get("mode", "once") if isinstance(policy, dict) else "once"
             state = self._autostart_state.setdefault(
                 source, {"restarts": 0, "next_allowed_ns": 0}
@@ -716,7 +733,9 @@ class Manager(BaseTask):
             elif mode == "ensure":
                 if source in active_sources:
                     continue
-                max_restarts = policy.get("max_restarts") if isinstance(policy, dict) else None
+                max_restarts = (
+                    policy.get("max_restarts") if isinstance(policy, dict) else None
+                )
                 if max_restarts is not None and state["restarts"] >= max_restarts:
                     continue
                 next_allowed = state.get("next_allowed_ns", 0)
@@ -737,7 +756,9 @@ class Manager(BaseTask):
 
             if mode == "ensure":
                 state["restarts"] += 1
-                backoff = policy.get("backoff_seconds") if isinstance(policy, dict) else None
+                backoff = (
+                    policy.get("backoff_seconds") if isinstance(policy, dict) else None
+                )
                 if isinstance(backoff, (int, float)) and backoff > 0:
                     multiplier = max(0, state["restarts"] - 1)
                     delay = float(backoff) * (2**multiplier)
@@ -759,9 +780,13 @@ class Manager(BaseTask):
         now_ns = time.time_ns()
         idle_timeout_ns = int(float(self._idle_timeout) * 1_000_000_000)
         if self._child_processes:
+            has_persistent_children = any(
+                child.persistent for child in self._child_processes.values()
+            )
             if (
                 self._idle_timeout > 0
                 and now_ns - self._last_activity_ns >= idle_timeout_ns
+                and not has_persistent_children
             ):
                 logger.debug(
                     "Idle timeout reached; forcing shutdown of %d child tasks",

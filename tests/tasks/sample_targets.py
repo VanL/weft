@@ -8,6 +8,16 @@ def echo_payload(payload: str, *, suffix: str = "") -> str:
     return f"{payload}{suffix}"
 
 
+def surround_payload(
+    payload: str,
+    *,
+    prefix: str = "[",
+    suffix: str = "]",
+) -> str:
+    """Wrap the payload in a predictable prefix/suffix pair."""
+    return f"{prefix}{payload}{suffix}"
+
+
 def fail_payload(*args, **kwargs) -> None:
     """Raise an exception to simulate task failure."""
     raise RuntimeError("intentional failure for testing")

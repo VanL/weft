@@ -73,7 +73,9 @@ def _display_taskspec_summary(data: dict[str, Any]) -> None:
             target = spec.get("process_target")
             args = spec.get("args") or []
             if isinstance(target, str):
-                command = " ".join([target, *[str(arg) for arg in args]]) if args else target
+                command = (
+                    " ".join([target, *[str(arg) for arg in args]]) if args else target
+                )
                 table.add_row("Command", command)
             else:
                 table.add_row("Command", "N/A")

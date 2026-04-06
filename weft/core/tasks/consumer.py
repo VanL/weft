@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import signal
 import threading
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import asdict
 from pathlib import Path
@@ -15,13 +17,16 @@ from weft._constants import (
     DEFAULT_OUTPUT_SIZE_LIMIT_MB,
     WORK_ENVELOPE_START,
 )
+from weft.core.agent_runtime import AgentExecutionResult
 from weft.core.targets import decode_work_message, serialize_result
 from weft.core.taskspec import ReservedPolicy, TaskSpec
+from weft.helpers import terminate_process_tree
 
 from .base import BaseTask
 from .interactive import InteractiveTaskMixin
 from .multiqueue_watcher import QueueMessageContext, QueueMode
 from .runner import RunnerOutcome, TaskRunner
+from .sessions import AgentSession
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +45,8 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         super().__init__(db, taskspec, stop_event=stop_event, config=config)
         self._init_interactive()
         self._active_raw_message: str | None = None
+        self._active_message_timestamp: int | None = None
+        self._agent_session: AgentSession | None = None
 
     def process_once(self) -> None:
         super().process_once()
@@ -94,45 +101,77 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             return
 
         self._active_raw_message = message
+        self._active_message_timestamp = timestamp
         try:
-            self.taskspec.mark_started(pid=os.getpid())
-            self._update_process_title("spawning")
-            self._report_state_change(event="work_spawning", message_id=timestamp)
-            self.taskspec.mark_running(pid=os.getpid())
-            self._update_process_title("running")
-            self._report_state_change(event="work_started", message_id=timestamp)
-
             work_item = decode_work_message(message)
-
-            self._execute_work_item(work_item, timestamp)
+            initial_transition = self._begin_work_item(timestamp)
+            self._execute_work_item(
+                work_item,
+                timestamp,
+                initial_transition=initial_transition,
+            )
         finally:
             self._active_raw_message = None
+            self._active_message_timestamp = None
 
-    def _execute_work_item(self, work_item: Any, timestamp: int | None) -> Any:
+    def _execute_work_item(
+        self,
+        work_item: Any,
+        timestamp: int | None,
+        *,
+        initial_transition: bool,
+    ) -> Any:
         outcome = self._run_task(work_item)
-        if getattr(outcome, "worker_pid", None):
-            self.register_managed_pid(outcome.worker_pid)
         metrics_payload = self._extract_metrics(outcome)
         self._ensure_outcome_ok(outcome, timestamp, metrics_payload)
         result_bytes = self._emit_result(outcome.value)
-        self._finalize_message(timestamp, result_bytes, metrics_payload)
+        self._finalize_message(
+            timestamp,
+            result_bytes,
+            metrics_payload,
+            initial_transition=initial_transition,
+        )
         return outcome.value
 
     def run_work_item(self, work_item: Any) -> Any:
         """Execute *work_item* without relying on queue plumbing."""
-        self.taskspec.mark_started(pid=os.getpid())
-        self._update_process_title("spawning")
-        self._report_state_change(event="work_spawning", message_id=None)
-        self.taskspec.mark_running(pid=os.getpid())
-        self._update_process_title("running")
-        self._report_state_change(event="work_started", message_id=None)
-        return self._execute_work_item(work_item, timestamp=None)
+        initial_transition = self._begin_work_item(None)
+        return self._execute_work_item(
+            work_item,
+            timestamp=None,
+            initial_transition=initial_transition,
+        )
 
     def _run_task(self, work_item: Any) -> RunnerOutcome:
+        if self._uses_agent_session():
+            session = self._ensure_agent_session()
+            start_time = time.monotonic()
+            result = session.execute(
+                work_item,
+                cancel_requested=self._cancel_requested,
+            )
+            return RunnerOutcome(
+                status=result.status,
+                value=result.value,
+                error=result.error,
+                stdout=None,
+                stderr=None,
+                returncode=None,
+                duration=time.monotonic() - start_time,
+                metrics=result.metrics,
+                worker_pid=session.pid,
+            )
+
         runner = TaskRunner(
             target_type=self.taskspec.spec.type,
+            tid=self.taskspec.tid,
             function_target=self.taskspec.spec.function_target,
             process_target=self.taskspec.spec.process_target,
+            agent=(
+                self.taskspec.spec.agent.model_dump(mode="python")
+                if self.taskspec.spec.agent is not None
+                else None
+            ),
             args=getattr(self.taskspec.spec, "args", None),
             kwargs=getattr(self.taskspec.spec, "keyword_args", None),
             env=self.taskspec.spec.env or {},
@@ -145,16 +184,46 @@ class Consumer(BaseTask, InteractiveTaskMixin):
                 "weft.core.resource_monitor.ResourceMonitor",
             ),
             monitor_interval=self.taskspec.spec.polling_interval,
-            db_path=str(self._db_path),
+            db_path=self._db_path,
             config=self._config,
         )
-        return runner.run(work_item)
+        return runner.run_with_hooks(
+            work_item,
+            cancel_requested=self._cancel_requested,
+            on_worker_started=self._register_running_worker,
+        )
+
+    def _begin_work_item(self, timestamp: int | None) -> bool:
+        if self._task_is_persistent() and self.taskspec.state.status == "running":
+            self._report_state_change(event="work_item_started", message_id=timestamp)
+            self._update_process_title("running")
+            return False
+
+        self.taskspec.mark_started(pid=os.getpid())
+        self._update_process_title("spawning")
+        self._report_state_change(event="work_spawning", message_id=timestamp)
+        self.taskspec.mark_running(pid=os.getpid())
+        self._update_process_title("running")
+        self._report_state_change(event="work_started", message_id=timestamp)
+        return True
+
+    def _cancel_requested(self) -> bool:
+        if self.should_stop:
+            return True
+        if self._stop_event is None:
+            return False
+        return self._stop_event.is_set()
+
+    def _register_running_worker(self, pid: int | None) -> None:
+        self.register_managed_pid(pid)
 
     def _finalize_message(
         self,
         timestamp: int | None,
         result_bytes: int,
         metrics_payload: dict[str, Any] | None,
+        *,
+        initial_transition: bool,
     ) -> None:
         if timestamp is not None:
             try:
@@ -169,6 +238,17 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             self._cleanup_reserved_if_needed()
 
         self._monitor_resource_usage()
+        if self._task_is_persistent():
+            self._report_state_change(
+                event="work_item_completed",
+                message_id=timestamp,
+                result_bytes=result_bytes,
+                metrics=metrics_payload,
+                initial_transition=initial_transition,
+            )
+            self._update_process_title("running")
+            return
+
         self.taskspec.mark_completed(return_code=0)
         self._report_state_change(
             event="work_completed",
@@ -184,6 +264,14 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             self._stop_event.set()
 
     def _emit_result(self, result: Any) -> int:
+        if isinstance(result, AgentExecutionResult):
+            total_bytes = 0
+            for output in result.outputs:
+                total_bytes += self._emit_single_output(output)
+            return total_bytes
+        return self._emit_single_output(result)
+
+    def _emit_single_output(self, result: Any) -> int:
         serialized = serialize_result(result)
         try:
             encoded_result = serialized.encode("utf-8")
@@ -231,6 +319,9 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         timestamp: int | None,
         metrics_payload: dict[str, Any] | None,
     ) -> None:
+        if outcome.status != "ok" and self._uses_agent_session():
+            self._shutdown_agent_session()
+
         if outcome.status == "timeout":
             timeout_exc = TimeoutError(outcome.error or "Target timeout")
             self.taskspec.mark_timeout(error=str(timeout_exc))
@@ -283,9 +374,47 @@ class Consumer(BaseTask, InteractiveTaskMixin):
                 self._stop_event.set()
             raise error_exc
 
+        if outcome.status == "cancelled":
+            reason = outcome.error or "Target execution cancelled"
+            self._handle_external_stop(reason)
+            raise RuntimeError(reason)
+
+    def handle_termination_signal(self, signum: int) -> None:
+        if self._external_stop_handled:
+            return
+        self._external_stop_handled = True
+        self._terminate_active_worker()
+        try:
+            signal_name = signal.Signals(signum).name
+        except ValueError:
+            signal_name = f"signal {signum}"
+        self._handle_external_stop(signal_name)
+
+    def _handle_external_stop(self, reason: str) -> None:
+        policy = self._resolve_policy(self.taskspec.spec.reserved_policy_on_stop)
+        self._handle_stop_request(
+            reason=reason,
+            event="task_signal_stop",
+            message_id=self._active_message_timestamp,
+            apply_reserved_policy=False,
+        )
+        self._apply_reserved_policy(
+            policy, message_timestamp=self._active_message_timestamp
+        )
+        if policy is not ReservedPolicy.KEEP:
+            self._ensure_reserved_empty()
+            self._cleanup_reserved_if_needed()
+        self._end_streaming_session()
+
+    def _terminate_active_worker(self) -> None:
+        for pid in sorted(self._managed_pids):
+            terminate_process_tree(pid, timeout=0.2)
+        self._shutdown_agent_session()
+
     def stop(self, *, join: bool = True, timeout: float = 2.0) -> None:
         if self._interactive_mode:
             self._interactive_shutdown()
+        self._shutdown_agent_session()
         super().stop(join=join, timeout=timeout)
 
     def cleanup(self) -> None:
@@ -296,11 +425,68 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         if self._interactive_mode:
             self._interactive_shutdown()
 
+        self._shutdown_agent_session()
+
         if cleanup_enabled:
             self._purge_start_tokens()
             self._purge_stream_markers()
+            self._cleanup_spilled_outputs_if_needed()
 
         super().cleanup()
+
+    def _task_is_persistent(self) -> bool:
+        return bool(getattr(self.taskspec.spec, "persistent", False))
+
+    def _uses_agent_session(self) -> bool:
+        agent = self.taskspec.spec.agent
+        return bool(
+            self._task_is_persistent()
+            and self.taskspec.spec.type == "agent"
+            and agent is not None
+            and agent.conversation_scope == "per_task"
+        )
+
+    def _ensure_agent_session(self) -> AgentSession:
+        if self._agent_session is not None:
+            return self._agent_session
+
+        runner = TaskRunner(
+            target_type=self.taskspec.spec.type,
+            tid=self.taskspec.tid,
+            function_target=self.taskspec.spec.function_target,
+            process_target=self.taskspec.spec.process_target,
+            agent=(
+                self.taskspec.spec.agent.model_dump(mode="python")
+                if self.taskspec.spec.agent is not None
+                else None
+            ),
+            args=getattr(self.taskspec.spec, "args", None),
+            kwargs=getattr(self.taskspec.spec, "keyword_args", None),
+            env=self.taskspec.spec.env or {},
+            working_dir=self.taskspec.spec.working_dir,
+            timeout=self.taskspec.spec.timeout,
+            limits=self.taskspec.spec.limits,
+            monitor_class=getattr(
+                self.taskspec.spec,
+                "monitor_class",
+                "weft.core.resource_monitor.ResourceMonitor",
+            ),
+            monitor_interval=self.taskspec.spec.polling_interval,
+            db_path=self._db_path,
+            config=self._config,
+        )
+        session = runner.start_agent_session()
+        self._agent_session = session
+        self.register_managed_pid(session.pid)
+        return session
+
+    def _shutdown_agent_session(self) -> None:
+        if self._agent_session is None:
+            return
+        try:
+            self._agent_session.close()
+        finally:
+            self._agent_session = None
 
     # ------------------------------------------------------------------
     # Sentinel helpers

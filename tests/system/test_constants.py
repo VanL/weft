@@ -198,6 +198,15 @@ class TestLoadConfig:
             # Logging
             assert config["WEFT_LOGGING_ENABLED"] is False
 
+            # Broker config should be complete and typed.
+            assert config["BROKER_PROJECT_SCOPE"] is True
+            assert config["BROKER_DEFAULT_DB_NAME"] == ".weft/broker.db"
+            assert config["BROKER_AUTO_VACUUM"] == 1
+            assert config["BROKER_AUTO_VACUUM_INTERVAL"] == 100
+            assert isinstance(config["BROKER_AUTO_VACUUM_INTERVAL"], int)
+            assert config["BROKER_MAX_MESSAGE_SIZE"] > 0
+            assert isinstance(config["BROKER_MAX_MESSAGE_SIZE"], int)
+
     def test_debug_setting(self) -> None:
         """Test debug environment variable."""
         # Values that should enable debug
@@ -260,28 +269,73 @@ class TestLoadConfig:
                 config["WEFT_MANAGER_LIFETIME_TIMEOUT"] == WEFT_MANAGER_LIFETIME_TIMEOUT
             )
 
+    def test_backend_env_translation(self) -> None:
+        """Backend-selection env vars are translated to SimpleBroker keys."""
+        with patch.dict(
+            os.environ,
+            {
+                "WEFT_BACKEND": "postgres",
+                "WEFT_BACKEND_HOST": "db.example.com",
+                "WEFT_BACKEND_PORT": "5433",
+                "WEFT_BACKEND_USER": "broker",
+                "WEFT_BACKEND_PASSWORD": "secret",
+                "WEFT_BACKEND_DATABASE": "simplebroker_app",
+                "WEFT_BACKEND_SCHEMA": "broker_schema",
+                "WEFT_BACKEND_TARGET": "postgresql://broker@db.example.com/simplebroker",
+            },
+            clear=True,
+        ):
+            config = load_config()
+
+        assert config["BROKER_BACKEND"] == "postgres"
+        assert config["BROKER_BACKEND_HOST"] == "db.example.com"
+        assert config["BROKER_BACKEND_PORT"] == 5433
+        assert config["BROKER_BACKEND_USER"] == "broker"
+        assert config["BROKER_BACKEND_PASSWORD"] == "secret"
+        assert config["BROKER_BACKEND_DATABASE"] == "simplebroker_app"
+        assert config["BROKER_BACKEND_SCHEMA"] == "broker_schema"
+        assert (
+            config["BROKER_BACKEND_TARGET"]
+            == "postgresql://broker@db.example.com/simplebroker"
+        )
+        assert config["BROKER_AUTO_VACUUM_INTERVAL"] == 100
+        assert isinstance(config["BROKER_AUTO_VACUUM_INTERVAL"], int)
+
     def test_all_config_keys_present(self) -> None:
-        """Test that all expected configuration keys are present."""
+        """Test that Weft returns its own keys plus a full broker config."""
         config = load_config()
 
-        expected_keys = {
+        weft_keys = {
             "WEFT_DEBUG",
             "WEFT_LOGGING_ENABLED",
             "WEFT_REDACT_TASKSPEC_FIELDS",
             "WEFT_MANAGER_REUSE_ENABLED",
             "WEFT_MANAGER_LIFETIME_TIMEOUT",
             "WEFT_AUTOSTART_TASKS",
+        }
+
+        broker_keys = {
             "BROKER_PROJECT_SCOPE",
             "BROKER_DEFAULT_DB_NAME",
             "BROKER_DEBUG",
             "BROKER_LOGGING_ENABLED",
+            "BROKER_AUTO_VACUUM",
+            "BROKER_AUTO_VACUUM_INTERVAL",
+            "BROKER_MAX_MESSAGE_SIZE",
+            "BROKER_BACKEND",
+            "BROKER_BACKEND_PORT",
         }
 
-        assert set(config.keys()) == expected_keys
-        assert config["BROKER_PROJECT_SCOPE"] in {"true", "True", True}
+        assert weft_keys.issubset(config.keys())
+        assert broker_keys.issubset(config.keys())
+        assert config["BROKER_PROJECT_SCOPE"] is True
         assert config["BROKER_DEFAULT_DB_NAME"] == ".weft/broker.db"
         assert config["BROKER_DEBUG"] == config["WEFT_DEBUG"]
         assert config["BROKER_LOGGING_ENABLED"] == config["WEFT_LOGGING_ENABLED"]
+        assert isinstance(config["BROKER_AUTO_VACUUM"], int)
+        assert isinstance(config["BROKER_AUTO_VACUUM_INTERVAL"], int)
+        assert isinstance(config["BROKER_MAX_MESSAGE_SIZE"], int)
+        assert isinstance(config["BROKER_BACKEND_PORT"], int)
         assert config["WEFT_REDACT_TASKSPEC_FIELDS"] == ""
         assert config["WEFT_MANAGER_LIFETIME_TIMEOUT"] == WEFT_MANAGER_LIFETIME_TIMEOUT
         assert config["WEFT_MANAGER_REUSE_ENABLED"] == WEFT_MANAGER_REUSE_ENABLED

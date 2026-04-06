@@ -52,4 +52,3 @@ def test_task_tid_reverse(workdir, weft_harness) -> None:
     assert rc == 0
     assert out.strip() == tid[-10:]
     assert err == ""
-

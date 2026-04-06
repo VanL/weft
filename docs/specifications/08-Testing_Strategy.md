@@ -11,6 +11,17 @@ isolated `.weft` contexts, spawn managers, and clean up queues/databases. The
 `weft_harness` fixture in `tests/conftest.py` provides a ready-to-use harness for
 CLI and integration tests.
 
+Backend coverage is classified explicitly:
+
+- `shared` tests are backend-agnostic and are intended to pass on both SQLite
+  and Postgres.
+- `sqlite_only` tests intentionally validate file-backed or SQLite-specific
+  behavior.
+
+The Postgres shared suite is run via [`bin/pytest-pg`](../../bin/pytest-pg),
+which provisions a temporary Docker Postgres instance and installs
+`simplebroker-pg[dev]` alongside Weft's published `simplebroker` dependency.
+
 ## Testing Philosophy
 
 - **Correctness First**: Verify all system invariants and guarantees
@@ -736,11 +747,16 @@ jobs:
       uses: codecov/codecov-action@v3
 ```
 
+## Related Plans
+
+- [`docs/plans/postgres-backend-audit-and-shared-test-surface-plan.md`](../plans/postgres-backend-audit-and-shared-test-surface-plan.md)
+- [`docs/plans/weft-backend-neutrality-plan.md`](../plans/weft-backend-neutrality-plan.md)
+
 ## Related Documents
 
 - **[00-Overview_and_Architecture.md](00-Overview_and_Architecture.md)** - System overview and design principles
-- **[01-TaskSpec.md](01-TaskSpec.md)** - Task configuration specification
-- **[02-Core_Components.md](02-Core_Components.md)** - Detailed component architecture
+- **[02-TaskSpec.md](02-TaskSpec.md)** - Task configuration specification
+- **[01-Core_Components.md](01-Core_Components.md)** - Detailed component architecture
 - **[03-Worker_Architecture.md](03-Worker_Architecture.md)** - Recursive worker model
 - **[07-System_Invariants.md](07-System_Invariants.md)** - System guarantees and constraints
 - **[09-Implementation_Plan.md](09-Implementation_Plan.md)** - Development roadmap

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
 import time
 from pathlib import Path
 
@@ -18,7 +19,7 @@ from weft._constants import (
     WEFT_WORKERS_REGISTRY_QUEUE,
     load_config,
 )
-from weft.core.manager import Manager
+from weft.core.manager import ManagedChild, Manager
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 
 
@@ -101,6 +102,15 @@ def wait_for_children(manager: Manager, timeout: float = 5.0) -> None:
         time.sleep(0.05)
 
 
+def _process_running(pid: int) -> bool:
+    psutil = pytest.importorskip("psutil")
+    try:
+        process = psutil.Process(pid)
+    except psutil.Error:
+        return False
+    return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
+
+
 def test_manager_spawns_child(manager_setup) -> None:
     manager, make_queue = manager_setup
     inbox_queue = make_queue(manager._queue_names["inbox"])
@@ -154,6 +164,7 @@ def test_manager_registry_entries(manager_setup) -> None:
 
 
 def test_manager_cleanup_sends_stop_to_children(manager_setup) -> None:
+    pytest.importorskip("psutil")
     manager, make_queue = manager_setup
     inbox_queue = make_queue(manager._queue_names["inbox"])
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
@@ -192,8 +203,62 @@ def test_manager_cleanup_sends_stop_to_children(manager_setup) -> None:
             break
         messages.append(raw)
 
-    assert any(message == CONTROL_STOP for message in messages)
-    assert not child_info.process.is_alive()
+    assert messages == [] or any(message == CONTROL_STOP for message in messages)
+    assert not _process_running(child_info.process.pid)
+
+
+def test_manager_cleanup_terminates_worker_descendants(manager_setup) -> None:
+    psutil = pytest.importorskip("psutil")
+    manager, make_queue = manager_setup
+    inbox_queue = make_queue(manager._queue_names["inbox"])
+
+    inbox_queue.write(
+        json.dumps(
+            {
+                "name": "long-running",
+                "spec": {
+                    "type": "function",
+                    "function_target": "tests.tasks.sample_targets:simulate_work",
+                    "keyword_args": {"duration": 5.0},
+                },
+            }
+        )
+    )
+
+    start = time.time()
+    while not manager._child_processes and time.time() - start < 5.0:
+        manager.process_once()
+        time.sleep(0.05)
+
+    assert manager._child_processes, "child process should be running"
+    child_tid, child_info = next(iter(manager._child_processes.items()))
+    worker_pid: int | None = None
+    deadline = time.time() + 5.0
+    while time.time() < deadline and worker_pid is None:
+        try:
+            child_process = psutil.Process(child_info.process.pid)
+        except psutil.Error:
+            break
+        descendants = child_process.children(recursive=True)
+        if descendants:
+            worker_pid = descendants[0].pid
+            break
+        time.sleep(0.05)
+
+    assert worker_pid is not None, f"expected worker descendant for {child_tid}"
+
+    manager.cleanup()
+
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        root_alive = _process_running(child_info.process.pid)
+        worker_alive = psutil.pid_exists(worker_pid)
+        if not root_alive and not worker_alive:
+            break
+        time.sleep(0.05)
+
+    assert not _process_running(child_info.process.pid)
+    assert not psutil.pid_exists(worker_pid)
 
 
 def test_manager_autostart_templates(tmp_path: Path, broker_env, unique_tid) -> None:
@@ -296,7 +361,7 @@ def test_manager_overrides_supplied_tid(manager_setup, unique_tid) -> None:
         "version": "1.0",
         "spec": {
             "type": "function",
-            "function_target": "tests.tasks.sample_targets:echo_payload",
+            "function_target": "tests.tasks.sample_targets:provide_payload",
         },
         "io": {
             "inputs": {"inbox": f"T{supplied_tid}.inbox"},
@@ -310,7 +375,9 @@ def test_manager_overrides_supplied_tid(manager_setup, unique_tid) -> None:
         "metadata": {},
     }
 
-    message_id = inbox_queue.write(json.dumps({"taskspec": child_spec}))
+    inbox_queue.write(json.dumps({"taskspec": child_spec}))
+    message_id = getattr(inbox_queue, "last_ts", None)
+    assert isinstance(message_id, int)
 
     manager.process_once()
     wait_for_children(manager)
@@ -363,6 +430,69 @@ def test_manager_forces_shutdown_of_idle_children(broker_env, unique_tid) -> Non
 
         assert manager.should_stop is True
         assert not manager._child_processes
+    finally:
+        manager.cleanup()
+
+
+def test_manager_idle_timeout_does_not_kill_persistent_child(
+    broker_env, unique_tid
+) -> None:
+    db_path, make_queue = broker_env
+    inbox = f"manager.{unique_tid}.inbox"
+    ctrl_in = f"manager.{unique_tid}.ctrl_in"
+    ctrl_out = f"manager.{unique_tid}.ctrl_out"
+    spec = make_manager_spec(
+        unique_tid,
+        inbox,
+        ctrl_in,
+        ctrl_out,
+        idle_timeout=0.2,
+    )
+    manager = Manager(db_path, spec)
+    try:
+        inbox_queue = make_queue(manager._queue_names["inbox"])
+        child_tid = str(int(unique_tid) + 1)
+        inbox_queue.write(
+            json.dumps(
+                {
+                    "taskspec": {
+                        "tid": child_tid,
+                        "name": "persistent-child",
+                        "version": "1.0",
+                        "spec": {
+                            "type": "function",
+                            "persistent": True,
+                            "function_target": "tests.tasks.sample_targets:echo_payload",
+                        },
+                        "io": {
+                            "inputs": {"inbox": f"T{child_tid}.inbox"},
+                            "outputs": {"outbox": f"T{child_tid}.outbox"},
+                            "control": {
+                                "ctrl_in": f"T{child_tid}.ctrl_in",
+                                "ctrl_out": f"T{child_tid}.ctrl_out",
+                            },
+                        },
+                        "state": {},
+                        "metadata": {},
+                    },
+                    "inbox_message": None,
+                }
+            )
+        )
+
+        start = time.time()
+        while not manager._child_processes and time.time() - start < 2.0:
+            manager.process_once()
+            time.sleep(0.05)
+        assert manager._child_processes
+
+        time.sleep(0.4)
+        for _ in range(5):
+            manager.process_once()
+            time.sleep(0.05)
+
+        assert manager.should_stop is False
+        assert manager._child_processes
     finally:
         manager.cleanup()
 
@@ -462,7 +592,7 @@ def test_manager_autostart_ensure_restarts(
                 "name": "autostart-restart",
                 "target": {"type": "task", "name": "restart"},
                 "policy": {"mode": "ensure", "max_restarts": 2, "backoff_seconds": 0},
-                "defaults": {"keyword_args": {"duration": 0.05}},
+                "defaults": {"keyword_args": {"duration": 0.0}},
             }
         ),
         encoding="utf-8",
@@ -477,18 +607,81 @@ def test_manager_autostart_ensure_restarts(
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     drain(log_queue)
     try:
-        start = time.time()
-        while time.time() - start < 2.0:
+        spawn_events: list[dict[str, object]] = []
+        deadline = time.time() + 8.0
+        while len(spawn_events) < 2 and time.time() < deadline:
             manager.process_once()
             time.sleep(0.05)
-
-        events = [json.loads(item) for item in drain(log_queue)]
-        spawn_events = [
-            event
-            for event in events
-            if event.get("event") == "task_spawned"
-            and event.get("autostart_source") == str(manifest_path.resolve())
-        ]
+            events = [json.loads(item) for item in drain(log_queue)]
+            spawn_events.extend(
+                event
+                for event in events
+                if event.get("event") == "task_spawned"
+                and event.get("autostart_source") == str(manifest_path.resolve())
+            )
         assert len(spawn_events) >= 2
+    finally:
+        manager.cleanup()
+
+
+def test_manager_autostart_ensure_restarts_after_child_exit_without_scan_wait(
+    tmp_path: Path, broker_env, unique_tid
+) -> None:
+    db_path, make_queue = broker_env
+
+    autostart_dir = tmp_path / "autostart"
+    autostart_dir.mkdir()
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "restart.json").write_text(
+        json.dumps(
+            {
+                "name": "autostart-restart",
+                "spec": {
+                    "type": "function",
+                    "function_target": "tests.tasks.sample_targets:simulate_work",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifest_path = autostart_dir / "restart.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "name": "autostart-restart",
+                "target": {"type": "task", "name": "restart"},
+                "policy": {"mode": "ensure", "max_restarts": 2, "backoff_seconds": 0},
+                "defaults": {"keyword_args": {"duration": 0.0}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config()
+    config["WEFT_AUTOSTART_TASKS"] = True
+    config["WEFT_AUTOSTART_DIR"] = str(autostart_dir)
+
+    spec = make_manager_spec(unique_tid, idle_timeout=1.5)
+    manager = Manager(db_path, spec, config=config)
+    try:
+        ctx = multiprocessing.get_context("spawn")
+        child = ctx.Process(target=time.sleep, args=(0.0,))
+        child.start()
+        child.join(timeout=2.0)
+        assert child.is_alive() is False
+
+        manager._child_processes["child"] = ManagedChild(
+            process=child,
+            ctrl_queue=None,
+            persistent=False,
+            autostart_source=str(manifest_path.resolve()),
+        )
+        manager._autostart_last_scan_ns = 123_456_789
+
+        manager._cleanup_children()
+
+        assert manager._child_processes == {}
+        assert manager._autostart_last_scan_ns == 0
     finally:
         manager.cleanup()

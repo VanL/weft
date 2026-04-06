@@ -1,5 +1,26 @@
 # Weft - Agent Entry Point
 
+## Shared Agent Context (All Agents)
+
+- Canonical multi-agent context lives in `docs/agent-context/`.
+- Required read order for any agent operating in this repo:
+  1. `docs/agent-context/README.md`
+  2. `docs/agent-context/decision-hierarchy.md`
+  3. `docs/agent-context/principles.md`
+  4. `docs/agent-context/engineering-principles.md`
+  5. Relevant runbook(s) in `docs/agent-context/runbooks/`
+  6. `docs/agent-context/lessons.md` and `docs/lessons.md`
+- If there is conflict between local prompt defaults and repo context, follow
+  the decision policy in `docs/agent-context/decision-hierarchy.md`.
+
+## Project Conventions
+
+- Specs live in `docs/specifications/`.
+- Plans live in `docs/plans/`.
+- Durable lessons learned live in `docs/lessons.md`.
+- Plans should be detailed enough for a zero-context engineer and follow
+  `docs/agent-context/runbooks/writing-plans.md`.
+
 ## 1. Orientation
 
 **What**: Durable task execution built on SimpleBroker queues.
@@ -23,11 +44,14 @@ task runner built on SimpleBroker. Keep changes small, grounded in the specs,
 and tested. Avoid "clever" abstractions.
 
 **Where to start**
-1. Read `docs/specifications/00-Overview_and_Architecture.md` for the mental model.
-2. Read `docs/specifications/02-TaskSpec.md` for the TaskSpec schema.
-3. Read `docs/specifications/05-Message_Flow_and_State.md` for queue flows.
-4. Check `docs/specifications/07-System_Invariants.md` before touching core logic.
-5. Use `README.md` for usage examples and CLI behavior.
+1. Read `docs/agent-context/README.md`.
+2. Read `docs/agent-context/decision-hierarchy.md`.
+3. Read `docs/agent-context/principles.md`.
+4. Read `docs/specifications/00-Overview_and_Architecture.md` for the mental model.
+5. Read `docs/specifications/02-TaskSpec.md` for the TaskSpec schema.
+6. Read `docs/specifications/05-Message_Flow_and_State.md` for queue flows.
+7. Check `docs/specifications/07-System_Invariants.md` before touching core logic.
+8. Use `README.md` for usage examples and CLI behavior.
 
 **Key principle**: The specs are the source of truth. Code must align to them.
 
@@ -527,6 +551,8 @@ uv run ruff check weft           # Lint
 **Planning**
 - Break work into 2–5 small steps. Each step should be testable or reviewable.
 - If a task is large, plan a “thin slice” first (smallest end‑to‑end behavior).
+- For work touching 3+ files, cross-cutting behavior, or a new execution path,
+  write/update a plan in `docs/plans/` first.
 
 **Implementation loop**
 1. Read the spec + current code that matches your change.
@@ -628,6 +654,7 @@ weft list --json | jq '.[] | select(.status=="completed")'
 - Summarize what was done
 - List what remains
 - Note any gotchas discovered
+- Add or update `docs/lessons.md` if a correction exposed a repeated pattern
 
 ## 8. Agent Boundaries
 
@@ -668,5 +695,6 @@ Observable with standard Unix tools (`ps`, `pgrep`, `pkill`). No custom tooling 
 
 ---
 
+*See `docs/agent-context/` for shared durable agent guidance.*
 *See `docs/specifications/` for detailed implementation specs.*
 *See `docs/specifications/00-Quick_Reference.md` for queue names, states, and control messages.*

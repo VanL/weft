@@ -2,19 +2,17 @@
 
 from __future__ import annotations
 
-from simplebroker import Queue
+import pytest
 
 from tests.conftest import run_cli
+from tests.helpers.test_backend import prepare_project_root
 from weft.context import build_context
+
+pytestmark = [pytest.mark.shared]
 
 
 def _write_message(context, queue_name: str, body: str) -> None:
-    queue = Queue(
-        queue_name,
-        db_path=str(context.database_path),
-        persistent=True,
-        config=context.broker_config,
-    )
+    queue = context.queue(queue_name, persistent=True)
     queue.write(body)
     queue.close()
 
@@ -41,7 +39,7 @@ def test_system_dump_exports_messages(workdir) -> None:
     assert output_path.exists()
 
     lines = output_path.read_text(encoding="utf-8").splitlines()
-    assert any("\"queue\": \"dump.test\"" in line for line in lines)
+    assert any('"queue": "dump.test"' in line for line in lines)
 
 
 def test_system_dump_excludes_runtime_queues(workdir) -> None:
@@ -72,7 +70,7 @@ def test_system_dump_excludes_runtime_queues(workdir) -> None:
 
 def test_system_load_imports_dump(workdir) -> None:
     source_dir = workdir / "source"
-    source_dir.mkdir()
+    prepare_project_root(source_dir)
     source_context = build_context(spec_context=source_dir)
     _write_message(source_context, "import.test", "hello")
 
@@ -92,7 +90,7 @@ def test_system_load_imports_dump(workdir) -> None:
     assert export_path.exists()
 
     target_dir = workdir / "target"
-    target_dir.mkdir()
+    prepare_project_root(target_dir)
 
     rc, out, err = run_cli(
         "system",
@@ -124,12 +122,7 @@ def test_system_load_imports_dump(workdir) -> None:
     assert "Import completed" in out
 
     target_context = build_context(spec_context=target_dir)
-    queue = Queue(
-        "import.test",
-        db_path=str(target_context.database_path),
-        persistent=True,
-        config=target_context.broker_config,
-    )
+    queue = target_context.queue("import.test", persistent=True)
     try:
         assert queue.peek_one() == "hello"
     finally:

@@ -21,8 +21,12 @@ Usage:
 
 """
 
+from __future__ import annotations
+
 import os
 from typing import Any, Final, Literal
+
+from simplebroker import resolve_config as resolve_broker_config
 
 # ==============================================================================
 # VERSION INFORMATION
@@ -213,6 +217,9 @@ WEFT_MANAGER_LIFETIME_TIMEOUT: Final[float] = 600.0
 WEFT_MANAGER_REUSE_ENABLED: Final[bool] = True
 """Whether a Manager started by the CLI should remain running after a task completes."""
 
+WEFT_COMPLETED_RESULT_GRACE_SECONDS: Final[float] = 0.25
+"""Time to keep polling an outbox after a completion event before assuming no result."""
+
 
 # Autostart behaviour
 # -------------------
@@ -250,22 +257,30 @@ SIMPLEBROKER_ENV_MAPPING: Final[dict[str, str]] = {
     "WEFT_DEFAULT_DB_LOCATION": "BROKER_DEFAULT_DB_LOCATION",
     "WEFT_DEFAULT_DB_NAME": "BROKER_DEFAULT_DB_NAME",
     "WEFT_PROJECT_SCOPE": "BROKER_PROJECT_SCOPE",
+    "WEFT_BACKEND": "BROKER_BACKEND",
+    "WEFT_BACKEND_HOST": "BROKER_BACKEND_HOST",
+    "WEFT_BACKEND_PORT": "BROKER_BACKEND_PORT",
+    "WEFT_BACKEND_USER": "BROKER_BACKEND_USER",
+    "WEFT_BACKEND_PASSWORD": "BROKER_BACKEND_PASSWORD",
+    "WEFT_BACKEND_DATABASE": "BROKER_BACKEND_DATABASE",
+    "WEFT_BACKEND_SCHEMA": "BROKER_BACKEND_SCHEMA",
+    "WEFT_BACKEND_TARGET": "BROKER_BACKEND_TARGET",
 }
 
 # Weft-specific defaults for SimpleBroker integration
-WEFT_SIMPLEBROKER_DEFAULTS: Final[dict[str, str]] = {
-    "BROKER_PROJECT_SCOPE": "true",
+WEFT_SIMPLEBROKER_DEFAULTS: Final[dict[str, Any]] = {
+    "BROKER_PROJECT_SCOPE": True,
     "BROKER_DEFAULT_DB_NAME": ".weft/broker.db",
 }
 
 
-def _translate_weft_env_vars() -> dict[str, str]:
+def _translate_weft_env_vars() -> dict[str, Any]:
     """Translate WEFT_* environment variables to BROKER_* equivalents.
 
     Returns:
         Dict with BROKER_* keys and values from corresponding WEFT_* env vars
     """
-    translated = {}
+    translated: dict[str, Any] = {}
 
     for weft_key, broker_key in SIMPLEBROKER_ENV_MAPPING.items():
         env_value = os.environ.get(weft_key)
@@ -283,6 +298,16 @@ def _apply_weft_simplebroker_defaults(config: dict[str, Any]) -> None:
     """
     for key, default_value in WEFT_SIMPLEBROKER_DEFAULTS.items():
         config.setdefault(key, default_value)
+
+
+def _resolve_weft_broker_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Return the complete typed SimpleBroker config for the current Weft env."""
+
+    broker_overrides = _translate_weft_env_vars()
+    _apply_weft_simplebroker_defaults(broker_overrides)
+    broker_overrides["BROKER_DEBUG"] = config["WEFT_DEBUG"]
+    broker_overrides["BROKER_LOGGING_ENABLED"] = config["WEFT_LOGGING_ENABLED"]
+    return resolve_broker_config(broker_overrides)
 
 
 def _parse_bool(value: str | None) -> bool:
@@ -356,16 +381,7 @@ def _add_simplebroker_env_vars(config: dict[str, Any]) -> None:
     1. Translates WEFT_* environment variables to BROKER_* equivalents
     2. Applies weft-specific defaults for SimpleBroker integration
     """
-    # Translate WEFT_* -> BROKER_* environment variables
-    translated_vars = _translate_weft_env_vars()
-    config.update(translated_vars)
-
-    # Apply weft defaults for SimpleBroker (weft is always project-scoped)
-    _apply_weft_simplebroker_defaults(config)
-
-    # Set SimpleBroker debug/logging settings to match weft
-    config["BROKER_DEBUG"] = config["WEFT_DEBUG"]
-    config["BROKER_LOGGING_ENABLED"] = config["WEFT_LOGGING_ENABLED"]
+    config.update(_resolve_weft_broker_config(config))
 
 
 def load_environment() -> dict[str, Any]:

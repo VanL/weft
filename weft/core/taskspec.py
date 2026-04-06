@@ -7,14 +7,16 @@ docs/specifications/02-TaskSpec.md [TS-1].
 
 from __future__ import annotations
 
+import copy
 import json as json_module
-from collections.abc import Iterator
-from contextlib import contextmanager
-from enum import Enum
-from typing import Any, Literal
+from collections.abc import Iterable, Iterator, Mapping
+from contextlib import ExitStack, contextmanager
+from enum import StrEnum
+from typing import Any, Literal, NoReturn, Self, SupportsIndex
 
 from pydantic import (
     BaseModel,
+    ConfigDict,
     Field,
     ValidationError,
     ValidationInfo,
@@ -50,7 +52,214 @@ from weft._constants import (
 )
 
 
-class ReservedPolicy(str, Enum):
+class FrozenList(list):
+    """List subclass that rejects in-place mutation."""
+
+    def _immutable(self, operation: str) -> NoReturn:
+        raise TypeError(f"Cannot {operation} immutable FrozenList")
+
+    def append(self, object: Any) -> None:  # noqa: A003
+        self._immutable("append to")
+
+    def extend(self, iterable: Iterable[Any]) -> None:
+        self._immutable("extend")
+
+    def insert(self, index: SupportsIndex, object: Any) -> None:  # noqa: A003
+        self._immutable("insert into")
+
+    def pop(self, index: SupportsIndex = -1) -> Any:
+        self._immutable("pop from")
+
+    def remove(self, value: Any) -> None:
+        self._immutable("remove from")
+
+    def clear(self) -> None:
+        self._immutable("clear")
+
+    def reverse(self) -> None:
+        self._immutable("reverse")
+
+    def sort(self, *args: Any, **kwargs: Any) -> None:
+        self._immutable("sort")
+
+    def __setitem__(self, index: SupportsIndex | slice, value: Any) -> None:
+        self._immutable("assign into")
+
+    def __delitem__(self, index: SupportsIndex | slice) -> None:
+        self._immutable("delete from")
+
+    def __iadd__(self, other: Iterable[Any]) -> Self:  # type: ignore[misc]
+        self._immutable("extend")
+
+    def __imul__(self, other: SupportsIndex) -> Self:
+        self._immutable("repeat")
+
+
+class FrozenDict(dict):
+    """Dict subclass that rejects in-place mutation."""
+
+    def _immutable(self, operation: str) -> NoReturn:
+        raise TypeError(f"Cannot {operation} immutable FrozenDict")
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        self._immutable("assign into")
+
+    def __delitem__(self, key: Any) -> None:
+        self._immutable("delete from")
+
+    def clear(self) -> None:
+        self._immutable("clear")
+
+    def pop(self, key: Any, default: Any = None) -> Any:
+        self._immutable("pop from")
+
+    def popitem(self) -> tuple[Any, Any]:
+        self._immutable("pop from")
+
+    def setdefault(self, key: Any, default: Any = None) -> Any:
+        self._immutable("set default on")
+
+    def update(self, *args: Any, **kwargs: Any) -> None:
+        self._immutable("update")
+
+    def __ior__(  # type: ignore[override,misc]
+        self,
+        other: Mapping[Any, Any] | Iterable[tuple[Any, Any]],
+    ) -> Self:
+        self._immutable("update")
+
+
+def _freeze_container_value(value: Any) -> Any:
+    """Recursively freeze container values used by immutable TaskSpec sections."""
+    if isinstance(value, FrozenDict | FrozenList):
+        return value
+    if isinstance(value, dict):
+        return FrozenDict(
+            {key: _freeze_container_value(nested) for key, nested in value.items()}
+        )
+    if isinstance(value, list):
+        return FrozenList([_freeze_container_value(item) for item in value])
+    if isinstance(value, tuple):
+        return tuple(_freeze_container_value(item) for item in value)
+    return value
+
+
+def rewrite_tid_in_io(io_section: dict[str, Any], old_tid: str, new_tid: str) -> None:
+    """Rewrite default queue names that embed an old TID prefix."""
+    if not old_tid or not new_tid or old_tid == new_tid:
+        return
+
+    old_prefix = f"T{old_tid}."
+    new_prefix = f"T{new_tid}."
+    for key in ("inputs", "outputs", "control"):
+        section = io_section.get(key)
+        if not isinstance(section, dict):
+            continue
+        for name, value in list(section.items()):
+            if isinstance(value, str) and old_prefix in value:
+                section[name] = value.replace(old_prefix, new_prefix)
+
+
+def resolve_taskspec_payload(
+    payload: Mapping[str, Any],
+    *,
+    tid: str | None = None,
+    inherited_weft_context: str | None = None,
+) -> dict[str, Any]:
+    """Return a fully resolved TaskSpec payload without mutating the input."""
+    candidate = copy.deepcopy(dict(payload))
+    original_tid = candidate.get("tid")
+    if tid is not None:
+        candidate["tid"] = tid
+
+    resolved_tid = candidate.get("tid")
+    if not isinstance(resolved_tid, str) or not resolved_tid:
+        raise ValueError("resolved TaskSpec payload requires a tid")
+
+    candidate.setdefault("version", TASKSPEC_VERSION)
+    if candidate.get("state") is None:
+        candidate["state"] = {}
+    if candidate.get("metadata") is None:
+        candidate["metadata"] = {}
+    candidate.setdefault("state", {})
+    candidate.setdefault("metadata", {})
+
+    io_section = candidate.get("io")
+    if io_section is None:
+        io_section = {}
+        candidate["io"] = io_section
+
+    if (
+        isinstance(io_section, dict)
+        and isinstance(original_tid, str)
+        and original_tid != resolved_tid
+    ):
+        rewrite_tid_in_io(io_section, original_tid, resolved_tid)
+
+    if isinstance(io_section, dict):
+        inputs = io_section.get("inputs")
+        if inputs is None:
+            inputs = {}
+            io_section["inputs"] = inputs
+        outputs = io_section.get("outputs")
+        if outputs is None:
+            outputs = {}
+            io_section["outputs"] = outputs
+        control = io_section.get("control")
+        if control is None:
+            control = {}
+            io_section["control"] = control
+
+        if isinstance(inputs, dict):
+            inputs.setdefault(
+                QUEUE_INBOX_SUFFIX, f"T{resolved_tid}.{QUEUE_INBOX_SUFFIX}"
+            )
+        if isinstance(outputs, dict):
+            outputs.setdefault(
+                QUEUE_OUTBOX_SUFFIX, f"T{resolved_tid}.{QUEUE_OUTBOX_SUFFIX}"
+            )
+        if isinstance(control, dict):
+            control.setdefault(
+                QUEUE_CTRL_IN_SUFFIX, f"T{resolved_tid}.{QUEUE_CTRL_IN_SUFFIX}"
+            )
+            control.setdefault(
+                QUEUE_CTRL_OUT_SUFFIX, f"T{resolved_tid}.{QUEUE_CTRL_OUT_SUFFIX}"
+            )
+
+    spec_section = candidate.get("spec")
+    if isinstance(spec_section, dict):
+        if inherited_weft_context and not spec_section.get("weft_context"):
+            spec_section["weft_context"] = inherited_weft_context
+        if spec_section.get("args") is None:
+            spec_section["args"] = []
+        if spec_section.get("keyword_args") is None:
+            spec_section["keyword_args"] = {}
+        if "timeout" not in spec_section:
+            spec_section["timeout"] = DEFAULT_TIMEOUT
+        if spec_section.get("env") is None:
+            spec_section["env"] = {}
+        if "working_dir" not in spec_section:
+            spec_section["working_dir"] = None
+
+        limits = spec_section.get("limits")
+        if limits is None:
+            limits = {}
+            spec_section["limits"] = limits
+        if isinstance(limits, dict):
+            limits_defaults = {
+                "memory_mb": DEFAULT_MEMORY_MB,
+                "cpu_percent": DEFAULT_CPU_PERCENT,
+                "max_fds": DEFAULT_MAX_FDS,
+                "max_connections": DEFAULT_MAX_CONNECTIONS,
+            }
+            for field, default_value in limits_defaults.items():
+                if default_value is not None and limits.get(field) is None:
+                    limits[field] = default_value
+
+    return candidate
+
+
+class ReservedPolicy(StrEnum):
     KEEP = "keep"
     REQUEUE = "requeue"
     CLEAR = "clear"
@@ -100,13 +309,184 @@ class LimitsSection(BaseModel):
         object.__setattr__(self, "_allow_mutation", False)
 
 
+class AgentToolSection(BaseModel):
+    """Agent tool descriptor for MVP agent runtime support (Spec: [AR-2.3])."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(..., min_length=1)
+    kind: Literal["python"]
+    ref: str = Field(..., min_length=1)
+    description: str | None = None
+    args_schema: dict[str, Any] | None = None
+    approval_required: bool = False
+    config: dict[str, Any] = Field(default_factory=dict)
+
+    def model_post_init(self, __context: Any) -> None:
+        super().model_post_init(__context)
+        object.__setattr__(self, "_allow_mutation", False)
+
+    @contextmanager
+    def _mutations_allowed(self) -> Iterator[None]:
+        object.__setattr__(self, "_allow_mutation", True)
+        try:
+            yield
+        finally:
+            object.__setattr__(self, "_allow_mutation", False)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Prevent modification if this instance is frozen."""
+        if name.startswith("_"):
+            super().__setattr__(name, value)
+            return
+        if getattr(self, "_frozen", False) and not getattr(
+            self, "_allow_mutation", False
+        ):
+            raise AttributeError(
+                f"Cannot modify field '{name}' on frozen AgentToolSection. "
+                "AgentToolSection is immutable after TaskSpec creation."
+            )
+        super().__setattr__(name, value)
+
+    def _freeze(self) -> None:
+        """Mark this instance as frozen."""
+        object.__setattr__(
+            self,
+            "args_schema",
+            _freeze_container_value(self.args_schema) if self.args_schema else None,
+        )
+        object.__setattr__(self, "config", _freeze_container_value(self.config))
+        object.__setattr__(self, "_frozen", True)
+        object.__setattr__(self, "_allow_mutation", False)
+
+
+class AgentTemplateSection(BaseModel):
+    """Named static prompt template for an agent task (Spec: [AR-2.2])."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    prompt: str = Field(..., min_length=1)
+    instructions: str | None = None
+
+    def model_post_init(self, __context: Any) -> None:
+        super().model_post_init(__context)
+        object.__setattr__(self, "_allow_mutation", False)
+
+    @contextmanager
+    def _mutations_allowed(self) -> Iterator[None]:
+        object.__setattr__(self, "_allow_mutation", True)
+        try:
+            yield
+        finally:
+            object.__setattr__(self, "_allow_mutation", False)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Prevent modification if this instance is frozen."""
+        if name.startswith("_"):
+            super().__setattr__(name, value)
+            return
+        if getattr(self, "_frozen", False) and not getattr(
+            self, "_allow_mutation", False
+        ):
+            raise AttributeError(
+                f"Cannot modify field '{name}' on frozen AgentTemplateSection. "
+                "AgentTemplateSection is immutable after TaskSpec creation."
+            )
+        super().__setattr__(name, value)
+
+    def _freeze(self) -> None:
+        """Mark this instance as frozen."""
+        object.__setattr__(self, "_frozen", True)
+        object.__setattr__(self, "_allow_mutation", False)
+
+
+class AgentSection(BaseModel):
+    """Agent runtime configuration for agent tasks (Spec: [AR-2.2])."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    runtime: str = Field(..., min_length=1)
+    model: str | None = None
+    instructions: str | None = None
+    templates: dict[str, AgentTemplateSection] = Field(default_factory=dict)
+    tools: tuple[AgentToolSection, ...] = Field(default_factory=tuple)
+    output_mode: Literal["text", "json", "messages"] = "text"
+    output_schema: dict[str, Any] | str | None = None
+    max_turns: int = Field(20, gt=0)
+    options: dict[str, Any] = Field(default_factory=dict)
+    conversation_scope: Literal["per_message", "per_task"] = "per_message"
+    runtime_config: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_output_schema(self) -> AgentSection:
+        """Ensure output schema is only set for JSON output (Spec: [AR-2.2])."""
+        if self.output_schema is not None and self.output_mode != "json":
+            raise ValueError("output_schema is only allowed when output_mode is 'json'")
+        return self
+
+    def model_post_init(self, __context: Any) -> None:
+        super().model_post_init(__context)
+        object.__setattr__(self, "_allow_mutation", False)
+
+    @contextmanager
+    def _mutations_allowed(self) -> Iterator[None]:
+        object.__setattr__(self, "_allow_mutation", True)
+        try:
+            with ExitStack() as stack:
+                for tool in self.tools:
+                    if hasattr(tool, "_mutations_allowed"):
+                        stack.enter_context(tool._mutations_allowed())
+                for template in self.templates.values():
+                    if hasattr(template, "_mutations_allowed"):
+                        stack.enter_context(template._mutations_allowed())
+                yield
+        finally:
+            object.__setattr__(self, "_allow_mutation", False)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Prevent modification if this instance is frozen."""
+        if name.startswith("_"):
+            super().__setattr__(name, value)
+            return
+        if getattr(self, "_frozen", False) and not getattr(
+            self, "_allow_mutation", False
+        ):
+            raise AttributeError(
+                f"Cannot modify field '{name}' on frozen AgentSection. "
+                "AgentSection is immutable after TaskSpec creation."
+            )
+        super().__setattr__(name, value)
+
+    def _freeze(self) -> None:
+        """Mark this instance as frozen."""
+        for tool in self.tools:
+            if hasattr(tool, "_freeze"):
+                tool._freeze()
+        for template in self.templates.values():
+            if hasattr(template, "_freeze"):
+                template._freeze()
+        object.__setattr__(self, "templates", _freeze_container_value(self.templates))
+        object.__setattr__(self, "options", _freeze_container_value(self.options))
+        object.__setattr__(
+            self, "runtime_config", _freeze_container_value(self.runtime_config)
+        )
+        if isinstance(self.output_schema, dict | list | tuple):
+            object.__setattr__(
+                self, "output_schema", _freeze_container_value(self.output_schema)
+            )
+        object.__setattr__(self, "_frozen", True)
+        object.__setattr__(self, "_allow_mutation", False)
+
+
 class SpecSection(BaseModel):
     """Execution configuration (Spec: [CC-1], [TS-1])."""
 
-    type: Literal["function", "command"]
+    type: Literal["function", "command", "agent"]
+    persistent: bool = False
     function_target: str | None = None
     # Spec: process_target is a single executable path; args are appended. [TS-1]
     process_target: str | None = Field(default=None, min_length=1)
+    agent: AgentSection | None = None
     args: list[Any] = Field(default_factory=list)
     keyword_args: dict[str, Any] = Field(default_factory=dict)
     timeout: float | None = None
@@ -142,10 +522,31 @@ class SpecSection(BaseModel):
             raise ValueError("function_target is required when type is 'function'")
         if self.type == "command" and not self.process_target:
             raise ValueError("process_target is required when type is 'command'")
+        if self.type == "agent" and self.agent is None:
+            raise ValueError("agent is required when type is 'agent'")
         if self.type == "function" and self.process_target:
             raise ValueError("process_target should not be set when type is 'function'")
         if self.type == "command" and self.function_target:
             raise ValueError("function_target should not be set when type is 'command'")
+        if self.type == "function" and self.agent is not None:
+            raise ValueError("agent should not be set when type is 'function'")
+        if self.type == "command" and self.agent is not None:
+            raise ValueError("agent should not be set when type is 'command'")
+        if self.type == "agent" and self.function_target:
+            raise ValueError("function_target should not be set when type is 'agent'")
+        if self.type == "agent" and self.process_target:
+            raise ValueError("process_target should not be set when type is 'agent'")
+        if self.type == "agent" and self.interactive:
+            raise ValueError("interactive is not supported when type is 'agent'")
+        if (
+            self.type == "agent"
+            and self.agent is not None
+            and self.agent.conversation_scope == "per_task"
+            and not self.persistent
+        ):
+            raise ValueError(
+                "conversation_scope='per_task' requires spec.persistent=true"
+            )
         return self
 
     @field_validator("process_target")
@@ -167,10 +568,13 @@ class SpecSection(BaseModel):
     def _mutations_allowed(self) -> Iterator[None]:
         object.__setattr__(self, "_allow_mutation", True)
         try:
-            if hasattr(self, "limits") and hasattr(self.limits, "_mutations_allowed"):
-                with self.limits._mutations_allowed():
-                    yield
-            else:
+            with ExitStack() as stack:
+                if hasattr(self, "limits") and hasattr(
+                    self.limits, "_mutations_allowed"
+                ):
+                    stack.enter_context(self.limits._mutations_allowed())
+                if self.agent is not None and hasattr(self.agent, "_mutations_allowed"):
+                    stack.enter_context(self.agent._mutations_allowed())
                 yield
         finally:
             object.__setattr__(self, "_allow_mutation", False)
@@ -191,11 +595,20 @@ class SpecSection(BaseModel):
 
     def _freeze(self) -> None:
         """Mark this instance as frozen."""
-        object.__setattr__(self, "_frozen", True)
-        object.__setattr__(self, "_allow_mutation", False)
-        # Also freeze nested LimitsSection
         if hasattr(self.limits, "_freeze"):
             self.limits._freeze()
+        if self.agent is not None and hasattr(self.agent, "_freeze"):
+            self.agent._freeze()
+        object.__setattr__(self, "args", _freeze_container_value(self.args))
+        object.__setattr__(
+            self,
+            "keyword_args",
+            _freeze_container_value(self.keyword_args),
+        )
+        if self.env is not None:
+            object.__setattr__(self, "env", _freeze_container_value(self.env))
+        object.__setattr__(self, "_frozen", True)
+        object.__setattr__(self, "_allow_mutation", False)
 
 
 class IOSection(BaseModel):
@@ -249,6 +662,9 @@ class IOSection(BaseModel):
 
     def _freeze(self) -> None:
         """Mark this instance as frozen."""
+        object.__setattr__(self, "inputs", _freeze_container_value(self.inputs))
+        object.__setattr__(self, "outputs", _freeze_container_value(self.outputs))
+        object.__setattr__(self, "control", _freeze_container_value(self.control))
         object.__setattr__(self, "_frozen", True)
 
 
@@ -354,8 +770,9 @@ class TaskSpec(BaseModel):
     """Complete TaskSpec structure with validation (Spec: [CC-1], [TS-1]).
 
     Args (via model_validate or __init__):
-        auto_expand: If True (default), automatically calls apply_defaults() after initialization.
-            Set to False to skip automatic expansion.
+        auto_expand: If True (default), resolves defaults before model
+            construction for non-template TaskSpecs. Set to False to skip
+            resolved-task expansion.
     """
 
     tid: str | None = Field(
@@ -430,20 +847,31 @@ class TaskSpec(BaseModel):
         # This is here for documentation and could do additional cross-field validation
         return self
 
+    @model_validator(mode="before")
+    @classmethod
+    def prepare_payload(cls, data: Any, info: ValidationInfo) -> Any:
+        """Resolve defaults before model construction for resolved TaskSpecs."""
+        if isinstance(data, cls):
+            return data
+        if not isinstance(data, Mapping):
+            return data
+
+        context = info.context or {}
+        auto_expand = context.get("auto_expand", True)
+        if context.get("template") or not auto_expand:
+            return copy.deepcopy(dict(data))
+
+        return resolve_taskspec_payload(
+            data,
+            tid=context.get("resolved_tid"),
+            inherited_weft_context=context.get("inherited_weft_context"),
+        )
+
     def model_post_init(self, __context: Any) -> None:
         """Called after the model is initialized.
 
-        Automatically applies defaults unless auto_expand=False was passed,
-        then enforces partial immutability.
+        Enforces partial immutability after initialization.
         """
-        # Check if auto_expand was set in context (defaults to True)
-        auto_expand = __context.get("auto_expand", True) if __context else True
-        is_template = self.is_template()
-
-        # Apply defaults automatically unless disabled
-        if auto_expand and not is_template:
-            self.apply_defaults()
-
         # Enforce partial immutability after initialization
         self._freeze_spec()
 
@@ -514,74 +942,13 @@ class TaskSpec(BaseModel):
         return default_inputs, default_control
 
     def apply_defaults(self) -> None:
-        """Fully expand the TaskSpec with all default values per specification.
+        """Compatibility shim for older code paths.
 
-        This method ensures all fields have explicit values, even optional ones.
-        After calling this method:
-        - All REQUIRED fields will be present
-        - All OPTIONAL fields will have their default values if not already set
-        - The TaskSpec will be fully expanded and pass strict validation
-
-        Raises:
-            ValueError: If the TaskSpec does not pass strict validation after defaults are applied
+        Resolved TaskSpecs are expanded before construction. This method remains
+        only as an idempotent compatibility shim for existing callers.
         """
         if self.is_template():
             raise ValueError("cannot apply defaults to a template TaskSpec")
-        with self.spec._mutations_allowed():
-            # === Optimized Spec Section Defaults ===
-            # Use bulk update pattern for better performance
-            spec_defaults: dict[str, Any] = {
-                "args": [],
-                "keyword_args": {},
-                "timeout": DEFAULT_TIMEOUT,
-                "env": {},
-                "working_dir": None,
-            }
-
-            # Apply defaults in bulk - only if field is None
-            for field, default_value in spec_defaults.items():
-                if getattr(self.spec, field, None) is None:
-                    setattr(self.spec, field, default_value)
-
-            # === Limits Section Defaults ===
-            # Apply defaults to nested limits section - only apply non-None defaults
-            limits_defaults: dict[str, Any] = {
-                "memory_mb": DEFAULT_MEMORY_MB,
-                "cpu_percent": DEFAULT_CPU_PERCENT,
-                "max_fds": DEFAULT_MAX_FDS,
-                "max_connections": DEFAULT_MAX_CONNECTIONS,
-            }
-
-            for field, default_value in limits_defaults.items():
-                # Only set defaults if field is None AND default is not None
-                if (
-                    getattr(self.spec.limits, field, None) is None
-                    and default_value is not None
-                ):
-                    setattr(self.spec.limits, field, default_value)
-
-        # === IO Section Defaults ===
-        # Generate queue names if needed
-        tid_prefix = f"T{self.tid}"
-        queue_defaults = {
-            ("outputs", "outbox"): f"{tid_prefix}.{QUEUE_OUTBOX_SUFFIX}",
-            ("control", "ctrl_in"): f"{tid_prefix}.{QUEUE_CTRL_IN_SUFFIX}",
-            ("control", "ctrl_out"): f"{tid_prefix}.{QUEUE_CTRL_OUT_SUFFIX}",
-        }
-
-        for (section, queue_name), default_name in queue_defaults.items():
-            section_dict = getattr(self.io, section)
-            if queue_name not in section_dict:
-                section_dict[queue_name] = default_name
-
-        # === State Section ===
-        # State metrics remain None until measurements begin (documented decision)
-
-        # === Metadata Section ===
-        if self.metadata is None:
-            self.metadata = {}
-
-        # Validate that the TaskSpec now meets strict requirements
         self._validate_strict_requirements()
 
     def _validate_strict_requirements(self) -> None:
@@ -613,6 +980,8 @@ class TaskSpec(BaseModel):
                 )
             elif self.spec.type == "command" and not self.spec.process_target:
                 errors.append("spec.process_target is required when type is 'command'")
+            elif self.spec.type == "agent" and self.spec.agent is None:
+                errors.append("spec.agent is required when type is 'agent'")
 
         # Check io requirements - all are REQUIRED per spec
         if not hasattr(self, "io") or self.io is None:
@@ -657,7 +1026,7 @@ class TaskSpec(BaseModel):
 
         if errors:
             raise ValueError(
-                f"TaskSpec validation failed after apply_defaults: {'; '.join(errors)}"
+                f"TaskSpec validation failed after resolution: {'; '.join(errors)}"
             )
 
     model_config = {
@@ -943,37 +1312,6 @@ class TaskSpec(BaseModel):
         if self.metadata is None:
             return default
         return self.metadata.get(key, default)
-
-    # === Convenience Methods for Queue Management ===
-
-    def add_input_queue(self, name: str, queue_path: str) -> None:
-        """Add an input queue to the IO specification.
-
-        Args:
-            name: Queue name (e.g., "data", "config")
-            queue_path: Queue path (e.g., "T1234.data")
-        """
-        if self.io.inputs is None:
-            self.io.inputs = {}
-        self.io.inputs[name] = queue_path
-
-    def add_output_queue(self, name: str, queue_path: str) -> None:
-        """Add an output queue to the IO specification.
-
-        Args:
-            name: Queue name (e.g., "logs", "metrics")
-            queue_path: Queue path (e.g., "T1234.logs")
-
-        Raises:
-            ValueError: If trying to override the required "outbox" queue
-        """
-        if name == "outbox" and "outbox" in self.io.outputs:
-            if self.io.outputs["outbox"] != queue_path:
-                raise ValueError("Cannot override required 'outbox' queue")
-
-        if self.io.outputs is None:
-            self.io.outputs = {}
-        self.io.outputs[name] = queue_path
 
     def get_queue_path(self, queue_type: str, queue_name: str) -> str | None:
         """Get the path for a specific queue.

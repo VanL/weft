@@ -13,8 +13,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, cast
 
-from simplebroker import Queue
-from simplebroker.db import BrokerDB
+from simplebroker import Queue, serialize_broker_target
 from weft._constants import (
     QUEUE_CTRL_IN_SUFFIX,
     QUEUE_CTRL_OUT_SUFFIX,
@@ -27,7 +26,7 @@ from weft.core.taskspec import TaskSpec
 
 
 def _generate_tid(context: WeftContext) -> str:
-    with BrokerDB(str(context.database_path)) as db:
+    with context.broker() as db:
         return str(db.generate_timestamp())
 
 
@@ -64,7 +63,7 @@ def _wait_for_registry(
 ) -> dict[str, Any] | None:
     queue = Queue(
         WEFT_WORKERS_REGISTRY_QUEUE,
-        db_path=str(context.database_path),
+        db_path=context.broker_target,
         persistent=False,
         config=context.broker_config,
     )
@@ -100,7 +99,11 @@ def _spawn_manager_subprocess(
     verbose: bool,
 ) -> subprocess.Popen[bytes]:
     spec_json = spec.model_dump_json()
+    broker_target_json = serialize_broker_target(context.broker_target)
     config_json = json.dumps(context.config)
+    broker_target_b64 = base64.b64encode(broker_target_json.encode("utf-8")).decode(
+        "ascii"
+    )
     spec_b64 = base64.b64encode(spec_json.encode("utf-8")).decode("ascii")
     config_b64 = base64.b64encode(config_json.encode("utf-8")).decode("ascii")
 
@@ -109,7 +112,7 @@ def _spawn_manager_subprocess(
         "-m",
         "weft.manager_process",
         "weft.core.manager.Manager",
-        str(context.database_path),
+        broker_target_b64,
         spec_b64,
         config_b64,
         "0.05",
@@ -171,7 +174,7 @@ def main(argv: list[str] | None = None) -> int:
         print("  Registry status: <unconfirmed>")
 
     if args.verbose:
-        print(f"  Database: {context.database_path}")
+        print(f"  Database: {context.broker_display_target}")
         print(f"  Context root: {context.root}")
 
     print("exiting")

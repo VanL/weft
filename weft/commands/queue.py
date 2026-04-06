@@ -21,8 +21,8 @@ from typing import Any, cast
 
 from simplebroker import commands as sb_commands
 from simplebroker._timestamp import TimestampGenerator
-from simplebroker.db import BrokerDB
 from weft.context import WeftContext, build_context
+from weft.helpers import resolve_broker_max_message_size, resolve_cli_message_content
 
 
 @dataclass
@@ -80,6 +80,14 @@ def _run_simplebroker_command(
     return exit_code, stdout.getvalue(), stderr.getvalue()
 
 
+def _resolve_message_content(
+    ctx: WeftContext,
+    message: str | None,
+) -> str:
+    max_bytes = resolve_broker_max_message_size(ctx.config)
+    return resolve_cli_message_content(message, max_bytes=max_bytes)
+
+
 def read_messages(
     ctx: WeftContext,
     queue_name: str,
@@ -88,35 +96,40 @@ def read_messages(
     with_timestamps: bool = False,
 ) -> list[QueueMessage]:
     queue = ctx.queue(queue_name, persistent=True)
+    try:
+        messages: list[QueueMessage] = []
 
-    messages: list[QueueMessage] = []
-
-    if all_messages:
-        iterator = queue.read_generator(with_timestamps=with_timestamps)
-        for item in iterator:
+        if all_messages:
+            iterator = queue.read_generator(with_timestamps=with_timestamps)
+            for item in iterator:
+                if with_timestamps:
+                    body, timestamp = cast(tuple[str, int], item)
+                    messages.append(QueueMessage(str(body), int(timestamp)))
+                else:
+                    text = cast(str, item)
+                    messages.append(QueueMessage(text))
+        else:
+            single_item = queue.read_one(with_timestamps=with_timestamps)
+            if single_item is None:
+                return []
             if with_timestamps:
-                body, timestamp = cast(tuple[str, int], item)
+                body, timestamp = cast(tuple[str, int], single_item)
                 messages.append(QueueMessage(str(body), int(timestamp)))
             else:
-                text = cast(str, item)
+                text = cast(str, single_item)
                 messages.append(QueueMessage(text))
-    else:
-        single_item = queue.read_one(with_timestamps=with_timestamps)
-        if single_item is None:
-            return []
-        if with_timestamps:
-            body, timestamp = cast(tuple[str, int], single_item)
-            messages.append(QueueMessage(str(body), int(timestamp)))
-        else:
-            text = cast(str, single_item)
-            messages.append(QueueMessage(text))
 
-    return messages
+        return messages
+    finally:
+        queue.close()
 
 
 def write_message(ctx: WeftContext, queue_name: str, message: str) -> None:
     queue = ctx.queue(queue_name, persistent=True)
-    queue.write(message)
+    try:
+        queue.write(message)
+    finally:
+        queue.close()
 
 
 def peek_messages(
@@ -127,29 +140,32 @@ def peek_messages(
     with_timestamps: bool = False,
 ) -> list[QueueMessage]:
     queue = ctx.queue(queue_name, persistent=True)
-    messages: list[QueueMessage] = []
+    try:
+        messages: list[QueueMessage] = []
 
-    if all_messages:
-        iterator = queue.peek_generator(with_timestamps=with_timestamps)
-        for item in iterator:
+        if all_messages:
+            iterator = queue.peek_generator(with_timestamps=with_timestamps)
+            for item in iterator:
+                if with_timestamps:
+                    body, timestamp = cast(tuple[str, int], item)
+                    messages.append(QueueMessage(str(body), int(timestamp)))
+                else:
+                    text = cast(str, item)
+                    messages.append(QueueMessage(text))
+        else:
+            single_item = queue.peek_one(with_timestamps=with_timestamps)
+            if single_item is None:
+                return []
             if with_timestamps:
-                body, timestamp = cast(tuple[str, int], item)
+                body, timestamp = cast(tuple[str, int], single_item)
                 messages.append(QueueMessage(str(body), int(timestamp)))
             else:
-                text = cast(str, item)
+                text = cast(str, single_item)
                 messages.append(QueueMessage(text))
-    else:
-        single_item = queue.peek_one(with_timestamps=with_timestamps)
-        if single_item is None:
-            return []
-        if with_timestamps:
-            body, timestamp = cast(tuple[str, int], single_item)
-            messages.append(QueueMessage(str(body), int(timestamp)))
-        else:
-            text = cast(str, single_item)
-            messages.append(QueueMessage(text))
 
-    return messages
+        return messages
+    finally:
+        queue.close()
 
 
 def move_messages(
@@ -160,12 +176,15 @@ def move_messages(
     limit: int | None = None,
 ) -> int:
     src_queue = ctx.queue(source, persistent=True)
-    moved = src_queue.move_many(
-        destination,
-        limit=limit or 1000,
-        with_timestamps=False,
-    )
-    return len(moved)
+    try:
+        moved = src_queue.move_many(
+            destination,
+            limit=limit or 1000,
+            with_timestamps=False,
+        )
+        return len(moved)
+    finally:
+        src_queue.close()
 
 
 def list_queues(
@@ -175,7 +194,7 @@ def list_queues(
     pattern: str | None = None,
 ) -> list[QueueInfo]:
     queues: list[QueueInfo] = []
-    with BrokerDB(str(ctx.database_path)) as db:
+    with ctx.broker() as db:
         stats = db.get_queue_stats()
 
     for name, unclaimed, total in stats:
@@ -211,44 +230,48 @@ def watch_queue(
     move_to: str | None = None,
 ) -> Iterator[QueueMessage]:
     queue = ctx.queue(queue_name, persistent=True)
-    emitted = 0
-    last_timestamp = since
+    try:
+        emitted = 0
+        last_timestamp = since
 
-    while max_messages is None or emitted < max_messages:
-        if move_to:
-            generator = queue.move_generator(
-                move_to,
-                with_timestamps=True,
-                since_timestamp=last_timestamp,
-            )
-        elif peek:
-            generator = queue.peek_generator(
-                with_timestamps=True,
-                since_timestamp=last_timestamp,
-            )
-        else:
-            generator = queue.read_generator(
-                with_timestamps=True,
-                since_timestamp=last_timestamp,
-            )
+        while max_messages is None or emitted < max_messages:
+            if move_to:
+                generator = queue.move_generator(
+                    move_to,
+                    with_timestamps=True,
+                    since_timestamp=last_timestamp,
+                )
+            elif peek:
+                generator = queue.peek_generator(
+                    with_timestamps=True,
+                    since_timestamp=last_timestamp,
+                )
+            else:
+                generator = queue.read_generator(
+                    with_timestamps=True,
+                    since_timestamp=last_timestamp,
+                )
 
-        found = False
-        for item in generator:
-            body, timestamp = cast(tuple[Any, Any], item)
-            found = True
-            last_timestamp = int(timestamp)
-            emitted += 1
-            yield QueueMessage(
-                str(body), int(timestamp) if with_timestamps or json_output else None
-            )
+            found = False
+            for item in generator:
+                body, timestamp = cast(tuple[Any, Any], item)
+                found = True
+                last_timestamp = int(timestamp)
+                emitted += 1
+                yield QueueMessage(
+                    str(body),
+                    int(timestamp) if with_timestamps or json_output else None,
+                )
+                if max_messages is not None and emitted >= max_messages:
+                    break
+
             if max_messages is not None and emitted >= max_messages:
                 break
 
-        if max_messages is not None and emitted >= max_messages:
-            break
-
-        if not found:
-            time.sleep(interval)
+            if not found:
+                time.sleep(interval)
+    finally:
+        queue.close()
 
 
 def read_command(
@@ -264,7 +287,7 @@ def read_command(
     ctx = _context(spec_context)
     return _run_simplebroker_command(
         sb_commands.cmd_read,
-        str(ctx.database_path),
+        ctx.broker_target,
         queue_name,
         all_messages=all_messages,
         json_output=json_output,
@@ -276,9 +299,12 @@ def read_command(
 
 def write_command(queue_name: str, message: str | None) -> tuple[int, str, str]:
     ctx = _context()
-    payload = message if message is not None else "-"
+    try:
+        content = _resolve_message_content(ctx, message)
+    except ValueError as exc:
+        return 1, "", str(exc)
     return _run_simplebroker_command(
-        sb_commands.cmd_write, str(ctx.database_path), queue_name, payload
+        sb_commands.cmd_write, ctx.broker_target, queue_name, content
     )
 
 
@@ -295,7 +321,7 @@ def peek_command(
     ctx = _context(spec_context)
     return _run_simplebroker_command(
         sb_commands.cmd_peek,
-        str(ctx.database_path),
+        ctx.broker_target,
         queue_name,
         all_messages=all_messages,
         json_output=json_output,
@@ -330,30 +356,33 @@ def move_command(
 
         if json_output or with_timestamps:
             dest_queue = ctx.queue(destination_queue, persistent=True)
-            iterator = dest_queue.peek_generator(with_timestamps=True)
-            payload_lines: list[str] = []
-            count = 0
-            for item in iterator:
-                body, timestamp = cast(tuple[Any, Any], item)
-                if json_output:
-                    payload_lines.append(
-                        json.dumps(
-                            {"message": body, "timestamp": timestamp},
-                            ensure_ascii=False,
+            try:
+                iterator = dest_queue.peek_generator(with_timestamps=True)
+                payload_lines: list[str] = []
+                count = 0
+                for item in iterator:
+                    body, timestamp = cast(tuple[Any, Any], item)
+                    if json_output:
+                        payload_lines.append(
+                            json.dumps(
+                                {"message": body, "timestamp": timestamp},
+                                ensure_ascii=False,
+                            )
                         )
-                    )
-                elif with_timestamps:
-                    payload_lines.append(f"{timestamp}\t{body}")
-                count += 1
-                if count >= moved:
-                    break
+                    elif with_timestamps:
+                        payload_lines.append(f"{timestamp}\t{body}")
+                    count += 1
+                    if count >= moved:
+                        break
+            finally:
+                dest_queue.close()
             lines.append("\n".join(payload_lines))
 
         return 0, "\n".join(filter(None, lines)), ""
 
     return _run_simplebroker_command(
         sb_commands.cmd_move,
-        str(ctx.database_path),
+        ctx.broker_target,
         source_queue,
         destination_queue,
         all_messages=all_messages,
@@ -383,7 +412,7 @@ def list_command(
 
     return _run_simplebroker_command(
         sb_commands.cmd_list,
-        str(ctx.database_path),
+        ctx.broker_target,
         show_stats=stats,
         pattern=pattern,
     )
@@ -400,7 +429,7 @@ def delete_command(
     target_queue = None if delete_all else queue_name
     return _run_simplebroker_command(
         sb_commands.cmd_delete,
-        str(ctx.database_path),
+        ctx.broker_target,
         target_queue,
         message_id_str=message_id,
     )
@@ -413,9 +442,12 @@ def broadcast_command(
     spec_context: str | None = None,
 ) -> tuple[int, str, str]:
     ctx = _context(spec_context)
-    payload = message if message is not None else "-"
+    try:
+        content = _resolve_message_content(ctx, message)
+    except ValueError as exc:
+        return 1, "", str(exc)
     return _run_simplebroker_command(
-        sb_commands.cmd_broadcast, str(ctx.database_path), payload, pattern=pattern
+        sb_commands.cmd_broadcast, ctx.broker_target, content, pattern=pattern
     )
 
 
@@ -436,7 +468,7 @@ def watch_command(
 
     if limit is None:
         exit_code = sb_commands.cmd_watch(
-            str(ctx.database_path),
+            ctx.broker_target,
             queue_name,
             peek=peek,
             json_output=json_output,
@@ -494,7 +526,7 @@ def alias_add_command(
     ctx = _context(spec_context)
     return _run_simplebroker_command(
         sb_commands.cmd_alias_add,
-        str(ctx.database_path),
+        ctx.broker_target,
         alias,
         target,
         quiet=quiet,
@@ -509,7 +541,7 @@ def alias_list_command(
     ctx = _context(spec_context)
     return _run_simplebroker_command(
         sb_commands.cmd_alias_list,
-        str(ctx.database_path),
+        ctx.broker_target,
         target=target,
     )
 
@@ -522,7 +554,7 @@ def alias_remove_command(
     ctx = _context(spec_context)
     return _run_simplebroker_command(
         sb_commands.cmd_alias_remove,
-        str(ctx.database_path),
+        ctx.broker_target,
         alias,
     )
 

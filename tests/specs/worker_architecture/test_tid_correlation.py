@@ -4,16 +4,20 @@ from __future__ import annotations
 
 import json
 
-from simplebroker import Queue
+import pytest
 
+from tests.helpers.test_backend import prepare_project_root
 from weft._constants import WEFT_SPAWN_REQUESTS_QUEUE
 from weft.commands import run as run_cmd
 from weft.context import build_context
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 
+pytestmark = [pytest.mark.shared]
+
 
 def test_spawn_request_timestamp_matches_tid(tmp_path) -> None:
-    context = build_context(spec_context=tmp_path)
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
     tid = run_cmd._generate_tid(context)
 
     taskspec = TaskSpec(
@@ -33,12 +37,7 @@ def test_spawn_request_timestamp_matches_tid(tmp_path) -> None:
     manager_record = {"requests": WEFT_SPAWN_REQUESTS_QUEUE}
     run_cmd._enqueue_taskspec(context, manager_record, taskspec, None)
 
-    queue = Queue(
-        WEFT_SPAWN_REQUESTS_QUEUE,
-        db_path=str(context.database_path),
-        persistent=True,
-        config=context.broker_config,
-    )
+    queue = context.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=True)
     payload, timestamp = queue.read_one(with_timestamps=True)
     assert isinstance(payload, str)
     assert json.loads(payload)["taskspec"]["tid"] == tid

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
@@ -33,6 +34,7 @@ class InteractiveTaskMixin(ABC):
     _interactive_stdout_final_sent: bool
     _interactive_stderr_final_sent: bool
     _interactive_total_stdout_bytes: int
+    _stop_event: threading.Event
 
     @property
     @abstractmethod
@@ -87,6 +89,34 @@ class InteractiveTaskMixin(ABC):
     @abstractmethod
     def _end_streaming_session(self) -> None:  # pragma: no cover - interface definition
         """Record that a streaming session has completed."""
+
+    @abstractmethod
+    def _apply_reserved_policy(
+        self,
+        policy: ReservedPolicy,
+        message_timestamp: int | None = None,
+    ) -> None:  # pragma: no cover - interface definition
+        """Apply reserved-queue cleanup policy."""
+
+    @abstractmethod
+    def _ensure_reserved_empty(self) -> None:  # pragma: no cover - interface definition
+        """Ensure the reserved queue does not retain stale work."""
+
+    @abstractmethod
+    def _cleanup_reserved_if_needed(
+        self,
+    ) -> None:  # pragma: no cover - interface definition
+        """Perform post-policy reserved-queue cleanup."""
+
+    @abstractmethod
+    def _send_control_response(
+        self,
+        command: str,
+        status: str,
+        /,
+        **extra: Any,
+    ) -> None:  # pragma: no cover - interface definition
+        """Publish a control response on the task control channel."""
 
     # ------------------------------------------------------------------
     # Initialisation
@@ -151,8 +181,14 @@ class InteractiveTaskMixin(ABC):
 
         runner = TaskRunner(
             target_type=self.taskspec.spec.type,
+            tid=self.taskspec.tid,
             function_target=self.taskspec.spec.function_target,
             process_target=self.taskspec.spec.process_target,
+            agent=(
+                self.taskspec.spec.agent.model_dump(mode="python")
+                if self.taskspec.spec.agent is not None
+                else None
+            ),
             args=getattr(self.taskspec.spec, "args", None),
             kwargs=getattr(self.taskspec.spec, "keyword_args", None),
             env=self.taskspec.spec.env or {},

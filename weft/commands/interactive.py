@@ -18,7 +18,7 @@ import threading
 from collections.abc import Callable
 from typing import Any, cast
 
-from simplebroker import Queue
+from simplebroker import BrokerTarget, Queue
 from weft._constants import WEFT_GLOBAL_LOG_QUEUE
 from weft.core.tasks.multiqueue_watcher import (
     MultiQueueWatcher,
@@ -45,7 +45,7 @@ class InteractiveStreamClient:
     def __init__(
         self,
         *,
-        db_path: str,
+        db_path: BrokerTarget | str,
         config: dict[str, Any],
         tid: str,
         inbox: str,

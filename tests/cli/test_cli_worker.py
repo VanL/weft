@@ -5,16 +5,21 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from tests.conftest import run_cli
+from tests.helpers.test_backend import prepare_project_root
 from weft._constants import WEFT_TID_MAPPINGS_QUEUE
 from weft.context import build_context
+
+pytestmark = [pytest.mark.shared]
 
 
 def _write_worker_spec(
     workdir: Path, *, auto_stop: bool = True
 ) -> tuple[Path, str, Path]:
     tid = "1761000000000000000"
-    context_root = workdir / "worker-project"
+    context_root = prepare_project_root(workdir / "worker-project")
     context = build_context(spec_context=context_root)
 
     spec = {
@@ -97,7 +102,7 @@ def test_worker_start_and_status(workdir):
 
 
 def test_worker_stop_missing_tid(workdir):
-    context_root = workdir / "missing-worker"
+    context_root = prepare_project_root(workdir / "missing-worker")
     build_context(spec_context=context_root)
 
     rc, out, err = run_cli(
@@ -116,7 +121,7 @@ def test_worker_stop_missing_tid(workdir):
 
 
 def test_worker_list_empty(workdir):
-    context_root = workdir / "empty-worker"
+    context_root = prepare_project_root(workdir / "empty-worker")
     build_context(spec_context=context_root)
 
     rc, out, err = run_cli(
@@ -132,7 +137,7 @@ def test_worker_list_empty(workdir):
 
 
 def test_worker_status_missing(workdir):
-    context_root = workdir / "status-worker"
+    context_root = prepare_project_root(workdir / "status-worker")
     build_context(spec_context=context_root)
 
     rc, out, err = run_cli(
@@ -149,7 +154,7 @@ def test_worker_status_missing(workdir):
 
 
 def test_worker_force_stop_missing_pid_record(workdir):
-    context_root = workdir / "force-worker"
+    context_root = prepare_project_root(workdir / "force-worker")
     context = build_context(spec_context=context_root)
     tid = "1761000000000000001"
 

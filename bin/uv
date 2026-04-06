@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+PATH_WITHOUT_SELF="$(
+  python3 - <<'PY' "$SCRIPT_DIR"
+import os
+import sys
+
+script_dir = os.path.realpath(sys.argv[1])
+parts = []
+for entry in os.environ.get("PATH", "").split(os.pathsep):
+    if not entry:
+        continue
+    real_entry = os.path.realpath(entry)
+    if real_entry == script_dir:
+        continue
+    parts.append(entry)
+print(os.pathsep.join(parts))
+PY
+)"
+
+export UV_PROJECT_ENVIRONMENT="$PROJECT_ROOT/.venv"
+export PATH="$PATH_WITHOUT_SELF"
+
+exec uv "$@"

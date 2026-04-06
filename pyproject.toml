@@ -33,7 +33,8 @@ dependencies = [
     "pydantic>=2.0.0",
     "rich>=14.0.0",
     "setproctitle>=1.3.7",
-    "simplebroker>=2.5.1",
+    "simplebroker>=3.1.2",
+    "simplebroker-pg>=1.0.0",
     "typer>=0.16.0",
     "typing-extensions>=4.0.0",
 ]
@@ -78,6 +79,8 @@ testpaths = ["tests"]
 addopts = "-ra -q --strict-markers -m 'not slow' -n auto --dist loadgroup"
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "shared: backend-agnostic tests that should pass across supported backends",
+    "sqlite_only: tests that intentionally validate SQLite/file-backed behavior",
 ]
 
 [tool.mypy]
@@ -92,23 +95,7 @@ no_implicit_optional = true
 warn_redundant_casts = true
 warn_unused_ignores = true
 plugins = ["pydantic.mypy"]
-exclude = "(^tests/|^simplebroker/(tests|examples)/)"
-
-[[tool.mypy.overrides]]
-module = "tests.*"
-ignore_errors = true
-
-[[tool.mypy.overrides]]
-module = "simplebroker.*"
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = "simplebroker.tests.*"
-ignore_errors = true
-
-[[tool.mypy.overrides]]
-module = "simplebroker.examples.*"
-ignore_errors = true
+exclude = "(^tests/)"
 
 [[tool.mypy.overrides]]
 module = "setproctitle"

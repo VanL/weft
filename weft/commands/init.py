@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from simplebroker import target_for_directory
 from simplebroker.commands import cmd_init as sb_cmd_init
 from weft._constants import EXIT_ERROR, EXIT_SUCCESS, load_config
 from weft.context import build_context
@@ -19,23 +20,24 @@ def cmd_init(
     (``.weft/`` directories, config metadata, database) is ensured.
     """
     config = load_config()
-    default_db_name = config.get("BROKER_DEFAULT_DB_NAME")
-    if not default_db_name:
+    root = Path(directory or Path.cwd()).expanduser().resolve()
+    backend_name = str(config.get("BROKER_BACKEND", "sqlite")).strip().lower()
+    if (
+        backend_name == "sqlite"
+        and
+        not config.get("BROKER_DEFAULT_DB_NAME")
+        and not (root / ".simplebroker.toml").is_file()
+    ):
         if not quiet:
             print(
                 "weft: BROKER_DEFAULT_DB_NAME not set in global config; cannot initialize project",
                 file=sys.stderr,
             )
         return EXIT_ERROR
-
-    root = Path(directory or Path.cwd()).expanduser().resolve()
-
-    db_path = Path(default_db_name)
-    if not db_path.is_absolute():
-        db_path = (root / db_path).resolve()
+    broker_target = target_for_directory(root, config=config)
 
     try:
-        result = int(sb_cmd_init(str(db_path), quiet=quiet))
+        result = int(sb_cmd_init(broker_target, quiet=quiet))
     except Exception as exc:  # pragma: no cover - defensive
         if not quiet:
             print(

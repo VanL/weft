@@ -18,12 +18,11 @@ import logging
 import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, cast
 
-from simplebroker import Queue
-from simplebroker.db import BrokerDB
+from simplebroker import BrokerTarget, Queue, target_for_directory
 from simplebroker.watcher import (
     BaseWatcher,
     PollingStrategy,
@@ -34,7 +33,7 @@ from weft._constants import load_config
 logger = logging.getLogger(__name__)
 
 
-class QueueMode(str, Enum):
+class QueueMode(StrEnum):
     """Supported queue processing behaviours (Spec: [CC-2.1])."""
 
     READ = "read"
@@ -65,10 +64,13 @@ class QueueRuntimeConfig:
     reserved_queue_name: str | None = None
 
 
-def _resolve_db_path(db: BrokerDB | str | Path | None, fallback: str) -> str:
-    """Derive a database path shared across Queue instances (Spec: [SB-0.1], [SB-0.4])."""
-    if isinstance(db, BrokerDB):
-        return str(db.db_path)
+def _resolve_db_target(
+    db: BrokerTarget | str | Path | None,
+    fallback: BrokerTarget,
+) -> BrokerTarget | str:
+    """Derive a broker target shared across Queue instances."""
+    if isinstance(db, BrokerTarget):
+        return db
     if isinstance(db, (str, Path)):
         return str(db)
     return fallback
@@ -81,7 +83,7 @@ class MultiQueueWatcher(BaseWatcher):
         self,
         queue_configs: Mapping[str, Mapping[str, object]],
         *,
-        db: BrokerDB | str | Path | None = None,
+        db: BrokerTarget | str | Path | None = None,
         stop_event: threading.Event | None = None,
         persistent: bool = True,
         polling_strategy: PollingStrategy | None = None,
@@ -99,7 +101,7 @@ class MultiQueueWatcher(BaseWatcher):
                 - handler (callable): required, signature (message, timestamp, context)
                 - mode (QueueMode or str): optional, defaults to QueueMode.READ
                 - error_handler (callable): optional override per queue
-            db: BrokerDB instance or filesystem path to the SQLite database
+            db: Explicit broker target or filesystem path for the watched queues
             stop_event: Event used to signal watcher shutdown
             persistent: Whether queues should be persistent
             polling_strategy: Optional SimpleBroker polling strategy override
@@ -127,11 +129,15 @@ class MultiQueueWatcher(BaseWatcher):
         self._handler: Callable[[str, int], None] | None = None
         self._error_handler: Callable[[Exception, str, int], bool | None] | None = None
 
-        # Establish primary queue and shared database path
+        # Establish primary queue and shared broker target
         first_queue_name = next(iter(queue_configs.keys()))
+        shared_target = _resolve_db_target(
+            db,
+            target_for_directory(Path.cwd(), config=self._config),
+        )
         initial_queue = Queue(
             first_queue_name,
-            db_path=_resolve_db_path(db, "broker.db"),
+            db_path=shared_target,
             persistent=persistent,
             config=self._config,
         )
@@ -143,12 +149,7 @@ class MultiQueueWatcher(BaseWatcher):
             config=self._config,
         )
 
-        db_path_obj = getattr(initial_queue, "_db_path", None)
-        if db_path_obj is not None:
-            db_path = str(db_path_obj)
-        else:
-            db_path = _resolve_db_path(db, "broker.db")
-        self._db_path = db_path
+        self._db_path = initial_queue.db_target
 
         # Build runtime configs for each queue
         self._queues: dict[str, QueueRuntimeConfig] = {}
@@ -173,7 +174,7 @@ class MultiQueueWatcher(BaseWatcher):
                 if queue_name == first_queue_name
                 else Queue(
                     queue_name,
-                    db_path=db_path,
+                    db_path=self._db_path,
                     persistent=persistent,
                     config=self._config,
                 )

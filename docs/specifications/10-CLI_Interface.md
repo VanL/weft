@@ -4,7 +4,15 @@
 
 The Weft CLI follows SimpleBroker's design philosophy: simple, intuitive commands that work with Unix pipes and require zero configuration. The CLI provides straightforward access to task management, queue operations, and system monitoring.
 
-_Implementation snapshot_: Current code implements queue helpers (`weft/commands/queue.py`), task submission via `weft run` (`weft/commands/run.py`), status/list/result reporting, spec/task/system management, and sequential pipeline execution. Task submission always flows through SimpleBroker queues: the CLI **Client** builds a validated TaskSpec template, enqueues it for the Manager, and the spawn-request message ID becomes the task TID. The Client can optionally wait for completion by watching the task log/outbox queues.
+_Implementation snapshot_: Current code implements queue helpers
+(`weft/commands/queue.py`), task submission via `weft run`
+(`weft/commands/run.py`), status/list/result reporting, spec/task/system
+management, and sequential pipeline execution. Task submission always flows
+through SimpleBroker queues: the CLI **Client** builds a validated TaskSpec
+template, enqueues it for the Manager, and the spawn-request message ID becomes
+the task TID. The Client can optionally wait for completion by watching the
+task log/outbox queues. `weft run --spec` also supports `spec.type="agent"`
+TaskSpecs in the current MVP.
 
 _Implementation mapping_: `weft/cli.py` (command registration), `weft/commands/run.py`, `weft/commands/status.py`, `weft/commands/result.py`, `weft/commands/queue.py`, `weft/commands/worker.py`, `weft/commands/tasks.py`, `weft/commands/specs.py`, `weft/commands/init.py`, `weft/commands/dump.py`, `weft/commands/load.py`, `weft/commands/tidy.py`, `weft/commands/validate_taskspec.py` (spec validate).
 
@@ -12,7 +20,8 @@ _Implemented commands_: `init`, `run`, `status`, `result`, `list`, `queue *`, `w
 
 ## Design Principles [CLI-0.1]
 
-1. **Zero Configuration** - Works immediately with `.weft/broker.db` in the project root
+1. **Zero Configuration** - Works immediately with the default broker target for the
+   project (`.weft/broker.db` on SQLite, project-configured target on other backends)
 2. **Simple Verbs** - Use familiar commands: run, status, result, list
 3. **Pipe-Friendly** - Input/output works with standard Unix tools
 4. **JSON Safety** - All commands support `--json` for safe handling
@@ -34,7 +43,7 @@ weft [global-options] system <subcommand> [arguments]
 | Option | Description |
 |--------|-------------|
 | `-d, --dir PATH` | Use PATH as the project root (where `.weft/` lives) |
-| `-f, --file NAME` | Database filename (default: `.weft/broker.db`) |
+| `-f, --file NAME` | SQLite database filename (default: `.weft/broker.db`) |
 | `-q, --quiet` | Suppress non-error output |
 | `--cleanup` | Delete database and exit |
 | `--vacuum` | Clean up completed tasks and exit |
@@ -65,11 +74,16 @@ weft run --spec git-clone
 # Run from JSON spec
 weft run --spec task.json
 
+# Run an agent TaskSpec from disk
+weft run --spec review-agent.json
+
 # Run a Python function
 weft run --function mymodule:process_data --arg input.csv --kw mode=fast
 
-# Pipe input
-echo "data" | weft run process -
+# Pipe raw stdin into the initial task input
+echo "data" | weft run -- python process.py
+echo "data" | weft run --spec task.json
+echo "data" | weft run --pipeline etl-job
 
 # With timeout
 weft run --timeout 30 long-task
@@ -96,6 +110,19 @@ weft run --memory 512 --cpu 50 heavy-task
 command arguments. `weft run` selects exactly one execution target. When
 invoking `--function`, `--arg`/`--kw` may be repeated and can be interleaved;
 `--arg` values preserve order, `--kw` values merge into a dict (last write wins).
+Agent execution is currently available only through TaskSpecs loaded by
+`--spec` (stored or JSON). The current implementation supports `llm` runtime,
+Python tools only, `output_mode` values `text`/`json`/`messages`, and
+persistent tasks when `spec.persistent=true`.
+
+**Piped stdin**
+- When stdin is not a TTY, `weft run` reads it once and treats it as the initial task input.
+- Inline command targets receive piped stdin as command stdin.
+- Inline function targets receive piped stdin as the initial work item (raw text, not auto-parsed JSON).
+- `weft run --spec` applies the same mapping based on `spec.type`.
+- `weft run --pipeline` uses piped stdin as the first stage input only when `--input` is absent.
+- `--input` and piped stdin are mutually exclusive for pipelines.
+- Piped stdin is limited by the active broker max-message-size setting.
 
 **Resolution rules for NAME|PATH**
 1. If the argument contains a path separator (`/`, `./`, `../`, `~`) or ends
@@ -201,6 +228,11 @@ weft result T1837025672140161024 --json
 
 When `--all` is provided, the CLI enumerates task outbox queues and filters out any queues that are still listed in `weft.state.streaming` (Implementation: `weft/commands/result.py` `_collect_all_results`).
 
+For agent tasks, public outbox payloads remain plain strings or JSON values.
+`weft result TID` does not require a public wrapper format. For persistent
+tasks it uses `work_item_completed` log events to return the next completed
+batch of outbox payloads for that task.
+
 #### `list` - List tasks
 
 ```bash
@@ -275,6 +307,7 @@ weft queue read T1837025672140161024.inbox
 
 # Write to queue
 weft queue write T1837025672140161024.ctrl_in "STOP"
+printf "STOP" | weft queue write T1837025672140161024.ctrl_in
 
 # Peek at queue
 weft queue peek T1837025672140161024.reserved
@@ -290,6 +323,7 @@ weft queue watch T1837025672140161024.outbox
 
 # Broadcast to matching queues using fnmatch-style pattern
 weft queue broadcast STOP --pattern 'T*.ctrl_in'
+printf "STOP" | weft queue broadcast --pattern 'T*.ctrl_in'
 
 # Manage aliases for pipeline wiring
 weft queue alias add agent1.outbox T1837025672140161024.outbox
@@ -300,6 +334,7 @@ weft queue alias remove agent1.outbox
 
 **Notes:**
 - Queue commands delegate directly to SimpleBroker's Queue API while respecting Weft context discovery.
+- `queue write` and `queue broadcast` accept either an explicit message, `-`, or omitted message content from piped stdin. Omitting the message while stdin is a TTY is an error.
 - Broadcast patterns apply to canonical queue names (`T*.ctrl_in`). Use `@alias` when invoking other commands to resolve-friendly names first.
 - Alias commands create durable mappings so multiple agents can rendezvous on a shared queue without extra move steps.
 
@@ -484,7 +519,7 @@ area minimal.
 System dumps exclude `weft.state.*` queues by default (runtime-only state).
 
 ```bash
-# Compact the broker database
+# Compact the active broker using backend-native maintenance
 weft system tidy
 
 # Dump broker state
@@ -494,8 +529,15 @@ weft system dump --output weft.dump
 weft system load --input weft.dump
 ```
 
+`system tidy` delegates compaction to the active SimpleBroker backend for the
+resolved context.
+
 **Exit codes:** `system load` returns `3` on alias conflicts (existing alias points
 to a different target) so callers can distinguish conflicts from general errors.
+Conflict detection happens before any writes begin. For file-backed sqlite
+contexts, `system load` uses a snapshot rollback on apply failure. For non-file
+backends, an apply-phase failure after writes begin is reported as a possible
+partial import.
 
 ## Example Workflows
 
@@ -513,8 +555,8 @@ Hello, World!
 ### Pipeline Processing
 
 ```bash
-# Process log files
-$ cat access.log | weft run parse-log - | weft run analyze -
+# Process piped stdin through sequential pipeline stages
+$ cat access.log | weft run --pipeline log-analysis
 T1837025672140161025
 
 $ weft result T1837025672140161025 --json
@@ -762,6 +804,10 @@ The Weft CLI provides a complete interface for task management that:
 - Supports both simple and complex workflows
 
 The CLI follows SimpleBroker's command patterns and integrates with standard Unix commands. It supports both simple interactive use and production automation scenarios.
+
+## Related Plans
+
+- [`docs/plans/piped-input-support-plan.md`](../plans/piped-input-support-plan.md)
 
 ## Related Documents
 

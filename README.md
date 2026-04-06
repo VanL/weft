@@ -9,6 +9,9 @@ hello world
 $ weft run --spec task.json
 # streams task output and returns when complete
 
+$ weft run --spec review-agent.json
+# runs an agent TaskSpec through the normal manager/task path
+
 $ weft status
 System: OK
 ```
@@ -39,8 +42,16 @@ $ weft run --spec data-cleanup
 # Run a pipeline spec (from .weft/pipelines/)
 $ weft run --pipeline etl-job
 
+# Pipe stdin into an inline command, stored spec, or pipeline
+$ printf "hello\n" | weft run -- python summarize.py
+$ printf "hello\n" | weft run --spec summarize.json
+$ printf "hello\n" | weft run --pipeline etl-job
+
 # Run a Python function
 $ weft run --function mymodule:process_data --arg input.csv --kw mode=fast
+
+# Run an agent TaskSpec
+$ weft run --spec review-agent.json
 
 # Check system status
 $ weft status
@@ -60,7 +71,7 @@ Weft uses `.weft/` directories for project isolation, similar to git repositorie
 ```text
 myproject/
   .weft/
-    broker.db        # SimpleBroker database
+    broker.db        # SQLite default broker file
     tasks/           # Saved task specs
     pipelines/       # Saved pipeline specs
     autostart/       # Autostart manifests (lifecycle + defaults)
@@ -70,6 +81,11 @@ myproject/
 ```
 
 Run `weft` commands from anywhere in the project tree - it searches upward to find `.weft/`.
+
+For non-file-backed backends such as Postgres, `.weft/` still holds Weft
+metadata, logs, outputs, and autostart manifests, but the broker target is
+resolved through SimpleBroker project configuration rather than assuming an
+on-disk `.weft/broker.db`.
 
 ### Task IDs (TIDs)
 
@@ -157,9 +173,9 @@ weft task status TID [--process] [--watch] [--json]
 weft list [--stats] [--status STATUS] [--json]
 
 # System maintenance
-weft system tidy
+weft system tidy            # backend-native broker compaction
 weft system dump -o FILE
-weft system load -i FILE
+weft system load -i FILE    # preflight import; exits 3 on alias conflicts
 ```
 
 ### Task Execution
@@ -170,6 +186,13 @@ weft run COMMAND [args...]
 weft run --spec NAME|PATH
 weft run --pipeline NAME|PATH
 weft run --function module:func [--arg VALUE] [--kw KEY=VALUE]
+
+# Pipe raw stdin as the initial task input
+printf "hello\n" | weft run -- python worker.py
+printf "hello\n" | weft run --spec summarize.json
+printf "hello\n" | weft run --pipeline etl-job
+# --input is still available for structured pipeline input and cannot be mixed
+# with piped stdin.
 
 # Execution options
 --wait              # Wait for completion
@@ -191,18 +214,33 @@ weft result --all [--peek]
 ```bash
 # Direct queue access
 weft queue read QUEUE [--json] [--all]
-weft queue write QUEUE MESSAGE
+weft queue write QUEUE [MESSAGE]
 weft queue peek QUEUE [--json] [--all]
 weft queue move SOURCE DEST [--all]
 weft queue list [--pattern PATTERN]
 weft queue watch QUEUE [--json] [--peek]
 
 # Broadcast and aliases
-weft queue broadcast MESSAGE [--pattern GLOB]
+weft queue broadcast [MESSAGE] [--pattern GLOB]
+printf "payload" | weft queue write QUEUE
+printf "STOP" | weft queue broadcast --pattern 'T*.ctrl_in'
 weft queue alias add ALIAS TARGET
 weft queue alias remove ALIAS
 weft queue alias list [--target QUEUE]
 ```
+
+## Testing
+
+Weft now classifies backend coverage explicitly:
+
+- `shared`: backend-agnostic tests intended to pass on both SQLite and Postgres
+- `sqlite_only`: tests that intentionally validate SQLite or file-backed behavior
+
+The default local suite remains SQLite-first. To run the audited shared suite
+against Postgres, use [`bin/pytest-pg`](./bin/pytest-pg), which provisions a
+temporary Docker Postgres instance and installs `simplebroker-pg[dev]` into the
+test environment alongside the published `simplebroker` dependency declared by
+Weft.
 
 ### Autostart Tasks
 
@@ -264,9 +302,10 @@ Tasks are configured with JSON specifications:
 ```
 
 **Spec fields:**
-- `type`: `"command"` or `"function"`
+- `type`: `"command"`, `"function"`, or `"agent"`
 - `process_target`: Command executable (for commands)
 - `function_target`: Module:function string (for functions)
+- `agent`: Static agent runtime config (for agent tasks)
 - `args`: Additional argv items (appended for commands, *args for functions)
 - `keyword_args`: Keyword args for function targets
 - `timeout`: Seconds (null for no timeout)
@@ -458,6 +497,49 @@ uv run mypy weft
 # Build
 uv build
 ```
+
+## Release
+
+Weft uses a tag-driven release flow in GitHub Actions:
+
+- [`.github/workflows/release-gate.yml`](./.github/workflows/release-gate.yml)
+  runs on pushed `v*` tags, executes the full SQLite suite plus the
+  PG-compatible suite via [`bin/pytest-pg`](./bin/pytest-pg), and only creates
+  the GitHub Release if both pass.
+- [`.github/workflows/release.yml`](./.github/workflows/release.yml) runs when
+  that GitHub Release is published and handles package build, PyPI/TestPyPI
+  publishing, signing, and artifact upload.
+
+```bash
+# Validate, update pyproject.toml + weft/_constants.py, commit, tag, and push
+uv run python bin/release.py --version 0.1.1
+
+# Preview the release steps without changing files or running commands
+uv run python bin/release.py --version 0.1.1 --dry-run
+```
+
+The release helper updates both canonical version sources:
+
+- `pyproject.toml`
+- `weft/_constants.py`
+
+After the helper pushes `v0.1.1`, the release gate workflow will:
+
+1. Run the full SQLite suite
+2. Run the PG-compatible suite with `uv run bin/pytest-pg --all`
+3. Create the GitHub Release if both suites pass
+
+Publishing the GitHub Release then triggers the package release workflow,
+which will:
+
+1. Build distributions with `uv build`
+2. Publish to PyPI with `uv publish --trusted-publishing always dist/*`
+3. Publish to TestPyPI with `uv publish --trusted-publishing always --publish-url https://test.pypi.org/legacy/ dist/*`
+4. Sign artifacts and upload them to the GitHub release
+
+Prerequisite:
+
+- Configure PyPI/TestPyPI Trusted Publishers for this GitHub repository/workflow.
 
 ## Configuration
 

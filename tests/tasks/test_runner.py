@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.fixtures.llm_test_models import TEST_MODEL_ID
 from weft.core.tasks.runner import TaskRunner
 from weft.core.taskspec import LimitsSection
 
@@ -14,8 +15,10 @@ from weft.core.taskspec import LimitsSection
 def test_task_runner_executes_function_successfully():
     runner = TaskRunner(
         target_type="function",
+        tid=None,
         function_target="tests.tasks.sample_targets:echo_payload",
         process_target=None,
+        agent=None,
         args=[],
         kwargs={"suffix": "!"},
         env={},
@@ -39,8 +42,10 @@ PROCESS_SCRIPT = str(Path(__file__).resolve().parent / "process_target.py")
 def test_task_runner_executes_command_successfully(tmp_path):
     runner = TaskRunner(
         target_type="command",
+        tid=None,
         function_target=None,
         process_target=sys.executable,
+        agent=None,
         args=[PROCESS_SCRIPT, "--result", "ok"],
         kwargs=None,
         env={},
@@ -61,8 +66,10 @@ def test_task_runner_executes_command_successfully(tmp_path):
 def test_task_runner_reports_command_failure(tmp_path):
     runner = TaskRunner(
         target_type="command",
+        tid=None,
         function_target=None,
         process_target=sys.executable,
+        agent=None,
         args=["-c", "import sys; sys.exit(3)"],
         kwargs=None,
         env={},
@@ -83,8 +90,10 @@ def test_task_runner_reports_command_failure(tmp_path):
 def test_task_runner_times_out(tmp_path):
     runner = TaskRunner(
         target_type="command",
+        tid=None,
         function_target=None,
         process_target=sys.executable,
+        agent=None,
         args=[PROCESS_SCRIPT, "--duration", "2"],
         kwargs=None,
         env={},
@@ -106,8 +115,10 @@ def test_task_runner_enforces_memory_limit(tmp_path):
     limits = LimitsSection(memory_mb=1)
     runner = TaskRunner(
         target_type="command",
+        tid=None,
         function_target=None,
         process_target=sys.executable,
+        agent=None,
         args=[PROCESS_SCRIPT, "--memory-mb", "10", "--duration", "2"],
         kwargs=None,
         env={},
@@ -130,8 +141,10 @@ def test_task_runner_enforces_cpu_limit(tmp_path):
     limits = LimitsSection(cpu_percent=1)
     runner = TaskRunner(
         target_type="command",
+        tid=None,
         function_target=None,
         process_target=sys.executable,
+        agent=None,
         args=[PROCESS_SCRIPT, "--cpu-percent", "100", "--duration", "3"],
         kwargs=None,
         env={},
@@ -154,8 +167,10 @@ def test_task_runner_enforces_fd_limit(tmp_path):
     limits = LimitsSection(max_fds=5)
     runner = TaskRunner(
         target_type="command",
+        tid=None,
         function_target=None,
         process_target=sys.executable,
+        agent=None,
         args=[PROCESS_SCRIPT, "--fds", "20", "--duration", "2"],
         kwargs=None,
         env={},
@@ -178,8 +193,10 @@ def test_task_runner_reports_multiple_violations(tmp_path):
     limits = LimitsSection(memory_mb=1, max_fds=2)
     runner = TaskRunner(
         target_type="command",
+        tid=None,
         function_target=None,
         process_target=sys.executable,
+        agent=None,
         args=[PROCESS_SCRIPT, "--memory-mb", "10", "--fds", "20", "--duration", "2"],
         kwargs=None,
         env={},
@@ -193,6 +210,78 @@ def test_task_runner_reports_multiple_violations(tmp_path):
     outcome = runner.run({})
 
     assert outcome.status == "limit"
-    assert "Memory" in (outcome.error or "")
-    assert "Open files" in (outcome.error or "")
+    assert outcome.error is not None
+    assert any(label in outcome.error for label in ("Memory", "Open files"))
     assert outcome.metrics is not None
+
+
+def test_task_runner_can_be_cancelled(tmp_path):
+    cancel_after_start = False
+
+    def on_worker_started(_pid: int | None) -> None:
+        nonlocal cancel_after_start
+        cancel_after_start = True
+
+    runner = TaskRunner(
+        target_type="command",
+        tid=None,
+        function_target=None,
+        process_target=sys.executable,
+        agent=None,
+        args=[PROCESS_SCRIPT, "--duration", "5"],
+        kwargs=None,
+        env={},
+        working_dir=str(tmp_path),
+        timeout=10.0,
+        limits=None,
+        monitor_class=None,
+        monitor_interval=0.05,
+    )
+
+    outcome = runner.run_with_hooks(
+        {},
+        cancel_requested=lambda: cancel_after_start,
+        on_worker_started=on_worker_started,
+    )
+
+    assert outcome.status == "cancelled"
+    assert outcome.error == "Target execution cancelled"
+
+
+def test_task_runner_agent_session_continues_conversation() -> None:
+    runner = TaskRunner(
+        target_type="agent",
+        tid="123",
+        function_target=None,
+        process_target=None,
+        agent={
+            "runtime": "llm",
+            "model": TEST_MODEL_ID,
+            "conversation_scope": "per_task",
+            "runtime_config": {
+                "plugin_modules": ["tests.fixtures.llm_test_models"],
+            },
+        },
+        args=None,
+        kwargs=None,
+        env={},
+        working_dir=None,
+        timeout=5.0,
+        limits=None,
+        monitor_class=None,
+        monitor_interval=0.05,
+    )
+
+    session = runner.start_agent_session()
+    try:
+        first = session.execute("hello")
+        second = session.execute("__history__")
+    finally:
+        session.close()
+
+    assert first.status == "ok"
+    assert first.value is not None
+    assert first.value.aggregate_public_output() == "text:hello"
+    assert second.status == "ok"
+    assert second.value is not None
+    assert second.value.aggregate_public_output() == "history:hello"

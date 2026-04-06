@@ -119,6 +119,17 @@ Complete command-line interface specification following SimpleBroker patterns.
 Deferred ideas and follow-ups that are intentionally out of scope for the
 current implementation.
 
+### **[13-Agent_Runtime.md](13-Agent_Runtime.md)**
+Specification for the first-class agent runtime layered on top of Weft's
+existing task, queue, and process model.
+
+**Key Topics:**
+- `spec.type="agent"` TaskSpec extension
+- Runtime adapters and the built-in `llm` backend
+- Queue-native agent work envelopes and plain public outbox payloads
+- Persistent per-task conversations without duplicating task lifecycle
+- Public vs private protocol boundaries for agent execution
+
 ## Quick Navigation by Topic
 
 ### **Reading Order**

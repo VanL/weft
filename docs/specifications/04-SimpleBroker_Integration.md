@@ -95,7 +95,8 @@ thread = watcher.run_in_thread()
 
 SimpleBroker handles all database concerns:
 - **Auto-creation**: SimpleBroker defaults to `.broker.db` on first queue write
-  (Weft uses `.weft/broker.db` via context discovery)
+  (Weft uses `.weft/broker.db` as the SQLite default; non-file-backed backends
+  resolve their target through SimpleBroker project config)
 - **Connection pooling**: Handled internally
 - **Concurrent access**: WAL mode for multiple readers/writers
 - **Cleanup**: Empty queues auto-deleted
@@ -188,7 +189,7 @@ call `build_context` (`weft/commands/queue.py`, `weft/commands/status.py`,
 ```
 project-root/
 ├── .weft/                  # Weft project marker and data
-│   ├── broker.db          # SimpleBroker database
+│   ├── broker.db          # SQLite default broker file
 │   ├── config.json        # Project configuration
 │   ├── outputs/           # Large output spillover
 │   └── logs/              # Centralized logging
@@ -202,7 +203,8 @@ project-root/
 1. **Consistent Behavior**: Same tasks visible from any subdirectory
 2. **Project Isolation**: Different projects have separate task systems
 3. **Developer Familiarity**: Follows git's well-understood model
-4. **Emergency Access**: Always know where the database is located
+4. **Emergency Access**: Always know where the project metadata lives, even
+   when the broker backend is not file-backed
 
 ### Context Management API
 
@@ -530,11 +532,17 @@ class QueueConnectionPool:
 - **Cleanup policies**: Remove old completed task data
 - **Connection pooling**: Reuse database connections
 
+## Related Plans
+
+- [`docs/plans/simplebroker-backend-generalization-plan.md`](../plans/simplebroker-backend-generalization-plan.md)
+- [`docs/plans/postgres-backend-audit-and-shared-test-surface-plan.md`](../plans/postgres-backend-audit-and-shared-test-surface-plan.md)
+- [`docs/plans/weft-backend-neutrality-plan.md`](../plans/weft-backend-neutrality-plan.md)
+
 ## Related Documents
 
 - **[00-Overview_and_Architecture.md](00-Overview_and_Architecture.md)** - System overview and design principles
-- **[01-TaskSpec.md](01-TaskSpec.md)** - Task configuration specification and runtime expansion
-- **[02-Core_Components.md](02-Core_Components.md)** - Detailed component architecture
+- **[02-TaskSpec.md](02-TaskSpec.md)** - Task configuration specification and runtime expansion
+- **[01-Core_Components.md](01-Core_Components.md)** - Detailed component architecture
 - **[03-Worker_Architecture.md](03-Worker_Architecture.md)** - Recursive worker model
 - **[05-Message_Flow_and_State.md](05-Message_Flow_and_State.md)** - Communication patterns
 - **[06-Resource_Management.md](06-Resource_Management.md)** - Resource controls and error handling

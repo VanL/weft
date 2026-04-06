@@ -14,7 +14,7 @@ Queue names and control message constants are summarized in
 ## Message Flow Patterns [MF-0]
 
 ### 1. Task Submission Flow [MF-1]
-_Implementation_: `weft run` enqueues a spawn request on `weft.spawn.requests`; the Manager expands the TaskSpec template, assigns the spawn-request message ID as the task TID, seeds `T{tid}.inbox`, and reports the initial state to `weft.log.tasks`.
+_Implementation_: `weft run` enqueues a spawn request on `weft.spawn.requests`; the Manager expands the TaskSpec template, assigns the spawn-request message ID as the task TID, seeds `T{tid}.inbox` with the initial payload when provided (for example CLI `--input` or piped stdin), and reports the initial state to `weft.log.tasks`.
 ```
 User -> CLI -> Queue(weft.spawn.requests) -> Manager -> Queue(T{tid}.inbox)
                                              |
@@ -24,7 +24,11 @@ User -> CLI -> Queue(weft.spawn.requests) -> Manager -> Queue(T{tid}.inbox)
 _Implementation mapping_: `weft/commands/run.py` (`_enqueue_taskspec`), `weft/core/manager.py` (spawn handling).
 
 ### 2. Message Processing Flow with Reservation [MF-2]
-_Implementation_: `Consumer` (`weft/core/tasks/consumer.py`) moves inbox messages to reserved queues, executes work, and applies reserved policies per this flow.
+_Implementation_: `Consumer` (`weft/core/tasks/consumer.py`) moves inbox
+messages to reserved queues, executes work, and applies reserved policies per
+this flow. The current target types are `function`, `command`, and `agent`;
+agent work still follows the same inbox/reserved/outbox/control lifecycle as
+other tasks.
 ```
 T{tid}.inbox -> move -> T{tid}.reserved -> process -> T{tid}.outbox
                               |                          |
@@ -42,6 +46,13 @@ T{tid}.inbox -> move -> T{tid}.reserved -> process -> T{tid}.outbox
 - **Success = delete reserved**: On success, the reserved message is deleted by ID.
 - **Failure/STOP = policy**: On error or STOP, apply `reserved_policy_on_error` / `reserved_policy_on_stop` (`keep`, `requeue`, `clear`).
 - **Crash = keep**: If the task crashes mid-work, the message remains in `T{tid}.reserved` for manual recovery or explicit requeue.
+
+**Agent output note**
+- Agent tasks write caller-facing outbox payloads as plain strings or JSON values.
+- A single agent work item may emit multiple outbox messages.
+- For persistent tasks, `work_item_completed` in `weft.log.tasks` is the public
+  boundary for one completed inbox message while the task itself remains
+  running.
 
 **Idempotency guidance**
 - **Single-message tasks** may use `tid` as an idempotency key.
@@ -555,3 +566,7 @@ class QueueLifecycleManager:
   write is treated as the task TID.
 - When using the manager (default), the spawn-request message ID is the TID and
   the Manager expands the TaskSpec before writing to `T{tid}.inbox`.
+
+## Related Plans
+
+- [`docs/plans/piped-input-support-plan.md`](../plans/piped-input-support-plan.md)

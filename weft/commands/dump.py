@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import TextIO
+from typing import Any, TextIO
 
-from simplebroker.db import BrokerDB
 from weft._constants import WEFT_STATE_QUEUE_PREFIX
 from weft.context import build_context
 
 
-def _export_metadata(output: TextIO, db: BrokerDB) -> None:
+def _export_metadata(output: TextIO, db: Any) -> None:
     """Export metadata from simplebroker meta table."""
     try:
         meta_dict = db.get_meta()
@@ -25,7 +24,7 @@ def _export_metadata(output: TextIO, db: BrokerDB) -> None:
         return
 
 
-def _export_aliases(output: TextIO, db: BrokerDB) -> int:
+def _export_aliases(output: TextIO, db: Any) -> int:
     """Export all aliases from the database."""
     try:
         aliases = list(db.list_aliases())
@@ -40,7 +39,7 @@ def _export_aliases(output: TextIO, db: BrokerDB) -> int:
     return len(aliases)
 
 
-def _export_messages(output: TextIO, db: BrokerDB) -> tuple[int, int]:
+def _export_messages(output: TextIO, db: Any) -> tuple[int, int]:
     """Export all messages from all queues. Returns (queue_count, message_count)."""
     try:
         queues = list(db.list_queues())
@@ -123,7 +122,7 @@ def cmd_dump(
     exported_messages = 0
 
     try:
-        with BrokerDB(str(context.database_path)) as db:
+        with context.broker() as db:
             # Open output file
             with open(output_path, "w", encoding="utf-8") as f:
                 # Export in order: metadata, aliases, messages

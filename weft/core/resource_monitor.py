@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from importlib import import_module
 from typing import Any
 
-from simplebroker import Queue
+from simplebroker import BrokerTarget, Queue
 
 logger = logging.getLogger(__name__)
 
@@ -82,14 +82,14 @@ class BaseResourceMonitor(ABC):
         *,
         limits: Any | None = None,
         polling_interval: float = 1.0,
-        db_path: str | None = None,
+        db_path: BrokerTarget | str | None = None,
         config: dict[str, Any] | None = None,
     ) -> None:
         self._pid: int | None = None
         self.limits = limits
         self.polling_interval = polling_interval
         queue_kwargs: dict[str, Any] = {}
-        if db_path:
+        if db_path is not None:
             queue_kwargs["db_path"] = db_path
         if config is not None:
             queue_kwargs["config"] = config
@@ -160,7 +160,7 @@ class PsutilResourceMonitor(BaseResourceMonitor):
         *,
         limits: Any | None = None,
         polling_interval: float = 1.0,
-        db_path: str | None = None,
+        db_path: BrokerTarget | str | None = None,
         config: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(
@@ -173,54 +173,128 @@ class PsutilResourceMonitor(BaseResourceMonitor):
         self.history: list[ResourceMetrics] = []
         self.max_history = 100
         self._last_metrics: ResourceMetrics | None = None
+        self._last_cpu_sample_at: float | None = None
+        self._last_cpu_times: dict[int, float] = {}
 
     def start_monitoring(self, pid: int) -> None:
         if psutil is None:  # pragma: no cover
             raise RuntimeError("psutil is required for resource monitoring")
         self._process = psutil.Process(pid)
         self._pid = pid
-        self._process.cpu_percent(interval=None)
+        self._last_cpu_sample_at = time.monotonic()
+        self._last_cpu_times = self._snapshot_cpu_times(self._process_tree())
 
     def stop_monitoring(self) -> None:
         self._process = None
         self._pid = None
         self.history.clear()
+        self._last_cpu_sample_at = None
+        self._last_cpu_times.clear()
 
-    def get_current_metrics(self) -> ResourceMetrics:
+    def _process_tree(self) -> list[PsutilProcess]:
         if psutil is None:
             raise RuntimeError("psutil is required for resource monitoring")
         if self._process is None:
             raise RuntimeError("Resource monitor not started")
 
-        memory_info = self._process.memory_info()
-        memory_mb = memory_info.rss / (1024 * 1024)
+        processes: list[PsutilProcess] = []
+        seen_pids: set[int] = set()
 
-        try:
-            cpu_percent = self._process.cpu_percent(interval=0.0)
-        except (psutil.NoSuchProcess, psutil.ZombieProcess):  # pragma: no cover
-            cpu_percent = 0.0
-
-        try:
-            # On Unix systems, use num_fds()
-            open_files = self._process.num_fds()
-        except (AttributeError, psutil.AccessDenied):  # pragma: no cover
+        def _add_process(process: PsutilProcess) -> None:
             try:
-                # On Windows, use num_handles() which is the equivalent concept
-                open_files = self._process.num_handles()
+                pid = int(process.pid)
+            except (AttributeError, TypeError, ValueError):
+                return
+            if pid in seen_pids:
+                return
+            seen_pids.add(pid)
+            processes.append(process)
+
+        try:
+            _add_process(self._process)
+            for child in self._process.children(recursive=True):
+                _add_process(child)
+        except (psutil.NoSuchProcess, psutil.ZombieProcess):
+            return []
+
+        return processes
+
+    @staticmethod
+    def _snapshot_cpu_times(processes: list[PsutilProcess]) -> dict[int, float]:
+        if psutil is None:
+            return {}
+        cpu_times: dict[int, float] = {}
+        for process in processes:
+            try:
+                pid = int(process.pid)
+            except (AttributeError, TypeError, ValueError):
+                continue
+            try:
+                times = process.cpu_times()
+            except (psutil.NoSuchProcess, psutil.ZombieProcess, psutil.AccessDenied):
+                continue
+            cpu_times[pid] = float(times.user + times.system)
+        return cpu_times
+
+    @staticmethod
+    def _open_file_count(process: PsutilProcess) -> int:
+        if psutil is None:
+            return 0
+        try:
+            return int(process.num_fds())
+        except (AttributeError, psutil.AccessDenied):
+            try:
+                return int(process.num_handles())
             except (AttributeError, psutil.AccessDenied):
                 try:
-                    # Final fallback: count open files (limited scope)
-                    open_files = len(self._process.open_files())
+                    return len(process.open_files())
                 except (psutil.AccessDenied, AttributeError):
-                    open_files = 0
+                    return 0
 
+    @staticmethod
+    def _connection_count(process: PsutilProcess) -> int:
+        if psutil is None:
+            return 0
         try:
-            connections = len(self._process.net_connections())
-        except (psutil.AccessDenied, AttributeError):  # pragma: no cover
+            return len(process.net_connections())
+        except (psutil.AccessDenied, AttributeError):
             try:
-                connections = len(self._process.connections())
+                return len(process.connections())
             except (psutil.AccessDenied, AttributeError):
-                connections = 0
+                return 0
+
+    def get_current_metrics(self) -> ResourceMetrics:
+        if psutil is None:
+            raise RuntimeError("psutil is required for resource monitoring")
+        processes = self._process_tree()
+        if not processes:
+            raise RuntimeError("Resource monitor not started")
+        now = time.monotonic()
+        current_cpu_times = self._snapshot_cpu_times(processes)
+
+        memory_mb = 0.0
+        open_files = 0
+        connections = 0
+        for process in processes:
+            try:
+                memory_mb += process.memory_info().rss / (1024 * 1024)
+            except (psutil.NoSuchProcess, psutil.ZombieProcess, psutil.AccessDenied):
+                continue
+
+            open_files += self._open_file_count(process)
+            connections += self._connection_count(process)
+
+        cpu_percent = 0.0
+        if self._last_cpu_sample_at is not None:
+            elapsed = now - self._last_cpu_sample_at
+            if elapsed > 0:
+                total_cpu_delta = 0.0
+                for pid, current_total in current_cpu_times.items():
+                    previous_total = self._last_cpu_times.get(pid, 0.0)
+                    total_cpu_delta += max(0.0, current_total - previous_total)
+                cpu_percent = (total_cpu_delta / elapsed) * 100.0
+        self._last_cpu_sample_at = now
+        self._last_cpu_times = current_cpu_times
 
         try:
             timestamp = self.metrics_queue.generate_timestamp()
@@ -321,7 +395,7 @@ def load_resource_monitor(
     *,
     limits: Any | None = None,
     polling_interval: float | None = None,
-    db_path: str | None = None,
+    db_path: BrokerTarget | str | None = None,
     config: dict[str, Any] | None = None,
 ) -> BaseResourceMonitor:
     """Load a monitor implementation by dotted path (Spec: [RM-5])."""

@@ -4,12 +4,23 @@ from __future__ import annotations
 
 import queue
 import subprocess
+import time
 from collections.abc import Callable
+from dataclasses import dataclass
+from multiprocessing.process import BaseProcess
+from multiprocessing.queues import Queue as MPQueue
 from typing import Any
 
 from weft.core.resource_monitor import (
     BaseResourceMonitor,
     ResourceMetrics,
+)
+from weft.core.tasks.agent_session_protocol import (
+    is_ready_response,
+    make_execute_request,
+    make_stop_request,
+    parse_result_response,
+    startup_error_message,
 )
 
 
@@ -108,6 +119,191 @@ class CommandSession:
         return self._last_metrics
 
 
+@dataclass(slots=True)
+class SessionExecutionResult:
+    """Result envelope returned by a long-lived session worker."""
+
+    status: str
+    value: Any | None
+    error: str | None
+    metrics: ResourceMetrics | None = None
+
+
+class AgentSession:
+    """Managed long-lived agent worker session."""
+
+    def __init__(
+        self,
+        process: BaseProcess,
+        request_queue: MPQueue[Any],
+        response_queue: MPQueue[dict[str, Any]],
+        monitor: BaseResourceMonitor | None,
+        limits: Any,
+        *,
+        timeout: float | None,
+    ) -> None:
+        self._process = process
+        self._request_queue = request_queue
+        self._response_queue = response_queue
+        self._monitor = monitor
+        self._limits = limits
+        self._timeout = timeout
+        self._last_metrics: ResourceMetrics | None = None
+        self._closed = False
+
+    @property
+    def pid(self) -> int | None:
+        return self._process.pid
+
+    def wait_ready(self, *, timeout: float = 5.0) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            remaining = max(deadline - time.monotonic(), 0.01)
+            try:
+                payload = self._response_queue.get(timeout=remaining)
+            except queue.Empty:
+                if not self.is_alive():
+                    break
+                continue
+            if is_ready_response(payload):
+                return
+            startup_error = startup_error_message(payload)
+            if startup_error is not None:
+                raise RuntimeError(startup_error)
+        raise RuntimeError("Agent session failed to signal readiness")
+
+    def execute(
+        self,
+        work_item: Any,
+        *,
+        cancel_requested: Callable[[], bool] | None = None,
+    ) -> SessionExecutionResult:
+        if self._closed:
+            raise RuntimeError("Agent session is closed")
+
+        self._request_queue.put(make_execute_request(work_item))
+        start_time = time.monotonic()
+
+        while self.is_alive():
+            if cancel_requested is not None and _cancel_requested(cancel_requested):
+                self.terminate()
+                self.stop_monitor()
+                return SessionExecutionResult(
+                    status="cancelled",
+                    value=None,
+                    error="Target execution cancelled",
+                    metrics=self._last_metrics,
+                )
+
+            elapsed = time.monotonic() - start_time
+            if self._timeout is not None and elapsed >= self._timeout:
+                self.terminate()
+                self.stop_monitor()
+                return SessionExecutionResult(
+                    status="timeout",
+                    value=None,
+                    error="Target execution timed out",
+                    metrics=self._last_metrics,
+                )
+
+            remaining = 0.05
+            if self._timeout is not None:
+                remaining = min(remaining, max(0.01, self._timeout - elapsed))
+
+            try:
+                payload = self._response_queue.get(timeout=remaining)
+            except queue.Empty:
+                ok, violation = self.poll_limits()
+                if not ok:
+                    self.terminate()
+                    self.stop_monitor()
+                    return SessionExecutionResult(
+                        status="limit",
+                        value=None,
+                        error=violation,
+                        metrics=self._last_metrics,
+                    )
+                continue
+
+            parsed = parse_result_response(payload)
+            if parsed is None:
+                continue
+            status, result, error = parsed
+
+            self._last_metrics = self.last_metrics
+            return SessionExecutionResult(
+                status=status,
+                value=result,
+                error=error,
+                metrics=self._last_metrics,
+            )
+
+        self._last_metrics = self.last_metrics
+        return SessionExecutionResult(
+            status="error",
+            value=None,
+            error="Agent session exited unexpectedly",
+            metrics=self._last_metrics,
+        )
+
+    def is_alive(self) -> bool:
+        return self._process.is_alive()
+
+    def terminate(self) -> None:
+        if not self.is_alive():
+            try:
+                self._process.join(timeout=0.2)
+            except Exception:  # pragma: no cover - defensive
+                pass
+            return
+
+        self._process.terminate()
+        self._process.join(timeout=0.5)
+        if self._process.is_alive():
+            self._process.kill()
+            self._process.join(timeout=0.5)
+
+    def poll_limits(self) -> tuple[bool, str | None]:
+        if not self._monitor:
+            return True, None
+        try:
+            ok, violation = self._monitor.check_limits(self._limits)
+            self._last_metrics = self._monitor.last_metrics() or self._last_metrics
+            return ok, violation
+        except Exception:  # pragma: no cover - process may have exited
+            self.stop_monitor()
+            return True, None
+
+    def stop_monitor(self) -> None:
+        if self._monitor:
+            self._last_metrics = self._monitor.last_metrics() or self._last_metrics
+            try:
+                self._monitor.stop()
+            except Exception:  # pragma: no cover - defensive
+                pass
+            self._monitor = None
+
+    @property
+    def last_metrics(self) -> ResourceMetrics | None:
+        if self._monitor:
+            self._last_metrics = self._monitor.last_metrics() or self._last_metrics
+        return self._last_metrics
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            if self.is_alive():
+                self._request_queue.put(make_stop_request())
+                self._process.join(timeout=0.5)
+        except Exception:  # pragma: no cover - defensive
+            pass
+        if self.is_alive():
+            self.terminate()
+        self.stop_monitor()
+
+
 class InProcessCommandSession:
     """Command session compatible with InteractiveTaskMixin without spawning a subprocess."""
 
@@ -178,4 +374,11 @@ class InProcessCommandSession:
         return self._last_metrics
 
 
-__all__ = ["InProcessCommandSession"]
+__all__ = ["AgentSession", "InProcessCommandSession", "SessionExecutionResult"]
+
+
+def _cancel_requested(callback: Callable[[], bool]) -> bool:
+    try:
+        return bool(callback())
+    except Exception:  # pragma: no cover - defensive
+        return False

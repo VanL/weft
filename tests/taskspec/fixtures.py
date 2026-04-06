@@ -1,8 +1,11 @@
 """TaskSpec fixtures for testing."""
 
+from __future__ import annotations
+
 from typing import Any
 
 from weft.core.taskspec import (
+    AgentSection,
     IOSection,
     LimitsSection,
     SpecSection,
@@ -99,6 +102,41 @@ def create_valid_command_taskspec(
         ),
         state=StateSection(),
         metadata={"owner": "test", "type": "command"},
+    )
+
+
+def create_valid_agent_taskspec(
+    tid: str = VALID_TEST_TID,
+    name: str = "test-agent",
+    runtime: str = "llm",
+    model: str = "weft-test-agent-model",
+) -> TaskSpec:
+    """Create a valid agent TaskSpec with common fields."""
+    return TaskSpec(
+        tid=tid,
+        name=name,
+        spec=SpecSection(
+            type="agent",
+            timeout=30.0,
+            limits=LimitsSection(memory_mb=256),
+            agent=AgentSection(
+                runtime=runtime,
+                model=model,
+                runtime_config={
+                    "plugin_modules": ["tests.fixtures.llm_test_models"],
+                },
+            ),
+        ),
+        io=IOSection(
+            inputs={"inbox": f"T{tid}.inbox"},
+            outputs={"outbox": f"T{tid}.outbox"},
+            control={
+                "ctrl_in": f"T{tid}.ctrl_in",
+                "ctrl_out": f"T{tid}.ctrl_out",
+            },
+        ),
+        state=StateSection(),
+        metadata={"owner": "test", "type": "agent"},
     )
 
 
@@ -215,6 +253,46 @@ VALID_COMMAND_TASKSPEC_DICT: dict[str, Any] = {
     "metadata": {
         "owner": "test",
         "type": "command",
+    },
+}
+
+VALID_AGENT_TASKSPEC_DICT: dict[str, Any] = {
+    "tid": VALID_TEST_TID,
+    "name": "test-agent",
+    "version": "1.0",
+    "spec": {
+        "type": "agent",
+        "timeout": 30.0,
+        "reserved_policy_on_stop": "keep",
+        "reserved_policy_on_error": "keep",
+        "limits": {
+            "memory_mb": 256,
+        },
+        "agent": {
+            "runtime": "llm",
+            "model": "weft-test-agent-model",
+            "runtime_config": {
+                "plugin_modules": ["tests.fixtures.llm_test_models"],
+            },
+        },
+    },
+    "io": {
+        "inputs": {"inbox": f"T{VALID_TEST_TID}.inbox"},
+        "outputs": {"outbox": f"T{VALID_TEST_TID}.outbox"},
+        "control": {
+            "ctrl_in": f"T{VALID_TEST_TID}.ctrl_in",
+            "ctrl_out": f"T{VALID_TEST_TID}.ctrl_out",
+        },
+    },
+    "state": {
+        "status": "created",
+        "return_code": None,
+        "started_at": None,
+        "completed_at": None,
+    },
+    "metadata": {
+        "owner": "test",
+        "type": "agent",
     },
 }
 

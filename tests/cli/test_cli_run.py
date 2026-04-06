@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
 from tests.conftest import run_cli
+from tests.taskspec import fixtures as taskspec_fixtures
 from weft._constants import (
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
@@ -95,6 +97,31 @@ def test_cli_run_reads_stdin(workdir, weft_harness) -> None:
     assert err == ""
 
 
+def test_cli_run_rejects_oversized_piped_stdin(workdir, weft_harness) -> None:
+    script = workdir / "stdin_limit_script.py"
+    script.write_text(
+        "import sys\nprint(sys.stdin.read(), end='')\n",
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["WEFT_MAX_MESSAGE_SIZE"] = "8"
+
+    rc, out, err = run_cli(
+        "run",
+        "--",
+        sys.executable,
+        str(script),
+        cwd=workdir,
+        harness=weft_harness,
+        stdin="123456789",
+        env=env,
+    )
+
+    assert rc != 0
+    combined = f"{out}\n{err}"
+    assert "Input exceeds maximum size of 8 bytes" in combined
+
+
 def test_cli_run_spec_path(workdir, weft_harness) -> None:
     context = build_context(spec_context=workdir)
 
@@ -137,6 +164,453 @@ def test_cli_run_spec_path(workdir, weft_harness) -> None:
     assert err == ""
 
 
+def test_cli_run_spec_path_reads_piped_stdin_into_function(
+    workdir, weft_harness
+) -> None:
+    spec_path = workdir / "task_stdin_function.json"
+    spec_payload = {
+        "tid": "1760000000000000101",
+        "name": "cli-spec-stdin-function",
+        "version": "1.0",
+        "spec": {
+            "type": "function",
+            "function_target": "tests.tasks.sample_targets:echo_payload",
+            "weft_context": str(workdir),
+            "reserved_policy_on_stop": "keep",
+            "reserved_policy_on_error": "keep",
+        },
+        "io": {
+            "inputs": {"inbox": "cli_spec_stdin_function.inbox"},
+            "outputs": {"outbox": "cli_spec_stdin_function.outbox"},
+            "control": {
+                "ctrl_in": "cli_spec_stdin_function.ctrl_in",
+                "ctrl_out": "cli_spec_stdin_function.ctrl_out",
+            },
+        },
+        "state": {"status": "created"},
+        "metadata": {},
+    }
+    spec_path.write_text(json.dumps(spec_payload, indent=2), encoding="utf-8")
+
+    rc, out, err = run_cli(
+        "run",
+        "--spec",
+        spec_path,
+        cwd=workdir,
+        harness=weft_harness,
+        stdin="from-stdin",
+    )
+
+    assert rc == 0
+    assert out == "from-stdin"
+    assert err == ""
+
+
+def test_cli_run_spec_path_reads_piped_stdin_into_command(
+    workdir, weft_harness
+) -> None:
+    script = workdir / "stdin_spec_script.py"
+    script.write_text(
+        "import sys\ndata = sys.stdin.read()\nprint(data.upper(), end='')\n",
+        encoding="utf-8",
+    )
+
+    spec_path = workdir / "task_stdin_command.json"
+    spec_payload = {
+        "tid": "1760000000000000102",
+        "name": "cli-spec-stdin-command",
+        "version": "1.0",
+        "spec": {
+            "type": "command",
+            "process_target": sys.executable,
+            "args": [str(script)],
+            "weft_context": str(workdir),
+            "reserved_policy_on_stop": "keep",
+            "reserved_policy_on_error": "keep",
+        },
+        "io": {
+            "inputs": {"inbox": "cli_spec_stdin_command.inbox"},
+            "outputs": {"outbox": "cli_spec_stdin_command.outbox"},
+            "control": {
+                "ctrl_in": "cli_spec_stdin_command.ctrl_in",
+                "ctrl_out": "cli_spec_stdin_command.ctrl_out",
+            },
+        },
+        "state": {"status": "created"},
+        "metadata": {},
+    }
+    spec_path.write_text(json.dumps(spec_payload, indent=2), encoding="utf-8")
+
+    rc, out, err = run_cli(
+        "run",
+        "--spec",
+        spec_path,
+        cwd=workdir,
+        harness=weft_harness,
+        stdin="from-stdin",
+    )
+
+    assert rc == 0
+    assert out == "FROM-STDIN"
+    assert err == ""
+
+
+def test_cli_run_persistent_spec_no_wait_consumes_initial_piped_stdin(
+    workdir, weft_harness
+) -> None:
+    spec_path = workdir / "persistent_stdin_spec.json"
+    spec_payload = {
+        "tid": "1760000000000000103",
+        "name": "cli-persistent-stdin",
+        "version": "1.0",
+        "spec": {
+            "type": "function",
+            "persistent": True,
+            "function_target": "tests.tasks.sample_targets:echo_payload",
+            "weft_context": str(workdir),
+            "reserved_policy_on_stop": "keep",
+            "reserved_policy_on_error": "keep",
+        },
+        "io": {
+            "inputs": {"inbox": "cli_persistent_stdin.inbox"},
+            "outputs": {"outbox": "cli_persistent_stdin.outbox"},
+            "control": {
+                "ctrl_in": "cli_persistent_stdin.ctrl_in",
+                "ctrl_out": "cli_persistent_stdin.ctrl_out",
+            },
+        },
+        "state": {"status": "created"},
+        "metadata": {},
+    }
+    spec_path.write_text(json.dumps(spec_payload, indent=2), encoding="utf-8")
+
+    rc, out, err = run_cli(
+        "run",
+        "--spec",
+        spec_path,
+        "--no-wait",
+        cwd=workdir,
+        harness=weft_harness,
+        stdin="hello-from-stdin",
+    )
+
+    assert rc == 0
+    assert err == ""
+    tid = out.strip()
+
+    rc, out, err = run_cli(
+        "result",
+        tid,
+        "--timeout",
+        "5",
+        "--json",
+        cwd=workdir,
+        harness=weft_harness,
+    )
+
+    assert rc == 0
+    result_payload = json.loads(out)
+    assert result_payload["result"] == "hello-from-stdin"
+    assert err == ""
+
+
+def test_cli_run_agent_spec_path(workdir, weft_harness) -> None:
+    context = build_context(spec_context=workdir)
+    inbox = context.queue("cli_agent.inbox", persistent=True)
+    inbox.write("hello")
+
+    spec_path = workdir / "agent_task.json"
+    spec_payload = taskspec_fixtures.create_valid_agent_taskspec(
+        tid="1760000000000000200",
+        name="cli-agent-task",
+    ).model_dump(mode="json")
+    spec_payload["spec"]["weft_context"] = str(workdir)
+    spec_payload["io"] = {
+        "inputs": {"inbox": "cli_agent.inbox"},
+        "outputs": {"outbox": "cli_agent.outbox"},
+        "control": {
+            "ctrl_in": "cli_agent.ctrl_in",
+            "ctrl_out": "cli_agent.ctrl_out",
+        },
+    }
+    spec_path.write_text(json.dumps(spec_payload, indent=2), encoding="utf-8")
+
+    rc, out, err = run_cli(
+        "run",
+        "--spec",
+        spec_path,
+        cwd=workdir,
+        harness=weft_harness,
+    )
+
+    assert rc == 0
+    assert out == "text:hello"
+    assert err == ""
+
+
+def test_cli_run_agent_spec_no_wait_and_result(workdir, weft_harness) -> None:
+    context = build_context(spec_context=workdir)
+    inbox = context.queue("cli_agent_result.inbox", persistent=True)
+    inbox.write("hello")
+
+    spec_path = workdir / "agent_result_task.json"
+    spec_payload = taskspec_fixtures.create_valid_agent_taskspec(
+        tid="1760000000000000201",
+        name="cli-agent-result-task",
+    ).model_dump(mode="json")
+    spec_payload["spec"]["weft_context"] = str(workdir)
+    spec_payload["io"] = {
+        "inputs": {"inbox": "cli_agent_result.inbox"},
+        "outputs": {"outbox": "cli_agent_result.outbox"},
+        "control": {
+            "ctrl_in": "cli_agent_result.ctrl_in",
+            "ctrl_out": "cli_agent_result.ctrl_out",
+        },
+    }
+    spec_path.write_text(json.dumps(spec_payload, indent=2), encoding="utf-8")
+
+    rc, out, err = run_cli(
+        "run",
+        "--spec",
+        spec_path,
+        "--no-wait",
+        cwd=workdir,
+        harness=weft_harness,
+    )
+
+    assert rc == 0
+    assert err == ""
+    tid = out.strip()
+    weft_harness.wait_for_completion(tid)
+
+    rc, out, err = run_cli(
+        "result",
+        tid,
+        "--timeout",
+        "5",
+        "--json",
+        cwd=workdir,
+        harness=weft_harness,
+    )
+
+    assert rc == 0
+    result_payload = json.loads(out)
+    assert result_payload["status"] == "completed"
+    assert result_payload["result"] == "text:hello"
+    assert err == ""
+
+
+def test_cli_run_persistent_agent_spec_continues_conversation(
+    workdir, weft_harness
+) -> None:
+    context = build_context(spec_context=workdir)
+    spec_path = workdir / "persistent_agent.json"
+    spec_payload = taskspec_fixtures.create_valid_agent_taskspec(
+        tid="1760000000000000202",
+        name="cli-persistent-agent",
+    ).model_dump(mode="json")
+    spec_payload["spec"]["persistent"] = True
+    spec_payload["spec"]["agent"]["conversation_scope"] = "per_task"
+    spec_payload["spec"]["weft_context"] = str(workdir)
+    spec_payload["io"] = {
+        "inputs": {"inbox": "cli_persistent_agent.inbox"},
+        "outputs": {"outbox": "cli_persistent_agent.outbox"},
+        "control": {
+            "ctrl_in": "cli_persistent_agent.ctrl_in",
+            "ctrl_out": "cli_persistent_agent.ctrl_out",
+        },
+    }
+    spec_path.write_text(json.dumps(spec_payload, indent=2), encoding="utf-8")
+
+    rc, out, err = run_cli(
+        "run",
+        "--spec",
+        spec_path,
+        "--no-wait",
+        cwd=workdir,
+        harness=weft_harness,
+    )
+
+    assert rc == 0
+    assert err == ""
+    tid = out.strip()
+
+    inbox = context.queue("cli_persistent_agent.inbox", persistent=True)
+    inbox.write("hello")
+
+    rc, out, err = run_cli(
+        "result",
+        tid,
+        "--timeout",
+        "5",
+        "--json",
+        cwd=workdir,
+        harness=weft_harness,
+    )
+
+    assert rc == 0
+    first_payload = json.loads(out)
+    assert first_payload["result"] == "text:hello"
+    assert err == ""
+
+    inbox.write("__history__")
+
+    rc, out, err = run_cli(
+        "result",
+        tid,
+        "--timeout",
+        "5",
+        "--json",
+        cwd=workdir,
+        harness=weft_harness,
+    )
+
+    assert rc == 0
+    second_payload = json.loads(out)
+    assert second_payload["result"] == "history:hello"
+    assert err == ""
+
+
+def test_cli_run_persistent_spec_rejects_wait(workdir, weft_harness) -> None:
+    spec_path = workdir / "persistent_wait_rejected.json"
+    spec_payload = taskspec_fixtures.create_valid_agent_taskspec(
+        tid="1760000000000000203",
+        name="cli-persistent-wait",
+    ).model_dump(mode="json")
+    spec_payload["spec"]["persistent"] = True
+    spec_payload["spec"]["agent"]["conversation_scope"] = "per_task"
+    spec_payload["spec"]["weft_context"] = str(workdir)
+    spec_path.write_text(json.dumps(spec_payload, indent=2), encoding="utf-8")
+
+    rc, out, err = run_cli(
+        "run",
+        "--spec",
+        spec_path,
+        cwd=workdir,
+        harness=weft_harness,
+    )
+
+    assert rc != 0
+    combined = f"{out}\n{err}"
+    assert "--wait is not supported for persistent TaskSpecs" in combined
+
+
+def test_cli_run_once_overrides_persistent_spec(workdir, weft_harness) -> None:
+    spec_path = workdir / "persistent_once_override.json"
+    spec_payload = {
+        "tid": "1760000000000000204",
+        "name": "persistent-once-override",
+        "version": "1.0",
+        "spec": {
+            "type": "function",
+            "persistent": True,
+            "function_target": "tests.tasks.sample_targets:provide_payload",
+            "weft_context": str(workdir),
+        },
+        "io": {
+            "inputs": {"inbox": "once_override.inbox"},
+            "outputs": {"outbox": "once_override.outbox"},
+            "control": {
+                "ctrl_in": "once_override.ctrl_in",
+                "ctrl_out": "once_override.ctrl_out",
+            },
+        },
+        "state": {"status": "created"},
+        "metadata": {},
+    }
+    spec_path.write_text(json.dumps(spec_payload, indent=2), encoding="utf-8")
+
+    rc, out, err = run_cli(
+        "run",
+        "--spec",
+        spec_path,
+        "--once",
+        cwd=workdir,
+        harness=weft_harness,
+    )
+
+    assert rc == 0
+    payload = json.loads(out)
+    assert payload["data"] == "payload"
+    assert err == ""
+
+
+def test_cli_run_continuous_overrides_nonpersistent_spec(workdir, weft_harness) -> None:
+    context = build_context(spec_context=workdir)
+    spec_path = workdir / "continuous_override.json"
+    spec_payload = {
+        "tid": "1760000000000000205",
+        "name": "continuous-override",
+        "version": "1.0",
+        "spec": {
+            "type": "function",
+            "persistent": False,
+            "function_target": "tests.tasks.sample_targets:echo_payload",
+            "weft_context": str(workdir),
+        },
+        "io": {
+            "inputs": {"inbox": "continuous_override.inbox"},
+            "outputs": {"outbox": "continuous_override.outbox"},
+            "control": {
+                "ctrl_in": "continuous_override.ctrl_in",
+                "ctrl_out": "continuous_override.ctrl_out",
+            },
+        },
+        "state": {"status": "created"},
+        "metadata": {},
+    }
+    spec_path.write_text(json.dumps(spec_payload, indent=2), encoding="utf-8")
+
+    rc, out, err = run_cli(
+        "run",
+        "--spec",
+        spec_path,
+        "--continuous",
+        "--no-wait",
+        cwd=workdir,
+        harness=weft_harness,
+    )
+
+    assert rc == 0
+    assert err == ""
+    tid = out.strip()
+
+    inbox = context.queue("continuous_override.inbox", persistent=True)
+    inbox.write(json.dumps({"args": ["one"]}))
+
+    rc, out, err = run_cli(
+        "result",
+        tid,
+        "--timeout",
+        "5",
+        "--json",
+        cwd=workdir,
+        harness=weft_harness,
+    )
+
+    assert rc == 0
+    first_payload = json.loads(out)
+    assert first_payload["result"] == "one"
+    assert err == ""
+
+    inbox.write(json.dumps({"args": ["two"]}))
+
+    rc, out, err = run_cli(
+        "result",
+        tid,
+        "--timeout",
+        "5",
+        "--json",
+        cwd=workdir,
+        harness=weft_harness,
+    )
+
+    assert rc == 0
+    second_payload = json.loads(out)
+    assert second_payload["result"] == "two"
+    assert err == ""
+
+
 def test_cli_run_interactive_command_streams(workdir, weft_harness) -> None:
     rc, out, err = run_cli(
         "run",
@@ -148,6 +622,7 @@ def test_cli_run_interactive_command_streams(workdir, weft_harness) -> None:
         cwd=workdir,
         harness=weft_harness,
         stdin="hello\nquit\n",
+        timeout=40.0,
     )
 
     assert rc == 0

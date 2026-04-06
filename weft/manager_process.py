@@ -6,6 +6,7 @@ import base64
 import json
 import sys
 
+from simplebroker import deserialize_broker_target
 from weft.core.launcher import _task_process_entry
 
 
@@ -13,14 +14,16 @@ def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if len(args) != 5:
         sys.stderr.write(
-            "manager_process requires 5 arguments: task_cls_path, db_path, "
+            "manager_process requires 5 arguments: task_cls_path, broker_target_b64, "
             "spec_b64, config_b64, poll_interval\n"
         )
         return 2
 
-    task_cls_path, db_path, spec_b64, config_b64, poll_interval_s = args
+    task_cls_path, broker_target_b64, spec_b64, config_b64, poll_interval_s = args
 
     try:
+        broker_target_json = base64.b64decode(broker_target_b64).decode("utf-8")
+        broker_target = deserialize_broker_target(broker_target_json)
         spec_json = base64.b64decode(spec_b64).decode("utf-8")
         config_json = base64.b64decode(config_b64).decode("utf-8")
         config = json.loads(config_json)
@@ -29,7 +32,13 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.write(f"Invalid manager arguments: {exc}\n")
         return 2
 
-    _task_process_entry(task_cls_path, db_path, spec_json, config, poll_interval)
+    _task_process_entry(
+        task_cls_path,
+        broker_target,
+        spec_json,
+        config,
+        poll_interval,
+    )
     return 0
 
 

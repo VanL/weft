@@ -1,0 +1,238 @@
+#!/usr/bin/env python3
+"""Run Postgres-backed Weft test suites with automatic Docker setup."""
+
+from __future__ import annotations
+
+import argparse
+import os
+import shutil
+import subprocess
+import sys
+import time
+import uuid
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+POSTGRES_IMAGE = os.environ.get("SIMPLEBROKER_PG_TEST_IMAGE", "postgres:17")
+POSTGRES_DB = os.environ.get("SIMPLEBROKER_PG_TEST_DB", "simplebroker_test")
+POSTGRES_USER = os.environ.get("SIMPLEBROKER_PG_TEST_USER", "postgres")
+POSTGRES_PASSWORD = os.environ.get("SIMPLEBROKER_PG_TEST_PASSWORD", "postgres")
+
+
+def _run(
+    cmd: list[str],
+    *,
+    env: dict[str, str] | None = None,
+    capture_output: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    """Run a subprocess from the repository root."""
+
+    print(f"+ {' '.join(cmd)}", flush=True)
+    return subprocess.run(
+        cmd,
+        cwd=ROOT,
+        env=env,
+        check=True,
+        capture_output=capture_output,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+
+
+def _docker_port(container_name: str) -> str | None:
+    """Return the published host port for Postgres or ``None`` if not ready."""
+
+    result = subprocess.run(
+        ["docker", "port", container_name, "5432/tcp"],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if result.returncode != 0:
+        return None
+    output = result.stdout.strip()
+    if not output:
+        return None
+    return output.rsplit(":", 1)[1]
+
+
+def _cleanup_container(container_name: str) -> None:
+    """Remove the temporary Docker container if it still exists."""
+
+    subprocess.run(
+        ["docker", "rm", "-f", container_name],
+        cwd=ROOT,
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def _wait_for_postgres(container_name: str, *, timeout_seconds: float = 60.0) -> str:
+    """Wait for the Postgres container to accept connections and return its host port."""
+
+    deadline = time.time() + timeout_seconds
+    last_error = "container did not start"
+
+    while time.time() < deadline:
+        port = _docker_port(container_name)
+        if port is None:
+            last_error = "waiting for published port"
+            time.sleep(1.0)
+            continue
+
+        result = subprocess.run(
+            [
+                "docker",
+                "exec",
+                container_name,
+                "pg_isready",
+                "-U",
+                POSTGRES_USER,
+                "-d",
+                POSTGRES_DB,
+            ],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if result.returncode == 0:
+            return port
+
+        last_error = (
+            result.stderr.strip() or result.stdout.strip() or "pg_isready failed"
+        )
+        time.sleep(1.0)
+
+    raise RuntimeError(f"Postgres did not become ready: {last_error}")
+
+
+def _start_postgres_container() -> tuple[str, str]:
+    """Start the temporary Postgres container and return ``(name, dsn)``."""
+
+    container_name = f"weft-pg-test-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    _run(
+        [
+            "docker",
+            "run",
+            "--detach",
+            "--rm",
+            "--name",
+            container_name,
+            "--env",
+            f"POSTGRES_PASSWORD={POSTGRES_PASSWORD}",
+            "--env",
+            f"POSTGRES_USER={POSTGRES_USER}",
+            "--env",
+            f"POSTGRES_DB={POSTGRES_DB}",
+            "--publish-all",
+            POSTGRES_IMAGE,
+            "-c",
+            "max_connections=300",
+        ],
+        capture_output=True,
+    )
+    port = _wait_for_postgres(container_name)
+    dsn = (
+        f"postgresql://{POSTGRES_USER}:{POSTGRES_PASSWORD}"
+        f"@127.0.0.1:{port}/{POSTGRES_DB}"
+    )
+    return container_name, dsn
+
+
+def _build_test_env(*, dsn: str) -> dict[str, str]:
+    """Build the environment used for PG-backed Weft test runs."""
+
+    env = os.environ.copy()
+    env["BROKER_TEST_BACKEND"] = "postgres"
+    env["SIMPLEBROKER_PG_TEST_DSN"] = dsn
+    return env
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Run PG-backed Weft tests with automatic Docker setup."
+    )
+    parser.add_argument(
+        "--fast",
+        action="store_true",
+        help="Run the release-gate subset (shared and not slow).",
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Run the full PG-compatible suite (all tests except sqlite_only).",
+    )
+    parser.add_argument(
+        "--keep-container",
+        action="store_true",
+        help="Leave the temporary Postgres container running for debugging.",
+    )
+    args = parser.parse_args()
+
+    if shutil.which("docker") is None:
+        print("docker is required to run PG-backed tests", file=sys.stderr)
+        return 1
+    if shutil.which("uv") is None:
+        print("uv is required to run PG-backed tests", file=sys.stderr)
+        return 1
+
+    if args.fast and args.all:
+        print("--fast and --all are mutually exclusive", file=sys.stderr)
+        return 2
+
+    marker = "shared"
+    if args.fast:
+        marker = "shared and not slow"
+    elif args.all:
+        marker = "not sqlite_only"
+    container_name: str | None = None
+
+    try:
+        container_name, dsn = _start_postgres_container()
+        print(f"Postgres test DSN: {dsn}", flush=True)
+
+        _run(
+            [
+                "uv",
+                "run",
+                "--extra",
+                "dev",
+                "--with-editable",
+                ".",
+                "--with",
+                "simplebroker-pg[dev]",
+                "pytest",
+                "tests",
+                "-m",
+                marker,
+                "-n",
+                "auto",
+                "--dist",
+                "loadgroup",
+            ],
+            env=_build_test_env(dsn=dsn),
+        )
+        return 0
+    except subprocess.CalledProcessError as exc:
+        return exc.returncode or 1
+    except KeyboardInterrupt:
+        print("Interrupted", file=sys.stderr)
+        return 130
+    except Exception as exc:  # pragma: no cover - defensive CLI wrapper
+        print(str(exc), file=sys.stderr)
+        return 1
+    finally:
+        if container_name and not args.keep_container:
+            _cleanup_container(container_name)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,14 +1,20 @@
 """Simplified tests for the Task class that work with current implementation."""
 
+from __future__ import annotations
+
 import os
 import tempfile
 import threading
 from pathlib import Path
 
+import pytest
+
 from simplebroker.db import BrokerDB
 from tests.fixtures import taskspecs as fixtures
 from weft.core.tasks import Consumer
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
+
+pytestmark = [pytest.mark.sqlite_only]
 
 
 class TestTaskSimple:
