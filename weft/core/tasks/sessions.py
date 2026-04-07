@@ -11,6 +11,7 @@ from multiprocessing.process import BaseProcess
 from multiprocessing.queues import Queue as MPQueue
 from typing import Any
 
+from weft._constants import ACTIVE_CONTROL_POLL_INTERVAL
 from weft.core.resource_monitor import (
     BaseResourceMonitor,
     ResourceMetrics,
@@ -227,7 +228,7 @@ class AgentSession:
                     metrics=self._last_metrics,
                 )
 
-            remaining = 0.05
+            remaining = ACTIVE_CONTROL_POLL_INTERVAL
             if self._timeout is not None:
                 remaining = min(remaining, max(0.01, self._timeout - elapsed))
 

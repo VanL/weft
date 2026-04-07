@@ -6,13 +6,11 @@ import os
 import signal
 import threading
 import time
-from collections.abc import Callable, Iterator, Mapping
-from contextlib import contextmanager
+from collections.abc import Callable, Mapping
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, cast
 
-from simplebroker import Queue
 from weft._constants import (
     CONTROL_KILL,
     CONTROL_STOP,
@@ -148,99 +146,76 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         )
 
     def _run_task(self, work_item: Any) -> RunnerOutcome:
-        with self._active_control_poller():
-            if self._uses_agent_session():
-                session = self._ensure_agent_session()
-                start_time = time.monotonic()
-                result = session.execute(
-                    work_item,
-                    cancel_requested=self._cancel_requested,
-                )
-                return RunnerOutcome(
-                    status=result.status,
-                    value=result.value,
-                    error=result.error,
-                    stdout=None,
-                    stderr=None,
-                    returncode=None,
-                    duration=time.monotonic() - start_time,
-                    metrics=result.metrics,
-                    worker_pid=session.pid,
-                    runtime_handle=session.handle,
-                )
-
-            runner = self._make_task_runner()
-            return runner.run_with_hooks(
+        if self._uses_agent_session():
+            session = self._ensure_agent_session()
+            start_time = time.monotonic()
+            result = session.execute(
                 work_item,
                 cancel_requested=self._cancel_requested,
-                on_worker_started=self._register_running_worker,
-                on_runtime_handle_started=self.register_runtime_handle,
+            )
+            return RunnerOutcome(
+                status=result.status,
+                value=result.value,
+                error=result.error,
+                stdout=None,
+                stderr=None,
+                returncode=None,
+                duration=time.monotonic() - start_time,
+                metrics=result.metrics,
+                worker_pid=session.pid,
+                runtime_handle=session.handle,
             )
 
-    @contextmanager
-    def _active_control_poller(self) -> Iterator[None]:
-        done = threading.Event()
-        worker = threading.Thread(
-            target=self._poll_control_queue_while_active,
-            args=(done,),
-            daemon=True,
+        runner = self._make_task_runner()
+        return runner.run_with_hooks(
+            work_item,
+            cancel_requested=self._cancel_requested,
+            on_worker_started=self._register_running_worker,
+            on_runtime_handle_started=self.register_runtime_handle,
         )
-        worker.start()
-        try:
-            yield
-        finally:
-            done.set()
-            worker.join()
 
-    def _poll_control_queue_while_active(self, done: threading.Event) -> None:
+    def _poll_active_control_once(self) -> None:
+        """Poll one active control message on the main task thread.
+
+        STOP and KILL remain deferred until the runtime unwinds. Other control
+        commands still flow through the normal BaseTask control handler.
+        """
+
+        if self._deferred_active_control_command is not None:
+            return
+
         queue_name = self._queue_names["ctrl_in"]
-        ctrl_queue = Queue(
-            queue_name,
-            db_path=self._db_path,
-            persistent=True,
-            config=self._config,
-        )
+        ctrl_queue = self._queue(queue_name)
         try:
-            while not done.is_set():
-                if self.should_stop:
-                    return
-                try:
-                    entries = ctrl_queue.peek_many(limit=1, with_timestamps=True) or []
-                except Exception:  # pragma: no cover - defensive broker guard
-                    time.sleep(0.05)
-                    continue
-                if not entries:
-                    done.wait(0.05)
-                    continue
-                entry = entries[0]
-                if not isinstance(entry, tuple) or len(entry) != 2:
-                    done.wait(0.05)
-                    continue
-                raw_message, timestamp = entry
-                if not isinstance(raw_message, str):
-                    done.wait(0.05)
-                    continue
-                command = raw_message.strip().upper()
-                if command in {CONTROL_STOP, CONTROL_KILL}:
-                    self._defer_active_control(command, int(timestamp))
-                    try:
-                        ctrl_queue.delete(message_id=int(timestamp))
-                    except Exception:
-                        logger.debug(
-                            "Failed to acknowledge active control message %s",
-                            timestamp,
-                            exc_info=True,
-                        )
-                    return
-                context = QueueMessageContext(
-                    queue_name=queue_name,
-                    queue=ctrl_queue,
-                    mode=QueueMode.PEEK,
-                    timestamp=int(timestamp),
-                )
-                self._handle_control_message(raw_message, int(timestamp), context)
-        finally:
-            ctrl_queue.close()
+            entries = ctrl_queue.peek_many(limit=1, with_timestamps=True) or []
+        except Exception:  # pragma: no cover - defensive broker guard
+            logger.debug("Failed to poll active control queue", exc_info=True)
+            return
+
+        if not entries:
+            return
+
+        entry = entries[0]
+        if not isinstance(entry, tuple) or len(entry) != 2:
+            return
+        raw_message, timestamp = entry
+        if not isinstance(raw_message, str):
+            return
+
+        timestamp_int = int(timestamp)
+        command = raw_message.strip().upper()
+        if command in {CONTROL_STOP, CONTROL_KILL}:
+            self._defer_active_control(command, timestamp_int)
+            self._ack_control_message(queue_name, timestamp_int)
+            return
+
+        context = QueueMessageContext(
+            queue_name=queue_name,
+            queue=ctrl_queue,
+            mode=QueueMode.PEEK,
+            timestamp=timestamp_int,
+        )
+        self._handle_control_message(raw_message, timestamp_int, context)
 
     def _defer_active_control(self, command: str, timestamp: int) -> None:
         """Defer active STOP/KILL finalization back to the main task thread.
@@ -346,6 +321,8 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         return True
 
     def _cancel_requested(self) -> bool:
+        if not self.should_stop:
+            self._poll_active_control_once()
         if self.should_stop:
             return True
         if self._stop_event is None:

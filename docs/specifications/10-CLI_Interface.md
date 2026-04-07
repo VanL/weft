@@ -320,8 +320,11 @@ use `@alias` when you want alias resolution before broadcast.
 
 When a live task has a persisted runner handle, stop/kill flows dispatch
 through the owning runner plugin before falling back to host-PID termination.
-This keeps the operator lifecycle surface consistent across host and non-host
-backends.
+Control flows first wait for the durable terminal task snapshot published
+through `weft.log.tasks`; runtime-handle or PID escalation is a fallback, not
+the primary success signal. This keeps the operator lifecycle surface
+consistent across host and non-host backends without racing the task-owned
+state transition.
 
 ## Queue Operations
 
@@ -883,6 +886,7 @@ The CLI follows SimpleBroker's command patterns and integrates with standard Uni
 
 ## Related Plans
 
+- [`docs/plans/active-control-main-thread-plan.md`](../plans/active-control-main-thread-plan.md)
 - [`docs/plans/piped-input-support-plan.md`](../plans/piped-input-support-plan.md)
 - [`docs/plans/runner-extension-point-plan.md`](../plans/runner-extension-point-plan.md)
 - [`docs/plans/agent-runtime-boundary-cleanup-plan.md`](../plans/agent-runtime-boundary-cleanup-plan.md)

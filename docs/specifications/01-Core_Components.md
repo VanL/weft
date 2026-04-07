@@ -4,6 +4,7 @@ This document details the fundamental components of the Weft system architecture
 
 ## Related Plans
 
+- [Active Control Main-Thread Ownership Plan](../plans/active-control-main-thread-plan.md) - Remove background active control polling and restore single-threaded task-state ownership.
 - [Runner Extension Point Plan](../plans/runner-extension-point-plan.md) - Runner plugin architecture replacing the monolithic executor.
 - [Persistent Agent Runtime Implementation Plan](../plans/persistent-agent-runtime-implementation-plan.md) - Agent session and persistent task support.
 - [Spec-Plan-Code Traceability Plan](../plans/spec-plan-code-traceability-plan.md) - Cross-referencing specs, plans, and code.
@@ -185,6 +186,10 @@ to maintain consistency.
 - **Control commands**: STOP, STATUS, and the health-check `PING`
   round-trip remain mandatory. Additional commands may be layered on via
   `_handle_control_command` overrides.
+- **Active control ownership**: While work is actively executing, control
+  polling may happen from the same task thread via the runtime loop, but
+  terminal STOP/KILL state publication, reserved-policy application, and
+  control ACK emission remain task-owned operations on that main task thread.
 - **State emission**: Each transition (start, completion, failure, timeout,
   reserved-policy event, etc.) must call `_report_state_change`. When
   `reporting_interval == "poll"`, tasks also emit `poll_report` events at the
@@ -210,6 +215,8 @@ At a high level a `Consumer` (and derivatives) execute the following steps:
    - Mark the task as running and emit `work_started`.
    - Delegate execution to `TaskRunner` (multiprocess isolation, resource
      monitoring, timeout enforcement).
+   - Poll active control from the same task thread while the runtime loop is
+     running, deferring active STOP/KILL finalization until the runtime exits.
    - Apply reserved-queue policy and emit state events (`work_completed`,
      `work_failed`, `work_timeout`, `work_limit_violation`, etc.).
 4. Emit control responses for any control commands encountered.
@@ -219,7 +226,7 @@ At a high level a `Consumer` (and derivatives) execute the following steps:
 The CLI command `weft run` already demonstrates both usage patterns: `--once`
 invokes `process_once()`, while the default mode loops until interrupted.
 
-_Implementation mapping_: `Consumer._handle_work_message`, `Consumer._execute_work_item`, `Consumer._begin_work_item`, `Consumer._finalize_message` (`weft/core/tasks/consumer.py`) and `cmd_run` (`weft/commands/run.py`).
+_Implementation mapping_: `Consumer._handle_work_message`, `Consumer._execute_work_item`, `Consumer._begin_work_item`, `Consumer._cancel_requested`, `Consumer._poll_active_control_once`, `Consumer._finalize_message` (`weft/core/tasks/consumer.py`) and `cmd_run` (`weft/commands/run.py`).
 
 ## 3. TaskRunner (weft/core/tasks/runner.py) [CC-3]
 **Purpose**: Plugin-backed facade that validates the execution shape declared by
