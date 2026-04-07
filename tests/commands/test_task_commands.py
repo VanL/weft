@@ -105,7 +105,7 @@ def test_stop_tasks_terminates_active_process_tree(tmp_path) -> None:
     try:
         stopped = task_cmd.stop_tasks([spec.tid], context_path=tmp_path)
         assert stopped == 1
-        assert _wait_for_process_exit(process.pid, process=process)
+        assert _wait_for_process_exit(process.pid, process=process, timeout=10.0)
         assert _wait_for_process_exit(worker_pid)
     finally:
         kill_process_tree(process.pid)
