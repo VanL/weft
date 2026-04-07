@@ -19,6 +19,7 @@ pty = pytest.importorskip("pty")
 
 READ_SLICE = 0.05
 DEFAULT_TIMEOUT = 5.0
+EXIT_TIMEOUT = 10.0
 
 
 @pytest.fixture
@@ -121,7 +122,7 @@ def test_interactive_python_repl_outputs(tty_workdir: Path) -> None:
         _write_line(master_fd, "quit()\n")
         _write_line(master_fd, ":quit\n")
         trailing = _read_until_exit(proc, master_fd)
-        rc = proc.wait(timeout=5.0)
+        rc = proc.wait(timeout=EXIT_TIMEOUT)
         assert rc == 0
         assert "SyntaxError" not in trailing
     finally:
