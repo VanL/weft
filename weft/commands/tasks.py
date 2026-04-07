@@ -29,6 +29,7 @@ from weft.ext import RunnerHandle
 from weft.helpers import (
     iter_queue_json_entries,
     kill_process_tree,
+    terminate_process_tree,
 )
 
 from . import status as status_cmd
@@ -201,7 +202,7 @@ def _await_control_surface(
     ctx: WeftContext,
     tid: str,
     *,
-    timeout: float = 1.0,
+    timeout: float = 0.5,
 ) -> tuple[dict[str, Any] | None, status_cmd.TaskSnapshot | None]:
     deadline = time.monotonic() + timeout
     latest_entry: dict[str, Any] | None = None
@@ -218,43 +219,6 @@ def _await_control_surface(
         if time.monotonic() >= deadline:
             return latest_entry, latest_snapshot
         time.sleep(0.05)
-
-
-def _await_terminal_snapshot(
-    ctx: WeftContext,
-    tid: str,
-    *,
-    timeout: float,
-    initial_snapshot: status_cmd.TaskSnapshot | None = None,
-) -> status_cmd.TaskSnapshot | None:
-    """Poll task status until a terminal snapshot is observed or time runs out."""
-
-    deadline = time.monotonic() + timeout
-    latest_snapshot = initial_snapshot
-    while True:
-        snapshot = task_status(tid, context_path=ctx.root)
-        if snapshot is not None:
-            latest_snapshot = snapshot
-            if snapshot.status in status_cmd.TERMINAL_STATUSES:
-                return snapshot
-        if time.monotonic() >= deadline:
-            return latest_snapshot
-        time.sleep(0.05)
-
-
-def _await_pid_exit(pid: int | None, *, timeout: float) -> bool:
-    """Return True when *pid* exits within *timeout* seconds."""
-
-    if not _pid_exists(pid):
-        return True
-
-    assert pid is not None
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if not _pid_exists(pid):
-            return True
-        time.sleep(0.05)
-    return not _pid_exists(pid)
 
 
 def stop_tasks(
@@ -280,47 +244,38 @@ def stop_tasks(
             continue
         _send_control(ctx, full, CONTROL_STOP)
         task_entry = lookup.get(full)
-        task_entry, snapshot = _await_control_surface(ctx, full)
-        task_entry = task_entry or lookup.get(full)
         pid = _task_pid_from_mapping(task_entry) if task_entry is not None else None
-        handle = (
-            _runtime_handle_from_mapping(task_entry) if task_entry is not None else None
-        )
-
-        if snapshot is None or snapshot.status not in status_cmd.TERMINAL_STATUSES:
+        task_entry, snapshot = _await_control_surface(ctx, full)
+        if snapshot is not None and snapshot.status == "cancelled" and _pid_exists(pid):
+            assert pid is not None
+            kill_process_tree(pid, timeout=0.2)
+        elif _pid_exists(pid):
+            assert pid is not None
+            task_entry = task_entry or lookup.get(full)
+            handle = (
+                _runtime_handle_from_mapping(task_entry)
+                if task_entry is not None
+                else None
+            )
             if handle is not None:
                 plugin = require_runner_plugin(handle.runner_name)
-                plugin.stop(handle, timeout=0.5)
-            elif _pid_exists(pid):
-                assert pid is not None
+                plugin.stop(handle, timeout=0.2)
+            else:
                 try:
                     os.kill(pid, signal.SIGTERM)
                 except OSError:
                     pass
-            snapshot = _await_terminal_snapshot(
-                ctx,
-                full,
-                timeout=3.0,
-                initial_snapshot=snapshot,
-            )
-
-        if snapshot is not None and snapshot.status == "cancelled":
-            if _await_pid_exit(pid, timeout=1.0):
-                count += 1
-                continue
-
-            if handle is not None:
-                plugin = require_runner_plugin(handle.runner_name)
-                plugin.stop(handle, timeout=0.5)
-                if _await_pid_exit(pid, timeout=4.0):
-                    count += 1
-                    continue
-            count += 1
-            continue
-
-        if _await_pid_exit(pid, timeout=1.0):
-            count += 1
-            continue
+                if _pid_exists(pid):
+                    kill_process_tree(pid, timeout=0.2)
+        if snapshot is None or snapshot.status not in status_cmd.TERMINAL_STATUSES:
+            task_entry = task_entry or lookup.get(full)
+            if task_entry is not None:
+                handle = _runtime_handle_from_mapping(task_entry)
+                if handle is not None:
+                    plugin = require_runner_plugin(handle.runner_name)
+                    plugin.stop(handle, timeout=0.2)
+                elif pid is not None:
+                    terminate_process_tree(pid, timeout=0.2, kill_after=False)
         count += 1
     return count
 
@@ -367,14 +322,15 @@ def kill_tasks(
                 plugin = require_runner_plugin(handle.runner_name)
                 plugin.kill(handle, timeout=0.2)
                 handled_by_runner = True
-            sigusr1 = getattr(signal, "SIGUSR1", None)
-            if sigusr1 is not None:
-                try:
-                    os.kill(pid, sigusr1)
-                except OSError:
-                    pass
-            if _pid_exists(pid):
-                kill_process_tree(pid, timeout=0.2)
+            else:
+                sigusr1 = getattr(signal, "SIGUSR1", None)
+                if sigusr1 is not None:
+                    try:
+                        os.kill(pid, sigusr1)
+                    except OSError:
+                        pass
+                if _pid_exists(pid):
+                    kill_process_tree(pid, timeout=0.2)
         handle = _runtime_handle_from_mapping(task_entry)
         if handle is not None and not handled_by_runner:
             plugin = require_runner_plugin(handle.runner_name)

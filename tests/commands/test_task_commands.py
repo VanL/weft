@@ -12,7 +12,6 @@ import pytest
 
 from tests.helpers.test_backend import prepare_project_root
 from weft.commands import tasks as task_cmd
-from weft.commands.status import TaskSnapshot
 from weft.context import build_context
 from weft.core import (
     IOSection,
@@ -105,7 +104,7 @@ def test_stop_tasks_terminates_active_process_tree(tmp_path) -> None:
     try:
         stopped = task_cmd.stop_tasks([spec.tid], context_path=tmp_path)
         assert stopped == 1
-        assert _wait_for_process_exit(process.pid, process=process, timeout=10.0)
+        assert _wait_for_process_exit(process.pid, process=process)
         assert _wait_for_process_exit(worker_pid)
     finally:
         kill_process_tree(process.pid)
@@ -164,6 +163,14 @@ def test_stop_tasks_uses_runner_handle_when_available(
     monkeypatch.setattr(
         task_cmd, "require_runner_plugin", lambda name: FakeRunnerPlugin()
     )
+    monkeypatch.setattr(
+        task_cmd,
+        "terminate_process_tree",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("should not fall back to direct PID stop")
+        ),
+    )
+
     stopped = task_cmd.stop_tasks([tid], context_path=root)
 
     assert stopped == 1
@@ -176,87 +183,10 @@ def test_stop_tasks_uses_runner_handle_when_available(
                 "host_pids": [33333],
                 "metadata": {"scope": "test"},
             },
-            0.5,
+            0.2,
         )
     ]
     assert ctrl_queue.read_one() == "STOP"
-
-
-def test_stop_tasks_does_not_force_kill_cancelled_task_pid(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    root = prepare_project_root(tmp_path)
-    tid = str(time.time_ns())
-    calls: list[tuple[str, dict[str, Any], float]] = []
-
-    class FakeRunnerPlugin:
-        def stop(self, handle, *, timeout: float = 2.0) -> bool:
-            calls.append(("stop", handle.to_dict(), timeout))
-            return True
-
-    mapping_entry = {
-        "short": tid[-6:],
-        "full": tid,
-        "pid": 11111,
-        "task_pid": 11111,
-        "caller_pid": 22222,
-        "managed_pids": [33333],
-        "runner": "fake",
-        "runtime_handle": {
-            "runner_name": "fake",
-            "runtime_id": "runtime-123",
-            "host_pids": [33333],
-            "metadata": {"scope": "test"},
-        },
-        "name": "task-func",
-        "hostname": "test-host",
-    }
-    cancelled_snapshot = TaskSnapshot(
-        tid=tid,
-        tid_short=tid[-6:],
-        name="task-func",
-        status="cancelled",
-        event="control_stop",
-        started_at=None,
-        completed_at=None,
-        last_timestamp=time.time_ns(),
-        duration_seconds=None,
-        runner="fake",
-        runtime_handle=mapping_entry["runtime_handle"],
-        runtime={"runner_name": "fake", "state": "running", "metadata": {}},
-        metadata={},
-    )
-    pid_exit_calls: list[float] = []
-
-    monkeypatch.setattr(task_cmd, "_send_control", lambda *args, **kwargs: None)
-    monkeypatch.setattr(
-        task_cmd,
-        "_await_control_surface",
-        lambda *args, **kwargs: (mapping_entry, cancelled_snapshot),
-    )
-    monkeypatch.setattr(task_cmd, "require_runner_plugin", lambda name: FakeRunnerPlugin())
-    def fake_await_pid_exit(pid: int | None, *, timeout: float) -> bool:
-        pid_exit_calls.append(timeout)
-        return len(pid_exit_calls) >= 2
-
-    monkeypatch.setattr(task_cmd, "_await_pid_exit", fake_await_pid_exit)
-
-    stopped = task_cmd.stop_tasks([tid], context_path=root)
-
-    assert stopped == 1
-    assert pid_exit_calls == [1.0, 4.0]
-    assert calls == [
-        (
-            "stop",
-            {
-                "runner_name": "fake",
-                "runtime_id": "runtime-123",
-                "host_pids": [33333],
-                "metadata": {"scope": "test"},
-            },
-            0.5,
-        )
-    ]
 
 
 def test_kill_tasks_uses_runner_handle_when_available(

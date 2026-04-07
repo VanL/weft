@@ -89,7 +89,7 @@ class BaseTask(MultiQueueWatcher, ABC):
 
     @property
     def _ctrl_out_queue(self) -> Queue:
-        return self._queue(self._queue_names["ctrl_out"])
+        return self._ctrl_out_queue_obj
 
     @_ctrl_out_queue.setter
     def _ctrl_out_queue(self, queue_obj: Queue) -> None:
@@ -137,9 +137,8 @@ class BaseTask(MultiQueueWatcher, ABC):
         self._taskspec_redaction_paths: tuple[str, ...] = tuple(
             part.strip() for part in str(redaction_setting).split(",") if part.strip()
         )
-        self._queue_cache: dict[tuple[int, str], Queue] = {}
+        self._queue_cache: dict[str, Queue] = {}
         self._owned_queue_names: set[str] = set()
-        self._queue_owner_thread_id = threading.get_ident()
         self._task_pid = os.getpid()
         self._caller_pid = os.getppid()
         self._managed_pids: set[int] = set()
@@ -233,18 +232,14 @@ class BaseTask(MultiQueueWatcher, ABC):
 
         Spec: [SB-0.1], [SB-0.4]
         """
-        thread_id = threading.get_ident()
-        cache_key = (thread_id, name)
-        if cache_key in self._queue_cache:
-            return self._queue_cache[cache_key]
+        if name in self._queue_cache:
+            return self._queue_cache[name]
 
-        managed = None
-        if thread_id == self._queue_owner_thread_id:
-            managed = self.get_queue(name)
+        managed = self.get_queue(name)
         if managed is not None:
             if hasattr(managed, "set_stop_event"):
                 managed.set_stop_event(self._stop_event)
-            self._queue_cache[cache_key] = managed
+            self._queue_cache[name] = managed
         else:
             queue_obj = Queue(
                 name,
@@ -254,58 +249,10 @@ class BaseTask(MultiQueueWatcher, ABC):
             )
             if hasattr(queue_obj, "set_stop_event"):
                 queue_obj.set_stop_event(self._stop_event)
-            self._queue_cache[cache_key] = queue_obj
+            self._queue_cache[name] = queue_obj
             self._owned_queue_names.add(name)
 
-        return self._queue_cache[cache_key]
-
-    def _fresh_queue(self, name: str) -> Queue:
-        """Create a one-shot Queue for operations that should not reuse cached state."""
-
-        queue_obj = Queue(
-            name,
-            db_path=self._db_path,
-            persistent=True,
-            config=self._config,
-        )
-        if hasattr(queue_obj, "set_stop_event"):
-            queue_obj.set_stop_event(self._stop_event)
-        return queue_obj
-
-    def _write_queue_payload(
-        self,
-        queue_name: str,
-        payload: str,
-        *,
-        description: str,
-    ) -> bool:
-        """Write *payload* to *queue_name*, retrying with a fresh Queue on failure."""
-
-        try:
-            self._queue(queue_name).write(payload)
-            return True
-        except Exception:
-            logger.debug(
-                "Cached queue write failed for %s on %s",
-                description,
-                queue_name,
-                exc_info=True,
-            )
-
-        fresh_queue = self._fresh_queue(queue_name)
-        try:
-            fresh_queue.write(payload)
-            return True
-        except Exception:
-            logger.debug(
-                "Fresh queue write failed for %s on %s",
-                description,
-                queue_name,
-                exc_info=True,
-            )
-            return False
-        finally:
-            fresh_queue.close()
+        return self._queue_cache[name]
 
     def _get_connected_queue(self) -> Queue:
         """Return any queue object backed by this task's shared DB connection.
@@ -666,11 +613,9 @@ class BaseTask(MultiQueueWatcher, ABC):
             else None,
         )
 
-        if not self._write_queue_payload(
-            WEFT_GLOBAL_LOG_QUEUE,
-            json.dumps(payload),
-            description=f"state change {event}",
-        ):
+        try:
+            self._queue(WEFT_GLOBAL_LOG_QUEUE).write(json.dumps(payload))
+        except Exception:
             logger.debug(
                 "Failed to write state change event %s", payload, exc_info=True
             )
@@ -691,11 +636,9 @@ class BaseTask(MultiQueueWatcher, ABC):
             "timestamp": time.time_ns(),
         }
         payload.update(extra)
-        if not self._write_queue_payload(
-            self._queue_names["ctrl_out"],
-            json.dumps(payload),
-            description=f"control response {command}",
-        ):
+        try:
+            self._ctrl_out_queue.write(json.dumps(payload))
+        except Exception:
             logger.debug("Failed to write control response %s", payload, exc_info=True)
 
     def handle_termination_signal(self, signum: int) -> None:
@@ -899,11 +842,9 @@ class BaseTask(MultiQueueWatcher, ABC):
             if self._tid_mapping_equivalent(latest_payload, mapping):
                 return
 
-        if not self._write_queue_payload(
-            WEFT_TID_MAPPINGS_QUEUE,
-            json.dumps(mapping),
-            description="tid mapping",
-        ):
+        try:
+            queue.write(json.dumps(mapping))
+        except Exception:
             logger.debug("Failed to register TID mapping %s", mapping, exc_info=True)
 
     def register_managed_pid(self, pid: int | None) -> None:
@@ -993,11 +934,9 @@ class BaseTask(MultiQueueWatcher, ABC):
         if metadata:
             payload.update(metadata)
 
-        if not self._write_queue_payload(
-            WEFT_STREAMING_SESSIONS_QUEUE,
-            json.dumps(payload, ensure_ascii=False),
-            description="streaming session",
-        ):
+        try:
+            queue.write(json.dumps(payload, ensure_ascii=False))
+        except Exception:
             logger.debug("Failed to register streaming session", exc_info=True)
             return
 
