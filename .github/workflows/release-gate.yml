@@ -35,7 +35,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          uv pip install --system -e ".[dev]"
+          uv pip install --system -e ".[dev,docker,macos-sandbox]"
 
       - name: Run full SQLite suite
         run: |
@@ -62,7 +62,7 @@ jobs:
 
       - name: Run PG-compatible suite
         run: |
-          uv run bin/pytest-pg --all
+          uv run --extra dev --extra docker --extra macos-sandbox bin/pytest-pg --all
 
   verify-tag-current:
     runs-on: ubuntu-latest
