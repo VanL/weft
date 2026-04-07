@@ -18,12 +18,17 @@ from weft._constants import (
     CONTROL_STOP,
     DEFAULT_CLEANUP_ON_EXIT,
     DEFAULT_OUTPUT_SIZE_LIMIT_MB,
+    WEFT_GLOBAL_LOG_QUEUE,
     WORK_ENVELOPE_START,
 )
 from weft.core.agent_runtime import AgentExecutionResult
 from weft.core.targets import decode_work_message, serialize_result
 from weft.core.taskspec import ReservedPolicy, TaskSpec
-from weft.helpers import kill_process_tree, terminate_process_tree
+from weft.helpers import (
+    kill_process_tree,
+    redact_taskspec_dump,
+    terminate_process_tree,
+)
 
 from .base import BaseTask
 from .interactive import InteractiveTaskMixin
@@ -50,6 +55,8 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         self._active_raw_message: str | None = None
         self._active_message_timestamp: int | None = None
         self._agent_session: AgentSession | None = None
+        self._deferred_active_control_command: str | None = None
+        self._deferred_active_control_timestamp: int | None = None
 
     def process_once(self) -> None:
         super().process_once()
@@ -226,6 +233,18 @@ class Consumer(BaseTask, InteractiveTaskMixin):
                 if not isinstance(raw_message, str):
                     done.wait(0.05)
                     continue
+                command = raw_message.strip().upper()
+                if command in {CONTROL_STOP, CONTROL_KILL}:
+                    self._defer_active_control(command, int(timestamp))
+                    try:
+                        ctrl_queue.delete(message_id=int(timestamp))
+                    except Exception:
+                        logger.debug(
+                            "Failed to acknowledge active control message %s",
+                            timestamp,
+                            exc_info=True,
+                        )
+                    return
                 context = QueueMessageContext(
                     queue_name=queue_name,
                     queue=ctrl_queue,
@@ -235,6 +254,103 @@ class Consumer(BaseTask, InteractiveTaskMixin):
                 self._handle_control_message(raw_message, int(timestamp), context)
         finally:
             ctrl_queue.close()
+
+    def _defer_active_control(self, command: str, timestamp: int) -> None:
+        """Record STOP/KILL from the control poller for main-thread finalization."""
+
+        self._deferred_active_control_command = command
+        self._deferred_active_control_timestamp = timestamp
+        self.should_stop = True
+        terminal_states = {"completed", "failed", "timeout", "cancelled", "killed"}
+        if command == CONTROL_STOP:
+            if self.taskspec.state.status not in terminal_states:
+                self.taskspec.mark_cancelled(reason="STOP command received")
+                self._update_process_title("cancelled")
+        elif command == CONTROL_KILL:
+            self._kill_requested = True
+            if self.taskspec.state.status not in terminal_states:
+                self.taskspec.mark_killed(reason="KILL command received")
+                self._update_process_title("killed")
+        self._emit_active_control_observability(command, timestamp)
+
+    def _emit_active_control_observability(self, command: str, timestamp: int) -> None:
+        """Write control ACK/state events from the poller using fresh queue handles."""
+
+        if command == CONTROL_STOP:
+            event = "control_stop"
+            response_command = "STOP"
+        else:
+            event = "control_kill"
+            response_command = "KILL"
+
+        taskspec_dump = redact_taskspec_dump(
+            self.taskspec.model_dump(mode="json"),
+            self._taskspec_redaction_paths,
+        )
+        state_payload = {
+            "event": event,
+            "tid": self.tid,
+            "tid_short": self.tid_short,
+            "status": self.taskspec.state.status,
+            "timestamp": time.time_ns(),
+            "taskspec": taskspec_dump,
+            "message_id": timestamp,
+            "task_pid": self._task_pid,
+            "caller_pid": self._caller_pid if self._caller_pid > 0 else None,
+            "managed_pids": self._all_managed_pids(),
+            "runner": self._current_runner_name(),
+            "runtime_handle": (
+                self._runtime_handle.to_dict()
+                if self._runtime_handle is not None
+                else None
+            ),
+        }
+        self._write_queue_payload(
+            WEFT_GLOBAL_LOG_QUEUE,
+            json.dumps(state_payload),
+            description=f"active control {event}",
+        )
+
+        response_payload = {
+            "command": response_command,
+            "status": "ack",
+            "tid": self.tid,
+            "timestamp": time.time_ns(),
+        }
+        self._write_queue_payload(
+            self._queue_names["ctrl_out"],
+            json.dumps(response_payload),
+            description=f"active control response {response_command}",
+        )
+
+    def _finalize_deferred_active_control(self) -> None:
+        """Emit control side effects for active STOP/KILL on the main task thread."""
+
+        command = self._deferred_active_control_command
+        if command is None:
+            return
+
+        self._deferred_active_control_command = None
+        self._deferred_active_control_timestamp = None
+
+        if command == CONTROL_STOP:
+            policy = self._resolve_policy(self.taskspec.spec.reserved_policy_on_stop)
+            self._apply_reserved_policy(
+                policy, message_timestamp=self._active_message_timestamp
+            )
+            if policy is not ReservedPolicy.KEEP:
+                self._ensure_reserved_empty()
+                self._cleanup_reserved_if_needed()
+            return
+
+        if command == CONTROL_KILL:
+            policy = self._resolve_policy(self.taskspec.spec.reserved_policy_on_error)
+            self._apply_reserved_policy(
+                policy, message_timestamp=self._active_message_timestamp
+            )
+            if policy is not ReservedPolicy.KEEP:
+                self._ensure_reserved_empty()
+                self._cleanup_reserved_if_needed()
 
     def _make_task_runner(self, *, interactive: bool = False) -> TaskRunner:
         return TaskRunner(
@@ -437,6 +553,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
 
         if outcome.status == "error":
             if self.taskspec.state.status == "cancelled":
+                self._finalize_deferred_active_control()
                 self._end_streaming_session()
                 self.should_stop = True
                 if self._stop_event:
@@ -445,6 +562,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
                     self.taskspec.state.error or "Target execution cancelled"
                 )
             if self.taskspec.state.status == "killed":
+                self._finalize_deferred_active_control()
                 self._end_streaming_session()
                 self.should_stop = True
                 if self._stop_event:
@@ -470,6 +588,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
 
         if outcome.status == "cancelled":
             if self.taskspec.state.status == "killed":
+                self._finalize_deferred_active_control()
                 self._end_streaming_session()
                 self.should_stop = True
                 if self._stop_event:
@@ -478,6 +597,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
                     self.taskspec.state.error or "Target execution killed"
                 )
             if self.taskspec.state.status == "cancelled":
+                self._finalize_deferred_active_control()
                 self._end_streaming_session()
                 self.should_stop = True
                 if self._stop_event:

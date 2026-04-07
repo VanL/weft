@@ -96,6 +96,11 @@ runbook needs to become stricter.
   fully join that thread before task teardown continues. A short timed join plus
   lingering broker activity can corrupt the SQLite broker under load, especially
   around STOP/cancel handling.
+- For active STOP/KILL handling, keep the poller thread's broker work minimal.
+  Let the poller trip task state and emit only the immediate observability
+  record/ACK with fresh one-shot Queue instances; defer reserved-queue cleanup
+  and other heavier side effects back to the main task thread. Cached queue
+  writers in the poller can drop terminal events or race cleanup under load.
 
 ## 2026-04-07 Plan Hardening
 

@@ -29,7 +29,6 @@ from weft.ext import RunnerHandle
 from weft.helpers import (
     iter_queue_json_entries,
     kill_process_tree,
-    terminate_process_tree,
 )
 
 from . import status as status_cmd
@@ -301,25 +300,27 @@ def stop_tasks(
             snapshot = _await_terminal_snapshot(
                 ctx,
                 full,
-                timeout=1.5,
+                timeout=3.0,
                 initial_snapshot=snapshot,
             )
 
         if snapshot is not None and snapshot.status == "cancelled":
-            if _await_pid_exit(pid, timeout=0.5):
+            if _await_pid_exit(pid, timeout=1.0):
                 count += 1
                 continue
 
             if handle is not None:
                 plugin = require_runner_plugin(handle.runner_name)
                 plugin.stop(handle, timeout=0.5)
-                if _await_pid_exit(pid, timeout=0.5):
+                if _await_pid_exit(pid, timeout=4.0):
                     count += 1
                     continue
+            count += 1
+            continue
 
-        if _pid_exists(pid):
-            assert pid is not None
-            terminate_process_tree(pid, timeout=0.5, kill_after=False)
+        if _await_pid_exit(pid, timeout=1.0):
+            count += 1
+            continue
         count += 1
     return count
 

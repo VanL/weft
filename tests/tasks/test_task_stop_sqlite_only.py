@@ -166,7 +166,7 @@ def main(root_arg: str) -> int:
     context = build_context(spec_context=root)
     inboxes: list[object] = []
     try:
-        for index in range(8):
+        for index in range(10):
             tid = str(time.time_ns())
             spec = build_spec(tid, root)
             process = launch_task_process(Consumer, context.broker_target, spec, config=context.config)
