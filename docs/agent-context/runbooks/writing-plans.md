@@ -187,6 +187,9 @@ Also call out any review gates that matter for this slice, for example:
 
 ### 5. Tasks
 
+Tasks should be dependency-ordered and normally executed in sequence unless the
+plan explicitly says that two tasks are independent.
+
 Use a numbered, dependency-ordered checklist. Each task should be small enough
 to implement and verify independently.
 
@@ -370,22 +373,16 @@ the task into something else.
 
 ## Plan Hardening Checklist
 
-Before treating a risky plan as review-ready, confirm that it covers these when
-relevant:
+Use `hardening-plans.md` as the canonical full checklist for risky work. Do
+not treat this section as a second competing source of truth.
 
-- invariants named before tasks
-- hidden couplings and stage-crossing state called out
-- wrapper logic separated from core work when the same behavior spans contexts
-- stop-and-re-evaluate gates included for risky tasks
-- explicit out-of-scope notes
-- anti-mocking guidance
-- contract-focused tests
-- fatal versus best-effort error-path priorities
-- post-deploy success signals
-- current-file, current-queue, or current-contract context
-- rollout sequencing and rollback
-- one-way doors
-- required reading with comprehension questions
+Before treating a risky plan as review-ready, confirm that the canonical
+hardening checklist has been applied and that the plan clearly includes:
+
+- invariants and hidden couplings before the tasks
+- anti-mocking guidance plus contract-focused proof
+- current-structure context, rollback, rollout, and one-way doors
+- required reading with comprehension questions when the boundary is complex
 
 ## Blockers Before Implementation
 

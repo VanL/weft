@@ -26,7 +26,8 @@
   `docs/agent-context/runbooks/hardening-plans.md` and
   `docs/agent-context/runbooks/review-loops-and-agent-bootstrap.md`. Risky
   includes execution-path changes, contract changes, new persistence or cleanup
-  lifecycles, rollout sequencing, and one-way doors.
+  lifecycles, rollout sequencing, and one-way doors. See
+  `docs/agent-context/runbooks/hardening-plans.md` for the full trigger list.
 - Optimize for agent usability, not just human readability. If something seems
   clear to a human but ambiguous to an agent, call that out and suggest a
   concrete fix.

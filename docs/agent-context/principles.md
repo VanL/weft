@@ -19,6 +19,13 @@ Agent-usable guidance should make these explicit when relevant:
 - verification
 - required action
 
+Example:
+
+- weak: "update the startup flow"
+- stronger: "owner: `weft/commands/run.py` manager wait path; boundary: no
+  second startup path; verification: targeted manager-startup regression;
+  required action: extend the existing registry wait logic"
+
 ## Collaboration Standards
 
 - Follow explicit user corrections immediately.
