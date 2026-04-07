@@ -97,10 +97,12 @@ runbook needs to become stricter.
   lingering broker activity can corrupt the SQLite broker under load, especially
   around STOP/cancel handling.
 - For active STOP/KILL handling, keep the poller thread's broker work minimal.
-  Let the poller trip task state and emit only the immediate observability
-  record/ACK with fresh one-shot Queue instances; defer reserved-queue cleanup
-  and other heavier side effects back to the main task thread. Cached queue
-  writers in the poller can drop terminal events or race cleanup under load.
+  The poller may notice control promptly, delete the control message, and set
+  in-memory stop/kill intent, but terminal state publication, control ACKs, and
+  reserved-queue policy must stay on the main task thread after the active work
+  has unwound. Publishing `cancelled`/`killed` from the poller can leave the
+  task process alive after a terminal snapshot, which is the precursor to the
+  SQLite corruption race.
 
 ## 2026-04-07 Plan Hardening
 

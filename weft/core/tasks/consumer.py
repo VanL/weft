@@ -18,17 +18,12 @@ from weft._constants import (
     CONTROL_STOP,
     DEFAULT_CLEANUP_ON_EXIT,
     DEFAULT_OUTPUT_SIZE_LIMIT_MB,
-    WEFT_GLOBAL_LOG_QUEUE,
     WORK_ENVELOPE_START,
 )
 from weft.core.agent_runtime import AgentExecutionResult
 from weft.core.targets import decode_work_message, serialize_result
 from weft.core.taskspec import ReservedPolicy, TaskSpec
-from weft.helpers import (
-    kill_process_tree,
-    redact_taskspec_dump,
-    terminate_process_tree,
-)
+from weft.helpers import kill_process_tree, terminate_process_tree
 
 from .base import BaseTask
 from .interactive import InteractiveTaskMixin
@@ -184,16 +179,11 @@ class Consumer(BaseTask, InteractiveTaskMixin):
 
     @contextmanager
     def _active_control_poller(self) -> Iterator[None]:
-        """Run a dedicated control poller while work is active.
-
-        The poller must be fully joined before task teardown proceeds; leaving a
-        live broker thread behind during STOP/cancel handling can corrupt the
-        SQLite broker under load.
-        """
         done = threading.Event()
         worker = threading.Thread(
             target=self._poll_control_queue_while_active,
             args=(done,),
+            daemon=True,
         )
         worker.start()
         try:
@@ -203,7 +193,6 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             worker.join()
 
     def _poll_control_queue_while_active(self, done: threading.Event) -> None:
-        """Peek ctrl_in while a work item is running and handle STOP/KILL promptly."""
         queue_name = self._queue_names["ctrl_in"]
         ctrl_queue = Queue(
             queue_name,
@@ -211,8 +200,6 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             persistent=True,
             config=self._config,
         )
-        if hasattr(ctrl_queue, "set_stop_event"):
-            ctrl_queue.set_stop_event(self._stop_event)
         try:
             while not done.is_set():
                 if self.should_stop:
@@ -256,77 +243,24 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             ctrl_queue.close()
 
     def _defer_active_control(self, command: str, timestamp: int) -> None:
-        """Record STOP/KILL from the control poller for main-thread finalization."""
+        """Defer active STOP/KILL finalization back to the main task thread.
+
+        The background control poller may request cancellation promptly, but it
+        must not publish terminal state or apply reserved-queue policy while the
+        main task thread is still running the active work item.
+        """
 
         self._deferred_active_control_command = command
         self._deferred_active_control_timestamp = timestamp
         self.should_stop = True
-        terminal_states = {"completed", "failed", "timeout", "cancelled", "killed"}
-        if command == CONTROL_STOP:
-            if self.taskspec.state.status not in terminal_states:
-                self.taskspec.mark_cancelled(reason="STOP command received")
-                self._update_process_title("cancelled")
-        elif command == CONTROL_KILL:
+        if command == CONTROL_KILL:
             self._kill_requested = True
-            if self.taskspec.state.status not in terminal_states:
-                self.taskspec.mark_killed(reason="KILL command received")
-                self._update_process_title("killed")
-        self._emit_active_control_observability(command, timestamp)
-
-    def _emit_active_control_observability(self, command: str, timestamp: int) -> None:
-        """Write control ACK/state events from the poller using fresh queue handles."""
-
-        if command == CONTROL_STOP:
-            event = "control_stop"
-            response_command = "STOP"
-        else:
-            event = "control_kill"
-            response_command = "KILL"
-
-        taskspec_dump = redact_taskspec_dump(
-            self.taskspec.model_dump(mode="json"),
-            self._taskspec_redaction_paths,
-        )
-        state_payload = {
-            "event": event,
-            "tid": self.tid,
-            "tid_short": self.tid_short,
-            "status": self.taskspec.state.status,
-            "timestamp": time.time_ns(),
-            "taskspec": taskspec_dump,
-            "message_id": timestamp,
-            "task_pid": self._task_pid,
-            "caller_pid": self._caller_pid if self._caller_pid > 0 else None,
-            "managed_pids": self._all_managed_pids(),
-            "runner": self._current_runner_name(),
-            "runtime_handle": (
-                self._runtime_handle.to_dict()
-                if self._runtime_handle is not None
-                else None
-            ),
-        }
-        self._write_queue_payload(
-            WEFT_GLOBAL_LOG_QUEUE,
-            json.dumps(state_payload),
-            description=f"active control {event}",
-        )
-
-        response_payload = {
-            "command": response_command,
-            "status": "ack",
-            "tid": self.tid,
-            "timestamp": time.time_ns(),
-        }
-        self._write_queue_payload(
-            self._queue_names["ctrl_out"],
-            json.dumps(response_payload),
-            description=f"active control response {response_command}",
-        )
 
     def _finalize_deferred_active_control(self) -> None:
-        """Emit control side effects for active STOP/KILL on the main task thread."""
+        """Apply deferred STOP/KILL state transitions on the main task thread."""
 
         command = self._deferred_active_control_command
+        timestamp = self._deferred_active_control_timestamp
         if command is None:
             return
 
@@ -335,22 +269,36 @@ class Consumer(BaseTask, InteractiveTaskMixin):
 
         if command == CONTROL_STOP:
             policy = self._resolve_policy(self.taskspec.spec.reserved_policy_on_stop)
+            self._handle_stop_request(
+                reason="STOP command received",
+                event="control_stop",
+                message_id=timestamp,
+                apply_reserved_policy=False,
+            )
             self._apply_reserved_policy(
                 policy, message_timestamp=self._active_message_timestamp
             )
             if policy is not ReservedPolicy.KEEP:
                 self._ensure_reserved_empty()
                 self._cleanup_reserved_if_needed()
+            self._send_control_response("STOP", "ack")
             return
 
         if command == CONTROL_KILL:
             policy = self._resolve_policy(self.taskspec.spec.reserved_policy_on_error)
+            self._handle_kill_request(
+                reason="KILL command received",
+                event="control_kill",
+                message_id=timestamp,
+                apply_reserved_policy=False,
+            )
             self._apply_reserved_policy(
                 policy, message_timestamp=self._active_message_timestamp
             )
             if policy is not ReservedPolicy.KEEP:
                 self._ensure_reserved_empty()
                 self._cleanup_reserved_if_needed()
+            self._send_control_response("KILL", "ack")
 
     def _make_task_runner(self, *, interactive: bool = False) -> TaskRunner:
         return TaskRunner(
@@ -552,8 +500,8 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             raise limit_exc
 
         if outcome.status == "error":
+            self._finalize_deferred_active_control()
             if self.taskspec.state.status == "cancelled":
-                self._finalize_deferred_active_control()
                 self._end_streaming_session()
                 self.should_stop = True
                 if self._stop_event:
@@ -562,7 +510,6 @@ class Consumer(BaseTask, InteractiveTaskMixin):
                     self.taskspec.state.error or "Target execution cancelled"
                 )
             if self.taskspec.state.status == "killed":
-                self._finalize_deferred_active_control()
                 self._end_streaming_session()
                 self.should_stop = True
                 if self._stop_event:
@@ -587,8 +534,8 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             raise error_exc
 
         if outcome.status == "cancelled":
+            self._finalize_deferred_active_control()
             if self.taskspec.state.status == "killed":
-                self._finalize_deferred_active_control()
                 self._end_streaming_session()
                 self.should_stop = True
                 if self._stop_event:
@@ -597,7 +544,6 @@ class Consumer(BaseTask, InteractiveTaskMixin):
                     self.taskspec.state.error or "Target execution killed"
                 )
             if self.taskspec.state.status == "cancelled":
-                self._finalize_deferred_active_control()
                 self._end_streaming_session()
                 self.should_stop = True
                 if self._stop_event:
