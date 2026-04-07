@@ -519,6 +519,7 @@ class InvariantMonitor:
 
 ## Related Plans
 
+- **[active-control-main-thread-plan.md](../plans/active-control-main-thread-plan.md)**
 - **[agent-runtime-boundary-cleanup-plan.md](../plans/agent-runtime-boundary-cleanup-plan.md)**
 - **[agent-runtime-implementation-plan.md](../plans/agent-runtime-implementation-plan.md)**
 - **[persistent-agent-runtime-implementation-plan.md](../plans/persistent-agent-runtime-implementation-plan.md)**

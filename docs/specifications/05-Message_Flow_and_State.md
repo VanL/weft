@@ -75,7 +75,7 @@ Controller -> Queue(T{tid}.ctrl_in) -> Task -> Queue(T{tid}.ctrl_out)
                                          └-> Queue(weft.log.tasks)
 ```
 
-_Implementation mapping_: `weft/core/tasks/base.py` (`BaseTask._handle_control_message` dispatches, `BaseTask._handle_control_command` handles PING/STOP/KILL/PAUSE/RESUME/STATUS, `BaseTask._send_control_response` writes to `ctrl_out`, `BaseTask._ack_control_message` deletes consumed control messages). `Consumer._poll_control_queue_while_active` polls `ctrl_in` in a background thread during active work execution. `weft/commands/tasks.py` (`_send_control` writes to `ctrl_in`, `stop_tasks`/`kill_tasks` orchestrate control + signal delivery).
+_Implementation mapping_: `weft/core/tasks/base.py` (`BaseTask._handle_control_message` dispatches, `BaseTask._handle_control_command` handles PING/STOP/KILL/PAUSE/RESUME/STATUS, `BaseTask._send_control_response` writes to `ctrl_out`, `BaseTask._ack_control_message` deletes consumed control messages). `weft/core/tasks/consumer.py` (`Consumer._poll_active_control_once` polls `ctrl_in` from the main task thread during active work, `Consumer._defer_active_control` records active STOP/KILL intent, `Consumer._finalize_deferred_active_control` publishes the terminal state after runtime exit). `weft/commands/tasks.py` (`_send_control` writes to `ctrl_in`, `stop_tasks`/`kill_tasks` wait for durable terminal state before runner/PID fallback).
 
 ### 4. Pipeline Flow [MF-4]
 **[NOT YET IMPLEMENTED]** Automatic pipeline chaining is not yet implemented; downstream routing must be orchestrated manually.
@@ -601,6 +601,7 @@ class QueueLifecycleManager:
 
 ## Related Plans
 
+- [`docs/plans/active-control-main-thread-plan.md`](../plans/active-control-main-thread-plan.md)
 - [`docs/plans/piped-input-support-plan.md`](../plans/piped-input-support-plan.md)
 - [`docs/plans/agent-runtime-implementation-plan.md`](../plans/agent-runtime-implementation-plan.md) (references MF-1, MF-2, MF-6)
 - [`docs/plans/agent-runtime-boundary-cleanup-plan.md`](../plans/agent-runtime-boundary-cleanup-plan.md)

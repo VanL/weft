@@ -84,6 +84,15 @@ DEFAULT_CLEANUP_ON_EXIT: Final[bool] = True
 DEFAULT_POLLING_INTERVAL: Final[float] = 1.0
 """Default psutil polling interval in seconds."""
 
+ACTIVE_CONTROL_POLL_INTERVAL: Final[float] = 0.05
+"""Internal control-loop polling interval for active task execution."""
+
+CONTROL_SURFACE_WAIT_TIMEOUT: Final[float] = 2.0
+"""Maximum time to wait for durable terminal task state before CLI fallback."""
+
+CONTROL_SURFACE_WAIT_INTERVAL: Final[float] = 0.05
+"""Polling interval while waiting for task terminal state in CLI control flows."""
+
 DEFAULT_REPORTING_INTERVAL: Final[Literal["transition"]] = "transition"
 """Default reporting interval. Either 'poll' or 'transition'."""
 

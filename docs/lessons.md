@@ -103,6 +103,12 @@ runbook needs to become stricter.
   has unwound. Publishing `cancelled`/`killed` from the poller can leave the
   task process alive after a terminal snapshot, which is the precursor to the
   SQLite corruption race.
+- The safer design is stronger than "minimal poller work": do not use a
+  background broker poller for active STOP/KILL at all when the main task
+  thread can poll cooperatively inside the runner/session loop. Main-thread
+  polling keeps control acknowledgement, terminal state publication, reserved
+  policy, and runtime unwind on one execution context and avoids teardown hangs
+  around non-interruptible broker reads.
 
 ## 2026-04-07 Plan Hardening
 

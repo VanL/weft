@@ -823,6 +823,7 @@ jobs:
 
 ## Related Plans
 
+- [`docs/plans/active-control-main-thread-plan.md`](../plans/active-control-main-thread-plan.md)
 - [`docs/plans/agent-runtime-boundary-cleanup-plan.md`](../plans/agent-runtime-boundary-cleanup-plan.md)
 - [`docs/plans/agent-runtime-implementation-plan.md`](../plans/agent-runtime-implementation-plan.md)
 - [`docs/plans/persistent-agent-runtime-implementation-plan.md`](../plans/persistent-agent-runtime-implementation-plan.md)

@@ -26,6 +26,7 @@ import psutil
 
 import weft.core.agents  # noqa: F401 - register built-in agent runtimes
 from simplebroker import BrokerTarget
+from weft._constants import ACTIVE_CONTROL_POLL_INTERVAL
 from weft.core.agent_runtime import (
     execute_agent_target,
     normalize_agent_work_item,
@@ -291,7 +292,7 @@ class HostTaskRunner:
                 monitor = None
 
         start_time = time.monotonic()
-        interval = self._monitor_interval
+        next_monitor_at = start_time + self._monitor_interval
 
         while process.is_alive():
             if cancel_requested is not None and _cancel_requested(cancel_requested):
@@ -336,25 +337,23 @@ class HostTaskRunner:
                 remaining = self._timeout - elapsed
                 if remaining <= 0:
                     continue
-            sleep_for = interval
+            sleep_for = ACTIVE_CONTROL_POLL_INTERVAL
             if remaining is not None:
-                sleep_for = min(interval, max(0.01, remaining))
+                sleep_for = min(sleep_for, max(0.01, remaining))
 
-            if outcome is None:
-                try:
-                    outcome = result_queue.get(timeout=sleep_for)
-                    break
-                except queue.Empty:
-                    pass
-            else:
-                time.sleep(sleep_for)
+            try:
+                outcome = result_queue.get(timeout=sleep_for)
+                break
+            except queue.Empty:
+                pass
 
-            if monitor:
+            if monitor and time.monotonic() >= next_monitor_at:
                 try:
                     ok, violation = monitor.check_limits()
                 except Exception:  # pragma: no cover - process may have exited
                     ok, violation = True, None
                 last_metrics = monitor.last_metrics()
+                next_monitor_at = time.monotonic() + self._monitor_interval
                 if not ok:
                     self._stop_process(process)
                     last_metrics = monitor.last_metrics()
