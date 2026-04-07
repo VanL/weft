@@ -368,9 +368,32 @@ def test_precheck_commands_cover_sqlite_and_postgres_release_gate() -> None:
     sqlite_command = release.PRECHECK_COMMANDS[0]
     postgres_command = release.PRECHECK_COMMANDS[1]
 
-    assert sqlite_command[:5] == ("uv", "run", "pytest", "-v", "--tb=short")
+    assert sqlite_command[:11] == (
+        "uv",
+        "run",
+        "--extra",
+        "dev",
+        "--extra",
+        "docker",
+        "--extra",
+        "macos-sandbox",
+        "pytest",
+        "-v",
+        "--tb=short",
+    )
     assert (
         "--override-ini=addopts=-ra -q --strict-markers -n auto --dist loadgroup"
         in sqlite_command
     )
-    assert postgres_command == ("uv", "run", "bin/pytest-pg", "--all")
+    assert postgres_command == (
+        "uv",
+        "run",
+        "--extra",
+        "dev",
+        "--extra",
+        "docker",
+        "--extra",
+        "macos-sandbox",
+        "bin/pytest-pg",
+        "--all",
+    )
