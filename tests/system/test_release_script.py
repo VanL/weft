@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -239,6 +240,46 @@ def test_plan_tag_action_replaces_remote_tag_only_with_retag() -> None:
         )
         == "replace_remote"
     )
+
+
+def test_github_api_auth_headers_use_environment_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GitHub release lookups should use the current API token when present."""
+
+    release = _load_release_module()
+    release._github_api_token.cache_clear()
+    monkeypatch.setenv("GITHUB_TOKEN", "env-token")
+
+    headers = release._github_api_auth_headers()
+
+    assert headers == {"Authorization": "Bearer env-token"}
+
+
+def test_github_api_auth_headers_fall_back_to_gh_auth_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The helper should fall back to `gh auth token` for authenticated lookups."""
+
+    release = _load_release_module()
+    release._github_api_token.cache_clear()
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.setattr(release.shutil, "which", lambda name: "/opt/homebrew/bin/gh")
+    monkeypatch.setattr(
+        release,
+        "_capture_command",
+        lambda command: subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="gh-token\n",
+            stderr="",
+        ),
+    )
+
+    headers = release._github_api_auth_headers()
+
+    assert headers == {"Authorization": "Bearer gh-token"}
 
 
 def test_main_dry_run_reuses_current_unpublished_version(
