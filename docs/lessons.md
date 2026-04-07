@@ -90,6 +90,13 @@ runbook needs to become stricter.
   backend-specific locks, provided stale `active` records are pruned by PID
   liveness first.
 
+## 2026-04-07 STOP Pollers
+
+- When a task spins up a background control-poller thread during active work,
+  fully join that thread before task teardown continues. A short timed join plus
+  lingering broker activity can corrupt the SQLite broker under load, especially
+  around STOP/cancel handling.
+
 ## 2026-04-07 Plan Hardening
 
 - Risky Weft plans usually fail at the boundary, not in the middle. Name what

@@ -381,6 +381,9 @@ def test_precheck_commands_cover_sqlite_and_postgres_release_gate() -> None:
         "-v",
         "--tb=short",
     )
+    assert "-m" in sqlite_command
+    marker_index = sqlite_command.index("-m")
+    assert sqlite_command[marker_index + 1] == ""
     assert (
         "--override-ini=addopts=-ra -q --strict-markers -n auto --dist loadgroup"
         in sqlite_command
