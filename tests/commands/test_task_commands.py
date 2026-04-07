@@ -183,7 +183,7 @@ def test_stop_tasks_uses_runner_handle_when_available(
                 "host_pids": [33333],
                 "metadata": {"scope": "test"},
             },
-            0.2,
+            0.5,
         )
     ]
     assert ctrl_queue.read_one() == "STOP"

@@ -366,15 +366,14 @@ def kill_tasks(
                 plugin = require_runner_plugin(handle.runner_name)
                 plugin.kill(handle, timeout=0.2)
                 handled_by_runner = True
-            else:
-                sigusr1 = getattr(signal, "SIGUSR1", None)
-                if sigusr1 is not None:
-                    try:
-                        os.kill(pid, sigusr1)
-                    except OSError:
-                        pass
-                if _pid_exists(pid):
-                    kill_process_tree(pid, timeout=0.2)
+            sigusr1 = getattr(signal, "SIGUSR1", None)
+            if sigusr1 is not None:
+                try:
+                    os.kill(pid, sigusr1)
+                except OSError:
+                    pass
+            if _pid_exists(pid):
+                kill_process_tree(pid, timeout=0.2)
         handle = _runtime_handle_from_mapping(task_entry)
         if handle is not None and not handled_by_runner:
             plugin = require_runner_plugin(handle.runner_name)
