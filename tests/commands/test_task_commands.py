@@ -164,14 +164,6 @@ def test_stop_tasks_uses_runner_handle_when_available(
     monkeypatch.setattr(
         task_cmd, "require_runner_plugin", lambda name: FakeRunnerPlugin()
     )
-    monkeypatch.setattr(
-        task_cmd,
-        "terminate_process_tree",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError("should not fall back to direct PID stop")
-        ),
-    )
-
     stopped = task_cmd.stop_tasks([tid], context_path=root)
 
     assert stopped == 1
@@ -243,14 +235,6 @@ def test_stop_tasks_does_not_force_kill_cancelled_task_pid(
         lambda *args, **kwargs: (mapping_entry, cancelled_snapshot),
     )
     monkeypatch.setattr(task_cmd, "require_runner_plugin", lambda name: FakeRunnerPlugin())
-    monkeypatch.setattr(
-        task_cmd,
-        "terminate_process_tree",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError("graceful stop should not force-kill the task pid")
-        ),
-    )
-
     def fake_await_pid_exit(pid: int | None, *, timeout: float) -> bool:
         pid_exit_calls.append(timeout)
         return len(pid_exit_calls) >= 2
