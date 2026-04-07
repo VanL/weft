@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import shlex
 import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Final, Literal
 from urllib import error as urllib_error
@@ -361,12 +363,16 @@ def github_repo_slug_from_remote(remote_url: str) -> str | None:
 def _url_exists(url: str) -> bool:
     """Return whether a JSON endpoint exists, treating 404 as missing."""
 
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "weft-release-helper",
+    }
+    if url.startswith(GITHUB_API_BASE):
+        headers.update(_github_api_auth_headers())
+
     request = urllib_request.Request(
         url,
-        headers={
-            "Accept": "application/json",
-            "User-Agent": "weft-release-helper",
-        },
+        headers=headers,
     )
     try:
         with urllib_request.urlopen(request, timeout=HTTP_TIMEOUT_SECONDS):
@@ -392,6 +398,35 @@ def github_release_exists(tag_name: str) -> bool:
     return _url_exists(
         f"{GITHUB_API_BASE}/repos/{repo_slug}/releases/tags/{encoded_tag}"
     )
+
+
+@lru_cache(maxsize=1)
+def _github_api_token() -> str | None:
+    """Return an auth token for GitHub API requests when one is available."""
+
+    for env_var in ("GITHUB_TOKEN", "GH_TOKEN"):
+        token = os.environ.get(env_var, "").strip()
+        if token:
+            return token
+
+    if shutil.which("gh") is None:
+        return None
+
+    result = _capture_command(("gh", "auth", "token"))
+    if result.returncode != 0:
+        return None
+
+    token = result.stdout.strip()
+    return token or None
+
+
+def _github_api_auth_headers() -> dict[str, str]:
+    """Return GitHub API auth headers for authenticated release lookups."""
+
+    token = _github_api_token()
+    if not token:
+        return {}
+    return {"Authorization": f"Bearer {token}"}
 
 
 def pypi_version_exists(version: str) -> bool:
