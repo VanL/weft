@@ -2,10 +2,16 @@
 
 This document details the fundamental components of the Weft system architecture.
 
+## Related Plans
+
+- [Runner Extension Point Plan](../plans/runner-extension-point-plan.md) - Runner plugin architecture replacing the monolithic executor.
+- [Persistent Agent Runtime Implementation Plan](../plans/persistent-agent-runtime-implementation-plan.md) - Agent session and persistent task support.
+- [Spec-Plan-Code Traceability Plan](../plans/spec-plan-code-traceability-plan.md) - Cross-referencing specs, plans, and code.
+
 ## 1. TaskSpec (weft/core/taskspec.py) [CC-1]
 **Purpose**: Task configuration with partial immutability - immutable spec, mutable state
 
-_Implementation_: `weft/core/taskspec.py` (`TaskSpec`, `SpecSection`, `IOSection`, `StateSection`) implements these behaviours, including default expansion and partial immutability.
+_Implementation mapping_: `weft/core/taskspec.py` — `TaskSpec`, `SpecSection`, `IOSection`, `StateSection`, `LimitsSection`, `RunnerSection`, `ReservedPolicy`, `resolve_taskspec_payload`, `FrozenList`, `FrozenDict`.
 
 **Key Responsibilities**:
 - Validate task configuration at creation
@@ -40,20 +46,21 @@ class TaskSpec:
 ```python
 class SpecSection:
     # Execution configuration
-    type: Literal["function", "command"]
+    type: Literal["function", "command", "agent"]   # "agent" added by runner-extension-point
     function_target: str | None      # For type="function"
     process_target: str | None       # For type="command"
     args: list[Any]
     keyword_args: dict[str, Any]
-    
+
     # Resource limits (grouped for clarity)
     limits: LimitsSection
-    
+
     # Execution behavior
     timeout: float | None
     env: dict[str, str]
     working_dir: str | None
     interactive: bool
+    persistent: bool                 # Long-lived tasks that survive multiple work items
     stream_output: bool
     cleanup_on_exit: bool
     reserved_policy_on_stop: Literal["keep", "requeue", "clear"]
@@ -61,7 +68,11 @@ class SpecSection:
     output_size_limit_mb: int
     enable_process_title: bool
     weft_context: str | None
-    
+
+    # Runner selection
+    runner: RunnerSection            # Plugin-based execution backend (default: "host")
+    agent: AgentSection | None       # Agent runtime configuration (type="agent" only)
+
     # Monitoring configuration
     polling_interval: float
     reporting_interval: Literal["poll", "transition"]
@@ -73,6 +84,11 @@ class LimitsSection:
     cpu_percent: int | None      # Max CPU percentage (0-100)
     max_fds: int | None          # Max file descriptors
     max_connections: int | None  # Max network connections
+
+class RunnerSection:
+    """Execution backend selection for the task."""
+    name: str                    # Runner plugin name (default: "host")
+    options: dict[str, Any]      # Runner-specific JSON-serializable options
 ```
 
 **Immutability Enforcement**:
@@ -94,6 +110,8 @@ def _freeze_spec(self):
 - State transitions are forward-only (enforced by TaskSpec.set_status)
 - Required queues (outbox, ctrl_in, ctrl_out) always present
 - All optional fields expanded to explicit values via apply_defaults()
+- `spec.runner.name` defaults to `"host"` when the runner section is omitted
+- `spec.runner.options` stays JSON-serializable so TaskSpecs can be stored and replayed safely
 
 ## 2. Task Execution Architecture
 Weft tasks build on top of SimpleBroker’s multi-queue watcher and are organised
@@ -106,7 +124,7 @@ channels, and queue-based state reporting).
 **Purpose**: Provide a scheduler that can monitor multiple SimpleBroker queues,
 each with its own processing semantics.
 
-_Implementation_: `weft/core/tasks/multiqueue_watcher.py` supplies `MultiQueueWatcher` with per-mode handling, queue registration, and shared database wiring aligned with this description.
+_Implementation mapping_: `weft/core/tasks/multiqueue_watcher.py` — `MultiQueueWatcher`, `QueueMode`, `QueueMessageContext`, `PollingStrategy` (re-exported from SimpleBroker).
 
 **Capabilities**:
 - Configurable per-queue processing modes (`READ`, `PEEK`, `RESERVE`).
@@ -123,7 +141,7 @@ SimpleBroker example while extending it for Weft’s needs.
 **Purpose**: Bind a `TaskSpec` to the watcher, manage control/state reporting,
 and provide shared utilities for concrete task types.
 
-_Implementation_: `BaseTask` in `weft/core/tasks/base.py` handles queue wiring, control commands, state reporting, and emits process titles with the required context prefix.
+_Implementation mapping_: `weft/core/tasks/base.py` — `BaseTask.__init__`, `_resolve_queue_names`, `_build_queue_configs` (abstract), `_handle_control_message`, `_handle_control_command`, `_report_state_change`, `_update_process_title`, `_format_process_title`, `_register_tid_mapping`, `run_until_stopped`, `process_once`, `_apply_reserved_policy`, `_maybe_emit_poll_report`, `cleanup`, `stop`.
 
 **Key Responsibilities**:
 - Translate `TaskSpec.io` into queue configurations (inbox reserve mode,
@@ -147,7 +165,7 @@ focus on the semantics of message handling rather than process orchestration.
 ### 2.3 Specialized Task Types [CC-2.3]
 Concrete task types extend `BaseTask` to express different queue behaviours.
 
-_Implementation_: `Consumer` (`weft/core/tasks/consumer.py`), `Observer` (`weft/core/tasks/observer.py`), `SelectiveConsumer` (`weft/core/tasks/observer.py`), `Monitor` (`weft/core/tasks/monitor.py`), and `SamplingObserver` (`weft/core/tasks/monitor.py`) provide the queue modes shown below while reusing the helpers exported from `weft/core/tasks/base.py`.
+_Implementation mapping_: `Consumer` and `SelectiveConsumer` (`weft/core/tasks/consumer.py`), `Observer` and `SamplingObserver` (`weft/core/tasks/observer.py`), `Monitor` (`weft/core/tasks/monitor.py`). All re-exported from `weft/core/tasks/__init__.py`.
 
 Interactive command sessions reuse `Consumer` with `spec.interactive=True`, streaming stdin/stdout via JSON envelopes rather than per-message execution.
 
@@ -201,28 +219,79 @@ At a high level a `Consumer` (and derivatives) execute the following steps:
 The CLI command `weft run` already demonstrates both usage patterns: `--once`
 invokes `process_once()`, while the default mode loops until interrupted.
 
-_Implementation_: `Consumer._handle_work_message` (`weft/core/tasks/consumer.py`) and `cmd_run` (`weft/commands/run.py`) follow this flow.
+_Implementation mapping_: `Consumer._handle_work_message`, `Consumer._execute_work_item`, `Consumer._begin_work_item`, `Consumer._finalize_message` (`weft/core/tasks/consumer.py`) and `cmd_run` (`weft/commands/run.py`).
 
 ## 3. TaskRunner (weft/core/tasks/runner.py) [CC-3]
-**Purpose**: Managed wrapper around Python’s multiprocessing primitives for
-executing TaskSpec targets with resource monitoring.
+**Purpose**: Plugin-backed facade that validates the execution shape declared by
+the TaskSpec and dispatches work through the selected runner backend.
 
-_Implementation_: `weft/core/tasks/runner.py` provides `TaskRunner` and `_worker_entry`, coordinating subprocess execution, timeout handling, and `ResourceMonitor` integration.
+_Implementation mapping_: `weft/core/tasks/runner.py` — `TaskRunner` (plugin-dispatching facade), `_build_runner_validation_payload`. The runner delegates to backend plugins via `weft/_runner_plugins.py` and `weft/ext.py`. The built-in host runner backend lives in `weft/core/runners/host.py`. External runners are loaded through the `weft.runners` entry-point group described in the [Runner Extension Point Plan](../plans/runner-extension-point-plan.md).
 
 **Highlights**:
-- Uses the `"spawn"` context to avoid inheriting state from the parent process.
-- Executes either Python callables (`type="function"`) or external commands
-  (`type="command"`) with optional args/kwargs overrides from the work item.
-- Integrates with `weft.core.resource_monitor` to enforce limits defined in
-  `TaskSpec.spec.limits`; returns `RunnerOutcome` statuses of `"ok"`, `"error"`,
-  `"timeout"`, or `"limit"`.
-- Captures stdout/stderr for command targets and returns structured metrics for
-  logging.
-- Designed to be invoked per work item from the `Consumer`’s `_handle_work_message`.
+- `spec.type` selects task semantics; `spec.runner` selects the execution backend.
+- The built-in `host` runner uses the same plugin contract as external runners.
+- Runner plugins may own backend-specific validation, preflight, control, and
+  runtime description behavior as long as they return Weft-compatible
+  `RunnerOutcome` data.
+- Consumers and CLI control/status flows must use persisted `RunnerHandle`
+  data rather than assuming that a host PID is the only valid runtime handle.
 
 The long-term contract remains the same: tasks must run in isolated processes,
 terminate cleanly on timeout or STOP, and surface sufficient telemetry for
 operators to understand what happened.
+
+### 3.1 Runner Plugin Boundary [CC-3.1]
+
+Runner extensibility is a first-class execution boundary.
+
+- Core resolves runners by name through the `weft.runners` entry-point group.
+- The built-in `host` runner is always available and is the default when
+  `spec.runner` is omitted.
+- External runners may ship as optional extension packages, for example
+  `weft[docker]` or `weft[macos-sandbox]`.
+- The public plugin surface must cover:
+  - capability declaration
+  - TaskSpec validation and preflight
+  - backend construction
+  - stop/kill control
+  - runtime description for observability
+
+Core owns queue semantics and task lifecycle. Plugins own runtime-specific
+execution details.
+
+### 3.2 Runtime Handles and Control [CC-3.2]
+
+Non-host runners require a durable control surface that is not just a host PID.
+
+- `RunnerHandle` persists the runner name, runner-defined runtime identifier,
+  any meaningful host PIDs, and optional metadata.
+- Runtime handles are recorded in runtime state so later CLI/status/control
+  paths can resolve the correct runner plugin and act on the live runtime.
+- Host PIDs remain useful observability hints, but they are not the canonical
+  cross-runner control identifier.
+
+### 3.3 Validation and Preflight [CC-3.3]
+
+Runner-aware validation happens in layers.
+
+- TaskSpec schema validation checks the shape of `spec.runner`.
+- Capability validation checks whether the selected runner supports the task
+  shape (`spec.type`, `interactive`, `persistent`, agent-session needs).
+- Plugin validation checks required runner-specific options.
+- Preflight checks verify that the runtime is actually available on the current
+  machine.
+
+Unsupported combinations should fail early and explicitly rather than
+silently degrading to host behavior.
+
+### 3.4 Monitoring Ownership [CC-3.4]
+
+Monitoring lives at the runner boundary.
+
+- The `host` runner uses Weft's psutil/resource-monitor path.
+- Non-host runners may provide runtime-native monitoring and enforcement.
+- Core status surfaces should display runner-native runtime descriptions when
+  available instead of forcing every runner into a host-PID-only model.
 
 ### Process Title Expectations
 ```python
@@ -385,8 +454,10 @@ class ProcessTitleMixin:
 12. Clean up resources, including clearing queues, if cleanup_on_exit is True
 13. Exit (process title automatically cleared by OS)
 
-## 3. Executor (weft/core/executor.py)
+## 3. Executor (weft/core/executor.py) **[NOT YET IMPLEMENTED -- superseded by runner plugins]**
 **Purpose**: Isolated execution of task targets with subprocess observability
+
+> **Note**: `weft/core/executor.py` does not exist. The responsibilities described below (function/command execution, subprocess title propagation) are handled by the runner plugin system (`weft/core/runners/`, `weft/_runner_plugins.py`). The `CommandExecutor` / `FunctionExecutor` classes shown in the pseudocode were never implemented as a standalone module. See [CC-3] and the [Runner Extension Point Plan](../plans/runner-extension-point-plan.md).
 
 **Types**:
 - **FunctionExecutor**: Runs Python callables in separate process using multiprocess
@@ -479,8 +550,10 @@ class FunctionExecutor(Executor):
 
 This ensures that both the main task process and any subprocesses it spawns are identifiable in system tools.
 
-## 4. ResourceMonitor (weft/core.resource_monitor.py)
+## 4. ResourceMonitor (weft/core/resource_monitor.py)
 **Purpose**: Track and enforce resource limits using psutil as the default implementation
+
+_Implementation mapping_: `weft/core/resource_monitor.py` — `ResourceMonitor` (psutil-based), `ResourceMetrics` dataclass, abstract `BaseResourceMonitor`. Limit enforcement is coordinated by the host runner backend in `weft/core/runners/`.
 
 **Default Implementation**: The system uses psutil for cross-platform resource monitoring. The `monitor_class` field in TaskSpec defaults to `"weft.core.resource_monitor.ResourceMonitor"` which is psutil-based.
 
@@ -680,25 +753,35 @@ Weft follows a structured module organization that separates concerns while main
 ```
 weft/core/                        # Core system components
 ├── taskspec.py                   # TaskSpec data model ✅
-├── tasks.py                      # Task execution engine
-├── worker.py                     # Manager (recursive architecture)  
-├── executor.py                   # Target execution (function/command)
-├── monitor.py                    # Resource monitoring with psutil
-└── manager.py                    # Client for submission/querying
+├── tasks/                        # Task execution engine (package) ✅
+│   ├── base.py                   # BaseTask ✅
+│   ├── consumer.py               # Consumer, SelectiveConsumer ✅
+│   ├── observer.py               # Observer, SamplingObserver ✅
+│   ├── monitor.py                # Monitor ✅
+│   ├── multiqueue_watcher.py     # MultiQueueWatcher ✅
+│   ├── runner.py                 # TaskRunner (plugin facade) ✅
+│   ├── interactive.py            # InteractiveTaskMixin ✅
+│   └── sessions.py               # AgentSession, CommandSession ✅
+├── runners/                      # Runner plugin backends ✅
+├── manager.py                    # Manager (spawns child tasks) ✅
+├── resource_monitor.py           # Resource monitoring with psutil ✅
+└── launcher.py                   # Process launching utilities ✅
 
 weft/                             # Root package components
 ├── context.py                    # Context discovery and initialization ✅
-├── cli.py                        # CLI framework and global options
-├── commands.py                   # CLI commands with SimpleBroker integration
-├── helpers.py                    # Cross-cutting helper functions
-└── commands.py                   # CLI commands with SimpleBroker integration
+├── cli.py                        # CLI framework and global options ✅
+├── commands/                     # CLI commands (package) ✅
+├── helpers.py                    # Cross-cutting helper functions ✅
+├── _constants.py                 # All constants and env vars ✅
+├── _runner_plugins.py            # Runner plugin registry ✅
+└── ext.py                        # Extension points (RunnerHandle, etc.) ✅
 
-weft/tools/                       # OS integration utilities
+weft/tools/                       # [NOT YET IMPLEMENTED]
 ├── process_tools.py              # Process discovery via ps/kill
 ├── tid_tools.py                  # TID resolution (short<->full)
-└── observability.py             # Log aggregation, state querying
+└── observability.py              # Log aggregation, state querying
 
-weft/integration/                 # External system integration
+weft/integration/                 # [NOT YET IMPLEMENTED]
 ├── streams.py                    # Stream adapters (stdin/stdout)
 ├── unix.py                       # Unix command wrappers
 ├── pipelines.py                  # Task pipeline builders
@@ -707,44 +790,56 @@ weft/integration/                 # External system integration
 
 ### Component Locations
 
-| Component | Module | Purpose |
-|-----------|--------|---------|
-| **TaskSpec** | `weft.core.taskspec` | Task configuration and validation |
-| **Task** | `weft.core.tasks` | Task execution extending MultiQueueWatcher |
-| **Manager** | `weft.core.manager` | Recursive worker implementation |
-| **Client** | `weft.core.manager` | Task submission and lifecycle management |
-| **ResourceMonitor** | `weft.core.resource_monitor` | psutil-based resource monitoring |
-| **WeftContext** | `weft.context` | Git-like project discovery and initialization |
-| **FunctionExecutor** | `weft.core.executor` | Python function execution |
-| **CommandExecutor** | `weft.core.executor` | System command execution |
-| **ProcessManager** | `weft.tools.process_tools` | OS process discovery and control |
-| **TIDResolver** | `weft.tools.tid_tools` | TID mapping and resolution |
-| **TaskMonitor** | `weft.tools.observability` | System state observation |
-| **StreamAdapter** | `weft.specs.streams` | Stream routing to queues |
-| **PipelineBuilder** | `weft.specs.pipelines` | Task chain construction |
+| Component | Module | Purpose | Status |
+|-----------|--------|---------|--------|
+| **TaskSpec** | `weft.core.taskspec` | Task configuration and validation | Implemented |
+| **BaseTask** | `weft.core.tasks.base` | Abstract task base with queue wiring | Implemented |
+| **Consumer** | `weft.core.tasks.consumer` | Default worker, reserves and executes | Implemented |
+| **Observer** | `weft.core.tasks.observer` | Non-consuming message observer | Implemented |
+| **Monitor** | `weft.core.tasks.monitor` | Message forwarding observer | Implemented |
+| **TaskRunner** | `weft.core.tasks.runner` | Plugin-dispatching execution facade | Implemented |
+| **Manager** | `weft.core.manager` | Spawns and manages child tasks | Implemented |
+| **ResourceMonitor** | `weft.core.resource_monitor` | psutil-based resource monitoring | Implemented |
+| **WeftContext** | `weft.context` | Project discovery and broker scoping | Implemented |
+| **RunnerHandle** | `weft.ext` | Extension point for runner plugins | Implemented |
+| **FunctionExecutor** | `weft.core.executor` | Python function execution | **[NOT YET IMPLEMENTED]** -- absorbed by runner plugins |
+| **CommandExecutor** | `weft.core.executor` | System command execution | **[NOT YET IMPLEMENTED]** -- absorbed by runner plugins |
+| **ProcessManager** | `weft.tools.process_tools` | OS process discovery and control | **[NOT YET IMPLEMENTED]** |
+| **TIDResolver** | `weft.tools.tid_tools` | TID mapping and resolution | **[NOT YET IMPLEMENTED]** |
+| **TaskMonitor** | `weft.tools.observability` | System state observation | **[NOT YET IMPLEMENTED]** |
+| **StreamAdapter** | `weft.specs.streams` | Stream routing to queues | **[NOT YET IMPLEMENTED]** |
+| **PipelineBuilder** | `weft.specs.pipelines` | Task chain construction | **[NOT YET IMPLEMENTED]** |
 
 ### Import Guidelines
 
 ```python
 # Public API (recommended for users)
-from weft import TaskSpec, Task, WeftContext
+from weft.core.taskspec import TaskSpec
+from weft.core.tasks import Consumer, Observer, Monitor, BaseTask
+from weft.context import WeftContext, build_context
 
 # Core components (internal use)
-from weft.core.manager import Client
 from weft.core.manager import Manager
-from weft.core.executor import FunctionExecutor, CommandExecutor
+from weft.core.tasks.runner import TaskRunner
+from weft.core.resource_monitor import ResourceMonitor
 
-# Administrative tools
-from weft.tools.process_tools import ProcessManager
-from weft.tools.tid_tools import TIDResolver
+# Extension points
+from weft.ext import RunnerHandle
+from weft._runner_plugins import require_runner_plugin
 
-# Spec utilities
-from weft.specs.streams import StreamAdapter
-from weft.specs.pipelines import PipelineBuilder
+# NOT YET IMPLEMENTED -- the imports below reference planned modules
+# from weft.tools.process_tools import ProcessManager
+# from weft.tools.tid_tools import TIDResolver
+# from weft.specs.streams import StreamAdapter
+# from weft.specs.pipelines import PipelineBuilder
 ```
 
 ## 6. WeftContext (weft/context.py)
 **Purpose**: Git-like project discovery and initialization
+
+_Implementation mapping_: `weft/context.py` — `WeftContext` (dataclass), `build_context`, `get_context`. The implementation delegates broker discovery to SimpleBroker's public project API rather than maintaining a parallel system. The function signatures below are aspirational; the actual public API uses `build_context(spec_context=None)` and `get_context(spec_context=None)`.
+
+> **Note**: The API shown in the pseudocode below (`get_context() -> Dict`, `discover_weft_root`, `initialize_project`, `needs_initialization`, `get_queue`) **[NOT YET IMPLEMENTED]** as described. The current implementation uses a simplified `WeftContext` dataclass with `build_context()` / `get_context()` helpers that delegate to SimpleBroker's project scoping. See `weft/context.py` module docstring for the actual contract.
 
 **Key Responsibilities**:
 - Discover `.weft/` project root by traversing up directory tree

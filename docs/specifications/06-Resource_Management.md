@@ -2,12 +2,17 @@
 
 This document covers resource monitoring, limit enforcement, and comprehensive error handling strategies.
 
-_Implementation snapshot_: `weft/core.resource_monitor.py` and `TaskRunner` provide psutil-based measurements and limit enforcement. The specialized manager classes illustrated below are design references and are not yet implemented as standalone components.
+_Implementation snapshot_: `weft/core/resource_monitor.py` and `TaskRunner` provide psutil-based measurements and limit enforcement. The specialized manager classes illustrated below are design references and are not yet implemented as standalone components.
+
+_Implementation mapping_: `weft/core/resource_monitor.py` (`PsutilResourceMonitor`, `BaseResourceMonitor`, `ResourceMetrics`), `weft/core/runners/host.py` (`HostTaskRunner.run_with_hooks` — monitoring loop and limit enforcement), `weft/core/tasks/runner.py` (`TaskRunner` — facade), `weft/core/tasks/consumer.py` (`Consumer._ensure_outcome_ok` — limit/timeout state transitions).
 
 ## Resource Management [RM-0]
 
 ### 1. Memory Management [RM-1]
 _Implementation status_: Memory monitoring and limit checking are handled generically in `PsutilResourceMonitor.check_limits`; dedicated `MemoryManager` helpers are not yet present.
+
+_Implementation mapping_: `weft/core/resource_monitor.py` — `PsutilResourceMonitor.check_limits` (memory limit comparison), `PsutilResourceMonitor.get_current_metrics` (RSS calculation via `process.memory_info().rss`). `weft/core/taskspec.py` — `LimitsSection.memory_mb`.
+
 ```python
 class MemoryManager:
     def check_limit(self, current_mb: float, limit_mb: int) -> bool
@@ -16,12 +21,15 @@ class MemoryManager:
 ```
 
 **Strategies**:
-- Soft limit: Warning at 90%
+- Soft limit: Warning at 90% **[NOT YET IMPLEMENTED]** — current implementation is hard-kill only
 - Hard limit: Kill at 100%
-- Grace period: 5 seconds between soft and hard
+- Grace period: 5 seconds between soft and hard **[NOT YET IMPLEMENTED]** — no grace period logic exists
 
 ### 2. CPU Management [RM-2]
 _Implementation status_: CPU limit evaluation leverages the rolling average in `PsutilResourceMonitor`; throttling strategies (nice/renice, cgroups) remain future work.
+
+_Implementation mapping_: `weft/core/resource_monitor.py` — `PsutilResourceMonitor._is_sustained_cpu_violation` (4-of-5 samples check), `PsutilResourceMonitor._get_average_cpu`, `PsutilResourceMonitor._snapshot_cpu_times` (tree-wide CPU time delta). `weft/core/taskspec.py` — `LimitsSection.cpu_percent`.
+
 ```python
 class CPUManager:
     def calculate_usage(self, pid: int) -> float
@@ -30,34 +38,40 @@ class CPUManager:
 ```
 
 **Strategies**:
-- Moving average over 10 samples
-- Sustained violation: 5 consecutive over-limit samples
-- Throttling via nice/renice or cgroups
+- Moving average over 10 samples — implemented as `_get_average_cpu(samples=10)`, violation uses last 5 samples (4-of-5 threshold)
+- Sustained violation: 5 consecutive over-limit samples — implemented as 4-of-5 in `_is_sustained_cpu_violation`
+- Throttling via nice/renice or cgroups **[NOT YET IMPLEMENTED]** — violators are terminated, not throttled
 
 ### 3. File Descriptor Management [RM-3]
 _Implementation status_: `PsutilResourceMonitor` gathers open file counts and enforces configured limits. Cleanup routines are TODO.
+
+_Implementation mapping_: `weft/core/resource_monitor.py` — `PsutilResourceMonitor._open_file_count` (fd counting via `num_fds`/`num_handles`/`open_files` fallback chain), `PsutilResourceMonitor.check_limits` (fd limit comparison). `weft/core/taskspec.py` — `LimitsSection.max_fds`.
+
 ```python
 class FDManager:
     def count_open_fds(self, pid: int) -> int
     def enforce_limit(self, pid: int, limit: int) -> None
-    def cleanup_on_exit(self, pid: int) -> None
+    def cleanup_on_exit(self, pid: int) -> None  # [NOT YET IMPLEMENTED]
 ```
 
 ### 4. Network Connection Management [RM-4]
 _Implementation status_: Connection counts are monitored via psutil; proactive limiting/closure logic is not yet implemented.
+
+_Implementation mapping_: `weft/core/resource_monitor.py` — `PsutilResourceMonitor._connection_count` (connection counting via `net_connections`/`connections` fallback), `PsutilResourceMonitor.check_limits` (connection limit comparison). `weft/core/taskspec.py` — `LimitsSection.max_connections`.
+
 ```python
 class NetworkManager:
     def count_connections(self, pid: int) -> int
-    def limit_new_connections(self, pid: int, limit: int) -> None
-    def close_idle_connections(self, pid: int, idle_seconds: int) -> None
+    def limit_new_connections(self, pid: int, limit: int) -> None  # [NOT YET IMPLEMENTED]
+    def close_idle_connections(self, pid: int, idle_seconds: int) -> None  # [NOT YET IMPLEMENTED]
 ```
 
 ## Resource Monitoring Implementation [RM-5]
 
 ### Default psutil-Based Monitor [RM-5.1]
-_Implementation_: `PsutilResourceMonitor` in `weft/core.resource_monitor.py` corresponds to this section and is used by `TaskRunner`.
+_Implementation_: `PsutilResourceMonitor` in `weft/core/resource_monitor.py` corresponds to this section and is used by `HostTaskRunner`.
 
-_Implementation mapping_: `weft/core/resource_monitor.py` (monitor/metrics API), `weft/core/tasks/runner.py` (monitor wiring).
+_Implementation mapping_: `weft/core/resource_monitor.py` (`PsutilResourceMonitor`, `BaseResourceMonitor`, `ResourceMonitor` alias, `load_resource_monitor`), `weft/core/runners/host.py` (`HostTaskRunner.run_with_hooks` — instantiates and polls monitor), `weft/core/tasks/runner.py` (`TaskRunner` — facade that delegates to runner plugin).
 
 ```python
 class ResourceMonitor:
@@ -256,6 +270,8 @@ _Implementation mapping_: `weft/core/resource_monitor.py` (`ResourceMetrics`).
 
 ### 1. Unified Reservation Pattern for Error Handling
 
+_Implementation mapping_: `weft/core/tasks/consumer.py` (`Consumer._handle_work_message` — reserve semantics, `Consumer._finalize_message` — delete from reserved on success, `Consumer._apply_reserved_policy_on_error` — policy on failure), `weft/core/tasks/base.py` (`BaseTask._apply_reserved_policy`).
+
 The system uses a **single reservation pattern** where the `.reserved` queue serves as both work-in-progress and dead-letter queue, leveraging SimpleBroker's atomic move operation:
 
 ```python
@@ -284,6 +300,8 @@ class Task:
 
 ### 2. Error Categories and State Tracking
 
+_Implementation mapping_: `weft/core/tasks/consumer.py` (`Consumer._ensure_outcome_ok` — routes timeout/limit/error/cancelled outcomes to `mark_timeout`, `mark_killed`, `mark_failed`), `weft/core/taskspec.py` (`TaskSpec.mark_*` state transitions, `StateSection`).
+
 | Category | Examples | State Update | Message Location |
 |----------|----------|--------------|------------------|
 | Configuration | Invalid TaskSpec | state.error="Invalid config" | Never reaches reserved |
@@ -294,6 +312,8 @@ class Task:
 | System | Disk full, permission denied | state.error="System error" | Stays in reserved |
 
 ### 3. Recovery Strategies
+
+**[NOT YET IMPLEMENTED]** — None of the three recovery strategies below are implemented as callable APIs. Reserved-queue messages persist for manual inspection via `weft queue peek`, but programmatic retry/reset helpers do not exist.
 
 **Option 1: Retry from Reserved Queue**
 ```python
@@ -358,9 +378,11 @@ def monitor_failures():
             alert(f"Task {task['tid']} failed: {task['error']}")
 ```
 
-_Implementation mapping_: `weft/core/tasks/consumer.py` (limit/timeout handling), `weft/core/taskspec.py` (`mark_timeout`).
+_Implementation mapping_: `weft/core/tasks/consumer.py` (`Consumer._ensure_outcome_ok` — timeout/limit/error branching, `Consumer._report_state_change` — writes to `weft.log.tasks`), `weft/core/taskspec.py` (`TaskSpec.mark_timeout`, `TaskSpec.mark_killed`, `TaskSpec.mark_failed`, `StateSection.error`, `StateSection.return_code`).
 
 ### 5. Resilience Patterns
+
+**[NOT YET IMPLEMENTED]** — Neither `ResilientTask` (automatic retry) nor the circuit breaker pattern is implemented. These remain design-only references.
 
 **Automatic Retry with State**:
 ```python
@@ -401,38 +423,48 @@ def should_process_task(tid: str) -> bool:
 ## Security Considerations
 
 ### Command Execution Safety
-- **Always use array form**: `["cmd", "arg1", "arg2"]` never shell strings
-- **Never use shell=True**: Prevents command injection attacks
+
+_Implementation mapping_: `weft/core/targets.py` (`execute_command_target` — builds command array, uses `subprocess.run` without `shell=True`), `weft/core/runners/host.py` (`HostTaskRunner.start_session` — `subprocess.Popen` without `shell=True`).
+
+- **Always use array form**: `["cmd", "arg1", "arg2"]` never shell strings — implemented
+- **Never use shell=True**: Prevents command injection attacks — implemented (no `shell=True` in codebase)
 - **Validate command arrays**: Check executables exist and are allowed
+
+**[NOT YET IMPLEMENTED]** — The `CommandValidator` class with allowlist support is a design reference. No dedicated validator or allowlist exists in the codebase.
 
 ```python
 class CommandValidator:
     """Validate commands before execution."""
-    
+
     def validate_command(self, command: list[str]) -> None:
         """Ensure command is safe to execute."""
         if not command:
             raise ValueError("Empty command")
-        
+
         # Never allow shell metacharacters in first element
         executable = command[0]
         if any(char in executable for char in ";|&<>$`"):
             raise ValueError(f"Invalid characters in command: {executable}")
-        
+
         # Optionally check against allowlist
         if self.allowlist and executable not in self.allowlist:
             raise ValueError(f"Command not in allowlist: {executable}")
 ```
 
 ### Resource Isolation (v1: Monitor & React)
-- **Current approach**: Tasks run under user permissions with monitoring
-- **Resource enforcement**: Limits checked periodically, violators terminated
-- **Future enhancement**: Sandbox options via cgroups/containers
+
+_Implementation mapping_: `weft/core/runners/host.py` (`HostTaskRunner.run_with_hooks` — polling loop calls `monitor.check_limits()`, terminates on violation), `weft/core/resource_monitor.py` (`PsutilResourceMonitor.check_limits`).
+
+- **Current approach**: Tasks run under user permissions with monitoring — implemented
+- **Resource enforcement**: Limits checked periodically, violators terminated — implemented
+- **Future enhancement**: Sandbox options via cgroups/containers **[NOT YET IMPLEMENTED]**
+
+**[NOT YET IMPLEMENTED]** — The standalone `ResourceEnforcer` class below is a design reference. Enforcement is inline in `HostTaskRunner.run_with_hooks`.
 
 ```python
 class ResourceEnforcer:
     """Enforce resource limits through monitoring."""
-    
+
     def enforce_limits(self, pid: int, limits: LimitsSection) -> None:
         """Monitor and enforce resource limits."""
         process = psutil.Process(pid)
@@ -453,33 +485,41 @@ class ResourceEnforcer:
 ```
 
 ### Environment Variable Safety
-- **Update, not replace**: Task env updates parent environment
-- **Preserve critical paths**: Never override PYTHONPATH, LD_LIBRARY_PATH
-- **Sanitize values**: Remove shell expansion characters
+
+**[NOT YET IMPLEMENTED]** — The `prepare_environment` function with protected-variable guard and sanitization is a design reference. The current host runner (`HostTaskRunner.start_session`) merges env without protected-variable checks or sanitization.
+
+_Implementation mapping (partial)_: `weft/core/runners/host.py` (`HostTaskRunner.start_session` — merges `os.environ` with spec env, sets `PYTHONUNBUFFERED`). No protected-variable enforcement or value sanitization exists.
+
+- **Update, not replace**: Task env updates parent environment — partially implemented (env merged in `start_session`)
+- **Preserve critical paths**: Never override PYTHONPATH, LD_LIBRARY_PATH **[NOT YET IMPLEMENTED]**
+- **Sanitize values**: Remove shell expansion characters **[NOT YET IMPLEMENTED]**
 
 ```python
 def prepare_environment(base_env: dict, task_env: dict) -> dict:
     """Safely merge task environment with base environment."""
     # Start with parent environment
     env = base_env.copy()
-    
+
     # Protected variables that cannot be overridden
     protected = {"PATH", "PYTHONPATH", "LD_LIBRARY_PATH", "HOME", "USER"}
-    
+
     # Update with task environment, skipping protected
     for key, value in task_env.items():
         if key not in protected:
             # Sanitize value (remove shell expansion)
             sanitized = value.replace("$", "").replace("`", "")
             env[key] = sanitized
-    
+
     return env
 ```
 
 ### AI Agent Constraints
-- **Pre-defined task registry**: Only registered tasks can be created
-- **No dynamic execution**: Agents cannot create arbitrary commands
-- **Audit trail**: All operations logged to weft.log.tasks
+
+**[NOT YET IMPLEMENTED]** — The `TaskRegistry` class and allowlist-based agent constraints are design references. The audit trail via `weft.log.tasks` is implemented.
+
+- **Pre-defined task registry**: Only registered tasks can be created **[NOT YET IMPLEMENTED]**
+- **No dynamic execution**: Agents cannot create arbitrary commands **[NOT YET IMPLEMENTED]**
+- **Audit trail**: All operations logged to weft.log.tasks — implemented via `Consumer._report_state_change`
 
 ```python
 class TaskRegistry:
@@ -508,19 +548,29 @@ class TaskRegistry:
 ```
 
 ### Large Output Security
-- **Path validation**: Output paths confined to .weft/outputs/
-- **Size limits**: Enforce maximum output size per task
-- **Cleanup policy**: Automatic removal of old outputs
+
+_Implementation mapping_: `weft/core/tasks/consumer.py` (`Consumer._emit_single_output` — size limit enforcement and spill), `weft/core/tasks/base.py` (`BaseTask._spill_large_output`, `BaseTask._cleanup_spilled_outputs_if_needed`), `weft/core/taskspec.py` (`SpecSection.output_size_limit_mb`).
+
+- **Path validation**: Output paths confined to .weft/outputs/ — partially implemented (spill uses `context.py` paths)
+- **Size limits**: Enforce maximum output size per task — implemented via `output_size_limit_mb`
+- **Cleanup policy**: Automatic removal of old outputs — implemented in `Consumer.cleanup` when `cleanup_on_exit` is true
+
+**[NOT YET IMPLEMENTED]** — The explicit `validate_output_path` function below is a design reference. The spill mechanism writes to a context-derived directory but does not perform traversal-safe path validation.
 
 ```python
 def validate_output_path(path: str, tid: str) -> None:
     """Ensure output path is within allowed directory."""
     resolved = Path(path).resolve()
     allowed_base = Path(f".weft/outputs/{tid}").resolve()
-    
+
     if not str(resolved).startswith(str(allowed_base)):
         raise ValueError(f"Invalid output path: {path}")
 ```
+
+## Related Plans
+
+- [runner-extension-point-plan.md](../plans/runner-extension-point-plan.md) — references this spec for resource monitor plugin architecture and limit enforcement in the host runner.
+- [agent-runtime-implementation-plan.md](../plans/agent-runtime-implementation-plan.md) — references this spec for resource management in agent task execution.
 
 ## Related Documents
 

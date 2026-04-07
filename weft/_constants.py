@@ -185,6 +185,9 @@ DEFAULT_STATUS: Final[Literal["created"]] = STATUS_CREATED
 CONTROL_STOP: Final[str] = "STOP"
 """Control command to stop a running task."""
 
+CONTROL_KILL: Final[str] = "KILL"
+"""Control command to force-kill a running task."""
+
 CONTROL_PAUSE: Final[str] = "PAUSE"
 """Control command to pause a running task (future feature)."""
 

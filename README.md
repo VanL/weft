@@ -26,11 +26,26 @@ uv add weft
 
 # Install Postgres backend support too
 uv add 'weft[pg]'
+
+# Install Docker runner support
+uv add 'weft[docker]'
+
+# Install macOS sandbox runner support
+uv add 'weft[macos-sandbox]'
+
+# Install all first-party optional backends and runners
+uv add 'weft[all]'
 ```
 
 Installing `weft[pg]` adds the `simplebroker-pg` backend plugin. Backend
 selection still happens at runtime through project config or environment
 variables; the extra only makes the Postgres backend available.
+
+Runner extras work the same way: `weft[docker]` adds the Docker runner plugin
+plus the Docker SDK dependency, and `weft[macos-sandbox]` adds the macOS
+sandbox runner plugin. `weft[all]` installs the current first-party optional
+backends and runners together. Runner selection still happens per TaskSpec
+through `spec.runner`.
 
 ## Quick Start
 
@@ -217,6 +232,9 @@ weft list [--stats] [--status STATUS] [--json]
 weft system tidy            # backend-native broker compaction
 weft system dump -o FILE
 weft system load -i FILE    # preflight import; exits 3 on alias conflicts
+
+# Validate a TaskSpec and optionally verify its runner
+weft validate-taskspec FILE [--load-runner] [--preflight]
 ```
 
 ### Task Execution

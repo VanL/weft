@@ -2,7 +2,7 @@
 
 This document details how Weft leverages SimpleBroker's features, avoiding reimplementation while building on a solid foundation.
 
-_Implementation overview_: Queue operations are surfaced through `weft/commands/queue.py`, and runtime queue consumption is handled by `weft/core/tasks/multiqueue_watcher.py` / `weft/core/tasks/base.py`.
+_Implementation overview_: Queue operations are surfaced through `weft/commands/queue.py` (CLI passthrough to `simplebroker.commands`), and runtime queue consumption is handled by `weft/core/tasks/multiqueue_watcher.py` (extends `simplebroker.watcher.BaseWatcher`) / `weft/core/tasks/base.py` (wires TaskSpec queues). Project context discovery lives in `weft/context.py` (`build_context`, `WeftContext`). Project initialization lives in `weft/commands/init.py` (`cmd_init`).
 
 ## SimpleBroker Features Leveraged by Weft [SB-0]
 
@@ -10,7 +10,7 @@ This section documents SimpleBroker features that Weft uses directly, avoiding r
 
 ### Queue Operations (via SimpleBroker Queue API) [SB-0.1]
 
-_Implementation_: CLI helpers in `weft/commands/queue.py` call `Queue.write/read/peek/move`, mirroring the patterns shown here.
+_Implementation mapping_: CLI helpers in `weft/commands/queue.py` (`read_messages`, `write_message`, `peek_messages`, `move_messages`, `read_command`, `write_command`, `peek_command`, `move_command`) delegate to `simplebroker.commands` or call `Queue` methods directly via `WeftContext.queue()`.
 
 ```python
 from simplebroker import Queue, QueueWatcher
@@ -33,7 +33,7 @@ queue.stream_messages()        # Generator for continuous reading
 
 ### Message IDs and Timestamps [SB-0.2]
 
-_Implementation_: `TaskSpec.tid` and TID utilities in `weft/helpers.py` rely on the SimpleBroker timestamp IDs.
+_Implementation mapping_: `TaskSpec.tid` (`weft/core/taskspec.py`) and TID utilities in `weft/helpers.py` rely on SimpleBroker timestamp IDs. The `TimestampGenerator` from `simplebroker._timestamp` is used in `weft/commands/queue.py` for `--since` validation.
 
 SimpleBroker automatically assigns unique 64-bit timestamp IDs to every message:
 - **Format**: High 52 bits (microseconds) + Low 12 bits (counter)
@@ -43,7 +43,7 @@ SimpleBroker automatically assigns unique 64-bit timestamp IDs to every message:
 
 ### Safe Patterns Built into SimpleBroker [SB-0.3]
 
-_Implementation_: `BaseTask._apply_reserved_policy` and `weft/commands/queue.move_command` use `move_one/move_many` for reservation patterns. Peek/delete flows are exercised via queue helpers.
+_Implementation mapping_: `BaseTask._apply_reserved_policy` (`weft/core/tasks/base.py`, `weft/core/tasks/interactive.py`) and `weft/commands/queue.move_command`/`move_messages` use `move_one`/`move_many` for reservation patterns. The `MultiQueueWatcher._fetch_next_message` (`weft/core/tasks/multiqueue_watcher.py`) uses `QueueMode.RESERVE` with `move_one` for the inbox-to-reserved flow. Peek/delete flows are exercised via queue helpers in `weft/commands/queue.py`.
 
 1. **Move for Reservation** (SimpleBroker provides atomically):
 ```python
@@ -68,7 +68,7 @@ result = queue.read(json_output=True)
 
 ### QueueWatcher for Monitoring [SB-0.4]
 
-_Implementation_: `MultiQueueWatcher` (`weft/core/tasks/multiqueue_watcher.py`) wraps QueueWatcher primitives and exposes per-mode handlers.
+_Implementation mapping_: `MultiQueueWatcher` (`weft/core/tasks/multiqueue_watcher.py`) extends `simplebroker.watcher.BaseWatcher` and exposes per-mode handlers (`QueueMode.READ`, `RESERVE`, `PEEK`). `BaseTask` (`weft/core/tasks/base.py`) subclasses `MultiQueueWatcher` to wire TaskSpec queues. Note: the spec example shows `QueueWatcher` directly, but the actual implementation uses `BaseWatcher` as the parent class, with `MultiQueueWatcher` providing multi-queue scheduling.
 
 SimpleBroker provides QueueWatcher - Weft uses this directly:
 
@@ -173,17 +173,18 @@ broker --vacuum                       # Cleanup deleted messages
 
 Weft uses **git-like project scoping** where a `.weft/` directory marks the project root. Commands executed anywhere in the project tree discover and use the same centralized broker database.
 
-_Implementation_: Context discovery and `.weft/` directory management live in
-`weft/context.py` (`build_context`, `_resolve_project_paths`). CLI entry points
-call `build_context` (`weft/commands/queue.py`, `weft/commands/status.py`,
-`weft/commands/run.py`).
+_Implementation mapping_: Context discovery and `.weft/` directory management live in
+`weft/context.py` (`build_context`, `_resolve_root_and_target`, `WeftContext`). CLI entry points
+call `build_context` via `weft/commands/queue.py`, `weft/commands/status.py`,
+`weft/commands/run.py`. Project initialization is handled by `weft/commands/init.py` (`cmd_init`)
+which delegates to `simplebroker.commands.cmd_init` and then calls `build_context` for `.weft/` setup.
 
 #### Project Discovery Algorithm
 1. Start from current working directory
 2. Look for `.weft/` directory in current directory
 3. If not found, traverse up parent directories
 4. Continue until `.weft/` found or filesystem root reached
-5. If no `.weft/` found, offer interactive initialization
+5. If no `.weft/` found, offer interactive initialization **[NOT YET IMPLEMENTED]** -- current behaviour falls back to `target_for_directory(cwd)` without prompting
 
 #### Project Structure
 ```
@@ -208,7 +209,15 @@ project-root/
 
 ### Context Management API
 
-Context management is handled by `weft/context.py` which provides discovery and initialization functions:
+_Implementation mapping_: Context management is handled by `weft/context.py` which exposes
+`build_context()`, `get_context()`, and `WeftContext` (frozen dataclass). The spec sample
+code below is **aspirational pseudo-code** -- the actual API differs:
+- `discover_weft_root()` is replaced by `_resolve_root_and_target()` which delegates to `simplebroker.resolve_broker_target()`
+- `needs_initialization()` **[NOT YET IMPLEMENTED]** -- no standalone function exists
+- `initialize_project()` **[NOT YET IMPLEMENTED]** as a `context.py` function -- initialization is handled by `weft/commands/init.py` (`cmd_init`) instead
+- `_validate_path_security()` **[NOT YET IMPLEMENTED]** -- path validation is delegated entirely to SimpleBroker
+- `WeftContextError` **[NOT YET IMPLEMENTED]** -- standard `RuntimeError` is used instead
+- `get_queue()` is implemented as `WeftContext.queue()` method on the dataclass
 
 ```python
 # weft/context.py - Core context discovery module
@@ -345,6 +354,11 @@ class WeftContextError(Exception):
 
 ### SimpleBroker Command Integration
 
+_Implementation mapping_: `weft/commands/queue.py` delegates to `simplebroker.commands` via
+`_run_simplebroker_command()`, injecting `ctx.broker_target` (not just `db_path`). The spec
+sample code below shows an older `db_path`-based pattern; the actual code passes a
+`BrokerTarget` object for backend-neutral operation.
+
 Weft queue commands delegate directly to SimpleBroker's command functions, automatically injecting the discovered database path:
 
 ```python
@@ -390,6 +404,13 @@ def cmd_write(
 
 ### CLI Integration and Auto-Initialization
 
+_Implementation mapping_: `weft init` is implemented by `weft/commands/init.py` (`cmd_init`).
+CLI commands discover context via `weft/context.py` `build_context()`.
+
+**[NOT YET IMPLEMENTED]**: Interactive auto-initialization prompt (`"Initialize weft project? [y/N]"`) -- currently `build_context` silently creates a default target via `target_for_directory(cwd)` without prompting.
+
+**[NOT YET IMPLEMENTED]**: `weft init --force` flag -- the current `cmd_init` does not accept a `--force` option.
+
 ```bash
 # CLI commands work from any subdirectory
 cd /project/deep/subdirectory
@@ -408,6 +429,10 @@ weft init --force              # Reinitialize existing project
 
 ### Context Information and Management
 
+**[NOT YET IMPLEMENTED]**: `weft info` command -- no dedicated project-info command exists.
+
+**[NOT YET IMPLEMENTED]**: `weft status --project` flag -- `weft status` exists but does not have a `--project` flag for project-wide summary.
+
 ```bash
 # Project information
 weft info                      # Show current project context
@@ -420,6 +445,8 @@ broker --db /project/.weft/broker.db list  # Direct SimpleBroker access
 ```
 
 ## Integration Patterns
+
+**[NOT YET IMPLEMENTED]**: The integration patterns below are aspirational designs. No `create_task_in_context`, `bridge_contexts`, or `ContextMonitor` classes exist in the codebase. Task creation goes through `weft/commands/run.py` and `weft/core/launcher.py`.
 
 ### Task Creation with Context
 
@@ -441,7 +468,7 @@ def create_task_in_context(context_path: str, task_config: dict) -> str:
     return tid
 ```
 
-### Cross-Context Communication
+### Cross-Context Communication **[NOT YET IMPLEMENTED]**
 
 ```python
 # Tasks in different contexts are isolated
@@ -459,7 +486,7 @@ def bridge_contexts(source_context: str, target_context: str, message: str):
     target.get_queue("bridge.in").write(msg)
 ```
 
-### Context-Aware Monitoring
+### Context-Aware Monitoring **[NOT YET IMPLEMENTED]**
 
 ```python
 class ContextMonitor:
@@ -502,7 +529,9 @@ SimpleBroker's SQLite backend provides:
 - **Automatic vacuuming**: Reclaims space from deleted messages
 - **Index optimization**: Efficient message retrieval by timestamp
 
-### Connection Management
+### Connection Management **[NOT YET IMPLEMENTED]**
+
+No `QueueConnectionPool` exists. Queue instances are created ad-hoc via `WeftContext.queue()` and closed explicitly or by garbage collection. `MultiQueueWatcher` shares a single `db_target` across its queues, providing implicit connection reuse.
 
 ```python
 class QueueConnectionPool:
@@ -527,10 +556,12 @@ class QueueConnectionPool:
 
 ### Memory Management
 
-- **Queue size monitoring**: Track message counts per queue
-- **Large message handling**: Automatic spillover to disk for >10MB messages
-- **Cleanup policies**: Remove old completed task data
-- **Connection pooling**: Reuse database connections
+_Implementation mapping_: Queue size monitoring is partially implemented via `list_queues()` in `weft/commands/queue.py` (calls `db.get_queue_stats()`). Cleanup is implemented in `weft/commands/tidy.py`. Message size is bounded by SimpleBroker's 10MB limit.
+
+- **Queue size monitoring**: Track message counts per queue -- implemented via `weft queue list --stats`
+- **Large message handling**: Automatic spillover to disk for >10MB messages -- **[NOT YET IMPLEMENTED]** (SimpleBroker enforces a 10MB hard limit; no spillover mechanism exists)
+- **Cleanup policies**: Remove old completed task data -- implemented in `weft system tidy`
+- **Connection pooling**: Reuse database connections -- **[NOT YET IMPLEMENTED]** as an explicit pool; `MultiQueueWatcher` shares a single `db_target`
 
 ## Related Plans
 

@@ -1,4 +1,9 @@
-"""Project initialisation command."""
+"""Project initialisation command.
+
+Spec references:
+- docs/specifications/04-SimpleBroker_Integration.md (Project Context and Directory Scoping)
+- docs/specifications/10-CLI_Interface.md [CLI-1.1] (init)
+"""
 
 from __future__ import annotations
 
@@ -18,6 +23,8 @@ def cmd_init(
 
     Returns the SimpleBroker exit code.  When successful the project structure
     (``.weft/`` directories, config metadata, database) is ensured.
+
+    Spec: [SB-0] (Project Context and Directory Scoping)
     """
     config = load_config()
     root = Path(directory or Path.cwd()).expanduser().resolve()

@@ -4,6 +4,10 @@ Rather than re-implementing SimpleBroker's CLI surface, these helpers resolve a
 Weft context and delegate to :mod:`simplebroker.commands`. This keeps the Weft
 CLI in sync with SimpleBroker (minus ``init``, which already exists as
 ``weft init``) while still respecting Weft configuration and project discovery.
+
+Spec references:
+- docs/specifications/04-SimpleBroker_Integration.md [SB-0.1], [SB-0.3]
+- docs/specifications/10-CLI_Interface.md (queue operations)
 """
 
 from __future__ import annotations

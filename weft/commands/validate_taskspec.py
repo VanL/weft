@@ -1,4 +1,10 @@
-"""Command handlers for the Weft CLI."""
+"""Command handlers for the Weft CLI.
+
+Spec references:
+- docs/specifications/10-CLI_Interface.md [CLI-1.4.1]
+- docs/specifications/01-Core_Components.md [CC-3.3]
+- docs/specifications/02-TaskSpec.md [TS-1.3]
+"""
 
 from __future__ import annotations
 
@@ -8,19 +14,33 @@ from pathlib import Path
 from typing import Any
 
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
+from weft.core.runner_validation import validate_taskspec_runner
 from weft.core.taskspec import validate_taskspec
 
 console = Console()
 
 
-def cmd_validate_taskspec(file_path: Path) -> None:
+def cmd_validate_taskspec(
+    file_path: Path,
+    *,
+    load_runner: bool = False,
+    preflight: bool = False,
+) -> None:
     """Validate a TaskSpec JSON file.
 
+    Spec: docs/specifications/10-CLI_Interface.md [CLI-1.4.1]
+
     Args:
-        file_path: Path to the TaskSpec JSON file to validate
+        file_path: Path to the TaskSpec JSON file to validate.
+        load_runner: Resolve the configured runner plugin.
+        preflight: Run runner runtime-availability checks.
     """
+    if preflight:
+        load_runner = True
+
     # Check if file exists
     if not file_path.exists():
         console.print(f"[red]Error:[/red] File not found: {file_path}")
@@ -42,9 +62,22 @@ def cmd_validate_taskspec(file_path: Path) -> None:
         # Optionally show a preview of the parsed TaskSpec
         try:
             data = json.loads(json_content)
+            if load_runner:
+                validate_taskspec_runner(
+                    data,
+                    load_runner=load_runner,
+                    preflight=preflight,
+                )
+                if preflight:
+                    console.print("[green]✓[/green] Runner preflight passed")
+                else:
+                    console.print("[green]✓[/green] Runner is available")
             _display_taskspec_summary(data)
-        except Exception:
-            pass  # Silent fail on preview
+        except Exception as exc:
+            if load_runner:
+                console.print("[red]✗[/red] Runner validation failed\n")
+                _display_validation_errors({"runner": str(exc)})
+                sys.exit(1)
     else:
         console.print("[red]✗[/red] TaskSpec validation failed\n")
         _display_validation_errors(errors)
@@ -67,6 +100,9 @@ def _display_taskspec_summary(data: dict[str, Any]) -> None:
     if "spec" in data:
         spec = data["spec"]
         table.add_row("Type", spec.get("type", "N/A"))
+        runner = spec.get("runner") or {}
+        if isinstance(runner, dict):
+            table.add_row("Runner", str(runner.get("name", "host")))
         if spec.get("type") == "function":
             table.add_row("Function", spec.get("function_target", "N/A"))
         elif spec.get("type") == "command":
@@ -99,6 +135,6 @@ def _display_validation_errors(errors: dict[str, str]) -> None:
     table.add_column("Error", style="red")
 
     for field, error in errors.items():
-        table.add_row(field, error)
+        table.add_row(field, escape(error))
 
     console.print(table)

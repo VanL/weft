@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import time
 from multiprocessing.process import BaseProcess
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -119,3 +121,133 @@ def test_kill_tasks_terminates_active_process_tree(tmp_path) -> None:
     finally:
         kill_process_tree(process.pid)
         kill_process_tree(worker_pid)
+
+
+def test_stop_tasks_uses_runner_handle_when_available(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    mapping_queue = ctx.queue("weft.state.tid_mappings", persistent=False)
+    ctrl_queue = ctx.queue(f"T{tid}.ctrl_in", persistent=False)
+    calls: list[tuple[str, dict[str, Any], float]] = []
+
+    class FakeRunnerPlugin:
+        def stop(self, handle, *, timeout: float = 2.0) -> bool:
+            calls.append(("stop", handle.to_dict(), timeout))
+            return True
+
+    mapping_queue.write(
+        json.dumps(
+            {
+                "short": tid[-6:],
+                "full": tid,
+                "pid": 11111,
+                "task_pid": 11111,
+                "caller_pid": 22222,
+                "managed_pids": [33333],
+                "runner": "fake",
+                "runtime_handle": {
+                    "runner_name": "fake",
+                    "runtime_id": "runtime-123",
+                    "host_pids": [33333],
+                    "metadata": {"scope": "test"},
+                },
+                "name": "task-func",
+                "hostname": "test-host",
+            }
+        )
+    )
+
+    monkeypatch.setattr(
+        task_cmd, "require_runner_plugin", lambda name: FakeRunnerPlugin()
+    )
+    monkeypatch.setattr(
+        task_cmd,
+        "terminate_process_tree",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("should not fall back to direct PID stop")
+        ),
+    )
+
+    stopped = task_cmd.stop_tasks([tid], context_path=root)
+
+    assert stopped == 1
+    assert calls == [
+        (
+            "stop",
+            {
+                "runner_name": "fake",
+                "runtime_id": "runtime-123",
+                "host_pids": [33333],
+                "metadata": {"scope": "test"},
+            },
+            0.2,
+        )
+    ]
+    assert ctrl_queue.read_one() == "STOP"
+
+
+def test_kill_tasks_uses_runner_handle_when_available(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    mapping_queue = ctx.queue("weft.state.tid_mappings", persistent=False)
+    calls: list[tuple[str, dict[str, Any], float]] = []
+
+    class FakeRunnerPlugin:
+        def kill(self, handle, *, timeout: float = 2.0) -> bool:
+            calls.append(("kill", handle.to_dict(), timeout))
+            return True
+
+    mapping_queue.write(
+        json.dumps(
+            {
+                "short": tid[-6:],
+                "full": tid,
+                "pid": 11111,
+                "task_pid": 11111,
+                "caller_pid": 22222,
+                "managed_pids": [33333],
+                "runner": "fake",
+                "runtime_handle": {
+                    "runner_name": "fake",
+                    "runtime_id": "runtime-123",
+                    "host_pids": [33333],
+                    "metadata": {"scope": "test"},
+                },
+                "name": "task-func",
+                "hostname": "test-host",
+            }
+        )
+    )
+
+    monkeypatch.setattr(
+        task_cmd, "require_runner_plugin", lambda name: FakeRunnerPlugin()
+    )
+    monkeypatch.setattr(
+        task_cmd,
+        "kill_process_tree",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("should not fall back to direct PID kill")
+        ),
+    )
+
+    killed = task_cmd.kill_tasks([tid], context_path=root)
+
+    assert killed == 1
+    assert calls == [
+        (
+            "kill",
+            {
+                "runner_name": "fake",
+                "runtime_id": "runtime-123",
+                "host_pids": [33333],
+                "metadata": {"scope": "test"},
+            },
+            0.2,
+        )
+    ]

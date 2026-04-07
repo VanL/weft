@@ -1,4 +1,9 @@
-"""Worker task implementation for spawning child tasks."""
+"""Worker task implementation for spawning child tasks.
+
+Spec references:
+- docs/specifications/01-Core_Components.md [CC-2.2], [CC-2.3], [CC-2.5]
+- docs/specifications/03-Worker_Architecture.md [WA-0], [WA-1], [WA-2], [WA-3]
+"""
 
 from __future__ import annotations
 
@@ -14,6 +19,8 @@ from dataclasses import dataclass
 from multiprocessing.process import BaseProcess
 from pathlib import Path
 from typing import Any, cast
+
+import psutil
 
 from simplebroker import Queue
 from weft._constants import (
@@ -50,7 +57,10 @@ class ManagedChild:
 
 
 class Manager(BaseTask):
-    """Task that listens for spawn requests and runs child tasks."""
+    """Task that listens for spawn requests and runs child tasks.
+
+    Spec: [WA-0], [WA-1], [MF-6], [MF-7]
+    """
 
     def __init__(
         self,
@@ -83,6 +93,8 @@ class Manager(BaseTask):
         self._autostart_state: dict[str, dict[str, Any]] = {}
         self._autostart_last_scan_ns = 0
         self._autostart_scan_interval_ns = 1_000_000_000
+        self._leader_check_interval_ns = 100_000_000
+        self._last_leader_check_ns = 0
         self._broker_activity_queue: Queue | None = None
         self._broker_probe_interval_ns = 1_000_000_000  # probe at most once per second
         self._last_broker_probe_ns = 0
@@ -93,6 +105,8 @@ class Manager(BaseTask):
             logger.debug("Failed to prime broker activity queue", exc_info=True)
         self._last_broker_timestamp = self._read_broker_timestamp(force=True)
         self._register_worker()
+        if self._maybe_yield_leadership(force=True):
+            return
         self.taskspec.mark_started(pid=multiprocessing.current_process().pid)
         self._update_process_title("spawning")
         self._report_state_change(event="task_spawning")
@@ -107,6 +121,10 @@ class Manager(BaseTask):
     # Queue configuration
     # ------------------------------------------------------------------
     def _build_queue_configs(self) -> dict[str, dict[str, Any]]:
+        """Configure inbox reserve mode and control peek mode for the manager.
+
+        Spec: [CC-2.2], [CC-2.5], [WA-1]
+        """
         return {
             self._queue_names["inbox"]: self._reserve_queue_config(
                 self._handle_work_message,
@@ -127,6 +145,10 @@ class Manager(BaseTask):
         *,
         autostart_source: str | None = None,
     ) -> None:
+        """Seed child inbox, spawn process, and emit task_spawned event.
+
+        Spec: [MF-1], [MF-6]
+        """
         inbox_name = child_spec.io.inputs.get("inbox")
         if inbox_message is not None and inbox_name:
             payload = (
@@ -184,6 +206,7 @@ class Manager(BaseTask):
     # Worker bookkeeping
     # ------------------------------------------------------------------
     def _register_worker(self) -> None:
+        """Publish an active record to the worker registry (Spec: [WA-1.4], [MF-7])."""
         registry_queue = self._queue(WEFT_WORKERS_REGISTRY_QUEUE)
         timestamp = registry_queue.generate_timestamp()
 
@@ -213,6 +236,7 @@ class Manager(BaseTask):
                 self._registry_message_id = message_id
 
     def _unregister_worker(self) -> None:
+        """Replace active record with stopped record on shutdown (Spec: [WA-1.4])."""
         if self._unregistered:
             return
         registry_queue = self._queue(WEFT_WORKERS_REGISTRY_QUEUE)
@@ -316,6 +340,84 @@ class Manager(BaseTask):
         for key in keys:
             if existing.get(key) != candidate.get(key):
                 return False
+        return True
+
+    @staticmethod
+    def _pid_alive(pid: int | None) -> bool:
+        if pid is None or pid <= 0:
+            return False
+        try:
+            process = psutil.Process(pid)
+            return process.is_running()
+        except psutil.Error:
+            return False
+
+    def _active_manager_records(self) -> dict[str, dict[str, Any]]:
+        queue = self._queue(WEFT_WORKERS_REGISTRY_QUEUE)
+        snapshot: dict[str, dict[str, Any]] = {}
+        stale_timestamps: list[int] = []
+
+        for payload, timestamp in iter_queue_json_entries(queue):
+            tid = payload.get("tid")
+            if not isinstance(tid, str) or not tid:
+                continue
+            payload["_timestamp"] = timestamp
+            existing = snapshot.get(tid)
+            existing_timestamp = int(existing.get("_timestamp", -1)) if existing else -1
+            if existing is None or existing_timestamp < timestamp:
+                snapshot[tid] = payload
+
+        active: dict[str, dict[str, Any]] = {}
+        for tid, record in snapshot.items():
+            if record.get("status") != "active":
+                continue
+            if record.get("role", "manager") != "manager":
+                continue
+            pid = record.get("pid")
+            if not isinstance(pid, int) or not self._pid_alive(pid):
+                stale_timestamp = record.get("_timestamp")
+                if isinstance(stale_timestamp, int):
+                    stale_timestamps.append(stale_timestamp)
+                continue
+            active[tid] = record
+
+        for timestamp in stale_timestamps:
+            try:
+                queue.delete(message_id=timestamp)
+            except Exception:
+                logger.debug("Failed to prune stale manager record", exc_info=True)
+
+        return active
+
+    def _leader_tid(self) -> str | None:
+        active = self._active_manager_records()
+        if not active:
+            return None
+        return min(active, key=int)
+
+    def _maybe_yield_leadership(self, *, force: bool = False) -> bool:
+        now_ns = time.time_ns()
+        if (
+            not force
+            and now_ns - self._last_leader_check_ns < self._leader_check_interval_ns
+        ):
+            return self.should_stop
+        self._last_leader_check_ns = now_ns
+
+        leader_tid = self._leader_tid()
+        if leader_tid is None or leader_tid == self.tid:
+            return False
+
+        if not self.should_stop:
+            self.taskspec.mark_cancelled(
+                reason=f"Superseded by lower-TID manager {leader_tid}"
+            )
+            self._report_state_change(
+                event="manager_leadership_yielded",
+                leader_tid=leader_tid,
+            )
+            self._unregister_worker()
+            self.should_stop = True
         return True
 
     # ------------------------------------------------------------------
@@ -445,6 +547,7 @@ class Manager(BaseTask):
     def _handle_work_message(
         self, message: str, timestamp: int, context: QueueMessageContext
     ) -> None:
+        """Consume a spawn request, build child spec, and launch (Spec: [WA-1.1], [WA-2], [MF-6])."""
         self._cleanup_children()
 
         try:
@@ -484,6 +587,7 @@ class Manager(BaseTask):
     def _build_child_spec(
         self, payload: dict[str, Any], timestamp: int
     ) -> TaskSpec | None:
+        """Parse spawn payload and validate a child TaskSpec (Spec: [WA-1.1], [WA-2])."""
         provided_spec = payload.get("taskspec")
         if provided_spec is not None:
             candidate = copy.deepcopy(provided_spec)
@@ -683,6 +787,7 @@ class Manager(BaseTask):
             logger.warning("Failed to enqueue autostart spawn request", exc_info=True)
 
     def _tick_autostart(self, *, force: bool = False) -> None:
+        """Scan autostart manifests and enqueue spawn requests (Spec: [WA-1.6])."""
         if not self._autostart_enabled:
             return
         now_ns = time.time_ns()
@@ -773,7 +878,11 @@ class Manager(BaseTask):
         super().cleanup()
 
     def process_once(self) -> None:
+        if self._maybe_yield_leadership():
+            return
         super().process_once()
+        if self._maybe_yield_leadership():
+            return
         self._cleanup_children()
         self._tick_autostart()
         self._update_idle_activity_from_broker()

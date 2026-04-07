@@ -1,184 +1,30 @@
-"""Process orchestration utilities for task execution.
+"""Runner facade for task execution backends.
 
-Implements the execution model described in
-docs/specifications/01-Core_Components.md [CC-3] and
-docs/specifications/06-Resource_Management.md [RM-5], [RM-5.1].
+Spec references:
+- docs/specifications/01-Core_Components.md [CC-3], [CC-3.1], [CC-3.3]
+- docs/specifications/02-TaskSpec.md [TS-1.3]
+- docs/specifications/06-Resource_Management.md [RM-5], [RM-5.1]
 """
 
 from __future__ import annotations
 
-import multiprocessing
-import os
-import queue
-import subprocess
-import sys
-import threading
-import time
-import traceback
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
-from multiprocessing.process import BaseProcess
-from multiprocessing.queues import Queue as MPQueue
-from typing import Any, TextIO
+from typing import Any
 
-import weft.core.agents  # noqa: F401 - register built-in agent runtimes
 from simplebroker import BrokerTarget
-from weft.core.agent_runtime import (
-    execute_agent_target,
-    normalize_agent_work_item,
-    start_agent_runtime_session,
-)
-from weft.core.resource_monitor import (
-    ResourceMetrics,
-    load_resource_monitor,
-)
-from weft.core.targets import execute_command_target, execute_function_target
-from weft.core.taskspec import AgentSection
-from weft.helpers import terminate_process_tree
+from weft._runner_plugins import require_runner_plugin
+from weft.core.runner_validation import validate_runner_capabilities
+from weft.core.runners import RunnerOutcome
+from weft.ext import RunnerHandle
 
-from .agent_session_protocol import (
-    make_ready_response,
-    make_result_response,
-    make_startup_error_response,
-    parse_request_type,
-)
 from .sessions import AgentSession, CommandSession
 
 
-@dataclass(slots=True)
-class RunnerOutcome:
-    """Result returned by :class:`TaskRunner` after executing a work item (Spec: [CC-3])."""
-
-    status: str
-    value: Any | None
-    error: str | None
-    stdout: str | None
-    stderr: str | None
-    returncode: int | None
-    duration: float
-    metrics: ResourceMetrics | None = None
-    worker_pid: int | None = None
-
-    @property
-    def ok(self) -> bool:
-        return self.status == "ok"
-
-
-def _worker_entry(
-    spec_data: Mapping[str, Any],
-    work_item: Any,
-    result_queue: MPQueue[RunnerOutcome],
-) -> None:
-    """Execute a single work item in a spawned process (Spec: [CC-3])."""
-    start = time.monotonic()
-    status = "ok"
-    value = None
-    error = None
-    stdout = None
-    stderr = None
-    returncode: int | None = 0
-
-    try:
-        if spec_data["type"] == "function":
-            value = execute_function_target(
-                spec_data["function_target"],
-                work_item,
-                args=spec_data.get("args"),
-                kwargs=spec_data.get("kwargs"),
-            )
-        elif spec_data["type"] == "agent":
-            agent = AgentSection.model_validate(spec_data["agent"])
-            value = execute_agent_target(
-                agent,
-                work_item,
-                tid=spec_data.get("tid"),
-            )
-        else:
-            completed = execute_command_target(
-                spec_data["process_target"],
-                work_item,
-                args=spec_data.get("args"),
-                env=spec_data.get("env") or {},
-                working_dir=spec_data.get("working_dir"),
-                timeout=spec_data.get("command_timeout"),
-            )
-            value = completed.stdout.strip() if completed.stdout is not None else ""
-            stdout = completed.stdout
-            stderr = completed.stderr
-            returncode = completed.returncode
-            if completed.returncode != 0:
-                status = "error"
-                error = (
-                    f"Command exited with {completed.returncode}: "
-                    f"{(completed.stderr or '').strip()}"
-                )
-    except Exception:  # pragma: no cover - propagated via parent
-        status = "error"
-        error = traceback.format_exc()
-        returncode = None
-
-    end = time.monotonic()
-    result_queue.put(
-        RunnerOutcome(
-            status=status,
-            value=value,
-            error=error,
-            stdout=stdout,
-            stderr=stderr,
-            returncode=returncode,
-            duration=end - start,
-        )
-    )
-
-
-def _agent_session_worker_entry(
-    spec_data: Mapping[str, Any],
-    request_queue: MPQueue[dict[str, Any]],
-    response_queue: MPQueue[dict[str, Any]],
-) -> None:
-    """Run a long-lived agent session in a spawned subprocess."""
-    session = None
-    try:
-        agent = AgentSection.model_validate(spec_data["agent"])
-        session = start_agent_runtime_session(
-            agent,
-            tid=spec_data.get("tid"),
-        )
-        response_queue.put(make_ready_response())
-
-        while True:
-            request = request_queue.get()
-            request_type = parse_request_type(request)
-            if request_type == "stop":
-                break
-            if request_type != "execute":
-                continue
-
-            try:
-                normalized = normalize_agent_work_item(
-                    agent,
-                    request.get("work_item"),
-                )
-                result = session.execute(normalized)
-            except Exception:  # pragma: no cover - propagated via parent
-                response_queue.put(
-                    make_result_response(status="error", error=traceback.format_exc())
-                )
-                break
-
-            response_queue.put(make_result_response(status="ok", result=result))
-    except Exception:  # pragma: no cover - propagated via parent
-        response_queue.put(make_startup_error_response(traceback.format_exc()))
-    finally:
-        if session is not None:
-            try:
-                session.close()
-            except Exception:  # pragma: no cover - defensive
-                pass
-
-
 class TaskRunner:
-    """Managed wrapper around multiprocessing for TaskSpec target execution (Spec: [CC-3], [RM-5])."""
+    """Dispatch task execution to the configured runner plugin.
+
+    Spec: docs/specifications/01-Core_Components.md [CC-3], [CC-3.1]
+    """
 
     def __init__(
         self,
@@ -196,34 +42,69 @@ class TaskRunner:
         limits: Any | None,
         monitor_class: str | None,
         monitor_interval: float | None,
+        runner_name: str = "host",
+        runner_options: Mapping[str, Any] | None = None,
+        persistent: bool = False,
+        interactive: bool = False,
         db_path: BrokerTarget | str | None = None,
         config: dict[str, Any] | None = None,
     ) -> None:
-        self._spec_data = {
-            "type": target_type,
-            "tid": tid,
-            "function_target": function_target,
-            "process_target": process_target,
-            "agent": dict(agent or {}) if agent is not None else None,
-            "args": list(args or []),
-            "kwargs": dict(kwargs or {}),
-            "env": dict(env or {}),
-            "working_dir": working_dir,
-            "command_timeout": timeout,
-        }
-        self._timeout = timeout
-        self._ctx = multiprocessing.get_context("spawn")
-        self._ctx.set_executable(sys.executable)
-        self._limits = limits
-        self._monitor_class = monitor_class
-        self._monitor_interval = monitor_interval or 1.0
-        self._db_path = db_path
-        self._config = dict(config) if config is not None else None
+        self._target_type = target_type
+        self._persistent = persistent
+        self._interactive = interactive
+        self._runner_name = runner_name.strip() or "host"
+        self._runner_options = dict(runner_options or {})
+        self._taskspec_payload = _build_runner_validation_payload(
+            target_type=target_type,
+            tid=tid,
+            function_target=function_target,
+            process_target=process_target,
+            agent=agent,
+            args=args,
+            kwargs=kwargs,
+            env=env,
+            working_dir=working_dir,
+            timeout=timeout,
+            limits=limits,
+            monitor_class=monitor_class,
+            monitor_interval=monitor_interval,
+            runner_name=self._runner_name,
+            runner_options=self._runner_options,
+            persistent=persistent,
+            interactive=interactive,
+        )
+
+        plugin = require_runner_plugin(self._runner_name)
+        plugin.check_version()
+        validate_runner_capabilities(plugin, self._taskspec_payload)
+        plugin.validate_taskspec(self._taskspec_payload, preflight=False)
+
+        self._plugin = plugin
+        self._backend = plugin.create_runner(
+            target_type=target_type,
+            tid=tid,
+            function_target=function_target,
+            process_target=process_target,
+            agent=agent,
+            args=args,
+            kwargs=kwargs,
+            env=env,
+            working_dir=working_dir,
+            timeout=timeout,
+            limits=limits,
+            monitor_class=monitor_class,
+            monitor_interval=monitor_interval,
+            runner_options=self._runner_options,
+            persistent=persistent,
+            interactive=interactive,
+            db_path=db_path,
+            config=config,
+        )
 
     def run(self, work_item: Any) -> RunnerOutcome:
-        """Execute *work_item* with resource monitoring and timeout handling.
+        """Execute *work_item* through the configured runner backend.
 
-        Spec: [CC-3], [RM-5], [RM-5.1]
+        Spec: [CC-3]
         """
         return self.run_with_hooks(work_item)
 
@@ -233,350 +114,82 @@ class TaskRunner:
         *,
         cancel_requested: Callable[[], bool] | None = None,
         on_worker_started: Callable[[int | None], None] | None = None,
+        on_runtime_handle_started: Callable[[RunnerHandle], None] | None = None,
     ) -> RunnerOutcome:
         """Execute *work_item* with optional lifecycle hooks.
 
-        ``cancel_requested`` is polled while the worker runs so callers can
-        cooperatively stop long-running work. ``on_worker_started`` receives
-        the spawned worker PID immediately after process start so callers can
-        track descendant processes before the task completes.
+        Spec: [CC-3], [RM-5.1]
         """
-        result_queue = self._ctx.Queue()
-        process = self._ctx.Process(
-            target=_worker_entry,
-            args=(self._spec_data, work_item, result_queue),
-            daemon=True,
+        self._plugin.validate_taskspec(self._taskspec_payload, preflight=True)
+        return self._backend.run_with_hooks(
+            work_item,
+            cancel_requested=cancel_requested,
+            on_worker_started=on_worker_started,
+            on_runtime_handle_started=on_runtime_handle_started,
         )
-        process.start()
-        worker_pid = process.pid
-        if on_worker_started is not None:
-            try:
-                on_worker_started(worker_pid)
-            except Exception:  # pragma: no cover - defensive
-                pass
-        monitor = None
-        last_metrics: ResourceMetrics | None = None
-        outcome: RunnerOutcome | None = None
-        if self._monitor_class:
-            monitor = load_resource_monitor(
-                self._monitor_class,
-                limits=self._limits,
-                polling_interval=self._monitor_interval,
-                db_path=self._db_path,
-                config=self._config,
-            )
-            try:
-                if worker_pid is None:
-                    raise RuntimeError("Worker process has no PID")
-                monitor.start(worker_pid)
-            except Exception:  # pragma: no cover
-                monitor = None
-
-        start_time = time.monotonic()
-        interval = self._monitor_interval
-
-        while process.is_alive():
-            if cancel_requested is not None and _cancel_requested(cancel_requested):
-                self._stop_process(process)
-                if monitor:
-                    last_metrics = monitor.last_metrics()
-                    monitor.stop()
-                return RunnerOutcome(
-                    status="cancelled",
-                    value=None,
-                    error="Target execution cancelled",
-                    stdout=None,
-                    stderr=None,
-                    returncode=None,
-                    duration=time.monotonic() - start_time,
-                    metrics=last_metrics,
-                    worker_pid=worker_pid,
-                )
-
-            elapsed = time.monotonic() - start_time
-            if self._timeout is not None and elapsed >= self._timeout:
-                self._stop_process(process)
-                if monitor:
-                    last_metrics = monitor.last_metrics()
-                    monitor.stop()
-                return RunnerOutcome(
-                    status="timeout",
-                    value=None,
-                    error="Target execution timed out",
-                    stdout=None,
-                    stderr=None,
-                    returncode=None,
-                    duration=self._timeout,
-                    metrics=last_metrics,
-                    worker_pid=worker_pid,
-                )
-
-            remaining: float | None = None
-            if self._timeout is not None:
-                remaining = self._timeout - elapsed
-                if remaining <= 0:
-                    continue
-            sleep_for = interval
-            if remaining is not None:
-                sleep_for = min(interval, max(0.01, remaining))
-
-            if outcome is None:
-                try:
-                    outcome = result_queue.get(timeout=sleep_for)
-                    break
-                except queue.Empty:
-                    pass
-            else:
-                time.sleep(sleep_for)
-
-            if monitor:
-                try:
-                    ok, violation = monitor.check_limits()
-                except Exception:  # pragma: no cover - process may have exited
-                    ok, violation = True, None
-                last_metrics = monitor.last_metrics()
-                if not ok:
-                    self._stop_process(process)
-                    last_metrics = monitor.last_metrics()
-                    monitor.stop()
-                    return RunnerOutcome(
-                        status="limit",
-                        value=None,
-                        error=violation,
-                        stdout=None,
-                        stderr=None,
-                        returncode=None,
-                        duration=time.monotonic() - start_time,
-                        metrics=last_metrics,
-                        worker_pid=worker_pid,
-                    )
-
-        process.join()
-
-        if cancel_requested is not None and _cancel_requested(cancel_requested):
-            if monitor:
-                last_metrics = monitor.last_metrics()
-                monitor.stop()
-            return RunnerOutcome(
-                status="cancelled",
-                value=None,
-                error="Target execution cancelled",
-                stdout=None,
-                stderr=None,
-                returncode=None,
-                duration=time.monotonic() - start_time,
-                metrics=last_metrics,
-                worker_pid=worker_pid,
-            )
-
-        if monitor:
-            last_metrics = monitor.last_metrics()
-            if last_metrics is None:
-                try:
-                    last_metrics = monitor.snapshot()
-                except Exception:  # pragma: no cover
-                    last_metrics = None
-            monitor.stop()
-
-        if outcome is None:
-            try:
-                outcome = result_queue.get_nowait()
-            except queue.Empty:
-                return RunnerOutcome(
-                    status="error",
-                    value=None,
-                    error="Worker produced no result",
-                    stdout=None,
-                    stderr=None,
-                    returncode=None,
-                    duration=time.monotonic() - start_time,
-                    metrics=last_metrics,
-                    worker_pid=worker_pid,
-                )
-
-        outcome.metrics = outcome.metrics or last_metrics
-        outcome.worker_pid = worker_pid
-        return outcome
-
-    @staticmethod
-    def _stop_process(process: BaseProcess, *, timeout: float = 0.2) -> None:
-        """Stop a worker process, escalating to ``kill`` if needed."""
-
-        if not process.is_alive():
-            process.join(timeout=timeout)
-            return
-
-        pid = process.pid
-        if isinstance(pid, int) and pid > 0:
-            terminate_process_tree(pid, timeout=timeout)
-
-        try:
-            process.join(timeout=timeout)
-        except Exception:  # pragma: no cover - defensive
-            pass
-        if not process.is_alive():
-            return
-
-        process.terminate()
-        process.join(timeout=timeout)
-        if process.is_alive():
-            process.kill()
-            process.join(timeout=timeout)
 
     def start_session(self) -> CommandSession:
-        """Start an interactive command session for streaming IO."""
-
-        if self._spec_data["type"] != "command":
-            raise ValueError(
-                "Interactive sessions are only supported for command targets"
-            )
-
-        env_vars: dict[str, str] = dict(os.environ)
-        env_override = self._spec_data.get("env") or {}
-        if isinstance(env_override, Mapping):
-            env_vars.update({str(k): str(v) for k, v in env_override.items()})
-        else:
-            raise TypeError("Spec env must be a mapping of string keys to values")
-        # Interactive Python commands often run behind pipes rather than a TTY.
-        # Force unbuffered stdio so REPL-style output is visible immediately.
-        env_vars.setdefault("PYTHONUNBUFFERED", "1")
-
-        process_target_obj = self._spec_data.get("process_target")
-        if not isinstance(process_target_obj, str) or not process_target_obj:
-            raise TypeError("process_target must be a non-empty command string")
-        command: list[str] = [process_target_obj]
-        raw_args = self._spec_data.get("args")
-        if isinstance(raw_args, Sequence) and not isinstance(raw_args, (str, bytes)):
-            command.extend(str(item) for item in raw_args)
-
-        working_dir_obj = self._spec_data.get("working_dir")
-        cwd_value: str | None = str(working_dir_obj) if working_dir_obj else None
-
-        # Windows-specific subprocess flags for proper console handling
-        creation_flags = 0
-        if sys.platform == "win32":
-            creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP
-
-        process = subprocess.Popen(
-            command,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            cwd=cwd_value,
-            env=env_vars,
-            bufsize=0,  # Unbuffered for interactive communication
-            creationflags=creation_flags,
-        )
-
-        stdout_queue: queue.Queue[str | None] = queue.Queue()
-        stderr_queue: queue.Queue[str | None] = queue.Queue()
-
-        def _reader(stream: TextIO, target_queue: queue.Queue[str | None]) -> None:
-            try:
-                while True:
-                    chunk = stream.read(CommandSession._READ_SIZE)
-                    if chunk == "":
-                        break
-                    target_queue.put(chunk)
-            finally:
-                target_queue.put(None)
-
-        if process.stdout is None or process.stderr is None:
-            raise RuntimeError("Failed to create pipes for interactive session")
-
-        threading.Thread(
-            target=_reader,
-            args=(process.stdout, stdout_queue),
-            daemon=True,
-        ).start()
-        threading.Thread(
-            target=_reader,
-            args=(process.stderr, stderr_queue),
-            daemon=True,
-        ).start()
-
-        monitor = None
-        if self._monitor_class:
-            monitor = load_resource_monitor(
-                self._monitor_class,
-                limits=self._limits,
-                polling_interval=self._monitor_interval,
-                db_path=self._db_path,
-                config=self._config,
-            )
-            try:
-                pid = process.pid
-                if pid is None:
-                    raise RuntimeError("Interactive process has no PID")
-                monitor.start(pid)
-            except Exception:  # pragma: no cover - fall back without monitoring
-                monitor = None
-
-        return CommandSession(
-            process, stdout_queue, stderr_queue, monitor, self._limits
-        )
+        """Start an interactive command session for the configured runner."""
+        self._plugin.validate_taskspec(self._taskspec_payload, preflight=True)
+        return self._backend.start_session()
 
     def start_agent_session(self) -> AgentSession:
-        """Start a long-lived agent session for persistent agent tasks."""
-
-        if self._spec_data["type"] != "agent":
-            raise ValueError("Agent sessions are only supported for agent targets")
-
-        agent_data = self._spec_data.get("agent")
-        if not isinstance(agent_data, Mapping):
-            raise TypeError("agent configuration is required for agent sessions")
-
-        request_queue = self._ctx.Queue()
-        response_queue = self._ctx.Queue()
-        process = self._ctx.Process(
-            target=_agent_session_worker_entry,
-            args=(self._spec_data, request_queue, response_queue),
-            daemon=True,
-        )
-        process.start()
-
-        monitor = None
-        if self._monitor_class:
-            monitor = load_resource_monitor(
-                self._monitor_class,
-                limits=self._limits,
-                polling_interval=self._monitor_interval,
-                db_path=self._db_path,
-                config=self._config,
-            )
-            try:
-                pid = process.pid
-                if pid is None:
-                    raise RuntimeError("Agent session process has no PID")
-                monitor.start(pid)
-            except Exception:  # pragma: no cover - fall back without monitoring
-                monitor = None
-
-        session = AgentSession(
-            process,
-            request_queue,
-            response_queue,
-            monitor,
-            self._limits,
-            timeout=self._timeout,
-        )
-        ready_timeout = self._timeout if self._timeout is not None else 5.0
-        try:
-            session.wait_ready(timeout=max(ready_timeout, 0.1))
-        except Exception:
-            session.close()
-            raise
-        return session
+        """Start a long-lived agent session for the configured runner."""
+        self._plugin.validate_taskspec(self._taskspec_payload, preflight=True)
+        return self._backend.start_agent_session()
 
 
-__all__ = ["TaskRunner", "RunnerOutcome", "CommandSession"]
+def _build_runner_validation_payload(
+    *,
+    target_type: str,
+    tid: str | None,
+    function_target: str | None,
+    process_target: str | None,
+    agent: Mapping[str, Any] | None,
+    args: Sequence[Any] | None,
+    kwargs: Mapping[str, Any] | None,
+    env: Mapping[str, str] | None,
+    working_dir: str | None,
+    timeout: float | None,
+    limits: Any | None,
+    monitor_class: str | None,
+    monitor_interval: float | None,
+    runner_name: str,
+    runner_options: Mapping[str, Any] | None,
+    persistent: bool,
+    interactive: bool,
+) -> dict[str, Any]:
+    limits_payload = limits
+    dump_model = getattr(limits, "model_dump", None)
+    if callable(dump_model):
+        limits_payload = dump_model(mode="python")
+
+    agent_payload = dict(agent) if agent is not None else None
+    env_payload = dict(env or {})
+
+    return {
+        "tid": tid,
+        "spec": {
+            "type": target_type,
+            "function_target": function_target,
+            "process_target": process_target,
+            "agent": agent_payload,
+            "args": list(args or []),
+            "keyword_args": dict(kwargs or {}),
+            "env": env_payload,
+            "working_dir": working_dir,
+            "timeout": timeout,
+            "limits": limits_payload,
+            "monitor_class": monitor_class,
+            "polling_interval": monitor_interval,
+            "interactive": interactive,
+            "persistent": persistent,
+            "runner": {
+                "name": runner_name,
+                "options": dict(runner_options or {}),
+            },
+        },
+    }
 
 
-def _cancel_requested(callback: Callable[[], bool]) -> bool:
-    try:
-        return bool(callback())
-    except Exception:  # pragma: no cover - defensive
-        return False
+__all__ = ["AgentSession", "CommandSession", "RunnerOutcome", "TaskRunner"]

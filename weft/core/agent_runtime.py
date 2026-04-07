@@ -41,7 +41,10 @@ class NormalizedAgentWorkItem:
 
 @dataclass(frozen=True, slots=True)
 class AgentExecutionResult:
-    """Internal result returned by agent runtime adapters."""
+    """Internal result returned by agent runtime adapters.
+
+    Spec: [AR-4], [AR-5]
+    """
 
     runtime: str
     model: str | None
@@ -194,7 +197,10 @@ def normalize_agent_work_item(
     agent: AgentSection,
     work_item: Any,
 ) -> NormalizedAgentWorkItem:
-    """Normalize supported work envelope shapes to a stable request object."""
+    """Normalize supported work envelope shapes to a stable request object.
+
+    Spec: [AR-3], [AR-3.1]
+    """
     if isinstance(work_item, str):
         return NormalizedAgentWorkItem(
             content=work_item,
@@ -237,7 +243,10 @@ def execute_agent_target(
     *,
     tid: str | None = None,
 ) -> AgentExecutionResult:
-    """Execute agent work against the registered runtime backend."""
+    """Execute agent work against the registered runtime backend.
+
+    Spec: [AR-5]
+    """
     normalized = normalize_agent_work_item(agent, work_item)
     tools = resolve_agent_tools(
         agent.tools,
@@ -258,7 +267,10 @@ def start_agent_runtime_session(
     *,
     tid: str | None = None,
 ) -> AgentRuntimeSession:
-    """Start a long-lived runtime session for a persistent agent task."""
+    """Start a long-lived runtime session for a persistent agent task.
+
+    Spec: [AR-6]
+    """
     runtime = get_agent_runtime(agent.runtime)
     start_session = getattr(runtime, "start_session", None)
     if not callable(start_session):

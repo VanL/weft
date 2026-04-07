@@ -6,12 +6,15 @@ import os
 import signal
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, cast
 
+from simplebroker import Queue
 from weft._constants import (
+    CONTROL_KILL,
     CONTROL_STOP,
     DEFAULT_CLEANUP_ON_EXIT,
     DEFAULT_OUTPUT_SIZE_LIMIT_MB,
@@ -20,7 +23,7 @@ from weft._constants import (
 from weft.core.agent_runtime import AgentExecutionResult
 from weft.core.targets import decode_work_message, serialize_result
 from weft.core.taskspec import ReservedPolicy, TaskSpec
-from weft.helpers import terminate_process_tree
+from weft.helpers import kill_process_tree, terminate_process_tree
 
 from .base import BaseTask
 from .interactive import InteractiveTaskMixin
@@ -143,26 +146,90 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         )
 
     def _run_task(self, work_item: Any) -> RunnerOutcome:
-        if self._uses_agent_session():
-            session = self._ensure_agent_session()
-            start_time = time.monotonic()
-            result = session.execute(
+        with self._active_control_poller():
+            if self._uses_agent_session():
+                session = self._ensure_agent_session()
+                start_time = time.monotonic()
+                result = session.execute(
+                    work_item,
+                    cancel_requested=self._cancel_requested,
+                )
+                return RunnerOutcome(
+                    status=result.status,
+                    value=result.value,
+                    error=result.error,
+                    stdout=None,
+                    stderr=None,
+                    returncode=None,
+                    duration=time.monotonic() - start_time,
+                    metrics=result.metrics,
+                    worker_pid=session.pid,
+                    runtime_handle=session.handle,
+                )
+
+            runner = self._make_task_runner()
+            return runner.run_with_hooks(
                 work_item,
                 cancel_requested=self._cancel_requested,
-            )
-            return RunnerOutcome(
-                status=result.status,
-                value=result.value,
-                error=result.error,
-                stdout=None,
-                stderr=None,
-                returncode=None,
-                duration=time.monotonic() - start_time,
-                metrics=result.metrics,
-                worker_pid=session.pid,
+                on_worker_started=self._register_running_worker,
+                on_runtime_handle_started=self.register_runtime_handle,
             )
 
-        runner = TaskRunner(
+    @contextmanager
+    def _active_control_poller(self) -> Iterator[None]:
+        done = threading.Event()
+        worker = threading.Thread(
+            target=self._poll_control_queue_while_active,
+            args=(done,),
+            daemon=True,
+        )
+        worker.start()
+        try:
+            yield
+        finally:
+            done.set()
+            worker.join(timeout=0.2)
+
+    def _poll_control_queue_while_active(self, done: threading.Event) -> None:
+        queue_name = self._queue_names["ctrl_in"]
+        ctrl_queue = Queue(
+            queue_name,
+            db_path=self._db_path,
+            persistent=True,
+            config=self._config,
+        )
+        try:
+            while not done.is_set():
+                if self.should_stop:
+                    return
+                try:
+                    entries = ctrl_queue.peek_many(limit=1, with_timestamps=True) or []
+                except Exception:  # pragma: no cover - defensive broker guard
+                    time.sleep(0.05)
+                    continue
+                if not entries:
+                    done.wait(0.05)
+                    continue
+                entry = entries[0]
+                if not isinstance(entry, tuple) or len(entry) != 2:
+                    done.wait(0.05)
+                    continue
+                raw_message, timestamp = entry
+                if not isinstance(raw_message, str):
+                    done.wait(0.05)
+                    continue
+                context = QueueMessageContext(
+                    queue_name=queue_name,
+                    queue=ctrl_queue,
+                    mode=QueueMode.PEEK,
+                    timestamp=int(timestamp),
+                )
+                self._handle_control_message(raw_message, int(timestamp), context)
+        finally:
+            ctrl_queue.close()
+
+    def _make_task_runner(self, *, interactive: bool = False) -> TaskRunner:
+        return TaskRunner(
             target_type=self.taskspec.spec.type,
             tid=self.taskspec.tid,
             function_target=self.taskspec.spec.function_target,
@@ -184,13 +251,12 @@ class Consumer(BaseTask, InteractiveTaskMixin):
                 "weft.core.resource_monitor.ResourceMonitor",
             ),
             monitor_interval=self.taskspec.spec.polling_interval,
+            runner_name=self.taskspec.spec.runner.name,
+            runner_options=self.taskspec.spec.runner.options,
+            persistent=self._task_is_persistent(),
+            interactive=interactive,
             db_path=self._db_path,
             config=self._config,
-        )
-        return runner.run_with_hooks(
-            work_item,
-            cancel_requested=self._cancel_requested,
-            on_worker_started=self._register_running_worker,
         )
 
     def _begin_work_item(self, timestamp: int | None) -> bool:
@@ -319,6 +385,10 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         timestamp: int | None,
         metrics_payload: dict[str, Any] | None,
     ) -> None:
+        """Raise on non-ok outcomes and transition task state accordingly.
+
+        Spec: [RM-1], [RM-2] (limit violations), docs/specifications/06-Resource_Management.md#error-categories
+        """
         if outcome.status != "ok" and self._uses_agent_session():
             self._shutdown_agent_session()
 
@@ -358,6 +428,22 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             raise limit_exc
 
         if outcome.status == "error":
+            if self.taskspec.state.status == "cancelled":
+                self._end_streaming_session()
+                self.should_stop = True
+                if self._stop_event:
+                    self._stop_event.set()
+                raise RuntimeError(
+                    self.taskspec.state.error or "Target execution cancelled"
+                )
+            if self.taskspec.state.status == "killed":
+                self._end_streaming_session()
+                self.should_stop = True
+                if self._stop_event:
+                    self._stop_event.set()
+                raise RuntimeError(
+                    self.taskspec.state.error or "Target execution killed"
+                )
             error_exc = RuntimeError(outcome.error or "Target execution failed")
             self.taskspec.mark_failed(error=str(error_exc))
             self._update_process_title("failed")
@@ -375,6 +461,22 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             raise error_exc
 
         if outcome.status == "cancelled":
+            if self.taskspec.state.status == "killed":
+                self._end_streaming_session()
+                self.should_stop = True
+                if self._stop_event:
+                    self._stop_event.set()
+                raise RuntimeError(
+                    self.taskspec.state.error or "Target execution killed"
+                )
+            if self.taskspec.state.status == "cancelled":
+                self._end_streaming_session()
+                self.should_stop = True
+                if self._stop_event:
+                    self._stop_event.set()
+                raise RuntimeError(
+                    self.taskspec.state.error or "Target execution cancelled"
+                )
             reason = outcome.error or "Target execution cancelled"
             self._handle_external_stop(reason)
             raise RuntimeError(reason)
@@ -383,14 +485,25 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         if self._external_stop_handled:
             return
         self._external_stop_handled = True
-        self._terminate_active_worker()
+        sigusr1 = getattr(signal, "SIGUSR1", None)
+        graceful = not (sigusr1 is not None and signum == sigusr1)
+        self._terminate_active_worker(graceful=graceful)
         try:
             signal_name = signal.Signals(signum).name
         except ValueError:
             signal_name = f"signal {signum}"
-        self._handle_external_stop(signal_name)
+        if graceful:
+            self._handle_external_stop(signal_name)
+        else:
+            self._handle_external_kill(signal_name)
 
     def _handle_external_stop(self, reason: str) -> None:
+        if self.taskspec.state.status == "cancelled":
+            self.should_stop = True
+            if self._stop_event:
+                self._stop_event.set()
+            self._end_streaming_session()
+            return
         policy = self._resolve_policy(self.taskspec.spec.reserved_policy_on_stop)
         self._handle_stop_request(
             reason=reason,
@@ -406,9 +519,35 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             self._cleanup_reserved_if_needed()
         self._end_streaming_session()
 
-    def _terminate_active_worker(self) -> None:
+    def _handle_external_kill(self, reason: str) -> None:
+        if self.taskspec.state.status == "killed":
+            self.should_stop = True
+            if self._stop_event:
+                self._stop_event.set()
+            self._end_streaming_session()
+            return
+        policy = self._resolve_policy(self.taskspec.spec.reserved_policy_on_error)
+        self._handle_kill_request(
+            reason=reason,
+            event="task_signal_kill",
+            message_id=self._active_message_timestamp,
+            apply_reserved_policy=False,
+        )
+        self._apply_reserved_policy(
+            policy, message_timestamp=self._active_message_timestamp
+        )
+        if policy is not ReservedPolicy.KEEP:
+            self._ensure_reserved_empty()
+            self._cleanup_reserved_if_needed()
+        self._end_streaming_session()
+
+    def _terminate_active_worker(self, *, graceful: bool) -> None:
+        self._stop_registered_runtime_handle(timeout=0.2, graceful=graceful)
         for pid in sorted(self._managed_pids):
-            terminate_process_tree(pid, timeout=0.2)
+            if graceful:
+                terminate_process_tree(pid, timeout=0.2)
+            else:
+                kill_process_tree(pid, timeout=0.2)
         self._shutdown_agent_session()
 
     def stop(self, *, join: bool = True, timeout: float = 2.0) -> None:
@@ -450,33 +589,10 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         if self._agent_session is not None:
             return self._agent_session
 
-        runner = TaskRunner(
-            target_type=self.taskspec.spec.type,
-            tid=self.taskspec.tid,
-            function_target=self.taskspec.spec.function_target,
-            process_target=self.taskspec.spec.process_target,
-            agent=(
-                self.taskspec.spec.agent.model_dump(mode="python")
-                if self.taskspec.spec.agent is not None
-                else None
-            ),
-            args=getattr(self.taskspec.spec, "args", None),
-            kwargs=getattr(self.taskspec.spec, "keyword_args", None),
-            env=self.taskspec.spec.env or {},
-            working_dir=self.taskspec.spec.working_dir,
-            timeout=self.taskspec.spec.timeout,
-            limits=self.taskspec.spec.limits,
-            monitor_class=getattr(
-                self.taskspec.spec,
-                "monitor_class",
-                "weft.core.resource_monitor.ResourceMonitor",
-            ),
-            monitor_interval=self.taskspec.spec.polling_interval,
-            db_path=self._db_path,
-            config=self._config,
-        )
+        runner = self._make_task_runner()
         session = runner.start_agent_session()
         self._agent_session = session
+        self.register_runtime_handle(session.handle)
         self.register_managed_pid(session.pid)
         return session
 
@@ -740,6 +856,16 @@ class Monitor(BaseTask):
                 event="control_stop", message_id=context.timestamp
             )
             self._update_process_title("cancelled")
+            if self._stop_event:
+                self._stop_event.set()
+            return True
+        if command == CONTROL_KILL:
+            self.should_stop = True
+            self.taskspec.mark_killed(reason="KILL command received")
+            self._report_state_change(
+                event="control_kill", message_id=context.timestamp
+            )
+            self._update_process_title("killed")
             if self._stop_event:
                 self._stop_event.set()
             return True

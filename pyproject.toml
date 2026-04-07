@@ -42,6 +42,17 @@ dependencies = [
 pg = [
     "simplebroker-pg>=1.0.0",
 ]
+docker = [
+    "weft-docker>=0.1.0,<1",
+]
+macos-sandbox = [
+    "weft-macos-sandbox>=0.1.0,<1",
+]
+all = [
+    "simplebroker-pg>=1.0.0",
+    "weft-docker>=0.1.0,<1",
+    "weft-macos-sandbox>=0.1.0,<1",
+]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
@@ -60,6 +71,10 @@ Homepage = "https://github.com/VanL/weft"
 Documentation = "https://github.com/VanL/weft#readme"
 Repository = "https://github.com/VanL/weft.git"
 Issues = "https://github.com/VanL/weft/issues"
+
+[tool.uv.sources]
+weft-docker = { path = "./extensions/weft_docker", editable = true }
+weft-macos-sandbox = { path = "./extensions/weft_macos_sandbox", editable = true }
 
 [tool.hatch.build]
 include = [
@@ -105,6 +120,10 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "psutil"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "docker"
 ignore_missing_imports = true
 
 [tool.ruff]

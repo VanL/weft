@@ -1,3 +1,10 @@
+"""Observer task types that peek at messages without consuming them.
+
+Spec references:
+- docs/specifications/01-Core_Components.md [CC-2.3]
+- docs/specifications/05-Message_Flow_and_State.md [MF-5]
+"""
+
 from __future__ import annotations
 
 import threading

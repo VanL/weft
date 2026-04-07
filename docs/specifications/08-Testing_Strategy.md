@@ -2,7 +2,7 @@
 
 This document outlines the comprehensive testing approach for the Weft system, covering unit tests, integration tests, system tests, and performance validation.
 
-_Implementation mapping_: implemented suites live under `tests/taskspec/`, `tests/tasks/`, `tests/core/`, `tests/cli/`, `tests/commands/`, `tests/context/`, and `tests/system/`.
+_Implementation mapping_: implemented suites live under `tests/taskspec/`, `tests/tasks/`, `tests/core/`, `tests/cli/`, `tests/commands/`, `tests/context/`, `tests/system/`, and `tests/specs/`. Directories described in this spec but **not yet created**: `tests/integration/`, `tests/performance/`, `tests/property/`.
 
 ## Test Harness
 
@@ -33,6 +33,15 @@ which provisions a temporary Docker Postgres instance and installs
 ## 1. Unit Testing
 
 ### TaskSpec Tests (`tests/taskspec/test_taskspec.py`)
+
+_Implementation mapping_: `tests/taskspec/test_taskspec.py` covers validation, defaults, immutability, convenience methods, and agent-specific fields. Additional TaskSpec-level tests in `tests/specs/taskspec/` cover state transitions (`test_state_transitions.py`), peak metrics (`test_peak_metrics.py`), process targets (`test_process_target.py`), and agent taskspec validation (`test_agent_taskspec.py`).
+
+- Validation tests: **implemented** (`test_minimal_taskspec_defaults`, `test_invalid_tid_format`, `test_missing_required_queue`, `test_runner_options_must_be_json_serializable`, `test_template_allows_missing_tid`).
+- Default application tests: **implemented** (`test_apply_defaults_idempotent`, `test_auto_expansion_on_init` via `test_minimal_taskspec_defaults`). **[NOT YET IMPLEMENTED]**: `test_defaults_dont_override_user_values` (no dedicated test).
+- Convenience method tests: **implemented** (`test_mark_running_updates_fields`, `test_mark_completed_sets_completed_at`, `test_update_and_get_metadata`, `test_get_runtime_seconds`, `test_should_report_modes`). `test_update_metrics` covered in `tests/specs/taskspec/test_peak_metrics.py`. **[NOT YET IMPLEMENTED]**: `test_check_limits_exceeded` (limit checking tested at runner level, not as a standalone TaskSpec method test).
+- Immutability tests: **implemented** (`test_spec_assignment_blocked`, `test_io_assignment_blocked`, `test_agent_assignment_blocked`, `test_runner_assignment_blocked`, `test_resolved_spec_args_reject_append`, `test_resolved_spec_env_rejects_update`, `test_resolved_io_rejects_nested_mutation`, `test_state_updates_remain_mutable`). **[NOT YET IMPLEMENTED]**: `test_metadata_remains_mutable` (no dedicated test; metadata mutation is tested indirectly via `test_update_and_get_metadata`).
+- Limits structure tests: **[NOT YET IMPLEMENTED]** as standalone TaskSpec-level tests (`test_limits_section_validation`, `test_memory_limit_validation`, `test_cpu_limit_validation`, `test_fd_limit_validation`). Limit enforcement is tested at the runner level in `tests/tasks/test_runner.py`.
+
 ```python
 class TestTaskSpec:
     # Validation Tests
@@ -40,23 +49,23 @@ class TestTaskSpec:
     def test_invalid_tid_format()
     def test_missing_required_fields()
     def test_invalid_state_transitions()
-    
+
     # Default Application Tests
     def test_apply_defaults_idempotent()
     def test_defaults_dont_override_user_values()
     def test_auto_expansion_on_init()
-    
+
     # Convenience Method Tests
     def test_set_status_transitions()
     def test_update_metrics()
     def test_check_limits_exceeded()
-    
+
     # Immutability Tests
     def test_spec_frozen_after_creation()
     def test_io_frozen_after_creation()
     def test_state_remains_mutable()
     def test_metadata_remains_mutable()
-    
+
     # Limits Structure Tests
     def test_limits_section_validation()
     def test_memory_limit_validation()
@@ -65,6 +74,15 @@ class TestTaskSpec:
 ```
 
 ### Task Tests (`tests/tasks/`)
+
+_Implementation mapping_: Covered across `tests/tasks/test_tasks_simple.py` (initialization, queue wiring), `tests/tasks/test_task_execution.py` (execution, reservation patterns, output spillover, streaming), `tests/tasks/test_runner.py` (function/command execution, timeouts, resource limits, cancellation), `tests/tasks/test_control_channel.py` (control queue commands), `tests/tasks/test_task_observability.py` (process titles, TID mapping, state logging), and `tests/tasks/test_task_interactive.py` (interactive sessions).
+
+- Initialization tests: **implemented** (`test_task_initialization_with_path`, `test_task_initialization_with_pathlib`, `test_task_initialization_with_brokerdb`, `test_task_with_stop_event`, `test_task_provides_default_stop_event`, `test_task_inherits_from_multiqueue_watcher`). **[NOT YET IMPLEMENTED]**: `test_init_without_setproctitle_graceful` (no graceful-degradation test for missing setproctitle).
+- Execution tests: **implemented** (`test_task_runner_executes_function_successfully`, `test_task_runner_executes_command_successfully`, `test_task_runner_times_out`, `test_task_runner_reports_command_failure`). **[NOT YET IMPLEMENTED]**: `test_run_forever_loop` (persistent loop behavior tested via interactive sessions, but no standalone `run_forever` test).
+- Queue tests: **implemented** (`test_pause_resume_control_flow`, `test_status_command_reports_state`, `test_stop_command_sends_ack`, `test_ping_control_command_returns_pong`, `test_task_processes_function_target_and_writes_outbox`, reservation policy tests in `test_task_execution.py`).
+- Process title tests: **implemented** in `tests/tasks/test_task_observability.py` (`test_process_titles_update`, `test_tid_mapping_written`, `test_tid_mapping_records_worker_pid`, `test_tid_mapping_deduplicates_identical_payloads`).
+- Worker tests: **implemented** in `tests/core/test_manager.py` (`test_manager_spawns_child`, `test_manager_registry_entries`, `test_manager_cleanup_sends_stop_to_children`). **[NOT YET IMPLEMENTED]**: `test_worker_is_task`, `test_worker_has_no_timeout`, `test_worker_registers_capabilities` as standalone worker tests.
+
 ```python
 class TestTask:
     # Initialization Tests
@@ -100,6 +118,15 @@ class TestTask:
 ```
 
 ### Process Title Tests (`tests/cli/test_manager_proctitle.py`, `tests/tasks/test_task_observability.py`)
+
+_Implementation mapping_: `tests/cli/test_manager_proctitle.py` covers manager process title updates. `tests/tasks/test_task_observability.py` covers TID mapping writes, worker PID recording, deduplication, process title updates on state change, and state logging.
+
+- TID management: **partially implemented** (`test_tid_mapping_written`, `test_tid_mapping_records_worker_pid`, `test_tid_mapping_deduplicates_identical_payloads`). **[NOT YET IMPLEMENTED]**: `test_tid_short_extraction`, `test_tid_short_collision_probability`, `test_tid_mapping_queue_format` as dedicated tests.
+- Title formatting: **partially implemented** (`test_process_titles_update`, `test_manager_proctitle_updates_to_running`). **[NOT YET IMPLEMENTED]**: `test_title_format_with_details`, `test_title_truncation_long_name`, `test_title_truncation_long_error`.
+- State integration: **partially implemented** (title updates on running/failed/completed covered indirectly via `test_process_titles_update`). **[NOT YET IMPLEMENTED]**: dedicated tests per terminal state (`test_title_updates_on_mark_timeout`, `test_title_updates_on_mark_killed`).
+- OS integration: **[NOT YET IMPLEMENTED]**: `test_process_title_visible_in_ps`, `test_process_findable_by_short_tid`, `test_process_killable_by_pattern`.
+- Mapping and lookup: **partially implemented** (`test_tid_mapping_written`). **[NOT YET IMPLEMENTED]**: `test_tid_lookup_from_short`, `test_pid_in_mapping_correct`.
+
 ```python
 class TestProcessTitles:
     # TID Management
@@ -133,6 +160,9 @@ class TestProcessTitles:
 ```
 
 ### Executor Tests (`tests/test_executor.py`) — _planned_
+
+**[NOT YET IMPLEMENTED]** as a standalone `tests/test_executor.py` file. Function execution is tested in `tests/tasks/test_runner.py` and `tests/core/test_targets.py`. Command execution is tested in `tests/tasks/test_runner.py`, `tests/tasks/test_command_runner_parity.py`, and `tests/core/test_callable.py`. Cross-platform tests (`test_preexec_fn_unix_only`, `test_windows_wrapper_script`, `test_setproctitle_in_subprocess`) are not implemented.
+
 ```python
 class TestExecutor:
     # Function Execution
@@ -156,6 +186,9 @@ class TestExecutor:
 ```
 
 ### Worker Tests (`tests/test_worker.py`)
+
+**[NOT YET IMPLEMENTED]** as `tests/test_worker.py`. Worker behavior is partially tested in `tests/core/test_manager.py` (spawn, cleanup, idle shutdown, registry entries, autostart templates). TID correlation is tested in `tests/specs/worker_architecture/test_tid_correlation.py` and `test_manager_state_events.py`. **[NOT YET IMPLEMENTED]**: `test_worker_follows_task_lifecycle`, `test_worker_appears_in_process_list`, `test_worker_responds_to_control_messages`, `test_worker_validates_against_registry`, `test_worker_rejects_unknown_tasks`, `test_worker_spawns_another_worker`, `test_tid_appears_in_all_logs`, `test_tid_sorting_by_timestamp`.
+
 ```python
 class TestWorker:
     # Worker as Task
@@ -181,6 +214,9 @@ class TestWorker:
 ```
 
 ### Resource Monitor Tests (`tests/test_monitor.py`)
+
+**[NOT YET IMPLEMENTED]** as `tests/test_monitor.py`. Resource limit enforcement is tested at the runner level in `tests/tasks/test_runner.py` (`test_task_runner_enforces_memory_limit`, `test_task_runner_enforces_cpu_limit`, `test_task_runner_enforces_fd_limit`, `test_task_runner_reports_multiple_violations`). Resource metrics are tested in `tests/specs/resource_management/test_resource_metrics.py` (`test_resource_metrics_to_dict_rounding`, `test_resource_metrics_exceeds_limits`). Monitor compatibility is tested in `tests/specs/resource_management/test_monitor_compat.py`. **[NOT YET IMPLEMENTED]**: standalone monitor lifecycle tests (`test_start_stop_monitoring`, `test_psutil_integration`), error handling tests (`test_process_gone_handling`, `test_permission_denied_graceful`, `test_psutil_not_available`), and metrics history tests (`test_max_metrics_tracking`, `test_history_size_limit`, `test_metric_accuracy`).
+
 ```python
 class TestResourceMonitor:
     # Basic Monitoring
@@ -207,7 +243,12 @@ class TestResourceMonitor:
 
 ## 2. Integration Testing
 
+**[NOT YET IMPLEMENTED]**: The `tests/integration/` directory does not exist. Integration-level behavior is partially covered by tests scattered across other directories (see notes below).
+
 ### Queue Integration (`tests/integration/test_queue_integration.py`)
+
+**[NOT YET IMPLEMENTED]** as a standalone file. Some queue integration behaviors are tested in `tests/tasks/test_task_execution.py` (reservation pattern, output spillover, output cleanup) and `tests/commands/test_queue.py` (read/write/peek/move). **[NOT YET IMPLEMENTED]**: `test_task_to_task_pipeline`, `test_multiple_workers_single_queue`, `test_queue_persistence_across_restarts`, `test_high_throughput_processing`, `test_exactly_once_delivery`, `test_output_reference_integrity`, `test_output_cleanup_policies`.
+
 ```python
 class TestQueueIntegration:
     def test_task_to_task_pipeline()
@@ -224,6 +265,9 @@ class TestQueueIntegration:
 ```
 
 ### Context Integration (`tests/integration/test_context_integration.py`)
+
+**[NOT YET IMPLEMENTED]** as `tests/integration/test_context_integration.py`. Context behavior is tested in `tests/context/test_context.py` (`test_build_context_creates_structure`, `test_build_context_discovers_existing_project`, `test_environment_translation`, `test_project_config_recovers_from_corruption`) and `tests/context/test_context_sqlite_only.py`. **[NOT YET IMPLEMENTED]**: `test_context_isolation`, `test_cross_context_communication_blocked`, `test_concurrent_contexts`, `test_context_switching`.
+
 ```python
 class TestContextIntegration:
     def test_context_isolation()
@@ -236,6 +280,9 @@ class TestContextIntegration:
 ```
 
 ### Resource Monitoring (`tests/integration/test_monitoring.py`)
+
+**[NOT YET IMPLEMENTED]** as `tests/integration/test_monitoring.py`. Resource enforcement is tested at the runner level in `tests/tasks/test_runner.py` and `tests/specs/resource_management/test_resource_limit_killed.py`. **[NOT YET IMPLEMENTED]**: `test_metrics_accuracy`, `test_monitor_cleanup_on_exit`, `test_resource_violation_alerts`, `test_monitoring_overhead`, `test_concurrent_monitoring`, `test_monitor_failure_recovery`.
+
 ```python
 class TestResourceMonitoring:
     def test_memory_limit_enforcement()
@@ -250,6 +297,9 @@ class TestResourceMonitoring:
 ```
 
 ### SimpleBroker Integration (`tests/integration/test_simplebroker.py`)
+
+**[NOT YET IMPLEMENTED]** as `tests/integration/test_simplebroker.py`. Some SimpleBroker behaviors are exercised indirectly by `tests/commands/test_queue.py` and `tests/commands/test_dump_load.py`. Queue name spec compliance is tested in `tests/specs/quick_reference/test_queue_names.py`. **[NOT YET IMPLEMENTED]**: `test_atomic_move_operations`, `test_message_persistence`, `test_concurrent_access`, `test_database_cleanup`, `test_timestamp_id_uniqueness`, `test_message_ordering`, `test_peek_and_delete_pattern`.
+
 ```python
 class TestSimpleBrokerIntegration:
     def test_queue_auto_creation()
@@ -266,6 +316,9 @@ class TestSimpleBrokerIntegration:
 ## 3. System Testing
 
 ### End-to-End Scenarios (`tests/system/test_scenarios.py`)
+
+**[NOT YET IMPLEMENTED]** as `tests/system/test_scenarios.py`. End-to-end CLI workflows are tested in `tests/cli/test_cli_run.py` (inline function/command, spec-path, no-wait, interactive streaming), `tests/cli/test_cli_pipeline.py` (sequential pipelines), and `tests/cli/test_cli_long_session.py` (persistent sessions). Manager lifecycle is tested in `tests/core/test_manager.py`. **[NOT YET IMPLEMENTED]**: `test_map_reduce_pipeline`, `test_task_failure_recovery`, `test_system_shutdown_graceful`, `test_primordial_worker_recovery`, `test_emergency_task_management`, `test_process_title_end_to_end`, `test_tid_lookup_workflow`, `test_os_integration_commands`.
+
 ```python
 class TestScenarios:
     def test_simple_unix_executable()
@@ -285,6 +338,9 @@ class TestScenarios:
 ```
 
 ### Cross-Platform Tests (`tests/system/test_cross_platform.py`)
+
+**[NOT YET IMPLEMENTED]**: `tests/system/test_cross_platform.py` does not exist. No cross-platform-specific test file exists. All listed tests (`test_unix_process_titles`, `test_windows_process_titles`, `test_multiprocessing_spawn_consistency`, `test_setproctitle_availability`, `test_psutil_cross_platform`) are unimplemented.
+
 ```python
 class TestCrossPlatform:
     @pytest.mark.skipif(os.name == 'nt', reason="Unix-specific")
@@ -299,6 +355,9 @@ class TestCrossPlatform:
 ```
 
 ### Load Testing (`tests/system/test_load.py`)
+
+**[NOT YET IMPLEMENTED]**: `tests/system/test_load.py` does not exist. Benchmark files `tests/multiqueue_polling_benchmark.py` and `tests/long_session_surface_benchmark.py` exist but are standalone benchmarks, not the load tests described here. All listed tests (`test_200_concurrent_tasks`, `test_queue_throughput_1000_msgs_sec`, `test_state_log_performance`, `test_memory_usage_under_load`, `test_database_performance`, `test_worker_scaling`, `test_context_isolation_under_load`, `test_large_output_handling_load`) are unimplemented.
+
 ```python
 class TestLoad:
     def test_200_concurrent_tasks()
@@ -315,7 +374,10 @@ class TestLoad:
 ## 4. Performance Testing
 
 ### Benchmarks (`tests/performance/test_benchmarks.py`)
-All benchmarks have "pytest.mark.slow" and are not executed by default. 
+
+**[NOT YET IMPLEMENTED]**: `tests/performance/` directory does not exist. All benchmark tests described below (`test_task_creation_throughput`, `test_queue_message_throughput`, `test_monitor_overhead`, `test_large_task_graph_execution`) are unimplemented. Related but distinct: `tests/multiqueue_polling_benchmark.py` and `tests/long_session_surface_benchmark.py` exist as standalone micro-benchmarks.
+
+All benchmarks have "pytest.mark.slow" and are not executed by default.
 They are designed to be informative at this point.
 
 ```python
@@ -381,6 +443,9 @@ class TestPerformance:
 ```
 
 ### Memory Profiling (`tests/performance/test_memory.py`)
+
+**[NOT YET IMPLEMENTED]**: `tests/performance/test_memory.py` does not exist. All listed tests (`test_task_memory_overhead`, `test_queue_memory_scaling`) are unimplemented.
+
 ```python
 class TestMemoryUsage:
     @pytest.mark.slow
@@ -423,6 +488,9 @@ class TestMemoryUsage:
 ## 5. Property-Based Testing
 
 ### Using Hypothesis (`tests/property/test_properties.py`)
+
+**[NOT YET IMPLEMENTED]**: `tests/property/` directory does not exist. `hypothesis` is not used anywhere in the test suite. All property-based tests (`test_state_transitions_always_forward`, `test_queue_delivery_exactly_once`, `test_resource_limits_enforced`) are unimplemented. State transitions are tested deterministically in `tests/specs/taskspec/test_state_transitions.py`.
+
 ```python
 from hypothesis import given, strategies as st
 
@@ -485,6 +553,9 @@ class TestProperties:
 ## 6. Testing Hooks
 
 ### Test Fixtures (`tests/fixtures/`)
+
+_Implementation mapping_: `tests/fixtures/taskspecs.py` exists as a backward-compatibility re-export shim pointing to `tests/taskspec/fixtures.py`. `tests/fixtures/llm_test_models.py` provides LLM test model stubs. The `WeftTestHarness` lives in `tests/helpers/weft_harness.py` and the `weft_harness` fixture is provided by `tests/conftest.py`. **[NOT YET IMPLEMENTED]**: `tests/fixtures/queues.py` and `tests/fixtures/mocks.py` as described below do not exist; queue and mock patterns are inlined in individual test files.
+
 ```python
 # taskspecs.py
 from simplebroker import Queue
@@ -581,6 +652,9 @@ def mock_broker_db():
 ```
 
 ### Test Utilities (`tests/utils.py`)
+
+**[NOT YET IMPLEMENTED]**: `tests/utils.py` does not exist as a standalone file. Utility functions described below (e.g., `wait_for_status`, `assert_queue_empty`, `capture_queue_output`, `get_memory_usage`) are not centralized. Some equivalent helpers live in `tests/helpers/weft_harness.py` and `tests/helpers/long_session_utils.py`.
+
 ```python
 def wait_for_status(task: Task, status: str, timeout: float = 5.0):
     """Wait for task to reach specified status."""
@@ -749,7 +823,14 @@ jobs:
 
 ## Related Plans
 
+- [`docs/plans/agent-runtime-boundary-cleanup-plan.md`](../plans/agent-runtime-boundary-cleanup-plan.md)
+- [`docs/plans/agent-runtime-implementation-plan.md`](../plans/agent-runtime-implementation-plan.md)
+- [`docs/plans/persistent-agent-runtime-implementation-plan.md`](../plans/persistent-agent-runtime-implementation-plan.md)
+- [`docs/plans/piped-input-support-plan.md`](../plans/piped-input-support-plan.md)
 - [`docs/plans/postgres-backend-audit-and-shared-test-surface-plan.md`](../plans/postgres-backend-audit-and-shared-test-surface-plan.md)
+- [`docs/plans/release-gated-tag-workflow-plan.md`](../plans/release-gated-tag-workflow-plan.md)
+- [`docs/plans/simplebroker-backend-generalization-plan.md`](../plans/simplebroker-backend-generalization-plan.md)
+- [`docs/plans/taskspec-clean-design-plan.md`](../plans/taskspec-clean-design-plan.md)
 - [`docs/plans/weft-backend-neutrality-plan.md`](../plans/weft-backend-neutrality-plan.md)
 
 ## Related Documents

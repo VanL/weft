@@ -22,6 +22,7 @@ from .tasks.runner import TaskRunner
 from .taskspec import (
     IOSection,
     LimitsSection,
+    RunnerSection,
     SpecSection,
     StateSection,
     TaskSpec,
@@ -49,6 +50,7 @@ __all__ = [
     "TaskSpec",
     "SpecSection",
     "LimitsSection",
+    "RunnerSection",
     "IOSection",
     "StateSection",
     "validate_taskspec",

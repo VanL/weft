@@ -366,9 +366,23 @@ def validate_taskspec(
             readable=True,
         ),
     ],
+    load_runner: Annotated[
+        bool,
+        typer.Option(
+            "--load-runner",
+            help="Require that the configured runner plugin can be loaded",
+        ),
+    ] = False,
+    preflight: Annotated[
+        bool,
+        typer.Option(
+            "--preflight",
+            help="Verify the configured runner runtime is available",
+        ),
+    ] = False,
 ) -> None:
     """Validate a TaskSpec JSON file."""
-    cmd_validate_taskspec(file)
+    cmd_validate_taskspec(file, load_runner=load_runner, preflight=preflight)
 
 
 @app.command("list")
@@ -443,7 +457,7 @@ def list_tasks(
         typer.echo("Tasks: none")
         return
     for snap in snapshots:
-        typer.echo(f"{snap.tid} {snap.status} {snap.name}")
+        typer.echo(f"{snap.tid} {snap.status} {snap.runner or '-'} {snap.name}")
 
 
 @spec_app.command("create")
@@ -639,7 +653,10 @@ def task_status(
     if json_output:
         typer.echo(json.dumps(status_payload, ensure_ascii=False))
         return
-    typer.echo(f"{snapshot.tid} {snapshot.status} {snapshot.name} ({snapshot.event})")
+    typer.echo(
+        f"{snapshot.tid} {snapshot.status} {snapshot.runner or '-'} "
+        f"{snapshot.name} ({snapshot.event})"
+    )
     if process:
         pid = status_payload.get("pid")
         managed = status_payload.get("managed_pids")
@@ -1032,7 +1049,11 @@ def run_command(
         ),
     ] = True,
 ) -> None:
-    """Execute a command, function, or TaskSpec using the built-in runner."""
+    """Execute a command, function, or TaskSpec via the TaskSpec runner surface.
+
+    Spec: docs/specifications/10-CLI_Interface.md [CLI-1.1.1],
+    docs/specifications/02-TaskSpec.md [TS-1.3]
+    """
 
     exit_code = cmd_run(
         command or [],

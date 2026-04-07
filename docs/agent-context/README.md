@@ -7,7 +7,10 @@ repository (Codex, Claude, Cursor-style agents, and automation agents).
 
 - Keep one source of truth for durable execution standards.
 - Reduce drift across agent-specific prompt files.
-- Make planning, testing, and verification expectations explicit.
+- Make planning, testing, review, and verification expectations explicit.
+- Make risky-work boundaries, rollback assumptions, and agent-usable guidance
+  visible in the normal read path.
+- Keep spec, plan, and code traceability bidirectional.
 
 ## Read Order
 
@@ -25,7 +28,11 @@ repository (Codex, Claude, Cursor-style agents, and automation agents).
 - `testing-patterns.md` — Test harness selection, regression strategy, and
   common broker-heavy testing traps.
 - `writing-plans.md` — How to write implementation plans that a zero-context
-  engineer can execute safely.
+  engineer can execute safely, with exact spec-section traceability.
+- `hardening-plans.md` — How to tighten risky plans so they say what must not
+  change, where the hidden couplings are, and how rollback/rollout will work.
+- `review-loops-and-agent-bootstrap.md` — How to choose independent reviewers,
+  run plan/work reviews, and feed findings back into the active plan.
 
 ## What Belongs Here
 
@@ -45,3 +52,5 @@ repository (Codex, Claude, Cursor-style agents, and automation agents).
 - Prefer checklists over long prose.
 - When a repeated mistake shows up, add a short lesson in `docs/lessons.md`
   and strengthen a runbook if the fix should become reusable guidance.
+- If a plan fails at a boundary or a reviewer cannot implement it confidently,
+  tighten the planning runbooks instead of treating the miss as one-off noise.

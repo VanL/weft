@@ -1,4 +1,9 @@
-"""Worker management commands for the Weft CLI."""
+"""Worker management commands for the Weft CLI.
+
+Spec references:
+- docs/specifications/10-CLI_Interface.md (worker start, stop, list, status)
+- docs/specifications/03-Worker_Architecture.md [WA-0]--[WA-4]
+"""
 
 from __future__ import annotations
 

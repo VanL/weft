@@ -67,3 +67,44 @@ def test_validate_taskspec_agent_summary(workdir):
     assert "llm" in out
     assert "weft-test-agent-model" in out
     assert err == ""
+
+
+def test_validate_taskspec_preflight_host_runner(workdir):
+    taskspec = create_valid_function_taskspec()
+    spec_path = workdir / "host_taskspec.json"
+    write_taskspec(spec_path, taskspec)
+
+    rc, out, err = run_cli(
+        "validate-taskspec",
+        spec_path,
+        "--preflight",
+        cwd=workdir,
+    )
+
+    assert rc == 0
+    assert "TaskSpec is valid" in out
+    assert "Runner preflight passed" in out
+    assert err == ""
+
+
+def test_validate_taskspec_load_runner_missing_plugin(workdir):
+    taskspec = create_valid_function_taskspec()
+    payload = taskspec.model_dump(mode="json")
+    payload["spec"]["runner"] = {
+        "name": "docker",
+        "options": {"image": "busybox:latest"},
+    }
+    spec_path = workdir / "docker_taskspec.json"
+    write_taskspec(spec_path, payload)
+
+    rc, out, err = run_cli(
+        "validate-taskspec",
+        spec_path,
+        "--load-runner",
+        cwd=workdir,
+    )
+
+    assert rc == 1
+    assert "Runner validation failed" in out
+    assert "Install weft[docker]" in out
+    assert err == ""

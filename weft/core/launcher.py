@@ -1,4 +1,8 @@
-"""Utilities for launching task processes."""
+"""Utilities for launching task processes.
+
+Spec references:
+- docs/specifications/03-Worker_Architecture.md [WA-1.2], [WA-3]
+"""
 
 from __future__ import annotations
 
@@ -64,7 +68,10 @@ def launch_task_process(
     config: dict[str, Any] | None = None,
     poll_interval: float = 0.05,
 ) -> BaseProcess:
-    """Launch *task_cls* in a new spawn-process and return the Process object."""
+    """Launch *task_cls* in a new spawn-process and return the Process object.
+
+    Spec: [WA-1.2], [WA-3]
+    """
 
     ctx = multiprocessing.get_context("spawn")
     ctx.set_executable(sys.executable)
@@ -92,7 +99,12 @@ def _install_signal_handlers(task: Any) -> None:
         if hasattr(task, "should_stop"):
             task.should_stop = True
 
-    for signum in (signal.SIGTERM, signal.SIGINT):
+    candidate_signals = [signal.SIGTERM, signal.SIGINT]
+    sigusr1 = getattr(signal, "SIGUSR1", None)
+    if sigusr1 is not None:
+        candidate_signals.append(sigusr1)
+
+    for signum in candidate_signals:
         try:
             signal.signal(signum, _handle_signal)
         except (OSError, ValueError):  # pragma: no cover - platform/thread guard
