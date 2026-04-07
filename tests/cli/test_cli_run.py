@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from tests.conftest import run_cli
@@ -876,3 +878,52 @@ def test_cli_run_prunes_stale_manager(workdir, weft_harness) -> None:
     ]
     assert all(record.get("pid") != stale_pid for record in payloads)
     assert any(record.get("role") == "manager" for record in payloads)
+
+
+def test_cli_run_parallel_no_wait_adopts_active_manager(workdir, weft_harness) -> None:
+    env = os.environ.copy()
+    env["WEFT_MANAGER_REUSE_ENABLED"] = "1"
+
+    def _submit() -> tuple[int, str, str]:
+        return run_cli(
+            "run",
+            "--no-wait",
+            "--function",
+            "tests.tasks.sample_targets:simulate_work",
+            "--kw",
+            "duration=0.2",
+            "--kw",
+            'result="ok"',
+            cwd=workdir,
+            env=env,
+            prepare_root=False,
+        )
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        results = list(executor.map(lambda _index: _submit(), range(4)))
+
+    assert all(rc == 0 for rc, _out, _err in results), results
+    assert all(err == "" for _rc, _out, err in results), results
+    assert all(len(out) == 19 and out.isdigit() for _rc, out, _err in results)
+
+    deadline = time.time() + 5.0
+    payload: dict[str, object] | None = None
+    while time.time() < deadline:
+        rc, out, err = run_cli(
+            "status",
+            "--json",
+            cwd=workdir,
+            env=env,
+            harness=weft_harness,
+        )
+        assert rc == 0, err
+        payload = json.loads(out)
+        managers = payload.get("managers")
+        if isinstance(managers, list) and len(managers) == 1:
+            break
+        time.sleep(0.1)
+
+    assert payload is not None
+    managers = payload.get("managers")
+    assert isinstance(managers, list)
+    assert len(managers) == 1, payload

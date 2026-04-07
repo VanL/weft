@@ -1,4 +1,8 @@
-"""llm-backed agent runtime adapter."""
+"""llm-backed agent runtime adapter.
+
+Spec references:
+- docs/specifications/13-Agent_Runtime.md [AR-7]
+"""
 
 from __future__ import annotations
 
@@ -20,7 +24,7 @@ from weft.core.taskspec import AgentSection
 
 
 class LLMBackend:
-    """Thin adapter around the llm Python API (Spec: [AR-6.2])."""
+    """Thin adapter around the llm Python API (Spec: [AR-7])."""
 
     def execute(
         self,

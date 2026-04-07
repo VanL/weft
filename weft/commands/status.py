@@ -1,4 +1,10 @@
-"""Status reporting helpers for the Weft CLI."""
+"""Status reporting helpers for the Weft CLI.
+
+Spec references:
+- docs/specifications/10-CLI_Interface.md [CLI-1.2.1]
+- docs/specifications/01-Core_Components.md [CC-3.2], [CC-3.4]
+- docs/specifications/02-TaskSpec.md [TS-1.3]
+"""
 
 from __future__ import annotations
 
@@ -19,7 +25,9 @@ from weft._constants import (
     WEFT_TID_MAPPINGS_QUEUE,
     WEFT_WORKERS_REGISTRY_QUEUE,
 )
+from weft._runner_plugins import require_runner_plugin
 from weft.context import WeftContext, build_context
+from weft.ext import RunnerHandle
 from weft.helpers import (
     format_byte_size,
     format_timestamp_ns_relative,
@@ -100,6 +108,9 @@ class TaskSnapshot:
     completed_at: int | None
     last_timestamp: int
     duration_seconds: float | None
+    runner: str | None
+    runtime_handle: dict[str, Any] | None
+    runtime: dict[str, Any] | None
     metadata: dict[str, Any]
 
     def to_dict(self) -> dict[str, Any]:
@@ -113,6 +124,9 @@ class TaskSnapshot:
             "completed_at": self.completed_at,
             "last_timestamp": self.last_timestamp,
             "duration_seconds": self.duration_seconds,
+            "runner": self.runner,
+            "runtime_handle": self.runtime_handle,
+            "runtime": self.runtime,
             "metadata": self.metadata,
         }
 
@@ -228,6 +242,19 @@ def _read_tid_mappings(ctx: WeftContext) -> dict[str, str]:
     return mapping
 
 
+def _latest_tid_mapping_entries(ctx: WeftContext) -> dict[str, dict[str, Any]]:
+    queue = _queue(ctx, WEFT_TID_MAPPINGS_QUEUE)
+    latest: dict[str, tuple[int, dict[str, Any]]] = {}
+    for payload, timestamp in iter_queue_json_entries(queue):
+        full = payload.get("full")
+        if not isinstance(full, str):
+            continue
+        previous = latest.get(full)
+        if previous is None or previous[0] <= timestamp:
+            latest[full] = (timestamp, payload)
+    return {full: payload for full, (_timestamp, payload) in latest.items()}
+
+
 def _resolve_tid_filters(ctx: WeftContext, raw: str | None) -> set[str] | None:
     if raw is None:
         return None
@@ -249,6 +276,10 @@ def _resolve_tid_filters(ctx: WeftContext, raw: str | None) -> set[str] | None:
 
 
 def _iter_log_events(ctx: WeftContext) -> Iterable[tuple[dict[str, Any], int]]:
+    """Replay all state-change events from the global log queue.
+
+    Spec: [MF-5]
+    """
     queue = _queue(ctx, WEFT_GLOBAL_LOG_QUEUE)
     try:
         iterator_raw = queue.peek_generator(with_timestamps=True)
@@ -299,14 +330,72 @@ def _format_duration(seconds: float | None) -> str:
     return f"{int(hours)}h{int(minutes):02}m"
 
 
+def _runtime_handle_from_mapping(entry: Mapping[str, Any]) -> RunnerHandle | None:
+    payload = entry.get("runtime_handle")
+    if not isinstance(payload, Mapping):
+        return None
+    try:
+        return RunnerHandle.from_dict(payload)
+    except ValueError:
+        return None
+
+
+def _runner_name_for_snapshot(
+    *,
+    taskspec: Mapping[str, Any],
+    mapping_entry: Mapping[str, Any] | None,
+) -> str | None:
+    if mapping_entry is not None:
+        mapped_runner = mapping_entry.get("runner")
+        if isinstance(mapped_runner, str) and mapped_runner.strip():
+            return mapped_runner
+        runtime_handle = _runtime_handle_from_mapping(mapping_entry)
+        if runtime_handle is not None:
+            return runtime_handle.runner_name
+
+    spec = taskspec.get("spec")
+    if not isinstance(spec, Mapping):
+        return None
+    runner = spec.get("runner")
+    if not isinstance(runner, Mapping):
+        return "host"
+    name = runner.get("name", "host")
+    if isinstance(name, str) and name.strip():
+        return name
+    return "host"
+
+
+def _describe_runtime_handle(handle: RunnerHandle | None) -> dict[str, Any] | None:
+    if handle is None:
+        return None
+    try:
+        plugin = require_runner_plugin(handle.runner_name)
+        runtime = plugin.describe(handle)
+    except Exception as exc:  # pragma: no cover - defensive integration guard
+        return {
+            "runner_name": handle.runner_name,
+            "runtime_id": handle.runtime_id,
+            "state": "unknown",
+            "metadata": {"describe_error": str(exc)},
+        }
+    if runtime is None:
+        return None
+    return runtime.to_dict()
+
+
 def _collect_task_snapshots(
     ctx: WeftContext,
     *,
     include_terminal: bool,
     tid_filters: set[str] | None,
 ) -> list[TaskSnapshot]:
+    """Reconstruct current task state from event-sourced log replay.
+
+    Spec: [MF-5]
+    """
     now_ns = time.time_ns()
     snapshots: dict[str, TaskSnapshot] = {}
+    tid_mapping_entries = _latest_tid_mapping_entries(ctx)
 
     for payload, timestamp in _iter_log_events(ctx):
         tid = payload.get("tid")
@@ -331,6 +420,13 @@ def _collect_task_snapshots(
         started_at = state.get("started_at")
         completed_at = state.get("completed_at")
         metadata = taskspec.get("metadata") or {}
+        mapping_entry = tid_mapping_entries.get(tid)
+        runtime_handle = _runtime_handle_from_mapping(mapping_entry or {})
+        runner = _runner_name_for_snapshot(
+            taskspec=taskspec,
+            mapping_entry=mapping_entry,
+        )
+        runtime_description = _describe_runtime_handle(runtime_handle)
 
         if isinstance(started_at, int) and not isinstance(completed_at, int):
             duration = max(0.0, (now_ns - started_at) / 1_000_000_000)
@@ -349,6 +445,11 @@ def _collect_task_snapshots(
             completed_at=completed_at if isinstance(completed_at, int) else None,
             last_timestamp=timestamp,
             duration_seconds=duration,
+            runner=runner,
+            runtime_handle=runtime_handle.to_dict()
+            if runtime_handle is not None
+            else None,
+            runtime=runtime_description,
             metadata=metadata if isinstance(metadata, dict) else {},
         )
         snapshots[tid] = snapshot
@@ -364,11 +465,14 @@ def _format_task_summary(snapshots: Sequence[TaskSnapshot]) -> str:
     if not snapshots:
         return "Tasks: none"
 
-    headers = ("TID", "STATUS", "NAME", "STARTED", "DURATION", "EVENT")
-    lines = ["Tasks:", "  {:<19} {:<10} {:<20} {:<20} {:<10} {}".format(*headers)]
+    headers = ("TID", "STATUS", "RUNNER", "NAME", "STARTED", "DURATION", "EVENT")
+    lines = [
+        "Tasks:",
+        "  {:<19} {:<10} {:<14} {:<20} {:<20} {:<10} {}".format(*headers),
+    ]
     for snap in snapshots:
         lines.append(
-            f"  {snap.tid:<19} {snap.status:<10} {snap.name[:20]:<20} {_format_timestamp(snap.started_at):<20} {_format_duration(snap.duration_seconds):<10} {snap.event}"
+            f"  {snap.tid:<19} {snap.status:<10} {(snap.runner or '-'):<14} {snap.name[:20]:<20} {_format_timestamp(snap.started_at):<20} {_format_duration(snap.duration_seconds):<10} {snap.event}"
         )
     return "\n".join(lines)
 
@@ -394,6 +498,10 @@ def _watch_task_events(
     json_output: bool,
     interval: float,
 ) -> int:
+    """Tail the global log queue for live state-change events.
+
+    Spec: [MF-5]
+    """
     last_timestamp = 0
     try:
         while True:
@@ -459,6 +567,10 @@ def cmd_status(
     watch_interval: float = 1.0,
     spec_context: str | os.PathLike[str] | None = None,
 ) -> tuple[int, str | None]:
+    """Broker status snapshot with optional task filtering.
+
+    Spec: [CLI-1.2.1]
+    """
     try:
         context = _resolve_context(spec_context)
         tid_filters = _resolve_tid_filters(context, tid)

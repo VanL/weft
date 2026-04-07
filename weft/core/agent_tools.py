@@ -5,7 +5,7 @@ callable tool objects. It intentionally knows nothing about queues or
 backend-specific tool classes.
 
 Spec references:
-- docs/specifications/13-Agent_Runtime.md [AR-2.3]
+- docs/specifications/13-Agent_Runtime.md [AR-2.2]
 - docs/specifications/02-TaskSpec.md [TS-1]
 """
 
@@ -43,7 +43,7 @@ def resolve_agent_tools(
 ) -> list[ResolvedAgentTool]:
     """Resolve configured tools and apply per-work-item allow/deny overrides.
 
-    Spec: [AR-2.3]
+    Spec: [AR-2.2], [AR-3.1]
     """
     tools_by_name = {tool.name: tool for tool in tools}
     _validate_override_names("allow", allow, tools_by_name)

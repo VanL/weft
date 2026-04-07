@@ -22,6 +22,7 @@ from weft.core.tasks.agent_session_protocol import (
     parse_result_response,
     startup_error_message,
 )
+from weft.ext import RunnerHandle
 from weft.helpers import terminate_process_tree
 
 
@@ -37,12 +38,15 @@ class CommandSession:
         stderr_queue: queue.Queue[str | None],
         monitor: BaseResourceMonitor | None,
         limits: Any,
+        *,
+        handle: RunnerHandle | None = None,
     ) -> None:
         self._process = process
         self._stdout_queue = stdout_queue
         self._stderr_queue = stderr_queue
         self._monitor: BaseResourceMonitor | None = monitor
         self._limits = limits
+        self._handle = handle
         self._last_metrics: ResourceMetrics | None = None
         self._stdout_closed = False
         self._stderr_closed = False
@@ -50,6 +54,10 @@ class CommandSession:
     @property
     def pid(self) -> int | None:
         return self._process.pid
+
+    @property
+    def handle(self) -> RunnerHandle | None:
+        return self._handle
 
     def send(self, data: str) -> None:
         if self._process.stdin is None:
@@ -148,6 +156,7 @@ class AgentSession:
         limits: Any,
         *,
         timeout: float | None,
+        handle: RunnerHandle | None = None,
     ) -> None:
         self._process = process
         self._request_queue = request_queue
@@ -155,12 +164,17 @@ class AgentSession:
         self._monitor = monitor
         self._limits = limits
         self._timeout = timeout
+        self._handle = handle
         self._last_metrics: ResourceMetrics | None = None
         self._closed = False
 
     @property
     def pid(self) -> int | None:
         return self._process.pid
+
+    @property
+    def handle(self) -> RunnerHandle | None:
+        return self._handle
 
     def wait_ready(self, *, timeout: float = 5.0) -> None:
         deadline = time.monotonic() + timeout
@@ -339,6 +353,10 @@ class InProcessCommandSession:
 
     @property
     def pid(self) -> int | None:
+        return None
+
+    @property
+    def handle(self) -> RunnerHandle | None:
         return None
 
     def send(self, data: str) -> None:

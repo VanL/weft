@@ -11,7 +11,7 @@ TaskSpec serves dual purposes:
 
 The specification uses **partial immutability**: configuration sections (spec, io) become frozen after task creation to prevent accidental changes, while state and metadata remain mutable for runtime updates.
 
-_Implementation_: `weft/core/taskspec.py` implements this structure, including frozen sections, defaults, and validation helpers.
+_Implementation mapping_: `weft/core/taskspec.py` (`TaskSpec`, `SpecSection`, `IOSection`, `StateSection`, `_freeze_spec`, `FrozenList`, `FrozenDict`). Partial immutability is enforced via `_freeze_spec()` on `model_post_init`, which recursively freezes `spec` and `io` sections using `_freeze()` methods on each sub-model. `state` and `metadata` remain mutable via `__setattr__` guards checking `_frozen_fields`.
 
 ## JSON Schema v1.0 [TS-1]
 
@@ -58,6 +58,10 @@ field.
     },
     "args": [],                              // OPTIONAL. For commands, args are appended to build argv. For functions, args become *args.
     "keyword_args": {},                      // OPTIONAL. Keyword arguments for a function (named differently from Python kwargs due to technical constraints).
+    "runner": {                              // OPTIONAL. Execution backend selection. Defaults to the built-in host runner.
+      "name": "host",                        // REQUIRED when the runner object is present. Runner plugin name.
+      "options": {}                          // OPTIONAL. Runner-specific JSON-serializable options.
+    },
     "timeout": 300.0 | null,                 // OPTIONAL. Timeout in seconds. null means no timeout.
     
     "limits": {                              // OPTIONAL. Resource limits for task execution.
@@ -139,6 +143,7 @@ constraint in the model layer.
 
 **Spec field groupings (for readability)**
 - **Target**: `type`, `function_target`/`process_target`/`agent`, `args`, `keyword_args`
+- **Runner**: `runner.name`, `runner.options`
 - **Lifecycle**: `persistent`
 - **Limits**: `limits.*`
 - **Environment**: `env`, `working_dir`, `weft_context`
@@ -156,8 +161,81 @@ constraint in the model layer.
 - **TaskSpecTemplate**: Stored specs in `.weft/tasks/` omit `tid`, `io`, `state`, and `spec.weft_context` (or set `tid` to null). These templates declare *what to run*.
 - **Resolved TaskSpec**: The Manager expands templates at spawn time, populating `tid`, `io`, `state`, and `spec.weft_context`, then seeds `io.inputs.inbox` with the initial payload when one was supplied by the caller.
 - **TID assignment**: The spawn-request message ID (SimpleBroker 64-bit timestamp) is the task's TID for the full lifecycle.
+- **Runner defaulting**: Templates may omit `spec.runner`; resolution defaults it to `{ "name": "host", "options": {} }`.
 
-_Implementation mapping_: `weft/core/taskspec.py` (`TaskSpec`, `SpecSection`, `IOSection`, `StateSection`), `weft/core/targets.py` (command argv construction), `weft/core/tasks/consumer.py` (streaming/output handling).
+_Implementation mapping_:
+- **Schema & validation**: `weft/core/taskspec.py` — `TaskSpec`, `SpecSection`, `IOSection`, `StateSection`, `LimitsSection`, `RunnerSection`, `AgentSection`, `AgentToolSection`, `AgentTemplateSection`, `ReservedPolicy`.
+- **Payload resolution & defaults**: `weft/core/taskspec.py` — `resolve_taskspec_payload()`, `rewrite_tid_in_io()`, `TaskSpec.prepare_payload()` (model_validator mode="before").
+- **Target semantics**: `weft/core/targets.py` — `decode_work_message()`, `build_argv()` (command argv construction), `resolve_function_target()`.
+- **Runtime execution**: `weft/core/tasks/consumer.py` (`Consumer` — streaming, output handling, reserved policy application), `weft/core/tasks/base.py` (`BaseTask` — queue wiring, state tracking, process titles, reserved policy), `weft/core/tasks/interactive.py` (`InteractiveTaskMixin` — interactive command sessions).
+- **Resource monitoring**: `weft/core/resource_monitor.py` (`ResourceMonitor` — psutil-based metrics collection), `weft/core/runners/host.py` (`HostTaskRunner` — monitor_class loading).
+- **Runner dispatch**: `weft/core/runners/host.py` (`HostTaskRunner`, `HostRunnerPlugin`), `weft/core/tasks/runner.py` (`TaskRunner`), `weft/core/taskspec.py` (`RunnerSection`).
+- **Agent runtime**: `weft/ext.py` (agent adapter wiring), `weft/core/taskspec.py` (`AgentSection`, `AgentToolSection`, `AgentTemplateSection`).
+
+_Per-field implementation status_:
+- `tid`: Implemented. `TaskSpec.validate_tid()` — 19-digit validation, timestamp bounds.
+- `version`: Implemented. `TaskSpec.version` field with regex pattern.
+- `name`, `description`: Implemented.
+- `spec.type`: Implemented. `SpecSection.type` — Literal["function", "command", "agent"].
+- `spec.persistent`: Implemented. `SpecSection.persistent` — used by agent/interactive task paths.
+- `spec.function_target`, `spec.process_target`: Implemented. Cross-validated in `SpecSection.validate_target()`.
+- `spec.agent`: Implemented. `AgentSection` with full sub-schema (`runtime`, `model`, `instructions`, `templates`, `tools`, `output_mode`, `output_schema`, `max_turns`, `options`, `conversation_scope`, `runtime_config`).
+- `spec.args`, `spec.keyword_args`: Implemented. Frozen after creation.
+- `spec.timeout`: Implemented. `SpecSection.timeout`.
+- `spec.limits.*`: Implemented. `LimitsSection` — `memory_mb`, `cpu_percent`, `max_fds`, `max_connections`. Runtime enforcement in `ResourceMonitor` and `TaskSpec.check_limits()`.
+- `spec.env`, `spec.working_dir`: Implemented. Passed to runner in `Consumer.__init__()`.
+- `spec.weft_context`: Implemented. Resolved by Manager at spawn time via `resolve_taskspec_payload()`.
+- `spec.interactive`: Implemented. `InteractiveTaskMixin` in `weft/core/tasks/interactive.py`.
+- `spec.stream_output`: Implemented. Consumer streaming path in `weft/core/tasks/consumer.py`.
+- `spec.cleanup_on_exit`: Implemented. `BaseTask._cleanup_reserved_on_exit()`, `BaseTask._cleanup_spill_dirs()`.
+- `spec.reserved_policy_on_stop`, `spec.reserved_policy_on_error`: Implemented. `BaseTask._apply_reserved_policy()`, `Consumer._apply_reserved_policy_on_error()`.
+- `spec.polling_interval`, `spec.reporting_interval`: Implemented. `BaseTask._maybe_emit_poll_report()`.
+- `spec.monitor_class`: Implemented. Loaded dynamically in `HostTaskRunner` and `Consumer`.
+- `spec.enable_process_title`: Implemented. `BaseTask._update_process_title()`.
+- `spec.output_size_limit_mb`: Implemented. Disk spill logic in `Consumer`.
+- `spec.runner`: Implemented. `RunnerSection` — `name` (default "host"), `options`.
+- `io.*`: Implemented. `IOSection` — `inputs`, `outputs`, `control` with required-queue validation.
+- `state.*`: Implemented. `StateSection` — all fields including peaks, with consistency validation.
+- `metadata`: Implemented. Mutable dict, supports `update_metadata` control messages.
+
+### Runner Selection and Extensibility [TS-1.3]
+
+`spec.type` and `spec.runner` are separate by design.
+
+- `spec.type` declares the task semantics:
+  - `function`
+  - `command`
+  - `agent`
+- `spec.runner` declares which execution backend should run that task:
+  - built-in `host`
+  - installed external runners such as `docker` or `macos-sandbox`
+
+This prevents execution environment from being overloaded into `spec.type`. A
+command task remains a command task regardless of whether it runs on the host,
+inside Docker, or in another supported backend.
+
+`spec.runner` contract:
+
+- `spec.runner.name`
+  - non-empty string
+  - defaults to `"host"`
+- `spec.runner.options`
+  - runner-specific mapping
+  - must remain JSON-serializable so stored TaskSpecs and queue payloads can
+    round-trip safely
+
+Validation is layered:
+
+- schema validation checks the shape of `spec.runner`
+- capability validation checks whether the selected runner supports the task
+  shape (`spec.type`, `interactive`, `persistent`, agent-session needs)
+- plugin validation checks runner-specific required options
+- preflight checks runtime availability on the current machine
+
+Stored TaskSpecs should remain portable; runtime availability is therefore a
+separate validation phase rather than part of baseline schema validation.
+
+_Implementation mapping_: `weft/core/taskspec.py` (`RunnerSection`, `resolve_taskspec_payload()`), `weft/core/runner_validation.py` (`validate_taskspec_runner()`, `validate_runner_capabilities()`, `runner_name_from_taskspec()`), `weft/ext.py` (`RunnerPlugin`, `RunnerHandle`), `weft/_runner_plugins.py` (`get_runner_plugin()`, `require_runner_plugin()`), `weft/core/tasks/runner.py` (`TaskRunner`, `_build_runner_validation_payload()`).
 
 ### Autostart Manifests [TS-1.2]
 
@@ -190,7 +268,7 @@ default inputs/arguments. They do **not** include `tid`, queue names, or runtime
 
 **Targets**
 - `task`: references a stored task spec in `.weft/tasks/`
-- `pipeline`: references a pipeline stored in `.weft/pipelines/`
+- `pipeline`: references a pipeline stored in `.weft/pipelines/` **[NOT YET IMPLEMENTED]** Pipeline targets are not yet supported; only `task` targets are implemented.
 
 **Defaults**
 - `args`/`keyword_args` are merged into the target’s `spec.args`/`spec.keyword_args`.
@@ -202,10 +280,14 @@ default inputs/arguments. They do **not** include `tid`, queue names, or runtime
 - `mode=ensure` restarts on unexpected exit with optional backoff while the
   manager is running. Manager shutdown stops autostarted tasks regardless of
   policy.
+- `max_restarts` **[NOT YET IMPLEMENTED]** — the `ensure` mode restarts unconditionally; `max_restarts` cap is not enforced.
+- `backoff_seconds` **[NOT YET IMPLEMENTED]** — exponential backoff between restarts is not yet implemented; restarts happen on the next scan tick.
 
 Managers record metadata linking the running task back to the manifest source
 (`metadata.autostart_source`) and set `metadata.autostart=true` for
 observability.
+
+_Implementation mapping_: `weft/core/manager.py` — `Manager._tick_autostart()` (scan loop), `Manager._load_autostart_manifest()` (JSON loading), `Manager._load_autostart_taskspec()` (task spec resolution from `.weft/tasks/`), `Manager._build_autostart_spawn_payload()` (defaults merging), `Manager._active_autostart_sources()` (active-source tracking via state log), `Manager._enqueue_autostart_request()` (spawn enqueue). Metadata fields `autostart_source` and `autostart` are set in `Manager._spawn_child()`.
 
 ### Reserved queue policies [TS-1.1]
 
@@ -214,9 +296,13 @@ Reserved queue policy semantics are defined in
 TaskSpec exposes `reserved_policy_on_stop` and `reserved_policy_on_error`, each
 accepting `keep` (default), `requeue`, or `clear`.
 
-_Implementation mapping_: `weft/core/tasks/base.py` (`_apply_reserved_policy`), `weft/core/tasks/consumer.py` (error/stop handling).
+_Implementation mapping_: `weft/core/tasks/base.py` (`BaseTask._apply_reserved_policy()`), `weft/core/tasks/consumer.py` (`Consumer._apply_reserved_policy_on_error()`, `Consumer._handle_stop()`, `Consumer._handle_kill()`), `weft/core/tasks/interactive.py` (`InteractiveTaskMixin` — applies policies on stop/kill/error for interactive sessions). The `ReservedPolicy` enum lives in `weft/core/taskspec.py`.
 
 ## Related Plans
 
 - [`docs/plans/piped-input-support-plan.md`](../plans/piped-input-support-plan.md)
 - [`docs/plans/runner-extension-point-plan.md`](../plans/runner-extension-point-plan.md)
+- [`docs/plans/taskspec-clean-design-plan.md`](../plans/taskspec-clean-design-plan.md)
+- [`docs/plans/agent-runtime-implementation-plan.md`](../plans/agent-runtime-implementation-plan.md)
+- [`docs/plans/persistent-agent-runtime-implementation-plan.md`](../plans/persistent-agent-runtime-implementation-plan.md)
+- [`docs/plans/agent-runtime-boundary-cleanup-plan.md`](../plans/agent-runtime-boundary-cleanup-plan.md)

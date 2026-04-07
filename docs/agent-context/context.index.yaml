@@ -1,5 +1,5 @@
 schema_version: 1
-updated_at: 2026-04-03
+updated_at: 2026-04-07
 hub: docs/agent-context
 read_order:
   - docs/agent-context/decision-hierarchy.md
@@ -22,6 +22,10 @@ documents:
   - path: docs/agent-context/runbooks/testing-patterns.md
     role: operational_runbook
   - path: docs/agent-context/runbooks/writing-plans.md
+    role: operational_runbook
+  - path: docs/agent-context/runbooks/hardening-plans.md
+    role: operational_runbook
+  - path: docs/agent-context/runbooks/review-loops-and-agent-bootstrap.md
     role: operational_runbook
   - path: docs/agent-context/lessons.md
     role: lessons_pointer

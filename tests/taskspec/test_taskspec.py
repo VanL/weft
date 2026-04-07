@@ -36,6 +36,8 @@ class TestCreationDefaults:
         assert taskspec.spec.output_size_limit_mb == 10
         assert taskspec.spec.reserved_policy_on_stop is ReservedPolicy.KEEP
         assert taskspec.spec.reserved_policy_on_error is ReservedPolicy.KEEP
+        assert taskspec.spec.runner.name == "host"
+        assert taskspec.spec.runner.options == {}
         assert taskspec.io.outputs["outbox"] == f"T{taskspec.tid}.outbox"
         assert taskspec.io.control["ctrl_in"] == f"T{taskspec.tid}.ctrl_in"
         assert taskspec.io.control["ctrl_out"] == f"T{taskspec.tid}.ctrl_out"
@@ -72,6 +74,17 @@ class TestValidation:
                 name="missing-ctrl",
                 spec=SpecSection(type="function", function_target="pkg:fn"),
                 io=IOSection(outputs={"outbox": "T.foo"}, control={}),
+            )
+
+    def test_runner_options_must_be_json_serializable(self) -> None:
+        with pytest.raises(ValueError):
+            SpecSection(
+                type="function",
+                function_target="pkg:fn",
+                runner={
+                    "name": "host",
+                    "options": {"bad": object()},
+                },
             )
 
 
@@ -147,6 +160,34 @@ class TestPartialImmutability:
         assert taskspec.spec.agent is not None
         with pytest.raises(AttributeError):
             taskspec.spec.agent.instructions = "changed"
+
+    def test_runner_assignment_blocked(self) -> None:
+        taskspec = fixtures.create_minimal_taskspec()
+
+        with pytest.raises(AttributeError):
+            taskspec.spec.runner.name = "docker"
+
+    def test_runner_options_reject_nested_mutation(self) -> None:
+        taskspec = TaskSpec.model_validate(
+            {
+                "tid": fixtures.VALID_TEST_TID,
+                "name": "runner-options",
+                "spec": {
+                    "type": "function",
+                    "function_target": "pkg:fn",
+                    "runner": {
+                        "name": "docker",
+                        "options": {"image": "busybox"},
+                    },
+                },
+                "io": {},
+                "state": {},
+                "metadata": {},
+            }
+        )
+
+        with pytest.raises((TypeError, AttributeError)):
+            taskspec.spec.runner.options["image"] = "ubuntu"
 
     def test_resolved_spec_args_reject_append(self) -> None:
         taskspec = fixtures.create_valid_function_taskspec()

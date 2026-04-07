@@ -115,6 +115,11 @@ Complete command-line interface specification following SimpleBroker patterns.
 - Process management with OS integration
 - Pipeline operations and task spec management
 
+### **[11-CLI_Architecture_Crosswalk.md](11-CLI_Architecture_Crosswalk.md)**
+Maps every CLI command to its corresponding system components and development
+dependencies. Contains an audit note (2026-04-07) marking divergences between
+the original design-time component names and the actual implementation.
+
 ### **[12-Future_Ideas.md](12-Future_Ideas.md)**
 Deferred ideas and follow-ups that are intentionally out of scope for the
 current implementation.
@@ -165,12 +170,34 @@ anchor requirements. When adding or updating text, prefer these codes over
 plain prose so cross-references stay consistent. If a section lacks codes, add
 them rather than introducing a new style.
 
+## Traceability Rules
+
+`docs/specifications/` is the canonical source of truth for intended Weft
+behavior. Keep it synchronized with plans and code using these rules:
+
+- Plans in `docs/plans/` should cite exact spec files and section/reference
+  codes, not only whole documents.
+- Risky or boundary-crossing plans should also use
+  `docs/agent-context/runbooks/hardening-plans.md` and
+  `docs/agent-context/runbooks/review-loops-and-agent-bootstrap.md` so they
+  state what must not change, what should not be mocked, and how independent
+  review will happen.
+- Specs implementing active work should add or update `## Plans` or
+  `## Related Plans` backlinks to those implementation plans.
+- When a spec already carries nearby implementation notes such as
+  `_Implementation snapshot_`, `_Implementation status_`, or
+  `_Implementation mapping_`, update those notes when code ownership or current
+  behavior changes.
+- Touched code modules and important boundary functions should keep docstrings
+  pointing back to the relevant spec sections so the mapping stays
+  bidirectional.
+
 ## Key Design Wins
 
 ### **1. Recursive Architecture**
 Workers are Tasks that run long-lived targets, using the same primitive throughout the system. All entities follow identical lifecycle, observability, and control patterns.
 
-### **2. TID Correlation** 
+### **2. TID Correlation**
 Spawn-request message IDs become Task IDs, providing end-to-end correlation. A single identifier follows each task from request to completion with chronological ordering.
 
 ### **3. Partial Immutability**
@@ -205,7 +232,7 @@ Every task visible in OS process lists, complete audit trail in logs, and recove
 ## Performance Targets
 
 - **Task Creation**: 100 tasks/second
-- **Queue Throughput**: 1000 messages/second  
+- **Queue Throughput**: 1000 messages/second
 - **Concurrent Tasks**: 200 maximum (design target)
 - **Task Startup**: <100ms
 - **Memory Overhead**: <10MB per task
@@ -222,4 +249,10 @@ Every task visible in OS process lists, complete audit trail in logs, and recove
 
 ---
 
-**Note**: This specification represents the complete design for Weft v1.0. Implementation follows the roadmap in [09-Implementation_Plan.md](09-Implementation_Plan.md) with a 4-week delivery target focusing on core functionality first.
+## Related Plans
+
+- [`docs/plans/spec-plan-code-traceability-plan.md`](../plans/spec-plan-code-traceability-plan.md)
+
+**Note**: These specifications are canonical for intended behavior. Current
+implementation ownership and known gaps should be recorded inline through the
+local implementation snapshot/status/mapping notes in each relevant spec.

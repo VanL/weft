@@ -6,7 +6,13 @@ _Implementation snapshot_: Reservation and control flows ([MF-2], [MF-3]) are
 implemented within `BaseTask`/`Consumer` (`weft/core/tasks/base.py`,
 `weft/core/tasks/consumer.py`). Worker spawning and bootstrap flows ([MF-6],
 [MF-7]) are handled by the Manager (`weft/core/manager.py`) and the CLI helpers
-in `weft/commands/run.py`.
+in `weft/commands/run.py`. State observation ([MF-5]) is provided by
+`weft/commands/status.py` (log replay and snapshot collection). Pipeline
+chaining ([MF-4]) is not yet implemented. Several design-reference classes
+(`StateTracker`, `TaskOutputReader`, `OutputCleaner`, `ReservationManager`,
+`QueueLifecycleManager`) are spec-only and not implemented as standalone
+classes; their behavior is either spread across existing modules or not yet
+built.
 
 Queue names and control message constants are summarized in
 [00-Quick_Reference.md](00-Quick_Reference.md).
@@ -21,7 +27,7 @@ User -> CLI -> Queue(weft.spawn.requests) -> Manager -> Queue(T{tid}.inbox)
                                              └-> Queue(weft.log.tasks) [initial state]
 ```
 
-_Implementation mapping_: `weft/commands/run.py` (`_enqueue_taskspec`), `weft/core/manager.py` (spawn handling).
+_Implementation mapping_: `weft/commands/run.py` (`_enqueue_taskspec` writes spawn request with forced timestamp = TID), `weft/core/manager.py` (`Manager._handle_work_message` receives spawn request, `Manager._build_child_spec` expands TaskSpec, `Manager._launch_child_task` seeds `T{tid}.inbox` and emits `task_spawned` to `weft.log.tasks`).
 
 ### 2. Message Processing Flow with Reservation [MF-2]
 _Implementation_: `Consumer` (`weft/core/tasks/consumer.py`) moves inbox
@@ -54,6 +60,8 @@ T{tid}.inbox -> move -> T{tid}.reserved -> process -> T{tid}.outbox
   boundary for one completed inbox message while the task itself remains
   running.
 
+_Implementation mapping_: `weft/core/tasks/consumer.py` (`Consumer._build_queue_configs` sets up reserve mode on inbox, `Consumer._handle_work_message` processes reserved items, `Consumer._finalize_message` deletes from reserved on success), `weft/core/tasks/base.py` (`BaseTask._apply_reserved_policy` enforces keep/requeue/clear, `BaseTask._move_reserved_to_inbox` handles requeue, `BaseTask._cleanup_reserved_if_needed` handles cleanup_on_exit).
+
 **Idempotency guidance**
 - **Single-message tasks** may use `tid` as an idempotency key.
 - **Multi-message tasks** should use the inbox/reserved `message_id` (timestamp) as the idempotency key.
@@ -67,8 +75,10 @@ Controller -> Queue(T{tid}.ctrl_in) -> Task -> Queue(T{tid}.ctrl_out)
                                          └-> Queue(weft.log.tasks)
 ```
 
+_Implementation mapping_: `weft/core/tasks/base.py` (`BaseTask._handle_control_message` dispatches, `BaseTask._handle_control_command` handles PING/STOP/KILL/PAUSE/RESUME/STATUS, `BaseTask._send_control_response` writes to `ctrl_out`, `BaseTask._ack_control_message` deletes consumed control messages). `Consumer._poll_control_queue_while_active` polls `ctrl_in` in a background thread during active work execution. `weft/commands/tasks.py` (`_send_control` writes to `ctrl_in`, `stop_tasks`/`kill_tasks` orchestrate control + signal delivery).
+
 ### 4. Pipeline Flow [MF-4]
-_Implementation status_: Automatic pipeline chaining is not yet implemented; downstream routing must be orchestrated manually.
+**[NOT YET IMPLEMENTED]** Automatic pipeline chaining is not yet implemented; downstream routing must be orchestrated manually.
 ```
 T{tid1}.outbox -> T{tid2}.inbox -> T{tid2}.reserved -> process
                                            |
@@ -83,6 +93,8 @@ Task2 ──┼─> weft.log.tasks -> Observer/Monitor -> Aggregated View
 Task3 ─┘                           |
                                    └-> Summary/Alert/Report
 ```
+
+_Implementation mapping_: `weft/core/tasks/base.py` (`BaseTask._report_state_change` writes JSON events to `weft.log.tasks` with full redacted TaskSpec snapshot). `weft/core/tasks/consumer.py` (`Observer`, `SamplingObserver`, `Monitor` peek at queues without consuming). `weft/commands/status.py` (`_iter_log_events` replays `weft.log.tasks`, `_collect_task_snapshots` reconstructs current state, `_watch_task_events` provides live tail). `weft/commands/tasks.py` (`list_tasks`, `task_status`) delegate to `_collect_task_snapshots`.
 
 ### 6. Worker Spawn Flow [MF-6]
 _Implementation_: Managers (`weft/core/manager.py`) consume spawn requests from
@@ -108,7 +120,7 @@ Client -> weft.spawn.requests -> Worker.inbox -> Worker validates
                                                 └─> Correlation throughout lifecycle
 ```
 
-_Implementation mapping_: `weft/core/manager.py` (spawn handling, autostart manifests), `weft/commands/run.py` (spawn request timestamps).
+_Implementation mapping_: `weft/core/manager.py` (`Manager._handle_work_message` consumes spawn requests, `Manager._build_child_spec` validates/expands TaskSpec with `resolve_taskspec_payload`, `Manager._launch_child_task` calls `launch_task_process` and seeds inbox, `Manager._tick_autostart` scans `.weft/autostart/` manifests, `Manager._build_autostart_spawn_payload` loads stored task specs, `Manager._active_autostart_sources` queries `weft.log.tasks` for running autostart tasks). `weft/commands/run.py` (`_enqueue_taskspec` writes spawn requests with forced TID timestamps). **[NOT YET IMPLEMENTED]**: Autostart pipeline targets (`target.type == "pipeline"`) are logged as unsupported.
 
 ### 7. Worker Bootstrap Flow [MF-7]
 _Implementation_: `weft run` and `weft worker start` use the helper in
@@ -124,6 +136,8 @@ weft CLI -> build manager TaskSpec -> spawn weft.manager_process
       |                  └─> Includes idle_timeout & queue bindings
       └─> Wait for registry entry, then exit (manager keeps running)
 ```
+
+_Implementation mapping_: `weft/commands/run.py` (builds manager TaskSpec and launches via `weft/core/launcher.py`). `weft/core/manager.py` (`Manager.__init__` calls `_register_worker` to write to `weft.state.workers`, sets up `weft.spawn.requests` watcher, and runs autostart on first tick; `Manager._maybe_yield_leadership` handles leader election among concurrent managers).
 
 ### 8. Failure Recovery Flow
 _Implementation_: Reserved queue policies (`keep`, `requeue`, `clear`) are enforced by `BaseTask._apply_reserved_policy`.
@@ -152,8 +166,10 @@ clears these messages automatically.
 | Crash | (implicit) | leave in reserved | n/a | n/a |
 ```
 
+_Implementation mapping_: `weft/core/tasks/base.py` (`BaseTask._apply_reserved_policy` implements KEEP/REQUEUE/CLEAR, `BaseTask._handle_stop_request` applies `reserved_policy_on_stop`, `BaseTask._handle_kill_request` applies `reserved_policy_on_error`). `weft/core/tasks/consumer.py` (`Consumer._apply_reserved_policy_on_error` applies on timeout/limit/error outcomes, `Consumer._handle_external_stop`/`_handle_external_kill` handle signal-driven policy application). **[NOT YET IMPLEMENTED]**: Retry-in-place (Option 1) and manual re-processing APIs are not provided as built-in commands; recovery requires manual queue manipulation via `weft queue move`.
+
 ## State Machine
-_Implementation_: `TaskSpec.state` (`weft/core/taskspec.py`) tracks the lifecycle states shown here. Transitions are updated via helper methods (`mark_*`).
+_Implementation_: `TaskSpec.state` (`weft/core/taskspec.py`) tracks the lifecycle states shown here. Transitions are updated via helper methods (`mark_started`, `mark_running`, `mark_completed`, `mark_failed`, `mark_timeout`, `mark_cancelled`, `mark_killed`).
 
 ### States and Transitions
 
@@ -205,6 +221,8 @@ VALID_TRANSITIONS = {
 finish within the first scheduling tick (e.g., very short commands). Long-running
 tasks are expected to emit `running` before a terminal state.
 
+_Implementation mapping_: `weft/core/taskspec.py` (`TaskSpec.mark_*` methods enforce forward-only transitions). **Note**: The `VALID_TRANSITIONS` dict shown above is a specification reference; the actual enforcement is distributed across the `mark_*` methods rather than a centralized lookup table.
+
 ### State Persistence
 
 **Queue-Based State Storage**:
@@ -216,14 +234,18 @@ tasks are expected to emit `running` before a terminal state.
   complete, JSON-friendly dump of the originating TaskSpec so a consumer can
   reconstruct the runtime state without querying the task directly.
 
+**[NOT YET IMPLEMENTED]** The `StateTracker` class shown below is a design reference; it is not implemented as a standalone class. The equivalent behavior is spread across:
+- `BaseTask._report_state_change` (writes state events to `weft.log.tasks`).
+- `weft/commands/status.py` (`_iter_log_events` + `_collect_task_snapshots`) replays the log to reconstruct current state per TID.
+
 ```python
 class StateTracker:
     """Track and manage task state through queue messages."""
-    
+
     def __init__(self, context: WeftContext):
         self.context = context
         self.log_queue = context.get_queue("weft.log.tasks")
-    
+
     def update_state(self, tid: str, state_update: dict) -> None:
         """Update task state by writing to log queue."""
         timestamp = self.log_queue.generate_timestamp()
@@ -234,23 +256,23 @@ class StateTracker:
             **state_update
         }
         self.log_queue.write(json.dumps(log_entry))
-    
+
     def get_current_state(self, tid: str) -> dict:
         """Reconstruct current state from log events."""
         state = {"status": "created"}  # Default initial state
-        
+
         # Replay all events for this TID
         for msg in self.log_queue.peek_all():
             entry = json.loads(msg)
             if entry.get("tid") == tid:
                 state.update(entry)
-        
+
         return state
-    
+
     def get_all_states(self) -> dict[str, dict]:
         """Get current state of all tasks."""
         states = {}
-        
+
         for msg in self.log_queue.peek_all():
             entry = json.loads(msg)
             tid = entry.get("tid")
@@ -258,15 +280,15 @@ class StateTracker:
                 if tid not in states:
                     states[tid] = {"status": "created"}
                 states[tid].update(entry)
-        
+
         return states
 ```
 
 ## TaskSpec Redaction
 
-_Implementation_: `weft/helpers.py` (`redact_taskspec_dump`) is applied by
-`BaseTask._report_state_change` and `Manager._report_state_change` to remove
-secret fields from the `taskspec` payloads written to `weft.log.tasks`.
+_Implementation_: `weft/helpers.py` (`redact_taskspec_dump`, line ~635) is applied by
+`BaseTask._report_state_change` and `Manager._report_state_change` (which inherits from BaseTask) to remove
+secret fields from the `taskspec` payloads written to `weft.log.tasks`. Redaction paths are configured via `WEFT_REDACT_TASKSPEC_FIELDS` in `BaseTask.__init__`.
 
 ## Large Output Handling
 
@@ -275,6 +297,8 @@ secret fields from the `taskspec` payloads written to `weft.log.tasks`.
 When task output exceeds SimpleBroker's 10MB message limit, the system automatically spills to disk:
 
 ### 1. Output Spilling API
+
+_Implementation mapping_: Output spilling is implemented inline in `weft/core/tasks/base.py` (`BaseTask._spill_large_output`) and `weft/core/tasks/consumer.py` (`Consumer._emit_single_output` checks size limits and delegates to `_spill_large_output`). The `LargeOutputHandler` class below is a design reference, not a standalone class.
 
 ```python
 class LargeOutputHandler:
@@ -328,6 +352,8 @@ class LargeOutputHandler:
 
 ### 2. Consumer API for Large Output
 
+**[NOT YET IMPLEMENTED]** The `TaskOutputReader` class below is a design reference. There is no standalone consumer-side reader that transparently handles large output references. Consumers must manually inspect outbox messages for `"type": "large_output"` payloads. The `weft result` command (`weft/commands/result.py`) reads outbox messages but does not implement automatic large-output dereferencing.
+
 ```python
 class TaskOutputReader:
     """Read task output, handling both inline and spilled outputs."""
@@ -379,6 +405,8 @@ _Implementation note_: When `spec.stream_output` is `True`, `Consumer` emits JSO
 
 ### 3. Cleanup Strategy
 
+_Implementation mapping_: Cleanup of spilled outputs is implemented in `weft/core/tasks/base.py` (`BaseTask._cleanup_spilled_outputs_if_needed`, gated on `cleanup_on_exit`). **[NOT YET IMPLEMENTED]**: The `OutputCleaner` class below and its `cleanup_old_outputs` method (time-based retention sweep) are design references; there is no built-in command or scheduled job to garbage-collect old output directories by age.
+
 ```python
 class OutputCleaner:
     """Clean up spilled output files based on retention policy."""
@@ -413,7 +441,9 @@ class OutputCleaner:
 
 ### The Unified Reservation Pattern
 
-The system uses a **single reservation pattern** where the `.reserved` queue serves as both work-in-progress and dead-letter queue:
+The system uses a **single reservation pattern** where the `.reserved` queue serves as both work-in-progress and dead-letter queue.
+
+_Implementation mapping_: The reservation pattern is implemented across `weft/core/tasks/base.py` (`BaseTask._reserve_queue_config`, `BaseTask._get_reserved_queue`, `BaseTask._apply_reserved_policy`, `BaseTask._move_reserved_to_inbox`, `BaseTask._ensure_reserved_empty`, `BaseTask._cleanup_reserved_if_needed`) and `weft/core/tasks/consumer.py` (`Consumer._build_queue_configs` sets up reserve mode, `Consumer._finalize_message` deletes from reserved on success). The `ReservationManager` class below is a design reference, not a standalone class. **[NOT YET IMPLEMENTED]**: `recover_reserved` and `retry_reserved` methods are not exposed as built-in APIs; recovery requires manual `weft queue` commands.
 
 ```python
 class ReservationManager:
@@ -481,6 +511,8 @@ class ReservationManager:
 ```
 
 ### Queue Lifecycle Management
+
+**[NOT YET IMPLEMENTED]** The `QueueLifecycleManager` class below is a design reference. Queue creation is implicit (SimpleBroker creates queues on first write). Task queue cleanup is partially implemented via `BaseTask.cleanup()` (closes handles) and `weft system tidy` (removes empty queues), but the full lifecycle management API (explicit create, force cleanup of non-empty queues, queue status dashboard) described here does not exist as a standalone class.
 
 ```python
 class QueueLifecycleManager:
@@ -570,3 +602,8 @@ class QueueLifecycleManager:
 ## Related Plans
 
 - [`docs/plans/piped-input-support-plan.md`](../plans/piped-input-support-plan.md)
+- [`docs/plans/agent-runtime-implementation-plan.md`](../plans/agent-runtime-implementation-plan.md) (references MF-1, MF-2, MF-6)
+- [`docs/plans/agent-runtime-boundary-cleanup-plan.md`](../plans/agent-runtime-boundary-cleanup-plan.md)
+- [`docs/plans/persistent-agent-runtime-implementation-plan.md`](../plans/persistent-agent-runtime-implementation-plan.md)
+- [`docs/plans/simplebroker-backend-generalization-plan.md`](../plans/simplebroker-backend-generalization-plan.md)
+- [`docs/plans/taskspec-clean-design-plan.md`](../plans/taskspec-clean-design-plan.md)

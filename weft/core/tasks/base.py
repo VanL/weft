@@ -35,6 +35,7 @@ from typing import Any, cast
 
 from simplebroker import BrokerTarget, Queue
 from weft._constants import (
+    CONTROL_KILL,
     CONTROL_STOP,
     DEFAULT_OUTPUT_SIZE_LIMIT_MB,
     QUEUE_CTRL_IN_SUFFIX,
@@ -48,9 +49,12 @@ from weft._constants import (
     WEFT_TID_MAPPINGS_QUEUE,
     load_config,
 )
+from weft._runner_plugins import require_runner_plugin
 from weft.core.taskspec import ReservedPolicy, TaskSpec
+from weft.ext import RunnerHandle
 from weft.helpers import (
     iter_queue_json_entries,
+    kill_process_tree,
     redact_taskspec_dump,
     terminate_process_tree,
 )
@@ -138,6 +142,8 @@ class BaseTask(MultiQueueWatcher, ABC):
         self._task_pid = os.getpid()
         self._caller_pid = os.getppid()
         self._managed_pids: set[int] = set()
+        self._runtime_handle: RunnerHandle | None = None
+        self._kill_requested = False
         self._external_stop_handled = False
 
         super().__init__(
@@ -518,6 +524,16 @@ class BaseTask(MultiQueueWatcher, ABC):
             self._send_control_response("STOP", "ack")
             return True
 
+        if command == CONTROL_KILL:
+            self._handle_kill_request(
+                reason="KILL command received",
+                event="control_kill",
+                message_id=context.timestamp,
+                apply_reserved_policy=True,
+            )
+            self._send_control_response("KILL", "ack")
+            return True
+
         if command == "PAUSE":
             if not self._paused:
                 self._paused = True
@@ -588,7 +604,14 @@ class BaseTask(MultiQueueWatcher, ABC):
         payload.setdefault(
             "caller_pid", self._caller_pid if self._caller_pid > 0 else None
         )
-        payload.setdefault("managed_pids", sorted(self._managed_pids))
+        payload.setdefault("managed_pids", self._all_managed_pids())
+        payload.setdefault("runner", self._current_runner_name())
+        payload.setdefault(
+            "runtime_handle",
+            self._runtime_handle.to_dict()
+            if self._runtime_handle is not None
+            else None,
+        )
 
         try:
             self._queue(WEFT_GLOBAL_LOG_QUEUE).write(json.dumps(payload))
@@ -625,10 +648,23 @@ class BaseTask(MultiQueueWatcher, ABC):
             return
         self._external_stop_handled = True
 
+        signal_name = _signal_name(signum)
+        sigusr1 = getattr(signal, "SIGUSR1", None)
+        if sigusr1 is not None and signum == sigusr1:
+            self._stop_registered_runtime_handle(timeout=0.2, graceful=False)
+            for pid in sorted(self._managed_pids):
+                kill_process_tree(pid, timeout=0.2)
+            self._handle_kill_request(
+                reason=f"{signal_name} received",
+                event="task_signal_kill",
+                message_id=None,
+                apply_reserved_policy=False,
+            )
+            return
+
+        self._stop_registered_runtime_handle(timeout=0.2, graceful=True)
         for pid in sorted(self._managed_pids):
             terminate_process_tree(pid, timeout=0.2)
-
-        signal_name = _signal_name(signum)
         self._handle_stop_request(
             reason=f"{signal_name} received",
             event="task_signal_stop",
@@ -655,6 +691,34 @@ class BaseTask(MultiQueueWatcher, ABC):
 
         if apply_reserved_policy:
             policy = self.taskspec.spec.reserved_policy_on_stop
+            self._apply_reserved_policy(policy)
+            if policy is not ReservedPolicy.KEEP:
+                self._ensure_reserved_empty()
+                self._cleanup_reserved_if_needed()
+
+        if self._stop_event:
+            self._stop_event.set()
+
+    def _handle_kill_request(
+        self,
+        *,
+        reason: str,
+        event: str,
+        message_id: int | None,
+        apply_reserved_policy: bool,
+    ) -> None:
+        """Transition the task into a killed state and stop processing."""
+
+        self.should_stop = True
+        self._kill_requested = True
+        terminal_states = {"completed", "failed", "timeout", "cancelled", "killed"}
+        if self.taskspec.state.status not in terminal_states:
+            self.taskspec.mark_killed(reason=reason)
+            self._report_state_change(event=event, message_id=message_id)
+            self._update_process_title("killed")
+
+        if apply_reserved_policy:
+            policy = self.taskspec.spec.reserved_policy_on_error
             self._apply_reserved_policy(policy)
             if policy is not ReservedPolicy.KEEP:
                 self._ensure_reserved_empty()
@@ -792,16 +856,43 @@ class BaseTask(MultiQueueWatcher, ABC):
         if pid in self._managed_pids:
             return
         self._managed_pids.add(pid)
+        self._merge_runtime_handle_host_pid(pid)
+        self._register_tid_mapping()
+
+    def register_runtime_handle(self, handle: RunnerHandle | None) -> None:
+        """Persist the runtime handle used to control the active runner."""
+        if handle is None:
+            return
+
+        merged_handle = handle
+        if handle.runner_name == "host" and self._managed_pids:
+            merged_handle = RunnerHandle(
+                runner_name=handle.runner_name,
+                runtime_id=handle.runtime_id,
+                host_pids=tuple(
+                    sorted(set(handle.host_pids).union(self._managed_pids))
+                ),
+                metadata=dict(handle.metadata),
+            )
+
+        if self._runtime_handle == merged_handle:
+            return
+        self._runtime_handle = merged_handle
         self._register_tid_mapping()
 
     def _build_tid_mapping_payload(self) -> dict[str, Any]:
+        runtime_handle = self._runtime_handle
         return {
             "short": self.tid_short,
             "full": self.tid,
             "pid": self._task_pid,
             "task_pid": self._task_pid,
             "caller_pid": self._caller_pid if self._caller_pid > 0 else None,
-            "managed_pids": sorted(self._managed_pids),
+            "managed_pids": self._all_managed_pids(),
+            "runner": self._current_runner_name(),
+            "runtime_handle": (
+                runtime_handle.to_dict() if runtime_handle is not None else None
+            ),
             "name": self.taskspec.name,
             "started": time.time_ns(),
             "hostname": socket.gethostname(),
@@ -915,6 +1006,8 @@ class BaseTask(MultiQueueWatcher, ABC):
             "task_pid",
             "caller_pid",
             "managed_pids",
+            "runner",
+            "runtime_handle",
             "name",
             "hostname",
         }
@@ -922,6 +1015,51 @@ class BaseTask(MultiQueueWatcher, ABC):
             if current.get(key) != incoming.get(key):
                 return False
         return True
+
+    def _all_managed_pids(self) -> list[int]:
+        runtime_pids: tuple[int, ...] = ()
+        if self._runtime_handle is not None:
+            runtime_pids = self._runtime_handle.host_pids
+        return sorted(set(self._managed_pids).union(runtime_pids))
+
+    def _current_runner_name(self) -> str:
+        if self._runtime_handle is not None:
+            return self._runtime_handle.runner_name
+        runner = getattr(self.taskspec.spec, "runner", None)
+        name = getattr(runner, "name", None)
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+        return "host"
+
+    def _merge_runtime_handle_host_pid(self, pid: int) -> None:
+        if self._runtime_handle is None or self._runtime_handle.runner_name != "host":
+            return
+        if pid in self._runtime_handle.host_pids:
+            return
+        self._runtime_handle = RunnerHandle(
+            runner_name=self._runtime_handle.runner_name,
+            runtime_id=self._runtime_handle.runtime_id,
+            host_pids=tuple(sorted(set(self._runtime_handle.host_pids).union({pid}))),
+            metadata=dict(self._runtime_handle.metadata),
+        )
+
+    def _stop_registered_runtime_handle(
+        self,
+        *,
+        timeout: float,
+        graceful: bool,
+    ) -> None:
+        handle = self._runtime_handle
+        if handle is None:
+            return
+        try:
+            plugin = require_runner_plugin(handle.runner_name)
+            if graceful:
+                plugin.stop(handle, timeout=timeout)
+            else:
+                plugin.kill(handle, timeout=timeout)
+        except Exception:
+            logger.debug("Failed to stop runtime handle %s", handle, exc_info=True)
 
     def _write_streaming_result(
         self, outbox_queue: Queue, data: bytes, limit_bytes: int
@@ -1022,7 +1160,7 @@ class BaseTask(MultiQueueWatcher, ABC):
     ) -> None:
         """Apply the ReservedPolicy configured on the TaskSpec to the reserved queue.
 
-        Spec: [CC-2.4], [MF-2]
+        Spec: [CC-2.4], [MF-2], [TS-1.1]
         """
         if policy is ReservedPolicy.KEEP:
             return

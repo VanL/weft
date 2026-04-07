@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "weft-docker"
+version = "0.1.0"
+description = "Docker runner plugin for Weft"
+readme = "README.md"
+requires-python = ">=3.12"
+license = {text = "MIT"}
+authors = [
+    {name = "Van Lindberg", email = "van@modelmonster.ai"},
+]
+dependencies = [
+    "docker>=7.1.0,<8",
+    "weft>=0.6.4,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+]
+
+[project.entry-points."weft.runners"]
+docker = "weft_docker.plugin:get_runner_plugin"
+
+[tool.hatch.build]
+include = [
+    "weft_docker/**/*.py",
+    "README.md",
+]

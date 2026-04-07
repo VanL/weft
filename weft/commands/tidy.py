@@ -1,4 +1,8 @@
-"""Maintenance commands for SimpleBroker databases."""
+"""Maintenance commands for SimpleBroker databases.
+
+Spec references:
+- docs/specifications/10-CLI_Interface.md (system tidy)
+"""
 
 from __future__ import annotations
 

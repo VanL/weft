@@ -8,6 +8,15 @@ The core decision is unchanged: **agents remain Tasks**. Weft owns queues,
 durability, process isolation, resource limits, and lifecycle. Agent libraries
 remain adapters that run inside those task processes.
 
+## Related Plans
+
+- [Agent Runtime Implementation Plan](../plans/agent-runtime-implementation-plan.md)
+  -- original prototype plan covering Tasks 1-7, one-shot agent MVP
+- [Persistent Agent Runtime Implementation Plan](../plans/persistent-agent-runtime-implementation-plan.md)
+  -- superseding plan for persistent agent tasks with continuation
+- [Agent Runtime Boundary Cleanup Plan](../plans/agent-runtime-boundary-cleanup-plan.md)
+  -- schema pruning, structured message preservation, public/private boundary cleanup
+
 ## Design Context [AR-0]
 
 Weft started from queues and processes, not from prompts and chat state. The
@@ -38,10 +47,10 @@ The current implementation supports:
 
 The current implementation does **not** support:
 
-- approval policies
-- transcript persistence
-- semantic event streaming on the public outbox
-- public result wrappers such as `agent_result`
+- approval policies **[NOT YET IMPLEMENTED]**
+- transcript persistence **[NOT YET IMPLEMENTED]**
+- semantic event streaming on the public outbox **[NOT YET IMPLEMENTED]**
+- public result wrappers such as `agent_result` (intentionally omitted by design)
 
 ## Conceptual Model [AR-1]
 
@@ -69,6 +78,12 @@ Important consequences:
 - agent execution still uses inbox -> reserved -> outbox flow
 - `STOP`, `PING`, `STATUS`, timeout, and reserved-queue policies still apply
 - model-backed work and non-model work still share the same outer runtime
+
+_Implementation mapping:_ The conceptual model is realized through
+`weft/core/tasks/consumer.py` (Consumer dispatches agent work via `_run_task`
+and `_uses_agent_session`), `weft/core/tasks/runner.py` (TaskRunner serializes
+agent config into the worker subprocess), and `weft/core/agent_runtime.py`
+(`execute_agent_target` as the runtime entry point).
 
 ## TaskSpec Extension [AR-2]
 
@@ -109,6 +124,11 @@ Agent execution is enabled by `spec.type="agent"` plus a required
 }
 ```
 
+_Implementation mapping:_ `weft/core/taskspec.py` -- `AgentSection` Pydantic
+model defines the full `spec.agent` schema. `SpecSection.type` includes
+`"agent"` as a valid literal. `SpecSection.agent` field typed as
+`AgentSection | None`.
+
 ### Field Rules [AR-2.1]
 
 - `spec.agent` is required when `spec.type="agent"`.
@@ -119,6 +139,12 @@ Agent execution is enabled by `spec.type="agent"` plus a required
 - `spec.agent.output_schema` is only valid when
   `spec.agent.output_mode="json"`.
 - `spec.agent.conversation_scope="per_task"` requires `spec.persistent=true`.
+
+_Implementation mapping:_ `weft/core/taskspec.py` -- `SpecSection` model
+validator `validate_type_targets` enforces mutual exclusion of
+`function_target`/`process_target`/`agent`; `AgentSection.validate_output_schema`
+enforces the output_schema constraint; `SpecSection` model validator enforces
+`conversation_scope="per_task"` requires `persistent=true`.
 
 ### Agent Field Semantics [AR-2.2]
 
@@ -136,6 +162,11 @@ Agent execution is enabled by `spec.type="agent"` plus a required
   - `per_task`: a persistent task may retain live in-process conversation
     state across work items.
 - `runtime_config`: backend-specific escape hatch.
+
+_Implementation mapping:_ `weft/core/taskspec.py` -- `AgentSection`,
+`AgentToolSection`, `AgentTemplateSection` Pydantic models define all fields.
+Template rendering: `weft/core/agent_templates.py` (`render_agent_template`).
+All fields listed above are implemented.
 
 ## Agent Work Envelope [AR-3]
 
@@ -168,6 +199,11 @@ Example:
 }
 ```
 
+_Implementation mapping:_ `weft/core/agent_runtime.py` --
+`normalize_agent_work_item` validates supported keys and dispatches to
+`_normalize_content_and_instructions`. All four payload forms (plain string,
+`task`, `messages`, `template`) are implemented.
+
 ### Normalization Rules [AR-3.1]
 
 - A plain string becomes the normalized task content.
@@ -177,6 +213,12 @@ Example:
   `spec.agent.templates`.
 - `tool_overrides` can only narrow the visible tool set for a single work
   item.
+
+_Implementation mapping:_ `weft/core/agent_runtime.py` --
+`normalize_agent_work_item`, `_normalize_content_and_instructions`,
+`_normalize_messages`, `_normalize_tool_overrides`. Messages are preserved as
+`NormalizedAgentMessage` tuples; flattening to a prompt string happens only
+inside the `llm` adapter (`LLMBackend._content_to_prompt`).
 
 ## Public Output Semantics [AR-4]
 
@@ -200,6 +242,12 @@ or:
 text:hello
 ```
 
+_Implementation mapping:_ `weft/core/agent_runtime.py` --
+`AgentExecutionResult.aggregate_public_output` produces the caller-facing
+result shape. `weft/core/agents/backends/llm_backend.py` --
+`LLMBackend._extract_outputs` maps output modes to public payloads. Consumer
+writes these directly to the outbox queue.
+
 ### Work Item Boundaries [AR-4.1]
 
 Queue consumers do not need to know a new public protocol to detect result
@@ -213,6 +261,11 @@ boundaries.
 
 This preserves a protocol-light public queue surface while still allowing one
 work item to emit multiple public outputs.
+
+_Implementation mapping:_ `weft/core/tasks/consumer.py` -- Consumer handles
+both one-off and persistent agent task work-item boundaries through the same
+code path used for non-agent tasks. `weft/commands/result.py` aggregates
+outbox payloads (no agent-specific handling).
 
 ## Runtime Adapter Boundary [AR-5]
 
@@ -233,6 +286,15 @@ The adapter may return internal execution metadata such as:
 Those details are internal to Weft's execution machinery unless a future public
 feature explicitly exposes them.
 
+_Implementation mapping:_ `weft/core/agent_runtime.py` --
+`AgentRuntimeAdapter` (Protocol for one-shot `.execute`),
+`AgentRuntimeSession` (Protocol for persistent `.execute` + `.close`),
+`AgentExecutionResult` (internal result dataclass carrying outputs, usage,
+tool_trace, artifacts), `execute_agent_target` (normalize + resolve tools +
+dispatch), `start_agent_runtime_session` (persistent session factory).
+Tool resolution: `weft/core/agent_tools.py` (`resolve_agent_tools`,
+`ResolvedAgentTool`).
+
 ## Persistent Session Boundary [AR-6]
 
 Persistent agent tasks with `conversation_scope="per_task"` keep their outer
@@ -249,6 +311,16 @@ Public callers do not send or receive:
 - `{"type": "ready"}`
 
 Those are private runtime-session messages only.
+
+_Implementation mapping:_ `weft/core/tasks/agent_session_protocol.py` --
+`make_execute_request`, `make_stop_request`, `make_ready_response`,
+`make_result_response`, `parse_request_type`, `parse_result_response`,
+`is_ready_response`, `startup_error_message`. Versioned via
+`AGENT_SESSION_PROTOCOL_VERSION`. Session management:
+`weft/core/tasks/sessions.py` (`AgentSession` class),
+`weft/core/tasks/consumer.py` (`_uses_agent_session`, `_ensure_agent_session`,
+`_shutdown_agent_session`), `weft/core/tasks/runner.py`
+(`start_agent_session`).
 
 ## Current `llm` Backend [AR-7]
 
@@ -270,6 +342,14 @@ Backend-specific notes:
   task process
 - conversation state is currently process-local, not restart-durable
 
+_Implementation mapping:_ `weft/core/agents/backends/llm_backend.py` --
+`LLMBackend` (one-shot `.execute`, persistent `.start_session`),
+`LLMBackendSession` (persistent conversation wrapper). Model resolution:
+`_resolve_model`. Tool conversion: `_to_llm_tool`. Output extraction:
+`_extract_outputs`. Message flattening: `_content_to_prompt`. Plugin module
+registration: `_register_plugin_modules`. Backend is registered via
+`weft/core/agents/backends/__init__.py`.
+
 ## Non-Goals [AR-8]
 
 This slice does not attempt to:
@@ -281,12 +361,20 @@ This slice does not attempt to:
 
 ## Implementation Mapping [AR-9]
 
-- TaskSpec models: `weft/core/taskspec.py`
-- Runtime normalization and registry: `weft/core/agent_runtime.py`
-- Templates: `weft/core/agent_templates.py`
-- Tool resolution: `weft/core/agent_tools.py`
-- Built-in `llm` backend: `weft/core/agents/backends/llm_backend.py`
+- TaskSpec models (`AgentSection`, `AgentToolSection`, `AgentTemplateSection`): `weft/core/taskspec.py`
+- Runtime normalization, registry, and dispatch: `weft/core/agent_runtime.py`
+- Templates (`render_agent_template`): `weft/core/agent_templates.py`
+- Tool resolution (`resolve_agent_tools`, `ResolvedAgentTool`): `weft/core/agent_tools.py`
+- Built-in `llm` backend (`LLMBackend`, `LLMBackendSession`): `weft/core/agents/backends/llm_backend.py`
+- Backend package init and registration: `weft/core/agents/__init__.py`, `weft/core/agents/backends/__init__.py`
 - Task execution and outbox emission: `weft/core/tasks/consumer.py`
+- Persistent session management (`AgentSession`): `weft/core/tasks/sessions.py`
 - Persistent runtime subprocess orchestration: `weft/core/tasks/runner.py`
 - Private session protocol: `weft/core/tasks/agent_session_protocol.py`
 - CLI result aggregation: `weft/commands/run.py`, `weft/commands/result.py`
+
+### Test coverage
+
+- `tests/core/test_agent_runtime.py` -- normalization, registry, work envelope
+- `tests/core/test_llm_backend.py` -- llm backend execution
+- `tests/fixtures/llm_test_models.py` -- real llm.Model test subclass

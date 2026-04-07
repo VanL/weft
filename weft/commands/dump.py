@@ -1,4 +1,8 @@
-"""Export Weft database state to JSONL format for git-friendly version control."""
+"""Export Weft database state to JSONL format for git-friendly version control.
+
+Spec references:
+- docs/specifications/10-CLI_Interface.md (system dump)
+"""
 
 from __future__ import annotations
 

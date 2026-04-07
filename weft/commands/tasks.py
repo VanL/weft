@@ -1,8 +1,15 @@
-"""Task listing and control helpers."""
+"""Task listing and control helpers.
+
+Spec references:
+- docs/specifications/10-CLI_Interface.md [CLI-1.2.1]
+- docs/specifications/10-CLI_Interface.md [CLI-1.3]
+- docs/specifications/01-Core_Components.md [CC-3.2]
+"""
 
 from __future__ import annotations
 
 import os
+import signal
 import time
 from collections.abc import Iterable
 from fnmatch import fnmatchcase
@@ -10,11 +17,15 @@ from typing import Any
 
 from simplebroker import Queue
 from weft._constants import (
+    CONTROL_KILL,
+    CONTROL_STOP,
     QUEUE_CTRL_IN_SUFFIX,
     TASKSPEC_TID_SHORT_LENGTH,
     WEFT_TID_MAPPINGS_QUEUE,
 )
+from weft._runner_plugins import require_runner_plugin
 from weft.context import WeftContext, build_context
+from weft.ext import RunnerHandle
 from weft.helpers import (
     iter_queue_json_entries,
     kill_process_tree,
@@ -47,10 +58,11 @@ def mapping_for_tid(ctx: WeftContext, tid: str) -> dict[str, Any] | None:
     full = resolve_full_tid(ctx, tid) or tid.strip().lstrip("T")
     if not full:
         return None
+    latest_match: dict[str, Any] | None = None
     for entry in _read_tid_mapping_entries(ctx):
         if entry.get("full") == full:
-            return entry
-    return None
+            latest_match = entry
+    return latest_match
 
 
 def resolve_full_tid(ctx: WeftContext, raw: str) -> str | None:
@@ -75,6 +87,10 @@ def task_tid(
     reverse: str | None = None,
     context_path: str | os.PathLike[str] | None = None,
 ) -> str | None:
+    """TID resolution: short-to-full, PID-to-TID, and reverse lookup.
+
+    Spec: [CLI-1.2] (task tid)
+    """
     ctx = _resolve_context(context_path)
     if reverse:
         value = reverse.strip().lstrip("T")
@@ -82,8 +98,8 @@ def task_tid(
             return value[-TASKSPEC_TID_SHORT_LENGTH:]
         return None
     if pid is not None:
-        entries = _read_tid_mapping_entries(ctx)
-        for entry in entries:
+        entries = list(_read_tid_mapping_entries(ctx))
+        for entry in reversed(entries):
             entry_pid = entry.get("pid") or entry.get("task_pid")
             if entry_pid == pid:
                 full = entry.get("full")
@@ -143,6 +159,10 @@ def _ctrl_in_for_tid(ctx: WeftContext, tid: str) -> str:
 
 
 def _send_control(ctx: WeftContext, tid: str, command: str) -> None:
+    """Write a control command to a task's ctrl_in queue.
+
+    Spec: [MF-3]
+    """
     ctrl_in = _ctrl_in_for_tid(ctx, tid)
     queue = Queue(
         ctrl_in,
@@ -153,11 +173,63 @@ def _send_control(ctx: WeftContext, tid: str, command: str) -> None:
     queue.write(command)
 
 
+def _runtime_handle_from_mapping(entry: dict[str, Any]) -> RunnerHandle | None:
+    payload = entry.get("runtime_handle")
+    if not isinstance(payload, dict):
+        return None
+    try:
+        return RunnerHandle.from_dict(payload)
+    except ValueError:
+        return None
+
+
+def _task_pid_from_mapping(entry: dict[str, Any]) -> int | None:
+    pid = entry.get("pid") or entry.get("task_pid")
+    return pid if isinstance(pid, int) else None
+
+
+def _pid_exists(pid: int | None) -> bool:
+    if pid is None or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _await_control_surface(
+    ctx: WeftContext,
+    tid: str,
+    *,
+    timeout: float = 0.5,
+) -> tuple[dict[str, Any] | None, status_cmd.TaskSnapshot | None]:
+    deadline = time.monotonic() + timeout
+    latest_entry: dict[str, Any] | None = None
+    latest_snapshot: status_cmd.TaskSnapshot | None = None
+    while True:
+        mapping_entry = mapping_for_tid(ctx, tid)
+        if mapping_entry is not None:
+            latest_entry = mapping_entry
+        snapshot = task_status(tid, context_path=ctx.root)
+        if snapshot is not None:
+            latest_snapshot = snapshot
+            if snapshot.status in status_cmd.TERMINAL_STATUSES:
+                return latest_entry, latest_snapshot
+        if time.monotonic() >= deadline:
+            return latest_entry, latest_snapshot
+        time.sleep(0.05)
+
+
 def stop_tasks(
     tids: Iterable[str],
     *,
     context_path: str | os.PathLike[str] | None = None,
 ) -> int:
+    """Gracefully stop one or more tasks by sending STOP control messages.
+
+    Spec: [CLI-1.2] (task stop)
+    """
     ctx = _resolve_context(context_path)
     entries = _read_tid_mapping_entries(ctx)
     lookup: dict[str, dict[str, Any]] = {}
@@ -170,13 +242,40 @@ def stop_tasks(
         full = resolve_full_tid(ctx, tid) or tid.strip().lstrip("T")
         if not full:
             continue
-        _send_control(ctx, full, "STOP")
-        task_entry: dict[str, Any] | None = lookup.get(full)
-        if task_entry is not None:
-            pid = task_entry.get("pid") or task_entry.get("task_pid")
-            if isinstance(pid, int):
-                time.sleep(0.05)
-                terminate_process_tree(pid, timeout=0.2, kill_after=False)
+        _send_control(ctx, full, CONTROL_STOP)
+        task_entry = lookup.get(full)
+        pid = _task_pid_from_mapping(task_entry) if task_entry is not None else None
+        task_entry, snapshot = _await_control_surface(ctx, full)
+        if snapshot is not None and snapshot.status == "cancelled" and _pid_exists(pid):
+            assert pid is not None
+            kill_process_tree(pid, timeout=0.2)
+        elif _pid_exists(pid):
+            assert pid is not None
+            task_entry = task_entry or lookup.get(full)
+            handle = (
+                _runtime_handle_from_mapping(task_entry)
+                if task_entry is not None
+                else None
+            )
+            if handle is not None:
+                plugin = require_runner_plugin(handle.runner_name)
+                plugin.stop(handle, timeout=0.2)
+            else:
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except OSError:
+                    pass
+                if _pid_exists(pid):
+                    kill_process_tree(pid, timeout=0.2)
+        if snapshot is None or snapshot.status not in status_cmd.TERMINAL_STATUSES:
+            task_entry = task_entry or lookup.get(full)
+            if task_entry is not None:
+                handle = _runtime_handle_from_mapping(task_entry)
+                if handle is not None:
+                    plugin = require_runner_plugin(handle.runner_name)
+                    plugin.stop(handle, timeout=0.2)
+                elif pid is not None:
+                    terminate_process_tree(pid, timeout=0.2, kill_after=False)
         count += 1
     return count
 
@@ -186,6 +285,10 @@ def kill_tasks(
     *,
     context_path: str | os.PathLike[str] | None = None,
 ) -> int:
+    """Force-terminate one or more tasks by sending KILL control messages.
+
+    Spec: [CLI-1.2] (task kill)
+    """
     ctx = _resolve_context(context_path)
     entries = _read_tid_mapping_entries(ctx)
     lookup: dict[str, dict[str, Any]] = {}
@@ -198,19 +301,58 @@ def kill_tasks(
         full = resolve_full_tid(ctx, tid) or tid.strip().lstrip("T")
         if not full:
             continue
-        task_entry: dict[str, Any] | None = lookup.get(full)
+        _send_control(ctx, full, CONTROL_KILL)
+        task_entry = lookup.get(full)
+        pid = _task_pid_from_mapping(task_entry) if task_entry is not None else None
+        task_entry, snapshot = _await_control_surface(ctx, full)
+        task_entry = task_entry or lookup.get(full)
         if not task_entry:
             continue
+        if snapshot is not None and snapshot.status == "killed":
+            if _pid_exists(pid):
+                assert pid is not None
+                kill_process_tree(pid, timeout=0.2)
+            killed += 1
+            continue
+        handled_by_runner = False
+        if _pid_exists(pid):
+            assert pid is not None
+            handle = _runtime_handle_from_mapping(task_entry)
+            if handle is not None:
+                plugin = require_runner_plugin(handle.runner_name)
+                plugin.kill(handle, timeout=0.2)
+                handled_by_runner = True
+            else:
+                sigusr1 = getattr(signal, "SIGUSR1", None)
+                if sigusr1 is not None:
+                    try:
+                        os.kill(pid, sigusr1)
+                    except OSError:
+                        pass
+                if _pid_exists(pid):
+                    kill_process_tree(pid, timeout=0.2)
+        handle = _runtime_handle_from_mapping(task_entry)
+        if handle is not None and not handled_by_runner:
+            plugin = require_runner_plugin(handle.runner_name)
+            if plugin.kill(handle, timeout=0.2):
+                killed += 1
+            continue
+        if handled_by_runner:
+            killed += 1
+            continue
         pids: list[int] = []
-        pid = task_entry.get("pid") or task_entry.get("task_pid")
+        pid = _task_pid_from_mapping(task_entry)
         if isinstance(pid, int):
             pids.append(pid)
         managed = task_entry.get("managed_pids")
         if isinstance(managed, list):
             pids.extend(pid for pid in managed if isinstance(pid, int))
+        task_killed = False
         for pid in set(pids):
             if kill_process_tree(pid, timeout=0.2):
-                killed += 1
+                task_killed = True
+        if task_killed:
+            killed += 1
     return killed
 
 

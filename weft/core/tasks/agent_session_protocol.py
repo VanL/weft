@@ -3,6 +3,9 @@
 This protocol is local to the multiprocessing queues connecting the task parent
 and the dedicated agent-session subprocess. It must not leak to public task
 inbox or outbox queues.
+
+Spec references:
+- docs/specifications/13-Agent_Runtime.md [AR-6]
 """
 
 from __future__ import annotations

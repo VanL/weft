@@ -5,7 +5,7 @@ in this slice is intentionally small: exact ``{{ name }}`` substitution with
 strict validation of missing and extra variables.
 
 Spec references:
-- docs/specifications/13-Agent_Runtime.md [AR-2.2], [AR-3.2]
+- docs/specifications/13-Agent_Runtime.md [AR-2.2], [AR-3]
 """
 
 from __future__ import annotations

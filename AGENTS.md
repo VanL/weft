@@ -18,8 +18,30 @@
 - Specs live in `docs/specifications/`.
 - Plans live in `docs/plans/`.
 - Durable lessons learned live in `docs/lessons.md`.
+- Documentation maintenance is part of the definition of done for spec-driven
+  and risky changes.
 - Plans should be detailed enough for a zero-context engineer and follow
   `docs/agent-context/runbooks/writing-plans.md`.
+- Risky or boundary-crossing changes should also read
+  `docs/agent-context/runbooks/hardening-plans.md` and
+  `docs/agent-context/runbooks/review-loops-and-agent-bootstrap.md`. Risky
+  includes execution-path changes, contract changes, new persistence or cleanup
+  lifecycles, rollout sequencing, and one-way doors.
+- Optimize for agent usability, not just human readability. If something seems
+  clear to a human but ambiguous to an agent, call that out and suggest a
+  concrete fix.
+- Agent-usable guidance should make four things explicit when relevant: owner,
+  boundary, verification, and required action.
+- Non-trivial plans should receive an independent review pass, preferably from
+  a different agent family than the authoring agent when one is available.
+- Larger changes should run an independent review after each meaningful slice
+  and again before completion.
+- New or updated plans must cite the exact spec file and section/reference code
+  they implement, or state plainly that no spec exists.
+- Spec-driven work must update the touched spec with plan backlinks and keep
+  nearby implementation notes synchronized.
+- Keep traceability bidirectional between the spec section, the plan, and the
+  owning code module or function.
 
 ## 1. Orientation
 
@@ -274,6 +296,15 @@ Spec references:
 - docs/specifications/05-Message_Flow_and_State.md [MF-2], [MF-3]
 """
 ```
+
+**Traceability rules**:
+- New or materially changed modules should keep module docstrings pointing to
+  the governing spec files and section codes.
+- When a single function or method owns a spec boundary, include a `Spec:`
+  reference in that docstring rather than relying only on the module docstring.
+- If implementation ownership changes, update both the spec's nearby
+  `Implementation mapping` notes and the touched code docstrings in the same
+  change.
 
 ### 4.6 Data Modeling
 
@@ -568,7 +599,7 @@ uv run ruff check weft           # Lint
 ## 5.2 Test Design (If You’re Unsure)
 
 **Prefer tests that: **
-- Assert observable behavior (queue messages, state events, output). 
+- Assert observable behavior (queue messages, state events, output).
 - Use `WeftTestHarness` (`tests/helpers/weft_harness.py`) for isolation.
 - Minimize timing flakiness (use deterministic inputs when possible).
 

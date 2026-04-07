@@ -87,6 +87,8 @@ def test_tid_mapping_written(broker_env, task_factory, unique_tid) -> None:
     assert data["full"] == unique_tid
     assert data["short"] == unique_tid[-TASKSPEC_TID_SHORT_LENGTH:]
     assert data["name"] == "observability-task"
+    assert data["runner"] == "host"
+    assert data["runtime_handle"] is None
     assert isinstance(data["pid"], int)
     assert data["pid"] == data["task_pid"]
     assert isinstance(data.get("caller_pid"), int)
@@ -107,12 +109,16 @@ def test_tid_mapping_records_worker_pid(broker_env, task_factory, unique_tid) ->
 
     records = [json.loads(msg) for msg in drain_queue(mapping_queue)]
     assert records, "expected at least one mapping record"
-
-    managed_pid_lists = [record.get("managed_pids") or [] for record in records]
-    flattened = [pid for sublist in managed_pid_lists for pid in sublist]
-    assert any(isinstance(pid, int) for pid in flattened), "managed pid missing"
-    for pid in flattened:
-        assert isinstance(pid, int)
+    runtime_records = [record for record in records if record.get("runtime_handle")]
+    assert runtime_records, "expected runtime handle mapping update"
+    runtime_record = runtime_records[-1]
+    runtime_handle = runtime_record["runtime_handle"]
+    assert runtime_record["runner"] == "host"
+    assert isinstance(runtime_handle, dict)
+    assert runtime_handle["runner_name"] == "host"
+    assert runtime_handle["runtime_id"]
+    assert runtime_handle["host_pids"]
+    assert runtime_record["managed_pids"] == runtime_handle["host_pids"]
 
 
 def test_tid_mapping_deduplicates_identical_payloads(

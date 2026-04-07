@@ -33,7 +33,9 @@ def test_list_and_task_status(workdir, weft_harness) -> None:
     rc, out, err = run_cli("list", "--all", "--json", cwd=workdir)
     assert rc == 0
     data = json.loads(out)
-    assert any(item["tid"] == tid for item in data)
+    entry = next(item for item in data if item["tid"] == tid)
+    assert entry["runner"] == "host"
+    assert entry["runtime_handle"]["runner_name"] == "host"
     assert err == ""
 
     rc, out, err = run_cli("task", "status", tid, "--json", cwd=workdir)
@@ -41,6 +43,8 @@ def test_list_and_task_status(workdir, weft_harness) -> None:
     payload = json.loads(out)
     assert payload["tid"] == tid
     assert payload["status"] in {"completed", "running", "failed"}
+    assert payload["runner"] == "host"
+    assert payload["runtime_handle"]["runner_name"] == "host"
     assert err == ""
 
 

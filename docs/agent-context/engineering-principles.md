@@ -70,6 +70,38 @@ This is especially important for Weft because details such as reserved queue
 policy, runtime-only queues, and TaskSpec immutability are easy to get almost
 right while still breaking invariants.
 
+## 6. Keep Traceability Bidirectional
+
+Treat documentation traceability as part of the implementation, not as optional
+cleanup.
+
+- When writing a plan, cite the exact spec section(s) and reference code(s) the
+  work implements.
+- When implementing a plan, update the touched spec with a backlink to that
+  plan and refresh any nearby implementation snapshot/status/mapping notes that
+  describe current code ownership or behavior.
+- When changing code at a spec-owned boundary, keep module and function
+  docstrings pointing back to the governing spec sections so the code-to-spec
+  path stays explicit in both directions.
+
+## 7. Boundary-First Risky Plans
+
+For risky or boundary-crossing work, name what must not change before breaking
+the work into tasks.
+
+For Weft this usually means spelling out:
+
+- whether the change must stay on the existing
+  `TaskSpec -> Manager -> Consumer -> TaskRunner -> queues/state log` spine
+- which queue names, state transitions, or result payloads must remain stable
+- whether the template/resolved `TaskSpec` boundary is changing
+- whether runtime-only `weft.state.*` queues must stay out of persistence or
+  history features
+- what should stay real in tests instead of being mocked away
+- what rollback, rollout order, or post-deploy observation is required
+
+If a risky plan cannot say these clearly, it is not ready for implementation.
+
 ## Secondary Rules
 
 - Use `build_context()` and `WeftContext` instead of re-implementing project
@@ -82,6 +114,8 @@ right while still breaking invariants.
   TaskSpec schema, CLI output shape, or result payloads.
 - Document plans for zero-context engineers: files to read, files to change,
   invariants to protect, and exact verification commands.
+- Prefer explicit spec-section references such as `[MF-2]` or `[CLI-1.1.1]`
+  over broad document-only references when tying a change to docs.
 - Prefer explicit rejection over silently ignoring unsupported fields or modes.
 - Keep future-proofing out unless the current spec requires it.
 

@@ -11,7 +11,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from simplebroker import Queue
-from weft._constants import CONTROL_STOP
+from weft._constants import CONTROL_KILL, CONTROL_STOP
 from weft.core.targets import decode_work_message
 from weft.core.taskspec import ReservedPolicy, TaskSpec
 
@@ -60,6 +60,12 @@ class InteractiveTaskMixin(ABC):
         """Lookup a managed SimpleBroker queue."""
 
     @abstractmethod
+    def _make_task_runner(
+        self, *, interactive: bool = False
+    ) -> TaskRunner:  # pragma: no cover - interface definition
+        """Build a runner configured from the active TaskSpec."""
+
+    @abstractmethod
     def _get_reserved_queue(self) -> Queue:  # pragma: no cover - interface definition
         """Return the reserved queue handle."""
 
@@ -80,6 +86,12 @@ class InteractiveTaskMixin(ABC):
         self, pid: int | None
     ) -> None:  # pragma: no cover - interface definition
         """Register a subprocess PID managed by the task."""
+
+    @abstractmethod
+    def register_runtime_handle(
+        self, handle: Any | None
+    ) -> None:  # pragma: no cover - interface definition
+        """Register the active runner handle for task control."""
 
     @abstractmethod
     def _begin_streaming_session(
@@ -194,37 +206,13 @@ class InteractiveTaskMixin(ABC):
         self._update_process_title("spawning")
         self._report_state_change(event="work_spawning", message_id=message_id)
 
-        runner = TaskRunner(
-            target_type=self.taskspec.spec.type,
-            tid=self.taskspec.tid,
-            function_target=self.taskspec.spec.function_target,
-            process_target=self.taskspec.spec.process_target,
-            agent=(
-                self.taskspec.spec.agent.model_dump(mode="python")
-                if self.taskspec.spec.agent is not None
-                else None
-            ),
-            args=getattr(self.taskspec.spec, "args", None),
-            kwargs=getattr(self.taskspec.spec, "keyword_args", None),
-            env=self.taskspec.spec.env or {},
-            working_dir=self.taskspec.spec.working_dir,
-            timeout=self.taskspec.spec.timeout,
-            limits=self.taskspec.spec.limits,
-            monitor_class=getattr(
-                self.taskspec.spec,
-                "monitor_class",
-                "weft.core.resource_monitor.ResourceMonitor",
-            ),
-            monitor_interval=self.taskspec.spec.polling_interval,
-            db_path=getattr(self, "_db_path", None),
-            config=getattr(self, "_config", None),
-        )
-
+        runner = self._make_task_runner(interactive=True)
         session = runner.start_session()
         self._interactive_runner = runner
         self._interactive_session = session
         self._interactive_started = True
 
+        self.register_runtime_handle(session.handle)
         if session.pid is not None:
             self.register_managed_pid(session.pid)
 
@@ -455,6 +443,21 @@ class InteractiveTaskMixin(ABC):
                 self._stop_event.set()
             self._send_control_response("STOP", "ack")
             self._interactive_shutdown(reason="cancelled")
+            return True
+        if command == CONTROL_KILL:
+            self.should_stop = True
+            self.taskspec.mark_killed(reason="KILL command received")
+            self._report_state_change(event="control_kill", message_id=time.time_ns())
+            self._update_process_title("killed")
+            policy = self.taskspec.spec.reserved_policy_on_error
+            self._apply_reserved_policy(policy)
+            if policy is not ReservedPolicy.KEEP:
+                self._ensure_reserved_empty()
+                self._cleanup_reserved_if_needed()
+            if self._stop_event:
+                self._stop_event.set()
+            self._send_control_response("KILL", "ack")
+            self._interactive_shutdown(reason="killed")
             return True
         return False
 

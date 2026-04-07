@@ -1,4 +1,8 @@
-"""Fetch task results from Weft queues."""
+"""Fetch task results from Weft queues.
+
+Spec references:
+- docs/specifications/10-CLI_Interface.md [CLI-1.2] (result)
+"""
 
 from __future__ import annotations
 

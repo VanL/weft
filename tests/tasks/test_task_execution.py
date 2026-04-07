@@ -294,7 +294,9 @@ def test_task_handles_stop_control_message(broker_env, unique_tid: str) -> None:
     assert ctrl_in.read_one() is None
 
 
-def test_task_run_until_stopped(broker_env, unique_tid: str) -> None:
+def test_task_run_until_stopped_honors_pending_stop_control(
+    broker_env, unique_tid: str
+) -> None:
     db_path, make_queue = broker_env
     spec = make_function_taskspec(
         unique_tid,
@@ -311,8 +313,9 @@ def test_task_run_until_stopped(broker_env, unique_tid: str) -> None:
 
     task.run_until_stopped(poll_interval=0.0, max_iterations=5)
 
-    assert outbox.read_one() == "indef!"
+    assert outbox.read_one() is None
     assert task.should_stop is True
+    assert task.taskspec.state.status == "cancelled"
 
 
 def test_task_ignores_unknown_control_message(broker_env, unique_tid: str) -> None:

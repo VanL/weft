@@ -68,3 +68,33 @@ runbook needs to become stricter.
   process tree, not just the immediate worker PID. Command targets can spawn
   grandchildren, and root-only termination leaves orphaned subprocesses behind
   even though the task itself appears to have stopped cleanly.
+- When adding pluggable execution backends, make the persisted runtime handle
+  the canonical control surface. Stop/kill paths cannot safely reconstruct
+  runner-specific control details later from the original TaskSpec alone;
+  persist the runner name plus any control-critical metadata with the live task.
+- For non-host runners, translate native runtime terminal state back into
+  Weft's task lifecycle instead of trusting only the transport process exit
+  code. Docker OOM kills, for example, should surface as `limit`/`killed`
+  semantics with runner-native metrics, not as a generic command failure.
+
+## 2026-04-07 Manager Startup Races
+
+- When a CLI launcher is waiting for manager startup in `weft.state.workers`,
+  do not reduce the registry to only the latest active manager if the caller
+  still needs to recognize its own just-started process. Concurrent starters can
+  all register successfully while older entries become invisible to their own
+  launchers, causing false "no registry entry appeared" failures.
+- If Weft needs one manager per broker context, enforce a deterministic leader
+  election rule from the registry inside the manager process itself, not only in
+  the launcher. A lowest-live-TID rule lets concurrent starters converge without
+  backend-specific locks, provided stale `active` records are pruned by PID
+  liveness first.
+
+## 2026-04-07 Plan Hardening
+
+- Risky Weft plans usually fail at the boundary, not in the middle. Name what
+  must not change around the durable spine, queue contracts, TaskSpec boundary,
+  and rollback/rollout behavior before decomposing the tasks.
+- If a document is human-clear but agent-ambiguous, tighten it immediately with
+  clearer ownership, boundary, verification, and required-action language
+  rather than trusting the next implementer to infer the right path.

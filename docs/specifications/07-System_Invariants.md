@@ -4,15 +4,19 @@ This document defines the fundamental invariants, constraints, and guarantees th
 
 ## System Invariants
 
-_Implementation mapping_: `weft/core/taskspec.py` (immutability/state validation), `weft/core/tasks/base.py` (process titles/logging), `weft/core/manager.py` (worker registry), `weft/_constants.py` (queue names).
-
 ### Immutability Invariants
+
+_Implementation mapping_: `weft/core/taskspec.py` — `TaskSpec._freeze_spec()` sets `_frozen_fields = {"tid", "spec", "io"}` and `__setattr__` rejects writes to those fields. `SpecSection`, `IOSection`, `LimitsSection`, `RunnerSection`, `AgentSection`, and sub-sections each implement `_freeze()` / `__setattr__` guards. Collection values use `FrozenList` and `FrozenDict` to block in-place mutation.
+
 - **IMMUT.1**: TaskSpec.spec section is immutable after creation
 - **IMMUT.2**: TaskSpec.io section is immutable after creation (runtime-expanded)
 - **IMMUT.3**: Resolved TaskSpec.tid is immutable and unique (templates may omit tid)
 - **IMMUT.4**: TaskSpec.state and metadata remain mutable for runtime updates
 
 ### State Machine Invariants
+
+_Implementation mapping_: `weft/core/taskspec.py` — `TaskSpec.set_status()` enforces forward-only transitions via a `valid_transitions` dict and rejects transitions from terminal states. `StateSection.validate_state_consistency()` (Pydantic `model_validator`) enforces timestamp requirements (STATE.3–STATE.5) at construction and validation time.
+
 - **STATE.1**: States transition forward only (no rollback)
 - **STATE.2**: Terminal states are immutable (completed, failed, timeout, cancelled, killed)
 - **STATE.3**: Running state requires started_at timestamp
@@ -20,6 +24,9 @@ _Implementation mapping_: `weft/core/taskspec.py` (immutability/state validation
 - **STATE.5**: completed_at > started_at when both present
 
 ### Queue Invariants
+
+_Implementation mapping_: `weft/core/taskspec.py` — `TaskSpec.get_default_queues()` generates default `T{tid}.` prefixed queue names (QUEUE.3). `weft/core/tasks/base.py` — `BaseTask.__init__` wires inbox/reserved/outbox/ctrl_in/ctrl_out into `_queue_names` (QUEUE.1, QUEUE.2). `_build_queue_configs()` uses `_reserve_queue_config` which claims-then-moves for exactly-once delivery (QUEUE.4). Reserved policy enforcement in `Consumer._apply_reserved_policy` and `_apply_reserved_policy_on_error` handles QUEUE.5/QUEUE.6. `weft/_constants.py` defines all queue suffix and global queue name constants.
+
 - **QUEUE.1**: Every task has exactly one inbox, reserved, and outbox queue
 - **QUEUE.2**: Every task has exactly one ctrl_in and ctrl_out queue
 - **QUEUE.3**: Queue names default to the "T{tid}." prefix when not overridden
@@ -28,6 +35,9 @@ _Implementation mapping_: `weft/core/taskspec.py` (immutability/state validation
 - **QUEUE.6**: Failed messages remain in reserved queue with state.error set (unless reserved policy requeues or clears)
 
 ### Resource Invariants
+
+_Implementation mapping_: `weft/core/taskspec.py` — `LimitsSection` uses Pydantic `Field(ge=...)` constraints to enforce RES.2–RES.4 at validation time. `TaskSpec.update_metrics()` tracks peak values (RES.5). `weft/core/resource_monitor.py` — `check_limits()` detects violations at runtime. `weft/core/tasks/consumer.py` — `_ensure_outcome_ok()` handles `outcome.status == "limit"` by calling `mark_killed()` (RES.6). `weft/core/tasks/sessions.py` calls `monitor.check_limits()` in the interactive session polling loop. `weft/core/runners/subprocess_runner.py` and `weft/core/runners/host.py` both call `monitor.check_limits()` in their polling loops.
+
 - **RES.1**: Limits are grouped in spec.limits subsection
 - **RES.2**: Memory limit > 0 MB when specified
 - **RES.3**: 0 <= CPU limit <= 100% when specified
@@ -36,17 +46,26 @@ _Implementation mapping_: `weft/core/taskspec.py` (immutability/state validation
 - **RES.6**: Resource violations trigger task termination
 
 ### Execution Invariants
+
+_Implementation mapping_: `weft/core/tasks/consumer.py` — `_handle_work_message` processes one work item per inbox message and transitions to terminal state (EXEC.1). `weft/core/runners/subprocess_runner.py` and `weft/core/runners/host.py` — polling loops check elapsed time against timeout with ~1s sleep intervals (EXEC.2). `weft/core/taskspec.py` — `mark_started()` and `mark_running()` accept optional `pid` parameter (EXEC.3). `mark_completed()`, `mark_failed()`, `mark_timeout()` set `state.return_code` (EXEC.4).
+
 - **EXEC.1**: Task executes target exactly once per run
 - **EXEC.2**: Timeouts are enforced within 1 second precision
 - **EXEC.3**: PID is set only when process/thread starts
 - **EXEC.4**: Return code is set only on process completion
 
 ### Idempotency Invariants
-- **IDEMP.1**: Single-message tasks may use `tid` as an idempotency key
-- **IDEMP.2**: Multi-message tasks must use inbox/reserved message IDs for idempotency
-- **IDEMP.3**: Recommended idempotency key format is `tid:message_id`
+
+_Implementation mapping_: **[NOT YET IMPLEMENTED]** — No explicit idempotency key generation or enforcement exists in the codebase. The TID and message timestamps provide the building blocks, but no code produces or checks `tid:message_id` idempotency keys.
+
+- **IDEMP.1**: Single-message tasks may use `tid` as an idempotency key **[NOT YET IMPLEMENTED]**
+- **IDEMP.2**: Multi-message tasks must use inbox/reserved message IDs for idempotency **[NOT YET IMPLEMENTED]**
+- **IDEMP.3**: Recommended idempotency key format is `tid:message_id` **[NOT YET IMPLEMENTED]**
 
 ### Observability Invariants
+
+_Implementation mapping_: `weft/core/tasks/base.py` — `_report_state_change()` writes JSON to `WEFT_GLOBAL_LOG_QUEUE` on every state transition (OBS.1). No separate state database exists; `weft/commands/status.py` reconstructs state from the log queue (OBS.2, OBS.3). `_format_process_title()` builds `weft-{context}-{tid_short}:{name}:{status}` titles; `_update_process_title()` calls `setproctitle` on each transition (OBS.4). `TASKSPEC_TID_SHORT_LENGTH = 10` in `weft/_constants.py`; `_format_process_title` uses `self.tid_short` (OBS.5). `_register_tid_mapping()` writes to `WEFT_TID_MAPPINGS_QUEUE` (OBS.6). `_format_process_title()` applies `re.sub(r"[^a-zA-Z0-9_-]", "")` to sanitize name and details segments (OBS.7, OBS.8).
+
 - **OBS.1**: All state transitions logged to weft.log.tasks
 - **OBS.2**: No separate state database (queue-based state only)
 - **OBS.3**: State visible through both task queues and global log
@@ -57,6 +76,9 @@ _Implementation mapping_: `weft/core/taskspec.py` (immutability/state validation
 - **OBS.8**: Process titles use only alphanumeric, hyphen, colon, and underscore characters
 
 ### Implementation Invariants
+
+_Implementation mapping_: `weft/core/taskspec.py` — `mark_timeout()` sets `state.return_code = 124` (IMPL.1). `weft/_constants.py` — `DEFAULT_OUTPUT_SIZE_LIMIT_MB = 10` (IMPL.2). `weft/core/tasks/base.py` — `_spill_large_output()` writes to `.weft/outputs/{tid}/output.dat` (or tempdir) and produces a reference dict with `path`, `size`, `truncated_preview`, `sha256` (IMPL.3, IMPL.4). `weft/core/tasks/consumer.py` — `_emit_single_output()` compares encoded size to limit and calls `_spill_large_output` when exceeded. `weft/core/launcher.py` — `multiprocessing.get_context("spawn")` (IMPL.6). `weft/core/runners/host.py` also uses `get_context("spawn")`. IMPL.5 is enforced by the spawn context (no inherited connections).
+
 - **IMPL.1**: Exit code 124 indicates timeout (GNU coreutils standard)
 - **IMPL.2**: Messages limited to 10MB by SimpleBroker
 - **IMPL.3**: Outputs >10MB written to `.weft/outputs/{tid}/` when `spec.weft_context` is set (runtime-expanded); otherwise to a temporary directory, with a reference message
@@ -65,6 +87,9 @@ _Implementation mapping_: `weft/core/taskspec.py` (immutability/state validation
 - **IMPL.6**: Use multiprocessing.get_context("spawn") for process creation
 
 ### Worker Invariants
+
+_Implementation mapping_: `weft/core/manager.py` — `Manager` extends `BaseTask` (WORKER.1, WORKER.7). `_register_worker()` writes capabilities/status to `WEFT_WORKERS_REGISTRY_QUEUE` (WORKER.3). `_build_child_spec()` uses `str(timestamp)` (the spawn-request message ID) as the child TID (WORKER.4). Manager can spawn Consumer tasks which themselves can be workers (WORKER.5). `weft/commands/run.py` auto-starts the primordial manager (WORKER.6). TID validation in `TaskSpec.validate_tid()` applies the same 19-digit rule for workers (WORKER.2). `BaseTask._handle_control_message()` handles STOP/PING/STATUS (WORKER.7).
+
 - **WORKER.1**: Workers are Tasks with long-running targets (timeout=None)
 - **WORKER.2**: Worker TIDs follow same format as regular Task TIDs
 - **WORKER.3**: Workers register capabilities in weft.state.workers
@@ -74,12 +99,17 @@ _Implementation mapping_: `weft/core/taskspec.py` (immutability/state validation
 - **WORKER.7**: Workers respond to the same control messages as Tasks (STOP/STATUS/PING)
 
 ### Context Invariants
+
+_Implementation mapping_: `weft/context.py` — `WeftContext` binds a single `db_path` (SimpleBroker database) per project context (CTX.1). Queue names are scoped to that database; no cross-context queue routing exists (CTX.2). `weft/_constants.py` — `WEFT_SIMPLEBROKER_DEFAULTS` sets `BROKER_DEFAULT_DB_NAME = ".weft/broker.db"` and `BROKER_PROJECT_SCOPE = True`, so SimpleBroker auto-creates the database on first queue operation (CTX.4). **CTX.3** is partially enforced by `weft system tidy` in `weft/commands/` but there is no guaranteed atomic "remove all queues for context" operation.
+
 - **CTX.1**: Each project context corresponds to one SimpleBroker database
 - **CTX.2**: Tasks cannot communicate across different contexts
 - **CTX.3**: Context cleanup removes all associated queues and data
 - **CTX.4**: .weft/broker.db auto-created on first queue operation in context
 
 ## Validation and Enforcement
+
+**[NOT YET IMPLEMENTED]** — The `InvariantChecker`, `InvariantEnforcer`, and `InvariantMonitor` classes described in the pseudocode below do not exist in the codebase. Invariants are enforced individually at their respective enforcement points (Pydantic validators, `set_status()`, process title formatting, resource monitor polling loops, etc.) rather than through a centralized invariant-checking framework.
 
 ### Invariant Checking
 
@@ -398,6 +428,8 @@ class TestInvariants:
 
 ## Error Classes
 
+**[NOT YET IMPLEMENTED]** — These dedicated exception classes do not exist in the codebase. State transition violations raise `ValueError` from `TaskSpec.set_status()`. Resource limit violations raise `RuntimeError` from `Consumer._ensure_outcome_ok()`. Immutability violations raise `AttributeError` or `TypeError` from `__setattr__` / `FrozenDict` / `FrozenList`.
+
 ```python
 class InvariantViolationError(Exception):
     """Raised when a system invariant is violated."""
@@ -421,6 +453,8 @@ class QueueStructureError(InvariantViolationError):
 ```
 
 ## Monitoring and Alerting
+
+**[NOT YET IMPLEMENTED]** — The `InvariantMonitor` class below is aspirational pseudocode. No continuous invariant monitoring or alerting system exists in the codebase.
 
 ```python
 class InvariantMonitor:
@@ -482,6 +516,18 @@ class InvariantMonitor:
         # Reconstruct from weft.log.tasks
         pass
 ```
+
+## Related Plans
+
+- **[agent-runtime-boundary-cleanup-plan.md](../plans/agent-runtime-boundary-cleanup-plan.md)**
+- **[agent-runtime-implementation-plan.md](../plans/agent-runtime-implementation-plan.md)**
+- **[persistent-agent-runtime-implementation-plan.md](../plans/persistent-agent-runtime-implementation-plan.md)**
+- **[simplebroker-backend-generalization-plan.md](../plans/simplebroker-backend-generalization-plan.md)**
+- **[weft-backend-neutrality-plan.md](../plans/weft-backend-neutrality-plan.md)**
+- **[postgres-backend-audit-and-shared-test-surface-plan.md](../plans/postgres-backend-audit-and-shared-test-surface-plan.md)**
+- **[runner-extension-point-plan.md](../plans/runner-extension-point-plan.md)**
+- **[taskspec-clean-design-plan.md](../plans/taskspec-clean-design-plan.md)**
+- **[piped-input-support-plan.md](../plans/piped-input-support-plan.md)**
 
 ## Related Documents
 

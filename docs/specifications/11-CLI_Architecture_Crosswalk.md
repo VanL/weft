@@ -10,7 +10,19 @@ The Weft CLI serves as the primary interface to all system functionality. Each C
 
 _Implementation mapping_: `weft/cli.py` (Typer app), `weft/commands/*.py` (command handlers), `weft/context.py` (context discovery), `weft/core/manager.py` (manager runtime).
 
-_Implemented command set_: `init`, `run`, `status`, `result`, `list`, `queue *`, `worker *`, `task *`, `spec *`, `system *`, `pipeline`.
+_Implemented command set_: `init`, `run`, `status`, `result`, `list`, `queue *`, `worker *`, `task *`, `spec *`, `system *`, `validate-taskspec`.
+
+> **Audit note (2026-04-07)**: This crosswalk was drafted early in the project
+> when the CLI was planned around Click. The actual implementation uses **Typer**
+> and organises command handlers as a **package** (`weft/commands/*.py`), not a
+> single `commands.py` file. Several component classes referenced below
+> (`TaskMonitor`, `ProcessManager`, `TIDResolver`, `TaskSpecStore`,
+> `PipelineBuilder`, `TaskRegistry`, `FunctionExecutor`/`CommandExecutor`) were
+> never created as standalone classes; their responsibilities are distributed
+> across the command modules and the runner plugin system. The inline code
+> samples therefore do **not** reflect the current implementation and should be
+> treated as historical design intent only. Pipeline execution is available as
+> `weft run --pipeline`, not as a standalone `weft pipeline` command.
 
 ## Core Architecture Mapping
 
@@ -380,40 +392,47 @@ def test_all_commands_json_output():
 
 ## CLI Command Reference Map
 
-| Command | Module | Component | Exit Codes | JSON Support |
-|---------|--------|-----------|------------|--------------|
-| `init` | `commands.py` | `weft.context` | 0, 1 | ❌ |
-| `run` | `commands.py` | `Client` | 0, 1, 2 | ❌ |
-| `status` | `commands.py` | `TaskMonitor` | 0, 2 | ✅ |
-| `result` | `commands.py` | `Client` | 0, 2, 124 | ✅ |
-| `list` | `commands.py` | `TaskMonitor` | 0 | ✅ |
-| `task status` | `commands.py` | `TaskMonitor`, `ProcessManager` | 0 | ✅ |
-| `task kill` | `commands.py` | `ProcessManager` | 0, 2 | ❌ |
-| `task stop` | `commands.py` | `Client` | 0, 2 | ❌ |
-| `worker start` | `commands.py` | `Manager` | 0, 1 | ❌ |
-| `worker stop` | `commands.py` | `Manager` | 0, 2 | ❌ |
-| `worker list` | `commands.py` | `TaskMonitor` | 0 | ✅ |
-| `queue read` | `commands.py` | SimpleBroker | 0, 2 | ✅ |
-| `queue write` | `commands.py` | SimpleBroker | 0, 1 | ✅ |
-| `queue peek` | `commands.py` | SimpleBroker | 0, 2 | ✅ |
-| `queue move` | `commands.py` | SimpleBroker | 0, 1, 2 | ✅ |
-| `queue list` | `commands.py` | SimpleBroker | 0 | ✅ |
-| `queue watch` | `commands.py` | SimpleBroker | 0, 130 | ✅ |
-| `queue delete` | `commands.py` | SimpleBroker | 0, 1, 2 | ✅ |
-| `queue broadcast` | `commands.py` | SimpleBroker | 0, 2 | ✅ |
-| `queue alias add` | `commands.py` | SimpleBroker | 0, 1 | ✅ |
-| `queue alias list` | `commands.py` | SimpleBroker | 0 | ✅ |
-| `queue alias remove` | `commands.py` | SimpleBroker | 0, 1, 2 | ✅ |
-| `task tid` | `commands.py` | `TIDResolver` | 0, 2 | ✅ |
-| `spec create` | `commands.py` | `TaskSpecStore`, `PipelineBuilder` | 0, 1, 2 | ❌ |
-| `spec list` | `commands.py` | `TaskSpecStore` | 0 | ✅ |
-| `spec show` | `commands.py` | `TaskSpecStore` | 0, 2 | ✅ |
-| `spec delete` | `commands.py` | `TaskSpecStore` | 0, 1, 2 | ✅ |
-| `spec validate` | `commands.py` | `TaskSpec` | 0, 1, 2 | ✅ |
-| `spec generate` | `commands.py` | `TaskSpec` | 0 | ✅ |
-| `system tidy` | `weft/commands/tidy.py` | `weft.context` | 0 | ❌ |
-| `system dump` | `weft/commands/dump.py` | `weft.commands.dump` | 0, 1 | ❌ |
-| `system load` | `weft/commands/load.py` | `weft.commands.load` | 0, 1, 2, 3 | ❌ |
+> **Audit note (2026-04-07)**: The "Module" column below has been corrected to
+> match the actual file layout (`weft/commands/*.py`). "Component" names that
+> never materialised as standalone classes are shown with a strikethrough and the
+> actual owning module noted.
+
+| Command | Module | Component (actual) | Exit Codes | JSON Support |
+|---------|--------|--------------------|------------|--------------|
+| `init` | `commands/init.py` | `weft.context` | 0, 1 | ❌ |
+| `run` | `commands/run.py` | `weft.core.manager`, `weft.core.launcher` | 0, 1, 2 | ✅ |
+| `status` | `commands/status.py` | ~~`TaskMonitor`~~ `commands/status.py` helpers | 0, 2 | ✅ |
+| `result` | `commands/result.py` | `commands/result.py` helpers | 0, 2, 124 | ✅ |
+| `list` | `commands/tasks.py` | ~~`TaskMonitor`~~ `commands/tasks.py` helpers | 0 | ✅ |
+| `validate-taskspec` | `commands/validate_taskspec.py` | `weft.core.taskspec` | 0, 1, 2 | ❌ |
+| `task status` | `commands/tasks.py` | ~~`TaskMonitor`~~ `commands/tasks.py` | 0, 2 | ✅ |
+| `task kill` | `commands/tasks.py` | ~~`ProcessManager`~~ `commands/tasks.py` | 0, 2 | ❌ |
+| `task stop` | `commands/tasks.py` | `commands/tasks.py` (ctrl_in queue) | 0, 2 | ❌ |
+| `task tid` | `commands/tasks.py` | ~~`TIDResolver`~~ `commands/tasks.py` | 0, 2 | ✅ |
+| `worker start` | `commands/worker.py` | `weft.core.manager` | 0, 1 | ❌ |
+| `worker stop` | `commands/worker.py` | `weft.core.manager` | 0, 2 | ❌ |
+| `worker list` | `commands/worker.py` | `commands/worker.py` | 0 | ✅ |
+| `worker status` | `commands/worker.py` | `commands/worker.py` | 0, 2 | ✅ |
+| `queue read` | `commands/queue.py` | SimpleBroker | 0, 2 | ✅ |
+| `queue write` | `commands/queue.py` | SimpleBroker | 0, 1 | ✅ |
+| `queue peek` | `commands/queue.py` | SimpleBroker | 0, 2 | ✅ |
+| `queue move` | `commands/queue.py` | SimpleBroker | 0, 1, 2 | ✅ |
+| `queue list` | `commands/queue.py` | SimpleBroker | 0 | ✅ |
+| `queue watch` | `commands/queue.py` | SimpleBroker | 0, 130 | ✅ |
+| `queue delete` | `commands/queue.py` | SimpleBroker | 0, 1, 2 | ✅ |
+| `queue broadcast` | `commands/queue.py` | SimpleBroker | 0, 2 | ✅ |
+| `queue alias add` | `commands/queue.py` | SimpleBroker | 0, 1 | ✅ |
+| `queue alias list` | `commands/queue.py` | SimpleBroker | 0 | ✅ |
+| `queue alias remove` | `commands/queue.py` | SimpleBroker | 0, 1, 2 | ✅ |
+| `spec create` | `commands/specs.py` | ~~`TaskSpecStore`~~ `commands/specs.py` | 0, 1, 2 | ❌ |
+| `spec list` | `commands/specs.py` | ~~`TaskSpecStore`~~ `commands/specs.py` | 0 | ✅ |
+| `spec show` | `commands/specs.py` | ~~`TaskSpecStore`~~ `commands/specs.py` | 0, 2 | ✅ |
+| `spec delete` | `commands/specs.py` | ~~`TaskSpecStore`~~ `commands/specs.py` | 0, 1, 2 | ✅ |
+| `spec validate` | `commands/specs.py` | `weft.core.taskspec` | 0, 1, 2 | ✅ |
+| `spec generate` | `commands/specs.py` | `weft.core.taskspec` | 0 | ✅ |
+| `system tidy` | `commands/tidy.py` | `weft.context` | 0 | ❌ |
+| `system dump` | `commands/dump.py` | `commands/dump.py` | 0, 1 | ❌ |
+| `system load` | `commands/load.py` | `commands/load.py` | 0, 1, 2, 3 | ❌ |
 
 ## Error Handling Crosswalk
 

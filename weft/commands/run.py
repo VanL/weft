@@ -3,7 +3,7 @@
 Spec references:
 - docs/specifications/10-CLI_Interface.md [CLI-1.1.1]
 - docs/specifications/01-Core_Components.md [CC-2.5]
-- docs/specifications/02-TaskSpec.md [TS-1]
+- docs/specifications/02-TaskSpec.md [TS-1], [TS-1.3]
 """
 
 from __future__ import annotations
@@ -188,6 +188,7 @@ def _drain_stream_queue(queue: Queue, *, to_stderr: bool = False) -> None:
 
 
 def _generate_tid(context: WeftContext) -> str:
+    """Generate a unique TID via broker timestamp (Spec: [WA-2])."""
     queue = Queue(
         WEFT_SPAWN_REQUESTS_QUEUE,
         db_path=context.broker_target,
@@ -253,7 +254,10 @@ def _select_active_manager(context: WeftContext) -> dict[str, Any] | None:
             candidates.append(record)
     if not candidates:
         return None
-    return max(candidates, key=lambda rec: rec.get("_timestamp", 0))
+    return min(
+        candidates,
+        key=lambda rec: (int(rec.get("tid", 0)), rec.get("_timestamp", 0)),
+    )
 
 
 def _is_pid_alive(pid: int) -> bool:
@@ -301,7 +305,8 @@ def _build_manager_spec(context: WeftContext, tid: str) -> TaskSpec:
 
 def _start_manager(
     context: WeftContext, *, verbose: bool
-) -> tuple[dict[str, Any], subprocess.Popen[bytes]]:
+) -> tuple[dict[str, Any], bool, subprocess.Popen[bytes] | None]:
+    """Launch a new Manager process and wait for its registry entry (Spec: [WA-3])."""
     manager_tid = _generate_tid(context)
     manager_spec = _build_manager_spec(context, manager_tid)
 
@@ -346,22 +351,46 @@ def _start_manager(
 
     deadline = time.time() + 10.0
     while time.time() < deadline:
-        if process.poll() is not None:
-            break
         record = _select_active_manager(context)
-        if record and record.get("tid") == manager_tid:
+        if record:
+            if record.get("tid") != manager_tid:
+                _terminate_manager_process(process)
+                return record, False, None
             if verbose:
                 _emit_manager_registry_snapshot(record)
-            return record, process
+            return record, True, process
+        if process.poll() is not None:
+            break
         time.sleep(0.1)
 
-    if process.poll() is None:
-        process.terminate()
+    _terminate_manager_process(process)
     typer.echo(
         "Failed to start Manager process; no registry entry appeared.",
         err=True,
     )
     raise typer.Exit(code=1)
+
+
+def _terminate_manager_process(
+    process: subprocess.Popen[bytes], *, timeout: float = 1.0
+) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        process.terminate()
+    except Exception:  # pragma: no cover - defensive
+        return
+    try:
+        process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:  # pragma: no cover - defensive
+        try:
+            process.kill()
+        except Exception:
+            return
+        try:
+            process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return
 
 
 def _emit_manager_registry_snapshot(record: dict[str, Any]) -> None:
@@ -384,6 +413,7 @@ def _emit_manager_registry_snapshot(record: dict[str, Any]) -> None:
 def _ensure_manager(
     context: WeftContext, *, verbose: bool
 ) -> tuple[dict[str, Any], bool, subprocess.Popen[bytes] | None]:
+    """Guarantee an active manager exists, starting one if necessary (Spec: [WA-3])."""
     record = _select_active_manager(context)
     if record:
         pid = record.get("pid")
@@ -391,12 +421,10 @@ def _ensure_manager(
             _snapshot_registry(context)  # prune stale entries
             record = _select_active_manager(context)
             if record is None:
-                new_record, process = _start_manager(context, verbose=verbose)
-                return new_record, True, process
+                return _start_manager(context, verbose=verbose)
         if record:
             return record, False, None
-    record, process = _start_manager(context, verbose=verbose)
-    return record, True, process
+    return _start_manager(context, verbose=verbose)
 
 
 def _stop_manager(
@@ -445,7 +473,7 @@ def _enqueue_taskspec(
     taskspec: TaskSpec,
     work_payload: Any,
 ) -> int:
-    # Spec: docs/specifications/03-Worker_Architecture.md#tid-correlation-wa-2
+    # Spec: docs/specifications/03-Worker_Architecture.md#tid-correlation-wa-2, [MF-1]
     inbox_name = manager_record.get("requests") or WEFT_SPAWN_REQUESTS_QUEUE
     task_tid = taskspec.tid or _generate_tid(context)
     taskspec_payload = resolve_taskspec_payload(

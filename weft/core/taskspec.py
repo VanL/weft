@@ -2,7 +2,7 @@
 
 Implements the configuration and state structure described in
 docs/specifications/01-Core_Components.md [CC-1] and
-docs/specifications/02-TaskSpec.md [TS-1].
+docs/specifications/02-TaskSpec.md [TS-1], [TS-1.3].
 """
 
 from __future__ import annotations
@@ -145,7 +145,10 @@ def _freeze_container_value(value: Any) -> Any:
 
 
 def rewrite_tid_in_io(io_section: dict[str, Any], old_tid: str, new_tid: str) -> None:
-    """Rewrite default queue names that embed an old TID prefix."""
+    """Rewrite default queue names that embed an old TID prefix.
+
+    Spec: [TS-1] (TID assignment and io queue naming).
+    """
     if not old_tid or not new_tid or old_tid == new_tid:
         return
 
@@ -166,7 +169,13 @@ def resolve_taskspec_payload(
     tid: str | None = None,
     inherited_weft_context: str | None = None,
 ) -> dict[str, Any]:
-    """Return a fully resolved TaskSpec payload without mutating the input."""
+    """Return a fully resolved TaskSpec payload without mutating the input.
+
+    Expands templates into resolved TaskSpecs by populating tid, io queues,
+    state, metadata, limits defaults, and runner defaults.
+
+    Spec: [TS-1] (Templates vs runtime-expanded specs).
+    """
     candidate = copy.deepcopy(dict(payload))
     original_tid = candidate.get("tid")
     if tid is not None:
@@ -228,6 +237,14 @@ def resolve_taskspec_payload(
 
     spec_section = candidate.get("spec")
     if isinstance(spec_section, dict):
+        runner = spec_section.get("runner")
+        if runner is None:
+            runner = {}
+            spec_section["runner"] = runner
+        if isinstance(runner, dict):
+            runner.setdefault("name", "host")
+            if runner.get("options") is None:
+                runner["options"] = {}
         if inherited_weft_context and not spec_section.get("weft_context"):
             spec_section["weft_context"] = inherited_weft_context
         if spec_section.get("args") is None:
@@ -260,6 +277,8 @@ def resolve_taskspec_payload(
 
 
 class ReservedPolicy(StrEnum):
+    """Reserved queue policy options (Spec: [TS-1.1])."""
+
     KEEP = "keep"
     REQUEUE = "requeue"
     CLEAR = "clear"
@@ -309,8 +328,64 @@ class LimitsSection(BaseModel):
         object.__setattr__(self, "_allow_mutation", False)
 
 
+class RunnerSection(BaseModel):
+    """Runner selection for task execution (Spec: [CC-1], [TS-1], [TS-1.3])."""
+
+    name: str = Field("host", min_length=1)
+    options: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("runner.name must be a non-empty string")
+        return normalized
+
+    @field_validator("options")
+    @classmethod
+    def validate_options(cls, value: dict[str, Any]) -> dict[str, Any]:
+        try:
+            json_module.dumps(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("runner.options must be JSON-serializable") from exc
+        return value
+
+    def model_post_init(self, __context: Any) -> None:
+        super().model_post_init(__context)
+        object.__setattr__(self, "_allow_mutation", False)
+
+    @contextmanager
+    def _mutations_allowed(self) -> Iterator[None]:
+        object.__setattr__(self, "_allow_mutation", True)
+        try:
+            yield
+        finally:
+            object.__setattr__(self, "_allow_mutation", False)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Prevent modification if this instance is frozen."""
+        if name.startswith("_"):
+            super().__setattr__(name, value)
+            return
+        if getattr(self, "_frozen", False) and not getattr(
+            self, "_allow_mutation", False
+        ):
+            raise AttributeError(
+                f"Cannot modify field '{name}' on frozen RunnerSection. "
+                "RunnerSection is immutable after TaskSpec creation."
+            )
+        super().__setattr__(name, value)
+
+    def _freeze(self) -> None:
+        """Mark this instance as frozen."""
+        object.__setattr__(self, "options", _freeze_container_value(self.options))
+        object.__setattr__(self, "_frozen", True)
+        object.__setattr__(self, "_allow_mutation", False)
+
+
 class AgentToolSection(BaseModel):
-    """Agent tool descriptor for MVP agent runtime support (Spec: [AR-2.3])."""
+    """Agent tool descriptor for MVP agent runtime support (Spec: [AR-2.2])."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -490,6 +565,7 @@ class SpecSection(BaseModel):
     args: list[Any] = Field(default_factory=list)
     keyword_args: dict[str, Any] = Field(default_factory=dict)
     timeout: float | None = None
+    runner: RunnerSection = Field(default_factory=RunnerSection)
 
     # Resource limits (grouped for clarity) - NEW STRUCTURE
     limits: LimitsSection = Field(default_factory=LimitsSection)
@@ -517,7 +593,10 @@ class SpecSection(BaseModel):
 
     @model_validator(mode="after")
     def validate_target(self) -> SpecSection:
-        """Ensure either function_target or process_target is provided based on type."""
+        """Ensure either function_target or process_target is provided based on type.
+
+        Spec: [TS-1] (Target semantics).
+        """
         if self.type == "function" and not self.function_target:
             raise ValueError("function_target is required when type is 'function'")
         if self.type == "command" and not self.process_target:
@@ -573,6 +652,10 @@ class SpecSection(BaseModel):
                     self.limits, "_mutations_allowed"
                 ):
                     stack.enter_context(self.limits._mutations_allowed())
+                if hasattr(self, "runner") and hasattr(
+                    self.runner, "_mutations_allowed"
+                ):
+                    stack.enter_context(self.runner._mutations_allowed())
                 if self.agent is not None and hasattr(self.agent, "_mutations_allowed"):
                     stack.enter_context(self.agent._mutations_allowed())
                 yield
@@ -597,6 +680,8 @@ class SpecSection(BaseModel):
         """Mark this instance as frozen."""
         if hasattr(self.limits, "_freeze"):
             self.limits._freeze()
+        if hasattr(self.runner, "_freeze"):
+            self.runner._freeze()
         if self.agent is not None and hasattr(self.agent, "_freeze"):
             self.agent._freeze()
         object.__setattr__(self, "args", _freeze_container_value(self.args))
@@ -634,6 +719,8 @@ class IOSection(BaseModel):
         - control MUST include 'ctrl_in' and 'ctrl_out'
 
         Note: Validation is skipped if all sections are empty (defaults will be applied later)
+
+        Spec: [TS-1] (io section requirements).
         """
         # Skip validation if this is an empty default (will be populated by apply_defaults)
         if not self.outputs and not self.control and not self.inputs:
@@ -708,7 +795,10 @@ class StateSection(BaseModel):
 
     @model_validator(mode="after")
     def validate_state_consistency(self) -> StateSection:
-        """Ensure state fields are consistent and transitions are valid."""
+        """Ensure state fields are consistent and transitions are valid.
+
+        Spec: [TS-1] (state section), [MF-5] (state transitions).
+        """
 
         # Define valid state requirements
         terminal_states = {"completed", "failed", "timeout", "cancelled", "killed"}
@@ -850,7 +940,10 @@ class TaskSpec(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def prepare_payload(cls, data: Any, info: ValidationInfo) -> Any:
-        """Resolve defaults before model construction for resolved TaskSpecs."""
+        """Resolve defaults before model construction for resolved TaskSpecs.
+
+        Spec: [TS-1] (Templates vs runtime-expanded specs).
+        """
         if isinstance(data, cls):
             return data
         if not isinstance(data, Mapping):
@@ -885,6 +978,8 @@ class TaskSpec(BaseModel):
         This implements the partial immutability design pattern where:
         - tid, spec and io sections become frozen after initialization
         - state and metadata remain mutable for runtime updates
+
+        Spec: [TS-0] (partial immutability), [TS-1].
         """
         # Mark the instance as having frozen fields
         # This is checked in __setattr__ to prevent modification
