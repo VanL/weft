@@ -91,10 +91,10 @@ def test_validate_taskspec_load_runner_missing_plugin(workdir):
     taskspec = create_valid_function_taskspec()
     payload = taskspec.model_dump(mode="json")
     payload["spec"]["runner"] = {
-        "name": "docker",
-        "options": {"image": "busybox:latest"},
+        "name": "missing-runner",
+        "options": {},
     }
-    spec_path = workdir / "docker_taskspec.json"
+    spec_path = workdir / "missing_runner_taskspec.json"
     write_taskspec(spec_path, payload)
 
     rc, out, err = run_cli(
@@ -106,5 +106,5 @@ def test_validate_taskspec_load_runner_missing_plugin(workdir):
 
     assert rc == 1
     assert "Runner validation failed" in out
-    assert "Install weft[docker]" in out
+    assert "Requested runner 'missing-runner' is not available." in out
     assert err == ""

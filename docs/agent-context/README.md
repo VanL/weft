@@ -38,6 +38,7 @@ repository (Codex, Claude, Cursor-style agents, and automation agents).
 
 - Durable decision policies and quality bars.
 - Reusable runbooks for recurring engineering workflows.
+- `context.index.yaml` as the machine-readable index for this hub.
 - Short pointers to the canonical lessons ledger.
 
 ## What Does Not Belong Here
@@ -50,6 +51,8 @@ repository (Codex, Claude, Cursor-style agents, and automation agents).
 
 - Keep files short, operational, and repo-specific.
 - Prefer checklists over long prose.
+- Keep `context.index.yaml` synchronized with the real read order and runbook
+  inventory.
 - When a repeated mistake shows up, add a short lesson in `docs/lessons.md`
   and strengthen a runbook if the fix should become reusable guidance.
 - If a plan fails at a boundary or a reviewer cannot implement it confidently,

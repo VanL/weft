@@ -15,6 +15,7 @@ Read first:
 
 - `AGENTS.md`
 - `docs/agent-context/README.md`
+- `docs/agent-context/decision-hierarchy.md`
 - `docs/agent-context/principles.md`
 - `docs/agent-context/engineering-principles.md`
 - `docs/agent-context/runbooks/writing-plans.md`
@@ -57,6 +58,13 @@ Reuse:
 
 ## Tasks
 
+Tasks are dependency-ordered and should be completed in sequence.
+
+Implementation status on 2026-04-07:
+
+- tasks 1-4 are complete in the current working tree
+- task 5 is the review-and-closeout step for this plan
+
 1. Tighten the root and session-start guidance.
    - Files to touch:
      - `AGENTS.md`
@@ -68,7 +76,12 @@ Reuse:
      - the stronger planning/review expectations are visible in the normal read
        path
    - Tests:
-     - inspect for concise wording and valid cross-references
+     - confirm `AGENTS.md` mentions the new runbooks, agent-usability rule,
+       and independent-review expectation
+     - confirm `docs/agent-context/README.md` lists the new runbooks and the
+       `context.index.yaml` role
+     - confirm `docs/agent-context/principles.md` and
+       `engineering-principles.md` surface the new risky-work language
 
 2. Add reusable runbooks for risky-plan hardening and independent review loops.
    - Files to add:
@@ -77,8 +90,10 @@ Reuse:
    - Outcome:
      - risky-work hardening and review workflows live in canonical runbooks
    - Tests:
-     - inspect for executable checklists, a concrete plan-review prompt, and
-       different-agent preference language
+     - confirm `hardening-plans.md` has mandatory-trigger guidance, explicit
+       checklists, and rollback/rollout expectations
+     - confirm `review-loops-and-agent-bootstrap.md` has the reviewer bootstrap
+       rule, the canonical review prompt, and the feedback loop
 
 3. Strengthen the plan-writing runbook to use the new runbooks as hard gates
    for risky work.
@@ -88,8 +103,11 @@ Reuse:
      - plans explicitly name what must not change, when hardening is mandatory,
        and how review feedback must be handled
    - Tests:
-     - inspect for risky-work triggers, anti-mocking guidance, rollback/rollout
-       expectations, comprehension questions, and an independent review loop
+     - confirm `writing-plans.md` includes hardening triggers, anti-mocking
+       guidance, rollback/rollout expectations, comprehension questions, and an
+       independent review loop
+     - confirm `writing-plans.md` treats `hardening-plans.md` as the canonical
+       full checklist
 
 4. Update the documentation indexes and lessons.
    - Files to touch:
@@ -99,7 +117,10 @@ Reuse:
      - the new planning/review expectations are discoverable and preserved as
        durable rules
    - Tests:
-     - inspect for short reusable lessons and accurate runbook pointers
+     - confirm `context.index.yaml` registers the new runbooks
+     - confirm `docs/specifications/README.md` points risky plans at the new
+       runbooks
+     - confirm `docs/lessons.md` records short reusable planning lessons
 
 5. Run an independent review on the touched guidance slice and answer the
    findings.
@@ -160,7 +181,18 @@ Feedback handling:
 
 Review result:
 
-- Pending.
+- 2026-04-07 Claude review said the uplift could be implemented confidently
+  and correctly, with non-blocking findings about duplicate hardening
+  checklists, the undocumented `context.index.yaml` role, a missing
+  `decision-hierarchy.md` entry in this plan's read-first list, overly vague
+  per-task checks, the abbreviated risky-work trigger list in `AGENTS.md`, and
+  the ambiguous meaning of "bootstrap" in the review runbook title. Accepted
+  and fixed in the touched docs and in this plan.
+- The reviewer also noted low-risk duplication between
+  `engineering-principles.md` and `hardening-plans.md`; that duplication is
+  intentional so the boundary-first rule appears in the normal read path, and
+  the runbook remains the deeper canonical checklist.
+- No blocker findings remain after the review-driven edits.
 
 ## Out of Scope
 
