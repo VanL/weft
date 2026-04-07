@@ -47,7 +47,7 @@ PRECHECK_COMMANDS: Final[tuple[tuple[str, ...], ...]] = (
         "-v",
         "--tb=short",
         "-m",
-        "not slow",
+        "",
         "--override-ini=addopts=-ra -q --strict-markers -n auto --dist loadgroup",
     ),
     (

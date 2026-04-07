@@ -177,20 +177,26 @@ class Consumer(BaseTask, InteractiveTaskMixin):
 
     @contextmanager
     def _active_control_poller(self) -> Iterator[None]:
+        """Run a dedicated control poller while work is active.
+
+        The poller must be fully joined before task teardown proceeds; leaving a
+        live broker thread behind during STOP/cancel handling can corrupt the
+        SQLite broker under load.
+        """
         done = threading.Event()
         worker = threading.Thread(
             target=self._poll_control_queue_while_active,
             args=(done,),
-            daemon=True,
         )
         worker.start()
         try:
             yield
         finally:
             done.set()
-            worker.join(timeout=0.2)
+            worker.join()
 
     def _poll_control_queue_while_active(self, done: threading.Event) -> None:
+        """Peek ctrl_in while a work item is running and handle STOP/KILL promptly."""
         queue_name = self._queue_names["ctrl_in"]
         ctrl_queue = Queue(
             queue_name,
@@ -198,6 +204,8 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             persistent=True,
             config=self._config,
         )
+        if hasattr(ctrl_queue, "set_stop_event"):
+            ctrl_queue.set_stop_event(self._stop_event)
         try:
             while not done.is_set():
                 if self.should_stop:
