@@ -798,10 +798,20 @@ def _run_interactive_session(
         if client.wait(timeout=1.0):
             return True
         _send_interactive_control(CONTROL_STOP)
-        if client.wait(timeout=INTERACTIVE_STOP_COMPLETION_TIMEOUT):
+        if (
+            client.wait_for_control_response("STOP", status="ack", timeout=1.0)
+            is not None
+        ):
+            return True
+        if client.wait(timeout=0.1):
             return True
         _send_interactive_control(CONTROL_KILL)
-        return client.wait(timeout=2.0)
+        if (
+            client.wait_for_control_response("KILL", status="ack", timeout=1.0)
+            is not None
+        ):
+            return True
+        return client.wait(timeout=0.1)
 
     client = InteractiveStreamClient(
         db_path=db_path,
@@ -871,7 +881,8 @@ def _run_interactive_session(
                     client.send_input(payload)
 
             waiter.join(timeout=0.5)
-            client.wait()
+            if not client.wait(timeout=INTERACTIVE_STOP_COMPLETION_TIMEOUT):
+                raise RuntimeError("Interactive session did not stop after :quit")
         else:
             if stdin_data:
                 client.send_input(stdin_data)

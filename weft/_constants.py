@@ -235,8 +235,19 @@ WEFT_COMPLETED_RESULT_GRACE_SECONDS: Final[float] = 0.25
 INTERACTIVE_STOP_GRACE_SECONDS: Final[float] = 2.0
 """Grace period for interactive tasks to exit cleanly after stdin closure."""
 
-INTERACTIVE_STOP_COMPLETION_TIMEOUT: Final[float] = 5.0
-"""CLI wait budget for interactive STOP completion, including queue propagation."""
+COMMAND_SESSION_TERMINATION_TIMEOUT: Final[float] = 2.0
+"""Base timeout for command-session termination steps."""
+
+COMMAND_SESSION_POST_TERMINATION_WAIT: Final[float] = 0.2
+"""Short wait after tree termination before direct process fallback."""
+
+INTERACTIVE_STOP_COMPLETION_TIMEOUT: Final[float] = (
+    INTERACTIVE_STOP_GRACE_SECONDS
+    + (COMMAND_SESSION_TERMINATION_TIMEOUT * 3)
+    + COMMAND_SESSION_POST_TERMINATION_WAIT
+    + 0.5
+)
+"""CLI wait budget for interactive STOP completion, matching session teardown."""
 
 
 # Autostart behaviour

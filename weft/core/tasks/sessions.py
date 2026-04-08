@@ -11,7 +11,11 @@ from multiprocessing.process import BaseProcess
 from multiprocessing.queues import Queue as MPQueue
 from typing import Any
 
-from weft._constants import ACTIVE_CONTROL_POLL_INTERVAL
+from weft._constants import (
+    ACTIVE_CONTROL_POLL_INTERVAL,
+    COMMAND_SESSION_POST_TERMINATION_WAIT,
+    COMMAND_SESSION_TERMINATION_TIMEOUT,
+)
 from weft.core.resource_monitor import (
     BaseResourceMonitor,
     ResourceMetrics,
@@ -114,13 +118,16 @@ class CommandSession:
             if self.is_alive():
                 pid = self._process.pid
                 if isinstance(pid, int) and pid > 0:
-                    terminate_process_tree(pid, timeout=2.0)
+                    terminate_process_tree(
+                        pid,
+                        timeout=COMMAND_SESSION_TERMINATION_TIMEOUT,
+                    )
                 try:
-                    self._process.wait(timeout=0.2)
+                    self._process.wait(timeout=COMMAND_SESSION_POST_TERMINATION_WAIT)
                 except subprocess.TimeoutExpired:
                     self._process.terminate()
                     try:
-                        self._process.wait(timeout=2.0)
+                        self._process.wait(timeout=COMMAND_SESSION_TERMINATION_TIMEOUT)
                     except subprocess.TimeoutExpired:
                         self._process.kill()
         finally:
