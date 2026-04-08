@@ -350,18 +350,32 @@ def _start_manager(
         )
 
     deadline = time.time() + 10.0
+    competing_record: dict[str, Any] | None = None
     while time.time() < deadline:
         record = _select_active_manager(context)
         if record:
             if record.get("tid") != manager_tid:
-                _terminate_manager_process(process)
-                return record, False, None
-            if verbose:
-                _emit_manager_registry_snapshot(record)
-            return record, True, process
+                # Do not terminate a concurrently starting manager here. Another
+                # caller may have observed our process before it had a chance to
+                # register, and abrupt termination during broker initialization can
+                # leave the underlying SQLite file in an invalid state. Leadership
+                # convergence belongs inside the manager process itself.
+                competing_record = record
+            else:
+                if verbose:
+                    _emit_manager_registry_snapshot(record)
+                return record, True, process
         if process.poll() is not None:
+            if competing_record is not None:
+                return competing_record, False, None
+            refreshed_record = _select_active_manager(context)
+            if refreshed_record is not None:
+                return refreshed_record, False, None
             break
         time.sleep(0.1)
+
+    if competing_record is not None:
+        return competing_record, False, None
 
     _terminate_manager_process(process)
     typer.echo(
