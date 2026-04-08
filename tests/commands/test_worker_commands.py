@@ -100,10 +100,42 @@ def test_start_foreground_runs_worker(tmp_path, monkeypatch):
     assert "init" in calls and "run" in calls and "cleanup" in calls
 
 
-def test_stop_command_writes_stop(tmp_path):
+def test_stop_command_writes_stop_for_active_worker(tmp_path):
     context_root = prepare_project_root(tmp_path / "ctx")
     context = build_context(context_root)
     tid = "1761000000000000001"
+
+    registry_queue = Queue(
+        WEFT_WORKERS_REGISTRY_QUEUE,
+        db_path=context.broker_target,
+        persistent=False,
+        config=context.config,
+    )
+    registry_queue.write(json.dumps({"tid": tid, "status": "active"}))
+
+    exit_code, message = worker_cmd.stop_command(
+        tid=tid,
+        force=False,
+        timeout=0.1,
+        context_path=context_root,
+    )
+
+    assert exit_code == 1
+    assert message is not None
+    assert "did not stop" in message
+    ctrl_queue = Queue(
+        f"T{tid}.ctrl_in",
+        db_path=context.broker_target,
+        persistent=False,
+        config=context.config,
+    )
+    assert ctrl_queue.read_one() == "STOP"
+
+
+def test_stop_command_noops_for_stopped_worker(tmp_path):
+    context_root = prepare_project_root(tmp_path / "ctx")
+    context = build_context(context_root)
+    tid = "1761000000000000002"
 
     registry_queue = Queue(
         WEFT_WORKERS_REGISTRY_QUEUE,
@@ -128,13 +160,13 @@ def test_stop_command_writes_stop(tmp_path):
         persistent=False,
         config=context.config,
     )
-    assert ctrl_queue.read_one() == "STOP"
+    assert ctrl_queue.read_one() is None
 
 
 def test_stop_command_uses_registry_control_queue(tmp_path):
     context_root = prepare_project_root(tmp_path / "ctx")
     context = build_context(context_root)
-    tid = "1761000000000000002"
+    tid = "1761000000000000003"
 
     registry_queue = Queue(
         WEFT_WORKERS_REGISTRY_QUEUE,
@@ -146,7 +178,7 @@ def test_stop_command_uses_registry_control_queue(tmp_path):
         json.dumps(
             {
                 "tid": tid,
-                "status": "stopped",
+                "status": "active",
                 "ctrl_in": f"worker.{tid}.ctrl_in",
             }
         )
@@ -159,8 +191,9 @@ def test_stop_command_uses_registry_control_queue(tmp_path):
         context_path=context_root,
     )
 
-    assert exit_code == 0
-    assert message is None
+    assert exit_code == 1
+    assert message is not None
+    assert "did not stop" in message
     ctrl_queue = Queue(
         f"worker.{tid}.ctrl_in",
         db_path=context.broker_target,
@@ -168,6 +201,117 @@ def test_stop_command_uses_registry_control_queue(tmp_path):
         config=context.config,
     )
     assert ctrl_queue.read_one() == "STOP"
+
+
+def test_stop_command_stop_if_absent_still_sends_stop(tmp_path):
+    context_root = prepare_project_root(tmp_path / "ctx")
+    context = build_context(context_root)
+    tid = "1761000000000000004"
+
+    exit_code, message = worker_cmd.stop_command(
+        tid=tid,
+        force=False,
+        timeout=0.1,
+        context_path=context_root,
+        stop_if_absent=True,
+    )
+
+    assert exit_code == 0
+    assert message is None
+    ctrl_queue = Queue(
+        f"T{tid}.ctrl_in",
+        db_path=context.broker_target,
+        persistent=False,
+        config=context.config,
+    )
+    assert ctrl_queue.read_one() == "STOP"
+
+
+def test_stop_command_waits_for_pid_exit_after_stopped_status(
+    tmp_path, monkeypatch
+) -> None:
+    context_root = prepare_project_root(tmp_path / "ctx")
+    build_context(context_root)
+    tid = "1761000000000000005"
+    seen_pids: list[int | None] = []
+
+    responses = iter(
+        [
+            {"tid": tid, "status": "active", "pid": 4321},
+            {"tid": tid, "status": "stopped", "pid": 4321},
+            {"tid": tid, "status": "stopped", "pid": 4321},
+            None,
+        ]
+    )
+    pid_states = iter([True, True, False, False])
+
+    monkeypatch.setattr(worker_cmd, "_send_stop", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        worker_cmd,
+        "_registry_entry_for_tid",
+        lambda *args, **kwargs: next(responses),
+    )
+
+    def fake_pid_alive(pid: int | None) -> bool:
+        seen_pids.append(pid)
+        return next(pid_states)
+
+    monkeypatch.setattr(worker_cmd, "_pid_alive", fake_pid_alive)
+
+    exit_code, message = worker_cmd.stop_command(
+        tid=tid,
+        force=False,
+        timeout=1.0,
+        context_path=context_root,
+        stop_if_absent=True,
+    )
+
+    assert exit_code == 0
+    assert message is None
+    assert seen_pids.count(4321) >= 2
+
+
+def test_stop_command_waits_when_worker_is_already_marked_stopped_but_pid_is_live(
+    tmp_path, monkeypatch
+) -> None:
+    context_root = prepare_project_root(tmp_path / "ctx")
+    build_context(context_root)
+    tid = "1761000000000000006"
+    seen_pids: list[int | None] = []
+
+    responses = iter(
+        [
+            {"tid": tid, "status": "stopped", "pid": 5432},
+            {"tid": tid, "status": "stopped", "pid": 5432},
+            None,
+        ]
+    )
+    pid_states = iter([True, False, False])
+
+    monkeypatch.setattr(worker_cmd, "_send_stop", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        worker_cmd,
+        "_registry_entry_for_tid",
+        lambda *args, **kwargs: next(responses),
+    )
+
+    def fake_pid_alive(pid: int | None) -> bool:
+        seen_pids.append(pid)
+        return next(pid_states)
+
+    monkeypatch.setattr(worker_cmd, "_pid_alive", fake_pid_alive)
+
+    exit_code, message = worker_cmd.stop_command(
+        tid=tid,
+        force=False,
+        timeout=1.0,
+        context_path=context_root,
+        stop_if_absent=True,
+    )
+
+    assert exit_code == 0
+    assert message is None
+    assert seen_pids.count(5432) >= 2
 
 
 def test_list_command_returns_table(tmp_path):

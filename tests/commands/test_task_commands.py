@@ -189,6 +189,62 @@ def test_stop_tasks_uses_runner_handle_when_available(
     assert ctrl_queue.read_one() == "STOP"
 
 
+def test_stop_tasks_prefers_task_process_over_runner_handle(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    mapping_queue = ctx.queue("weft.state.tid_mappings", persistent=False)
+    ctrl_queue = ctx.queue(f"T{tid}.ctrl_in", persistent=False)
+    terminate_calls: list[tuple[int, float, bool]] = []
+    plugin_calls: list[tuple[str, dict[str, Any], float]] = []
+
+    class FakeRunnerPlugin:
+        def stop(self, handle, *, timeout: float = 2.0) -> bool:
+            plugin_calls.append(("stop", handle.to_dict(), timeout))
+            return True
+
+    mapping_queue.write(
+        json.dumps(
+            {
+                "short": tid[-6:],
+                "full": tid,
+                "pid": 11111,
+                "task_pid": 11111,
+                "caller_pid": 22222,
+                "managed_pids": [33333],
+                "runner": "fake",
+                "runtime_handle": {
+                    "runner_name": "fake",
+                    "runtime_id": "runtime-123",
+                    "host_pids": [33333],
+                    "metadata": {"scope": "test"},
+                },
+                "name": "task-func",
+                "hostname": "test-host",
+            }
+        )
+    )
+
+    monkeypatch.setattr(task_cmd, "require_runner_plugin", lambda name: FakeRunnerPlugin())
+    monkeypatch.setattr(task_cmd, "_pid_exists", lambda pid: pid == 11111)
+    monkeypatch.setattr(
+        task_cmd,
+        "terminate_process_tree",
+        lambda pid, timeout=0.2, kill_after=True: terminate_calls.append(
+            (pid, timeout, kill_after)
+        ),
+    )
+
+    stopped = task_cmd.stop_tasks([tid], context_path=root)
+
+    assert stopped == 1
+    assert terminate_calls == [(11111, 0.2, False), (11111, 0.2, False)]
+    assert plugin_calls == []
+    assert ctrl_queue.read_one() == "STOP"
+
+
 def test_kill_tasks_uses_runner_handle_when_available(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -317,6 +373,64 @@ def test_stop_tasks_does_not_force_terminal_consumer_for_external_runner(
         "terminate_process_tree",
         lambda *args, **kwargs: (_ for _ in ()).throw(
             AssertionError("external runners must not force-stop the consumer PID")
+        ),
+    )
+
+    stopped = task_cmd.stop_tasks([tid], context_path=root)
+
+    assert stopped == 1
+    assert ctrl_queue.read_one() == "STOP"
+
+
+def test_stop_tasks_does_not_force_stop_consumer_without_runner_handle(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    mapping_queue = ctx.queue("weft.state.tid_mappings", persistent=False)
+    ctrl_queue = ctx.queue(f"T{tid}.ctrl_in", persistent=False)
+    mapping_queue.write(
+        json.dumps(
+            {
+                "short": tid[-6:],
+                "full": tid,
+                "pid": 11111,
+                "task_pid": 11111,
+                "caller_pid": 22222,
+                "managed_pids": [],
+                "runner": "host",
+                "runtime_handle": None,
+                "name": "task-func",
+                "hostname": "test-host",
+            }
+        )
+    )
+
+    monkeypatch.setattr(
+        task_cmd,
+        "task_status",
+        lambda *args, **kwargs: task_cmd.status_cmd.TaskSnapshot(
+            tid=tid,
+            tid_short=tid[-10:],
+            name="host-task",
+            status="running",
+            event="work_started",
+            started_at=None,
+            completed_at=None,
+            last_timestamp=time.time_ns(),
+            duration_seconds=None,
+            runner="host",
+            runtime_handle=None,
+            runtime=None,
+            metadata={},
+        ),
+    )
+    monkeypatch.setattr(
+        task_cmd,
+        "terminate_process_tree",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("graceful stop must not terminate the consumer PID")
         ),
     )
 

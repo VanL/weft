@@ -17,6 +17,7 @@ import pytest
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import WEFT_GLOBAL_LOG_QUEUE, WEFT_WORKERS_REGISTRY_QUEUE
 from weft.commands.run import (
+    _build_manager_spec,
     _collect_interactive_queue_output,
     _select_active_manager,
     _start_manager,
@@ -234,6 +235,17 @@ def test_start_manager_does_not_terminate_competing_startup_manager(
     assert started_here is False
     assert handle is None
     assert terminated is False
+
+
+def test_build_manager_spec_uses_tid_scoped_control_queues(tmp_path: Path) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = "1775622400000000001"
+
+    spec = _build_manager_spec(ctx, tid)
+
+    assert spec.io.control["ctrl_in"] == f"T{tid}.ctrl_in"
+    assert spec.io.control["ctrl_out"] == f"T{tid}.ctrl_out"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX only")

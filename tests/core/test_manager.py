@@ -261,6 +261,288 @@ def test_manager_cleanup_terminates_worker_descendants(manager_setup) -> None:
     assert not psutil.pid_exists(worker_pid)
 
 
+def test_manager_stop_command_drains_nonpersistent_children(manager_setup) -> None:
+    pytest.importorskip("psutil")
+    manager, make_queue = manager_setup
+    inbox_queue = make_queue(manager._queue_names["inbox"])
+    ctrl_in_queue = make_queue(manager._queue_names["ctrl_in"])
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    drain(log_queue)
+
+    inbox_queue.write(
+        json.dumps(
+            {
+                "name": "long-running",
+                "spec": {
+                    "type": "function",
+                    "function_target": "tests.tasks.sample_targets:simulate_work",
+                    "keyword_args": {"duration": 5.0},
+                },
+            }
+        )
+    )
+
+    start = time.time()
+    while not manager._child_processes and time.time() - start < 5.0:
+        manager.process_once()
+        time.sleep(0.05)
+
+    assert manager._child_processes, "child process should be running"
+    _child_tid, child_info = next(iter(manager._child_processes.items()))
+    assert child_info.process.is_alive()
+
+    ctrl_in_queue.write(CONTROL_STOP)
+
+    deadline = time.time() + 2.0
+    while time.time() < deadline and not manager.should_stop:
+        manager.process_once()
+        time.sleep(0.05)
+
+    assert manager.should_stop
+    assert manager.taskspec.state.status == "cancelled"
+    assert not _process_running(child_info.process.pid)
+
+    events = [json.loads(item) for item in drain(log_queue)]
+    assert any(event.get("event") == "control_stop" for event in events)
+    assert any(event.get("event") == "manager_stop_drained" for event in events)
+
+
+def test_manager_stop_command_does_not_launch_new_children_after_stop(
+    manager_setup,
+) -> None:
+    manager, make_queue = manager_setup
+    inbox_queue = make_queue(manager._queue_names["inbox"])
+    ctrl_in_queue = make_queue(manager._queue_names["ctrl_in"])
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    drain(log_queue)
+
+    payload = {
+        "name": "queued-stop",
+        "spec": {
+            "type": "function",
+            "function_target": "tests.tasks.sample_targets:simulate_work",
+            "keyword_args": {"duration": 0.5, "result": "ok"},
+        },
+    }
+    inbox_queue.write(json.dumps(payload))
+    inbox_queue.write(json.dumps(payload))
+
+    manager.process_once()
+    assert len(manager._child_processes) == 1
+
+    ctrl_in_queue.write(CONTROL_STOP)
+
+    deadline = time.time() + 3.0
+    max_children_seen = len(manager._child_processes)
+    while time.time() < deadline and not manager.should_stop:
+        manager.process_once()
+        max_children_seen = max(max_children_seen, len(manager._child_processes))
+        time.sleep(0.05)
+
+    assert manager.should_stop is True
+    assert max_children_seen == 1
+
+    events = [json.loads(item) for item in drain(log_queue)]
+    spawn_events = [event for event in events if event.get("event") == "task_spawned"]
+    assert len(spawn_events) == 1
+    assert any(event.get("event") == "control_stop" for event in events)
+
+
+def test_manager_drain_reissues_stop_for_child_added_after_stop(
+    manager_setup,
+) -> None:
+    manager, make_queue = manager_setup
+    ctrl_queue_name = "manager.late-child.ctrl_in"
+    ctrl_queue = make_queue(ctrl_queue_name)
+
+    class FakeProcess:
+        pid = 424245
+        exitcode = None
+
+        def is_alive(self) -> bool:
+            return True
+
+        def join(self, timeout: float | None = None) -> None:
+            return None
+
+    manager._begin_graceful_shutdown(message_id=None)
+    manager._child_processes["late-child"] = ManagedChild(
+        process=FakeProcess(),
+        ctrl_queue=ctrl_queue_name,
+        persistent=False,
+    )
+
+    manager.process_once()
+
+    assert ctrl_queue.read_one() == CONTROL_STOP
+
+
+def test_manager_stop_mid_handler_keeps_reserved_work_unlaunched(
+    manager_setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, make_queue = manager_setup
+    inbox_queue = make_queue(manager._queue_names["inbox"])
+    ctrl_in_queue = make_queue(manager._queue_names["ctrl_in"])
+    reserved_queue = make_queue(manager._queue_names["reserved"])
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    drain(log_queue)
+
+    payload = {
+        "name": "queued-stop",
+        "spec": {
+            "type": "function",
+            "function_target": "tests.tasks.sample_targets:simulate_work",
+            "keyword_args": {"duration": 0.5, "result": "ok"},
+        },
+    }
+    inbox_queue.write(json.dumps(payload))
+
+    original_build_child_spec = manager._build_child_spec
+
+    def inject_stop(payload: dict[str, object], timestamp: int) -> TaskSpec | None:
+        child_spec = original_build_child_spec(payload, timestamp)
+        ctrl_in_queue.write(CONTROL_STOP)
+        return child_spec
+
+    monkeypatch.setattr(manager, "_build_child_spec", inject_stop)
+
+    manager.process_once()
+
+    assert manager._child_processes == {}
+    assert reserved_queue.peek_one() is not None
+    assert manager.taskspec.state.status == "cancelled"
+
+    events = [json.loads(item) for item in drain(log_queue)]
+    assert any(event.get("event") == "control_stop" for event in events)
+    assert not any(event.get("event") == "task_spawned" for event in events)
+
+
+def test_manager_leadership_yield_drains_nonpersistent_children(
+    manager_setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, make_queue = manager_setup
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    drain(log_queue)
+
+    class FakeProcess:
+        pid = 424243
+        exitcode = None
+
+        def is_alive(self) -> bool:
+            return True
+
+        def join(self, timeout: float | None = None) -> None:
+            return None
+
+    manager._child_processes["child"] = ManagedChild(
+        process=FakeProcess(),
+        ctrl_queue=None,
+        persistent=False,
+    )
+
+    lower_leader_tid = str(int(manager.tid) - 1)
+    unregister_calls: list[bool] = []
+
+    monkeypatch.setattr(manager, "_leader_tid", lambda: lower_leader_tid)
+    monkeypatch.setattr(manager, "_unregister_worker", lambda: unregister_calls.append(True))
+
+    yielded = manager._maybe_yield_leadership(force=True)
+
+    assert yielded is True
+    assert manager._draining is True
+    assert manager.should_stop is False
+    assert unregister_calls == [True]
+    assert manager.taskspec.state.status == "running"
+
+    events = [json.loads(item) for item in drain(log_queue)]
+    yield_events = [event for event in events if event.get("event") == "manager_leadership_yielded"]
+    assert len(yield_events) == 1
+    assert yield_events[0]["leader_tid"] == lower_leader_tid
+    assert yield_events[0]["draining"] is True
+    assert yield_events[0]["status"] == "running"
+
+    manager._child_processes.clear()
+    manager.process_once()
+
+    assert manager.should_stop is True
+    assert manager.taskspec.state.status == "cancelled"
+
+    events = [json.loads(item) for item in drain(log_queue)]
+    drained_events = [event for event in events if event.get("event") == "manager_leadership_drained"]
+    assert len(drained_events) == 1
+    assert drained_events[0]["status"] == "cancelled"
+
+
+def test_manager_leadership_yield_waits_while_persistent_children_exist(
+    manager_setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, _make_queue = manager_setup
+
+    class FakeProcess:
+        pid = 424244
+        exitcode = None
+
+        def is_alive(self) -> bool:
+            return True
+
+        def join(self, timeout: float | None = None) -> None:
+            return None
+
+    manager._child_processes["child"] = ManagedChild(
+        process=FakeProcess(),
+        ctrl_queue=None,
+        persistent=True,
+    )
+
+    lower_leader_tid = str(int(manager.tid) - 1)
+    monkeypatch.setattr(manager, "_leader_tid", lambda: lower_leader_tid)
+
+    yielded = manager._maybe_yield_leadership(force=True)
+
+    assert yielded is False
+    assert manager._draining is False
+    assert manager.should_stop is False
+    assert manager.taskspec.state.status == "running"
+
+
+def test_cleanup_children_reaps_os_dead_child_without_mapping_scan(
+    manager_setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, _make_queue = manager_setup
+
+    class FakeProcess:
+        pid = 424242
+        exitcode = None
+
+        def __init__(self) -> None:
+            self.join_calls: list[float] = []
+
+        def is_alive(self) -> bool:
+            return True
+
+        def join(self, timeout: float | None = None) -> None:
+            self.join_calls.append(0.0 if timeout is None else float(timeout))
+
+    fake_process = FakeProcess()
+    manager._child_processes["child"] = ManagedChild(
+        process=fake_process,
+        ctrl_queue=None,
+        persistent=False,
+    )
+
+    monkeypatch.setattr(manager, "_pid_alive", lambda pid: False)
+
+    def _unexpected_mapping_scan(_tid: str) -> set[int]:
+        raise AssertionError("normal dead-child cleanup should not scan tid mappings")
+
+    monkeypatch.setattr(manager, "_managed_pids_for_child", _unexpected_mapping_scan)
+
+    manager._cleanup_children()
+
+    assert manager._child_processes == {}
+    assert fake_process.join_calls == [0.0, 0.1]
+
+
 def test_manager_autostart_templates(tmp_path: Path, broker_env, unique_tid) -> None:
     db_path, make_queue = broker_env
 

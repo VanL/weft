@@ -882,6 +882,7 @@ class BaseTask(MultiQueueWatcher, ABC):
 
     def _build_tid_mapping_payload(self) -> dict[str, Any]:
         runtime_handle = self._runtime_handle
+        role = self.taskspec.metadata.get("role")
         return {
             "short": self.tid_short,
             "full": self.tid,
@@ -894,6 +895,7 @@ class BaseTask(MultiQueueWatcher, ABC):
                 runtime_handle.to_dict() if runtime_handle is not None else None
             ),
             "name": self.taskspec.name,
+            "role": role if isinstance(role, str) and role else None,
             "started": time.time_ns(),
             "hostname": socket.gethostname(),
         }
@@ -1009,6 +1011,7 @@ class BaseTask(MultiQueueWatcher, ABC):
             "runner",
             "runtime_handle",
             "name",
+            "role",
             "hostname",
         }
         for key in comparable_keys:
