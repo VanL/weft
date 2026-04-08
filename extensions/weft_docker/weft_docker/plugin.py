@@ -516,7 +516,12 @@ def _describe_runtime(
     base_metadata: Mapping[str, Any],
 ) -> RunnerRuntimeDescription:
     metadata = dict(base_metadata)
-    container = _lookup_container(client, runtime_id)
+    container_id = metadata.get("container_id")
+    container = _lookup_container(
+        client,
+        runtime_id,
+        fallback_id=container_id if isinstance(container_id, str) else None,
+    )
     if container is None:
         return RunnerRuntimeDescription(
             runner_name="docker",
@@ -743,11 +748,21 @@ def _block_io_bytes(payload: Mapping[str, Any]) -> dict[str, int] | None:
     return {"read": read_total, "write": write_total}
 
 
-def _lookup_container(client: Any, runtime_id: str) -> Any | None:
+def _lookup_container(
+    client: Any,
+    runtime_id: str,
+    *,
+    fallback_id: str | None = None,
+) -> Any | None:
     docker = _load_docker_sdk()
     try:
         return client.containers.get(runtime_id)
     except docker.errors.NotFound:
+        if isinstance(fallback_id, str) and fallback_id and fallback_id != runtime_id:
+            try:
+                return client.containers.get(fallback_id)
+            except docker.errors.NotFound:
+                return None
         return None
 
 

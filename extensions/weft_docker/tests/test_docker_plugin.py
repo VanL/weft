@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 
 import pytest
-from weft_docker import get_runner_plugin
+from weft_docker import get_runner_plugin, plugin
 
 pytestmark = [pytest.mark.shared]
 
@@ -91,3 +91,59 @@ def test_docker_runner_is_unsupported_on_windows(
                 }
             }
         )
+
+
+def test_describe_runtime_falls_back_to_container_id_when_name_lookup_misses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeNotFound(Exception):
+        pass
+
+    class FakeDocker:
+        class errors:
+            NotFound = FakeNotFound
+
+    class FakeContainer:
+        id = "container-123"
+        attrs = {
+            "Name": "/weft-test",
+            "Config": {"Image": "busybox:latest"},
+            "State": {
+                "Status": "running",
+                "OOMKilled": False,
+                "ExitCode": 0,
+                "Pid": 42,
+                "StartedAt": "2026-04-08T00:00:00Z",
+                "FinishedAt": "",
+                "Error": "",
+            },
+            "HostConfig": {"NetworkMode": "default"},
+        }
+
+        def reload(self) -> None:
+            return None
+
+        def stats(self, *, stream: bool = False) -> dict[str, object]:
+            assert stream is False
+            return {}
+
+    class FakeContainers:
+        def get(self, runtime_id: str) -> FakeContainer:
+            if runtime_id == "container-123":
+                return FakeContainer()
+            raise FakeNotFound()
+
+    class FakeClient:
+        containers = FakeContainers()
+
+    monkeypatch.setattr(plugin, "_load_docker_sdk", lambda: FakeDocker)
+
+    description = plugin._describe_runtime(  # pyright: ignore[reportPrivateUsage]
+        FakeClient(),
+        runtime_id="weft-runtime-name",
+        base_metadata={"container_id": "container-123", "image": "busybox:latest"},
+    )
+
+    assert description.state == "running"
+    assert description.metadata["container_id"] == "container-123"
+    assert description.metadata["container_name"] == "weft-test"
