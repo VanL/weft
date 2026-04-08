@@ -32,7 +32,7 @@ jobs:
 
     - name: Install dependencies
       run: |
-        uv pip install --system -e ".[dev]"
+        uv pip install --system -e ".[dev,docker,macos-sandbox]"
 
     - name: Run tests with pytest
       run: |
@@ -59,19 +59,71 @@ jobs:
 
     - name: Install dependencies
       run: |
-        uv pip install --system -e ".[dev]"
+        uv pip install --system -e ".[dev,docker,macos-sandbox]"
 
     - name: Run linting with ruff
       run: |
-        ruff check weft
+        ruff check weft tests extensions/weft_docker extensions/weft_macos_sandbox
 
     - name: Check formatting with ruff
       run: |
-        ruff format --check weft
+        ruff format --check weft tests extensions/weft_docker extensions/weft_macos_sandbox
 
     - name: Type check with mypy
       run: |
-        mypy weft --config-file pyproject.toml
+        mypy weft extensions/weft_docker/weft_docker extensions/weft_macos_sandbox/weft_macos_sandbox --config-file pyproject.toml
+
+  test-docker-extension:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6
+
+    - name: Set up Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: "3.13"
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@v7
+      with:
+        enable-cache: true
+        cache-dependency-glob: "pyproject.toml"
+
+    - name: Install dependencies
+      run: |
+        uv pip install --system -e ".[dev,docker]"
+
+    - name: Verify Docker is available
+      run: |
+        docker version
+
+    - name: Run Docker extension tests
+      run: |
+        pytest -q -n 0 extensions/weft_docker/tests
+
+  test-macos-sandbox-extension:
+    runs-on: macos-latest
+    steps:
+    - uses: actions/checkout@v6
+
+    - name: Set up Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: "3.13"
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@v7
+      with:
+        enable-cache: true
+        cache-dependency-glob: "pyproject.toml"
+
+    - name: Install dependencies
+      run: |
+        uv pip install --system -e ".[dev,macos-sandbox]"
+
+    - name: Run macOS sandbox extension tests
+      run: |
+        pytest -q -n 0 extensions/weft_macos_sandbox/tests
 
   coverage:
     runs-on: ubuntu-latest
@@ -90,7 +142,7 @@ jobs:
 
     - name: Install dependencies
       run: |
-        uv pip install --system -e ".[dev]"
+        uv pip install --system -e ".[dev,docker,macos-sandbox]"
         uv pip install --system pytest-cov
 
     - name: Run tests with coverage

@@ -563,10 +563,11 @@ Weft uses a tag-driven release flow in GitHub Actions:
 
 - [`.github/workflows/release-gate.yml`](./.github/workflows/release-gate.yml)
   runs on pushed `v*` tags, executes the full SQLite suite plus the
-  PG-compatible suite via [`bin/pytest-pg`](./bin/pytest-pg), and only invokes
-  the publish workflow if both pass. If the tag is moved while a gate is
-  running, the older run is canceled and the gate refuses to publish from the
-  stale tag state.
+  PG-compatible suite via [`bin/pytest-pg`](./bin/pytest-pg), runs the
+  Docker extension test suite on Ubuntu and the macOS sandbox extension test
+  suite on macOS, and only invokes the publish workflow if every job passes.
+  If the tag is moved while a gate is running, the older run is canceled and
+  the gate refuses to publish from the stale tag state.
 - [`.github/workflows/release.yml`](./.github/workflows/release.yml) is a
   reusable workflow that can only be called from the release gate; it handles
   package build, PyPI publishing, signing, and GitHub Release creation from
@@ -604,16 +605,20 @@ Before it tags and pushes, the helper runs:
 
 1. The SQLite release precheck with xdist
 2. The PG-compatible release precheck with `uv run bin/pytest-pg --all`
+3. The Docker extension tests when Docker is available locally
+4. The macOS sandbox extension tests when running on macOS
 
 After the helper pushes `v0.1.1`, the release gate workflow will:
 
 1. Run the full SQLite suite
 2. Run the PG-compatible suite with `uv run bin/pytest-pg --all`
-3. Confirm the tag still points at the tested commit
-4. Invoke the package release workflow only if both suites pass
-5. Build distributions with `uv build`
-6. Publish to PyPI with `uv publish --trusted-publishing always dist/*`
-7. Sign artifacts, create the GitHub Release, and upload the release files once PyPI succeeds
+3. Run the Docker extension tests on Ubuntu
+4. Run the macOS sandbox extension tests on macOS
+5. Confirm the tag still points at the tested commit
+6. Invoke the package release workflow only if all suites pass
+7. Build distributions with `uv build`
+8. Publish to PyPI with `uv publish --trusted-publishing always dist/*`
+9. Sign artifacts, create the GitHub Release, and upload the release files once PyPI succeeds
 
 Prerequisite:
 

@@ -403,11 +403,18 @@ def test_main_dry_run_retags_remote_when_requested(
     assert "$ git tag v0.1.0" in captured.out
 
 
-def test_precheck_commands_cover_sqlite_and_postgres_release_gate() -> None:
-    """The helper precheck should cover both release-gate backend suites."""
+def test_build_precheck_commands_cover_release_gate_and_quality_gates() -> None:
+    """The helper precheck should always cover the core release-gate suites."""
     release = _load_release_module()
-    sqlite_command = release.PRECHECK_COMMANDS[0]
-    postgres_command = release.PRECHECK_COMMANDS[1]
+    commands = release.build_precheck_commands(
+        include_docker_extension_tests=False,
+        include_macos_sandbox_extension_tests=False,
+    )
+    sqlite_command = commands[0]
+    postgres_command = commands[1]
+    ruff_check_command = commands[2]
+    ruff_format_command = commands[3]
+    mypy_command = commands[4]
 
     assert sqlite_command[:11] == (
         "uv",
@@ -441,10 +448,87 @@ def test_precheck_commands_cover_sqlite_and_postgres_release_gate() -> None:
         "bin/pytest-pg",
         "--all",
     )
+    assert ruff_check_command == (
+        "uv",
+        "run",
+        "--extra",
+        "dev",
+        "--extra",
+        "docker",
+        "--extra",
+        "macos-sandbox",
+        "ruff",
+        "check",
+        "weft",
+        "tests",
+        "extensions/weft_docker",
+        "extensions/weft_macos_sandbox",
+    )
+    assert ruff_format_command == (
+        "uv",
+        "run",
+        "--extra",
+        "dev",
+        "--extra",
+        "docker",
+        "--extra",
+        "macos-sandbox",
+        "ruff",
+        "format",
+        "--check",
+        "weft",
+        "tests",
+        "extensions/weft_docker",
+        "extensions/weft_macos_sandbox",
+    )
+    assert mypy_command == (
+        "uv",
+        "run",
+        "--extra",
+        "dev",
+        "--extra",
+        "docker",
+        "--extra",
+        "macos-sandbox",
+        "mypy",
+        "weft",
+        "extensions/weft_docker/weft_docker",
+        "extensions/weft_macos_sandbox/weft_macos_sandbox",
+        "--config-file",
+        "pyproject.toml",
+    )
     assert release.PRECHECK_ENV_OVERRIDES == {
         "PYTEST_ADDOPTS": "-x --maxfail=1",
         "WEFT_EAGER_FAILURE_TRACEBACK": "1",
     }
+
+
+def test_build_precheck_commands_include_extension_tests_when_supported() -> None:
+    """The helper should add extension-local tests only on capable hosts."""
+
+    release = _load_release_module()
+
+    commands = release.build_precheck_commands(
+        include_docker_extension_tests=True,
+        include_macos_sandbox_extension_tests=True,
+    )
+
+    assert commands[2] == release.DOCKER_EXTENSION_TEST_COMMAND
+    assert commands[3] == release.MACOS_SANDBOX_EXTENSION_TEST_COMMAND
+
+
+def test_build_precheck_commands_skip_extension_tests_when_unavailable() -> None:
+    """Unavailable local runners should not block a release-helper precheck."""
+
+    release = _load_release_module()
+
+    commands = release.build_precheck_commands(
+        include_docker_extension_tests=False,
+        include_macos_sandbox_extension_tests=False,
+    )
+
+    assert release.DOCKER_EXTENSION_TEST_COMMAND not in commands
+    assert release.MACOS_SANDBOX_EXTENSION_TEST_COMMAND not in commands
 
 
 def test_merge_command_env_appends_pytest_addopts() -> None:

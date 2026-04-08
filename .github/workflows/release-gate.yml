@@ -14,6 +14,64 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  test-docker-extension:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+
+      - name: Install dependencies
+        run: |
+          uv pip install --system -e ".[dev,docker]"
+
+      - name: Verify Docker is available
+        run: |
+          docker version
+
+      - name: Run Docker extension tests
+        run: |
+          pytest -q -n 0 extensions/weft_docker/tests
+
+  test-macos-sandbox-extension:
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+
+      - name: Install dependencies
+        run: |
+          uv pip install --system -e ".[dev,macos-sandbox]"
+
+      - name: Run macOS sandbox extension tests
+        run: |
+          pytest -q -n 0 extensions/weft_macos_sandbox/tests
+
   test-sqlite:
     runs-on: ubuntu-latest
 
@@ -67,6 +125,8 @@ jobs:
   verify-tag-current:
     runs-on: ubuntu-latest
     needs:
+      - test-docker-extension
+      - test-macos-sandbox-extension
       - test-sqlite
       - test-postgres
 
