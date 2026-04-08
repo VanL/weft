@@ -19,7 +19,7 @@ from weft._constants import (
 )
 from weft.commands import worker as worker_cmd
 from weft.context import WeftContext, build_context
-from weft.helpers import iter_queue_json_entries, terminate_process_tree
+from weft.helpers import iter_queue_json_entries, pid_is_live, terminate_process_tree
 
 DEFAULT_TASK_COMPLETION_TIMEOUT = 60.0
 
@@ -364,13 +364,7 @@ class WeftTestHarness:
 
     @staticmethod
     def _pid_alive(pid: int) -> bool:
-        try:
-            process = psutil.Process(pid)
-            return process.is_running()
-        except psutil.NoSuchProcess:
-            return False
-        except psutil.Error:
-            return False
+        return pid_is_live(pid)
 
     def _mark_safe_pid(self, pid: int) -> None:
         if pid > 0:

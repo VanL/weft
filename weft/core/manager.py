@@ -20,8 +20,6 @@ from multiprocessing.process import BaseProcess
 from pathlib import Path
 from typing import Any, cast
 
-import psutil
-
 from simplebroker import Queue
 from weft._constants import (
     CONTROL_STOP,
@@ -34,6 +32,7 @@ from weft._constants import (
 )
 from weft.helpers import (
     iter_queue_json_entries,
+    pid_is_live,
     redact_taskspec_dump,
     terminate_process_tree,
 )
@@ -344,13 +343,7 @@ class Manager(BaseTask):
 
     @staticmethod
     def _pid_alive(pid: int | None) -> bool:
-        if pid is None or pid <= 0:
-            return False
-        try:
-            process = psutil.Process(pid)
-            return process.is_running()
-        except psutil.Error:
-            return False
+        return pid_is_live(pid)
 
     def _active_manager_records(self) -> dict[str, dict[str, Any]]:
         queue = self._queue(WEFT_WORKERS_REGISTRY_QUEUE)

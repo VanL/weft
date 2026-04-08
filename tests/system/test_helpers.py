@@ -5,7 +5,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import subprocess
+import sys
 import threading
+import time
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -28,6 +31,7 @@ from weft.helpers import (  # noqa: D401 - module already documented
     log_info,
     log_warning,
     parse_tid,
+    pid_is_live,
     reload_config,
     resolve_cli_command,
     send_log,
@@ -42,6 +46,16 @@ def _reset_config() -> Any:
     reload_config()
     yield
     reload_config()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX only")
+def test_pid_is_live_rejects_zombie_process() -> None:
+    process = subprocess.Popen([sys.executable, "-c", "import os; os._exit(0)"])
+    try:
+        time.sleep(0.1)
+        assert pid_is_live(process.pid) is False
+    finally:
+        process.wait()
 
 
 class TestSendLog:
@@ -336,6 +350,28 @@ class TestWriteJsonAtomically:
 
         monkeypatch.setattr(Path, "replace", replace_fail)
         write_json_atomically(target, {"status": "ok"})
+        assert json.loads(target.read_text()) == {"status": "ok"}
+
+    def test_write_json_atomically_retries_permission_error(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        target = tmp_path / "retry.json"
+        original_replace = Path.replace
+        calls = {"count": 0}
+
+        def replace_once_blocked(self: Path, target_path: Path) -> Path:
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise PermissionError("sharing violation")
+            return original_replace(self, target_path)
+
+        monkeypatch.setattr(Path, "replace", replace_once_blocked)
+
+        write_json_atomically(target, {"status": "ok"})
+
+        assert calls["count"] >= 2
         assert json.loads(target.read_text()) == {"status": "ok"}
 
     def test_write_json_atomically_handles_concurrent_writes(

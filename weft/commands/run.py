@@ -18,7 +18,6 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-import psutil
 import typer
 
 from simplebroker import Queue, serialize_broker_target
@@ -44,6 +43,7 @@ from weft.context import WeftContext, build_context
 from weft.core.taskspec import TaskSpec, resolve_taskspec_payload
 from weft.helpers import (
     iter_queue_json_entries,
+    pid_is_live,
     read_limited_stdin,
     resolve_broker_max_message_size,
     stdin_is_tty,
@@ -261,11 +261,7 @@ def _select_active_manager(context: WeftContext) -> dict[str, Any] | None:
 
 
 def _is_pid_alive(pid: int) -> bool:
-    try:
-        process = psutil.Process(pid)
-        return process.is_running()
-    except psutil.NoSuchProcess:
-        return False
+    return pid_is_live(pid)
 
 
 def _build_manager_spec(context: WeftContext, tid: str) -> TaskSpec:

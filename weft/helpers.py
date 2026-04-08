@@ -223,6 +223,37 @@ def iter_queue_json_entries(
             yield payload, timestamp
 
 
+def pid_is_live(pid: int | None) -> bool:
+    """Return whether *pid* refers to a currently live, non-zombie process.
+
+    Spec: docs/specifications/03-Worker_Architecture.md [WA-3]
+    """
+
+    if pid is None or pid <= 0:
+        return False
+
+    try:
+        process = psutil.Process(pid)
+    except psutil.Error:
+        return False
+
+    try:
+        if not process.is_running():
+            return False
+    except psutil.Error:
+        return False
+
+    try:
+        return process.status() != psutil.STATUS_ZOMBIE
+    except psutil.ZombieProcess:
+        return False
+    except psutil.AccessDenied:
+        # Fall back to the existence check above when status details are hidden.
+        return True
+    except psutil.Error:
+        return False
+
+
 def terminate_process_tree(
     root_pid: int,
     *,
@@ -561,6 +592,8 @@ def write_file_atomically(
 
     target_path = Path(file_path)
     is_binary = data is not None
+    retry_attempts = 10
+    retry_sleep_seconds = 0.01
 
     try:
         # Create parent directory if it doesn't exist
@@ -580,8 +613,16 @@ def write_file_atomically(
                 with os.fdopen(temp_fd, "w", encoding=encoding) as f:
                     f.write(content)
 
-            # Atomic rename (on most filesystems)
-            Path(temp_path).replace(target_path)
+            temp_file = Path(temp_path)
+            for attempt in range(retry_attempts):
+                try:
+                    # Atomic rename (on most filesystems)
+                    temp_file.replace(target_path)
+                    break
+                except PermissionError:
+                    if attempt == retry_attempts - 1:
+                        raise
+                    time.sleep(retry_sleep_seconds)
 
             log_debug(
                 f"Atomically wrote {'binary' if is_binary else 'text'} to {target_path}"
@@ -602,13 +643,20 @@ def write_file_atomically(
             f"Atomic write failed for {target_path}, falling back to simple write: {e}"
         )
 
-        if data is not None:
-            with open(target_path, "wb") as f:
-                f.write(data)
-        else:
-            assert content is not None
-            with open(target_path, "w", encoding=encoding) as f:
-                f.write(content)
+        for attempt in range(retry_attempts):
+            try:
+                if data is not None:
+                    with open(target_path, "wb") as f:
+                        f.write(data)
+                else:
+                    assert content is not None
+                    with open(target_path, "w", encoding=encoding) as f:
+                        f.write(content)
+                break
+            except PermissionError:
+                if attempt == retry_attempts - 1:
+                    raise
+                time.sleep(retry_sleep_seconds)
 
 
 def write_json_atomically(file_path: Path | str, data: dict[str, Any]) -> None:

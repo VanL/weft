@@ -160,3 +160,13 @@ runbook needs to become stricter.
   isolated local runs. When multiple unrelated CLI tests fail at the same
   fixed timeout, move the fix to the shared harness default instead of raising
   per-test limits.
+
+## 2026-04-08 Zombie PID Liveness
+
+- `psutil.Process(pid).is_running()` is not a sufficient liveness check for
+  manager or worker registries. Zombie processes still report `True`, so any
+  PID-backed registry or status surface must also reject `STATUS_ZOMBIE`.
+- When a manager can register before it is fully ready, treating zombies as
+  live lets launchers and leader-election code select a dead manager and route
+  spawn requests into an inbox that no process will ever service. The fix
+  belongs in the shared PID-liveness helper, not in one caller.
