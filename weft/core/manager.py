@@ -40,6 +40,7 @@ from weft.helpers import (
 from .launcher import launch_task_process
 from .tasks import Consumer
 from .tasks.base import BaseTask, QueueMessageContext
+from .tasks.multiqueue_watcher import QueueMode
 from .taskspec import ReservedPolicy, TaskSpec, resolve_taskspec_payload
 
 logger = logging.getLogger(__name__)
@@ -85,6 +86,9 @@ class Manager(BaseTask):
         self._idle_shutdown_logged = False
         self._unregistered = False
         self._registry_message_id: int | None = None
+        self._draining = False
+        self._drain_reason: str | None = None
+        self._drain_completion_event = "manager_stop_drained"
         self._autostart_enabled = bool(self._config.get("WEFT_AUTOSTART_TASKS", True))
         autostart_dir = self._config.get("WEFT_AUTOSTART_DIR")
         self._autostart_dir = Path(autostart_dir) if autostart_dir else None
@@ -137,17 +141,36 @@ class Manager(BaseTask):
             ),
         }
 
+    def _handle_control_command(
+        self, command: str, context: QueueMessageContext
+    ) -> bool:
+        """Override STOP to drain active children before manager exit."""
+
+        if command == CONTROL_STOP:
+            self._begin_graceful_shutdown(message_id=context.timestamp)
+            self._send_control_response("STOP", "ack", draining=True)
+            return True
+        return super()._handle_control_command(command, context)
+
     def _launch_child_task(
         self,
         child_spec: TaskSpec,
         inbox_message: Any | None,
         *,
         autostart_source: str | None = None,
-    ) -> None:
+    ) -> bool:
         """Seed child inbox, spawn process, and emit task_spawned event.
 
         Spec: [MF-1], [MF-6]
         """
+        if self._draining or self.should_stop:
+            logger.debug(
+                "Skipping child launch for %s while manager %s is draining",
+                child_spec.tid,
+                self.tid,
+            )
+            return False
+
         inbox_name = child_spec.io.inputs.get("inbox")
         if inbox_message is not None and inbox_name:
             payload = (
@@ -200,6 +223,7 @@ class Manager(BaseTask):
             event_payload["autostart_source"] = autostart_source
 
         self._report_state_change(event="task_spawned", **event_payload)
+        return True
 
     # ------------------------------------------------------------------
     # Worker bookkeeping
@@ -401,6 +425,12 @@ class Manager(BaseTask):
         if leader_tid is None or leader_tid == self.tid:
             return False
 
+        if self._child_processes:
+            if any(child.persistent for child in self._child_processes.values()):
+                return False
+            self._begin_leadership_drain(leader_tid=leader_tid)
+            return True
+
         if not self.should_stop:
             self.taskspec.mark_cancelled(
                 reason=f"Superseded by lower-TID manager {leader_tid}"
@@ -416,16 +446,45 @@ class Manager(BaseTask):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+    def _child_has_exited(self, child: ManagedChild) -> bool:
+        """Return True when the child process is no longer live.
+
+        The multiprocessing Process view can lag behind the OS process table on
+        some platforms. When that happens, relying on ``is_alive()`` alone keeps
+        exited children in ``_child_processes`` indefinitely and blocks manager
+        shutdown. Treat a missing OS PID as authoritative and reap best-effort.
+        """
+
+        exitcode = child.process.exitcode
+        if exitcode is not None:
+            return True
+
+        pid = child.process.pid
+        if pid is not None and not self._pid_alive(pid):
+            try:
+                child.process.join(timeout=0.0)
+            except Exception:  # pragma: no cover - defensive
+                pass
+            return True
+
+        try:
+            return not child.process.is_alive()
+        except Exception:  # pragma: no cover - defensive
+            return True
+
     def _cleanup_children(self) -> None:
         autostart_child_exited = False
         child_exited = False
         for tid, child in list(self._child_processes.items()):
-            if not child.process.is_alive():
+            if self._child_has_exited(child):
                 child_exited = True
-                for pid in self._managed_pids_for_child(tid):
-                    terminate_process_tree(pid, timeout=0.2)
                 try:
-                    child.process.join()
+                    # Dead children must never stall the manager control loop.
+                    # Treat dead-child cleanup as a local reap only; descendant
+                    # teardown belongs to explicit termination paths, not the
+                    # hot loop that must stay responsive to new control
+                    # messages.
+                    child.process.join(timeout=0.1)
                 except Exception:  # pragma: no cover - defensive
                     pass
                 finally:
@@ -443,12 +502,19 @@ class Manager(BaseTask):
             self._last_activity_ns = time.time_ns()
 
     def _terminate_children(self) -> None:
+        self._wait_for_children_to_exit(timeout=1.0)
+        if not self._child_processes:
+            return
+
         for tid, child in list(self._child_processes.items()):
             ctrl_queue = child.ctrl_queue or f"T{tid}.{QUEUE_CTRL_IN_SUFFIX}"
             self._send_stop_command(ctrl_queue)
+        self._wait_for_children_to_exit(timeout=1.0)
+
+        for tid, child in list(self._child_processes.items()):
             if child.process.is_alive():
                 try:
-                    child.process.join(timeout=1.0)
+                    child.process.join(timeout=0.2)
                 except Exception:  # pragma: no cover - defensive
                     pass
             if child.process.is_alive():
@@ -469,6 +535,74 @@ class Manager(BaseTask):
                 terminate_process_tree(pid, timeout=0.2)
             self._child_processes.pop(tid, None)
 
+    def _wait_for_children_to_exit(self, *, timeout: float) -> None:
+        deadline = time.monotonic() + timeout
+        while self._child_processes and time.monotonic() < deadline:
+            self._cleanup_children()
+            if not self._child_processes:
+                return
+            time.sleep(0.05)
+
+    def _signal_children_to_stop(self) -> None:
+        """Best-effort STOP broadcast to currently tracked child tasks."""
+
+        for tid, child in list(self._child_processes.items()):
+            ctrl_queue = child.ctrl_queue or f"T{tid}.{QUEUE_CTRL_IN_SUFFIX}"
+            self._send_stop_command(ctrl_queue)
+
+    def _begin_graceful_shutdown(self, *, message_id: int | None) -> None:
+        if self._draining:
+            return
+
+        self._draining = True
+        self._drain_reason = "STOP command received"
+        self._drain_completion_event = "manager_stop_drained"
+        self._report_state_change(
+            event="control_stop",
+            message_id=message_id,
+            draining=True,
+        )
+        self._update_process_title("stopping")
+
+        policy = self.taskspec.spec.reserved_policy_on_stop
+        self._apply_reserved_policy(policy)
+        if policy is not ReservedPolicy.KEEP:
+            self._ensure_reserved_empty()
+            self._cleanup_reserved_if_needed()
+
+        self._signal_children_to_stop()
+
+    def _begin_leadership_drain(self, *, leader_tid: str) -> None:
+        """Stop accepting new work and drain owned children before yielding.
+
+        Leadership yield must not publish a terminal manager state while this
+        manager still owns live child tasks. Once a lower-TID manager exists,
+        this manager unregisters from the active registry so new submissions go
+        to the leader, but it stays alive long enough to let already-spawned
+        non-persistent children finish.
+        """
+
+        if self._draining:
+            return
+
+        self._draining = True
+        self._drain_reason = f"Superseded by lower-TID manager {leader_tid}"
+        self._drain_completion_event = "manager_leadership_drained"
+        self._report_state_change(
+            event="manager_leadership_yielded",
+            leader_tid=leader_tid,
+            draining=True,
+        )
+        self._update_process_title("draining")
+        self._unregister_worker()
+
+    def _finish_graceful_shutdown(self) -> None:
+        if self.taskspec.state.status not in {"completed", "cancelled"}:
+            self.taskspec.mark_cancelled(reason=self._drain_reason)
+            self._report_state_change(event=self._drain_completion_event)
+            self._update_process_title("cancelled")
+        self.should_stop = True
+
     def handle_termination_signal(self, signum: int) -> None:
         self._terminate_children()
         super().handle_termination_signal(signum)
@@ -483,6 +617,53 @@ class Manager(BaseTask):
             ).write(CONTROL_STOP)
         except Exception:
             logger.debug("Failed to send STOP to %s", queue_name, exc_info=True)
+
+    def _drain_control_queue_first(self) -> None:
+        """Handle pending manager control messages before new spawn work.
+
+        The manager owns the global spawn inbox. Once STOP is pending, it must
+        stop consuming new spawn requests before launching additional children,
+        otherwise cleanup can race with newly-created child tasks.
+        """
+
+        ctrl_name = self._queue_names["ctrl_in"]
+        ctrl_queue = self._queue(ctrl_name)
+
+        while True:
+            pending = ctrl_queue.peek_one(with_timestamps=True)
+            if pending is None:
+                return
+
+            if isinstance(pending, tuple) and len(pending) == 2:
+                body, timestamp = pending
+            else:  # pragma: no cover - defensive queue shape guard
+                body, timestamp = pending, None
+
+            if not isinstance(timestamp, int):
+                return
+
+            context = QueueMessageContext(
+                queue_name=ctrl_name,
+                queue=ctrl_queue,
+                mode=QueueMode.PEEK,
+                timestamp=timestamp,
+            )
+            self._handle_control_message(str(body), timestamp, context)
+            if self._draining or self.should_stop:
+                return
+
+    def _control_allows_child_launch(self) -> bool:
+        """Return whether spawn work may still launch a new child.
+
+        STOP can arrive after a spawn request has been reserved but before the
+        manager reaches ``_launch_child_task()``. Managers in drain mode must
+        not start new child work from that in-flight reserved request.
+        """
+
+        if self._draining or self.should_stop:
+            return False
+        self._drain_control_queue_first()
+        return not self._draining and not self.should_stop
 
     def _read_broker_timestamp(self, *, force: bool = False) -> int:
         last_known = getattr(self, "_last_broker_timestamp", 0)
@@ -548,6 +729,8 @@ class Manager(BaseTask):
     ) -> None:
         """Consume a spawn request, build child spec, and launch (Spec: [WA-1.1], [WA-2], [MF-6])."""
         self._cleanup_children()
+        if not self._control_allows_child_launch():
+            return
 
         try:
             payload = json.loads(message) if message else {}
@@ -570,11 +753,16 @@ class Manager(BaseTask):
             return
 
         inbox_message = payload.get("inbox_message", WORK_ENVELOPE_START)
-        self._launch_child_task(
+        if not self._control_allows_child_launch():
+            return
+
+        launched = self._launch_child_task(
             child_spec,
             inbox_message,
             autostart_source=child_spec.metadata.get("autostart_source"),
         )
+        if not launched:
+            return
 
         try:
             self._get_reserved_queue().delete(message_id=timestamp)
@@ -879,7 +1067,26 @@ class Manager(BaseTask):
     def process_once(self) -> None:
         if self._maybe_yield_leadership():
             return
+        if self._draining:
+            self._signal_children_to_stop()
+            self._cleanup_children()
+            if not self._child_processes:
+                self._finish_graceful_shutdown()
+            return
+        self._drain_control_queue_first()
+        if self._draining:
+            self._signal_children_to_stop()
+            self._cleanup_children()
+            if not self._child_processes:
+                self._finish_graceful_shutdown()
+            return
         super().process_once()
+        if self._draining:
+            self._signal_children_to_stop()
+            self._cleanup_children()
+            if not self._child_processes:
+                self._finish_graceful_shutdown()
+            return
         if self._maybe_yield_leadership():
             return
         self._cleanup_children()

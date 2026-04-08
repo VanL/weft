@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -12,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from tests.conftest import run_cli
+from tests.helpers.weft_harness import WeftTestHarness
 from tests.taskspec import fixtures as taskspec_fixtures
 from weft._constants import (
     WEFT_GLOBAL_LOG_QUEUE,
@@ -44,6 +46,15 @@ def _latest_completed_record(harness, limit: int = 512) -> tuple[str, dict] | No
         if isinstance(tid, str) and data.get("event") == "work_completed":
             return tid, data
     return None
+
+
+def _assert_sqlite_integrity(path: Path) -> None:
+    connection = sqlite3.connect(path)
+    try:
+        result = connection.execute("PRAGMA integrity_check").fetchone()
+    finally:
+        connection.close()
+    assert result == ("ok",)
 
 
 def _wait_for_started_task_tid(
@@ -1058,3 +1069,64 @@ def test_cli_run_parallel_no_wait_adopts_active_manager(workdir, weft_harness) -
     managers = payload.get("managers")
     assert isinstance(managers, list)
     assert len(managers) == 1, payload
+
+
+@pytest.mark.sqlite_only
+def test_weft_harness_cleanup_preserves_sqlite_integrity_for_parallel_manager_reuse() -> (
+    None
+):
+    iterations = 20
+
+    for _ in range(iterations):
+        harness = WeftTestHarness()
+        harness.__enter__()
+        db_path = harness.context.database_path
+        assert db_path is not None
+        env = os.environ.copy()
+        env["WEFT_MANAGER_REUSE_ENABLED"] = "1"
+
+        try:
+            def _submit(
+                current_root: Path = harness.root,
+                current_env: dict[str, str] = env,
+            ) -> tuple[int, str, str]:
+                return run_cli(
+                    "run",
+                    "--no-wait",
+                    "--function",
+                    "tests.tasks.sample_targets:simulate_work",
+                    "--kw",
+                    "duration=0.2",
+                    "--kw",
+                    'result="ok"',
+                    cwd=current_root,
+                    env=current_env,
+                    prepare_root=False,
+                )
+
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                results = list(executor.map(lambda _index: _submit(), range(4)))
+
+            assert all(rc == 0 for rc, _out, _err in results), results
+
+            deadline = time.time() + 5.0
+            while time.time() < deadline:
+                rc, out, err = run_cli(
+                    "status",
+                    "--json",
+                    cwd=harness.root,
+                    env=env,
+                    harness=harness,
+                )
+                assert rc == 0, err
+                payload = json.loads(out)
+                managers = payload.get("managers")
+                if isinstance(managers, list) and len(managers) == 1:
+                    break
+                time.sleep(0.1)
+
+            _assert_sqlite_integrity(db_path)
+            harness.cleanup(preserve_database=True)
+            _assert_sqlite_integrity(db_path)
+        finally:
+            harness._tempdir.cleanup()

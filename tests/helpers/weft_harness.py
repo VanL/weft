@@ -12,16 +12,26 @@ import psutil
 from simplebroker import Queue
 from tests.helpers.test_backend import cleanup_prepared_roots, prepare_project_root
 from weft._constants import (
+    CONTROL_STOP,
     QUEUE_OUTBOX_SUFFIX,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
     WEFT_WORKERS_REGISTRY_QUEUE,
 )
+from weft.commands import tasks as task_cmd
 from weft.commands import worker as worker_cmd
 from weft.context import WeftContext, build_context
 from weft.helpers import iter_queue_json_entries, pid_is_live, terminate_process_tree
 
 DEFAULT_TASK_COMPLETION_TIMEOUT = 60.0
+TERMINAL_TASK_EVENTS = {
+    "work_completed",
+    "work_failed",
+    "work_timeout",
+    "work_limit_violation",
+    "task_signal_stop",
+    "task_signal_kill",
+}
 
 
 class WeftTestHarness:
@@ -37,7 +47,10 @@ class WeftTestHarness:
         self._orig_cwd: Path | None = None
         self._context: WeftContext | None = None
         self._registered_pids: set[int] = set()
+        self._registered_owner_pids: set[int] = set()
+        self._registered_managed_pids: set[int] = set()
         self._registered_tids: set[str] = set()
+        self._registered_worker_tids: set[str] = set()
         self._closed = False
         self._self_pid = os.getpid()
         self._safe_pids = self._compute_safe_pid_set()
@@ -69,9 +82,19 @@ class WeftTestHarness:
     # ------------------------------------------------------------------
     # Resource tracking
     # ------------------------------------------------------------------
-    def register_pid(self, pid: int, tid: str | None = None) -> None:
+    def register_pid(
+        self,
+        pid: int,
+        tid: str | None = None,
+        *,
+        kind: str = "owner",
+    ) -> None:
         if pid > 0 and not self._should_skip_pid(pid):
             self._registered_pids.add(pid)
+            if kind == "managed":
+                self._registered_managed_pids.add(pid)
+            else:
+                self._registered_owner_pids.add(pid)
         if tid:
             self._registered_tids.add(tid)
 
@@ -79,8 +102,15 @@ class WeftTestHarness:
         if tid:
             self._registered_tids.add(tid)
 
+    def register_worker_tid(self, tid: str) -> None:
+        if tid:
+            self._registered_worker_tids.add(tid)
+
     def registered_tids(self) -> set[str]:
         return set(self._registered_tids)
+
+    def registered_worker_tids(self) -> set[str]:
+        return set(self._registered_worker_tids)
 
     def dump_debug_state(self) -> str:
         """Return a human-readable snapshot of harness state for debugging."""
@@ -89,6 +119,7 @@ class WeftTestHarness:
             "WeftTestHarness snapshot:",
             f"  root={self.root}",
             f"  registered_tids={sorted(self._registered_tids)}",
+            f"  registered_worker_tids={sorted(self._registered_worker_tids)}",
             f"  registered_pids={sorted(self._registered_pids)}",
         ]
 
@@ -205,20 +236,31 @@ class WeftTestHarness:
     # ------------------------------------------------------------------
     # Cleanup
     # ------------------------------------------------------------------
-    def cleanup(self) -> None:
+    def cleanup(self, *, preserve_database: bool = False) -> None:
         if self._closed:
             return
 
         try:
-            self._stop_active_workers()
+            if preserve_database:
+                self._cleanup_preserving_database()
+                return
+
+            self._stop_active_workers(
+                force=True,
+                drain_registry=True,
+                stop_tasks=True,
+            )
             self._collect_pid_mappings()
-            self._terminate_registered_pids()
-            self._remove_database_files()
-            cleanup_prepared_roots(self.root)
+            self._wait_for_registered_pids_to_exit()
+            if not preserve_database:
+                self._terminate_registered_pids()
+                self._remove_database_files()
+                cleanup_prepared_roots(self.root)
         finally:
             self._restore_cwd()
             self._restore_environment()
-            self._tempdir.cleanup()
+            if not preserve_database:
+                self._tempdir.cleanup()
             self._closed = True
 
     # ------------------------------------------------------------------
@@ -260,46 +302,245 @@ class WeftTestHarness:
                 pass
             self._orig_cwd = None
 
-    def _stop_active_workers(self) -> None:
-        context_path = self.context.root
+    def _load_tid_mapping_payloads(self) -> list[dict[str, object]]:
+        queue = Queue(
+            WEFT_TID_MAPPINGS_QUEUE,
+            db_path=self.context.broker_target,
+            persistent=False,
+            config=self.context.broker_config,
+        )
+        try:
+            records = queue.peek_many(limit=2048) or []
+        except Exception:  # pragma: no cover - defensive
+            queue.close()
+            return []
+        finally:
+            queue.close()
 
-        all_tids: set[str] = set(self._registered_tids)
+        payloads: list[dict[str, object]] = []
+        for raw in records:
+            payload = raw[0] if isinstance(raw, tuple) else raw
+            try:
+                data = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(data, dict):
+                payloads.append(data)
+        return payloads
+
+    def _latest_tid_mapping_payloads(self) -> dict[str, dict[str, object]]:
+        latest: dict[str, dict[str, object]] = {}
+        for data in self._load_tid_mapping_payloads():
+            full_tid = data.get("full")
+            if isinstance(full_tid, str) and full_tid:
+                latest[full_tid] = data
+        return latest
+
+    @staticmethod
+    def _mapping_role(data: dict[str, object]) -> str | None:
+        role = data.get("role")
+        if isinstance(role, str) and role:
+            return role
+        return None
+
+    def _latest_task_events(self) -> dict[str, str]:
+        queue = Queue(
+            WEFT_GLOBAL_LOG_QUEUE,
+            db_path=self.context.broker_target,
+            persistent=False,
+            config=self.context.broker_config,
+        )
+        latest: dict[str, str] = {}
+        try:
+            for data, _timestamp in iter_queue_json_entries(queue):
+                tid = data.get("tid")
+                event = data.get("event")
+                if isinstance(tid, str) and isinstance(event, str):
+                    latest[tid] = event
+        finally:
+            queue.close()
+        return latest
+
+    def _live_task_tids_from_mappings(self) -> list[str]:
+        live_tids: list[str] = []
+        terminal_events = self._latest_task_events()
+        for full_tid, data in self._latest_tid_mapping_payloads().items():
+            if (
+                full_tid in self._registered_worker_tids
+                or self._mapping_role(data) == "manager"
+                or terminal_events.get(full_tid) in TERMINAL_TASK_EVENTS
+            ):
+                continue
+
+            candidate_pids: list[int] = []
+            for key in ("task_pid", "pid"):
+                value = data.get(key)
+                if isinstance(value, int):
+                    candidate_pids.append(value)
+
+            managed = data.get("managed_pids")
+            if isinstance(managed, list):
+                candidate_pids.extend(
+                    value for value in managed if isinstance(value, int)
+                )
+
+            if any(
+                pid > 0 and not self._should_skip_pid(pid) and self._pid_alive(pid)
+                for pid in candidate_pids
+            ):
+                live_tids.append(full_tid)
+
+        return sorted(set(live_tids))
+
+    def _list_active_worker_records(self) -> list[dict[str, object]]:
+        context_path = self.context.root
         exit_code, payload = worker_cmd.list_command(
             json_output=True,
             context_path=context_path,
         )
-        if exit_code == 0 and payload:
-            try:
-                records = json.loads(payload)
-            except json.JSONDecodeError:
-                records = []
-            for record in records:
-                tid = record.get("tid")
-                if isinstance(tid, str):
-                    all_tids.add(tid)
+        if exit_code != 0 or not payload:
+            return []
 
+        try:
+            records = json.loads(payload)
+        except json.JSONDecodeError:
+            return []
+
+        active_records: list[dict[str, object]] = []
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            if record.get("status") != "active":
+                continue
+            active_records.append(record)
+        return active_records
+
+    def _cleanup_worker_records(self) -> dict[str, dict[str, object]]:
+        worker_records: dict[str, dict[str, object]] = {}
+        for record in self._list_active_worker_records():
+            tid = record.get("tid")
+            if isinstance(tid, str):
+                worker_records[tid] = record
+        for tid in self._registered_worker_tids:
+            worker_records.setdefault(tid, {"tid": tid})
+        return worker_records
+
+    def _send_worker_stop(self, tid: str, *, record: dict[str, object]) -> None:
+        ctrl_in = record.get("ctrl_in")
+        queue_name = ctrl_in if isinstance(ctrl_in, str) and ctrl_in else f"T{tid}.ctrl_in"
+        pid = record.get("pid")
+        if isinstance(pid, int):
+            self.register_pid(pid, kind="owner")
+        queue = Queue(
+            queue_name,
+            db_path=self.context.broker_target,
+            persistent=False,
+            config=self.context.broker_config,
+        )
+        try:
+            queue.write(CONTROL_STOP)
+        finally:
+            queue.close()
+
+    def _send_task_stop(self, tid: str) -> None:
+        task_cmd._send_control(self.context, tid, CONTROL_STOP)
+
+    def _stop_active_workers(
+        self,
+        *,
+        force: bool = True,
+        drain_registry: bool = True,
+        stop_tasks: bool = True,
+    ) -> None:
+        context_path = self.context.root
+        issued_task_stops: set[str] = set()
+        worker_records = self._cleanup_worker_records()
         stop_timeout = max(6.0, min(self._manager_timeout, 10.0))
 
-        for tid in all_tids:
-            rc, _ = worker_cmd.stop_command(
-                tid=tid,
-                force=False,
-                timeout=stop_timeout,
-                context_path=context_path,
-                stop_if_absent=True,
-            )
-            if rc == 0:
-                continue
-            worker_cmd.stop_command(
-                tid=tid,
-                force=True,
-                timeout=stop_timeout,
-                context_path=context_path,
-                stop_if_absent=True,
-            )
+        for tid, record in sorted(worker_records.items()):
+            self._send_worker_stop(tid, record=record)
 
-        time.sleep(0.1)
-        self._drain_registry_queue()
+        for _ in range(3):
+            self._collect_pid_mappings()
+            if stop_tasks:
+                task_tids = sorted(set(self._registered_tids) - issued_task_stops)
+                if task_tids:
+                    for tid in task_tids:
+                        self._send_task_stop(tid)
+                    issued_task_stops.update(task_tids)
+            live_pids = self._wait_for_registered_pids_to_exit(timeout=1.0)
+            if not live_pids:
+                break
+
+        if force and issued_task_stops:
+            task_cmd.kill_tasks(sorted(issued_task_stops), context_path=context_path)
+        if force:
+            for tid in sorted(worker_records):
+                worker_cmd.stop_command(
+                    tid=tid,
+                    force=True,
+                    timeout=stop_timeout,
+                    context_path=context_path,
+                    stop_if_absent=True,
+                )
+
+        if issued_task_stops or worker_records:
+            self._collect_pid_mappings()
+            self._wait_for_registered_pids_to_exit()
+            time.sleep(0.1)
+        if drain_registry:
+            self._drain_registry_queue()
+
+    def _cleanup_preserving_database(self) -> None:
+        deadline = time.time() + max(6.0, min(self._manager_timeout, 10.0))
+        issued_worker_stops: set[str] = set()
+        issued_task_stops: set[str] = set()
+        quiescent_since: float | None = None
+        lingering_task_deadline: float | None = None
+        last_live_task_tids: list[str] = []
+        last_live_pids: list[int] = []
+
+        while time.time() < deadline:
+            self._collect_pid_mappings()
+
+            for tid in sorted(self._registered_worker_tids):
+                if tid in issued_worker_stops:
+                    continue
+                self._send_worker_stop(tid, record={"tid": tid})
+                issued_worker_stops.add(tid)
+
+            last_live_task_tids = self._live_task_tids_from_mappings()
+            last_live_pids = self._live_registered_pids()
+            if last_live_task_tids:
+                if lingering_task_deadline is None:
+                    lingering_task_deadline = time.time() + 2.0
+                elif time.time() >= lingering_task_deadline:
+                    for tid in sorted(last_live_task_tids):
+                        if tid in issued_task_stops:
+                            continue
+                        self._send_task_stop(tid)
+                        issued_task_stops.add(tid)
+            else:
+                lingering_task_deadline = None
+            if not last_live_task_tids and not last_live_pids:
+                if quiescent_since is None:
+                    quiescent_since = time.time()
+                elif time.time() - quiescent_since >= 0.1:
+                    return
+            else:
+                quiescent_since = None
+
+            time.sleep(0.05)
+
+        if last_live_task_tids:
+            raise RuntimeError(
+                "Cleanup left live task processes while preserve_database=True: "
+                f"{last_live_task_tids}"
+            )
+        if last_live_pids:
+            raise RuntimeError(
+                f"Cleanup left live processes while preserve_database=True: {last_live_pids}"
+            )
 
     def _drain_registry_queue(self) -> None:
         queue = Queue(
@@ -315,53 +556,62 @@ class WeftTestHarness:
             queue.close()
 
     def _collect_pid_mappings(self) -> None:
-        queue = Queue(
-            WEFT_TID_MAPPINGS_QUEUE,
-            db_path=self.context.broker_target,
-            persistent=False,
-            config=self.context.broker_config,
-        )
-        try:
-            records = queue.peek_many(limit=2048) or []
-        except Exception:  # pragma: no cover - defensive
-            queue.close()
-            return
+        for data in self._load_tid_mapping_payloads():
+            full_tid = data.get("full")
+            if isinstance(full_tid, str) and full_tid:
+                if self._mapping_role(data) == "manager":
+                    self.register_worker_tid(full_tid)
+                elif full_tid not in self._registered_worker_tids:
+                    self.register_tid(full_tid)
 
-        for raw in records:
-            payload = raw[0] if isinstance(raw, tuple) else raw
-            try:
-                data = json.loads(payload)
-            except json.JSONDecodeError:
-                continue
             caller_pid = data.get("caller_pid")
             if isinstance(caller_pid, int):
                 self._mark_safe_pid(caller_pid)
 
-            pid_candidates: list[int] = []
             for key in ("task_pid", "pid"):
                 candidate = data.get(key)
                 if isinstance(candidate, int):
-                    pid_candidates.append(candidate)
+                    self.register_pid(candidate, kind="owner")
 
             managed = data.get("managed_pids")
             if isinstance(managed, list):
                 for value in managed:
                     if isinstance(value, int):
-                        pid_candidates.append(value)
-
-            for candidate in pid_candidates:
-                self.register_pid(candidate)
-        queue.close()
+                        self.register_pid(value, kind="managed")
 
     def _terminate_registered_pids(self) -> None:
-        for pid in list(self._registered_pids):
+        for pid in list(self._registered_managed_pids):
             if self._should_skip_pid(pid):
                 continue
             self._terminate_pid(pid)
+        self._registered_owner_pids.clear()
+        self._registered_managed_pids.clear()
         self._registered_pids.clear()
+
+    def _live_registered_pids(self) -> list[int]:
+        return [
+            pid
+            for pid in self._registered_pids
+            if not self._should_skip_pid(pid) and self._pid_alive(pid)
+        ]
+
+    def _wait_for_registered_pids_to_exit(
+        self, *, timeout: float | None = None
+    ) -> list[int]:
+        deadline = time.time() + (
+            min(self._manager_timeout, 5.0) if timeout is None else timeout
+        )
+        while time.time() < deadline:
+            live_pids = self._live_registered_pids()
+            if not live_pids:
+                return []
+            time.sleep(0.05)
+        return self._live_registered_pids()
 
     def _terminate_pid(self, pid: int) -> None:
         if pid <= 0:
+            return
+        if not self._pid_alive(pid):
             return
         try:
             terminated = terminate_process_tree(pid, timeout=self._manager_timeout)

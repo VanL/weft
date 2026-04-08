@@ -342,20 +342,21 @@ def _register_cli_outputs(
     _extract_ids(harness, stdout)
     _extract_ids(harness, stderr)
 
+    worker_command = bool(args and args[0] == "worker" and len(args) > 1)
     for blob in (stdout, stderr):
         for line in blob.splitlines():
             try:
                 payload = json.loads(line)
             except Exception:
                 continue
-            _register_from_json(harness, payload)
+            _register_from_json(harness, payload, worker_command=worker_command)
 
-    if args and args[0] == "worker" and len(args) > 1:
+    if worker_command:
         subcommand = args[1]
         if subcommand in {"start", "stop", "status", "list"}:
             for arg in args:
                 if isinstance(arg, str) and arg.isdigit() and len(arg) == 19:
-                    harness.register_tid(arg)
+                    harness.register_worker_tid(arg)
 
 
 def _extract_ids(harness: WeftTestHarness, text: str) -> None:
@@ -374,27 +375,49 @@ def _extract_ids(harness: WeftTestHarness, text: str) -> None:
             continue
 
 
-def _register_from_json(harness: WeftTestHarness, payload: Any) -> None:
+def _register_from_json(
+    harness: WeftTestHarness,
+    payload: Any,
+    *,
+    worker_command: bool = False,
+) -> None:
     if isinstance(payload, dict):
+        metadata = payload.get("metadata")
+        metadata_role = metadata.get("role") if isinstance(metadata, dict) else None
         tid = payload.get("tid")
         if isinstance(tid, str):
-            harness.register_tid(tid)
+            if (
+                worker_command
+                or payload.get("role") == "manager"
+                or metadata_role == "manager"
+            ):
+                harness.register_worker_tid(tid)
+            else:
+                harness.register_tid(tid)
         pid = payload.get("pid")
         if isinstance(pid, int):
-            harness.register_pid(pid)
+            harness.register_pid(pid, kind="owner")
         managed = payload.get("managed_pids")
         if isinstance(managed, list):
             for value in managed:
                 if isinstance(value, int):
-                    harness.register_pid(value)
+                    harness.register_pid(value, kind="managed")
         caller = payload.get("caller_pid")
         if isinstance(caller, int):
             harness._mark_safe_pid(caller)
         for value in payload.values():
-            _register_from_json(harness, value)
+            _register_from_json(
+                harness,
+                value,
+                worker_command=worker_command,
+            )
     elif isinstance(payload, list):
         for item in payload:
-            _register_from_json(harness, item)
+            _register_from_json(
+                harness,
+                item,
+                worker_command=worker_command,
+            )
 
 
 @pytest.hookimpl(tryfirst=True)

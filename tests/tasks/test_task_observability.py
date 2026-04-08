@@ -95,6 +95,25 @@ def test_tid_mapping_written(broker_env, task_factory, unique_tid) -> None:
     assert data.get("managed_pids") == []
 
 
+def test_tid_mapping_includes_metadata_role(
+    broker_env,
+    task_factory,
+    unique_tid,
+) -> None:
+    _db_path, make_queue = broker_env
+    mapping_queue = make_queue(WEFT_TID_MAPPINGS_QUEUE)
+    drain_queue(mapping_queue)
+
+    spec = build_function_spec(unique_tid, metadata={"role": "manager"})
+    task_factory(spec)
+
+    record = mapping_queue.read_one()
+    assert record is not None
+    data = json.loads(record)
+    assert data["full"] == unique_tid
+    assert data["role"] == "manager"
+
+
 def test_tid_mapping_records_worker_pid(broker_env, task_factory, unique_tid) -> None:
     db_path, make_queue = broker_env
     mapping_queue = make_queue(WEFT_TID_MAPPINGS_QUEUE)

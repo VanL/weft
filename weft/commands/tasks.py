@@ -235,6 +235,7 @@ def _latest_task_entry(
 def _stop_via_fallback(task_entry: dict[str, Any] | None) -> bool:
     if task_entry is None:
         return False
+
     pid = _task_pid_from_mapping(task_entry)
     if pid is not None and _pid_exists(pid):
         terminate_process_tree(pid, timeout=0.2, kill_after=False)

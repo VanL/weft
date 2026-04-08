@@ -112,8 +112,9 @@ def _send_stop(
     db_path: BrokerTarget | str,
     config: dict[str, Any],
     tid: str,
+    *,
+    entry: dict[str, Any] | None = None,
 ) -> None:
-    entry = _registry_entry_for_tid(db_path, config, tid)
     queue_name = None
     if isinstance(entry, dict):
         ctrl_in = entry.get("ctrl_in")
@@ -165,30 +166,45 @@ def stop_command(
     context = build_context(context_path)
     db_path = context.broker_target
 
-    _send_stop(db_path, context.broker_config, tid)
+    current_entry = _registry_entry_for_tid(db_path, context.broker_config, tid)
+    if current_entry is None:
+        _send_stop(db_path, context.broker_config, tid)
+    else:
+        if current_entry.get("status") == "stopped":
+            pid = current_entry.get("pid")
+            if not _pid_alive(cast(int | None, pid)):
+                return 0, None
+        _send_stop(
+            db_path,
+            context.broker_config,
+            tid,
+            entry=current_entry,
+        )
 
     deadline = time.time() + timeout
-    entry_observed = False
-    last_entry: dict[str, Any] | None = None
+    entry_observed = current_entry is not None
+    last_entry: dict[str, Any] | None = current_entry
     pid_checked_at: float = 0.0
 
     while time.time() < deadline:
         entry = _registry_entry_for_tid(db_path, context.broker_config, tid)
         if entry is None:
             if stop_if_absent or entry_observed:
-                return 0, None
+                last_pid = last_entry.get("pid") if isinstance(last_entry, dict) else None
+                if not _pid_alive(cast(int | None, last_pid)):
+                    return 0, None
         else:
             entry_observed = True
             last_entry = entry
             status = entry.get("status")
-            if status == "stopped":
+            pid = entry.get("pid")
+            if status == "stopped" and not _pid_alive(cast(int | None, pid)):
                 return 0, None
             if stop_if_absent:
-                pid = entry.get("pid")
                 now = time.time()
                 if now - pid_checked_at >= 0.5:
                     pid_checked_at = now
-                    if not _pid_alive(pid):
+                    if not _pid_alive(cast(int | None, pid)):
                         return 0, None
         time.sleep(0.1)
 
