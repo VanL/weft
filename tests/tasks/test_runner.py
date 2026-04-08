@@ -83,7 +83,11 @@ def _wait_for_pid_exit(pid: int, *, timeout: float = 5.0) -> bool:
     psutil = pytest.importorskip("psutil")
     deadline = time.time() + timeout
     while time.time() < deadline:
-        if not psutil.pid_exists(pid):
+        try:
+            process = psutil.Process(pid)
+        except psutil.Error:
+            return True
+        if not process.is_running() or process.status() == psutil.STATUS_ZOMBIE:
             return True
         time.sleep(0.05)
     return False
