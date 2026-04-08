@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import json
 import os
 from types import SimpleNamespace
 
 import pytest
 
+from simplebroker import Queue
 from tests.conftest import _register_from_json
 from tests.helpers.weft_harness import WeftTestHarness
+from weft._constants import WEFT_GLOBAL_LOG_QUEUE, WEFT_TID_MAPPINGS_QUEUE
 from weft.commands import tasks as task_cmd
 from weft.commands import worker as worker_cmd
 
@@ -404,6 +407,81 @@ def test_live_task_tids_ignore_terminal_log_events() -> None:
     finally:
         harness._closed = True
         harness._tempdir.cleanup()
+
+
+@pytest.mark.sqlite_only
+def test_wait_for_completion_treats_control_stop_as_terminal_event() -> None:
+    harness = WeftTestHarness()
+    repo_cwd = os.getcwd()
+    try:
+        harness.__enter__()
+        tid = "1775630560739303424"
+        log_queue = Queue(
+            WEFT_GLOBAL_LOG_QUEUE,
+            db_path=harness.context.broker_target,
+            persistent=False,
+            config=harness.context.broker_config,
+        )
+        try:
+            log_queue.write(json.dumps({"tid": tid, "event": "control_stop"}))
+        finally:
+            log_queue.close()
+
+        with pytest.raises(RuntimeError, match=rf"Task {tid} reported control_stop"):
+            harness.wait_for_completion(tid, timeout=0.2)
+    finally:
+        os.chdir(repo_cwd)
+        harness.cleanup()
+
+
+@pytest.mark.sqlite_only
+def test_wait_for_completion_timeout_includes_tid_debug_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = WeftTestHarness()
+    repo_cwd = os.getcwd()
+    try:
+        harness.__enter__()
+        tid = "1775630560739303424"
+        mapping_queue = Queue(
+            WEFT_TID_MAPPINGS_QUEUE,
+            db_path=harness.context.broker_target,
+            persistent=False,
+            config=harness.context.broker_config,
+        )
+        try:
+            mapping_queue.write(
+                json.dumps(
+                    {
+                        "full": tid,
+                        "pid": 424242,
+                        "task_pid": 424242,
+                        "managed_pids": [434343],
+                    }
+                )
+            )
+        finally:
+            mapping_queue.close()
+
+        monkeypatch.setattr(harness, "_pid_alive", lambda pid: pid == 424242)
+        monkeypatch.setattr(harness, "_should_skip_pid", lambda pid: False)
+
+        with pytest.raises(
+            TimeoutError, match=rf"Timed out waiting for task {tid}"
+        ) as exc_info:
+            harness.wait_for_completion(tid, timeout=0.01)
+
+        message = str(exc_info.value)
+        assert "Task completion timeout snapshot:" in message
+        assert f"  tid={tid}" in message
+        assert "  latest_tid_mapping=" in message
+        assert '"managed_pids": [434343]' in message
+        assert "  outbox_present=False" in message
+        assert "  live_candidate_pids=[424242]" in message
+        assert "WeftTestHarness snapshot:" in message
+    finally:
+        os.chdir(repo_cwd)
+        harness.cleanup()
 
 
 @pytest.mark.sqlite_only

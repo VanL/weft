@@ -112,6 +112,120 @@ class WeftTestHarness:
     def registered_worker_tids(self) -> set[str]:
         return set(self._registered_worker_tids)
 
+    @staticmethod
+    def _format_debug_payload(payload: object) -> str:
+        try:
+            decoded = json.loads(payload) if isinstance(payload, str) else payload
+            return json.dumps(decoded, ensure_ascii=False, sort_keys=True)
+        except Exception:
+            return str(payload)
+
+    def _peek_queue_lines(
+        self,
+        name: str,
+        *,
+        persistent: bool,
+        limit: int = 20,
+    ) -> list[str]:
+        queue = Queue(
+            name,
+            db_path=self.context.broker_target,
+            persistent=persistent,
+            config=self.context.broker_config,
+        )
+        try:
+            entries = queue.peek_many(limit=limit, with_timestamps=True) or []
+        except Exception as exc:  # pragma: no cover - defensive logging
+            return [f"<error reading {name}: {exc}>"]
+        finally:
+            queue.close()
+
+        formatted: list[str] = []
+        for entry in entries[-limit:]:
+            if isinstance(entry, tuple) and len(entry) == 2:
+                payload, ts = entry
+            else:
+                payload, ts = entry, None
+            formatted.append(f"    ts={ts}: {self._format_debug_payload(payload)}")
+        return formatted
+
+    def _task_log_tail_lines(self, tid: str, *, limit: int = 10) -> list[str]:
+        queue = Queue(
+            WEFT_GLOBAL_LOG_QUEUE,
+            db_path=self.context.broker_target,
+            persistent=False,
+            config=self.context.broker_config,
+        )
+        try:
+            matching: list[str] = []
+            for data, ts in iter_queue_json_entries(queue):
+                if data.get("tid") != tid:
+                    continue
+                matching.append(f"    ts={ts}: {self._format_debug_payload(data)}")
+        finally:
+            queue.close()
+        return matching[-limit:]
+
+    def dump_completion_timeout_state(self, tid: str) -> str:
+        lines = [
+            "Task completion timeout snapshot:",
+            f"  tid={tid}",
+        ]
+
+        latest_event = self._latest_task_events().get(tid)
+        lines.append(f"  latest_task_event={latest_event or '<missing>'}")
+
+        latest_mapping = self._latest_tid_mapping_payloads().get(tid)
+        if latest_mapping is None:
+            lines.append("  latest_tid_mapping=<missing>")
+            candidate_pids: list[int] = []
+        else:
+            lines.append(
+                f"  latest_tid_mapping={self._format_debug_payload(latest_mapping)}"
+            )
+            candidate_pids = []
+            for key in ("task_pid", "pid"):
+                value = latest_mapping.get(key)
+                if isinstance(value, int):
+                    candidate_pids.append(value)
+            managed = latest_mapping.get("managed_pids")
+            if isinstance(managed, list):
+                candidate_pids.extend(
+                    value for value in managed if isinstance(value, int)
+                )
+
+        deduped_candidate_pids = sorted(set(candidate_pids))
+        lines.append(f"  candidate_pids={deduped_candidate_pids}")
+        live_candidate_pids = [
+            pid
+            for pid in deduped_candidate_pids
+            if not self._should_skip_pid(pid) and self._pid_alive(pid)
+        ]
+        lines.append(f"  live_candidate_pids={live_candidate_pids}")
+        lines.append(f"  registered_live_pids={self._live_registered_pids()}")
+
+        outbox_name = f"T{tid}.{QUEUE_OUTBOX_SUFFIX}"
+        outbox_queue = Queue(
+            outbox_name,
+            db_path=self.context.broker_target,
+            persistent=True,
+            config=self.context.broker_config,
+        )
+        try:
+            outbox_message = outbox_queue.peek_one()
+        finally:
+            outbox_queue.close()
+
+        lines.append(f"  outbox_present={outbox_message is not None}")
+        if outbox_message is not None:
+            lines.append(f"  outbox_head={self._format_debug_payload(outbox_message)}")
+
+        lines.append("  task_log_tail:")
+        lines.extend(self._task_log_tail_lines(tid, limit=10) or ["    <empty>"])
+
+        lines.append(self.dump_debug_state())
+        return "\n".join(lines)
+
     def dump_debug_state(self) -> str:
         """Return a human-readable snapshot of harness state for debugging."""
 
@@ -130,44 +244,19 @@ class WeftTestHarness:
 
         lines.append(f"  database_path={context.database_path}")
 
-        def _peek_queue(name: str, *, persistent: bool, limit: int = 20) -> list[str]:
-            queue = Queue(
-                name,
-                db_path=context.broker_target,
-                persistent=persistent,
-                config=context.broker_config,
-            )
-            try:
-                entries = queue.peek_many(limit=limit, with_timestamps=True) or []
-            except Exception as exc:  # pragma: no cover - defensive logging
-                return [f"<error reading {name}: {exc}>"]
-            finally:
-                queue.close()
-
-            formatted: list[str] = []
-            for entry in entries[-limit:]:
-                if isinstance(entry, tuple) and len(entry) == 2:
-                    payload, ts = entry
-                else:
-                    payload, ts = entry, None
-                snippet: str
-                try:
-                    decoded = (
-                        json.loads(payload) if isinstance(payload, str) else payload
-                    )
-                    snippet = json.dumps(decoded, ensure_ascii=False)
-                except Exception:
-                    snippet = str(payload)
-                formatted.append(f"    ts={ts}: {snippet}")
-            return formatted
-
-        registry_dump = _peek_queue(
-            WEFT_WORKERS_REGISTRY_QUEUE, persistent=False, limit=10
+        registry_dump = self._peek_queue_lines(
+            WEFT_WORKERS_REGISTRY_QUEUE,
+            persistent=False,
+            limit=10,
         )
         lines.append("  registry_tail:")
         lines.extend(registry_dump or ["    <empty>"])
 
-        log_dump = _peek_queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False, limit=10)
+        log_dump = self._peek_queue_lines(
+            WEFT_GLOBAL_LOG_QUEUE,
+            persistent=False,
+            limit=10,
+        )
         lines.append("  log_tail:")
         lines.extend(log_dump or ["    <empty>"])
 
@@ -231,7 +320,10 @@ class WeftTestHarness:
         finally:
             outbox_queue.close()
 
-        raise TimeoutError(f"Timed out waiting for task {tid}")
+        raise TimeoutError(
+            f"Timed out waiting for task {tid}\n"
+            f"{self.dump_completion_timeout_state(tid)}"
+        )
 
     # ------------------------------------------------------------------
     # Cleanup
