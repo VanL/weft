@@ -243,3 +243,46 @@ def test_interactive_client_waits_for_control_response(broker_env) -> None:
     assert response is not None
     assert response["command"] == "STOP"
     assert response["status"] == "ack"
+
+
+def test_interactive_client_control_stop_is_terminal(broker_env) -> None:
+    db_path, make_queue = broker_env
+    tid = str(time.time_ns())
+    spec = _make_interactive_spec(tid)
+
+    make_queue(spec.io.outputs["outbox"])
+    make_queue(spec.io.control["ctrl_out"])
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+
+    state_events: list[str] = []
+
+    config = load_config()
+    client = InteractiveStreamClient(
+        db_path=db_path,
+        config=config,
+        tid=tid,
+        inbox=spec.io.inputs["inbox"],
+        outbox=spec.io.outputs["outbox"],
+        ctrl_out=spec.io.control["ctrl_out"],
+        on_state=lambda event: state_events.append(event.get("event", "")),
+    )
+
+    client.start()
+    try:
+        log_queue.write(
+            json.dumps(
+                {
+                    "event": "control_stop",
+                    "tid": tid,
+                    "status": "cancelled",
+                }
+            )
+        )
+
+        assert client.wait(timeout=5.0), "client did not observe control_stop"
+    finally:
+        client.stop()
+
+    assert "control_stop" in state_events
+    assert client.status == "cancelled"
+    assert client.error == "Task cancelled"

@@ -306,6 +306,12 @@ class InteractiveStreamClient:
             elif event in {"work_failed", "work_timeout", "work_limit_violation"}:
                 error = payload.get("error") or event.replace("_", " ")
                 self._mark_completion(status="failed", error=error)
+            elif event in {"control_stop", "task_signal_stop"}:
+                error = payload.get("error") or "Task cancelled"
+                self._mark_completion(status="cancelled", error=error)
+            elif event in {"control_kill", "task_signal_kill"}:
+                error = payload.get("error") or "Task killed"
+                self._mark_completion(status="killed", error=error)
 
         self._log_last_timestamp = scan_last_timestamp
 
