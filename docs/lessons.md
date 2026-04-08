@@ -161,6 +161,19 @@ runbook needs to become stricter.
   fixed timeout, move the fix to the shared harness default instead of raising
   per-test limits.
 
+## 2026-04-08 Interactive Contract
+
+- Treat `spec.interactive` as a line-oriented, queue-mediated IO mode, not as
+  a terminal-emulation feature. Task-local correctness should come from
+  `T{tid}.outbox` and `T{tid}.ctrl_out`, with `ctrl_out` carrying terminal
+  completion for interactive sessions.
+- Do not make interactive clients depend on `weft.log.tasks` for their own
+  completion semantics. The global task log is for status, audit, and recovery;
+  a task-facing interactive client should only care about its local channels.
+- Interpreter-specific argument tweaks such as `python -u -i` or `bash -i`
+  are still useful in the line-oriented model. They improve behavior of known
+  interactive programs without requiring PTY/TTY transport support.
+
 ## 2026-04-08 Zombie PID Liveness
 
 - `psutil.Process(pid).is_running()` is not a sufficient liveness check for

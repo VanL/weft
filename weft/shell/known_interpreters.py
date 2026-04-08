@@ -17,7 +17,8 @@ class InterpreterHit:
 
 KNOWN_INTERPRETERS: Mapping[str, InterpreterHit] = {
     # Python REPLs need -u (unbuffered) for prompt responsiveness and -i to
-    # stay interactive when stdin is piped from the CLI.
+    # stay interactive when stdin is streamed over Weft's line-oriented
+    # interactive channel.
     "python": InterpreterHit("python", ("-u", "-i")),
     "python3": InterpreterHit("python", ("-u", "-i")),
     "python3.10": InterpreterHit("python", ("-u", "-i")),
@@ -28,10 +29,10 @@ KNOWN_INTERPRETERS: Mapping[str, InterpreterHit] = {
     "pypy": InterpreterHit("python", ("-u", "-i")),
     "pypy3": InterpreterHit("python", ("-u", "-i")),
     # Node already enters a REPL when no script is given, but --interactive
-    # makes the intent explicit and keeps the session alive after stdin closes.
+    # makes the intent explicit for line-oriented stdin streaming.
     "node": InterpreterHit("node", ("--interactive",)),
-    # Bash supports -i for interactive shells; this unlocks prompt export when
-    # invoked via the CLI.
+    # Bash supports -i for interactive shells driven through Weft's stdin
+    # stream, even though Weft is not emulating a full terminal.
     "bash": InterpreterHit("bash", ("-i",)),
 }
 

@@ -23,11 +23,11 @@ from weft._constants import (
 from weft.context import WeftContext, build_context
 from weft.helpers import iter_queue_json_entries
 
-from .run import (
-    _aggregate_public_outputs,
-    _handle_ctrl_stream,
-    _poll_log_events,
-    _process_outbox_message,
+from ._streaming import (
+    aggregate_public_outputs,
+    handle_ctrl_stream,
+    poll_log_events,
+    process_outbox_message,
 )
 
 
@@ -213,7 +213,7 @@ def _drain_outbox_until_timestamp(
         consumed = queue.read_one(exact_timestamp=timestamp)
         if consumed is None:
             continue
-        final, value = _process_outbox_message(
+        final, value = process_outbox_message(
             str(consumed),
             stream_buffer,
             emit_stream=False,
@@ -260,7 +260,7 @@ def _collect_all_results(
             stream_buffer: list[str] = []
             result_values: list[Any] = []
             for payload in _iter_queue_messages(queue, peek=peek_only):
-                final, value = _process_outbox_message(
+                final, value = process_outbox_message(
                     payload,
                     stream_buffer,
                     emit_stream=False,
@@ -268,7 +268,7 @@ def _collect_all_results(
                 if not final:
                     continue
                 _append_public_value(result_values, value, show_stderr=show_stderr)
-            rendered = _aggregate_public_outputs(result_values)
+            rendered = aggregate_public_outputs(result_values)
             if rendered is not None:
                 aggregated.append({"tid": tid, "result": rendered})
         finally:
@@ -337,7 +337,7 @@ def _await_single_result(
                 if ctrl_raw is None:
                     break
                 ctrl_payload = ctrl_raw[0] if isinstance(ctrl_raw, tuple) else ctrl_raw
-                _handle_ctrl_stream(str(ctrl_payload))
+                handle_ctrl_stream(str(ctrl_payload))
 
             if is_persistent:
                 peeked = outbox_queue.peek_one(with_timestamps=True)
@@ -358,7 +358,7 @@ def _await_single_result(
                     payload = (
                         outbox_raw[0] if isinstance(outbox_raw, tuple) else outbox_raw
                     )
-                    final, value = _process_outbox_message(
+                    final, value = process_outbox_message(
                         str(payload),
                         stream_buffer,
                         emit_stream=False,
@@ -372,7 +372,7 @@ def _await_single_result(
                         continue
 
             events: list[tuple[dict[str, Any], int]]
-            events, log_last_timestamp = _poll_log_events(
+            events, log_last_timestamp = poll_log_events(
                 log_queue,
                 log_last_timestamp,
                 tid,
@@ -426,14 +426,14 @@ def _await_single_result(
                     and time.monotonic() - boundary_seen_at
                     >= WEFT_COMPLETED_RESULT_GRACE_SECONDS
                 ):
-                    result_value = _aggregate_public_outputs(result_values)
+                    result_value = aggregate_public_outputs(result_values)
                     status = "completed"
                     break
 
             if completed_at is not None and (
                 time.monotonic() - completed_at >= WEFT_COMPLETED_RESULT_GRACE_SECONDS
             ):
-                result_value = _aggregate_public_outputs(result_values)
+                result_value = aggregate_public_outputs(result_values)
                 status = "completed"
                 break
 

@@ -169,7 +169,10 @@ Concrete task types extend `BaseTask` to express different queue behaviours.
 
 _Implementation mapping_: `Consumer` and `SelectiveConsumer` (`weft/core/tasks/consumer.py`), `Observer` and `SamplingObserver` (`weft/core/tasks/observer.py`), `Monitor` (`weft/core/tasks/monitor.py`). All re-exported from `weft/core/tasks/__init__.py`.
 
-Interactive command sessions reuse `Consumer` with `spec.interactive=True`, streaming stdin/stdout via JSON envelopes rather than per-message execution.
+Interactive command sessions reuse `Consumer` with `spec.interactive=True`,
+streaming line-oriented stdin/stdout via task-local JSON envelopes rather than
+per-message execution. This mode is queue-mediated interaction, not terminal
+emulation.
 
 | Class | Purpose | Queue Modes |
 |-------|---------|-------------|

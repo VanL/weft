@@ -401,7 +401,7 @@ class TaskOutputReader:
             yield msg
 ```
 
-_Implementation note_: When `spec.stream_output` is `True`, `Consumer` emits JSON envelopes on `outbox` with the shape `{"type": "stream", "chunk": N, "final": bool, "encoding": "base64", "size": bytes, "data": "..."}`. Interactive sessions add a `stream` field (`stdout`/`stderr`) and use `encoding: "text"` when forwarding live output. Consumers can decode and reassemble the payload in order.
+_Implementation note_: When `spec.stream_output` is `True`, `Consumer` emits JSON envelopes on `outbox` with the shape `{"type": "stream", "chunk": N, "final": bool, "encoding": "base64", "size": bytes, "data": "..."}`. Interactive sessions add a `stream` field (`stdout`/`stderr`) and use `encoding: "text"` when forwarding live output. Interactive terminal completion is reported on `ctrl_out` with a task-local envelope shaped like `{"type": "terminal", "status": "...", "event": "...", ...}` so interactive clients do not need to watch `weft.log.tasks` for correctness. Consumers can decode and reassemble the payload in order.
 
 ### 3. Cleanup Strategy
 

@@ -71,7 +71,18 @@ For TaskSpecs loaded through `--spec`, `weft run` preserves the declared
 `spec.runner`. Inline command/function invocations synthesize TaskSpecs that use
 the default `host` runner.
 
-If `--wait` (current default) is provided the Client then tails `weft.log.tasks` and the task outbox queue until it observes a terminal event, streaming output as it arrives. When `--no-wait` is provided it simply enqueues the request, reports the TID, and returns; the Manager is unaware of the distinction.
+If `--wait` (current default) is provided the Client then waits for task
+completion using the task log plus task-local queues. Ordinary one-shot runs
+tail `weft.log.tasks` and the outbox until a terminal event appears. Interactive
+command runs use their task-local `outbox`/`ctrl_out` channels for live output
+and terminal completion. When `--no-wait` is provided the CLI simply enqueues
+the request, reports the TID, and returns; the Manager is unaware of the
+distinction.
+
+Interactive command mode is line-oriented. `weft run --interactive` forwards
+stdin lines to the task inbox and renders stdout/stderr from the task-local
+queues. It is intentionally **not** a PTY/TTY terminal-emulation feature; the
+interactive contract is durable queue-mediated IO, not remote terminal fidelity.
 
 ```bash
 # Run a command
@@ -132,6 +143,12 @@ persistent tasks when `spec.persistent=true`.
 - `weft run --pipeline` uses piped stdin as the first stage input only when `--input` is absent.
 - `--input` and piped stdin are mutually exclusive for pipelines.
 - Piped stdin is limited by the active broker max-message-size setting.
+
+**Interactive stdin/stdout**
+- `weft run --interactive` keeps a command task alive and routes follow-up input through `T{tid}.inbox`.
+- Interactive stdout streams on `T{tid}.outbox`; interactive stderr, control replies, and terminal completion stream on `T{tid}.ctrl_out`.
+- Interactive completion is task-local and does not require watching `weft.log.tasks`.
+- Terminal-oriented applications may still run if they behave over streamed stdin/stdout, but Weft does not promise PTY/TTY semantics.
 
 **Resolution rules for NAME|PATH**
 1. If the argument contains a path separator (`/`, `./`, `../`, `~`) or ends

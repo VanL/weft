@@ -1,4 +1,9 @@
-"""Interactive task mixin and helpers."""
+"""Line-oriented interactive task mixin and helpers.
+
+Spec references:
+- docs/specifications/01-Core_Components.md [CC-2.3], [CC-2.4]
+- docs/specifications/05-Message_Flow_and_State.md [MF-2]
+"""
 
 from __future__ import annotations
 
@@ -320,6 +325,34 @@ class InteractiveTaskMixin(ABC):
                 break
             time.sleep(0.01)
 
+    def _interactive_terminal_envelope(self) -> dict[str, Any]:
+        """Build the task-local terminal event emitted on ctrl_out.
+
+        Spec: [CC-2.3], [MF-2]
+        """
+
+        status = str(self.taskspec.state.status)
+        event = {
+            "completed": "work_completed",
+            "failed": "work_failed",
+            "timeout": "work_timeout",
+            "cancelled": "control_stop",
+            "killed": "control_kill",
+        }.get(status, "work_completed")
+        payload: dict[str, Any] = {
+            "type": "terminal",
+            "tid": str(self.taskspec.tid),
+            "status": status,
+            "event": event,
+        }
+        error = self.taskspec.state.error
+        if isinstance(error, str) and error:
+            payload["error"] = error
+        return_code = self.taskspec.state.return_code
+        if isinstance(return_code, int):
+            payload["return_code"] = return_code
+        return payload
+
     def _interactive_finalize_session(self, failure_reason: str | None = None) -> None:
         if getattr(self, "_interactive_session", None) is None:
             return
@@ -399,6 +432,8 @@ class InteractiveTaskMixin(ABC):
             self._ctrl_out_queue.write(json.dumps(envelope))
             self._interactive_stderr_index += 1
             self._interactive_stderr_final_sent = True
+
+        self._ctrl_out_queue.write(json.dumps(self._interactive_terminal_envelope()))
 
         self.should_stop = True
         self._interactive_completion_reported = True
