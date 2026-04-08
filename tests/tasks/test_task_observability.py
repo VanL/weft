@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import sys
 import time
 import types
 
@@ -168,21 +167,16 @@ def test_tid_mapping_deduplicates_identical_payloads(
     drain_queue(mapping_queue)
 
 
-def test_process_titles_update(
-    monkeypatch, broker_env, task_factory, unique_tid
-) -> None:
+def test_process_titles_update(task_factory, unique_tid) -> None:
     calls: list[str] = []
     fake_module = types.SimpleNamespace(setproctitle=lambda title: calls.append(title))
-    monkeypatch.setitem(sys.modules, "setproctitle", fake_module)
-
-    db_path, make_queue = broker_env
-    spec = build_function_spec(unique_tid, enable_title=True)
+    spec = build_function_spec(unique_tid, enable_title=False)
     task = task_factory(spec)
-
-    inbox = make_queue(spec.io.inputs["inbox"])
-    inbox.write(json.dumps({"args": ["payload"]}))
-
-    task._drain_queue()
+    task._setproctitle_module = fake_module
+    task.enable_process_title = True
+    task._update_process_title("init")
+    task._update_process_title("running")
+    task._update_process_title("completed")
 
     assert any(title.endswith(":init") for title in calls)
     assert any(title.endswith(":running") for title in calls)

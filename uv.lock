@@ -721,11 +721,11 @@ wheels = [
 
 [[package]]
 name = "puremagic"
-version = "2.1.1"
+version = "2.2.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/eb/df/3725f4b848095ef634c0b2226c97901e64ee2d5a82981d89d4b784ae8ce1/puremagic-2.1.1.tar.gz", hash = "sha256:b156c4ae63d84842f92a85cd49c9b9029a4f107f98ad14e7584ed652954feff4", size = 1133417, upload-time = "2026-03-23T19:08:46.929Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/24/74/ce5987ab9b8aec4ced06e2723ebb604205c9eb58abdad91453da93166380/puremagic-2.2.0.tar.gz", hash = "sha256:eb4bddf07c177c4b434554b92165b67449f5a51e152b976202d6254498810eef", size = 1189752, upload-time = "2026-04-08T01:39:55.562Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/62/d0/12b1d4113fd6660a0a75e8c40500c5d1c4febd8e24dc85aaf20cfd93e9d6/puremagic-2.1.1-py3-none-any.whl", hash = "sha256:b8862451f96254358a6e2ea7fba46e0600cf8b13ebe917d6eecdb18fc22db964", size = 68025, upload-time = "2026-03-23T19:08:45.872Z" },
+    { url = "https://files.pythonhosted.org/packages/95/81/314320aeffd88dadeac553ff9eb10f54507ab41deccd0c69f6221d254a0a/puremagic-2.2.0-py3-none-any.whl", hash = "sha256:c4f7ed7307f056c787199acfda839555921be1df13abba61e8e6db0c787ae1d0", size = 71971, upload-time = "2026-04-08T01:39:54.169Z" },
 ]
 
 [[package]]
@@ -834,7 +834,7 @@ wheels = [
 
 [[package]]
 name = "pytest"
-version = "9.0.2"
+version = "9.0.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "colorama", marker = "sys_platform == 'win32'" },
@@ -843,9 +843,9 @@ dependencies = [
     { name = "pluggy" },
     { name = "pygments" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/d1/db/7ef3487e0fb0049ddb5ce41d3a49c235bf9ad299b6a25d5780a89f19230f/pytest-9.0.2.tar.gz", hash = "sha256:75186651a92bd89611d1d9fc20f0b4345fd827c41ccd5c299a868a05d70edf11", size = 1568901, upload-time = "2025-12-06T21:30:51.014Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/7d/0d/549bd94f1a0a402dc8cf64563a117c0f3765662e2e668477624baeec44d5/pytest-9.0.3.tar.gz", hash = "sha256:b86ada508af81d19edeb213c681b1d48246c1a91d304c6c81a427674c17eb91c", size = 1572165, upload-time = "2026-04-07T17:16:18.027Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/3b/ab/b3226f0bd7cdcf710fbede2b3548584366da3b19b5021e74f5bde2a8fa3f/pytest-9.0.2-py3-none-any.whl", hash = "sha256:711ffd45bf766d5264d487b917733b453d917afd2b0ad65223959f59089f875b", size = 374801, upload-time = "2025-12-06T21:30:49.154Z" },
+    { url = "https://files.pythonhosted.org/packages/d4/24/a372aaf5c9b7208e7112038812994107bc65a84cd00e0354a88c2c77a617/pytest-9.0.3-py3-none-any.whl", hash = "sha256:2c5efc453d45394fdd706ade797c0a81091eccd1d6e4bccfcd476e2b8e0ab5d9", size = 375249, upload-time = "2026-04-07T17:16:16.13Z" },
 ]
 
 [[package]]
@@ -1101,11 +1101,11 @@ wheels = [
 
 [[package]]
 name = "simplebroker"
-version = "3.1.4"
+version = "3.1.5"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/c8/33/0873e806a15da7b54249172214737dc224b8952e6769f194cabe56cd27e8/simplebroker-3.1.4.tar.gz", hash = "sha256:67b46bae89f577feb48d15e6d5ee4fbd37bb05e30081a0171bf930f46b42cdda", size = 132756, upload-time = "2026-04-06T15:43:45.506Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/0c/ae/6693bffe00f0b0d72e3be29f22300d109346842ea1797a20a8fc704149fb/simplebroker-3.1.5.tar.gz", hash = "sha256:2c9dcae87bd47a683737f1c40516c3262d35aa3fdeb25391bc106abf8c25cc01", size = 133128, upload-time = "2026-04-08T13:13:38.389Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/95/d7/f9cf0b7a7bf51f4ee0e0634906712f4d014856c6c09d01b47614b6c3ecc2/simplebroker-3.1.4-py3-none-any.whl", hash = "sha256:67ec8d1a6013d8f892ab824e64a00983547b37c8b5cfc88c8b01d6c093b25a30", size = 149912, upload-time = "2026-04-06T15:43:44.064Z" },
+    { url = "https://files.pythonhosted.org/packages/93/d9/e304439172d67949fa1476c34b11878d35567b6645fbd7ffc90f8d140d25/simplebroker-3.1.5-py3-none-any.whl", hash = "sha256:2b9a8288d33fdb79238b32a0575ba4e65b3d1cd80d76a5bb68ac93351d62ed8b", size = 150298, upload-time = "2026-04-08T13:13:39.867Z" },
 ]
 
 [package.optional-dependencies]
@@ -1222,11 +1222,11 @@ wheels = [
 
 [[package]]
 name = "types-psutil"
-version = "7.2.2.20260402"
+version = "7.2.2.20260408"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/31/a2/a608db0caf0d71bd231305dc3ab3f5d65624d77761003696a3ca8c6fad40/types_psutil-7.2.2.20260402.tar.gz", hash = "sha256:9f36eebf15ad8487f8004ed67c8e008b84b63ba00cfb709a3f60275058217329", size = 26522, upload-time = "2026-04-02T04:18:47.916Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/44/14/279fd5defebbd560ede04aecd38f7651cccee7336f2264d0889d8c9a9d43/types_psutil-7.2.2.20260408.tar.gz", hash = "sha256:e8053450685965b8cd52afb62569073d00ea9967ae78bb45dff5f606847f97f2", size = 26556, upload-time = "2026-04-08T04:27:44.349Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/81/8a/f4b3ca3154e8a77df91eb7a28c208af721d48f8a4aca667f582523a0beff/types_psutil-7.2.2.20260402-py3-none-any.whl", hash = "sha256:653d1fd908e68cc0666754b16a0cee28efbded0c401caa5314d2aeea67f227cd", size = 32860, upload-time = "2026-04-02T04:18:46.671Z" },
+    { url = "https://files.pythonhosted.org/packages/af/40/2fd92a4a1ee088c4dbcc44c977908d9869838d9cd2a2fa2e001352f56694/types_psutil-7.2.2.20260408-py3-none-any.whl", hash = "sha256:0c334f6f6bc9e9c24fca5c7d1f0b6971c961a0a2e3956dc5ce704722c01f9762", size = 32861, upload-time = "2026-04-08T04:27:42.929Z" },
 ]
 
 [[package]]
