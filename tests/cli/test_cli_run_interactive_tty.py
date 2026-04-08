@@ -119,7 +119,6 @@ def test_interactive_python_repl_outputs(tty_workdir: Path) -> None:
             _shutdown(proc, master_fd)
             pytest.fail(f"expected python output, saw {output!r}")
 
-        _write_line(master_fd, "quit()\n")
         _write_line(master_fd, ":quit\n")
         trailing = _read_until_exit(proc, master_fd)
         rc = proc.wait(timeout=EXIT_TIMEOUT)

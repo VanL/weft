@@ -123,3 +123,10 @@ runbook needs to become stricter.
 - If a document is human-clear but agent-ambiguous, tighten it immediately with
   clearer ownership, boundary, verification, and required-action language
   rather than trusting the next implementer to infer the right path.
+
+## 2026-04-07 Interactive TTY Tests
+
+- PTY-backed integration tests should exercise one shutdown path at a time.
+  Combining a downstream REPL exit command like `quit()` with a wrapper-level
+  command like `:quit` creates nondeterministic teardown races under slower
+  backends and full-suite load.
