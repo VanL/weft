@@ -40,7 +40,16 @@ TERMINAL_STATUSES: frozenset[str] = frozenset(
     {"completed", "failed", "timeout", "cancelled", "killed"}
 )
 NON_LIVE_RUNTIME_STATES: frozenset[str] = frozenset(
-    {"missing", "exited", "dead", "stopped", "completed", "failed", "cancelled"}
+    {
+        "missing",
+        "created",
+        "exited",
+        "dead",
+        "stopped",
+        "completed",
+        "failed",
+        "cancelled",
+    }
 )
 
 
