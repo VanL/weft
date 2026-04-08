@@ -7,7 +7,7 @@ import sys
 import time
 from pathlib import Path
 
-from weft._constants import WEFT_GLOBAL_LOG_QUEUE, load_config
+from weft._constants import load_config
 from weft.commands.interactive import InteractiveStreamClient
 from weft.core.tasks import Consumer
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
@@ -53,11 +53,10 @@ def test_interactive_client_streams_and_completes(broker_env) -> None:
     make_queue(spec.io.inputs["inbox"])
     make_queue(spec.io.outputs["outbox"])
     make_queue(spec.io.control["ctrl_out"])
-    make_queue(WEFT_GLOBAL_LOG_QUEUE)
 
     stdout_chunks: list[str] = []
     stderr_chunks: list[str] = []
-    state_events: list[str] = []
+    state_statuses: list[str] = []
 
     config = load_config()
     client = InteractiveStreamClient(
@@ -69,7 +68,7 @@ def test_interactive_client_streams_and_completes(broker_env) -> None:
         ctrl_out=spec.io.control["ctrl_out"],
         on_stdout=lambda chunk, _final: stdout_chunks.append(chunk),
         on_stderr=lambda chunk, _final: stderr_chunks.append(chunk),
-        on_state=lambda event: state_events.append(event.get("event", "")),
+        on_state=lambda event: state_statuses.append(str(event.get("status", ""))),
     )
 
     client.start()
@@ -89,25 +88,22 @@ def test_interactive_client_streams_and_completes(broker_env) -> None:
     combined_stdout = "".join(stdout_chunks)
     assert "echo: hello" in combined_stdout
     assert "goodbye" in combined_stdout
-    assert "work_completed" in state_events
+    assert "completed" in state_statuses
     assert client.status == "completed"
     assert client.error is None
     assert not [chunk for chunk in stderr_chunks if chunk.strip()]
 
 
-def test_interactive_client_observes_completion_beyond_fixed_log_window(
-    broker_env,
-) -> None:
+def test_interactive_client_observes_terminal_ctrl_out_envelope(broker_env) -> None:
     db_path, make_queue = broker_env
     tid = str(time.time_ns())
     spec = _make_interactive_spec(tid)
 
     make_queue(spec.io.inputs["inbox"])
     make_queue(spec.io.outputs["outbox"])
-    make_queue(spec.io.control["ctrl_out"])
-    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    ctrl_out = make_queue(spec.io.control["ctrl_out"])
 
-    state_events: list[str] = []
+    state_statuses: list[str] = []
 
     config = load_config()
     client = InteractiveStreamClient(
@@ -117,37 +113,27 @@ def test_interactive_client_observes_completion_beyond_fixed_log_window(
         inbox=spec.io.inputs["inbox"],
         outbox=spec.io.outputs["outbox"],
         ctrl_out=spec.io.control["ctrl_out"],
-        on_state=lambda event: state_events.append(event.get("event", "")),
+        on_state=lambda event: state_statuses.append(str(event.get("status", ""))),
     )
 
     client.start()
     try:
-        for index in range(140):
-            log_queue.write(
-                json.dumps(
-                    {
-                        "event": "work_started",
-                        "tid": f"other-{index:03d}",
-                        "status": "running",
-                    }
-                )
-            )
-
-        log_queue.write(
+        ctrl_out.write(
             json.dumps(
                 {
-                    "event": "work_completed",
+                    "type": "terminal",
                     "tid": tid,
                     "status": "completed",
+                    "event": "work_completed",
                 }
             )
         )
 
-        assert client.wait(timeout=5.0), "client did not observe terminal log event"
+        assert client.wait(timeout=5.0), "client did not observe terminal envelope"
     finally:
         client.stop()
 
-    assert "work_completed" in state_events
+    assert "completed" in state_statuses
     assert client.status == "completed"
 
 
@@ -157,8 +143,7 @@ def test_interactive_client_failure_overrides_stdout_final(broker_env) -> None:
     spec = _make_interactive_spec(tid)
 
     outbox = make_queue(spec.io.outputs["outbox"])
-    make_queue(spec.io.control["ctrl_out"])
-    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    ctrl_out = make_queue(spec.io.control["ctrl_out"])
 
     config = load_config()
     client = InteractiveStreamClient(
@@ -184,22 +169,23 @@ def test_interactive_client_failure_overrides_stdout_final(broker_env) -> None:
                 }
             )
         )
-        assert client.wait(timeout=5.0), "client did not observe final stdout marker"
+        assert not client.wait(timeout=0.1), (
+            "stdout final marker should not be terminal"
+        )
 
-        log_queue.write(
+        ctrl_out.write(
             json.dumps(
                 {
-                    "event": "work_failed",
+                    "type": "terminal",
                     "tid": tid,
                     "status": "failed",
+                    "event": "work_failed",
                     "error": "boom",
                 }
             )
         )
 
-        deadline = time.monotonic() + 5.0
-        while time.monotonic() < deadline and client.status != "failed":
-            time.sleep(0.05)
+        assert client.wait(timeout=5.0), "client did not observe failed terminal event"
     finally:
         client.stop()
 
@@ -251,10 +237,9 @@ def test_interactive_client_control_stop_is_terminal(broker_env) -> None:
     spec = _make_interactive_spec(tid)
 
     make_queue(spec.io.outputs["outbox"])
-    make_queue(spec.io.control["ctrl_out"])
-    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    ctrl_out = make_queue(spec.io.control["ctrl_out"])
 
-    state_events: list[str] = []
+    state_statuses: list[str] = []
 
     config = load_config()
     client = InteractiveStreamClient(
@@ -264,17 +249,19 @@ def test_interactive_client_control_stop_is_terminal(broker_env) -> None:
         inbox=spec.io.inputs["inbox"],
         outbox=spec.io.outputs["outbox"],
         ctrl_out=spec.io.control["ctrl_out"],
-        on_state=lambda event: state_events.append(event.get("event", "")),
+        on_state=lambda event: state_statuses.append(str(event.get("status", ""))),
     )
 
     client.start()
     try:
-        log_queue.write(
+        ctrl_out.write(
             json.dumps(
                 {
-                    "event": "control_stop",
+                    "type": "terminal",
                     "tid": tid,
                     "status": "cancelled",
+                    "event": "control_stop",
+                    "error": "Task cancelled",
                 }
             )
         )
@@ -283,6 +270,6 @@ def test_interactive_client_control_stop_is_terminal(broker_env) -> None:
     finally:
         client.stop()
 
-    assert "control_stop" in state_events
+    assert "cancelled" in state_statuses
     assert client.status == "cancelled"
     assert client.error == "Task cancelled"

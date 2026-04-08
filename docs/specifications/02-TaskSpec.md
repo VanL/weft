@@ -18,7 +18,8 @@ _Implementation mapping_: `weft/core/taskspec.py` (`TaskSpec`, `SpecSection`, `I
 _Implementation coverage_: Field validation and defaults correspond to Pydantic
 models in `weft/core/taskspec.py`. Runtime behaviour honours `stream_output`
 (chunked, base64-encoded messages), `output_size_limit_mb` (disk spillover),
-and `interactive` (long-lived command sessions with streaming stdin/stdout).
+and `interactive` (long-lived, line-oriented command sessions with streaming
+stdin/stdout over task-local queues rather than terminal emulation).
 `spec.type="agent"` is implemented with `spec.agent.runtime="llm"`, Python
 tools, `output_mode` values `text`/`json`/`messages`, and persistent
 continuations when `spec.persistent=true` and
@@ -74,7 +75,7 @@ field.
     "env": { "DEBUG": "1" } | null,          // OPTIONAL. Environment variables to set in the task's process. These update, not replace, the existing environment.
     "working_dir": "/tmp" | null,            // OPTIONAL. Working directory. null means not applicable or not set.
     "weft_context": "/path/to/.weft" | null,  // OPTIONAL (runtime-expanded). Resolved project context for this task. Templates omit this; the Manager fills it when available.
-    "interactive": false,                     // OPTIONAL. Keep command processes alive and stream stdin/stdout.
+    "interactive": false,                     // OPTIONAL. Keep command processes alive and stream line-oriented stdin/stdout over queues. This is not a PTY/TTY terminal-emulation mode.
     "stream_output": false,                  // OPTIONAL. Stream stdout/stderr to queues. If false, all output will be written in one message.
     "cleanup_on_exit": true,                 // OPTIONAL. Delete empty task queues on completion (outbox retained until consumed)
     "reserved_policy_on_stop": "keep",      // OPTIONAL. Behaviour for messages left in T{tid}.reserved when STOP is received. Options: "keep", "requeue", "clear". Default is "keep".
@@ -167,7 +168,7 @@ _Implementation mapping_:
 - **Schema & validation**: `weft/core/taskspec.py` — `TaskSpec`, `SpecSection`, `IOSection`, `StateSection`, `LimitsSection`, `RunnerSection`, `AgentSection`, `AgentToolSection`, `AgentTemplateSection`, `ReservedPolicy`.
 - **Payload resolution & defaults**: `weft/core/taskspec.py` — `resolve_taskspec_payload()`, `rewrite_tid_in_io()`, `TaskSpec.prepare_payload()` (model_validator mode="before").
 - **Target semantics**: `weft/core/targets.py` — `decode_work_message()`, `build_argv()` (command argv construction), `resolve_function_target()`.
-- **Runtime execution**: `weft/core/tasks/consumer.py` (`Consumer` — streaming, output handling, reserved policy application), `weft/core/tasks/base.py` (`BaseTask` — queue wiring, state tracking, process titles, reserved policy), `weft/core/tasks/interactive.py` (`InteractiveTaskMixin` — interactive command sessions).
+- **Runtime execution**: `weft/core/tasks/consumer.py` (`Consumer` — streaming, output handling, reserved policy application), `weft/core/tasks/base.py` (`BaseTask` — queue wiring, state tracking, process titles, reserved policy), `weft/core/tasks/interactive.py` (`InteractiveTaskMixin` — line-oriented interactive command sessions over task-local queues).
 - **Resource monitoring**: `weft/core/resource_monitor.py` (`ResourceMonitor` — psutil-based metrics collection), `weft/core/runners/host.py` (`HostTaskRunner` — monitor_class loading).
 - **Runner dispatch**: `weft/core/runners/host.py` (`HostTaskRunner`, `HostRunnerPlugin`), `weft/core/tasks/runner.py` (`TaskRunner`), `weft/core/taskspec.py` (`RunnerSection`).
 - **Agent runtime**: `weft/ext.py` (agent adapter wiring), `weft/core/taskspec.py` (`AgentSection`, `AgentToolSection`, `AgentTemplateSection`).

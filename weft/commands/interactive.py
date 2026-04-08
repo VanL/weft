@@ -20,23 +20,20 @@ from collections.abc import Callable
 from typing import Any
 
 from simplebroker import BrokerTarget, Queue
-from weft._constants import WEFT_GLOBAL_LOG_QUEUE
 from weft.core.tasks.multiqueue_watcher import (
     MultiQueueWatcher,
-    QueueMessageContext,
     QueueMode,
 )
-from weft.helpers import iter_queue_json_entries
 
 
 class InteractiveStreamClient:
     """Bridge between queue streams and CLI callbacks.
 
-    The client consumes three queues associated with an interactive task:
+    The client consumes the task-local interactive queues:
 
     * ``outbox`` – streaming stdout envelopes (JSON) emitted by the task
     * ``ctrl_out`` – stderr and control notifications
-    * ``weft.log.tasks`` – state transitions for the task
+    * ``ctrl_out`` terminal envelopes for task-local completion state
 
     Callbacks are invoked from the watcher thread, so they must be
     thread-safe.  The CLI supplies lightweight closures that forward messages
@@ -53,7 +50,6 @@ class InteractiveStreamClient:
         inbox: str,
         outbox: str,
         ctrl_out: str,
-        log_queue: str = WEFT_GLOBAL_LOG_QUEUE,
         on_stdout: Callable[[str, bool], None] | None = None,
         on_stderr: Callable[[str, bool], None] | None = None,
         on_state: Callable[[dict[str, Any]], None] | None = None,
@@ -64,7 +60,6 @@ class InteractiveStreamClient:
         self._inbox_name = inbox
         self._outbox_name = outbox
         self._ctrl_out_name = ctrl_out
-        self._log_queue_name = log_queue
 
         self._stdout_cb = on_stdout or (lambda _chunk, _final: None)
         self._stderr_cb = on_stderr or (lambda _chunk, _final: None)
@@ -87,7 +82,6 @@ class InteractiveStreamClient:
         self._completion = threading.Event()
         self._control_condition = threading.Condition()
         self._control_responses: list[dict[str, Any]] = []
-        self._log_last_timestamp: int | None = None
         self._stopped = False
 
     # ------------------------------------------------------------------
@@ -107,10 +101,6 @@ class InteractiveStreamClient:
             self._ctrl_out_name: {
                 "handler": self._handle_ctrl_message,
                 "mode": QueueMode.READ,
-            },
-            self._log_queue_name: {
-                "handler": self._handle_log_message,
-                "mode": QueueMode.PEEK,
             },
         }
 
@@ -222,7 +212,7 @@ class InteractiveStreamClient:
     # Queue handlers (run on watcher thread)
     # ------------------------------------------------------------------
     def _handle_outbox_message(
-        self, message: str, timestamp: int, _context: QueueMessageContext
+        self, message: str, timestamp: int, _context: object
     ) -> None:
         payload = self._maybe_parse_json(message)
         if isinstance(payload, dict) and payload.get("type") == "stream":
@@ -232,8 +222,6 @@ class InteractiveStreamClient:
             if stream == "stdout":
                 self._stdout_history.append(str(chunk))
                 self._stdout_cb(str(chunk), is_final)
-                if is_final:
-                    self._mark_completion(status="completed")
             elif stream == "stderr":
                 self._stderr_history.append(str(chunk))
                 self._stderr_cb(str(chunk), is_final)
@@ -246,16 +234,29 @@ class InteractiveStreamClient:
         text_payload = str(payload)
         self._stdout_history.append(text_payload)
         self._stdout_cb(text_payload, True)
-        self._mark_completion(status="completed")
 
     def _handle_ctrl_message(
-        self, message: str, _timestamp: int, _context: QueueMessageContext
+        self, message: str, _timestamp: int, _context: object
     ) -> None:
         payload = self._maybe_parse_json(message)
+        if (
+            isinstance(payload, dict)
+            and payload.get("type") == "terminal"
+            and "status" in payload
+        ):
+            self._state_cb(dict(payload))
+            error = payload.get("error")
+            self._mark_completion(
+                status=str(payload["status"]),
+                error=str(error) if isinstance(error, str) else None,
+            )
+            return
+
         if isinstance(payload, dict) and "command" in payload and "status" in payload:
             with self._control_condition:
                 self._control_responses.append(dict(payload))
                 self._control_condition.notify_all()
+            return
         if isinstance(payload, dict) and payload.get("type") == "stream":
             stream = payload.get("stream")
             chunk = payload.get("data", "")
@@ -269,71 +270,20 @@ class InteractiveStreamClient:
                 self._stdout_cb(json.dumps(payload), is_final)
             return
 
-        # Control responses (STATUS/INFO) are surfaced to stderr for visibility
+        # Non-stream control payloads fallback to stderr for visibility.
         text_payload = str(payload)
         self._stderr_history.append(text_payload)
         self._stderr_cb(text_payload, False)
-
-    def _handle_log_message(
-        self, message: str, timestamp: int, context: QueueMessageContext
-    ) -> None:
-        # Peek mode returns the oldest message repeatedly. Iterate through the
-        # append-only log using the generator API so large histories do not
-        # strand us on a fixed-size snapshot.
-        queue = context.queue
-        scan_last_timestamp = self._log_last_timestamp
-        processed = False
-        for payload, entry_ts in iter_queue_json_entries(
-            queue,
-            since_timestamp=self._log_last_timestamp,
-        ):
-            if (
-                self._log_last_timestamp is not None
-                and entry_ts <= self._log_last_timestamp
-            ):
-                continue
-
-            scan_last_timestamp = entry_ts
-            if payload.get("tid") != self._tid:
-                continue
-
-            processed = True
-            self._state_cb(payload)
-
-            event = payload.get("event")
-            if event == "work_completed":
-                self._mark_completion(status="completed")
-            elif event in {"work_failed", "work_timeout", "work_limit_violation"}:
-                error = payload.get("error") or event.replace("_", " ")
-                self._mark_completion(status="failed", error=error)
-            elif event in {"control_stop", "task_signal_stop"}:
-                error = payload.get("error") or "Task cancelled"
-                self._mark_completion(status="cancelled", error=error)
-            elif event in {"control_kill", "task_signal_kill"}:
-                error = payload.get("error") or "Task killed"
-                self._mark_completion(status="killed", error=error)
-
-        self._log_last_timestamp = scan_last_timestamp
-
-        if not processed and self._log_last_timestamp is None:
-            # Fallback for the very first message (already provided) so future
-            # iterations can progress.
-            payload = self._maybe_parse_json(message)
-            if isinstance(payload, dict) and payload.get("tid") == self._tid:
-                self._log_last_timestamp = timestamp
-                self._state_cb(payload)
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
     def _mark_completion(self, *, status: str, error: str | None = None) -> None:
         with self._status_lock:
-            if self._status == "failed":
-                return
-            if self._status == "completed" and status != "failed":
+            if self._status is not None:
                 return
             self._status = status
-            if error is not None or status == "failed":
+            if error is not None or status in {"failed", "cancelled", "killed"}:
                 self._error = error
         self._completion.set()
 

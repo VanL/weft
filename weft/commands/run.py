@@ -39,6 +39,21 @@ from weft._constants import (
     WORK_ENVELOPE_START,
 )
 from weft.commands import specs as spec_cmd
+from weft.commands._streaming import (
+    aggregate_public_outputs as _aggregate_public_outputs,
+)
+from weft.commands._streaming import (
+    collect_interactive_queue_output as _collect_interactive_queue_output,
+)
+from weft.commands._streaming import (
+    handle_ctrl_stream as _handle_ctrl_stream,
+)
+from weft.commands._streaming import (
+    poll_log_events as _poll_log_events,
+)
+from weft.commands._streaming import (
+    process_outbox_message as _process_outbox_message,
+)
 from weft.commands.interactive import InteractiveStreamClient
 from weft.context import WeftContext, build_context
 from weft.core.taskspec import TaskSpec, resolve_taskspec_payload
@@ -514,108 +529,6 @@ def _enqueue_taskspec(
     return message_timestamp
 
 
-def _decode_result_payload(raw: str) -> Any:
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        return raw
-
-
-def _handle_ctrl_stream(raw: str) -> None:
-    try:
-        envelope = json.loads(raw)
-    except json.JSONDecodeError:
-        typer.echo(raw, err=True)
-        return
-
-    if not isinstance(envelope, dict):
-        typer.echo(str(envelope), err=True)
-        return
-
-    data = envelope.get("data", "")
-    encoding = envelope.get("encoding", "text")
-    if encoding == "base64":
-        try:
-            chunk = base64.b64decode(data)
-            text = chunk.decode("utf-8", errors="replace")
-        except Exception:
-            text = ""
-    else:
-        text = str(data)
-
-    is_stderr = envelope.get("stream") == "stderr"
-    if text:
-        typer.echo(text, err=is_stderr, nl=False)
-        if envelope.get("final"):
-            typer.echo(err=is_stderr)
-
-
-def _process_outbox_message(
-    raw: str,
-    stream_buffer: list[str],
-    *,
-    emit_stream: bool = True,
-) -> tuple[bool, Any]:
-    try:
-        envelope = json.loads(raw)
-    except json.JSONDecodeError:
-        return True, _decode_result_payload(raw)
-
-    if isinstance(envelope, dict) and envelope.get("type") == "stream":
-        encoding = envelope.get("encoding", "text")
-        data = envelope.get("data", "")
-        if encoding == "base64":
-            try:
-                chunk = base64.b64decode(data)
-                text = chunk.decode("utf-8", errors="replace")
-            except Exception:
-                text = ""
-        else:
-            text = str(data)
-        if text:
-            if emit_stream:
-                typer.echo(text, nl=False)
-            stream_buffer.append(text)
-        if envelope.get("final"):
-            if emit_stream:
-                typer.echo()
-            value = "".join(stream_buffer)
-            stream_buffer.clear()
-            return True, value
-        return False, None
-
-    return True, envelope
-
-
-def _aggregate_public_outputs(values: list[Any]) -> Any:
-    if not values:
-        return None
-    if len(values) == 1:
-        return values[0]
-    return list(values)
-
-
-def _poll_log_events(
-    log_queue: Queue,
-    last_timestamp: int | None,
-    target_tid: str,
-) -> tuple[list[tuple[dict[str, Any], int]], int | None]:
-    events: list[tuple[dict[str, Any], int]] = []
-    for data, timestamp in iter_queue_json_entries(
-        log_queue,
-        since_timestamp=last_timestamp,
-    ):
-        if last_timestamp is not None and timestamp <= last_timestamp:
-            continue
-        if data.get("tid") != target_tid:
-            continue
-        events.append((data, timestamp))
-
-    if events:
-        last_timestamp = events[-1][1]
-    return events, last_timestamp
-
-
 def _wait_for_task_completion(
     context: WeftContext,
     taskspec: TaskSpec,
@@ -775,6 +688,19 @@ def _run_interactive_session(
             typer.echo(err=True)
 
     def _state_callback(event: dict[str, Any]) -> None:
+        status = event.get("status")
+        if isinstance(status, str) and status in {
+            "completed",
+            "failed",
+            "timeout",
+            "cancelled",
+            "killed",
+        }:
+            status_holder["status"] = status
+            error = event.get("error")
+            status_holder["error"] = str(error) if isinstance(error, str) else None
+            return
+
         evt = event.get("event")
         if evt in {"work_failed", "work_timeout", "work_limit_violation"}:
             status_holder["status"] = "failed"
@@ -938,36 +864,6 @@ def _run_interactive_session(
     return status, result, error
 
 
-def _collect_interactive_queue_output(outbox_queue: Queue) -> list[str]:
-    """Return textual stream content from an interactive outbox queue."""
-
-    collected: list[str] = []
-    for item in outbox_queue.peek_generator():
-        payload_raw = item[0] if isinstance(item, tuple) else item
-        try:
-            payload_obj = json.loads(payload_raw)
-        except json.JSONDecodeError:
-            collected.append(str(payload_raw))
-            continue
-
-        if isinstance(payload_obj, dict) and payload_obj.get("type") == "stream":
-            data = payload_obj.get("data", "")
-            encoding = payload_obj.get("encoding", "text")
-            if encoding == "base64":
-                try:
-                    chunk_bytes = base64.b64decode(data)
-                    collected.append(chunk_bytes.decode("utf-8", errors="replace"))
-                except Exception:
-                    collected.append(str(data))
-            else:
-                collected.append(str(data))
-            continue
-
-        collected.append(json.dumps(payload_obj, ensure_ascii=False))
-
-    return collected
-
-
 def _build_taskspec_dict(
     *,
     tid: str | None,
@@ -983,7 +879,6 @@ def _build_taskspec_dict(
     memory: int | None,
     cpu: int | None,
     interactive: bool,
-    interactive_transport: str | None,
     stream_output: bool,
     metadata: dict[str, Any],
 ) -> dict[str, Any]:
@@ -1021,11 +916,6 @@ def _build_taskspec_dict(
         limits["cpu_percent"] = cpu
     if limits:
         spec_section["limits"] = limits
-    if interactive_transport:
-        spec_section["runner"] = {
-            "name": "host",
-            "options": {"interactive_transport": interactive_transport},
-        }
 
     io_section: dict[str, Any] = {}
     if tid is not None:
@@ -1139,7 +1029,6 @@ def _run_inline(
         memory=memory,
         cpu=cpu,
         interactive=interactive,
-        interactive_transport="pty" if interactive and stdin_is_terminal else None,
         stream_output=effective_stream_output,
         metadata=metadata,
     )

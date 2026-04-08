@@ -77,7 +77,6 @@ _UNAUDITED_MODULE_ALLOWLIST = frozenset(
         "tests/cli/test_cli_queue.py",
         "tests/cli/test_cli_result_all.py",
         "tests/cli/test_cli_run.py",
-        "tests/cli/test_cli_run_interactive_tty.py",
         "tests/cli/test_cli_spec.py",
         "tests/cli/test_cli_tidy.py",
         "tests/cli/test_commands.py",

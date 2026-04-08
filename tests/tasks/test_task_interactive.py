@@ -172,7 +172,16 @@ def test_interactive_command_streams_output(broker_env, unique_tid: str) -> None
             break
         ctrl_messages.append(json.loads(msg))
     if ctrl_messages:
-        assert ctrl_messages[-1]["final"] is True
+        assert any(
+            message.get("type") == "stream"
+            and message.get("stream") == "stderr"
+            and message.get("final") is True
+            for message in ctrl_messages
+        )
+        assert any(
+            message.get("type") == "terminal" and message.get("status") == "completed"
+            for message in ctrl_messages
+        )
 
     events = [json.loads(e) for e in _drain(log_queue)]
     assert any(event["event"] == "work_completed" for event in events)
@@ -188,6 +197,7 @@ def test_interactive_command_stop_cancels(broker_env, unique_tid: str) -> None:
 
     inbox = make_queue(spec.io.inputs["inbox"])
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
+    ctrl_out = make_queue(spec.io.control["ctrl_out"])
     outbox = make_queue(spec.io.outputs["outbox"])
 
     inbox.write(json.dumps({"stdin": "first\n"}))
@@ -205,6 +215,11 @@ def test_interactive_command_stop_cancels(broker_env, unique_tid: str) -> None:
 
     assert final_messages
     assert final_messages[-1]["final"] is True
+    ctrl_messages = [json.loads(msg) for msg in _drain(ctrl_out)]
+    assert any(
+        message.get("type") == "terminal" and message.get("status") == "cancelled"
+        for message in ctrl_messages
+    )
     assert task.taskspec.state.status == "cancelled"
     task.stop(join=False)
 
@@ -268,7 +283,16 @@ if __name__ == "__main__":
         assert "stdout-before-fail" in stdout_combined
         assert "stderr-before-fail" in stderr_combined
         assert stdout_messages[-1]["final"] is True
-        assert ctrl_messages[-1]["final"] is True
+        assert any(
+            message.get("type") == "stream"
+            and message.get("stream") == "stderr"
+            and message.get("final") is True
+            for message in ctrl_messages
+        )
+        assert any(
+            message.get("type") == "terminal" and message.get("status") == "failed"
+            for message in ctrl_messages
+        )
         assert task.taskspec.state.status == "failed"
         assert any(event["event"] == "work_failed" for event in events)
         assert not any(event["event"] == "work_completed" for event in events)
