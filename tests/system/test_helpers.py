@@ -52,7 +52,11 @@ def _reset_config() -> Any:
 def test_pid_is_live_rejects_zombie_process() -> None:
     process = subprocess.Popen([sys.executable, "-c", "import os; os._exit(0)"])
     try:
-        time.sleep(0.1)
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if not pid_is_live(process.pid):
+                break
+            time.sleep(0.01)
         assert pid_is_live(process.pid) is False
     finally:
         process.wait()

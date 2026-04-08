@@ -33,7 +33,11 @@ def _spawn_with_pty(
 ) -> tuple[subprocess.Popen[bytes], int]:
     master_fd, slave_fd = pty.openpty()
     env = os.environ.copy()
-    env.setdefault("WEFT_MANAGER_LIFETIME_TIMEOUT", "1.0")
+    # PTY-backed interactive tests run under xdist and can spend noticeable
+    # time waiting for prompts and child shutdown. Keep the manager lifetime
+    # long enough that these tests are exercising interactive quit behavior,
+    # not an artificial idle-timeout race.
+    env.setdefault("WEFT_MANAGER_LIFETIME_TIMEOUT", "5.0")
     env.setdefault("WEFT_MANAGER_REUSE_ENABLED", "0")
     env.setdefault("WEFT_AUTOSTART_TASKS", "0")
     proc = subprocess.Popen(
@@ -140,7 +144,7 @@ def test_interactive_python_repl_outputs(tty_workdir: Path) -> None:
             pytest.fail(
                 f"interactive session did not exit after :quit; trailing={trailing!r}"
             )
-        assert rc == 0
+        assert rc == 0, trailing
         assert "SyntaxError" not in trailing
     finally:
         _shutdown(proc, master_fd)
