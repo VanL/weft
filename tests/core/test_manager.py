@@ -670,6 +670,45 @@ def test_manager_idle_shutdown(broker_env, unique_tid) -> None:
         manager.cleanup()
 
 
+def test_manager_idle_timeout_force_refreshes_broker_activity_before_shutdown(
+    broker_env, unique_tid, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path, _make_queue = broker_env
+    inbox = f"manager.{unique_tid}.inbox"
+    ctrl_in = f"manager.{unique_tid}.ctrl_in"
+    ctrl_out = f"manager.{unique_tid}.ctrl_out"
+    spec = make_manager_spec(
+        unique_tid,
+        inbox,
+        ctrl_in,
+        ctrl_out,
+        idle_timeout=0.2,
+    )
+    manager = Manager(db_path, spec)
+    try:
+        previous_activity = time.time_ns() - 1_000_000_000
+        manager._last_activity_ns = previous_activity
+        manager._last_broker_timestamp = 100
+        observed_force_flags: list[bool] = []
+
+        def fake_read_broker_timestamp(*, force: bool = False) -> int:
+            observed_force_flags.append(force)
+            return 200 if force else 100
+
+        monkeypatch.setattr(
+            manager, "_read_broker_timestamp", fake_read_broker_timestamp
+        )
+
+        manager.process_once()
+
+        assert observed_force_flags[-1] is True
+        assert manager.should_stop is False
+        assert manager._last_broker_timestamp == 200
+        assert manager._last_activity_ns > previous_activity
+    finally:
+        manager.cleanup()
+
+
 def test_manager_overrides_supplied_tid(manager_setup, unique_tid) -> None:
     manager, make_queue = manager_setup
     inbox_queue = make_queue(manager._queue_names["inbox"])

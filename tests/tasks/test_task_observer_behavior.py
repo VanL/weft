@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import time
-
 from weft._constants import (
     CONTROL_STOP,
     QUEUE_CTRL_IN_SUFFIX,
@@ -128,11 +126,17 @@ def test_monitor_stop_command(broker_env) -> None:
     assert monitor.should_stop is True
 
 
-def test_sampling_observer_interval(broker_env) -> None:
+def test_sampling_observer_interval(broker_env, monkeypatch) -> None:
     db_path, make_queue = broker_env
     spec = make_observer_spec("1761013000000000400")
     inbox = make_queue(spec.io.inputs["inbox"])
     calls: list[str] = []
+    current_time = 100.0
+
+    def fake_monotonic() -> float:
+        return current_time
+
+    monkeypatch.setattr("weft.core.tasks.observer.time.monotonic", fake_monotonic)
 
     observer = SamplingObserver(
         db_path,
@@ -145,11 +149,12 @@ def test_sampling_observer_interval(broker_env) -> None:
     observer._drain_queue()
     inbox.read_one()
 
-    time.sleep(0.06)
+    current_time += 0.06
     inbox.write("sample-2")
     observer._drain_queue()
     inbox.read_one()
 
+    current_time += 0.01
     inbox.write("sample-3")
     observer._drain_queue()
     inbox.read_one()

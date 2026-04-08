@@ -35,7 +35,7 @@ CONSTANTS_VERSION_PATTERN: Final[re.Pattern[str]] = re.compile(
     r'(?m)^__version__:\s*Final\[str\]\s*=\s*"([^"]+)"$'
 )
 
-PRECHECK_COMMANDS: Final[tuple[tuple[str, ...], ...]] = (
+BASE_PRECHECK_COMMANDS: Final[tuple[tuple[str, ...], ...]] = (
     (
         "uv",
         "run",
@@ -76,6 +76,9 @@ PRECHECK_COMMANDS: Final[tuple[tuple[str, ...], ...]] = (
         "ruff",
         "check",
         "weft",
+        "tests",
+        "extensions/weft_docker",
+        "extensions/weft_macos_sandbox",
     ),
     (
         "uv",
@@ -90,6 +93,9 @@ PRECHECK_COMMANDS: Final[tuple[tuple[str, ...], ...]] = (
         "format",
         "--check",
         "weft",
+        "tests",
+        "extensions/weft_docker",
+        "extensions/weft_macos_sandbox",
     ),
     (
         "uv",
@@ -102,9 +108,41 @@ PRECHECK_COMMANDS: Final[tuple[tuple[str, ...], ...]] = (
         "macos-sandbox",
         "mypy",
         "weft",
+        "extensions/weft_docker/weft_docker",
+        "extensions/weft_macos_sandbox/weft_macos_sandbox",
         "--config-file",
         "pyproject.toml",
     ),
+)
+DOCKER_EXTENSION_TEST_COMMAND: Final[tuple[str, ...]] = (
+    "uv",
+    "run",
+    "--extra",
+    "dev",
+    "--extra",
+    "docker",
+    "--extra",
+    "macos-sandbox",
+    "pytest",
+    "-q",
+    "-n",
+    "0",
+    "extensions/weft_docker/tests",
+)
+MACOS_SANDBOX_EXTENSION_TEST_COMMAND: Final[tuple[str, ...]] = (
+    "uv",
+    "run",
+    "--extra",
+    "dev",
+    "--extra",
+    "docker",
+    "--extra",
+    "macos-sandbox",
+    "pytest",
+    "-q",
+    "-n",
+    "0",
+    "extensions/weft_macos_sandbox/tests",
 )
 PRECHECK_ENV_OVERRIDES: Final[dict[str, str]] = {
     "PYTEST_ADDOPTS": "-x --maxfail=1",
@@ -232,6 +270,55 @@ def write_version_files(
 
 def _format_command(command: tuple[str, ...]) -> str:
     return " ".join(shlex.quote(part) for part in command)
+
+
+def _docker_available_for_tests() -> bool:
+    """Return whether Docker-backed extension tests can run on this host."""
+
+    executable = shutil.which("docker")
+    if executable is None:
+        return False
+    try:
+        completed = subprocess.run(
+            (executable, "version"),
+            cwd=PROJECT_ROOT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=5.0,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return completed.returncode == 0
+
+
+def _host_supports_macos_sandbox_tests() -> bool:
+    """Return whether macOS-sandbox extension tests should run on this host."""
+
+    return sys.platform == "darwin"
+
+
+def build_precheck_commands(
+    *,
+    include_docker_extension_tests: bool | None = None,
+    include_macos_sandbox_extension_tests: bool | None = None,
+) -> tuple[tuple[str, ...], ...]:
+    """Return the release-helper precheck commands for the current host."""
+
+    commands = list(BASE_PRECHECK_COMMANDS)
+
+    if include_docker_extension_tests is None:
+        include_docker_extension_tests = _docker_available_for_tests()
+    if include_macos_sandbox_extension_tests is None:
+        include_macos_sandbox_extension_tests = _host_supports_macos_sandbox_tests()
+
+    if include_docker_extension_tests:
+        commands.insert(2, DOCKER_EXTENSION_TEST_COMMAND)
+    if include_macos_sandbox_extension_tests:
+        insert_at = 3 if include_docker_extension_tests else 2
+        commands.insert(insert_at, MACOS_SANDBOX_EXTENSION_TEST_COMMAND)
+
+    return tuple(commands)
 
 
 def _merge_command_env(
@@ -672,7 +759,7 @@ def main(argv: list[str] | None = None) -> int:
                 "SQLite and Postgres tests"
             )
         if not args.skip_checks:
-            for command in PRECHECK_COMMANDS:
+            for command in build_precheck_commands():
                 run_command(
                     command,
                     dry_run=True,
@@ -732,7 +819,7 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     if not args.skip_checks:
-        for command in PRECHECK_COMMANDS:
+        for command in build_precheck_commands():
             run_command(command, env_overrides=PRECHECK_ENV_OVERRIDES)
 
     if version_changed:

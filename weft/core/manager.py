@@ -717,9 +717,9 @@ class Manager(BaseTask):
 
         return candidate
 
-    def _update_idle_activity_from_broker(self) -> None:
+    def _update_idle_activity_from_broker(self, *, force: bool = False) -> None:
         previous_timestamp = self._last_broker_timestamp
-        new_timestamp = self._read_broker_timestamp()
+        new_timestamp = self._read_broker_timestamp(force=force)
         if new_timestamp > previous_timestamp:
             self._last_broker_timestamp = new_timestamp
             now_ns = time.time_ns()
@@ -1112,10 +1112,16 @@ class Manager(BaseTask):
             inbox_queue = self._queue(self._queue_names["inbox"])
             if inbox_queue.has_pending():
                 self._last_activity_ns = time.time_ns()
+                return
         except Exception:  # pragma: no cover - defensive
             logger.debug(
                 "Failed to inspect inbox queue for pending work", exc_info=True
             )
+        # Re-check broker activity without the periodic throttle before deciding the
+        # manager is idle. Short manager lifetimes can otherwise race with a freshly
+        # submitted spawn request that arrives between ordinary polls.
+        self._update_idle_activity_from_broker(force=True)
+        now_ns = time.time_ns()
         if now_ns - self._last_activity_ns >= idle_timeout_ns:
             if not self._idle_shutdown_logged:
                 self.taskspec.mark_completed(return_code=0)
