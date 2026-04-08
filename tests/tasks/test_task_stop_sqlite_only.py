@@ -35,6 +35,8 @@ import sys
 import time
 from pathlib import Path
 
+import psutil
+
 from tests.helpers.test_backend import prepare_project_root
 from weft.commands import tasks as task_cmd
 from weft.context import build_context
@@ -79,12 +81,24 @@ def wait_for_status(root: Path, tid: str, expected: str, timeout: float = 10.0) 
 
 
 def wait_for_exit(process: object, timeout: float = 5.0) -> bool:
+    pid = getattr(process, "pid", None)
+    if not isinstance(pid, int) or pid <= 0:
+        return True
     deadline = time.time() + timeout
     join = getattr(process, "join", None)
     while time.time() < deadline:
         if callable(join):
             join(timeout=0.05)
         if getattr(process, "exitcode", None) is not None:
+            return True
+        try:
+            ps_process = psutil.Process(pid)
+        except psutil.Error:
+            return True
+        if (
+            not ps_process.is_running()
+            or ps_process.status() == psutil.STATUS_ZOMBIE
+        ):
             return True
         time.sleep(0.05)
     return False

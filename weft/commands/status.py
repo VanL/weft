@@ -345,6 +345,20 @@ def _runtime_handle_from_mapping(entry: Mapping[str, Any]) -> RunnerHandle | Non
         return None
 
 
+def _merge_runtime_entry(
+    mapping_entry: Mapping[str, Any] | None,
+    event_payload: Mapping[str, Any],
+) -> Mapping[str, Any] | None:
+    """Combine runtime metadata from the mapping queue and the log payload."""
+
+    merged: dict[str, Any] = {}
+    if isinstance(event_payload, Mapping):
+        merged.update(event_payload)
+    if mapping_entry is not None:
+        merged.update(mapping_entry)
+    return merged or None
+
+
 def _pid_alive(pid: int | None) -> bool:
     if pid is None or pid <= 0:
         return False
@@ -484,16 +498,17 @@ def _collect_task_snapshots(
         completed_at = state.get("completed_at")
         metadata = taskspec.get("metadata") or {}
         mapping_entry = tid_mapping_entries.get(tid)
-        runtime_handle = _runtime_handle_from_mapping(mapping_entry or {})
+        runtime_entry = _merge_runtime_entry(mapping_entry, payload)
+        runtime_handle = _runtime_handle_from_mapping(runtime_entry or {})
         runner = _runner_name_for_snapshot(
             taskspec=taskspec,
-            mapping_entry=mapping_entry,
+            mapping_entry=runtime_entry,
         )
         runtime_description = _describe_runtime_handle(runtime_handle)
         public_status = _effective_public_status(
             str(status),
             runner_name=runner,
-            mapping_entry=mapping_entry,
+            mapping_entry=runtime_entry,
             runtime_description=runtime_description,
         )
 

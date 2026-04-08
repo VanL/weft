@@ -1,4 +1,9 @@
-"""Shared helpers for one-shot command runners backed by external processes."""
+"""Shared helpers for one-shot command runners backed by external processes.
+
+Spec references:
+- docs/specifications/01-Core_Components.md [CC-3.2], [CC-3.4]
+- docs/specifications/06-Resource_Management.md [RM-5.1]
+"""
 
 from __future__ import annotations
 
@@ -8,6 +13,7 @@ from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 
 from simplebroker import BrokerTarget
+from weft._constants import ACTIVE_CONTROL_POLL_INTERVAL
 from weft.core.resource_monitor import ResourceMetrics, load_resource_monitor
 from weft.core.runners import RunnerOutcome
 from weft.ext import RunnerHandle
@@ -92,6 +98,7 @@ def run_monitored_subprocess(
 
     start_time = time.monotonic()
     interval = monitor_interval or 1.0
+    next_monitor_at = start_time + interval
     stdout: str | None = None
     stderr: str | None = None
     pending_input = stdin_data
@@ -132,10 +139,13 @@ def run_monitored_subprocess(
                 runtime_handle=runtime_handle,
             )
 
-        sleep_for = interval
+        sleep_for = ACTIVE_CONTROL_POLL_INTERVAL
         if timeout is not None:
             remaining = timeout - elapsed
-            sleep_for = min(interval, max(0.01, remaining))
+            sleep_for = min(sleep_for, max(0.01, remaining))
+        if monitor is not None:
+            until_monitor = max(0.01, next_monitor_at - time.monotonic())
+            sleep_for = min(sleep_for, until_monitor)
 
         try:
             stdout, stderr = process.communicate(
@@ -148,12 +158,13 @@ def run_monitored_subprocess(
             pending_input = None
             pass
 
-        if monitor is not None:
+        if monitor is not None and time.monotonic() >= next_monitor_at:
             try:
                 ok, violation = monitor.check_limits()
             except Exception:  # pragma: no cover - process may have exited
                 ok, violation = True, None
             last_metrics = monitor.last_metrics()
+            next_monitor_at = time.monotonic() + interval
             if not ok:
                 _kill_process_runtime(process, kill_runtime=kill_runtime)
                 last_metrics = _stop_monitor(monitor, last_metrics)

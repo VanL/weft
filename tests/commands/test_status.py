@@ -229,6 +229,50 @@ def test_task_status_keeps_terminal_log_state_running_while_task_pid_is_alive(
     assert snapshot.status == "running"
 
 
+def test_task_status_uses_log_runtime_metadata_when_mapping_is_missing(
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = "1844674407370955164"
+    started = 1_762_000_000_000_000_000
+    completed = started + 1_000_000_000
+    log_queue = ctx.queue("weft.log.tasks", persistent=False)
+    log_queue.write(
+        json.dumps(
+            {
+                "event": "control_stop",
+                "status": "cancelled",
+                "tid": tid,
+                "task_pid": os.getpid(),
+                "pid": os.getpid(),
+                "runner": "host",
+                "runtime_handle": {
+                    "runner_name": "host",
+                    "runtime_id": "host-current",
+                    "host_pids": [os.getpid()],
+                    "metadata": {},
+                },
+                "taskspec": {
+                    "name": "log-only-live-consumer-task",
+                    "spec": {"runner": {"name": "host", "options": {}}},
+                    "state": {
+                        "status": "cancelled",
+                        "started_at": started,
+                        "completed_at": completed,
+                    },
+                    "metadata": {},
+                },
+            }
+        )
+    )
+
+    snapshot = task_cmd.task_status(tid, context_path=root)
+
+    assert snapshot is not None
+    assert snapshot.status == "running"
+
+
 def test_task_status_surfaces_terminal_log_state_once_task_pid_is_gone(
     tmp_path: Path,
 ) -> None:
