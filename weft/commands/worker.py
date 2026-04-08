@@ -12,8 +12,6 @@ import time
 from pathlib import Path
 from typing import Any, cast
 
-import psutil
-
 from simplebroker import BrokerTarget, Queue
 from weft._constants import (
     WEFT_TID_MAPPINGS_QUEUE,
@@ -22,7 +20,7 @@ from weft._constants import (
 from weft.context import build_context
 from weft.core import Manager, launch_task_process
 from weft.core.taskspec import TaskSpec
-from weft.helpers import iter_queue_json_entries, terminate_process_tree
+from weft.helpers import iter_queue_json_entries, pid_is_live, terminate_process_tree
 
 
 def _load_taskspec(path: Path) -> TaskSpec:
@@ -153,14 +151,7 @@ def _lookup_pid(
 
 def _pid_alive(pid: int | None) -> bool:
     """Cross-platform liveness probe using psutil (avoids os.kill(0) on Windows)."""
-
-    if pid is None or pid <= 0:
-        return False
-    try:
-        process = psutil.Process(pid)
-        return process.is_running()
-    except psutil.Error:
-        return False
+    return pid_is_live(pid)
 
 
 def stop_command(
@@ -209,7 +200,7 @@ def stop_command(
             return 0, None
         try:
             terminate_process_tree(pid, timeout=timeout)
-        except (ProcessLookupError, OSError, psutil.Error):
+        except (ProcessLookupError, OSError):
             return 0, None
         except PermissionError:  # pragma: no cover - unlikely in tests
             return 1, f"Permission denied sending SIGTERM to PID {pid}"

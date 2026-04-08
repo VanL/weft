@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 import threading
 import time
 from collections.abc import Iterator, Sequence
@@ -12,9 +15,10 @@ from typing import Any
 import pytest
 
 from tests.helpers.test_backend import prepare_project_root
-from weft._constants import WEFT_GLOBAL_LOG_QUEUE
+from weft._constants import WEFT_GLOBAL_LOG_QUEUE, WEFT_WORKERS_REGISTRY_QUEUE
 from weft.commands.run import (
     _collect_interactive_queue_output,
+    _select_active_manager,
     _start_manager,
     _wait_for_task_completion,
 )
@@ -230,3 +234,40 @@ def test_start_manager_does_not_terminate_competing_startup_manager(
     assert started_here is False
     assert handle is None
     assert terminated is False
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX only")
+def test_select_active_manager_ignores_zombie_registry_pid(
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+
+    process = subprocess.Popen([sys.executable, "-c", "import os; os._exit(0)"])
+    try:
+        time.sleep(0.1)
+        registry = ctx.queue(WEFT_WORKERS_REGISTRY_QUEUE, persistent=False)
+        try:
+            registry.write(
+                json.dumps(
+                    {
+                        "tid": "1775622400000000001",
+                        "name": "manager",
+                        "status": "active",
+                        "pid": process.pid,
+                        "timestamp": registry.generate_timestamp(),
+                        "inbox": "weft.spawn.requests",
+                        "requests": "weft.spawn.requests",
+                        "ctrl_in": "weft.manager.ctrl_in",
+                        "ctrl_out": "weft.manager.ctrl_out",
+                        "outbox": "weft.manager.outbox",
+                        "role": "manager",
+                    }
+                )
+            )
+        finally:
+            registry.close()
+
+        assert _select_active_manager(ctx) is None
+    finally:
+        process.wait()

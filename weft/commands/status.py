@@ -17,8 +17,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
 
-import psutil
-
 from simplebroker import Queue
 from weft._constants import (
     TASKSPEC_TID_SHORT_LENGTH,
@@ -34,6 +32,7 @@ from weft.helpers import (
     format_byte_size,
     format_timestamp_ns_relative,
     iter_queue_json_entries,
+    pid_is_live,
 )
 
 StatusMapping = Mapping[str, int | float | str | None]
@@ -360,13 +359,7 @@ def _merge_runtime_entry(
 
 
 def _pid_alive(pid: int | None) -> bool:
-    if pid is None or pid <= 0:
-        return False
-    try:
-        process = psutil.Process(pid)
-        return process.is_running()
-    except psutil.Error:
-        return False
+    return pid_is_live(pid)
 
 
 def _task_process_alive(mapping_entry: Mapping[str, Any] | None) -> bool:
