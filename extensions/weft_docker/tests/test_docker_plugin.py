@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 from weft_docker import get_runner_plugin
 
@@ -11,6 +13,8 @@ pytestmark = [pytest.mark.shared]
 def test_docker_runner_accepts_docker_enforced_limits_and_rejects_unsupported_ones() -> (
     None
 ):
+    if os.name == "nt":
+        pytest.skip("Docker runner is currently unsupported on Windows")
     plugin = get_runner_plugin()
 
     plugin.validate_taskspec(
@@ -49,6 +53,8 @@ def test_docker_runner_accepts_docker_enforced_limits_and_rejects_unsupported_on
 def test_docker_runner_preflight_requires_binary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    if os.name == "nt":
+        pytest.skip("Docker runner is currently unsupported on Windows")
     plugin = get_runner_plugin()
     monkeypatch.setattr("weft_docker.plugin.shutil.which", lambda name: None)
 
@@ -64,4 +70,24 @@ def test_docker_runner_preflight_requires_binary(
                 }
             },
             preflight=True,
+        )
+
+
+def test_docker_runner_is_unsupported_on_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plugin = get_runner_plugin()
+    monkeypatch.setattr("weft_docker.plugin.os.name", "nt")
+
+    with pytest.raises(ValueError, match="Linux and macOS"):
+        plugin.validate_taskspec(
+            {
+                "spec": {
+                    "type": "command",
+                    "runner": {
+                        "name": "docker",
+                        "options": {"image": "busybox:latest"},
+                    },
+                }
+            }
         )

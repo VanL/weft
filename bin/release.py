@@ -275,6 +275,8 @@ def _format_command(command: tuple[str, ...]) -> str:
 def _docker_available_for_tests() -> bool:
     """Return whether Docker-backed extension tests can run on this host."""
 
+    if os.name == "nt":
+        return False
     executable = shutil.which("docker")
     if executable is None:
         return False

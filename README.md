@@ -27,7 +27,7 @@ uv add weft
 # Install Postgres backend support too
 uv add 'weft[pg]'
 
-# Install Docker runner support
+# Install Docker runner support (currently supported on Linux and macOS)
 uv add 'weft[docker]'
 
 # Install macOS sandbox runner support
@@ -43,7 +43,8 @@ variables; the extra only makes the Postgres backend available.
 
 Runner extras work the same way: `weft[docker]` adds the Docker runner plugin
 plus the Docker SDK dependency, and `weft[macos-sandbox]` adds the macOS
-sandbox runner plugin. `weft[all]` installs the current first-party optional
+sandbox runner plugin. The first-party Docker runner is currently supported on
+Linux and macOS only. `weft[all]` installs the current first-party optional
 backends and runners together. Runner selection still happens per TaskSpec
 through `spec.runner`.
 

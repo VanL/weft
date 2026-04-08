@@ -260,6 +260,8 @@ Runner extensibility is a first-class execution boundary.
   `spec.runner` is omitted.
 - External runners may ship as optional extension packages, for example
   `weft[docker]` or `weft[macos-sandbox]`.
+  - Current support note: the first-party Docker runner is supported on Linux
+    and macOS, but not Windows.
 - The public plugin surface must cover:
   - capability declaration
   - TaskSpec validation and preflight

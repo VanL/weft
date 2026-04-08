@@ -210,6 +210,8 @@ _Per-field implementation status_:
 - `spec.runner` declares which execution backend should run that task:
   - built-in `host`
   - installed external runners such as `docker` or `macos-sandbox`
+    - current platform note: the first-party `docker` runner is supported on
+      Linux and macOS, but not Windows
 
 This prevents execution environment from being overloaded into `spec.type`. A
 command task remains a command task regardless of whether it runs on the host,
