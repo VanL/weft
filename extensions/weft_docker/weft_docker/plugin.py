@@ -755,15 +755,39 @@ def _lookup_container(
     fallback_id: str | None = None,
 ) -> Any | None:
     docker = _load_docker_sdk()
-    try:
-        return client.containers.get(runtime_id)
-    except docker.errors.NotFound:
-        if isinstance(fallback_id, str) and fallback_id and fallback_id != runtime_id:
-            try:
-                return client.containers.get(fallback_id)
-            except docker.errors.NotFound:
-                return None
+
+    def _get(identifier: str) -> Any | None:
+        try:
+            return client.containers.get(identifier)
+        except docker.errors.NotFound:
+            return None
+
+    container = _get(runtime_id)
+    if container is not None:
+        return container
+
+    if isinstance(fallback_id, str) and fallback_id and fallback_id != runtime_id:
+        container = _get(fallback_id)
+        if container is not None:
+            return container
+
+    list_method = getattr(client.containers, "list", None)
+    if not callable(list_method):
         return None
+    try:
+        candidates = list_method(all=True, filters={"name": runtime_id})
+    except Exception:  # pragma: no cover - defensive Docker API fallback
+        return None
+    for candidate in candidates:
+        attrs = getattr(candidate, "attrs", None)
+        if isinstance(attrs, Mapping):
+            name = attrs.get("Name")
+            if isinstance(name, str) and name.lstrip("/") == runtime_id:
+                return candidate
+        candidate_name = getattr(candidate, "name", None)
+        if isinstance(candidate_name, str) and candidate_name == runtime_id:
+            return candidate
+    return candidates[0] if candidates else None
 
 
 def _wait_for_container(

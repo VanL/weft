@@ -147,3 +147,68 @@ def test_describe_runtime_falls_back_to_container_id_when_name_lookup_misses(
     assert description.state == "running"
     assert description.metadata["container_id"] == "container-123"
     assert description.metadata["container_name"] == "weft-test"
+
+
+def test_describe_runtime_falls_back_to_container_list_when_name_get_misses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeNotFound(Exception):
+        pass
+
+    class FakeDocker:
+        class errors:
+            NotFound = FakeNotFound
+
+    class FakeContainer:
+        id = "container-456"
+        name = "weft-runtime-name"
+        attrs = {
+            "Name": "/weft-runtime-name",
+            "Config": {"Image": "busybox:latest"},
+            "State": {
+                "Status": "running",
+                "OOMKilled": False,
+                "ExitCode": 0,
+                "Pid": 77,
+                "StartedAt": "2026-04-08T00:00:00Z",
+                "FinishedAt": "",
+                "Error": "",
+            },
+            "HostConfig": {"NetworkMode": "default"},
+        }
+
+        def reload(self) -> None:
+            return None
+
+        def stats(self, *, stream: bool = False) -> dict[str, object]:
+            assert stream is False
+            return {}
+
+    class FakeContainers:
+        def get(self, runtime_id: str) -> FakeContainer:
+            raise FakeNotFound()
+
+        def list(
+            self,
+            *,
+            all: bool = False,
+            filters: dict[str, str] | None = None,
+        ) -> list[FakeContainer]:
+            assert all is True
+            assert filters == {"name": "weft-runtime-name"}
+            return [FakeContainer()]
+
+    class FakeClient:
+        containers = FakeContainers()
+
+    monkeypatch.setattr(plugin, "_load_docker_sdk", lambda: FakeDocker)
+
+    description = plugin._describe_runtime(  # pyright: ignore[reportPrivateUsage]
+        FakeClient(),
+        runtime_id="weft-runtime-name",
+        base_metadata={"image": "busybox:latest"},
+    )
+
+    assert description.state == "running"
+    assert description.metadata["container_id"] == "container-456"
+    assert description.metadata["container_name"] == "weft-runtime-name"
