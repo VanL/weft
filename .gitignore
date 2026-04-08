@@ -72,6 +72,10 @@ agent_history/
 .broker.db
 .broker.db-shm
 .broker.db-wal
+.broker.connection.done
+.broker.connection.lock
+.broker.optimization.done
+.broker.optimization.lock
 *comments*.md
 .code/
 # This is in context for agents but we don't want it to check it in here

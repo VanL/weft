@@ -117,7 +117,11 @@ def _worker_entry(
                 args=spec_data.get("args"),
                 env=spec_data.get("env") or {},
                 working_dir=spec_data.get("working_dir"),
-                timeout=spec_data.get("command_timeout"),
+                # HostTaskRunner owns timeout enforcement for one-shot command
+                # tasks. Passing the same timeout into subprocess.run() races the
+                # outer worker timeout and can orphan grandchildren when the
+                # direct child exits first.
+                timeout=None,
             )
             value = completed.stdout.strip() if completed.stdout is not None else ""
             stdout = completed.stdout
