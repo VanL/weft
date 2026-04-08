@@ -92,6 +92,28 @@ _UNAUDITED_MODULE_ALLOWLIST = frozenset(
         "tests/system/test_release_script.py",
     }
 )
+_EAGER_FAILURE_TRACEBACK_ENV = "WEFT_EAGER_FAILURE_TRACEBACK"
+
+
+def _env_flag_enabled(name: str) -> bool:
+    """Return whether an environment flag is explicitly enabled."""
+
+    value = os.environ.get(name, "")
+    return value.lower() in {"1", "true", "yes", "on"}
+
+
+def _should_emit_eager_failure_traceback(report: pytest.TestReport) -> bool:
+    """Return whether to emit a failed report immediately."""
+
+    if not _env_flag_enabled(_EAGER_FAILURE_TRACEBACK_ENV):
+        return False
+    if os.environ.get("PYTEST_XDIST_WORKER"):
+        return False
+    if not report.failed:
+        return False
+    if getattr(report, "wasxfail", False):
+        return False
+    return hasattr(report, "longreprtext")
 
 
 def _preferred_test_python() -> Path:
@@ -461,6 +483,21 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
             0 if any(nodeid in item.nodeid for nodeid in _PRIORITY_TEST_NODEIDS) else 1
         )
     )
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_logreport(report: pytest.TestReport) -> None:
+    """Emit failed tracebacks immediately when debugging env flags opt in."""
+
+    if not _should_emit_eager_failure_traceback(report):
+        return
+
+    header = f"Immediate traceback: {report.nodeid} [{report.when}]"
+    longrepr = getattr(report, "longreprtext", "")
+    print(f"\n{'=' * len(header)}", file=sys.stderr, flush=True)
+    print(header, file=sys.stderr, flush=True)
+    print(f"{'=' * len(header)}", file=sys.stderr, flush=True)
+    print(longrepr, file=sys.stderr, flush=True)
 
 
 __all__ = ["weft_harness", "workdir", "broker_env", "task_factory", "run_cli"]

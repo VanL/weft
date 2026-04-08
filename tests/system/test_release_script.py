@@ -441,3 +441,47 @@ def test_precheck_commands_cover_sqlite_and_postgres_release_gate() -> None:
         "bin/pytest-pg",
         "--all",
     )
+    assert release.PRECHECK_ENV_OVERRIDES == {
+        "PYTEST_ADDOPTS": "-x --maxfail=1",
+        "WEFT_EAGER_FAILURE_TRACEBACK": "1",
+    }
+
+
+def test_merge_command_env_appends_pytest_addopts() -> None:
+    """Precheck env overrides should preserve existing pytest addopts."""
+
+    release = _load_release_module()
+
+    merged = release._merge_command_env(
+        release.PRECHECK_ENV_OVERRIDES,
+        base_env={
+            "PATH": "/tmp/bin",
+            "PYTEST_ADDOPTS": "--lf",
+        },
+    )
+
+    assert merged is not None
+    assert merged["PATH"] == "/tmp/bin"
+    assert merged["PYTEST_ADDOPTS"] == "--lf -x --maxfail=1"
+    assert merged["WEFT_EAGER_FAILURE_TRACEBACK"] == "1"
+
+
+def test_run_command_dry_run_shows_env_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Dry-run command logging should show precheck env overrides explicitly."""
+
+    release = _load_release_module()
+    monkeypatch.setattr(release.subprocess, "run", lambda *args, **kwargs: None)
+
+    release.run_command(
+        ("pytest", "-q"),
+        dry_run=True,
+        env_overrides=release.PRECHECK_ENV_OVERRIDES,
+    )
+
+    captured = capsys.readouterr()
+    assert "PYTEST_ADDOPTS='-x --maxfail=1'" in captured.out
+    assert "WEFT_EAGER_FAILURE_TRACEBACK=1" in captured.out
+    assert "pytest -q" in captured.out
