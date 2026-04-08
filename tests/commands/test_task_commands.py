@@ -251,3 +251,147 @@ def test_kill_tasks_uses_runner_handle_when_available(
             0.2,
         )
     ]
+
+
+def test_stop_tasks_does_not_force_terminal_consumer_for_external_runner(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    mapping_queue = ctx.queue("weft.state.tid_mappings", persistent=False)
+    ctrl_queue = ctx.queue(f"T{tid}.ctrl_in", persistent=False)
+    mapping_queue.write(
+        json.dumps(
+            {
+                "short": tid[-6:],
+                "full": tid,
+                "pid": 11111,
+                "task_pid": 11111,
+                "caller_pid": 22222,
+                "managed_pids": [],
+                "runner": "docker",
+                "runtime_handle": {
+                    "runner_name": "docker",
+                    "runtime_id": "runtime-123",
+                    "host_pids": [],
+                    "metadata": {"image": "python:3.13-alpine"},
+                },
+                "name": "task-func",
+                "hostname": "test-host",
+            }
+        )
+    )
+
+    monkeypatch.setattr(
+        task_cmd,
+        "task_status",
+        lambda *args, **kwargs: task_cmd.status_cmd.TaskSnapshot(
+            tid=tid,
+            tid_short=tid[-10:],
+            name="docker-task",
+            status="cancelled",
+            event="control_stop",
+            started_at=None,
+            completed_at=None,
+            last_timestamp=time.time_ns(),
+            duration_seconds=None,
+            runner="docker",
+            runtime_handle={
+                "runner_name": "docker",
+                "runtime_id": "runtime-123",
+                "host_pids": [],
+                "metadata": {"image": "python:3.13-alpine"},
+            },
+            runtime={
+                "runner_name": "docker",
+                "runtime_id": "runtime-123",
+                "state": "missing",
+                "metadata": {"image": "python:3.13-alpine"},
+            },
+            metadata={},
+        ),
+    )
+    monkeypatch.setattr(
+        task_cmd,
+        "terminate_process_tree",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("external runners must not force-stop the consumer PID")
+        ),
+    )
+
+    stopped = task_cmd.stop_tasks([tid], context_path=root)
+
+    assert stopped == 1
+    assert ctrl_queue.read_one() == "STOP"
+
+
+def test_kill_tasks_does_not_force_terminal_consumer_for_external_runner(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    mapping_queue = ctx.queue("weft.state.tid_mappings", persistent=False)
+    mapping_queue.write(
+        json.dumps(
+            {
+                "short": tid[-6:],
+                "full": tid,
+                "pid": 11111,
+                "task_pid": 11111,
+                "caller_pid": 22222,
+                "managed_pids": [],
+                "runner": "macos-sandbox",
+                "runtime_handle": {
+                    "runner_name": "macos-sandbox",
+                    "runtime_id": "runtime-123",
+                    "host_pids": [33333],
+                    "metadata": {"profile": "allow-default.sb"},
+                },
+                "name": "task-func",
+                "hostname": "test-host",
+            }
+        )
+    )
+
+    monkeypatch.setattr(
+        task_cmd,
+        "task_status",
+        lambda *args, **kwargs: task_cmd.status_cmd.TaskSnapshot(
+            tid=tid,
+            tid_short=tid[-10:],
+            name="sandbox-task",
+            status="killed",
+            event="control_kill",
+            started_at=None,
+            completed_at=None,
+            last_timestamp=time.time_ns(),
+            duration_seconds=None,
+            runner="macos-sandbox",
+            runtime_handle={
+                "runner_name": "macos-sandbox",
+                "runtime_id": "runtime-123",
+                "host_pids": [33333],
+                "metadata": {"profile": "allow-default.sb"},
+            },
+            runtime={
+                "runner_name": "macos-sandbox",
+                "runtime_id": "runtime-123",
+                "state": "missing",
+                "metadata": {"profile": "allow-default.sb"},
+            },
+            metadata={},
+        ),
+    )
+    monkeypatch.setattr(
+        task_cmd,
+        "kill_process_tree",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("external runners must not force-kill the consumer PID")
+        ),
+    )
+
+    killed = task_cmd.kill_tasks([tid], context_path=root)
+
+    assert killed == 1

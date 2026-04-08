@@ -235,69 +235,42 @@ def _latest_task_entry(
 def _stop_via_fallback(task_entry: dict[str, Any] | None) -> bool:
     if task_entry is None:
         return False
+    pid = _task_pid_from_mapping(task_entry)
+    if pid is not None and _pid_exists(pid):
+        terminate_process_tree(pid, timeout=0.2, kill_after=False)
+        return False
+
     handle = _runtime_handle_from_mapping(task_entry)
     if handle is not None:
-        if handle.runner_name == "host":
-            pid = _task_pid_from_mapping(task_entry)
-            if pid is not None:
-                terminate_process_tree(pid, timeout=0.2, kill_after=False)
-                return False
         plugin = require_runner_plugin(handle.runner_name)
         plugin.stop(handle, timeout=0.2)
         return True
 
-    pid = _task_pid_from_mapping(task_entry)
-    if pid is not None:
-        terminate_process_tree(pid, timeout=0.2, kill_after=False)
     return False
 
 
 def _kill_via_fallback(task_entry: dict[str, Any] | None) -> bool:
     if task_entry is None:
         return False
+    pid = _task_pid_from_mapping(task_entry)
+    if pid is not None and _pid_exists(pid):
+        sigusr1 = getattr(signal, "SIGUSR1", None)
+        if sigusr1 is not None:
+            try:
+                os.kill(pid, sigusr1)
+            except OSError:
+                pass
+        else:
+            kill_process_tree(pid, timeout=0.2)
+        return False
 
     handle = _runtime_handle_from_mapping(task_entry)
     if handle is not None:
-        if handle.runner_name == "host":
-            pid = _task_pid_from_mapping(task_entry)
-            if pid is None:
-                plugin = require_runner_plugin(handle.runner_name)
-                plugin.kill(handle, timeout=0.2)
-                return True
-        else:
-            plugin = require_runner_plugin(handle.runner_name)
-            plugin.kill(handle, timeout=0.2)
-            return True
+        plugin = require_runner_plugin(handle.runner_name)
+        plugin.kill(handle, timeout=0.2)
+        return True
 
-    pid = _task_pid_from_mapping(task_entry)
-    if pid is None:
-        return False
-
-    sigusr1 = getattr(signal, "SIGUSR1", None)
-    if sigusr1 is not None:
-        try:
-            os.kill(pid, sigusr1)
-        except OSError:
-            pass
     return False
-
-
-def _stop_terminal_task_process(task_entry: dict[str, Any] | None) -> None:
-    if task_entry is None:
-        return
-
-    pid = _task_pid_from_mapping(task_entry)
-    if pid is not None and _pid_exists(pid):
-        terminate_process_tree(pid, timeout=0.2)
-
-
-def _kill_terminal_task_process(task_entry: dict[str, Any] | None) -> None:
-    if task_entry is None:
-        return
-
-    pid = _task_pid_from_mapping(task_entry)
-    if pid is not None and _pid_exists(pid):
-        kill_process_tree(pid, timeout=0.2)
 
 
 def _force_kill_task_processes(task_entry: dict[str, Any] | None) -> bool:
@@ -352,9 +325,6 @@ def stop_tasks(
             if not handled_by_runner:
                 task_entry = _latest_task_entry(ctx, lookup, full, task_entry)
                 _stop_via_fallback(task_entry)
-        elif snapshot.status == "cancelled":
-            task_entry = _latest_task_entry(ctx, lookup, full, task_entry)
-            _stop_terminal_task_process(task_entry)
         count += 1
     return count
 
@@ -384,8 +354,6 @@ def kill_tasks(
         task_entry, snapshot = _await_control_surface(ctx, full)
 
         if snapshot is not None and snapshot.status == "killed":
-            task_entry = _latest_task_entry(ctx, lookup, full, task_entry)
-            _kill_terminal_task_process(task_entry)
             killed += 1
             continue
 
@@ -394,8 +362,6 @@ def kill_tasks(
         task_entry, snapshot = _await_control_surface(ctx, full)
 
         if snapshot is not None and snapshot.status == "killed":
-            task_entry = _latest_task_entry(ctx, lookup, full, task_entry)
-            _kill_terminal_task_process(task_entry)
             killed += 1
             continue
 

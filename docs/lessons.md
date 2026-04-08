@@ -114,6 +114,11 @@ runbook needs to become stricter.
   PID is still alive; for external runners such as Docker or macOS sandbox, the
   external runtime description is authoritative and should not be masked by a
   still-exiting consumer wrapper process.
+- CLI stop/kill fallbacks should target the consumer task process while it is
+  still alive, even for external runners. The persisted external runtime handle
+  is the fallback only after the consumer is gone; otherwise the CLI can bypass
+  the consumer's terminal-state publication and either strand the task in
+  `running` or corrupt SQLite by killing teardown mid-write.
 
 ## 2026-04-07 Plan Hardening
 
