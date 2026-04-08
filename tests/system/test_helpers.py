@@ -13,6 +13,8 @@ from unittest.mock import patch
 
 import pytest
 
+from tests.conftest import _register_cli_outputs
+from tests.helpers.weft_harness import WeftTestHarness
 from weft.helpers import (  # noqa: D401 - module already documented
     CommandNotFoundError,
     debug_print,
@@ -403,3 +405,37 @@ class TestResolveCliCommand:
     def test_rejects_blank_commands(self) -> None:
         with pytest.raises(ValueError):
             resolve_cli_command("   ")
+
+
+class TestCliOutputRegistration:
+    """Tests for CLI test-helper output parsing."""
+
+    def test_register_cli_outputs_ignores_status_timestamps(self) -> None:
+        harness = WeftTestHarness()
+        try:
+            payload = json.dumps(
+                {
+                    "managers": [
+                        {
+                            "tid": "1775619600000000001",
+                            "timestamp": 1775619600000000999,
+                        }
+                    ],
+                    "tasks": [
+                        {
+                            "tid": "1775619600000000002",
+                            "last_timestamp": 1775619600000000888,
+                            "runtime": {"started_at": 1775619600000000777},
+                        }
+                    ],
+                }
+            )
+
+            _register_cli_outputs(harness, ("status", "--json"), payload, "")
+
+            assert harness.registered_tids() == {
+                "1775619600000000001",
+                "1775619600000000002",
+            }
+        finally:
+            harness.cleanup()

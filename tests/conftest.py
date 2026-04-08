@@ -361,11 +361,12 @@ def _register_cli_outputs(
 def _extract_ids(harness: WeftTestHarness, text: str) -> None:
     import re
 
-    tid_pattern = re.compile(r"\b\d{19}\b")
     pid_pattern = re.compile(r"pid\s+(\d+)", re.IGNORECASE)
 
-    for match in tid_pattern.findall(text):
-        harness.register_tid(match)
+    for line in text.splitlines():
+        candidate = line.strip()
+        if candidate.isdigit() and len(candidate) == 19:
+            harness.register_tid(candidate)
     for match in pid_pattern.findall(text):
         try:
             harness.register_pid(int(match))

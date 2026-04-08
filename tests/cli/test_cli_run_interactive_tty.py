@@ -138,8 +138,7 @@ def test_interactive_python_repl_outputs(tty_workdir: Path) -> None:
         if rc is None:
             _shutdown(proc, master_fd)
             pytest.fail(
-                "interactive session did not exit after :quit; "
-                f"trailing={trailing!r}"
+                f"interactive session did not exit after :quit; trailing={trailing!r}"
             )
         assert rc == 0
         assert "SyntaxError" not in trailing
