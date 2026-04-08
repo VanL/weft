@@ -229,6 +229,67 @@ def test_task_status_keeps_terminal_log_state_running_while_task_pid_is_alive(
     assert snapshot.status == "running"
 
 
+def test_task_status_treats_created_runtime_as_non_live_for_terminal_docker_task(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = "1844674407370955165"
+    started = 1_762_000_000_000_000_000
+    completed = started + 1_000_000_000
+    mapping_queue = ctx.queue("weft.state.tid_mappings", persistent=False)
+
+    _write_task_log_entry(
+        ctx=ctx,
+        tid=tid,
+        event="control_stop",
+        status="cancelled",
+        started_at=started,
+        completed_at=completed,
+        name="docker-stopped-task",
+        runner_name="docker",
+    )
+    mapping_queue.write(
+        json.dumps(
+            {
+                "short": tid[-10:],
+                "full": tid,
+                "runner": "docker",
+                "runtime_handle": {
+                    "runner_name": "docker",
+                    "runtime_id": "container-123",
+                    "host_pids": [],
+                    "metadata": {"image": "python:3.13-alpine"},
+                },
+            }
+        )
+    )
+
+    class FakeRunnerPlugin:
+        def describe(self, handle: Any) -> RunnerRuntimeDescription | None:
+            return RunnerRuntimeDescription(
+                runner_name=handle.runner_name,
+                runtime_id=handle.runtime_id,
+                state="created",
+                metadata={"image": "python:3.13-alpine"},
+            )
+
+    monkeypatch.setattr(
+        status_cmd,
+        "require_runner_plugin",
+        lambda name: FakeRunnerPlugin(),
+    )
+
+    snapshot = task_cmd.task_status(tid, context_path=root)
+
+    assert snapshot is not None
+    assert snapshot.event == "control_stop"
+    assert snapshot.runtime is not None
+    assert snapshot.runtime["state"] == "created"
+    assert snapshot.status == "cancelled"
+
+
 def test_task_status_uses_log_runtime_metadata_when_mapping_is_missing(
     tmp_path: Path,
 ) -> None:
