@@ -57,7 +57,9 @@ def test_harness_force_termination_targets_managed_pids_only(
         harness.register_pid(303, kind="managed")
 
         monkeypatch.setattr(harness, "_should_skip_pid", lambda pid: False)
-        monkeypatch.setattr(harness, "_terminate_pid", lambda pid: terminated.append(pid))
+        monkeypatch.setattr(
+            harness, "_terminate_pid", lambda pid: terminated.append(pid)
+        )
 
         harness._terminate_registered_pids()
 
@@ -93,7 +95,9 @@ def test_harness_cleanup_preserve_database_avoids_force_termination(
             lambda: [202],
         )
         terminated: list[int] = []
-        monkeypatch.setattr(harness, "_terminate_pid", lambda pid: terminated.append(pid))
+        monkeypatch.setattr(
+            harness, "_terminate_pid", lambda pid: terminated.append(pid)
+        )
 
         with pytest.raises(RuntimeError, match="preserve_database=True"):
             harness.cleanup(preserve_database=True)
@@ -140,7 +144,9 @@ def test_harness_stop_active_workers_stops_registered_task_and_worker_tids(
             "_send_task_stop",
             lambda tid: task_calls.append(tid),
         )
-        monkeypatch.setattr(task_cmd, "kill_tasks", lambda tids, **kwargs: len(tuple(tids)))
+        monkeypatch.setattr(
+            task_cmd, "kill_tasks", lambda tids, **kwargs: len(tuple(tids))
+        )
         monkeypatch.setattr(
             worker_cmd,
             "stop_command",
@@ -153,6 +159,123 @@ def test_harness_stop_active_workers_stops_registered_task_and_worker_tids(
         assert task_calls == ["1775630560739303424"]
     finally:
         harness.cleanup()
+
+
+@pytest.mark.sqlite_only
+def test_harness_stop_active_workers_does_not_fan_out_worker_tid_as_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = WeftTestHarness()
+    repo_cwd = os.getcwd()
+    try:
+        harness.__enter__()
+        monkeypatch.setattr(
+            harness,
+            "_list_active_worker_records",
+            lambda: [{"tid": "1775630560447778816", "status": "active"}],
+        )
+        harness._load_tid_mapping_payloads = lambda: [  # type: ignore[method-assign]
+            {
+                "full": "1775630560447778816",
+                "pid": 424242,
+                "task_pid": 424242,
+                "managed_pids": [],
+            }
+        ]
+        monkeypatch.setattr(
+            harness,
+            "_wait_for_registered_pids_to_exit",
+            lambda **kwargs: [],
+        )
+        monkeypatch.setattr(harness, "_drain_registry_queue", lambda: None)
+
+        worker_calls: list[str] = []
+        task_calls: list[str] = []
+        kill_calls: list[tuple[str, ...]] = []
+
+        monkeypatch.setattr(
+            harness,
+            "_send_worker_stop",
+            lambda tid, *, record: worker_calls.append(tid),
+        )
+        monkeypatch.setattr(
+            harness,
+            "_send_task_stop",
+            lambda tid: task_calls.append(tid),
+        )
+        monkeypatch.setattr(
+            task_cmd,
+            "kill_tasks",
+            lambda tids, **kwargs: kill_calls.append(tuple(tids)),
+        )
+        monkeypatch.setattr(
+            worker_cmd,
+            "stop_command",
+            lambda **kwargs: (0, None),
+        )
+
+        harness._stop_active_workers()
+
+        assert worker_calls == ["1775630560447778816"]
+        assert task_calls == []
+        assert kill_calls == []
+    finally:
+        os.chdir(repo_cwd)
+        harness._closed = True
+        harness._tempdir.cleanup()
+
+
+@pytest.mark.sqlite_only
+def test_harness_stop_active_workers_does_not_fan_out_in_process_task_tid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = WeftTestHarness()
+    repo_cwd = os.getcwd()
+    try:
+        harness.__enter__()
+        monkeypatch.setattr(harness, "_list_active_worker_records", lambda: [])
+        harness._load_tid_mapping_payloads = lambda: [  # type: ignore[method-assign]
+            {
+                "full": "1775630561555555555",
+                "pid": harness._self_pid,
+                "task_pid": harness._self_pid,
+                "managed_pids": [],
+            }
+        ]
+        monkeypatch.setattr(
+            harness,
+            "_wait_for_registered_pids_to_exit",
+            lambda **kwargs: [],
+        )
+        monkeypatch.setattr(harness, "_drain_registry_queue", lambda: None)
+
+        task_calls: list[str] = []
+        kill_calls: list[tuple[str, ...]] = []
+
+        monkeypatch.setattr(
+            harness,
+            "_send_task_stop",
+            lambda tid: task_calls.append(tid),
+        )
+        monkeypatch.setattr(
+            task_cmd,
+            "kill_tasks",
+            lambda tids, **kwargs: kill_calls.append(tuple(tids)),
+        )
+        monkeypatch.setattr(
+            worker_cmd,
+            "stop_command",
+            lambda **kwargs: (0, None),
+        )
+
+        harness._stop_active_workers()
+
+        assert task_calls == []
+        assert kill_calls == []
+    finally:
+        os.chdir(repo_cwd)
+        harness._closed = True
+        harness._tempdir.cleanup()
 
 
 @pytest.mark.sqlite_only

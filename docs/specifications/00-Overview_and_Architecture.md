@@ -155,6 +155,7 @@ _Implementation mapping_: State events written to `weft.log.tasks` by `weft/core
 
 ## Related Plans
 
+- [`docs/plans/task-lifecycle-stop-drain-audit-plan.md`](../plans/task-lifecycle-stop-drain-audit-plan.md) — Audit task lifecycle stop/drain failures, preserve-cleanup, and liveness truth boundaries before planning fixes.
 - [`docs/plans/agent-runtime-boundary-cleanup-plan.md`](../plans/agent-runtime-boundary-cleanup-plan.md) — Agent runtime boundary cleanup
 - [`docs/plans/agent-runtime-implementation-plan.md`](../plans/agent-runtime-implementation-plan.md) — Agent runtime implementation
 - [`docs/plans/persistent-agent-runtime-implementation-plan.md`](../plans/persistent-agent-runtime-implementation-plan.md) — Persistent agent runtime

@@ -141,6 +141,14 @@ class Manager(BaseTask):
             ),
         }
 
+    def _build_tid_mapping_payload(self) -> dict[str, Any]:
+        """Publish manager identity in tid mappings even without explicit metadata."""
+
+        payload = super()._build_tid_mapping_payload()
+        # Manager role is structural, not advisory metadata.
+        payload["role"] = "manager"
+        return payload
+
     def _handle_control_command(
         self, command: str, context: QueueMessageContext
     ) -> bool:

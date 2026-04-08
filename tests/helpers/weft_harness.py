@@ -343,6 +343,17 @@ class WeftTestHarness:
             return role
         return None
 
+    def _mapping_owner_pid(self, data: dict[str, object]) -> int | None:
+        for key in ("task_pid", "pid"):
+            value = data.get(key)
+            if isinstance(value, int):
+                return value
+        return None
+
+    def _mapping_has_safe_owner(self, data: dict[str, object]) -> bool:
+        owner_pid = self._mapping_owner_pid(data)
+        return isinstance(owner_pid, int) and self._should_skip_pid(owner_pid)
+
     def _latest_task_events(self) -> dict[str, str]:
         queue = Queue(
             WEFT_GLOBAL_LOG_QUEUE,
@@ -368,6 +379,7 @@ class WeftTestHarness:
             if (
                 full_tid in self._registered_worker_tids
                 or self._mapping_role(data) == "manager"
+                or self._mapping_has_safe_owner(data)
                 or terminal_events.get(full_tid) in TERMINAL_TASK_EVENTS
             ):
                 continue
@@ -420,6 +432,7 @@ class WeftTestHarness:
         for record in self._list_active_worker_records():
             tid = record.get("tid")
             if isinstance(tid, str):
+                self.register_worker_tid(tid)
                 worker_records[tid] = record
         for tid in self._registered_worker_tids:
             worker_records.setdefault(tid, {"tid": tid})
@@ -427,7 +440,9 @@ class WeftTestHarness:
 
     def _send_worker_stop(self, tid: str, *, record: dict[str, object]) -> None:
         ctrl_in = record.get("ctrl_in")
-        queue_name = ctrl_in if isinstance(ctrl_in, str) and ctrl_in else f"T{tid}.ctrl_in"
+        queue_name = (
+            ctrl_in if isinstance(ctrl_in, str) and ctrl_in else f"T{tid}.ctrl_in"
+        )
         pid = record.get("pid")
         if isinstance(pid, int):
             self.register_pid(pid, kind="owner")
@@ -561,7 +576,10 @@ class WeftTestHarness:
             if isinstance(full_tid, str) and full_tid:
                 if self._mapping_role(data) == "manager":
                     self.register_worker_tid(full_tid)
-                elif full_tid not in self._registered_worker_tids:
+                elif (
+                    full_tid not in self._registered_worker_tids
+                    and not self._mapping_has_safe_owner(data)
+                ):
                     self.register_tid(full_tid)
 
             caller_pid = data.get("caller_pid")

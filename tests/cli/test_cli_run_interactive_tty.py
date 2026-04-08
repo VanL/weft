@@ -149,10 +149,7 @@ def test_interactive_python_repl_outputs(tty_workdir: Path) -> None:
 def test_interactive_quit_stops_child_that_ignores_eof(tty_workdir: Path) -> None:
     script = tty_workdir / "ignore_eof.py"
     script.write_text(
-        "import time\n"
-        "print('ready', flush=True)\n"
-        "while True:\n"
-        "    time.sleep(1)\n",
+        "import time\nprint('ready', flush=True)\nwhile True:\n    time.sleep(1)\n",
         encoding="utf-8",
     )
 

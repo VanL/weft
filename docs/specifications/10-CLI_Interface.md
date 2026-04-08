@@ -886,6 +886,7 @@ The CLI follows SimpleBroker's command patterns and integrates with standard Uni
 
 ## Related Plans
 
+- [`docs/plans/task-lifecycle-stop-drain-audit-plan.md`](../plans/task-lifecycle-stop-drain-audit-plan.md)
 - [`docs/plans/active-control-main-thread-plan.md`](../plans/active-control-main-thread-plan.md)
 - [`docs/plans/piped-input-support-plan.md`](../plans/piped-input-support-plan.md)
 - [`docs/plans/runner-extension-point-plan.md`](../plans/runner-extension-point-plan.md)

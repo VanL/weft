@@ -4,6 +4,7 @@ This document details the fundamental components of the Weft system architecture
 
 ## Related Plans
 
+- [Task Lifecycle Stop/Drain Audit Plan](../plans/task-lifecycle-stop-drain-audit-plan.md) - Audit terminal-state ownership, manager drain, and cleanup behavior before making lifecycle fixes.
 - [Active Control Main-Thread Ownership Plan](../plans/active-control-main-thread-plan.md) - Remove background active control polling and restore single-threaded task-state ownership.
 - [Runner Extension Point Plan](../plans/runner-extension-point-plan.md) - Runner plugin architecture replacing the monolithic executor.
 - [Persistent Agent Runtime Implementation Plan](../plans/persistent-agent-runtime-implementation-plan.md) - Agent session and persistent task support.

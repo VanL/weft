@@ -227,7 +227,9 @@ def test_stop_tasks_prefers_task_process_over_runner_handle(
         )
     )
 
-    monkeypatch.setattr(task_cmd, "require_runner_plugin", lambda name: FakeRunnerPlugin())
+    monkeypatch.setattr(
+        task_cmd, "require_runner_plugin", lambda name: FakeRunnerPlugin()
+    )
     monkeypatch.setattr(task_cmd, "_pid_exists", lambda pid: pid == 11111)
     monkeypatch.setattr(
         task_cmd,

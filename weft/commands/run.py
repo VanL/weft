@@ -1539,7 +1539,12 @@ def _run_pipeline(
             stage_input = result_value
 
     finally:
-        if manager_started_here and wait and not reuse_enabled and manager_record is not None:
+        if (
+            manager_started_here
+            and wait
+            and not reuse_enabled
+            and manager_record is not None
+        ):
             _stop_manager(context, manager_record, process_handle)
 
     if json_output:

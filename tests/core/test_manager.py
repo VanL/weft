@@ -16,6 +16,7 @@ from weft._constants import (
     WEFT_MANAGER_CTRL_OUT_QUEUE,
     WEFT_MANAGER_OUTBOX_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
+    WEFT_TID_MAPPINGS_QUEUE,
     WEFT_WORKERS_REGISTRY_QUEUE,
     load_config,
 )
@@ -45,10 +46,13 @@ def make_manager_spec(
     ctrl_out: str = WEFT_MANAGER_CTRL_OUT_QUEUE,
     *,
     idle_timeout: float | None = None,
+    role: str | None = None,
 ) -> TaskSpec:
     metadata = {"capabilities": ["tests.tasks.sample_targets:large_output"]}
     if idle_timeout is not None:
         metadata["idle_timeout"] = idle_timeout
+    if role is not None:
+        metadata["role"] = role
     return TaskSpec(
         tid=tid,
         name="manager",
@@ -161,6 +165,36 @@ def test_manager_registry_entries(manager_setup) -> None:
     relevant = [entry for entry in entries if entry.get("tid") == manager.tid]
     assert len(relevant) == 1
     assert relevant[0]["status"] == "stopped"
+
+
+def test_manager_tid_mapping_forces_role_manager(broker_env, unique_tid) -> None:
+    db_path, make_queue = broker_env
+    spec = make_manager_spec(
+        unique_tid,
+        f"manager.{unique_tid}.inbox",
+        f"manager.{unique_tid}.ctrl_in",
+        f"manager.{unique_tid}.ctrl_out",
+        role="task",
+    )
+    manager = Manager(db_path, spec)
+    try:
+        mapping_queue = make_queue(WEFT_TID_MAPPINGS_QUEUE)
+        entries = [json.loads(item) for item in drain(mapping_queue)]
+        relevant = [entry for entry in entries if entry.get("full") == manager.tid]
+        assert relevant
+        assert relevant[-1]["role"] == "manager"
+    finally:
+        manager.stop(join=False)
+        manager.cleanup()
+
+
+def test_manager_tid_mapping_defaults_role_manager(manager_setup) -> None:
+    manager, make_queue = manager_setup
+    mapping_queue = make_queue(WEFT_TID_MAPPINGS_QUEUE)
+    entries = [json.loads(item) for item in drain(mapping_queue)]
+    relevant = [entry for entry in entries if entry.get("full") == manager.tid]
+    assert relevant
+    assert relevant[-1]["role"] == "manager"
 
 
 def test_manager_cleanup_sends_stop_to_children(manager_setup) -> None:
@@ -444,7 +478,9 @@ def test_manager_leadership_yield_drains_nonpersistent_children(
     unregister_calls: list[bool] = []
 
     monkeypatch.setattr(manager, "_leader_tid", lambda: lower_leader_tid)
-    monkeypatch.setattr(manager, "_unregister_worker", lambda: unregister_calls.append(True))
+    monkeypatch.setattr(
+        manager, "_unregister_worker", lambda: unregister_calls.append(True)
+    )
 
     yielded = manager._maybe_yield_leadership(force=True)
 
@@ -455,7 +491,9 @@ def test_manager_leadership_yield_drains_nonpersistent_children(
     assert manager.taskspec.state.status == "running"
 
     events = [json.loads(item) for item in drain(log_queue)]
-    yield_events = [event for event in events if event.get("event") == "manager_leadership_yielded"]
+    yield_events = [
+        event for event in events if event.get("event") == "manager_leadership_yielded"
+    ]
     assert len(yield_events) == 1
     assert yield_events[0]["leader_tid"] == lower_leader_tid
     assert yield_events[0]["draining"] is True
@@ -468,7 +506,9 @@ def test_manager_leadership_yield_drains_nonpersistent_children(
     assert manager.taskspec.state.status == "cancelled"
 
     events = [json.loads(item) for item in drain(log_queue)]
-    drained_events = [event for event in events if event.get("event") == "manager_leadership_drained"]
+    drained_events = [
+        event for event in events if event.get("event") == "manager_leadership_drained"
+    ]
     assert len(drained_events) == 1
     assert drained_events[0]["status"] == "cancelled"
 
@@ -691,14 +731,14 @@ def test_manager_idle_timeout_waits_for_active_child_to_finish(
         inbox_queue.write(
             json.dumps(
                 {
-                        "spec": {
-                            "type": "function",
-                            "function_target": "tests.tasks.sample_targets:simulate_work",
-                            "keyword_args": {"duration": 0.5},
-                        },
-                    }
-                )
+                    "spec": {
+                        "type": "function",
+                        "function_target": "tests.tasks.sample_targets:simulate_work",
+                        "keyword_args": {"duration": 0.5},
+                    },
+                }
             )
+        )
 
         start = time.time()
         while not manager._child_processes and time.time() - start < 2.0:

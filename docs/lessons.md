@@ -170,3 +170,21 @@ runbook needs to become stricter.
   live lets launchers and leader-election code select a dead manager and route
   spawn requests into an inbox that no process will ever service. The fix
   belongs in the shared PID-liveness helper, not in one caller.
+
+## 2026-04-08 Manager Role Identity
+
+- Manager identity has to stay consistent across every observability surface,
+  especially the worker registry and `weft.state.tid_mappings`. If the registry
+  says a TID is a manager but the tid-mapping payload omits `role="manager"`,
+  cleanup code can misclassify that manager as a task and send task-kill
+  signals to the wrong process.
+- For manager tasks, `role="manager"` is structural and must be emitted
+  unconditionally by the manager itself rather than inherited from mutable
+  TaskSpec metadata.
+- Test harness cleanup should treat active worker records as authoritative
+  worker tids before it fans out task STOP/KILL calls. That keeps teardown safe
+  even if a future regression drops manager role metadata from one surface.
+- Test harness cleanup must also treat tasks whose owner PID is the current
+  pytest process as local-only, not as external task-control targets. In-process
+  `task_factory` Consumers still publish `tid_mappings`; if cleanup fans out
+  STOP/KILL for those TIDs, teardown can signal the test runner itself.

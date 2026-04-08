@@ -190,7 +190,9 @@ def stop_command(
         entry = _registry_entry_for_tid(db_path, context.broker_config, tid)
         if entry is None:
             if stop_if_absent or entry_observed:
-                last_pid = last_entry.get("pid") if isinstance(last_entry, dict) else None
+                last_pid = (
+                    last_entry.get("pid") if isinstance(last_entry, dict) else None
+                )
                 if not _pid_alive(cast(int | None, last_pid)):
                     return 0, None
         else:

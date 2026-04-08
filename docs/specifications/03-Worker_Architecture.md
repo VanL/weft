@@ -21,6 +21,7 @@ Managers consume those requests, expand the TaskSpec, launch child Consumers via
 
 ## Related Plans
 
+- [Task Lifecycle Stop/Drain Audit Plan](../plans/task-lifecycle-stop-drain-audit-plan.md) – Audit manager drain, registry semantics, and lifecycle ownership before changing worker behavior.
 - [Agent Runtime Implementation Plan](../plans/agent-runtime-implementation-plan.md) – references `WA-2` TID correlation.
 - [Persistent Agent Runtime Implementation Plan](../plans/persistent-agent-runtime-implementation-plan.md) – references Worker Architecture for long-lived agent sessions.
 - [TaskSpec Clean Design Plan](../plans/taskspec-clean-design-plan.md) – references Worker Architecture for TaskSpec schema alignment.
