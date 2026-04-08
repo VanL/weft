@@ -170,7 +170,15 @@ class WeftTestHarness:
                     event = data.get("event")
                     if event == "work_completed":
                         return
-                    if event in {"work_failed", "work_timeout"}:
+                    if event in {
+                        "work_failed",
+                        "work_timeout",
+                        "work_limit_violation",
+                        "control_stop",
+                        "control_kill",
+                        "task_signal_stop",
+                        "task_signal_kill",
+                    }:
                         raise RuntimeError(f"Task {tid} reported {event}")
                 last_seen = next_last_seen
                 time.sleep(0.05)

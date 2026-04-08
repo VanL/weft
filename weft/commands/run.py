@@ -22,6 +22,8 @@ import typer
 
 from simplebroker import Queue, serialize_broker_target
 from weft._constants import (
+    CONTROL_KILL,
+    CONTROL_STOP,
     DEFAULT_STREAM_OUTPUT,
     QUEUE_CTRL_IN_SUFFIX,
     QUEUE_CTRL_OUT_SUFFIX,
@@ -479,12 +481,10 @@ def _stop_manager(
 
 def _enqueue_taskspec(
     context: WeftContext,
-    manager_record: dict[str, Any],
     taskspec: TaskSpec,
     work_payload: Any,
 ) -> int:
     # Spec: docs/specifications/03-Worker_Architecture.md#tid-correlation-wa-2, [MF-1]
-    inbox_name = manager_record.get("requests") or WEFT_SPAWN_REQUESTS_QUEUE
     task_tid = taskspec.tid or _generate_tid(context)
     taskspec_payload = resolve_taskspec_payload(
         taskspec.model_dump(mode="json"),
@@ -506,7 +506,7 @@ def _enqueue_taskspec(
     with context.broker() as db:
         db._run_with_retry(
             lambda: db._do_write_transaction(
-                inbox_name,
+                WEFT_SPAWN_REQUESTS_QUEUE,
                 message_json,
                 message_timestamp,
             )
@@ -700,6 +700,20 @@ def _wait_for_task_completion(
             if status != "running":
                 break
 
+            for payload, _ts in events:
+                event = payload.get("event")
+                if event in {"control_stop", "task_signal_stop"}:
+                    status = "cancelled"
+                    error_message = payload.get("error") or "Task cancelled"
+                    break
+                if event in {"control_kill", "task_signal_kill"}:
+                    status = "killed"
+                    error_message = payload.get("error") or "Task killed"
+                    break
+
+            if status != "running":
+                break
+
             if completed_at is not None and (
                 time.monotonic() - completed_at >= WEFT_COMPLETED_RESULT_GRACE_SECONDS
             ):
@@ -734,6 +748,9 @@ def _run_interactive_session(
         taskspec.io.control.get("ctrl_out")
         or f"T{taskspec.tid}.{QUEUE_CTRL_OUT_SUFFIX}"
     )
+    ctrl_in_name = (
+        taskspec.io.control.get("ctrl_in") or f"T{taskspec.tid}.{QUEUE_CTRL_IN_SUFFIX}"
+    )
     inbox_name = (
         taskspec.io.inputs.get("inbox") or f"T{taskspec.tid}.{QUEUE_INBOX_SUFFIX}"
     )
@@ -764,6 +781,28 @@ def _run_interactive_session(
             status_holder["error"] = event.get("error") or evt.replace("_", " ")
         elif evt == "work_completed":
             status_holder["status"] = "completed"
+
+    def _send_interactive_control(command: str) -> None:
+        ctrl_queue = Queue(
+            ctrl_in_name,
+            db_path=db_path,
+            persistent=False,
+            config=config,
+        )
+        try:
+            ctrl_queue.write(command)
+        finally:
+            ctrl_queue.close()
+
+    def _request_interactive_exit() -> bool:
+        client.close_input()
+        if client.wait(timeout=1.0):
+            return True
+        _send_interactive_control(CONTROL_STOP)
+        if client.wait(timeout=2.0):
+            return True
+        _send_interactive_control(CONTROL_KILL)
+        return client.wait(timeout=2.0)
 
     client = InteractiveStreamClient(
         db_path=db_path,
@@ -823,7 +862,10 @@ def _run_interactive_session(
 
                     stripped = line.strip()
                     if stripped in {":quit", ":exit"}:
-                        client.close_input()
+                        if not _request_interactive_exit():
+                            raise RuntimeError(
+                                "Interactive session did not stop after :quit"
+                            )
                         break
 
                     payload = line if line.endswith("\n") else f"{line}\n"
@@ -920,6 +962,7 @@ def _build_taskspec_dict(
     memory: int | None,
     cpu: int | None,
     interactive: bool,
+    interactive_transport: str | None,
     stream_output: bool,
     metadata: dict[str, Any],
 ) -> dict[str, Any]:
@@ -957,6 +1000,11 @@ def _build_taskspec_dict(
         limits["cpu_percent"] = cpu
     if limits:
         spec_section["limits"] = limits
+    if interactive_transport:
+        spec_section["runner"] = {
+            "name": "host",
+            "options": {"interactive_transport": interactive_transport},
+        }
 
     io_section: dict[str, Any] = {}
     if tid is not None:
@@ -1070,6 +1118,7 @@ def _run_inline(
         memory=memory,
         cpu=cpu,
         interactive=interactive,
+        interactive_transport="pty" if interactive and stdin_is_terminal else None,
         stream_output=effective_stream_output,
         metadata=metadata,
     )
@@ -1077,9 +1126,9 @@ def _run_inline(
     taskspec = TaskSpec.model_validate(
         template_dict, context={"auto_expand": False, "template": True}
     )
-    manager_record, started_here, process_handle = _ensure_manager(
-        context, verbose=verbose
-    )
+    manager_record: dict[str, Any] | None = None
+    started_here = False
+    process_handle: subprocess.Popen[bytes] | None = None
     reuse_enabled = bool(context.config.get("WEFT_MANAGER_REUSE_ENABLED", True))
 
     try:
@@ -1092,7 +1141,16 @@ def _run_inline(
                 raise typer.BadParameter(
                     "--json is not supported together with --interactive"
                 )
-        tid = str(_enqueue_taskspec(context, manager_record, taskspec, work_payload))
+        manager_record, started_here, process_handle = _ensure_manager(
+            context,
+            verbose=verbose,
+        )
+        tid_int = _enqueue_taskspec(
+            context,
+            taskspec,
+            work_payload,
+        )
+        tid = str(tid_int)
         if verbose:
             typer.echo(
                 json.dumps(
@@ -1153,12 +1211,12 @@ def _run_inline(
                 verbose=verbose,
             )
     except Exception as exc:
-        if started_here:
+        if started_here and manager_record is not None:
             _stop_manager(context, manager_record, process_handle)
         typer.echo(f"Error submitting task: {exc}", err=True)
         return 1
     else:
-        if started_here and wait and not reuse_enabled:
+        if started_here and wait and not reuse_enabled and manager_record is not None:
             _stop_manager(context, manager_record, process_handle)
 
     if status == "completed":
@@ -1225,13 +1283,22 @@ def _run_spec_via_manager(
         stdin_data=stdin_data,
         interactive=bool(spec.spec.interactive),
     )
-    manager_record, started_here, process_handle = _ensure_manager(
-        context, verbose=verbose
-    )
+    manager_record: dict[str, Any] | None = None
+    started_here = False
+    process_handle: subprocess.Popen[bytes] | None = None
     reuse_enabled = bool(context.config.get("WEFT_MANAGER_REUSE_ENABLED", True))
 
     try:
-        tid = str(_enqueue_taskspec(context, manager_record, spec, work_payload))
+        manager_record, started_here, process_handle = _ensure_manager(
+            context,
+            verbose=verbose,
+        )
+        tid_int = _enqueue_taskspec(
+            context,
+            spec,
+            work_payload,
+        )
+        tid = str(tid_int)
         resolved_payload = resolve_taskspec_payload(
             spec.model_dump(mode="json"),
             tid=tid,
@@ -1259,12 +1326,12 @@ def _run_spec_via_manager(
             verbose=verbose,
         )
     except Exception as exc:
-        if started_here:
+        if started_here and manager_record is not None:
             _stop_manager(context, manager_record, process_handle)
         typer.echo(f"Error submitting TaskSpec: {exc}", err=True)
         return 1
     else:
-        if started_here and wait and not reuse_enabled:
+        if started_here and wait and not reuse_enabled and manager_record is not None:
             _stop_manager(context, manager_record, process_handle)
 
     if status == "completed":
@@ -1324,16 +1391,16 @@ def _run_pipeline(
     stdin_data = _read_piped_stdin(context)
     if pipeline_input is not None and stdin_data is not None:
         raise typer.BadParameter("--input cannot be used together with piped stdin")
-    manager_record, started_here, process_handle = _ensure_manager(
-        context, verbose=verbose
-    )
-    reuse_enabled = bool(context.config.get("WEFT_MANAGER_REUSE_ENABLED", True))
 
     stage_input: Any = None
     if pipeline_input is not None:
         stage_input = _parse_cli_value(pipeline_input)
     elif stdin_data is not None:
         stage_input = stdin_data
+    manager_record: dict[str, Any] | None = None
+    process_handle: subprocess.Popen[bytes] | None = None
+    manager_started_here = False
+    reuse_enabled = bool(context.config.get("WEFT_MANAGER_REUSE_ENABLED", True))
 
     try:
         for stage in stages:
@@ -1401,9 +1468,18 @@ def _run_pipeline(
             work_payload = stage_input
             if isinstance(defaults, dict) and "input" in defaults:
                 work_payload = defaults.get("input")
-            tid = str(
-                _enqueue_taskspec(context, manager_record, taskspec, work_payload)
+            manager_record, started_here, process_handle = _ensure_manager(
+                context,
+                verbose=verbose,
             )
+            tid_int = _enqueue_taskspec(
+                context,
+                taskspec,
+                work_payload,
+            )
+            tid = str(tid_int)
+            if started_here:
+                manager_started_here = True
 
             resolved_payload = resolve_taskspec_payload(
                 taskspec.model_dump(mode="json"),
@@ -1465,7 +1541,7 @@ def _run_pipeline(
             stage_input = result_value
 
     finally:
-        if started_here and wait and not reuse_enabled:
+        if manager_started_here and wait and not reuse_enabled and manager_record is not None:
             _stop_manager(context, manager_record, process_handle)
 
     if json_output:

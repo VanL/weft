@@ -144,3 +144,44 @@ def test_interactive_python_repl_outputs(tty_workdir: Path) -> None:
         assert "SyntaxError" not in trailing
     finally:
         _shutdown(proc, master_fd)
+
+
+def test_interactive_quit_stops_child_that_ignores_eof(tty_workdir: Path) -> None:
+    script = tty_workdir / "ignore_eof.py"
+    script.write_text(
+        "import time\n"
+        "print('ready', flush=True)\n"
+        "while True:\n"
+        "    time.sleep(1)\n",
+        encoding="utf-8",
+    )
+
+    cmd = ["weft", "run", "-i", "--", "python", str(script)]
+    proc, master_fd = _spawn_with_pty(cmd, cwd=tty_workdir)
+    try:
+        banner = _read_until(master_fd, "weft>", proc=proc)
+        if "weft>" not in banner:
+            rc = proc.poll()
+            trailing = _read_until_exit(proc, master_fd, timeout=1.0)
+            _shutdown(proc, master_fd)
+            pytest.fail(
+                "weft prompt not detected; "
+                f"returncode={rc!r} banner={banner!r} trailing={trailing!r}"
+            )
+
+        ready_output = _read_until(master_fd, "ready", proc=proc)
+        if "ready" not in ready_output:
+            _shutdown(proc, master_fd)
+            pytest.fail(f"expected child readiness output, saw {ready_output!r}")
+
+        _write_line(master_fd, ":quit\n")
+        trailing = _read_until_exit(proc, master_fd, timeout=EXIT_TIMEOUT)
+        rc = proc.poll()
+        if rc is None:
+            _shutdown(proc, master_fd)
+            pytest.fail(
+                f"interactive session did not exit after :quit; trailing={trailing!r}"
+            )
+        assert rc == 0
+    finally:
+        _shutdown(proc, master_fd)

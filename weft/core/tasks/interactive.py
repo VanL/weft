@@ -401,6 +401,10 @@ class InteractiveTaskMixin(ABC):
         self._interactive_session = None
         self._interactive_runner = None
         self._end_streaming_session()
+        try:
+            session.close()
+        except Exception:
+            logger.debug("Failed to close interactive session resources", exc_info=True)
 
     def _interactive_shutdown(self, *, reason: str | None = None) -> None:
         session_obj = getattr(self, "_interactive_session", None)
