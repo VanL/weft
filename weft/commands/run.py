@@ -756,6 +756,7 @@ def _run_interactive_session(
 
     status_holder: dict[str, str | None] = {"status": None, "error": None}
     stdout_chunks: list[str] = []
+    quit_requested = False
 
     def _stdout_callback(chunk: str, final: bool) -> None:
         if use_prompt:
@@ -780,6 +781,12 @@ def _run_interactive_session(
             status_holder["error"] = event.get("error") or evt.replace("_", " ")
         elif evt == "work_completed":
             status_holder["status"] = "completed"
+        elif evt in {"control_stop", "task_signal_stop"}:
+            status_holder["status"] = "cancelled"
+            status_holder["error"] = event.get("error") or "Task cancelled"
+        elif evt in {"control_kill", "task_signal_kill"}:
+            status_holder["status"] = "killed"
+            status_holder["error"] = event.get("error") or "Task killed"
 
     def _send_interactive_control(command: str) -> None:
         ctrl_queue = Queue(
@@ -871,6 +878,7 @@ def _run_interactive_session(
 
                     stripped = line.strip()
                     if stripped in {":quit", ":exit"}:
+                        quit_requested = True
                         if not _request_interactive_exit():
                             raise RuntimeError(
                                 "Interactive session did not stop after :quit"
@@ -897,6 +905,9 @@ def _run_interactive_session(
                 client.wait()
         status = status_holder["status"] or client.status or "completed"
         error = status_holder["error"] or client.error
+        if quit_requested and status in {"cancelled", "killed"}:
+            status = "completed"
+            error = None
         result: Any | None = None
     finally:
         client.stop()
