@@ -11,7 +11,11 @@ from collections.abc import Mapping
 from typing import Any
 
 from simplebroker import Queue
-from weft._constants import CONTROL_KILL, CONTROL_STOP
+from weft._constants import (
+    CONTROL_KILL,
+    CONTROL_STOP,
+    INTERACTIVE_STOP_GRACE_SECONDS,
+)
 from weft.core.targets import decode_work_message
 from weft.core.taskspec import ReservedPolicy, TaskSpec
 
@@ -415,7 +419,7 @@ class InteractiveTaskMixin(ABC):
             session.close_stdin()
         except Exception:
             logger.debug("Failed to close interactive stdin", exc_info=True)
-        deadline = time.time() + 2.0
+        deadline = time.time() + INTERACTIVE_STOP_GRACE_SECONDS
         while session.is_alive() and time.time() < deadline:
             time.sleep(0.05)
             self._interactive_flush_outputs()

@@ -25,6 +25,7 @@ from weft._constants import (
     CONTROL_KILL,
     CONTROL_STOP,
     DEFAULT_STREAM_OUTPUT,
+    INTERACTIVE_STOP_COMPLETION_TIMEOUT,
     QUEUE_CTRL_IN_SUFFIX,
     QUEUE_CTRL_OUT_SUFFIX,
     QUEUE_INBOX_SUFFIX,
@@ -797,7 +798,7 @@ def _run_interactive_session(
         if client.wait(timeout=1.0):
             return True
         _send_interactive_control(CONTROL_STOP)
-        if client.wait(timeout=2.0):
+        if client.wait(timeout=INTERACTIVE_STOP_COMPLETION_TIMEOUT):
             return True
         _send_interactive_control(CONTROL_KILL)
         return client.wait(timeout=2.0)

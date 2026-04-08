@@ -232,6 +232,12 @@ WEFT_MANAGER_REUSE_ENABLED: Final[bool] = True
 WEFT_COMPLETED_RESULT_GRACE_SECONDS: Final[float] = 0.25
 """Time to keep polling an outbox after a completion event before assuming no result."""
 
+INTERACTIVE_STOP_GRACE_SECONDS: Final[float] = 2.0
+"""Grace period for interactive tasks to exit cleanly after stdin closure."""
+
+INTERACTIVE_STOP_COMPLETION_TIMEOUT: Final[float] = 5.0
+"""CLI wait budget for interactive STOP completion, including queue propagation."""
+
 
 # Autostart behaviour
 # -------------------
