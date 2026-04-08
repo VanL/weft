@@ -21,6 +21,8 @@ from weft.commands import worker as worker_cmd
 from weft.context import WeftContext, build_context
 from weft.helpers import iter_queue_json_entries, terminate_process_tree
 
+DEFAULT_TASK_COMPLETION_TIMEOUT = 60.0
+
 
 class WeftTestHarness:
     """Isolated Weft test environment with automatic cleanup."""
@@ -140,7 +142,11 @@ class WeftTestHarness:
 
         return "\n".join(lines)
 
-    def wait_for_completion(self, tid: str, timeout: float = 20.0) -> None:
+    def wait_for_completion(
+        self,
+        tid: str,
+        timeout: float = DEFAULT_TASK_COMPLETION_TIMEOUT,
+    ) -> None:
         log_queue = Queue(
             WEFT_GLOBAL_LOG_QUEUE,
             db_path=self.context.broker_target,

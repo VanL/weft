@@ -152,3 +152,11 @@ runbook needs to become stricter.
 - Spawned-process teardown tests should treat zombie processes as exited.
   `pid_exists()` alone is too strict for cross-platform process cleanup checks
   and can create false failures after the process has already terminated.
+
+## 2026-04-08 CLI Harness Timeouts
+
+- Shared CLI integration helpers must size their default subprocess and
+  completion waits for full-suite xdist and release-gate load, not just for
+  isolated local runs. When multiple unrelated CLI tests fail at the same
+  fixed timeout, move the fix to the shared harness default instead of raising
+  per-test limits.
