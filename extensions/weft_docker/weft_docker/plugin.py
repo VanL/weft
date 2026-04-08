@@ -313,6 +313,8 @@ class DockerRunnerPlugin:
         *,
         preflight: bool = False,
     ) -> None:
+        if os.name == "nt":
+            raise ValueError("Docker runner is currently supported only on Linux and macOS")
         spec = _require_mapping(taskspec_payload.get("spec"), name="spec")
         if spec.get("type") != "command":
             raise ValueError("Docker runner supports only spec.type='command'")
@@ -370,6 +372,8 @@ class DockerRunnerPlugin:
         config: dict[str, Any] | None = None,
     ) -> DockerCommandRunner:
         del target_type, function_target, agent, kwargs, persistent, interactive
+        if os.name == "nt":
+            raise ValueError("Docker runner is currently supported only on Linux and macOS")
         return DockerCommandRunner(
             tid=tid,
             process_target=process_target,

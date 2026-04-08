@@ -120,6 +120,16 @@ def _skip_unavailable_runner(
         pytest.skip(f"{runner_name} runner unavailable: {exc}")
 
 
+def test_docker_runner_is_skipped_on_windows(
+    monkeypatch: pytest.MonkeyPatch,
+    sandbox_profile: Path,
+) -> None:
+    monkeypatch.setattr("weft_docker.plugin.os.name", "nt")
+
+    with pytest.raises(pytest.skip.Exception, match="docker runner unavailable"):
+        _skip_unavailable_runner("docker", sandbox_profile=sandbox_profile)
+
+
 def _runner_command(
     runner_name: str,
     *,

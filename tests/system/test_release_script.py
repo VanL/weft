@@ -531,6 +531,17 @@ def test_build_precheck_commands_skip_extension_tests_when_unavailable() -> None
     assert release.MACOS_SANDBOX_EXTENSION_TEST_COMMAND not in commands
 
 
+def test_docker_extension_tests_are_disabled_on_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Windows release runs should not schedule Docker extension tests."""
+
+    release = _load_release_module()
+    monkeypatch.setattr(release.os, "name", "nt")
+
+    assert release._docker_available_for_tests() is False
+
+
 def test_merge_command_env_appends_pytest_addopts() -> None:
     """Precheck env overrides should preserve existing pytest addopts."""
 
