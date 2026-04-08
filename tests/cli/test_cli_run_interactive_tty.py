@@ -192,6 +192,6 @@ def test_interactive_quit_stops_child_that_ignores_eof(tty_workdir: Path) -> Non
             pytest.fail(
                 f"interactive session did not exit after :quit; trailing={trailing!r}"
             )
-        assert rc == 0
+        assert rc == 0, trailing
     finally:
         _shutdown(proc, master_fd)

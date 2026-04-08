@@ -106,6 +106,10 @@ PRECHECK_COMMANDS: Final[tuple[tuple[str, ...], ...]] = (
         "pyproject.toml",
     ),
 )
+PRECHECK_ENV_OVERRIDES: Final[dict[str, str]] = {
+    "PYTEST_ADDOPTS": "-x --maxfail=1",
+    "WEFT_EAGER_FAILURE_TRACEBACK": "1",
+}
 POSTUPDATE_COMMANDS: Final[tuple[tuple[str, ...], ...]] = (
     ("uv", "run", "pytest", "tests/system/test_constants.py", "-q"),
     ("uv", "build"),
@@ -230,12 +234,54 @@ def _format_command(command: tuple[str, ...]) -> str:
     return " ".join(shlex.quote(part) for part in command)
 
 
-def run_command(command: tuple[str, ...], *, dry_run: bool = False) -> None:
+def _merge_command_env(
+    env_overrides: dict[str, str] | None,
+    *,
+    base_env: dict[str, str] | None = None,
+) -> dict[str, str] | None:
+    """Merge per-command environment overrides onto the current environment."""
+
+    if not env_overrides:
+        return None
+
+    merged = os.environ.copy() if base_env is None else base_env.copy()
+    for key, value in env_overrides.items():
+        if key == "PYTEST_ADDOPTS":
+            existing = merged.get(key, "").strip()
+            merged[key] = f"{existing} {value}".strip() if existing else value
+            continue
+        merged[key] = value
+    return merged
+
+
+def _format_command_prefix(env_overrides: dict[str, str] | None) -> str:
+    """Format environment overrides shown before a command in logs."""
+
+    if not env_overrides:
+        return ""
+    return " ".join(
+        f"{key}={shlex.quote(value)}" for key, value in sorted(env_overrides.items())
+    )
+
+
+def run_command(
+    command: tuple[str, ...],
+    *,
+    dry_run: bool = False,
+    env_overrides: dict[str, str] | None = None,
+) -> None:
     """Run a command from the repo root, printing it first."""
-    print(f"$ {_format_command(command)}")
+    prefix = _format_command_prefix(env_overrides)
+    formatted = _format_command(command)
+    print(f"$ {prefix} {formatted}" if prefix else f"$ {formatted}")
     if dry_run:
         return
-    subprocess.run(command, cwd=PROJECT_ROOT, check=True)
+    subprocess.run(
+        command,
+        cwd=PROJECT_ROOT,
+        check=True,
+        env=_merge_command_env(env_overrides),
+    )
 
 
 def is_dirty_worktree() -> bool:
@@ -627,7 +673,11 @@ def main(argv: list[str] | None = None) -> int:
             )
         if not args.skip_checks:
             for command in PRECHECK_COMMANDS:
-                run_command(command, dry_run=True)
+                run_command(
+                    command,
+                    dry_run=True,
+                    env_overrides=PRECHECK_ENV_OVERRIDES,
+                )
         if version_changed:
             print(
                 "dry-run: would update "
@@ -683,7 +733,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.skip_checks:
         for command in PRECHECK_COMMANDS:
-            run_command(command)
+            run_command(command, env_overrides=PRECHECK_ENV_OVERRIDES)
 
     if version_changed:
         write_version_files(target_version)
