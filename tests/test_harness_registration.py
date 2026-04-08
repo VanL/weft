@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 import os
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
 from simplebroker import Queue
 from tests.conftest import _register_from_json
+from tests.helpers import weft_harness as harness_mod
 from tests.helpers.weft_harness import WeftTestHarness
 from weft._constants import WEFT_GLOBAL_LOG_QUEUE, WEFT_TID_MAPPINGS_QUEUE
 from weft.commands import tasks as task_cmd
@@ -54,7 +56,7 @@ def test_harness_force_termination_targets_managed_pids_only(
     harness = WeftTestHarness()
     terminated: list[int] = []
     try:
-        harness._context = SimpleNamespace(backend_name="postgres")
+        harness._context = cast(Any, SimpleNamespace(backend_name="postgres"))
         harness.register_pid(101, kind="owner")
         harness.register_pid(202, kind="managed")
         harness.register_pid(303, kind="managed")
@@ -314,6 +316,84 @@ def test_harness_cleanup_preserve_database_skips_registry_drain(
         assert preserve_calls == ["preserve"]
         assert drain_calls == []
         assert terminate_calls == []
+    finally:
+        os.chdir(repo_cwd)
+        harness._closed = True
+        harness._tempdir.cleanup()
+
+
+@pytest.mark.sqlite_only
+def test_harness_cleanup_preserve_database_waits_for_database_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = WeftTestHarness()
+    repo_cwd = os.getcwd()
+    try:
+        harness.__enter__()
+        monkeypatch.setattr(harness, "_collect_pid_mappings", lambda: None)
+        monkeypatch.setattr(harness, "_live_task_tids_from_mappings", lambda: [])
+        monkeypatch.setattr(harness, "_live_registered_pids", lambda: [])
+
+        checks: list[str] = []
+        release_states = iter([False, False, True])
+
+        def fake_database_files_releasable() -> bool:
+            checks.append("check")
+            return next(release_states)
+
+        clock = {"now": 0.0}
+
+        def fake_time() -> float:
+            return clock["now"]
+
+        def fake_sleep(seconds: float) -> None:
+            clock["now"] += seconds
+
+        monkeypatch.setattr(
+            harness, "_database_files_releasable", fake_database_files_releasable
+        )
+        monkeypatch.setattr(harness_mod.time, "time", fake_time)
+        monkeypatch.setattr(harness_mod.time, "sleep", fake_sleep)
+
+        harness.cleanup(preserve_database=True)
+
+        assert checks == ["check", "check", "check"]
+    finally:
+        os.chdir(repo_cwd)
+        harness._closed = True
+        harness._tempdir.cleanup()
+
+
+@pytest.mark.sqlite_only
+def test_harness_cleanup_preserve_database_raises_if_database_stays_locked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = WeftTestHarness()
+    repo_cwd = os.getcwd()
+    try:
+        harness.__enter__()
+        monkeypatch.setattr(harness, "_collect_pid_mappings", lambda: None)
+        monkeypatch.setattr(harness, "_live_task_tids_from_mappings", lambda: [])
+        monkeypatch.setattr(harness, "_live_registered_pids", lambda: [])
+        monkeypatch.setattr(harness, "_database_candidate_paths", lambda: [])
+        monkeypatch.setattr(harness, "_database_files_releasable", lambda: False)
+
+        clock = {"now": 0.0}
+
+        def fake_time() -> float:
+            return clock["now"]
+
+        def fake_sleep(seconds: float) -> None:
+            clock["now"] += 1.0
+
+        monkeypatch.setattr(harness_mod.time, "time", fake_time)
+        monkeypatch.setattr(harness_mod.time, "sleep", fake_sleep)
+
+        with pytest.raises(
+            RuntimeError,
+            match="Cleanup left database files in use while preserve_database=True",
+        ):
+            harness.cleanup(preserve_database=True)
     finally:
         os.chdir(repo_cwd)
         harness._closed = True

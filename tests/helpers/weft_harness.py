@@ -6,6 +6,7 @@ import os
 import tempfile
 import time
 from pathlib import Path
+from types import TracebackType
 
 import psutil
 
@@ -67,7 +68,12 @@ class WeftTestHarness:
         _ = self.context
         return self
 
-    def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
         self.cleanup()
 
     def __del__(self) -> None:  # noqa: D401
@@ -633,7 +639,8 @@ class WeftTestHarness:
                 if quiescent_since is None:
                     quiescent_since = time.time()
                 elif time.time() - quiescent_since >= 0.1:
-                    return
+                    if self._database_files_releasable():
+                        return
             else:
                 quiescent_since = None
 
@@ -647,6 +654,12 @@ class WeftTestHarness:
         if last_live_pids:
             raise RuntimeError(
                 f"Cleanup left live processes while preserve_database=True: {last_live_pids}"
+            )
+        if not self._database_files_releasable():
+            locked_paths = [str(path) for path in self._database_candidate_paths()]
+            raise RuntimeError(
+                "Cleanup left database files in use while preserve_database=True: "
+                f"{locked_paths}"
             )
 
     def _drain_registry_queue(self) -> None:
@@ -794,11 +807,7 @@ class WeftTestHarness:
             return
 
         gc.collect()
-        base = self.context.database_path
-        if base is None:
-            return
-        candidates = [base, Path(f"{base}-wal"), Path(f"{base}-shm")]
-        for path in candidates:
+        for path in self._database_candidate_paths():
             try:
                 path.unlink(missing_ok=True)
             except PermissionError:
@@ -807,6 +816,55 @@ class WeftTestHarness:
                     path.unlink(missing_ok=True)
                 except PermissionError:
                     pass
+
+    def _database_candidate_paths(self) -> list[Path]:
+        if self._context is None:
+            return []
+
+        base = self.context.database_path
+        if base is None:
+            return []
+
+        candidates = [base, Path(f"{base}-wal"), Path(f"{base}-shm")]
+        return [path for path in candidates if path.exists()]
+
+    def _database_files_releasable(self) -> bool:
+        candidates = self._database_candidate_paths()
+        if not candidates:
+            return True
+
+        gc.collect()
+        if os.name != "nt":
+            return True
+
+        renamed: list[tuple[Path, Path]] = []
+        token = f".weft-release-probe-{os.getpid()}-{time.time_ns()}"
+        try:
+            for path in candidates:
+                probe = path.with_name(f"{path.name}{token}")
+                try:
+                    path.replace(probe)
+                except FileNotFoundError:
+                    continue
+                except PermissionError:
+                    return False
+                renamed.append((path, probe))
+            return True
+        finally:
+            restore_errors: list[str] = []
+            for original, probe in reversed(renamed):
+                try:
+                    if probe.exists():
+                        probe.replace(original)
+                except FileNotFoundError:
+                    continue
+                except OSError as exc:
+                    restore_errors.append(f"{probe} -> {original}: {exc}")
+            if restore_errors:
+                raise RuntimeError(
+                    "Failed to restore database files after release probe: "
+                    + "; ".join(restore_errors)
+                )
 
 
 __all__ = ["WeftTestHarness"]

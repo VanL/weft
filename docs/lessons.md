@@ -160,6 +160,12 @@ runbook needs to become stricter.
   isolated local runs. When multiple unrelated CLI tests fail at the same
   fixed timeout, move the fix to the shared harness default instead of raising
   per-test limits.
+- `WeftTestHarness.cleanup(preserve_database=True)` must wait for actual broker
+  file release, not just process quiescence. On Windows, recently exited
+  managers/tasks and recently closed broker handles can leave `weft-tests.db`
+  undeletable for a short period after the last live PID disappears, so the
+  preserve-cleanup contract must gate return on database releasability when the
+  caller may immediately dispose the tempdir.
 
 ## 2026-04-08 Interactive Contract
 
