@@ -388,7 +388,9 @@ def _effective_public_status(
     if status not in TERMINAL_STATUSES:
         return status
 
-    normalized_runner = runner_name.strip().lower() if isinstance(runner_name, str) else ""
+    normalized_runner = (
+        runner_name.strip().lower() if isinstance(runner_name, str) else ""
+    )
     if normalized_runner and normalized_runner != "host":
         if _runtime_description_is_live(runtime_description):
             return "running"
