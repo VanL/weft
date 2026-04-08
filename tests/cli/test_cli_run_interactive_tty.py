@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.helpers.test_backend import active_test_backend, prepare_project_root
+
 pytestmark = pytest.mark.skipif(
     os.name == "nt",
     reason="PTY-backed interactive CLI test requires Unix PTY support",
@@ -33,13 +35,20 @@ def _spawn_with_pty(
 ) -> tuple[subprocess.Popen[bytes], int]:
     master_fd, slave_fd = pty.openpty()
     env = os.environ.copy()
+    backend = active_test_backend(env)
     # PTY-backed interactive tests run under xdist and can spend noticeable
     # time waiting for prompts and child shutdown. Keep the manager lifetime
     # long enough that these tests are exercising interactive quit behavior,
     # not an artificial idle-timeout race.
-    env.setdefault("WEFT_MANAGER_LIFETIME_TIMEOUT", "5.0")
-    env.setdefault("WEFT_MANAGER_REUSE_ENABLED", "0")
-    env.setdefault("WEFT_AUTOSTART_TASKS", "0")
+    env["WEFT_MANAGER_LIFETIME_TIMEOUT"] = "5.0"
+    env["WEFT_MANAGER_REUSE_ENABLED"] = "0"
+    env["WEFT_AUTOSTART_TASKS"] = "0"
+    if backend == "sqlite":
+        env["WEFT_DEFAULT_DB_LOCATION"] = str(cwd)
+        env["WEFT_DEFAULT_DB_NAME"] = "tty-weft.db"
+        env["BROKER_DEFAULT_DB_LOCATION"] = str(cwd)
+        env["BROKER_DEFAULT_DB_NAME"] = "tty-weft.db"
+    prepare_project_root(cwd, env=env)
     proc = subprocess.Popen(
         args,
         cwd=cwd,

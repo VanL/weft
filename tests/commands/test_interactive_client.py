@@ -205,3 +205,41 @@ def test_interactive_client_failure_overrides_stdout_final(broker_env) -> None:
 
     assert client.status == "failed"
     assert client.error == "boom"
+
+
+def test_interactive_client_waits_for_control_response(broker_env) -> None:
+    db_path, make_queue = broker_env
+    tid = str(time.time_ns())
+    spec = _make_interactive_spec(tid)
+
+    ctrl_out = make_queue(spec.io.control["ctrl_out"])
+
+    config = load_config()
+    client = InteractiveStreamClient(
+        db_path=db_path,
+        config=config,
+        tid=tid,
+        inbox=spec.io.inputs["inbox"],
+        outbox=spec.io.outputs["outbox"],
+        ctrl_out=spec.io.control["ctrl_out"],
+    )
+
+    client.start()
+    try:
+        ctrl_out.write(
+            json.dumps(
+                {
+                    "command": "STOP",
+                    "status": "ack",
+                    "tid": tid,
+                    "timestamp": time.time_ns(),
+                }
+            )
+        )
+        response = client.wait_for_control_response("STOP", status="ack", timeout=5.0)
+    finally:
+        client.stop()
+
+    assert response is not None
+    assert response["command"] == "STOP"
+    assert response["status"] == "ack"

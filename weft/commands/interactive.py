@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -84,6 +85,8 @@ class InteractiveStreamClient:
         self._status: str | None = None
         self._error: str | None = None
         self._completion = threading.Event()
+        self._control_condition = threading.Condition()
+        self._control_responses: list[dict[str, Any]] = []
         self._log_last_timestamp: int | None = None
         self._stopped = False
 
@@ -164,6 +167,39 @@ class InteractiveStreamClient:
 
         return self._completion.wait(timeout=timeout)
 
+    def wait_for_control_response(
+        self,
+        command: str,
+        *,
+        status: str | None = None,
+        timeout: float | None = None,
+    ) -> dict[str, Any] | None:
+        """Block until a matching control response is observed."""
+
+        target_command = command.strip().upper()
+        target_status = status.strip().lower() if status is not None else None
+        deadline = None if timeout is None else time.monotonic() + timeout
+
+        with self._control_condition:
+            while True:
+                for response in self._control_responses:
+                    response_command = str(response.get("command", "")).strip().upper()
+                    if response_command != target_command:
+                        continue
+                    response_status = str(response.get("status", "")).strip().lower()
+                    if target_status is not None and response_status != target_status:
+                        continue
+                    return dict(response)
+
+                if deadline is None:
+                    self._control_condition.wait()
+                    continue
+
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                self._control_condition.wait(timeout=remaining)
+
     @property
     def status(self) -> str | None:
         with self._status_lock:
@@ -216,6 +252,10 @@ class InteractiveStreamClient:
         self, message: str, _timestamp: int, _context: QueueMessageContext
     ) -> None:
         payload = self._maybe_parse_json(message)
+        if isinstance(payload, dict) and "command" in payload and "status" in payload:
+            with self._control_condition:
+                self._control_responses.append(dict(payload))
+                self._control_condition.notify_all()
         if isinstance(payload, dict) and payload.get("type") == "stream":
             stream = payload.get("stream")
             chunk = payload.get("data", "")
