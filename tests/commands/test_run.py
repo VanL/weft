@@ -19,6 +19,7 @@ from weft._constants import WEFT_GLOBAL_LOG_QUEUE, WEFT_WORKERS_REGISTRY_QUEUE
 from weft.commands.run import (
     _build_manager_spec,
     _collect_interactive_queue_output,
+    _run_inline,
     _select_active_manager,
     _start_manager,
     _wait_for_task_completion,
@@ -235,6 +236,61 @@ def test_start_manager_does_not_terminate_competing_startup_manager(
     assert started_here is False
     assert handle is None
     assert terminated is False
+
+
+def test_run_inline_enqueues_task_before_ensuring_manager(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        "weft.commands.run.build_context",
+        lambda spec_context=None, autostart=True: context,
+    )
+    monkeypatch.setattr("weft.commands.run._read_piped_stdin", lambda context: None)
+    monkeypatch.setattr("weft.commands.run.stdin_is_tty", lambda: False)
+    monkeypatch.setattr("weft.commands.run.typer.echo", lambda *args, **kwargs: None)
+
+    def _fake_enqueue(context_arg, taskspec, work_payload):
+        calls.append("enqueue")
+        return 1775679597297004544
+
+    def _fake_ensure(context_arg, *, verbose):
+        calls.append("ensure")
+        return (
+            {"tid": "1775679596841701376", "ctrl_in": "Tmanager.ctrl_in"},
+            False,
+            None,
+        )
+
+    monkeypatch.setattr("weft.commands.run._enqueue_taskspec", _fake_enqueue)
+    monkeypatch.setattr("weft.commands.run._ensure_manager", _fake_ensure)
+
+    exit_code = _run_inline(
+        command=(),
+        function_target="tests.tasks.sample_targets:echo_payload",
+        args=(),
+        kwargs=(),
+        env=(),
+        name=None,
+        interactive=False,
+        stream_output=None,
+        timeout=None,
+        memory=None,
+        cpu=None,
+        tags=(),
+        context_dir=root,
+        wait=False,
+        json_output=False,
+        verbose=False,
+        autostart_enabled=True,
+    )
+
+    assert exit_code == 0
+    assert calls == ["enqueue", "ensure"]
 
 
 def test_build_manager_spec_uses_tid_scoped_control_queues(tmp_path: Path) -> None:

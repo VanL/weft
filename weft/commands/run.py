@@ -529,6 +529,23 @@ def _enqueue_taskspec(
     return message_timestamp
 
 
+def _delete_spawn_request(context: WeftContext, message_timestamp: int) -> None:
+    """Best-effort removal of a queued spawn request after submission failure."""
+
+    queue = Queue(
+        WEFT_SPAWN_REQUESTS_QUEUE,
+        db_path=context.broker_target,
+        persistent=False,
+        config=context.broker_config,
+    )
+    try:
+        queue.delete(message_id=message_timestamp)
+    except Exception:
+        pass
+    finally:
+        queue.close()
+
+
 def _wait_for_task_completion(
     context: WeftContext,
     taskspec: TaskSpec,
@@ -1051,15 +1068,19 @@ def _run_inline(
                 raise typer.BadParameter(
                     "--json is not supported together with --interactive"
                 )
-        manager_record, started_here, process_handle = _ensure_manager(
-            context,
-            verbose=verbose,
-        )
         tid_int = _enqueue_taskspec(
             context,
             taskspec,
             work_payload,
         )
+        try:
+            manager_record, started_here, process_handle = _ensure_manager(
+                context,
+                verbose=verbose,
+            )
+        except Exception:
+            _delete_spawn_request(context, tid_int)
+            raise
         tid = str(tid_int)
         if verbose:
             typer.echo(
@@ -1199,15 +1220,19 @@ def _run_spec_via_manager(
     reuse_enabled = bool(context.config.get("WEFT_MANAGER_REUSE_ENABLED", True))
 
     try:
-        manager_record, started_here, process_handle = _ensure_manager(
-            context,
-            verbose=verbose,
-        )
         tid_int = _enqueue_taskspec(
             context,
             spec,
             work_payload,
         )
+        try:
+            manager_record, started_here, process_handle = _ensure_manager(
+                context,
+                verbose=verbose,
+            )
+        except Exception:
+            _delete_spawn_request(context, tid_int)
+            raise
         tid = str(tid_int)
         resolved_payload = resolve_taskspec_payload(
             spec.model_dump(mode="json"),
@@ -1378,15 +1403,19 @@ def _run_pipeline(
             work_payload = stage_input
             if isinstance(defaults, dict) and "input" in defaults:
                 work_payload = defaults.get("input")
-            manager_record, started_here, process_handle = _ensure_manager(
-                context,
-                verbose=verbose,
-            )
             tid_int = _enqueue_taskspec(
                 context,
                 taskspec,
                 work_payload,
             )
+            try:
+                manager_record, started_here, process_handle = _ensure_manager(
+                    context,
+                    verbose=verbose,
+                )
+            except Exception:
+                _delete_spawn_request(context, tid_int)
+                raise
             tid = str(tid_int)
             if started_here:
                 manager_started_here = True
