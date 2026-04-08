@@ -119,6 +119,16 @@ runbook needs to become stricter.
   is the fallback only after the consumer is gone; otherwise the CLI can bypass
   the consumer's terminal-state publication and either strand the task in
   `running` or corrupt SQLite by killing teardown mid-write.
+- Active STOP/KILL polling must be decoupled from monitor/report intervals for
+  every runner loop, not just the host runner. Subprocess-backed runners that
+  only poll cancellation when they collect metrics can miss the CLI control
+  deadline and get their consumer wrapper killed before `cancelled`/`killed`
+  is published.
+- Tests that assert spawned task teardown should use real PID liveness
+  (`psutil`/`os.kill`) instead of `multiprocessing.Process.exitcode` as the
+  primary oracle. Under `spawn`, the OS process can disappear while the parent
+  `Process` object still reports `exitcode is None`, which creates false
+  regressions in Linux CI.
 
 ## 2026-04-07 Plan Hardening
 
