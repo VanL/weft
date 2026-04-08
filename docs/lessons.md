@@ -109,6 +109,11 @@ runbook needs to become stricter.
   polling keeps control acknowledgement, terminal state publication, reserved
   policy, and runtime unwind on one execution context and avoids teardown hangs
   around non-interruptible broker reads.
+- Public task status must reconcile liveness differently by runner type. For
+  the host runner, a terminal log entry is not yet public if the consumer task
+  PID is still alive; for external runners such as Docker or macOS sandbox, the
+  external runtime description is authoritative and should not be masked by a
+  still-exiting consumer wrapper process.
 
 ## 2026-04-07 Plan Hardening
 

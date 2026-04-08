@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
 
+import psutil
+
 from simplebroker import Queue
 from weft._constants import (
     TASKSPEC_TID_SHORT_LENGTH,
@@ -37,6 +39,9 @@ from weft.helpers import (
 StatusMapping = Mapping[str, int | float | str | None]
 TERMINAL_STATUSES: frozenset[str] = frozenset(
     {"completed", "failed", "timeout", "cancelled", "killed"}
+)
+NON_LIVE_RUNTIME_STATES: frozenset[str] = frozenset(
+    {"missing", "exited", "dead", "stopped", "completed", "failed", "cancelled"}
 )
 
 
@@ -340,6 +345,62 @@ def _runtime_handle_from_mapping(entry: Mapping[str, Any]) -> RunnerHandle | Non
         return None
 
 
+def _pid_alive(pid: int | None) -> bool:
+    if pid is None or pid <= 0:
+        return False
+    try:
+        process = psutil.Process(pid)
+        return process.is_running()
+    except psutil.Error:
+        return False
+
+
+def _task_process_alive(mapping_entry: Mapping[str, Any] | None) -> bool:
+    if mapping_entry is None:
+        return False
+    pid = mapping_entry.get("task_pid") or mapping_entry.get("pid")
+    return _pid_alive(pid if isinstance(pid, int) else None)
+
+
+def _runtime_description_is_live(
+    runtime_description: Mapping[str, Any] | None,
+) -> bool:
+    if runtime_description is None:
+        return False
+    state = runtime_description.get("state")
+    if not isinstance(state, str):
+        return False
+    normalized = state.strip().lower()
+    if not normalized:
+        return False
+    return normalized not in NON_LIVE_RUNTIME_STATES
+
+
+def _effective_public_status(
+    status: str,
+    *,
+    runner_name: str | None,
+    mapping_entry: Mapping[str, Any] | None,
+    runtime_description: Mapping[str, Any] | None,
+) -> str:
+    """Keep public terminal states aligned with live runtime liveness."""
+
+    if status not in TERMINAL_STATUSES:
+        return status
+
+    normalized_runner = runner_name.strip().lower() if isinstance(runner_name, str) else ""
+    if normalized_runner and normalized_runner != "host":
+        if _runtime_description_is_live(runtime_description):
+            return "running"
+        return status
+
+    if _task_process_alive(mapping_entry):
+        return "running"
+    if _runtime_description_is_live(runtime_description):
+        return "running"
+    return status
+
+
 def _runner_name_for_snapshot(
     *,
     taskspec: Mapping[str, Any],
@@ -427,6 +488,12 @@ def _collect_task_snapshots(
             mapping_entry=mapping_entry,
         )
         runtime_description = _describe_runtime_handle(runtime_handle)
+        public_status = _effective_public_status(
+            str(status),
+            runner_name=runner,
+            mapping_entry=mapping_entry,
+            runtime_description=runtime_description,
+        )
 
         if isinstance(started_at, int) and not isinstance(completed_at, int):
             duration = max(0.0, (now_ns - started_at) / 1_000_000_000)
@@ -439,7 +506,7 @@ def _collect_task_snapshots(
             tid=tid,
             tid_short=tid[-TASKSPEC_TID_SHORT_LENGTH:],
             name=str(name),
-            status=str(status),
+            status=public_status,
             event=str(event),
             started_at=started_at if isinstance(started_at, int) else None,
             completed_at=completed_at if isinstance(completed_at, int) else None,
