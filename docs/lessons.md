@@ -145,3 +145,10 @@ runbook needs to become stricter.
   Combining a downstream REPL exit command like `quit()` with a wrapper-level
   command like `:quit` creates nondeterministic teardown races under slower
   backends and full-suite load.
+- PTY-backed prompt tests need startup timeouts sized for full-suite xdist
+  pressure, not just single-test runs. When the prompt does not appear, capture
+  the child return code and trailing PTY output so the failure distinguishes
+  slow startup from an early process exit.
+- Spawned-process teardown tests should treat zombie processes as exited.
+  `pid_exists()` alone is too strict for cross-platform process cleanup checks
+  and can create false failures after the process has already terminated.

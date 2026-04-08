@@ -18,7 +18,7 @@ pytestmark = pytest.mark.skipif(
 pty = pytest.importorskip("pty")
 
 READ_SLICE = 0.05
-DEFAULT_TIMEOUT = 5.0
+DEFAULT_TIMEOUT = 10.0
 EXIT_TIMEOUT = 10.0
 
 
@@ -50,10 +50,18 @@ def _spawn_with_pty(
     return proc, master_fd
 
 
-def _read_until(fd: int, needle: str, *, timeout: float = DEFAULT_TIMEOUT) -> str:
+def _read_until(
+    fd: int,
+    needle: str,
+    *,
+    timeout: float = DEFAULT_TIMEOUT,
+    proc: subprocess.Popen[bytes] | None = None,
+) -> str:
     deadline = time.monotonic() + timeout
     chunks: list[str] = []
     while time.monotonic() < deadline:
+        if proc is not None and proc.poll() is not None:
+            break
         rlist, _, _ = select.select([fd], [], [], READ_SLICE)
         if fd not in rlist:
             continue
@@ -108,13 +116,18 @@ def test_interactive_python_repl_outputs(tty_workdir: Path) -> None:
     cmd = ["weft", "run", "-i", "python"]
     proc, master_fd = _spawn_with_pty(cmd, cwd=tty_workdir)
     try:
-        banner = _read_until(master_fd, "weft>")
+        banner = _read_until(master_fd, "weft>", proc=proc)
         if "weft>" not in banner:
+            rc = proc.poll()
+            trailing = _read_until_exit(proc, master_fd, timeout=1.0)
             _shutdown(proc, master_fd)
-            pytest.fail(f"weft prompt not detected; got {banner!r}")
+            pytest.fail(
+                "weft prompt not detected; "
+                f"returncode={rc!r} banner={banner!r} trailing={trailing!r}"
+            )
 
         _write_line(master_fd, "print(2+2)\n")
-        output = _read_until(master_fd, "4")
+        output = _read_until(master_fd, "4", proc=proc)
         if "4" not in output:
             _shutdown(proc, master_fd)
             pytest.fail(f"expected python output, saw {output!r}")
