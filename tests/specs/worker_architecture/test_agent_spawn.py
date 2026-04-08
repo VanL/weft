@@ -40,8 +40,7 @@ def test_agent_spawn_request_timestamp_matches_tid(tmp_path) -> None:
         state=StateSection(),
     )
 
-    manager_record = {"requests": WEFT_SPAWN_REQUESTS_QUEUE}
-    run_cmd._enqueue_taskspec(context, manager_record, taskspec, None)
+    run_cmd._enqueue_taskspec(context, taskspec, None)
 
     queue = context.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=True)
     payload, timestamp = queue.read_one(with_timestamps=True)

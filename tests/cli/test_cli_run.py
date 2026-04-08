@@ -9,6 +9,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import pytest
+
 from tests.conftest import run_cli
 from tests.taskspec import fixtures as taskspec_fixtures
 from weft._constants import (
@@ -42,6 +44,41 @@ def _latest_completed_record(harness, limit: int = 512) -> tuple[str, dict] | No
         if isinstance(tid, str) and data.get("event") == "work_completed":
             return tid, data
     return None
+
+
+def _wait_for_started_task_tid(
+    harness,
+    *,
+    task_name: str,
+    timeout: float = 10.0,
+) -> str:
+    queue = harness.context.queue(
+        WEFT_GLOBAL_LOG_QUEUE,
+        persistent=False,
+    )
+    try:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            events = queue.peek_many(limit=200, with_timestamps=False) or []
+            for raw in reversed(events):
+                payload = raw[0] if isinstance(raw, tuple) else raw
+                try:
+                    data = json.loads(payload)
+                except json.JSONDecodeError:
+                    continue
+                if data.get("event") != "work_started":
+                    continue
+                taskspec = data.get("taskspec") or {}
+                if taskspec.get("name") != task_name:
+                    continue
+                tid = data.get("tid")
+                if isinstance(tid, str) and tid:
+                    return tid
+            time.sleep(0.05)
+    finally:
+        queue.close()
+
+    raise AssertionError(f"Timed out waiting for started task {task_name!r}")
 
 
 def test_cli_run_function_inline(workdir, weft_harness) -> None:
@@ -842,6 +879,100 @@ def test_cli_run_no_wait_returns_tid(workdir, weft_harness) -> None:
     assert err == ""
     assert len(out) == 19 and out.isdigit()
     weft_harness.wait_for_completion(out)
+
+
+def test_cli_run_no_wait_survives_short_manager_lifetime(workdir, weft_harness) -> None:
+    env = os.environ.copy()
+    env["WEFT_MANAGER_LIFETIME_TIMEOUT"] = "0.2"
+
+    rc, out, err = run_cli(
+        "run",
+        "--function",
+        "tests.tasks.sample_targets:simulate_work",
+        "--kw",
+        "duration=0.5",
+        "--kw",
+        "result=payload",
+        "--no-wait",
+        cwd=workdir,
+        env=env,
+        harness=weft_harness,
+    )
+
+    assert rc == 0
+    assert err == ""
+    assert len(out) == 19 and out.isdigit()
+    weft_harness.wait_for_completion(out, timeout=10.0)
+
+
+def test_harness_wait_for_completion_reports_cancelled_task(
+    workdir, weft_harness
+) -> None:
+    rc, out, err = run_cli(
+        "run",
+        "--function",
+        "tests.tasks.sample_targets:simulate_work",
+        "--kw",
+        "duration=5",
+        "--no-wait",
+        cwd=workdir,
+        harness=weft_harness,
+    )
+
+    assert rc == 0
+    assert err == ""
+    tid = out.strip()
+    assert tid
+    started_tid = _wait_for_started_task_tid(
+        weft_harness,
+        task_name="simulate_work",
+    )
+    assert started_tid == tid
+
+    rc, _out, err = run_cli(
+        "task",
+        "stop",
+        tid,
+        cwd=workdir,
+        harness=weft_harness,
+    )
+    assert rc == 0, err
+    with pytest.raises(RuntimeError, match=rf"Task {tid} reported control_stop"):
+        weft_harness.wait_for_completion(tid, timeout=10.0)
+
+
+def test_cli_run_wait_reports_cancelled_task(workdir, weft_harness) -> None:
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            run_cli,
+            "run",
+            "--function",
+            "tests.tasks.sample_targets:simulate_work",
+            "--kw",
+            "duration=5",
+            cwd=workdir,
+            harness=weft_harness,
+            timeout=15.0,
+        )
+
+        task_tid = _wait_for_started_task_tid(
+            weft_harness,
+            task_name="simulate_work",
+        )
+        rc, _out, err = run_cli(
+            "task",
+            "stop",
+            task_tid,
+            cwd=workdir,
+            harness=weft_harness,
+        )
+        assert rc == 0, err
+
+        rc, out, err = future.result(timeout=20.0)
+
+    assert rc == 1
+    assert out == ""
+    assert "Task cancelled" in err
 
 
 def test_cli_run_prunes_stale_manager(workdir, weft_harness) -> None:

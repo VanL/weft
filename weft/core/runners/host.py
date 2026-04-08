@@ -213,6 +213,7 @@ class HostTaskRunner:
         limits: Any | None,
         monitor_class: str | None,
         monitor_interval: float | None,
+        session_use_pty: bool = False,
         db_path: BrokerTarget | str | None = None,
         config: dict[str, Any] | None = None,
     ) -> None:
@@ -236,6 +237,7 @@ class HostTaskRunner:
         self._monitor_interval = monitor_interval or 1.0
         self._db_path = db_path
         self._config = dict(config) if config is not None else None
+        self._session_use_pty = session_use_pty
 
     def run(self, work_item: Any) -> RunnerOutcome:
         """Execute a work item with resource monitoring and timeout handling."""
@@ -471,50 +473,108 @@ class HostTaskRunner:
         working_dir_obj = self._spec_data.get("working_dir")
         cwd_value: str | None = str(working_dir_obj) if working_dir_obj else None
 
-        creation_flags = 0
-        if sys.platform == "win32":
-            creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP
-
-        process = subprocess.Popen(
-            command,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            cwd=cwd_value,
-            env=env_vars,
-            bufsize=0,
-            creationflags=creation_flags,
-        )
-
         stdout_queue: queue.Queue[str | None] = queue.Queue()
         stderr_queue: queue.Queue[str | None] = queue.Queue()
+        process: subprocess.Popen[Any]
+        stdin_writer: Callable[[str], None] | None = None
+        stdin_closer: Callable[[], None] | None = None
+        cleanup_callback: Callable[[], None] | None = None
 
-        def _reader(stream: TextIO, target_queue: queue.Queue[str | None]) -> None:
-            try:
-                while True:
-                    chunk = stream.read(CommandSession._READ_SIZE)
-                    if chunk == "":
-                        break
-                    target_queue.put(chunk)
-            finally:
-                target_queue.put(None)
+        if self._session_use_pty and os.name != "nt":
+            import pty
 
-        if process.stdout is None or process.stderr is None:
-            raise RuntimeError("Failed to create pipes for interactive session")
+            master_fd, slave_fd = pty.openpty()
+            process = subprocess.Popen(
+                command,
+                stdin=slave_fd,
+                stdout=slave_fd,
+                stderr=slave_fd,
+                cwd=cwd_value,
+                env=env_vars,
+                close_fds=True,
+                start_new_session=True,
+            )
+            os.close(slave_fd)
 
-        threading.Thread(
-            target=_reader,
-            args=(process.stdout, stdout_queue),
-            daemon=True,
-        ).start()
-        threading.Thread(
-            target=_reader,
-            args=(process.stderr, stderr_queue),
-            daemon=True,
-        ).start()
+            def _pty_reader(fd: int, target_queue: queue.Queue[str | None]) -> None:
+                try:
+                    while True:
+                        try:
+                            chunk = os.read(fd, CommandSession._READ_SIZE)
+                        except OSError:
+                            break
+                        if not chunk:
+                            break
+                        target_queue.put(chunk.decode("utf-8", errors="replace"))
+                finally:
+                    target_queue.put(None)
+
+            def _pty_write(data: str) -> None:
+                os.write(master_fd, data.encode("utf-8"))
+
+            def _pty_send_eof() -> None:
+                try:
+                    os.write(master_fd, b"\x04")
+                except OSError:
+                    return
+
+            def _pty_cleanup() -> None:
+                try:
+                    os.close(master_fd)
+                except OSError:
+                    pass
+
+            threading.Thread(
+                target=_pty_reader,
+                args=(master_fd, stdout_queue),
+                daemon=True,
+            ).start()
+            stderr_queue.put(None)
+            stdin_writer = _pty_write
+            stdin_closer = _pty_send_eof
+            cleanup_callback = _pty_cleanup
+        else:
+            creation_flags = 0
+            if sys.platform == "win32":
+                creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP
+
+            process = subprocess.Popen(
+                command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                cwd=cwd_value,
+                env=env_vars,
+                bufsize=0,
+                creationflags=creation_flags,
+            )
+
+            def _reader(stream: TextIO, target_queue: queue.Queue[str | None]) -> None:
+                try:
+                    while True:
+                        chunk = stream.read(CommandSession._READ_SIZE)
+                        if chunk == "":
+                            break
+                        target_queue.put(chunk)
+                finally:
+                    target_queue.put(None)
+
+            if process.stdout is None or process.stderr is None:
+                raise RuntimeError("Failed to create pipes for interactive session")
+
+            threading.Thread(
+                target=_reader,
+                args=(process.stdout, stdout_queue),
+                daemon=True,
+            ).start()
+            threading.Thread(
+                target=_reader,
+                args=(process.stderr, stderr_queue),
+                daemon=True,
+            ).start()
 
         monitor = None
         if self._monitor_class:
@@ -540,6 +600,9 @@ class HostTaskRunner:
             monitor,
             self._limits,
             handle=_host_handle(process.pid),
+            stdin_writer=stdin_writer,
+            stdin_closer=stdin_closer,
+            cleanup_callback=cleanup_callback,
         )
 
     def start_agent_session(self) -> AgentSession:
@@ -635,7 +698,10 @@ class HostRunnerPlugin:
         db_path: BrokerTarget | str | None = None,
         config: dict[str, Any] | None = None,
     ) -> HostTaskRunner:
-        del runner_options, persistent, interactive
+        use_pty = False
+        if isinstance(runner_options, Mapping):
+            use_pty = runner_options.get("interactive_transport") == "pty"
+        del persistent, interactive
         return HostTaskRunner(
             target_type=target_type,
             tid=tid,
@@ -652,6 +718,7 @@ class HostRunnerPlugin:
             monitor_interval=monitor_interval,
             db_path=db_path,
             config=config,
+            session_use_pty=use_pty,
         )
 
     def stop(self, handle: RunnerHandle, *, timeout: float = 2.0) -> bool:

@@ -418,8 +418,10 @@ class Manager(BaseTask):
     # ------------------------------------------------------------------
     def _cleanup_children(self) -> None:
         autostart_child_exited = False
+        child_exited = False
         for tid, child in list(self._child_processes.items()):
             if not child.process.is_alive():
+                child_exited = True
                 for pid in self._managed_pids_for_child(tid):
                     terminate_process_tree(pid, timeout=0.2)
                 try:
@@ -435,6 +437,10 @@ class Manager(BaseTask):
             # Re-evaluate ensure-style autostart manifests immediately after an
             # autostart child exits instead of waiting for the next scan interval.
             self._autostart_last_scan_ns = 0
+        if child_exited:
+            # Child completion is activity. The manager should only begin its idle
+            # countdown after in-flight work has actually finished.
+            self._last_activity_ns = time.time_ns()
 
     def _terminate_children(self) -> None:
         for tid, child in list(self._child_processes.items()):
@@ -882,22 +888,9 @@ class Manager(BaseTask):
         now_ns = time.time_ns()
         idle_timeout_ns = int(float(self._idle_timeout) * 1_000_000_000)
         if self._child_processes:
-            has_persistent_children = any(
-                child.persistent for child in self._child_processes.values()
-            )
-            if (
-                self._idle_timeout > 0
-                and now_ns - self._last_activity_ns >= idle_timeout_ns
-                and not has_persistent_children
-            ):
-                logger.debug(
-                    "Idle timeout reached; forcing shutdown of %d child tasks",
-                    len(self._child_processes),
-                )
-                self._terminate_children()
-                self._last_activity_ns = now_ns
-            else:
-                return
+            # Idle timeout applies only when the manager is actually idle. Active
+            # child tasks are in-flight work, not inactivity.
+            return
         if self._idle_timeout <= 0:
             return
         try:

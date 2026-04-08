@@ -389,7 +389,9 @@ def test_manager_overrides_supplied_tid(manager_setup, unique_tid) -> None:
     assert spawn_events[-1]["child_taskspec"]["tid"] == str(message_id)
 
 
-def test_manager_forces_shutdown_of_idle_children(broker_env, unique_tid) -> None:
+def test_manager_idle_timeout_waits_for_active_child_to_finish(
+    broker_env, unique_tid
+) -> None:
     db_path, make_queue = broker_env
     inbox = f"manager.{unique_tid}.inbox"
     ctrl_in = f"manager.{unique_tid}.ctrl_in"
@@ -407,14 +409,14 @@ def test_manager_forces_shutdown_of_idle_children(broker_env, unique_tid) -> Non
         inbox_queue.write(
             json.dumps(
                 {
-                    "spec": {
-                        "type": "function",
-                        "function_target": "tests.tasks.sample_targets:simulate_work",
-                        "keyword_args": {"duration": 5.0},
-                    },
-                }
+                        "spec": {
+                            "type": "function",
+                            "function_target": "tests.tasks.sample_targets:simulate_work",
+                            "keyword_args": {"duration": 0.5},
+                        },
+                    }
+                )
             )
-        )
 
         start = time.time()
         while not manager._child_processes and time.time() - start < 2.0:
@@ -422,14 +424,24 @@ def test_manager_forces_shutdown_of_idle_children(broker_env, unique_tid) -> Non
             time.sleep(0.05)
         assert manager._child_processes
 
-        time.sleep(0.4)
+        start = time.time()
+        while time.time() - start < 0.35:
+            manager.process_once()
+            time.sleep(0.05)
+        assert manager.should_stop is False
+        assert manager._child_processes
+
+        start = time.time()
+        while manager._child_processes and time.time() - start < 3.0:
+            manager.process_once()
+            time.sleep(0.05)
+        assert not manager._child_processes
+
         start = time.time()
         while not manager.should_stop and time.time() - start < 2.0:
             manager.process_once()
             time.sleep(0.05)
-
         assert manager.should_stop is True
-        assert not manager._child_processes
     finally:
         manager.cleanup()
 

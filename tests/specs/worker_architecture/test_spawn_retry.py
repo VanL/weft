@@ -63,6 +63,6 @@ def test_spawn_request_uses_retry(monkeypatch, tmp_path) -> None:
 
     monkeypatch.setattr(type(context), "broker", _broker_with_retry_probe)
 
-    run_module._enqueue_taskspec(context, {}, taskspec, None)
+    run_module._enqueue_taskspec(context, taskspec, None)
 
     assert called["count"] >= 1

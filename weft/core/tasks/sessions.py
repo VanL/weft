@@ -34,13 +34,16 @@ class CommandSession:
 
     def __init__(
         self,
-        process: subprocess.Popen[str],
+        process: subprocess.Popen[Any],
         stdout_queue: queue.Queue[str | None],
         stderr_queue: queue.Queue[str | None],
         monitor: BaseResourceMonitor | None,
         limits: Any,
         *,
         handle: RunnerHandle | None = None,
+        stdin_writer: Callable[[str], None] | None = None,
+        stdin_closer: Callable[[], None] | None = None,
+        cleanup_callback: Callable[[], None] | None = None,
     ) -> None:
         self._process = process
         self._stdout_queue = stdout_queue
@@ -48,9 +51,13 @@ class CommandSession:
         self._monitor: BaseResourceMonitor | None = monitor
         self._limits = limits
         self._handle = handle
+        self._stdin_writer = stdin_writer
+        self._stdin_closer = stdin_closer
+        self._cleanup_callback = cleanup_callback
         self._last_metrics: ResourceMetrics | None = None
         self._stdout_closed = False
         self._stderr_closed = False
+        self._closed = False
 
     @property
     def pid(self) -> int | None:
@@ -61,12 +68,18 @@ class CommandSession:
         return self._handle
 
     def send(self, data: str) -> None:
+        if self._stdin_writer is not None:
+            self._stdin_writer(data)
+            return
         if self._process.stdin is None:
             raise RuntimeError("Session stdin is not available")
         self._process.stdin.write(data)
         self._process.stdin.flush()
 
     def close_stdin(self) -> None:
+        if self._stdin_closer is not None:
+            self._stdin_closer()
+            return
         stdin = self._process.stdin
         if stdin and not stdin.closed:
             stdin.close()
@@ -97,18 +110,32 @@ class CommandSession:
         return self._process.poll()
 
     def terminate(self) -> None:
-        if self.is_alive():
-            pid = self._process.pid
-            if isinstance(pid, int) and pid > 0:
-                terminate_process_tree(pid, timeout=2.0)
-            try:
-                self._process.wait(timeout=0.2)
-            except subprocess.TimeoutExpired:
-                self._process.terminate()
+        try:
+            if self.is_alive():
+                pid = self._process.pid
+                if isinstance(pid, int) and pid > 0:
+                    terminate_process_tree(pid, timeout=2.0)
                 try:
-                    self._process.wait(timeout=2.0)
+                    self._process.wait(timeout=0.2)
                 except subprocess.TimeoutExpired:
-                    self._process.kill()
+                    self._process.terminate()
+                    try:
+                        self._process.wait(timeout=2.0)
+                    except subprocess.TimeoutExpired:
+                        self._process.kill()
+        finally:
+            self.close()
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self._cleanup_callback is None:
+            return
+        try:
+            self._cleanup_callback()
+        except Exception:  # pragma: no cover - defensive
+            pass
 
     def poll_limits(self) -> tuple[bool, str | None]:
         if not self._monitor:
