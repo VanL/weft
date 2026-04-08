@@ -255,11 +255,21 @@ def test_control_stop_logged_and_cancelled(
 
 
 def test_poll_reporting_emits_periodic_events(
-    broker_env, task_factory, unique_tid
+    monkeypatch: pytest.MonkeyPatch,
+    broker_env,
+    task_factory,
+    unique_tid,
 ) -> None:
     db_path, make_queue = broker_env
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     drain_queue(log_queue)
+
+    current_time = 100.0
+
+    def _fake_monotonic() -> float:
+        return current_time
+
+    monkeypatch.setattr("weft.core.tasks.base.time.monotonic", _fake_monotonic)
 
     spec = build_function_spec(
         unique_tid,
@@ -279,11 +289,12 @@ def test_poll_reporting_emits_periodic_events(
     assert poll_event["summary"]["status"] == task.taskspec.state.status
 
     # Next call without waiting should not emit another report
+    current_time += 0.01
     task.process_once()
     assert drain_queue(log_queue) == []
 
     # Advance timer and expect another poll report
-    task._last_poll_report_at = time.monotonic() - 0.1
+    current_time += 0.1
     task.process_once()
     records = [json.loads(msg) for msg in drain_queue(log_queue)]
     assert len(records) == 1
