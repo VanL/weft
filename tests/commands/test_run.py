@@ -15,11 +15,19 @@ from typing import Any
 import pytest
 
 from tests.helpers.test_backend import prepare_project_root
-from weft._constants import WEFT_GLOBAL_LOG_QUEUE, WEFT_WORKERS_REGISTRY_QUEUE
+from weft._constants import (
+    WEFT_GLOBAL_LOG_QUEUE,
+    WEFT_SPAWN_REQUESTS_QUEUE,
+    WEFT_WORKERS_REGISTRY_QUEUE,
+)
 from weft.commands.run import (
     _build_manager_spec,
     _collect_interactive_queue_output,
+    _delete_spawn_request,
+    _enqueue_taskspec,
     _run_inline,
+    _run_pipeline,
+    _run_spec_via_manager,
     _select_active_manager,
     _start_manager,
     _wait_for_task_completion,
@@ -49,6 +57,11 @@ def _make_taskspec(tid: str) -> TaskSpec:
         state=StateSection(),
         metadata={},
     )
+
+
+def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 def test_wait_for_task_completion_reads_outbox_after_completion_event(
@@ -291,6 +304,199 @@ def test_run_inline_enqueues_task_before_ensuring_manager(
 
     assert exit_code == 0
     assert calls == ["enqueue", "ensure"]
+
+
+def test_delete_spawn_request_removes_queued_message(tmp_path: Path) -> None:
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    taskspec = _make_taskspec(tid)
+
+    message_timestamp = _enqueue_taskspec(context, taskspec, None)
+
+    _delete_spawn_request(context, message_timestamp)
+
+    queue = context.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=False)
+    try:
+        assert queue.read_one() is None
+    finally:
+        queue.close()
+
+
+def test_delete_spawn_request_swallows_delete_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+    closed = False
+
+    class _FakeQueue:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            del args, kwargs
+
+        def delete(self, *, message_id: int) -> None:
+            del message_id
+            raise RuntimeError("delete failed")
+
+        def close(self) -> None:
+            nonlocal closed
+            closed = True
+
+    monkeypatch.setattr("weft.commands.run.Queue", _FakeQueue)
+
+    _delete_spawn_request(context, 1775679597297004544)
+
+    assert closed is True
+
+
+def test_run_inline_deletes_spawn_request_when_ensure_manager_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+
+    monkeypatch.setattr(
+        "weft.commands.run.build_context",
+        lambda spec_context=None, autostart=True: context,
+    )
+    monkeypatch.setattr("weft.commands.run._read_piped_stdin", lambda context: None)
+    monkeypatch.setattr("weft.commands.run.stdin_is_tty", lambda: False)
+    monkeypatch.setattr("weft.commands.run.typer.echo", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "weft.commands.run._ensure_manager",
+        lambda context_arg, *, verbose: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    exit_code = _run_inline(
+        command=(),
+        function_target="tests.tasks.sample_targets:echo_payload",
+        args=(),
+        kwargs=(),
+        env=(),
+        name=None,
+        interactive=False,
+        stream_output=None,
+        timeout=None,
+        memory=None,
+        cpu=None,
+        tags=(),
+        context_dir=root,
+        wait=False,
+        json_output=False,
+        verbose=False,
+        autostart_enabled=True,
+    )
+
+    queue = context.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=False)
+    try:
+        assert queue.read_one() is None
+    finally:
+        queue.close()
+    assert exit_code == 1
+
+
+def test_run_spec_via_manager_deletes_spawn_request_when_ensure_manager_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+    spec_path = root / "task.json"
+    _write_json(
+        spec_path,
+        {
+            "name": "demo-task",
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:echo_payload",
+            },
+            "metadata": {},
+        },
+    )
+
+    monkeypatch.setattr(
+        "weft.commands.run.build_context",
+        lambda spec_context=None, autostart=True: context,
+    )
+    monkeypatch.setattr("weft.commands.run._read_piped_stdin", lambda context: None)
+    monkeypatch.setattr("weft.commands.run.typer.echo", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "weft.commands.run._ensure_manager",
+        lambda context_arg, *, verbose: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    exit_code = _run_spec_via_manager(
+        spec_path,
+        verbose=False,
+        wait=False,
+        json_output=False,
+        autostart_enabled=True,
+        persistent_override=None,
+    )
+
+    queue = context.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=False)
+    try:
+        assert queue.read_one() is None
+    finally:
+        queue.close()
+    assert exit_code == 1
+
+
+def test_run_pipeline_deletes_spawn_request_when_ensure_manager_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+    task_spec_path = context.weft_dir / "tasks" / "stage-task.json"
+    pipeline_path = root / "pipeline.json"
+    _write_json(
+        task_spec_path,
+        {
+            "name": "stage-task",
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:echo_payload",
+            },
+            "metadata": {},
+        },
+    )
+    _write_json(
+        pipeline_path,
+        {
+            "name": "demo-pipeline",
+            "stages": [{"task": "stage-task"}],
+        },
+    )
+
+    monkeypatch.setattr(
+        "weft.commands.run.build_context",
+        lambda spec_context=None, autostart=True: context,
+    )
+    monkeypatch.setattr("weft.commands.run._read_piped_stdin", lambda context: None)
+    monkeypatch.setattr(
+        "weft.commands.run._ensure_manager",
+        lambda context_arg, *, verbose: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    with pytest.raises(RuntimeError, match="boom"):
+        _run_pipeline(
+            pipeline_path,
+            pipeline_input=None,
+            context_dir=root,
+            wait=True,
+            json_output=False,
+            verbose=False,
+            autostart_enabled=True,
+        )
+
+    queue = context.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=False)
+    try:
+        assert queue.read_one() is None
+    finally:
+        queue.close()
 
 
 def test_build_manager_spec_uses_tid_scoped_control_queues(tmp_path: Path) -> None:
