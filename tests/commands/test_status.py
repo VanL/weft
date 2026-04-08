@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -10,11 +11,45 @@ import pytest
 
 from tests.helpers.test_backend import prepare_project_root
 from weft.commands import status as status_cmd
+from weft.commands import tasks as task_cmd
 from weft.commands.status import cmd_status, collect_status
 from weft.context import build_context
 from weft.ext import RunnerRuntimeDescription
 
 pytestmark = [pytest.mark.shared]
+
+
+def _write_task_log_entry(
+    *,
+    ctx: Any,
+    tid: str,
+    event: str,
+    status: str,
+    started_at: int,
+    completed_at: int | None,
+    name: str = "task",
+    runner_name: str = "host",
+) -> None:
+    log_queue = ctx.queue("weft.log.tasks", persistent=False)
+    log_queue.write(
+        json.dumps(
+            {
+                "event": event,
+                "status": status,
+                "tid": tid,
+                "taskspec": {
+                    "name": name,
+                    "spec": {"runner": {"name": runner_name, "options": {}}},
+                    "state": {
+                        "status": status,
+                        "started_at": started_at,
+                        "completed_at": completed_at,
+                    },
+                    "metadata": {},
+                },
+            }
+        )
+    )
 
 
 def test_collect_status_reports_message_counts(tmp_path):
@@ -153,6 +188,144 @@ def test_cmd_status_json_includes_runner_runtime_details(
     assert entry["runtime"]["state"] == "running"
     assert entry["runtime"]["metadata"]["image"] == "python:3.13-alpine"
     assert entry["metadata"]["owner"] == "tests"
+
+
+def test_task_status_keeps_terminal_log_state_running_while_task_pid_is_alive(
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = "1844674407370955161"
+    started = 1_762_000_000_000_000_000
+    completed = started + 1_000_000_000
+    mapping_queue = ctx.queue("weft.state.tid_mappings", persistent=False)
+
+    _write_task_log_entry(
+        ctx=ctx,
+        tid=tid,
+        event="control_stop",
+        status="cancelled",
+        started_at=started,
+        completed_at=completed,
+        name="live-consumer-task",
+    )
+    mapping_queue.write(
+        json.dumps(
+            {
+                "short": tid[-10:],
+                "full": tid,
+                "pid": os.getpid(),
+                "task_pid": os.getpid(),
+                "managed_pids": [],
+                "runner": "host",
+            }
+        )
+    )
+
+    snapshot = task_cmd.task_status(tid, context_path=root)
+
+    assert snapshot is not None
+    assert snapshot.event == "control_stop"
+    assert snapshot.status == "running"
+
+
+def test_task_status_surfaces_terminal_log_state_once_task_pid_is_gone(
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = "1844674407370955162"
+    started = 1_762_000_000_000_000_000
+    completed = started + 1_000_000_000
+    mapping_queue = ctx.queue("weft.state.tid_mappings", persistent=False)
+
+    _write_task_log_entry(
+        ctx=ctx,
+        tid=tid,
+        event="control_stop",
+        status="cancelled",
+        started_at=started,
+        completed_at=completed,
+        name="exited-consumer-task",
+    )
+    mapping_queue.write(
+        json.dumps(
+            {
+                "short": tid[-10:],
+                "full": tid,
+                "pid": 999_999_999,
+                "task_pid": 999_999_999,
+                "managed_pids": [],
+                "runner": "host",
+            }
+        )
+    )
+
+    snapshot = task_cmd.task_status(tid, context_path=root)
+
+    assert snapshot is not None
+    assert snapshot.status == "cancelled"
+
+
+def test_task_status_keeps_external_runner_terminal_when_runtime_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = "1844674407370955163"
+    started = 1_762_000_000_000_000_000
+    completed = started + 1_000_000_000
+    mapping_queue = ctx.queue("weft.state.tid_mappings", persistent=False)
+
+    _write_task_log_entry(
+        ctx=ctx,
+        tid=tid,
+        event="control_stop",
+        status="cancelled",
+        started_at=started,
+        completed_at=completed,
+        name="docker-task",
+        runner_name="docker",
+    )
+    mapping_queue.write(
+        json.dumps(
+            {
+                "short": tid[-10:],
+                "full": tid,
+                "pid": os.getpid(),
+                "task_pid": os.getpid(),
+                "managed_pids": [],
+                "runner": "docker",
+                "runtime_handle": {
+                    "runner_name": "docker",
+                    "runtime_id": "container-123",
+                    "host_pids": [],
+                    "metadata": {"image": "python:3.13-alpine"},
+                },
+            }
+        )
+    )
+
+    class FakeRunnerPlugin:
+        def describe(self, handle: Any) -> RunnerRuntimeDescription | None:
+            return RunnerRuntimeDescription(
+                runner_name=handle.runner_name,
+                runtime_id=handle.runtime_id,
+                state="missing",
+                metadata={"image": "python:3.13-alpine"},
+            )
+
+    monkeypatch.setattr(
+        status_cmd,
+        "require_runner_plugin",
+        lambda name: FakeRunnerPlugin(),
+    )
+
+    snapshot = task_cmd.task_status(tid, context_path=root)
+
+    assert snapshot is not None
+    assert snapshot.status == "cancelled"
 
 
 def test_cmd_status_discovers_parent_context_from_subdirectory(
