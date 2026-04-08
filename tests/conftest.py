@@ -18,6 +18,7 @@ from tests.helpers.test_backend import active_test_backend, prepare_cli_root
 from tests.helpers.weft_harness import WeftTestHarness
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_CLI_SUBPROCESS_TIMEOUT = 60.0
 _BROKER_HEAVY_FIXTURES = frozenset(
     {
         "weft_harness",
@@ -240,7 +241,7 @@ def run_cli(
     *args: object,
     cwd: Path,
     stdin: str | None = None,
-    timeout: float = 20.0,
+    timeout: float = DEFAULT_CLI_SUBPROCESS_TIMEOUT,
     env: dict[str, str] | None = None,
     strip_path_entry: bool = False,
     harness: WeftTestHarness | None = None,
