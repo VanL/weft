@@ -189,6 +189,14 @@ runbook needs to become stricter.
   are still useful in the line-oriented model. They improve behavior of known
   interactive programs without requiring PTY/TTY transport support.
 
+## 2026-04-09 Completion Grace
+
+- `work_completed` can become visible before the last public outbox messages
+  are readable. Completion waiters in `run` and `result` must do one final
+  non-blocking outbox drain after the grace window before returning a completed
+  result, or they will intermittently drop late-arriving outputs on slower
+  platforms.
+
 ## 2026-04-08 Zombie PID Liveness
 
 - `psutil.Process(pid).is_running()` is not a sufficient liveness check for

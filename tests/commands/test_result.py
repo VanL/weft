@@ -134,6 +134,45 @@ def test_await_single_result_reads_outbox_after_completion_event(tmp_path) -> No
     assert error is None
 
 
+def test_await_single_result_aggregates_multiple_outbox_messages(tmp_path) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    log_queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
+    outbox_queue = ctx.queue(f"T{tid}.outbox", persistent=True)
+
+    log_queue.write(
+        json.dumps(
+            {
+                "tid": tid,
+                "status": "completed",
+                "event": "work_completed",
+            }
+        )
+    )
+
+    def _write_outputs() -> None:
+        time.sleep(0.05)
+        outbox_queue.write("hello")
+        outbox_queue.write("world")
+
+    writer = threading.Thread(target=_write_outputs, daemon=True)
+    writer.start()
+    try:
+        status, result, error = _await_single_result(
+            ctx,
+            tid,
+            timeout=1.0,
+            show_stderr=False,
+        )
+    finally:
+        writer.join(timeout=1.0)
+
+    assert status == "completed"
+    assert result == ["hello", "world"]
+    assert error is None
+
+
 def test_await_single_result_persistent_returns_one_work_item_batch(tmp_path) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)

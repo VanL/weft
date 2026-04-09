@@ -51,6 +51,9 @@ from weft.commands._streaming import (
     collect_interactive_queue_output as _collect_interactive_queue_output,
 )
 from weft.commands._streaming import (
+    drain_available_outbox_values as _drain_available_outbox_values,
+)
+from weft.commands._streaming import (
     handle_ctrl_stream as _handle_ctrl_stream,
 )
 from weft.commands._streaming import (
@@ -313,16 +316,13 @@ def _wait_for_task_completion(
                 ctrl_payload = ctrl_raw[0] if isinstance(ctrl_raw, tuple) else ctrl_raw
                 _handle_ctrl_stream(str(ctrl_payload))
 
-            outbox_raw = outbox_queue.read_one()
-            if outbox_raw is not None:
-                outbox_payload = (
-                    outbox_raw[0] if isinstance(outbox_raw, tuple) else outbox_raw
-                )
-                final, value = _process_outbox_message(
-                    str(outbox_payload), stream_buffer
-                )
-                if final:
-                    result_values.append(value)
+            ready_values, drained_outbox = _drain_available_outbox_values(
+                outbox_queue,
+                stream_buffer,
+            )
+            if ready_values:
+                result_values.extend(ready_values)
+            if drained_outbox:
                 continue
 
             events, log_last_timestamp = _poll_log_events(
@@ -359,6 +359,12 @@ def _wait_for_task_completion(
             if completed_at is not None and (
                 time.monotonic() - completed_at >= WEFT_COMPLETED_RESULT_GRACE_SECONDS
             ):
+                late_values, _ = _drain_available_outbox_values(
+                    outbox_queue,
+                    stream_buffer,
+                )
+                if late_values:
+                    result_values.extend(late_values)
                 result_value = _aggregate_public_outputs(result_values)
                 status = "completed"
                 break
