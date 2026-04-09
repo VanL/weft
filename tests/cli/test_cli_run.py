@@ -1089,6 +1089,7 @@ def test_weft_harness_cleanup_preserves_sqlite_integrity_for_parallel_manager_re
         env["WEFT_MANAGER_REUSE_ENABLED"] = "1"
 
         try:
+
             def _submit(
                 current_root: Path = harness.root,
                 current_env: dict[str, str] = env,
