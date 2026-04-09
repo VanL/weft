@@ -170,7 +170,7 @@ TagAction = Literal[
 ]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class ReleaseTarget:
     """Release metadata for one publishable first-party package."""
 
@@ -192,7 +192,7 @@ class ReleaseTarget:
         return f"{self.tag_namespace}/v{version}"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class CommandStep:
     """One command executed by the release helper."""
 
@@ -200,7 +200,7 @@ class CommandStep:
     cwd: Path = PROJECT_ROOT
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class ReleaseState:
     """Observed publication and tag state for a release version."""
 
@@ -219,7 +219,7 @@ class ReleaseState:
         return self.github_release_exists or self.pypi_release_exists
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class SupplementalReleasePlan:
     """Release plan for a first-party extension package."""
 
