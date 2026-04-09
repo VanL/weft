@@ -605,7 +605,12 @@ class WeftTestHarness:
             self._drain_registry_queue()
 
     def _cleanup_preserving_database(self) -> None:
-        deadline = time.time() + max(6.0, min(self._manager_timeout, 10.0))
+        wait_budget = max(6.0, min(self._manager_timeout, 10.0))
+        if os.name == "nt":
+            # Windows can keep SQLite WAL/SHM handles around after the last
+            # live PID exits, especially under CI load.
+            wait_budget = max(wait_budget, 30.0)
+        deadline = time.time() + wait_budget
         issued_worker_stops: set[str] = set()
         issued_task_stops: set[str] = set()
         quiescent_since: float | None = None

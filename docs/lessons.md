@@ -166,6 +166,10 @@ runbook needs to become stricter.
   undeletable for a short period after the last live PID disappears, so the
   preserve-cleanup contract must gate return on database releasability when the
   caller may immediately dispose the tempdir.
+- Windows CI can need materially longer than a local developer machine for that
+  releasability probe to turn green. Keep the extra wait budget in the shared
+  harness cleanup path, and lock it with a regression test, rather than raising
+  one flaky caller's timeout.
 
 ## 2026-04-08 Interactive Contract
 

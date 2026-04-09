@@ -365,6 +365,48 @@ def test_harness_cleanup_preserve_database_waits_for_database_release(
 
 
 @pytest.mark.sqlite_only
+def test_harness_cleanup_preserve_database_extends_windows_release_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = WeftTestHarness()
+    repo_cwd = os.getcwd()
+    try:
+        harness.__enter__()
+        monkeypatch.setattr(harness, "_collect_pid_mappings", lambda: None)
+        monkeypatch.setattr(harness, "_live_task_tids_from_mappings", lambda: [])
+        monkeypatch.setattr(harness, "_live_registered_pids", lambda: [])
+        monkeypatch.setattr(harness_mod.os, "name", "nt")
+
+        release_checks: list[float] = []
+        clock = {"now": 0.0}
+
+        def fake_time() -> float:
+            return clock["now"]
+
+        def fake_sleep(seconds: float) -> None:
+            clock["now"] += seconds
+
+        def fake_database_files_releasable() -> bool:
+            release_checks.append(clock["now"])
+            return clock["now"] >= 12.0
+
+        monkeypatch.setattr(
+            harness, "_database_files_releasable", fake_database_files_releasable
+        )
+        monkeypatch.setattr(harness_mod.time, "time", fake_time)
+        monkeypatch.setattr(harness_mod.time, "sleep", fake_sleep)
+
+        harness.cleanup(preserve_database=True)
+
+        assert release_checks
+        assert release_checks[-1] >= 12.0
+    finally:
+        os.chdir(repo_cwd)
+        harness._closed = True
+        harness._tempdir.cleanup()
+
+
+@pytest.mark.sqlite_only
 def test_harness_cleanup_preserve_database_raises_if_database_stays_locked(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
