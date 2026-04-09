@@ -252,6 +252,19 @@ runbook needs to become stricter.
   parent fixture should wait briefly for that signal before entering its long
   sleep. That makes the test measure subtree cleanup instead of scheduler luck.
 
+## 2026-04-09 Cancelled Task Teardown
+
+- Cancelled-task integration tests must not stop at the first `control_stop`
+  or cancelled status event when fixture teardown still has to reap live task
+  PIDs. On slower Windows runners, the task can report cancellation before the
+  worker process has fully exited, and that leaves teardown to do the hard
+  cleanup work under much worse timing.
+- For CLI cancellation tests that exercise real task processes, wait for the
+  TID-mapping surface to show no live `pid` or `managed_pids` before returning
+  from the test. That keeps the assertion aligned with the real cleanup
+  boundary and avoids cross-platform teardown flakes that only show up under
+  CI load.
+
 ## 2026-04-08 Manager Role Identity
 
 - Manager identity has to stay consistent across every observability surface,

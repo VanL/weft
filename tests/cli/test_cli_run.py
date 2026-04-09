@@ -20,7 +20,9 @@ from weft._constants import (
     WEFT_SPAWN_REQUESTS_QUEUE,
     WEFT_WORKERS_REGISTRY_QUEUE,
 )
+from weft.commands import tasks as task_cmd
 from weft.context import build_context
+from weft.helpers import pid_is_live
 
 PROCESS_SCRIPT = Path(__file__).resolve().parents[1] / "tasks" / "process_target.py"
 INTERACTIVE_SCRIPT = (
@@ -90,6 +92,35 @@ def _wait_for_started_task_tid(
         queue.close()
 
     raise AssertionError(f"Timed out waiting for started task {task_name!r}")
+
+
+def _wait_for_task_process_exit(
+    harness,
+    *,
+    tid: str,
+    timeout: float = 10.0,
+) -> None:
+    deadline = time.time() + timeout
+    last_mapping: dict[str, object] | None = None
+    while time.time() < deadline:
+        mapping = task_cmd.mapping_for_tid(harness.context, tid) or {}
+        last_mapping = mapping
+        candidate_pids: list[int] = []
+        for key in ("task_pid", "pid"):
+            value = mapping.get(key)
+            if isinstance(value, int):
+                candidate_pids.append(value)
+        managed = mapping.get("managed_pids")
+        if isinstance(managed, list):
+            candidate_pids.extend(value for value in managed if isinstance(value, int))
+        if not any(pid_is_live(pid) for pid in set(candidate_pids)):
+            return
+        time.sleep(0.05)
+
+    raise AssertionError(
+        f"Timed out waiting for task {tid} processes to exit; "
+        f"last mapping={last_mapping!r}"
+    )
 
 
 def test_cli_run_function_inline(workdir, weft_harness) -> None:
@@ -950,6 +981,7 @@ def test_harness_wait_for_completion_reports_cancelled_task(
     assert rc == 0, err
     with pytest.raises(RuntimeError, match=rf"Task {tid} reported control_stop"):
         weft_harness.wait_for_completion(tid, timeout=10.0)
+    _wait_for_task_process_exit(weft_harness, tid=tid)
 
 
 def test_cli_run_wait_reports_cancelled_task(workdir, weft_harness) -> None:
@@ -984,6 +1016,7 @@ def test_cli_run_wait_reports_cancelled_task(workdir, weft_harness) -> None:
     assert rc == 1
     assert out == ""
     assert "Task cancelled" in err
+    _wait_for_task_process_exit(weft_harness, tid=task_tid)
 
 
 def test_cli_run_prunes_stale_manager(workdir, weft_harness) -> None:
