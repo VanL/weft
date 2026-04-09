@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from typing import Any
 
@@ -41,7 +42,7 @@ def test_status_json_includes_manager_records(workdir) -> None:
         "tid": "1762000000000000999",
         "name": "cli-manager",
         "status": "active",
-        "pid": 12345,
+        "pid": os.getpid(),
         "role": "manager",
         "requests": WEFT_SPAWN_REQUESTS_QUEUE,
         "timestamp": 1762000000000001999,
@@ -62,6 +63,38 @@ def test_status_json_includes_manager_records(workdir) -> None:
         assert entry["requests"] == WEFT_SPAWN_REQUESTS_QUEUE
         assert entry["pid"] == record["pid"]
         assert payload["tasks"] == []
+    finally:
+        registry.read_many(limit=100)
+
+
+def test_status_json_includes_noncanonical_manager_records(workdir) -> None:
+    context = build_context(spec_context=workdir)
+    registry = context.queue(WEFT_WORKERS_REGISTRY_QUEUE, persistent=False)
+
+    record = {
+        "tid": "1762000000000000888",
+        "name": "legacy-manager",
+        "status": "active",
+        "pid": os.getpid(),
+        "role": "manager",
+        "requests": "custom.manager.requests",
+        "timestamp": 1762000000000002888,
+    }
+
+    registry.write(json.dumps(record))
+
+    try:
+        rc, out, err = run_cli("status", "--json", cwd=workdir)
+
+        assert rc == 0
+        assert err == ""
+
+        payload = json.loads(out)
+        managers = payload["managers"]
+        assert any(item.get("tid") == record["tid"] for item in managers)
+        entry = next(item for item in managers if item.get("tid") == record["tid"])
+        assert entry["requests"] == "custom.manager.requests"
+        assert entry["pid"] == record["pid"]
     finally:
         registry.read_many(limit=100)
 

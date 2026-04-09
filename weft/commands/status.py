@@ -23,9 +23,9 @@ from weft._constants import (
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
-    WEFT_WORKERS_REGISTRY_QUEUE,
 )
 from weft._runner_plugins import require_runner_plugin
+from weft.commands._manager_bootstrap import _list_manager_records
 from weft.context import WeftContext, build_context
 from weft.ext import RunnerHandle
 from weft.helpers import (
@@ -186,29 +186,11 @@ def _queue(
 def _collect_manager_records(
     ctx: WeftContext, *, include_stopped: bool = False
 ) -> list[dict[str, Any]]:
-    queue = _queue(ctx, WEFT_WORKERS_REGISTRY_QUEUE)
-    records: dict[str, dict[str, Any]] = {}
-    for data, timestamp in iter_queue_json_entries(queue):
-        tid = data.get("tid")
-        if not tid:
-            continue
-        data["_timestamp"] = timestamp
-        existing = records.get(tid)
-        previous_timestamp = _to_int(existing.get("_timestamp")) if existing else -1
-        if existing is None or previous_timestamp < timestamp:
-            records[tid] = data
-
-    formatted: list[dict[str, Any]] = []
-    for record in records.values():
-        timestamp = _to_int(record.get("_timestamp"))
-        record.pop("_timestamp", None)
-        record["timestamp"] = timestamp
-        record.setdefault("requests", WEFT_SPAWN_REQUESTS_QUEUE)
-        formatted.append(record)
-    formatted.sort(key=lambda rec: rec.get("timestamp", 0), reverse=True)
-    if not include_stopped:
-        formatted = [rec for rec in formatted if rec.get("status") != "stopped"]
-    return formatted
+    return _list_manager_records(
+        ctx,
+        include_stopped=include_stopped,
+        canonical_only=False,
+    )
 
 
 def _format_manager_summary(records: list[dict[str, Any]]) -> str:

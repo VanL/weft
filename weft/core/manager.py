@@ -12,6 +12,7 @@ import copy
 import json
 import logging
 import multiprocessing
+import signal
 import threading
 import time
 from collections.abc import Mapping
@@ -31,6 +32,7 @@ from weft._constants import (
     WORK_ENVELOPE_START,
 )
 from weft.helpers import (
+    is_canonical_manager_record,
     iter_queue_json_entries,
     pid_is_live,
     redact_taskspec_dump,
@@ -396,7 +398,7 @@ class Manager(BaseTask):
         for tid, record in snapshot.items():
             if record.get("status") != "active":
                 continue
-            if record.get("role", "manager") != "manager":
+            if not is_canonical_manager_record(record):
                 continue
             pid = record.get("pid")
             if not isinstance(pid, int) or not self._pid_alive(pid):
@@ -559,17 +561,33 @@ class Manager(BaseTask):
             self._send_stop_command(ctrl_queue)
 
     def _begin_graceful_shutdown(self, *, message_id: int | None) -> None:
+        self._begin_shutdown_drain(
+            message_id=message_id,
+            reason="STOP command received",
+            event="control_stop",
+            completion_event="manager_stop_drained",
+        )
+
+    def _begin_shutdown_drain(
+        self,
+        *,
+        message_id: int | None,
+        reason: str,
+        event: str | None,
+        completion_event: str,
+    ) -> None:
         if self._draining:
             return
 
         self._draining = True
-        self._drain_reason = "STOP command received"
-        self._drain_completion_event = "manager_stop_drained"
-        self._report_state_change(
-            event="control_stop",
-            message_id=message_id,
-            draining=True,
-        )
+        self._drain_reason = reason
+        self._drain_completion_event = completion_event
+        if event is not None:
+            self._report_state_change(
+                event=event,
+                message_id=message_id,
+                draining=True,
+            )
         self._update_process_title("stopping")
 
         policy = self.taskspec.spec.reserved_policy_on_stop
@@ -612,8 +630,27 @@ class Manager(BaseTask):
         self.should_stop = True
 
     def handle_termination_signal(self, signum: int) -> None:
-        self._terminate_children()
-        super().handle_termination_signal(signum)
+        sigusr1 = getattr(signal, "SIGUSR1", None)
+        if sigusr1 is not None and signum == sigusr1:
+            self._terminate_children()
+            super().handle_termination_signal(signum)
+            return
+
+        if self._external_stop_handled:
+            return
+        self._external_stop_handled = True
+
+        try:
+            signal_name = signal.Signals(signum).name
+        except ValueError:  # pragma: no cover - defensive
+            signal_name = f"signal {signum}"
+
+        self._begin_shutdown_drain(
+            message_id=None,
+            reason=f"{signal_name} received",
+            event=None,
+            completion_event="task_signal_stop",
+        )
 
     def _send_stop_command(self, queue_name: str) -> None:
         try:

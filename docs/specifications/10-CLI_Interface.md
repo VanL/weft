@@ -176,6 +176,26 @@ booting background agents.
 
 > **Note:** Bare-name shortcuts (for example `weft run git-clone ...`) and additional convenience flags remain planned; today only direct command/function/spec submission is implemented.
 
+#### `serve` - Run a foreground Manager [CLI-1.1.2]
+_Implementation mapping_: `weft/commands/serve.py` `serve_command()`, registered in `weft/cli.py` as `weft serve`. The command reuses the canonical manager TaskSpec builder and shared manager runtime path from `weft/commands/_manager_bootstrap.py` and `weft/manager_process.py`.
+
+`weft serve` is the operator entrypoint for `systemd`, `launchd`, and
+`supervisord` style supervision. Unlike `weft worker start`, it does not
+daemonize and return. It runs the canonical manager in the foreground in the
+current process, forcing `idle_timeout=0.0` for that invocation so the manager
+stays alive until explicitly stopped or until leadership yield makes it drain
+and exit. If another live canonical manager already exists for the chosen
+context, `weft serve` exits with code `1` and reports the existing manager
+instead of attaching to it.
+
+```bash
+# Run the canonical manager in the foreground for the current context
+weft serve
+
+# Run the canonical manager in the foreground for another project
+weft serve --context /path/to/project
+```
+
 #### `init` - Initialize a project
 
 _Implementation mapping_: `weft/commands/init.py` `cmd_init()`, registered in `weft/cli.py` as `weft init`.
@@ -194,7 +214,7 @@ weft init /path/to/project
 
 `weft status` answers "how is the system doing?" and can optionally filter task snapshots by TID or status. For detailed per-task inspection use `weft task status`.
 
-_Implementation mapping_: `weft/commands/status.py` `cmd_status()`, registered in `weft/cli.py` as `weft status`. Key helpers: `collect_broker_status()`, `_collect_task_snapshots()`, `_collect_manager_records()`, `_watch_task_events()`.
+_Implementation mapping_: `weft/commands/status.py` `cmd_status()`, registered in `weft/cli.py` as `weft status`. Key helpers: `collect_broker_status()`, `_collect_task_snapshots()`, `_collect_manager_records()`, `_watch_task_events()`. Manager registry replay for both `weft status` and `weft list --workers` is normalized through `weft/commands/_manager_bootstrap.py`.
 
 _Implementation today_: `weft status` surfaces SimpleBroker metrics for the active project database, manager registry entries, and recent task snapshots from `weft.log.tasks`. Optional filters include TID (full or short), `--status`, and `--all` to include terminal tasks. `--watch` streams task events as they arrive.
 
@@ -392,17 +412,23 @@ weft queue alias remove agent1.outbox
 
 The `worker` commands manage long-lived Manager instances (Spec: [WA-0]–[WA-4]). The naming of the CLI command remains `worker` for compatibility, even though the runtime role is now called Manager.
 
-_Implementation mapping_: `weft/commands/worker.py` (`start_command`, `stop_command`, `list_command`, `status_command`), registered in `weft/cli.py` under the `worker` sub-app.
+_Implementation mapping_: `weft/commands/worker.py` (`start_command`, `stop_command`, `list_command`, `status_command`), registered in `weft/cli.py` under the `worker` sub-app. These wrappers delegate manager bootstrap, registry replay, and STOP / force-stop observation to `weft/commands/_manager_bootstrap.py`.
 
 #### `worker start` – launch a Manager
 
 ```bash
-# Launch a worker from TaskSpec JSON (runs in background by default)
-weft worker start worker.json
+# Start the canonical manager for the current project context
+weft worker start
 
-# Run the worker in the foreground (Ctrl+C to stop)
-weft worker start worker.json --foreground
+# Start the canonical manager for another project context
+weft worker start --context /path/to/project
 ```
+
+`worker start` is idempotent at the manager level: if a canonical manager is
+already running for the chosen context, the command reports that manager instead
+of launching a second startup path. It remains a detached bootstrap command and
+is not the right `ExecStart` / `ProgramArguments` / `command` target for a
+service manager. Use `weft serve` for supervised foreground operation.
 
 #### `worker stop` – request a worker shutdown
 
@@ -433,7 +459,14 @@ Worker subcommands operate on the current project context.
 #### Manager lifecycle (implicit)
 
 `weft run` ensures a manager is available, starting one automatically when
-needed. Operators who want explicit control can use `weft worker start|stop`.
+needed. Operators who want explicit control can use
+`weft worker start|stop` for detached lifecycle management or `weft serve` for
+foreground supervision. `weft worker start` uses the same canonical bootstrap
+helper as `weft run`.
+`weft worker list|status|stop` and the manager section of `weft status` use the
+same shared lifecycle helper for registry replay and liveness decisions.
+
+_Related plans_: [Manager Bootstrap Unification Plan](../plans/manager-bootstrap-unification-plan.md), [Manager Lifecycle Command Consolidation Plan](../plans/manager-lifecycle-command-consolidation-plan.md), [Weft Serve Supervised Manager Plan](../plans/weft-serve-supervised-manager-plan.md)
 
 ## Task Process Tools (`weft task …`)
 
@@ -909,6 +942,7 @@ The CLI follows SimpleBroker's command patterns and integrates with standard Uni
 - [`docs/plans/runner-extension-point-plan.md`](../plans/runner-extension-point-plan.md)
 - [`docs/plans/agent-runtime-boundary-cleanup-plan.md`](../plans/agent-runtime-boundary-cleanup-plan.md)
 - [`docs/plans/agent-runtime-implementation-plan.md`](../plans/agent-runtime-implementation-plan.md)
+- [`docs/plans/manager-lifecycle-command-consolidation-plan.md`](../plans/manager-lifecycle-command-consolidation-plan.md)
 - [`docs/plans/persistent-agent-runtime-implementation-plan.md`](../plans/persistent-agent-runtime-implementation-plan.md)
 - [`docs/plans/simplebroker-backend-generalization-plan.md`](../plans/simplebroker-backend-generalization-plan.md)
 - [`docs/plans/weft-backend-neutrality-plan.md`](../plans/weft-backend-neutrality-plan.md)

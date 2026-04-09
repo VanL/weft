@@ -9,6 +9,7 @@ import typer
 from ._constants import PROG_NAME, __version__
 from .commands import cmd_init, cmd_status, cmd_tidy, cmd_validate_taskspec
 from .commands import queue as queue_cmd
+from .commands import serve as serve_cmd
 from .commands import specs as spec_cmd
 from .commands import tasks as task_cmd
 from .commands import worker as worker_cmd
@@ -414,10 +415,13 @@ def list_tasks(
 ) -> None:
     if workers:
         from .commands import status as status_cmd
+        from .commands._manager_bootstrap import _list_manager_records
 
         context = status_cmd._resolve_context(context_dir)
-        managers = status_cmd._collect_manager_records(
-            context, include_stopped=include_terminal
+        managers = _list_manager_records(
+            context,
+            include_stopped=include_terminal,
+            canonical_only=False,
         )
         if json_output:
             typer.echo(json.dumps(managers, ensure_ascii=False))
@@ -1082,24 +1086,29 @@ def run_command(
     raise typer.Exit(code=exit_code)
 
 
+@app.command("serve")
+def serve_cli_command(
+    context: Annotated[
+        Path | None,
+        typer.Option("--context", help="Weft project directory"),
+    ] = None,
+) -> None:
+    """Run the canonical manager in the foreground."""
+
+    exit_code, payload = serve_cmd.serve_command(context_path=context)
+    if payload:
+        typer.echo(payload)
+    raise typer.Exit(code=exit_code)
+
+
 @worker_app.command("start")
 def worker_start_command(
-    taskspec: Annotated[
-        Path,
-        typer.Argument(
-            help="Path to worker TaskSpec JSON",
-            exists=True,
-            file_okay=True,
-            dir_okay=False,
-            readable=True,
-        ),
-    ],
-    foreground: Annotated[
-        bool,
-        typer.Option("--foreground", help="Run the worker in the foreground"),
-    ] = False,
+    context: Annotated[
+        Path | None,
+        typer.Option("--context", help="Weft project directory"),
+    ] = None,
 ) -> None:
-    exit_code, payload = worker_cmd.start_command(taskspec, foreground=foreground)
+    exit_code, payload = worker_cmd.start_command(context_path=context)
     if payload:
         typer.echo(payload)
     raise typer.Exit(code=exit_code)

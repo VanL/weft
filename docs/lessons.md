@@ -200,6 +200,30 @@ runbook needs to become stricter.
   interpolate `Path` objects directly into strings. Normalize display paths at
   the output boundary with `.as_posix()` or a shared helper.
 
+## 2026-04-09 Manager Bootstrap Unification
+
+- Operator-facing manager startup must wrap the same canonical bootstrap helper
+  as `weft run`. Allowing `weft worker start` to launch arbitrary manager
+  TaskSpecs creates a second execution path and lets registry selection adopt a
+  live manager that is not bound to `weft.spawn.requests`.
+- Canonical manager election should use the request-queue contract already
+  present in the registry (`requests == weft.spawn.requests`) instead of
+  treating every live `role="manager"` record as equivalent.
+
+## 2026-04-09 Manager Lifecycle Command Consolidation
+
+- Manager control-plane commands must share one registry replay and liveness
+  path. If `weft run`, `weft worker list|status|stop`, and `weft status` each
+  interpret `weft.state.workers` separately, dead active records persist on one
+  surface and disappear on another.
+- Shared registry readers should normalize record shape at the boundary
+  (`timestamp`, `requests` backfill, canonical `T{tid}.ctrl_in` fallback) and
+  keep presentation differences local to the CLI wrapper.
+- Force-stop should trust a manager PID only when that PID is corroborated by
+  the TID-mapping queue or an owned `Popen` handle. A registry-only PID can be
+  a stale or synthetic record, and treating it as kill-authoritative can signal
+  the current pytest worker or another unrelated process during cleanup.
+
 ## 2026-04-08 Manager Role Identity
 
 - Manager identity has to stay consistent across every observability surface,
