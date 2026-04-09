@@ -1,0 +1,61 @@
+name: Release Gate (weft-docker)
+
+on:
+  push:
+    tags:
+      - "weft_docker/v*"
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: release-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-docker-extension:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+
+      - name: Install dependencies
+        run: |
+          uv pip install --system -e ".[dev,docker]"
+
+      - name: Verify Docker is available
+        run: |
+          docker version
+
+      - name: Run Docker extension tests
+        run: |
+          pytest -q -n 0 extensions/weft_docker/tests
+
+  publish-release:
+    needs:
+      - test-docker-extension
+    uses: ./.github/workflows/release.yml
+    with:
+      package_name: weft-docker
+      package_dir: extensions/weft_docker
+      tag_name: ${{ github.ref_name }}
+      release_ref: ${{ github.sha }}
+      expected_tag_commit: ${{ github.sha }}
+      create_github_release: false
+    permissions:
+      contents: write
+      id-token: write

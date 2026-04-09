@@ -21,9 +21,21 @@ from urllib import request as urllib_request
 PROJECT_ROOT: Final[Path] = Path(__file__).resolve().parents[1]
 PYPROJECT_PATH: Final[Path] = PROJECT_ROOT / "pyproject.toml"
 CONSTANTS_PATH: Final[Path] = PROJECT_ROOT / "weft" / "_constants.py"
+DOCKER_EXTENSION_DIR: Final[Path] = PROJECT_ROOT / "extensions" / "weft_docker"
+DOCKER_EXTENSION_PYPROJECT_PATH: Final[Path] = DOCKER_EXTENSION_DIR / "pyproject.toml"
+MACOS_SANDBOX_EXTENSION_DIR: Final[Path] = (
+    PROJECT_ROOT / "extensions" / "weft_macos_sandbox"
+)
+MACOS_SANDBOX_EXTENSION_PYPROJECT_PATH: Final[Path] = (
+    MACOS_SANDBOX_EXTENSION_DIR / "pyproject.toml"
+)
 UV_LOCK_PATH: Final[Path] = PROJECT_ROOT / "uv.lock"
-RELEASE_GATE_WORKFLOW: Final[str] = ".github/workflows/release-gate.yml"
-RELEASE_PROJECT_NAME: Final[str] = "weft"
+ROOT_RELEASE_GATE_WORKFLOW: Final[str] = ".github/workflows/release-gate.yml"
+DOCKER_RELEASE_GATE_WORKFLOW: Final[str] = ".github/workflows/release-gate-docker.yml"
+MACOS_SANDBOX_RELEASE_GATE_WORKFLOW: Final[str] = (
+    ".github/workflows/release-gate-macos-sandbox.yml"
+)
+RELEASE_GATE_WORKFLOW: Final[str] = ROOT_RELEASE_GATE_WORKFLOW
 GITHUB_API_BASE: Final[str] = "https://api.github.com"
 PYPI_API_BASE: Final[str] = "https://pypi.org/pypi"
 HTTP_TIMEOUT_SECONDS: Final[float] = 10.0
@@ -34,6 +46,7 @@ PYPROJECT_VERSION_PATTERN: Final[re.Pattern[str]] = re.compile(
 CONSTANTS_VERSION_PATTERN: Final[re.Pattern[str]] = re.compile(
     r'(?m)^__version__:\s*Final\[str\]\s*=\s*"([^"]+)"$'
 )
+PENDING_RELEASE_COMMIT: Final[str] = "<release-commit>"
 
 BASE_PRECHECK_COMMANDS: Final[tuple[tuple[str, ...], ...]] = (
     (
@@ -148,10 +161,6 @@ PRECHECK_ENV_OVERRIDES: Final[dict[str, str]] = {
     "PYTEST_ADDOPTS": "-x --maxfail=1",
     "WEFT_EAGER_FAILURE_TRACEBACK": "1",
 }
-POSTUPDATE_COMMANDS: Final[tuple[tuple[str, ...], ...]] = (
-    ("uv", "run", "pytest", "tests/system/test_constants.py", "-q"),
-    ("uv", "build"),
-)
 TagAction = Literal[
     "create",
     "push_local",
@@ -162,9 +171,40 @@ TagAction = Literal[
 
 
 @dataclass(frozen=True, slots=True)
+class ReleaseTarget:
+    """Release metadata for one publishable first-party package."""
+
+    key: str
+    package_name: str
+    display_name: str
+    package_dir: Path
+    pyproject_path: Path
+    release_gate_workflow: str
+    tag_namespace: str | None = None
+    constants_path: Path | None = None
+    github_release_enabled: bool = False
+
+    def tag_name(self, version: str) -> str:
+        """Return the Git tag used to publish this package version."""
+
+        if self.tag_namespace is None:
+            return f"v{version}"
+        return f"{self.tag_namespace}/v{version}"
+
+
+@dataclass(frozen=True, slots=True)
+class CommandStep:
+    """One command executed by the release helper."""
+
+    command: tuple[str, ...]
+    cwd: Path = PROJECT_ROOT
+
+
+@dataclass(frozen=True, slots=True)
 class ReleaseState:
     """Observed publication and tag state for a release version."""
 
+    target: ReleaseTarget
     version: str
     tag_name: str
     github_release_exists: bool
@@ -179,8 +219,51 @@ class ReleaseState:
         return self.github_release_exists or self.pypi_release_exists
 
 
+@dataclass(frozen=True, slots=True)
+class SupplementalReleasePlan:
+    """Release plan for a first-party extension package."""
+
+    state: ReleaseState
+    tag_action: TagAction
+
+
+ROOT_RELEASE_TARGET: Final[ReleaseTarget] = ReleaseTarget(
+    key="core",
+    package_name="weft",
+    display_name="weft",
+    package_dir=PROJECT_ROOT,
+    pyproject_path=PYPROJECT_PATH,
+    constants_path=CONSTANTS_PATH,
+    release_gate_workflow=ROOT_RELEASE_GATE_WORKFLOW,
+    github_release_enabled=True,
+)
+DOCKER_RELEASE_TARGET: Final[ReleaseTarget] = ReleaseTarget(
+    key="docker",
+    package_name="weft-docker",
+    display_name="weft-docker",
+    package_dir=DOCKER_EXTENSION_DIR,
+    pyproject_path=DOCKER_EXTENSION_PYPROJECT_PATH,
+    tag_namespace="weft_docker",
+    release_gate_workflow=DOCKER_RELEASE_GATE_WORKFLOW,
+)
+MACOS_SANDBOX_RELEASE_TARGET: Final[ReleaseTarget] = ReleaseTarget(
+    key="macos-sandbox",
+    package_name="weft-macos-sandbox",
+    display_name="weft-macos-sandbox",
+    package_dir=MACOS_SANDBOX_EXTENSION_DIR,
+    pyproject_path=MACOS_SANDBOX_EXTENSION_PYPROJECT_PATH,
+    tag_namespace="weft_macos_sandbox",
+    release_gate_workflow=MACOS_SANDBOX_RELEASE_GATE_WORKFLOW,
+)
+FIRST_PARTY_EXTENSION_TARGETS: Final[tuple[ReleaseTarget, ...]] = (
+    DOCKER_RELEASE_TARGET,
+    MACOS_SANDBOX_RELEASE_TARGET,
+)
+
+
 def validate_version(version: str) -> str:
     """Validate the explicit release version."""
+
     normalized = version.strip()
     if not VERSION_PATTERN.fullmatch(normalized):
         raise ValueError("Version must use X.Y.Z format, for example: 0.1.1")
@@ -206,6 +289,7 @@ def read_current_version(
     constants_path: Path = CONSTANTS_PATH,
 ) -> str:
     """Read and verify the current repo version."""
+
     pyproject_version = _extract_version(
         pyproject_path,
         PYPROJECT_VERSION_PATTERN,
@@ -222,6 +306,21 @@ def read_current_version(
             f"({pyproject_version}) and weft/_constants.py ({constants_version})"
         )
     return pyproject_version
+
+
+def read_target_version(target: ReleaseTarget) -> str:
+    """Read the current version for one publishable package."""
+
+    if target.constants_path is not None:
+        return read_current_version(
+            pyproject_path=target.pyproject_path,
+            constants_path=target.constants_path,
+        )
+    return _extract_version(
+        target.pyproject_path,
+        PYPROJECT_VERSION_PATTERN,
+        label=_display_path(target.pyproject_path),
+    )
 
 
 def _replace_version(
@@ -247,7 +346,8 @@ def write_version_files(
     pyproject_path: Path = PYPROJECT_PATH,
     constants_path: Path = CONSTANTS_PATH,
 ) -> None:
-    """Update the canonical version files together."""
+    """Update the canonical root-package version files together."""
+
     pyproject_text = pyproject_path.read_text(encoding="utf-8")
     constants_text = constants_path.read_text(encoding="utf-8")
 
@@ -268,8 +368,38 @@ def write_version_files(
     constants_path.write_text(updated_constants, encoding="utf-8")
 
 
+def write_target_version(target: ReleaseTarget, version: str) -> None:
+    """Update the version source(s) for one publishable package."""
+
+    if target.constants_path is not None:
+        write_version_files(
+            version,
+            pyproject_path=target.pyproject_path,
+            constants_path=target.constants_path,
+        )
+        return
+
+    pyproject_text = target.pyproject_path.read_text(encoding="utf-8")
+    updated_pyproject = _replace_version(
+        pyproject_text,
+        PYPROJECT_VERSION_PATTERN,
+        version,
+        label=_display_path(target.pyproject_path),
+    )
+    target.pyproject_path.write_text(updated_pyproject, encoding="utf-8")
+
+
 def _format_command(command: tuple[str, ...]) -> str:
     return " ".join(shlex.quote(part) for part in command)
+
+
+def _display_path(path: Path) -> str:
+    """Return a stable display path for logs and errors."""
+
+    try:
+        return str(path.relative_to(PROJECT_ROOT))
+    except ValueError:
+        return str(path)
 
 
 def _docker_available_for_tests() -> bool:
@@ -323,6 +453,17 @@ def build_precheck_commands(
     return tuple(commands)
 
 
+def build_postupdate_steps() -> tuple[CommandStep, ...]:
+    """Return post-version-update verification/build steps."""
+
+    return (
+        CommandStep(("uv", "run", "pytest", "tests/system/test_constants.py", "-q")),
+        CommandStep(("uv", "build"), cwd=PROJECT_ROOT),
+        CommandStep(("uv", "build"), cwd=DOCKER_EXTENSION_DIR),
+        CommandStep(("uv", "build"), cwd=MACOS_SANDBOX_EXTENSION_DIR),
+    )
+
+
 def _merge_command_env(
     env_overrides: dict[str, str] | None,
     *,
@@ -353,21 +494,30 @@ def _format_command_prefix(env_overrides: dict[str, str] | None) -> str:
     )
 
 
+def _format_cwd_suffix(cwd: Path) -> str:
+    if cwd == PROJECT_ROOT:
+        return ""
+    return f"  (cwd={cwd.relative_to(PROJECT_ROOT)})"
+
+
 def run_command(
     command: tuple[str, ...],
     *,
+    cwd: Path = PROJECT_ROOT,
     dry_run: bool = False,
     env_overrides: dict[str, str] | None = None,
 ) -> None:
-    """Run a command from the repo root, printing it first."""
+    """Run a command, printing it first."""
+
     prefix = _format_command_prefix(env_overrides)
     formatted = _format_command(command)
-    print(f"$ {prefix} {formatted}" if prefix else f"$ {formatted}")
+    command_text = f"$ {prefix} {formatted}" if prefix else f"$ {formatted}"
+    print(f"{command_text}{_format_cwd_suffix(cwd)}")
     if dry_run:
         return
     subprocess.run(
         command,
-        cwd=PROJECT_ROOT,
+        cwd=cwd,
         check=True,
         env=_merge_command_env(env_overrides),
     )
@@ -375,6 +525,7 @@ def run_command(
 
 def is_dirty_worktree() -> bool:
     """Return True when git reports local modifications."""
+
     result = subprocess.run(
         ("git", "status", "--porcelain"),
         cwd=PROJECT_ROOT,
@@ -390,12 +541,16 @@ def _require_command(name: str) -> None:
         raise RuntimeError(f"Required command not found on PATH: {name}")
 
 
-def _capture_command(command: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
-    """Run a command from the repo root and capture its output."""
+def _capture_command(
+    command: tuple[str, ...],
+    *,
+    cwd: Path = PROJECT_ROOT,
+) -> subprocess.CompletedProcess[str]:
+    """Run a command and capture its output."""
 
     return subprocess.run(
         command,
-        cwd=PROJECT_ROOT,
+        cwd=cwd,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -471,7 +626,7 @@ def origin_remote_url() -> str:
 
 
 def github_repo_slug_from_remote(remote_url: str) -> str | None:
-    """Extract `owner/repo` from a GitHub remote URL."""
+    """Extract ``owner/repo`` from a GitHub remote URL."""
 
     stripped = remote_url.strip()
     if stripped.startswith("git@github.com:"):
@@ -493,46 +648,6 @@ def github_repo_slug_from_remote(remote_url: str) -> str | None:
     if not owner or not repo:
         return None
     return f"{owner}/{repo}"
-
-
-def _url_exists(url: str) -> bool:
-    """Return whether a JSON endpoint exists, treating 404 as missing."""
-
-    headers = {
-        "Accept": "application/json",
-        "User-Agent": "weft-release-helper",
-    }
-    if url.startswith(GITHUB_API_BASE):
-        headers.update(_github_api_auth_headers())
-
-    request = urllib_request.Request(
-        url,
-        headers=headers,
-    )
-    try:
-        with urllib_request.urlopen(request, timeout=HTTP_TIMEOUT_SECONDS):
-            return True
-    except urllib_error.HTTPError as exc:
-        if exc.code == 404:
-            return False
-        raise RuntimeError(f"Unable to query {url}: HTTP {exc.code}") from exc
-    except urllib_error.URLError as exc:
-        raise RuntimeError(f"Unable to query {url}: {exc.reason}") from exc
-
-
-def github_release_exists(tag_name: str) -> bool:
-    """Return whether GitHub already has a published release for the tag."""
-
-    remote_url = origin_remote_url()
-    repo_slug = github_repo_slug_from_remote(remote_url)
-    if repo_slug is None:
-        raise RuntimeError(
-            f"Unable to determine GitHub repository from origin remote: {remote_url}"
-        )
-    encoded_tag = urllib_parse.quote(tag_name, safe="")
-    return _url_exists(
-        f"{GITHUB_API_BASE}/repos/{repo_slug}/releases/tags/{encoded_tag}"
-    )
 
 
 @lru_cache(maxsize=1)
@@ -564,23 +679,68 @@ def _github_api_auth_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
-def pypi_version_exists(version: str) -> bool:
-    """Return whether PyPI already has the project version."""
+def _url_exists(url: str) -> bool:
+    """Return whether a JSON endpoint exists, treating 404 as missing."""
 
-    encoded_project = urllib_parse.quote(RELEASE_PROJECT_NAME, safe="")
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "weft-release-helper",
+    }
+    if url.startswith(GITHUB_API_BASE):
+        headers.update(_github_api_auth_headers())
+
+    request = urllib_request.Request(url, headers=headers)
+    try:
+        with urllib_request.urlopen(request, timeout=HTTP_TIMEOUT_SECONDS):
+            return True
+    except urllib_error.HTTPError as exc:
+        if exc.code == 404:
+            return False
+        raise RuntimeError(f"Unable to query {url}: HTTP {exc.code}") from exc
+    except urllib_error.URLError as exc:
+        raise RuntimeError(f"Unable to query {url}: {exc.reason}") from exc
+
+
+def github_release_exists(tag_name: str) -> bool:
+    """Return whether GitHub already has a published release for the tag."""
+
+    remote_url = origin_remote_url()
+    repo_slug = github_repo_slug_from_remote(remote_url)
+    if repo_slug is None:
+        raise RuntimeError(
+            f"Unable to determine GitHub repository from origin remote: {remote_url}"
+        )
+    encoded_tag = urllib_parse.quote(tag_name, safe="")
+    return _url_exists(
+        f"{GITHUB_API_BASE}/repos/{repo_slug}/releases/tags/{encoded_tag}"
+    )
+
+
+def pypi_version_exists(package_name: str, version: str) -> bool:
+    """Return whether PyPI already has the package version."""
+
+    encoded_project = urllib_parse.quote(package_name, safe="")
     encoded_version = urllib_parse.quote(version, safe="")
     return _url_exists(f"{PYPI_API_BASE}/{encoded_project}/{encoded_version}/json")
 
 
-def inspect_release_state(version: str) -> ReleaseState:
-    """Collect publication and tag state for a target version."""
+def inspect_release_state(
+    version: str,
+    *,
+    target: ReleaseTarget = ROOT_RELEASE_TARGET,
+) -> ReleaseState:
+    """Collect publication and tag state for a package version."""
 
-    tag_name = f"v{version}"
+    tag_name = target.tag_name(version)
+    github_published = (
+        github_release_exists(tag_name) if target.github_release_enabled else False
+    )
     return ReleaseState(
+        target=target,
         version=version,
         tag_name=tag_name,
-        github_release_exists=github_release_exists(tag_name),
-        pypi_release_exists=pypi_version_exists(version),
+        github_release_exists=github_published,
+        pypi_release_exists=pypi_version_exists(target.package_name, version),
         local_tag_commit=local_tag_commit(tag_name),
         remote_tag_commit=remote_tag_commit(tag_name),
     )
@@ -590,7 +750,7 @@ def published_destinations(state: ReleaseState) -> str:
     """Return a human-readable list of external publication destinations."""
 
     destinations: list[str] = []
-    if state.github_release_exists:
+    if state.target.github_release_enabled and state.github_release_exists:
         destinations.append("GitHub Release")
     if state.pypi_release_exists:
         destinations.append("PyPI publication")
@@ -601,6 +761,7 @@ def resolve_target_version(
     requested_version: str | None,
     *,
     current_version: str,
+    target: ReleaseTarget = ROOT_RELEASE_TARGET,
 ) -> tuple[str, ReleaseState]:
     """Resolve the target version and ensure it has not been externally published."""
 
@@ -609,7 +770,7 @@ def resolve_target_version(
         if requested_version is None
         else validate_version(requested_version)
     )
-    state = inspect_release_state(target_version)
+    state = inspect_release_state(target_version, target=target)
     if state.published:
         if requested_version is None:
             raise RuntimeError(
@@ -676,11 +837,40 @@ def plan_tag_action(
     return "create"
 
 
-def _remote_tag_reuse_note(tag_name: str) -> str:
+def collect_extension_release_plans(
+    *,
+    head_commit: str,
+    allow_retag: bool,
+) -> tuple[tuple[SupplementalReleasePlan, ...], tuple[ReleaseState, ...]]:
+    """Plan tag pushes for unpublished first-party extension package versions."""
+
+    plans: list[SupplementalReleasePlan] = []
+    skipped: list[ReleaseState] = []
+    for target in FIRST_PARTY_EXTENSION_TARGETS:
+        version = read_target_version(target)
+        state = inspect_release_state(version, target=target)
+        if state.published:
+            skipped.append(state)
+            continue
+        plans.append(
+            SupplementalReleasePlan(
+                state=state,
+                tag_action=plan_tag_action(
+                    state,
+                    head_commit=head_commit,
+                    version_changed=False,
+                    allow_retag=allow_retag,
+                ),
+            )
+        )
+    return tuple(plans), tuple(skipped)
+
+
+def _remote_tag_reuse_note(state: ReleaseState) -> str:
     return (
-        f"Tag {tag_name} already exists on origin at HEAD. Pushing the same tag "
-        f"again will not retrigger {RELEASE_GATE_WORKFLOW}; rerun the existing "
-        "release gate manually in GitHub Actions if needed."
+        f"Tag {state.tag_name} already exists on origin at HEAD. Pushing the same tag "
+        f"again will not retrigger {state.target.release_gate_workflow}; rerun the "
+        "existing release gate manually in GitHub Actions if needed."
     )
 
 
@@ -689,8 +879,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--version",
         help=(
-            "Explicit release version in X.Y.Z format. When omitted, the helper "
-            "reuses the current version if it has not been published yet."
+            "Explicit root-package release version in X.Y.Z format. When omitted, "
+            "the helper reuses the current root version if it has not been "
+            "published yet."
         ),
     )
     parser.add_argument(
@@ -698,7 +889,7 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Deprecated compatibility flag. GitHub Releases are now created by "
-            "the tag-push workflow after SQLite and Postgres tests pass."
+            "the tag-push workflow after the release gate passes."
         ),
     )
     parser.add_argument(
@@ -715,11 +906,70 @@ def _build_parser() -> argparse.ArgumentParser:
         "--retag",
         action="store_true",
         help=(
-            "Delete and recreate the remote tag when the target version is still "
-            "unpublished but the existing tag points at the wrong commit."
+            "Delete and recreate unpublished remote tags when the existing tag "
+            "points at the wrong commit."
         ),
     )
     return parser
+
+
+def _print_extension_release_summary(
+    plans: tuple[SupplementalReleasePlan, ...],
+    skipped: tuple[ReleaseState, ...],
+) -> None:
+    """Print extension-package release status alongside the root release."""
+
+    if not plans and not skipped:
+        return
+    print("extensions:")
+    for state in skipped:
+        print(
+            f"  {state.target.display_name} {state.version}: "
+            f"already published via {published_destinations(state)}; skipping"
+        )
+    for plan in plans:
+        print(
+            f"  {plan.state.target.display_name} {plan.state.version}: "
+            f"tag {plan.state.tag_name} ({plan.tag_action})"
+        )
+
+
+def _prepare_tag_action(
+    state: ReleaseState,
+    *,
+    tag_action: TagAction,
+    dry_run: bool,
+) -> None:
+    """Apply local tag mutations and remote tag deletions."""
+
+    tag_name = state.tag_name
+    if tag_action == "replace_local":
+        run_command(("git", "tag", "-d", tag_name), dry_run=dry_run)
+
+    if tag_action == "replace_remote":
+        if state.local_tag_commit is not None:
+            run_command(("git", "tag", "-d", tag_name), dry_run=dry_run)
+        run_command(("git", "push", "--delete", "origin", tag_name), dry_run=dry_run)
+
+    if tag_action in {"create", "replace_local", "replace_remote"}:
+        run_command(("git", "tag", tag_name), dry_run=dry_run)
+
+
+def _push_tag_action(
+    state: ReleaseState,
+    *,
+    tag_action: TagAction,
+    dry_run: bool,
+) -> None:
+    """Push a prepared tag to origin when required."""
+
+    tag_name = state.tag_name
+    if tag_action in {"create", "push_local", "replace_local", "replace_remote"}:
+        run_command(("git", "push", "origin", tag_name), dry_run=dry_run)
+        return
+
+    note = _remote_tag_reuse_note(state)
+    print(note if not dry_run else f"dry-run: {note}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -735,20 +985,33 @@ def main(argv: list[str] | None = None) -> int:
     target_version, release_state = resolve_target_version(
         args.version,
         current_version=current_version,
+        target=ROOT_RELEASE_TARGET,
     )
-    tag_name = release_state.tag_name
     version_changed = target_version != current_version
-    head_commit = current_head_commit()
-    tag_action = plan_tag_action(
+    initial_head_commit = current_head_commit()
+    planning_head_commit = (
+        PENDING_RELEASE_COMMIT if version_changed else initial_head_commit
+    )
+    root_tag_action = plan_tag_action(
         release_state,
-        head_commit=head_commit,
+        head_commit=planning_head_commit,
         version_changed=version_changed,
         allow_retag=args.retag,
+    )
+    planned_extension_releases, skipped_extension_releases = (
+        collect_extension_release_plans(
+            head_commit=planning_head_commit,
+            allow_retag=args.retag,
+        )
     )
 
     print(f"current: {current_version}")
     print(f"target:  {target_version}")
     print("status:  unpublished on GitHub Release and PyPI")
+    _print_extension_release_summary(
+        planned_extension_releases,
+        skipped_extension_releases,
+    )
 
     if args.dry_run:
         if dirty:
@@ -756,9 +1019,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.publish:
             print(
                 "--publish is ignored: "
-                f"{RELEASE_GATE_WORKFLOW} publishes the distributions and "
-                "creates the GitHub Release after the pushed tag passes "
-                "SQLite and Postgres tests"
+                f"{ROOT_RELEASE_GATE_WORKFLOW} publishes the root distributions and "
+                "creates the GitHub Release after the pushed tag passes"
             )
         if not args.skip_checks:
             for command in build_precheck_commands():
@@ -778,36 +1040,34 @@ def main(argv: list[str] | None = None) -> int:
                 f"dry-run: current version {target_version} is unpublished; "
                 "would reuse existing version files"
             )
-        for command in POSTUPDATE_COMMANDS:
-            run_command(command, dry_run=True)
+        for step in build_postupdate_steps():
+            run_command(step.command, cwd=step.cwd, dry_run=True)
         if version_changed:
-            for command in (
+            run_command(
                 ("git", "add", "pyproject.toml", "weft/_constants.py", "uv.lock"),
-                ("git", "commit", "-m", f"Release {target_version}"),
-            ):
-                run_command(command, dry_run=True)
+                dry_run=True,
+            )
+            run_command(
+                ("git", "commit", "-m", f"Release {target_version}"), dry_run=True
+            )
         else:
             print(
                 "dry-run: no release commit needed because version files already match"
             )
-        if tag_action == "replace_local":
-            run_command(("git", "tag", "-d", tag_name), dry_run=True)
-        if tag_action == "replace_remote":
-            if release_state.local_tag_commit is not None:
-                run_command(("git", "tag", "-d", tag_name), dry_run=True)
-            run_command(("git", "push", "--delete", "origin", tag_name), dry_run=True)
-        if tag_action in {"create", "replace_local", "replace_remote"}:
-            run_command(("git", "tag", tag_name), dry_run=True)
+        _prepare_tag_action(
+            release_state,
+            tag_action=root_tag_action,
+            dry_run=True,
+        )
         run_command(("git", "push"), dry_run=True)
-        if tag_action in {"create", "push_local", "replace_local", "replace_remote"}:
-            run_command(("git", "push", "origin", tag_name), dry_run=True)
-        else:
-            print(f"dry-run: {_remote_tag_reuse_note(tag_name)}")
+        _push_tag_action(release_state, tag_action=root_tag_action, dry_run=True)
+        for plan in planned_extension_releases:
+            _prepare_tag_action(plan.state, tag_action=plan.tag_action, dry_run=True)
+            _push_tag_action(plan.state, tag_action=plan.tag_action, dry_run=True)
         print(
             "dry-run: next step is to wait for "
-            f"{RELEASE_GATE_WORKFLOW} to run on {tag_name}; it will publish "
-            "the distributions and create the GitHub Release after the SQLite "
-            "and Postgres suites pass"
+            f"{ROOT_RELEASE_GATE_WORKFLOW} on {release_state.tag_name} and any "
+            "extension release gates triggered by pushed namespaced tags"
         )
         return 0
 
@@ -815,9 +1075,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.publish:
         print(
             "--publish is ignored: "
-            f"{RELEASE_GATE_WORKFLOW} publishes the distributions and creates "
-            "the GitHub Release after the pushed tag passes SQLite and "
-            "Postgres tests"
+            f"{ROOT_RELEASE_GATE_WORKFLOW} publishes the root distributions and "
+            "creates the GitHub Release after the pushed tag passes"
         )
 
     if not args.skip_checks:
@@ -825,7 +1084,7 @@ def main(argv: list[str] | None = None) -> int:
             run_command(command, env_overrides=PRECHECK_ENV_OVERRIDES)
 
     if version_changed:
-        write_version_files(target_version)
+        write_target_version(ROOT_RELEASE_TARGET, target_version)
         print(
             "Updated version files: "
             f"{PYPROJECT_PATH.relative_to(PROJECT_ROOT)}, "
@@ -836,42 +1095,42 @@ def main(argv: list[str] | None = None) -> int:
             f"Reusing current unpublished version {target_version}; version files unchanged"
         )
 
-    for command in POSTUPDATE_COMMANDS:
-        run_command(command)
+    for step in build_postupdate_steps():
+        run_command(step.command, cwd=step.cwd)
 
     if version_changed:
-        for command in (
-            ("git", "add", "pyproject.toml", "weft/_constants.py", "uv.lock"),
-            ("git", "commit", "-m", f"Release {target_version}"),
-        ):
-            run_command(command)
+        run_command(("git", "add", "pyproject.toml", "weft/_constants.py", "uv.lock"))
+        run_command(("git", "commit", "-m", f"Release {target_version}"))
 
-    if tag_action == "replace_local":
-        run_command(("git", "tag", "-d", tag_name))
+    head_commit = current_head_commit()
+    root_tag_action = plan_tag_action(
+        release_state,
+        head_commit=head_commit,
+        version_changed=version_changed,
+        allow_retag=args.retag,
+    )
+    extension_releases, _ = collect_extension_release_plans(
+        head_commit=head_commit,
+        allow_retag=args.retag,
+    )
 
-    if tag_action == "replace_remote":
-        if release_state.local_tag_commit is not None:
-            run_command(("git", "tag", "-d", tag_name))
-        run_command(("git", "push", "--delete", "origin", tag_name))
-
-    if tag_action in {"create", "replace_local", "replace_remote"}:
-        run_command(("git", "tag", tag_name))
-
-    for command in (("git", "push"),):
-        run_command(command)
-
-    if tag_action in {"create", "push_local", "replace_local", "replace_remote"}:
-        run_command(("git", "push", "origin", tag_name))
-    else:
-        print(_remote_tag_reuse_note(tag_name))
+    _prepare_tag_action(
+        release_state,
+        tag_action=root_tag_action,
+        dry_run=False,
+    )
+    run_command(("git", "push"))
+    _push_tag_action(release_state, tag_action=root_tag_action, dry_run=False)
+    for plan in extension_releases:
+        _prepare_tag_action(plan.state, tag_action=plan.tag_action, dry_run=False)
+        _push_tag_action(plan.state, tag_action=plan.tag_action, dry_run=False)
 
     print(
         "Next step: wait for "
-        f"{RELEASE_GATE_WORKFLOW} to run on {tag_name}; it will publish the "
-        "distributions and create the GitHub Release after the SQLite and "
-        "Postgres suites pass"
+        f"{ROOT_RELEASE_GATE_WORKFLOW} on {release_state.tag_name}; any pushed "
+        "extension tags will run their package-specific release gates and publish "
+        "their distributions to PyPI after those gates pass"
     )
-
     return 0
 
 

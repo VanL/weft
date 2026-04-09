@@ -3,6 +3,14 @@ name: Release
 on:
   workflow_call:
     inputs:
+      package_name:
+        description: Package name to publish to PyPI.
+        required: true
+        type: string
+      package_dir:
+        description: Package directory to build from.
+        required: true
+        type: string
       tag_name:
         description: Release tag to publish and attach artifacts to.
         required: true
@@ -15,6 +23,11 @@ on:
         description: Commit SHA the release tag is expected to reference.
         required: true
         type: string
+      create_github_release:
+        description: Whether to create a GitHub Release for this tag.
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   build:
@@ -39,14 +52,15 @@ jobs:
           test "$(git rev-parse HEAD)" = "${{ inputs.expected_tag_commit }}"
 
       - name: Build package
+        working-directory: ${{ inputs.package_dir }}
         run: |
           uv build
 
       - name: Store the distribution packages
         uses: actions/upload-artifact@v4
         with:
-          name: python-package-distributions
-          path: dist/
+          name: ${{ inputs.package_name }}-python-package-distributions
+          path: ${{ inputs.package_dir }}/dist/
 
   verify-tag-current:
     runs-on: ubuntu-latest
@@ -80,7 +94,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/p/weft
+      url: ${{ format('https://pypi.org/p/{0}', inputs.package_name) }}
     permissions:
       id-token: write
 
@@ -88,7 +102,7 @@ jobs:
       - name: Download all the dists
         uses: actions/download-artifact@v4
         with:
-          name: python-package-distributions
+          name: ${{ inputs.package_name }}-python-package-distributions
           path: dist/
 
       - name: Install uv
@@ -101,6 +115,7 @@ jobs:
 
   github-release:
     name: Sign and upload to GitHub Release
+    if: ${{ inputs.create_github_release }}
     needs:
       - publish-to-pypi
     runs-on: ubuntu-latest
@@ -112,7 +127,7 @@ jobs:
       - name: Download all the dists
         uses: actions/download-artifact@v4
         with:
-          name: python-package-distributions
+          name: ${{ inputs.package_name }}-python-package-distributions
           path: dist/
 
       - name: Sign the dists with Sigstore
