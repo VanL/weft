@@ -497,7 +497,7 @@ def _format_command_prefix(env_overrides: dict[str, str] | None) -> str:
 def _format_cwd_suffix(cwd: Path) -> str:
     if cwd == PROJECT_ROOT:
         return ""
-    return f"  (cwd={cwd.relative_to(PROJECT_ROOT)})"
+    return f"  (cwd={_display_path(cwd)})"
 
 
 def run_command(

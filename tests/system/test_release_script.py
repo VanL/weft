@@ -750,3 +750,38 @@ def test_run_command_dry_run_shows_env_prefix_and_cwd(
     assert "WEFT_EAGER_FAILURE_TRACEBACK=1" in captured.out
     assert "pytest -q" in captured.out
     assert "(cwd=extensions/weft_docker)" in captured.out
+
+
+def test_release_workflows_require_green_test_workflow() -> None:
+    """All publish workflows should block on a successful Test workflow run."""
+
+    root = Path(__file__).resolve().parents[2]
+    release_workflow = (root / ".github" / "workflows" / "release.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "verify-main-test-workflow" in release_workflow
+    assert 'workflow_id: "test.yml"' in release_workflow
+    assert "head_sha: expectedSha" in release_workflow
+    assert 'event: "push"' in release_workflow
+    assert "- verify-main-test-workflow" in release_workflow
+
+
+@pytest.mark.parametrize(
+    "workflow_path",
+    [
+        Path(".github/workflows/release-gate.yml"),
+        Path(".github/workflows/release-gate-docker.yml"),
+        Path(".github/workflows/release-gate-macos-sandbox.yml"),
+    ],
+)
+def test_release_gate_workflows_grant_actions_read_for_publish(
+    workflow_path: Path,
+) -> None:
+    """Reusable release workflow callers need actions:read to inspect Test runs."""
+
+    root = Path(__file__).resolve().parents[2]
+    workflow_text = (root / workflow_path).read_text(encoding="utf-8")
+
+    assert "publish-release:" in workflow_text
+    assert "actions: read" in workflow_text
