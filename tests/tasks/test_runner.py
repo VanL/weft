@@ -42,7 +42,27 @@ PROCESS_SCRIPT = str(Path(__file__).resolve().parent / "process_target.py")
 
 def _write_descendant_scripts(tmp_path: Path) -> tuple[Path, Path]:
     child_script = tmp_path / "child_sleep.py"
-    child_script.write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
+    child_script.write_text(
+        """
+from __future__ import annotations
+
+import os
+import sys
+import time
+from pathlib import Path
+
+
+def main() -> None:
+    Path(sys.argv[1]).write_text(str(os.getpid()), encoding="utf-8")
+    time.sleep(30)
+
+
+if __name__ == "__main__":
+    main()
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
 
     parent_script = tmp_path / "spawn_child.py"
     parent_script.write_text(
@@ -56,8 +76,12 @@ from pathlib import Path
 
 
 def main() -> None:
-    child = subprocess.Popen([sys.executable, sys.argv[1]])
-    Path(sys.argv[2]).write_text(str(child.pid), encoding="utf-8")
+    child = subprocess.Popen([sys.executable, sys.argv[1], sys.argv[2]])
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        if Path(sys.argv[2]).exists():
+            break
+        time.sleep(0.01)
     time.sleep(30)
 
 
@@ -178,14 +202,14 @@ def test_task_runner_timeout_terminates_command_descendants(tmp_path: Path) -> N
         kwargs=None,
         env={},
         working_dir=str(tmp_path),
-        timeout=1.0,
+        timeout=3.0,
         limits=None,
         monitor_class=None,
         monitor_interval=0.05,
     )
 
     outcome = runner.run({})
-    child_pid = _wait_for_pidfile(pidfile)
+    child_pid = _wait_for_pidfile(pidfile, timeout=5.0)
 
     try:
         assert outcome.status == "timeout"
