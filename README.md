@@ -569,10 +569,19 @@ Weft uses a tag-driven release flow in GitHub Actions:
   suite on macOS, and only invokes the publish workflow if every job passes.
   If the tag is moved while a gate is running, the older run is canceled and
   the gate refuses to publish from the stale tag state.
+- [`.github/workflows/release-gate-docker.yml`](./.github/workflows/release-gate-docker.yml)
+  runs on pushed `weft_docker/v*` tags, executes the Docker extension package
+  tests on Ubuntu, and publishes the `weft-docker` package to PyPI if the tag
+  still points at the tested commit.
+- [`.github/workflows/release-gate-macos-sandbox.yml`](./.github/workflows/release-gate-macos-sandbox.yml)
+  runs on pushed `weft_macos_sandbox/v*` tags, executes the macOS sandbox
+  extension package tests on macOS, and publishes the `weft-macos-sandbox`
+  package to PyPI if the tag still points at the tested commit.
 - [`.github/workflows/release.yml`](./.github/workflows/release.yml) is a
-  reusable workflow that can only be called from the release gate; it handles
-  package build, PyPI publishing, signing, and GitHub Release creation from
-  the tested commit SHA rather than re-resolving the mutable tag.
+  reusable workflow that can only be called from a release gate; it handles
+  package build, PyPI publishing, signing, and, for the root `weft` package,
+  GitHub Release creation from the tested commit SHA rather than re-resolving
+  the mutable tag.
 
 ```bash
 # Reuse the current version if it has never reached GitHub Release / PyPI;
@@ -595,6 +604,21 @@ still unpublished, the helper can reuse it without rewriting version files.
 It will still refuse to silently move an existing remote tag to a different
 commit; use `--retag` if you want the helper to delete and recreate an
 unpublished remote tag.
+
+The helper also inspects the current versions in the first-party extension
+packages:
+
+- `extensions/weft_docker/pyproject.toml`
+- `extensions/weft_macos_sandbox/pyproject.toml`
+
+If either extension version is still unpublished on PyPI, the helper pushes the
+matching namespaced tag from the tested commit:
+
+- `weft_docker/vX.Y.Z`
+- `weft_macos_sandbox/vX.Y.Z`
+
+Those namespaced tags can also be pushed manually when you want to release just
+one extension package.
 
 When the helper does need to bump the version, it updates both canonical
 version sources:
@@ -621,9 +645,18 @@ After the helper pushes `v0.1.1`, the release gate workflow will:
 8. Publish to PyPI with `uv publish --trusted-publishing always dist/*`
 9. Sign artifacts, create the GitHub Release, and upload the release files once PyPI succeeds
 
+If the helper also pushes `weft_docker/vX.Y.Z` or `weft_macos_sandbox/vX.Y.Z`,
+the package-specific release gates will:
+
+1. Run the matching extension package test suite
+2. Verify the namespaced tag still points at the tested commit
+3. Build the extension package from its subdirectory
+4. Publish the extension distribution to PyPI
+
 Prerequisite:
 
-- Configure the PyPI Trusted Publisher for this GitHub repository/workflow.
+- Configure the PyPI Trusted Publisher for `weft`, `weft-docker`, and
+  `weft-macos-sandbox`, each with the corresponding GitHub Actions workflow.
 
 ## Configuration
 

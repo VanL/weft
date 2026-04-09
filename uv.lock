@@ -1347,7 +1347,7 @@ provides-extras = ["pg", "docker", "macos-sandbox", "all", "dev"]
 
 [[package]]
 name = "weft-docker"
-version = "0.1.0"
+version = "0.5.0"
 source = { editable = "extensions/weft_docker" }
 dependencies = [
     { name = "docker" },
@@ -1364,7 +1364,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "weft-macos-sandbox"
-version = "0.1.0"
+version = "0.5.0"
 source = { editable = "extensions/weft_macos_sandbox" }
 dependencies = [
     { name = "weft" },

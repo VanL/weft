@@ -10,3 +10,7 @@ Current host support:
 - Linux: supported
 - macOS: supported
 - Windows: not currently supported
+
+Release tag:
+
+- `weft_docker/vX.Y.Z`

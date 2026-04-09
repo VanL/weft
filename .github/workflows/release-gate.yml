@@ -156,9 +156,12 @@ jobs:
       - verify-tag-current
     uses: ./.github/workflows/release.yml
     with:
+      package_name: weft
+      package_dir: .
       tag_name: ${{ github.ref_name }}
       release_ref: ${{ github.sha }}
       expected_tag_commit: ${{ github.sha }}
+      create_github_release: true
     permissions:
       contents: write
       id-token: write
