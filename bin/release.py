@@ -397,9 +397,9 @@ def _display_path(path: Path) -> str:
     """Return a stable display path for logs and errors."""
 
     try:
-        return str(path.relative_to(PROJECT_ROOT))
+        return path.relative_to(PROJECT_ROOT).as_posix()
     except ValueError:
-        return str(path)
+        return path.as_posix()
 
 
 def _docker_available_for_tests() -> bool:
