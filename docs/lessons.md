@@ -224,6 +224,17 @@ runbook needs to become stricter.
   a stale or synthetic record, and treating it as kill-authoritative can signal
   the current pytest worker or another unrelated process during cleanup.
 
+## 2026-04-09 Spawn-Heavy Timeout Tests
+
+- Timeout tests for subprocess trees must assert the kill boundary, not a tight
+  startup budget. In xdist-heavy runs, one second is not enough headroom for
+  spawned Python worker startup, interpreter import, parent process launch, and
+  child process launch.
+- When a test needs proof that a descendant existed before timeout cleanup, the
+  descendant should publish its own readiness signal as its first action and the
+  parent fixture should wait briefly for that signal before entering its long
+  sleep. That makes the test measure subtree cleanup instead of scheduler luck.
+
 ## 2026-04-08 Manager Role Identity
 
 - Manager identity has to stay consistent across every observability surface,
