@@ -57,5 +57,6 @@ jobs:
       expected_tag_commit: ${{ github.sha }}
       create_github_release: false
     permissions:
+      actions: read
       contents: write
       id-token: write

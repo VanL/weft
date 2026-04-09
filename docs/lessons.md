@@ -190,6 +190,16 @@ runbook needs to become stricter.
   spawn requests into an inbox that no process will ever service. The fix
   belongs in the shared PID-liveness helper, not in one caller.
 
+## 2026-04-09 Release Publication Guards
+
+- First-party package publish workflows must wait for a successful `Test`
+  workflow on the exact release commit before they upload to PyPI. Tag-specific
+  release gates are not a substitute for the broader cross-platform CI matrix
+  when that matrix covers additional platforms or jobs.
+- For cross-platform log and dry-run output that is asserted in tests, do not
+  interpolate `Path` objects directly into strings. Normalize display paths at
+  the output boundary with `.as_posix()` or a shared helper.
+
 ## 2026-04-08 Manager Role Identity
 
 - Manager identity has to stay consistent across every observability surface,
