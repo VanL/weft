@@ -25,6 +25,7 @@ from weft.helpers import iter_queue_json_entries
 
 from ._streaming import (
     aggregate_public_outputs,
+    drain_available_outbox_values,
     handle_ctrl_stream,
     poll_log_events,
     process_outbox_message,
@@ -353,23 +354,19 @@ def _await_single_result(
                             boundary_seen_at = time.monotonic()
                             break
             else:
-                outbox_raw = outbox_queue.read_one()
-                if outbox_raw is not None:
-                    payload = (
-                        outbox_raw[0] if isinstance(outbox_raw, tuple) else outbox_raw
+                ready_values, drained_outbox = drain_available_outbox_values(
+                    outbox_queue,
+                    stream_buffer,
+                    emit_stream=False,
+                )
+                for value in ready_values:
+                    _append_public_value(
+                        result_values,
+                        value,
+                        show_stderr=show_stderr,
                     )
-                    final, value = process_outbox_message(
-                        str(payload),
-                        stream_buffer,
-                        emit_stream=False,
-                    )
-                    if final:
-                        _append_public_value(
-                            result_values,
-                            value,
-                            show_stderr=show_stderr,
-                        )
-                        continue
+                if drained_outbox:
+                    continue
 
             events: list[tuple[dict[str, Any], int]]
             events, log_last_timestamp = poll_log_events(
@@ -433,6 +430,17 @@ def _await_single_result(
             if completed_at is not None and (
                 time.monotonic() - completed_at >= WEFT_COMPLETED_RESULT_GRACE_SECONDS
             ):
+                late_values, _ = drain_available_outbox_values(
+                    outbox_queue,
+                    stream_buffer,
+                    emit_stream=False,
+                )
+                for value in late_values:
+                    _append_public_value(
+                        result_values,
+                        value,
+                        show_stderr=show_stderr,
+                    )
                 result_value = aggregate_public_outputs(result_values)
                 status = "completed"
                 break

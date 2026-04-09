@@ -85,6 +85,32 @@ def process_outbox_message(
     return True, envelope
 
 
+def drain_available_outbox_values(
+    outbox_queue: Queue,
+    stream_buffer: list[str],
+    *,
+    emit_stream: bool = True,
+) -> tuple[list[Any], bool]:
+    """Drain all currently available outbox messages without blocking."""
+
+    values: list[Any] = []
+    consumed_any = False
+    while True:
+        outbox_raw = outbox_queue.read_one()
+        if outbox_raw is None:
+            return values, consumed_any
+
+        consumed_any = True
+        payload = outbox_raw[0] if isinstance(outbox_raw, tuple) else outbox_raw
+        final, value = process_outbox_message(
+            str(payload),
+            stream_buffer,
+            emit_stream=emit_stream,
+        )
+        if final:
+            values.append(value)
+
+
 def aggregate_public_outputs(values: list[Any]) -> Any:
     """Collapse collected public outputs into the CLI-facing shape."""
     if not values:

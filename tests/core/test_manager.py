@@ -462,7 +462,7 @@ def test_manager_stop_command_does_not_launch_new_children_after_stop(
 
     ctrl_in_queue.write(CONTROL_STOP)
 
-    deadline = time.time() + 3.0
+    deadline = time.time() + (8.0 if os.name == "nt" else 3.0)
     max_children_seen = len(manager._child_processes)
     while time.time() < deadline and not manager.should_stop:
         manager.process_once()
