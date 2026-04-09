@@ -131,6 +131,8 @@ jobs:
       - test-postgres
 
     steps:
+      - uses: actions/checkout@v5
+
       - name: Verify tag still points at tested commit
         env:
           EXPECTED_SHA: ${{ github.sha }}
