@@ -98,7 +98,12 @@ def _wait_for_pidfile(pidfile: Path, *, timeout: float = 2.0) -> int:
     deadline = time.time() + timeout
     while time.time() < deadline:
         if pidfile.exists():
-            return int(pidfile.read_text(encoding="utf-8").strip())
+            raw = pidfile.read_text(encoding="utf-8").strip()
+            if raw:
+                try:
+                    return int(raw)
+                except ValueError:
+                    pass
         time.sleep(0.05)
     raise AssertionError(f"Timed out waiting for pid file {pidfile}")
 

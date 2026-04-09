@@ -170,6 +170,11 @@ runbook needs to become stricter.
   releasability probe to turn green. Keep the extra wait budget in the shared
   harness cleanup path, and lock it with a regression test, rather than raising
   one flaky caller's timeout.
+- Tests that manage `WeftTestHarness` manually must always call
+  `harness.cleanup()` in `finally` before any direct `_tempdir.cleanup()`.
+  Jumping straight to tempdir cleanup on failure skips worker teardown and can
+  leak harness environment overrides into later tests, which turns one broken
+  test into a misleading cascade.
 
 ## 2026-04-08 Interactive Contract
 

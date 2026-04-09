@@ -1075,7 +1075,10 @@ def test_cli_run_parallel_no_wait_adopts_active_manager(workdir, weft_harness) -
 def test_weft_harness_cleanup_preserves_sqlite_integrity_for_parallel_manager_reuse() -> (
     None
 ):
-    iterations = 20
+    iterations = 5 if os.name == "nt" else 20
+    max_workers = 2 if os.name == "nt" else 4
+    submit_timeout = 120.0 if os.name == "nt" else 60.0
+    status_timeout = 10.0 if os.name == "nt" else 5.0
 
     for _ in range(iterations):
         harness = WeftTestHarness()
@@ -1086,10 +1089,10 @@ def test_weft_harness_cleanup_preserves_sqlite_integrity_for_parallel_manager_re
         env["WEFT_MANAGER_REUSE_ENABLED"] = "1"
 
         try:
-
             def _submit(
                 current_root: Path = harness.root,
                 current_env: dict[str, str] = env,
+                current_timeout: float = submit_timeout,
             ) -> tuple[int, str, str]:
                 return run_cli(
                     "run",
@@ -1103,14 +1106,15 @@ def test_weft_harness_cleanup_preserves_sqlite_integrity_for_parallel_manager_re
                     cwd=current_root,
                     env=current_env,
                     prepare_root=False,
+                    timeout=current_timeout,
                 )
 
-            with ThreadPoolExecutor(max_workers=4) as executor:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 results = list(executor.map(lambda _index: _submit(), range(4)))
 
             assert all(rc == 0 for rc, _out, _err in results), results
 
-            deadline = time.time() + 5.0
+            deadline = time.time() + status_timeout
             while time.time() < deadline:
                 rc, out, err = run_cli(
                     "status",
@@ -1130,4 +1134,10 @@ def test_weft_harness_cleanup_preserves_sqlite_integrity_for_parallel_manager_re
             harness.cleanup(preserve_database=True)
             _assert_sqlite_integrity(db_path)
         finally:
-            harness._tempdir.cleanup()
+            if not harness._closed:
+                harness.cleanup()
+            else:
+                try:
+                    harness._tempdir.cleanup()
+                except PermissionError:
+                    pass

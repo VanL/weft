@@ -101,13 +101,25 @@ def _active_canonical_manager_records(context) -> list[dict[str, Any]]:
 
 
 def _wait_for_active_canonical_manager(
-    context, *, timeout: float = 10.0
+    context,
+    *,
+    process: subprocess.Popen[str] | None = None,
+    timeout: float | None = None,
 ) -> dict[str, Any]:
-    deadline = time.time() + timeout
+    wait_timeout = timeout
+    if wait_timeout is None:
+        wait_timeout = 20.0 if os.name == "nt" else 10.0
+    deadline = time.time() + wait_timeout
     while time.time() < deadline:
         records = _active_canonical_manager_records(context)
         if records:
             return records[0]
+        if process is not None and process.poll() is not None:
+            stdout, stderr = _stop_process(process, timeout=1.0)
+            raise AssertionError(
+                "Serve process exited before a canonical manager became active: "
+                f"returncode={process.returncode}, stdout={stdout!r}, stderr={stderr!r}"
+            )
         time.sleep(0.05)
     raise AssertionError("Timed out waiting for an active canonical manager")
 
@@ -170,7 +182,7 @@ def test_serve_runs_in_foreground_and_reuses_single_manager(
     weft_harness.register_pid(process.pid, kind="owner")
 
     try:
-        record = _wait_for_active_canonical_manager(context)
+        record = _wait_for_active_canonical_manager(context, process=process)
         manager_tid = record["tid"]
         weft_harness.register_worker_tid(manager_tid)
         assert process.poll() is None
@@ -229,7 +241,7 @@ def test_serve_rejects_duplicate_canonical_manager(
     weft_harness.register_pid(process.pid, kind="owner")
 
     try:
-        record = _wait_for_active_canonical_manager(context)
+        record = _wait_for_active_canonical_manager(context, process=process)
         manager_tid = record["tid"]
         weft_harness.register_worker_tid(manager_tid)
 
@@ -270,7 +282,7 @@ def test_serve_forces_no_idle_timeout(workdir, weft_harness: WeftTestHarness) ->
     weft_harness.register_pid(process.pid, kind="owner")
 
     try:
-        record = _wait_for_active_canonical_manager(context)
+        record = _wait_for_active_canonical_manager(context, process=process)
         weft_harness.register_worker_tid(record["tid"])
 
         time.sleep(0.2)
@@ -310,7 +322,7 @@ def test_serve_sigterm_drains_children_cleanly(
     weft_harness.register_pid(process.pid, kind="owner")
 
     try:
-        record = _wait_for_active_canonical_manager(context)
+        record = _wait_for_active_canonical_manager(context, process=process)
         manager_tid = record["tid"]
         weft_harness.register_worker_tid(manager_tid)
 
