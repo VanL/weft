@@ -20,7 +20,7 @@ from typing import Any
 
 import typer
 
-from simplebroker import Queue, serialize_broker_target
+from simplebroker import Queue
 from weft._constants import (
     CONTROL_KILL,
     CONTROL_STOP,
@@ -32,13 +32,18 @@ from weft._constants import (
     QUEUE_OUTBOX_SUFFIX,
     WEFT_COMPLETED_RESULT_GRACE_SECONDS,
     WEFT_GLOBAL_LOG_QUEUE,
-    WEFT_MANAGER_LIFETIME_TIMEOUT,
-    WEFT_MANAGER_OUTBOX_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
-    WEFT_WORKERS_REGISTRY_QUEUE,
     WORK_ENVELOPE_START,
 )
 from weft.commands import specs as spec_cmd
+from weft.commands._manager_bootstrap import (
+    _build_manager_spec,
+    _ensure_manager,
+    _generate_tid,
+    _select_active_manager,
+    _start_manager,
+    _stop_manager,
+)
 from weft.commands._streaming import (
     aggregate_public_outputs as _aggregate_public_outputs,
 )
@@ -58,8 +63,6 @@ from weft.commands.interactive import InteractiveStreamClient
 from weft.context import WeftContext, build_context
 from weft.core.taskspec import TaskSpec, resolve_taskspec_payload
 from weft.helpers import (
-    iter_queue_json_entries,
-    pid_is_live,
     read_limited_stdin,
     resolve_broker_max_message_size,
     stdin_is_tty,
@@ -201,296 +204,6 @@ def _drain_stream_queue(queue: Queue, *, to_stderr: bool = False) -> None:
         else:
             target.write(json.dumps(envelope))
             target.flush()
-
-
-def _generate_tid(context: WeftContext) -> str:
-    """Generate a unique TID via broker timestamp (Spec: [WA-2])."""
-    queue = Queue(
-        WEFT_SPAWN_REQUESTS_QUEUE,
-        db_path=context.broker_target,
-        persistent=False,
-        config=context.broker_config,
-    )
-    return str(queue.generate_timestamp())
-
-
-def _registry_queue(context: WeftContext) -> Queue:
-    return Queue(
-        WEFT_WORKERS_REGISTRY_QUEUE,
-        db_path=context.broker_target,
-        persistent=False,
-        config=context.broker_config,
-    )
-
-
-def _snapshot_registry(
-    context: WeftContext, *, prune_stale: bool = True
-) -> dict[str, dict[str, Any]]:
-    queue = _registry_queue(context)
-    snapshot: dict[str, dict[str, Any]] = {}
-    stale_timestamps: list[int] = []
-    for data, timestamp in iter_queue_json_entries(queue):
-        tid = data.get("tid")
-        if not tid:
-            continue
-        data["_timestamp"] = timestamp
-        if (
-            prune_stale
-            and data.get("status") == "active"
-            and data.get("role", "manager") == "manager"
-        ):
-            pid = data.get("pid")
-            if pid and not _is_pid_alive(pid):
-                stale_timestamps.append(timestamp)
-                continue
-        existing = snapshot.get(tid)
-        existing_ts = int(existing.get("_timestamp", 0)) if existing else -1
-        if existing is None or existing_ts < timestamp:
-            snapshot[tid] = data
-
-    for ts in stale_timestamps:
-        try:
-            queue.delete(message_id=ts)
-        except Exception:
-            pass
-
-    return snapshot
-
-
-def _select_active_manager(context: WeftContext) -> dict[str, Any] | None:
-    snapshot = _snapshot_registry(context)
-    candidates = []
-    for record in snapshot.values():
-        if record.get("status") != "active":
-            continue
-        if record.get("role", "manager") != "manager":
-            continue
-        pid = record.get("pid")
-        if pid and _is_pid_alive(pid):
-            candidates.append(record)
-    if not candidates:
-        return None
-    return min(
-        candidates,
-        key=lambda rec: (int(rec.get("tid", 0)), rec.get("_timestamp", 0)),
-    )
-
-
-def _is_pid_alive(pid: int) -> bool:
-    return pid_is_live(pid)
-
-
-def _build_manager_spec(context: WeftContext, tid: str) -> TaskSpec:
-    idle_timeout = float(
-        context.config.get(
-            "WEFT_MANAGER_LIFETIME_TIMEOUT", WEFT_MANAGER_LIFETIME_TIMEOUT
-        )
-    )
-
-    spec_dict = {
-        "tid": tid,
-        "name": "manager",
-        "spec": {
-            "type": "function",
-            "function_target": "weft.core.manager:Manager",
-            "timeout": None,
-            "weft_context": str(context.root),
-        },
-        "io": {
-            "inputs": {"inbox": WEFT_SPAWN_REQUESTS_QUEUE},
-            "outputs": {"outbox": WEFT_MANAGER_OUTBOX_QUEUE},
-            "control": {
-                "ctrl_in": f"T{tid}.{QUEUE_CTRL_IN_SUFFIX}",
-                "ctrl_out": f"T{tid}.{QUEUE_CTRL_OUT_SUFFIX}",
-            },
-        },
-        "state": {},
-        "metadata": {
-            "role": "manager",
-            "capabilities": [],
-            "idle_timeout": idle_timeout,
-        },
-    }
-    resolved_payload = resolve_taskspec_payload(spec_dict)
-    return TaskSpec.model_validate(resolved_payload, context={"auto_expand": False})
-
-
-def _start_manager(
-    context: WeftContext, *, verbose: bool
-) -> tuple[dict[str, Any], bool, subprocess.Popen[bytes] | None]:
-    """Launch a new Manager process and wait for its registry entry (Spec: [WA-3])."""
-    manager_tid = _generate_tid(context)
-    manager_spec = _build_manager_spec(context, manager_tid)
-
-    spec_json = manager_spec.model_dump_json()
-    broker_target_json = serialize_broker_target(context.broker_target)
-    config_json = json.dumps(context.config)
-
-    broker_target_b64 = base64.b64encode(broker_target_json.encode("utf-8")).decode(
-        "ascii"
-    )
-    spec_b64 = base64.b64encode(spec_json.encode("utf-8")).decode("ascii")
-    config_b64 = base64.b64encode(config_json.encode("utf-8")).decode("ascii")
-
-    cmd = [
-        sys.executable,
-        "-m",
-        "weft.manager_process",
-        "weft.core.manager.Manager",
-        broker_target_b64,
-        spec_b64,
-        config_b64,
-        "0.05",
-    ]
-
-    # Always detach manager stdio so the CLI does not inherit open pipes that would
-    # keep subprocess.run() callers from observing EOF (important for --no-wait).
-    process = subprocess.Popen(
-        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-    )
-
-    if verbose:
-        typer.echo(
-            json.dumps(
-                {
-                    "manager_tid": manager_tid,
-                    "pid": process.pid,
-                    "db": context.broker_display_target,
-                },
-                ensure_ascii=False,
-            )
-        )
-
-    deadline = time.time() + 10.0
-    competing_record: dict[str, Any] | None = None
-    while time.time() < deadline:
-        record = _select_active_manager(context)
-        if record:
-            if record.get("tid") != manager_tid:
-                # Do not terminate a concurrently starting manager here. Another
-                # caller may have observed our process before it had a chance to
-                # register, and abrupt termination during broker initialization can
-                # leave the underlying SQLite file in an invalid state. Leadership
-                # convergence belongs inside the manager process itself.
-                competing_record = record
-            else:
-                if verbose:
-                    _emit_manager_registry_snapshot(record)
-                return record, True, process
-        if process.poll() is not None:
-            if competing_record is not None:
-                return competing_record, False, None
-            refreshed_record = _select_active_manager(context)
-            if refreshed_record is not None:
-                return refreshed_record, False, None
-            break
-        time.sleep(0.1)
-
-    if competing_record is not None:
-        return competing_record, False, None
-
-    _terminate_manager_process(process)
-    typer.echo(
-        "Failed to start Manager process; no registry entry appeared.",
-        err=True,
-    )
-    raise typer.Exit(code=1)
-
-
-def _terminate_manager_process(
-    process: subprocess.Popen[bytes], *, timeout: float = 1.0
-) -> None:
-    if process.poll() is not None:
-        return
-    try:
-        process.terminate()
-    except Exception:  # pragma: no cover - defensive
-        return
-    try:
-        process.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:  # pragma: no cover - defensive
-        try:
-            process.kill()
-        except Exception:
-            return
-        try:
-            process.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            return
-
-
-def _emit_manager_registry_snapshot(record: dict[str, Any]) -> None:
-    """Emit a manager_started event mirroring legacy verbose output."""
-
-    payload = {
-        "event": "manager_started",
-        "manager_tid": record.get("tid"),
-        "pid": record.get("pid"),
-        "queues": {
-            key: record.get(key)
-            for key in ("requests", "outbox", "ctrl_in", "ctrl_out")
-            if record.get(key)
-        },
-        "timestamp": record.get("timestamp"),
-    }
-    typer.echo(json.dumps(payload, ensure_ascii=False))
-
-
-def _ensure_manager(
-    context: WeftContext, *, verbose: bool
-) -> tuple[dict[str, Any], bool, subprocess.Popen[bytes] | None]:
-    """Guarantee an active manager exists, starting one if necessary (Spec: [WA-3])."""
-    record = _select_active_manager(context)
-    if record:
-        pid = record.get("pid")
-        if not (isinstance(pid, int) and _is_pid_alive(pid)):
-            _snapshot_registry(context)  # prune stale entries
-            record = _select_active_manager(context)
-            if record is None:
-                return _start_manager(context, verbose=verbose)
-        if record:
-            return record, False, None
-    return _start_manager(context, verbose=verbose)
-
-
-def _stop_manager(
-    context: WeftContext,
-    record: dict[str, Any],
-    process: subprocess.Popen[bytes] | None,
-    *,
-    timeout: float = 5.0,
-) -> None:
-    ctrl_in = record.get("ctrl_in") or f"worker.{record['tid']}.{QUEUE_CTRL_IN_SUFFIX}"
-    queue = Queue(
-        ctrl_in,
-        db_path=context.broker_target,
-        persistent=False,
-        config=context.broker_config,
-    )
-    try:
-        queue.write("STOP")
-    except Exception:
-        typer.echo("Warning: failed to send STOP to manager.", err=True)
-        return
-
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        snapshot = _snapshot_registry(context)
-        current = snapshot.get(record["tid"])
-        if current is None or current.get("status") == "stopped":
-            if process is not None:
-                try:
-                    process.wait(timeout=timeout)
-                except Exception:  # pragma: no cover - defensive
-                    pass
-            return
-        time.sleep(0.1)
-
-    if process is not None:
-        try:
-            process.terminate()
-        except Exception:  # pragma: no cover - defensive
-            pass
 
 
 def _enqueue_taskspec(
@@ -1618,4 +1331,11 @@ def cmd_run(
     )
 
 
-__all__ = ["cmd_run"]
+__all__ = [
+    "_build_manager_spec",
+    "_ensure_manager",
+    "_generate_tid",
+    "_select_active_manager",
+    "_start_manager",
+    "cmd_run",
+]

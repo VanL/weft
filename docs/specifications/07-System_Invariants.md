@@ -88,7 +88,7 @@ _Implementation mapping_: `weft/core/taskspec.py` — `mark_timeout()` sets `sta
 
 ### Worker Invariants
 
-_Implementation mapping_: `weft/core/manager.py` — `Manager` extends `BaseTask` (WORKER.1, WORKER.7). `_register_worker()` writes capabilities/status to `WEFT_WORKERS_REGISTRY_QUEUE` (WORKER.3). `_build_child_spec()` uses `str(timestamp)` (the spawn-request message ID) as the child TID (WORKER.4). Manager can spawn Consumer tasks which themselves can be workers (WORKER.5). `weft/commands/run.py` auto-starts the primordial manager (WORKER.6). TID validation in `TaskSpec.validate_tid()` applies the same 19-digit rule for workers (WORKER.2). `BaseTask._handle_control_message()` handles STOP/PING/STATUS (WORKER.7).
+_Implementation mapping_: `weft/core/manager.py` — `Manager` extends `BaseTask` (WORKER.1, WORKER.7). `_register_worker()` writes capabilities/status to `WEFT_WORKERS_REGISTRY_QUEUE` (WORKER.3). `_build_child_spec()` uses `str(timestamp)` (the spawn-request message ID) as the child TID (WORKER.4). Manager can spawn Consumer tasks which themselves can be workers (WORKER.5). `weft/commands/_manager_bootstrap.py` owns the shared CLI-side manager lifecycle path for startup, foreground serve, registry replay, and stop observation used by `weft run`, `weft serve`, `weft worker ...`, and `weft status` (WORKER.6). TID validation in `TaskSpec.validate_tid()` applies the same 19-digit rule for workers (WORKER.2). `BaseTask._handle_control_message()` handles STOP/PING/STATUS, while `Manager.handle_termination_signal()` maps TERM/INT to drain and leaves SIGUSR1 on the kill path (WORKER.7).
 
 - **WORKER.1**: Workers are Tasks with long-running targets (timeout=None)
 - **WORKER.2**: Worker TIDs follow same format as regular Task TIDs
@@ -96,7 +96,7 @@ _Implementation mapping_: `weft/core/manager.py` — `Manager` extends `BaseTask
 - **WORKER.4**: Spawn-request message ID becomes child Task TID for correlation
 - **WORKER.5**: Workers can spawn other workers (recursive architecture)
 - **WORKER.6**: Primordial manager bootstraps the system
-- **WORKER.7**: Workers respond to the same control messages as Tasks (STOP/STATUS/PING)
+- **WORKER.7**: Workers respond to the same control messages as Tasks (STOP/STATUS/PING); Managers also treat TERM/INT as graceful drain and SIGUSR1 as immediate kill
 
 ### Context Invariants
 
@@ -529,6 +529,8 @@ class InvariantMonitor:
 - **[runner-extension-point-plan.md](../plans/runner-extension-point-plan.md)**
 - **[taskspec-clean-design-plan.md](../plans/taskspec-clean-design-plan.md)**
 - **[piped-input-support-plan.md](../plans/piped-input-support-plan.md)**
+- **[manager-lifecycle-command-consolidation-plan.md](../plans/manager-lifecycle-command-consolidation-plan.md)**
+- **[weft-serve-supervised-manager-plan.md](../plans/weft-serve-supervised-manager-plan.md)**
 
 ## Related Documents
 

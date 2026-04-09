@@ -658,6 +658,33 @@ Prerequisite:
 - Configure the PyPI Trusted Publisher for `weft`, `weft-docker`, and
   `weft-macos-sandbox`, each with the corresponding GitHub Actions workflow.
 
+## Supervised Manager
+
+Use `weft serve` when you want a persistent manager owned by `systemd`,
+`launchd`, `supervisord`, or a similar service manager:
+
+```bash
+weft serve --context /path/to/project
+```
+
+`weft serve` runs the canonical manager in the foreground and keeps it alive
+until it is explicitly stopped. It forces `idle_timeout=0.0` for that
+invocation, so the manager does not self-exit for inactivity.
+
+`weft worker start` is different. It starts a detached manager and exits, which
+means the service manager would only supervise the short-lived CLI wrapper, not
+the actual manager process.
+
+Operational notes:
+
+- Put restart policy in the service manager, not in Weft.
+- `weft worker stop <tid>` still sends a graceful STOP, but an auto-restarting
+  service manager may start the manager again unless the service itself is
+  stopped.
+- This minimal supervised mode does not add a separate Weft-side drain timeout
+  or second-signal escalation. Configure the service manager's stop timeout to
+  match the grace period you want for draining child tasks.
+
 ## Configuration
 
 Environment variables:

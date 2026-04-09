@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import multiprocessing
+import os
+import signal
 import time
 from pathlib import Path
 
@@ -341,6 +343,100 @@ def test_manager_stop_command_drains_nonpersistent_children(manager_setup) -> No
     assert any(event.get("event") == "manager_stop_drained" for event in events)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX signals required")
+def test_manager_sigterm_drains_nonpersistent_children(manager_setup) -> None:
+    pytest.importorskip("psutil")
+    manager, make_queue = manager_setup
+    inbox_queue = make_queue(manager._queue_names["inbox"])
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    drain(log_queue)
+
+    inbox_queue.write(
+        json.dumps(
+            {
+                "name": "long-running",
+                "spec": {
+                    "type": "function",
+                    "function_target": "tests.tasks.sample_targets:simulate_work",
+                    "keyword_args": {"duration": 5.0},
+                },
+            }
+        )
+    )
+
+    start = time.time()
+    while not manager._child_processes and time.time() - start < 5.0:
+        manager.process_once()
+        time.sleep(0.05)
+
+    assert manager._child_processes, "child process should be running"
+    _child_tid, child_info = next(iter(manager._child_processes.items()))
+    assert child_info.process.is_alive()
+
+    manager.handle_termination_signal(signal.SIGTERM)
+
+    assert manager._draining is True
+    assert manager.should_stop is False
+    assert manager.taskspec.state.status == "running"
+
+    deadline = time.time() + 5.0
+    while time.time() < deadline and not manager.should_stop:
+        manager.process_once()
+        time.sleep(0.05)
+
+    assert manager.should_stop is True
+    assert manager.taskspec.state.status == "cancelled"
+    assert not _process_running(child_info.process.pid)
+
+    events = [json.loads(item) for item in drain(log_queue)]
+    assert any(event.get("event") == "task_signal_stop" for event in events)
+    assert not any(event.get("event") == "task_signal_kill" for event in events)
+
+
+@pytest.mark.skipif(
+    os.name == "nt" or getattr(signal, "SIGUSR1", None) is None,
+    reason="SIGUSR1 not available",
+)
+def test_manager_sigusr1_keeps_kill_semantics(manager_setup) -> None:
+    """SIGUSR1 should stay on the immediate kill path and emit task_signal_kill."""
+
+    pytest.importorskip("psutil")
+    manager, make_queue = manager_setup
+    inbox_queue = make_queue(manager._queue_names["inbox"])
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    drain(log_queue)
+
+    inbox_queue.write(
+        json.dumps(
+            {
+                "name": "long-running",
+                "spec": {
+                    "type": "function",
+                    "function_target": "tests.tasks.sample_targets:simulate_work",
+                    "keyword_args": {"duration": 5.0},
+                },
+            }
+        )
+    )
+
+    start = time.time()
+    while not manager._child_processes and time.time() - start < 5.0:
+        manager.process_once()
+        time.sleep(0.05)
+
+    assert manager._child_processes, "child process should be running"
+    _child_tid, child_info = next(iter(manager._child_processes.items()))
+
+    manager.handle_termination_signal(signal.SIGUSR1)
+
+    assert manager.should_stop is True
+    assert manager.taskspec.state.status == "killed"
+    assert not _process_running(child_info.process.pid)
+
+    events = [json.loads(item) for item in drain(log_queue)]
+    assert any(event.get("event") == "task_signal_kill" for event in events)
+
+
 def test_manager_stop_command_does_not_launch_new_children_after_stop(
     manager_setup,
 ) -> None:
@@ -536,6 +632,38 @@ def test_manager_leadership_yield_waits_while_persistent_children_exist(
 
     lower_leader_tid = str(int(manager.tid) - 1)
     monkeypatch.setattr(manager, "_leader_tid", lambda: lower_leader_tid)
+
+    yielded = manager._maybe_yield_leadership(force=True)
+
+    assert yielded is False
+    assert manager._draining is False
+    assert manager.should_stop is False
+    assert manager.taskspec.state.status == "running"
+
+
+def test_manager_leadership_ignores_noncanonical_lower_manager(
+    manager_setup,
+) -> None:
+    manager, make_queue = manager_setup
+    registry_queue = make_queue(WEFT_WORKERS_REGISTRY_QUEUE)
+    lower_tid = str(int(manager.tid) - 1)
+    registry_queue.write(
+        json.dumps(
+            {
+                "tid": lower_tid,
+                "name": "legacy-manager",
+                "status": "active",
+                "pid": os.getpid(),
+                "timestamp": registry_queue.generate_timestamp(),
+                "inbox": "legacy.requests",
+                "requests": "legacy.requests",
+                "ctrl_in": "legacy.ctrl_in",
+                "ctrl_out": "legacy.ctrl_out",
+                "outbox": "legacy.outbox",
+                "role": "manager",
+            }
+        )
+    )
 
     yielded = manager._maybe_yield_leadership(force=True)
 

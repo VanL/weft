@@ -3,70 +3,37 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
+import os
+import subprocess
+import sys
 
 import pytest
 
 from tests.conftest import run_cli
 from tests.helpers.test_backend import prepare_project_root
-from weft._constants import WEFT_TID_MAPPINGS_QUEUE
+from weft._constants import (
+    WEFT_SPAWN_REQUESTS_QUEUE,
+    WEFT_TID_MAPPINGS_QUEUE,
+    WEFT_WORKERS_REGISTRY_QUEUE,
+)
 from weft.context import build_context
 
 pytestmark = [pytest.mark.shared]
 
 
-def _write_worker_spec(
-    workdir: Path, *, auto_stop: bool = True
-) -> tuple[Path, str, Path]:
-    tid = "1761000000000000000"
-    context_root = prepare_project_root(workdir / "worker-project")
-    context = build_context(spec_context=context_root)
-
-    spec = {
-        "tid": tid,
-        "name": "worker",
-        "version": "1.0",
-        "spec": {
-            "type": "function",
-            "function_target": "weft.core.manager:Manager",
-            "weft_context": str(context_root),
-            "reserved_policy_on_stop": "keep",
-            "reserved_policy_on_error": "keep",
-        },
-        "io": {
-            "inputs": {"inbox": f"worker.{tid}.inbox"},
-            "outputs": {"outbox": f"T{tid}.outbox"},
-            "control": {
-                "ctrl_in": f"worker.{tid}.ctrl_in",
-                "ctrl_out": f"worker.{tid}.ctrl_out",
-            },
-        },
-        "state": {"status": "created"},
-        "metadata": {"capabilities": ["tests.tasks.sample_targets:large_output"]},
-    }
-
-    spec_path = workdir / "worker.json"
-    spec_path.write_text(json.dumps(spec, indent=2), encoding="utf-8")
-
-    if auto_stop:
-        ctrl_queue = context.queue(f"worker.{tid}.ctrl_in", persistent=False)
-        ctrl_queue.write("STOP")
-
-    return spec_path, tid, context_root
-
-
 def test_worker_start_and_status(workdir):
-    spec_path, tid, context_root = _write_worker_spec(workdir, auto_stop=True)
+    context_root = prepare_project_root(workdir / "worker-project")
+    build_context(spec_context=context_root)
 
     rc, out, err = run_cli(
         "worker",
         "start",
-        spec_path,
-        "--foreground",
+        "--context",
+        context_root,
         cwd=workdir,
     )
     assert rc == 0
-    assert out == ""
+    assert "manager" in out.lower()
     assert err == ""
 
     rc, out, err = run_cli(
@@ -80,10 +47,20 @@ def test_worker_start_and_status(workdir):
     assert rc == 0
     assert err == ""
     records = json.loads(out or "[]")
-    assert any(
-        record.get("tid") == tid and record.get("status") == "stopped"
-        for record in records
+    active = [record for record in records if record.get("status") == "active"]
+    assert active
+    tid = active[0]["tid"]
+
+    rc, out, err = run_cli(
+        "worker",
+        "start",
+        "--context",
+        context_root,
+        cwd=workdir,
     )
+    assert rc == 0
+    assert "already running" in out.lower()
+    assert err == ""
 
     rc, out, err = run_cli(
         "worker",
@@ -98,6 +75,31 @@ def test_worker_start_and_status(workdir):
     assert err == ""
     detail = json.loads(out)
     assert detail.get("tid") == tid
+    assert detail.get("status") == "active"
+
+    rc, out, err = run_cli(
+        "worker",
+        "stop",
+        tid,
+        "--context",
+        context_root,
+        cwd=workdir,
+    )
+    assert rc == 0
+    assert err == ""
+
+    rc, out, err = run_cli(
+        "worker",
+        "status",
+        tid,
+        "--context",
+        context_root,
+        "--json",
+        cwd=workdir,
+    )
+    assert rc == 0
+    assert err == ""
+    detail = json.loads(out)
     assert detail.get("status") == "stopped"
 
 
@@ -134,6 +136,57 @@ def test_worker_list_empty(workdir):
     assert rc == 0
     assert "No registered workers" in out
     assert err == ""
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX only")
+def test_worker_list_and_status_agree_on_stale_active_manager(workdir):
+    context_root = prepare_project_root(workdir / "stale-worker")
+    context = build_context(spec_context=context_root)
+    tid = "1761000000000000007"
+
+    process = subprocess.Popen([sys.executable, "-c", "import os; os._exit(0)"])
+    try:
+        process.wait(timeout=2.0)
+        registry_queue = context.queue(WEFT_WORKERS_REGISTRY_QUEUE, persistent=False)
+        registry_queue.write(
+            json.dumps(
+                {
+                    "tid": tid,
+                    "status": "active",
+                    "name": "stale-manager",
+                    "pid": process.pid,
+                    "role": "manager",
+                    "requests": WEFT_SPAWN_REQUESTS_QUEUE,
+                }
+            )
+        )
+    finally:
+        process.wait()
+
+    rc, out, err = run_cli(
+        "worker",
+        "list",
+        "--json",
+        "--context",
+        context_root,
+        cwd=workdir,
+    )
+    assert rc == 0
+    assert err == ""
+    worker_records = json.loads(out or "[]")
+    assert tid not in {record["tid"] for record in worker_records}
+
+    rc, out, err = run_cli(
+        "status",
+        "--json",
+        "--context",
+        context_root,
+        cwd=workdir,
+    )
+    assert rc == 0
+    assert err == ""
+    status_payload = json.loads(out or "{}")
+    assert tid not in {record["tid"] for record in status_payload["managers"]}
 
 
 def test_worker_status_missing(workdir):

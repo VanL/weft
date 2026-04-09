@@ -124,9 +124,13 @@ _Implementation mapping_: `weft/core/manager.py` (`Manager._handle_work_message`
 
 ### 7. Worker Bootstrap Flow [MF-7]
 _Implementation_: `weft run` and `weft worker start` use the helper in
-`weft/commands/run.py` to mint a manager TaskSpec, launch
+`weft/commands/_manager_bootstrap.py` to mint a manager TaskSpec, launch
 `weft.manager_process`, and wait for the manager to register itself before
-returning control to the user.
+returning control to the user. `weft worker start` is an operator wrapper over
+that helper; it no longer launches managers from a user-supplied TaskSpec.
+`weft serve` uses the same canonical manager TaskSpec builder but runs the
+manager in the foreground in the current process, forcing `idle_timeout=0.0`
+for that invocation so a service manager can supervise it directly.
 ```
 weft CLI -> build manager TaskSpec -> spawn weft.manager_process
       |                  |                     |
@@ -137,7 +141,21 @@ weft CLI -> build manager TaskSpec -> spawn weft.manager_process
       └─> Wait for registry entry, then exit (manager keeps running)
 ```
 
-_Implementation mapping_: `weft/commands/run.py` (builds manager TaskSpec and launches via `weft/core/launcher.py`). `weft/core/manager.py` (`Manager.__init__` calls `_register_worker` to write to `weft.state.workers`, sets up `weft.spawn.requests` watcher, and runs autostart on first tick; `Manager._maybe_yield_leadership` handles leader election among concurrent managers).
+Foreground supervised path:
+
+```
+weft CLI -> build manager TaskSpec -> run shared manager runtime in-process
+      |                  |                          |
+      |                  |                          ├─> Manager registers in weft.state.workers
+      |                  |                          ├─> Begins watching weft.spawn.requests
+      |                  |                          └─> Handles TERM/INT via manager drain
+      |                  └─> Forces idle_timeout=0.0 for this invocation
+      └─> Blocks until manager exits
+```
+
+_Related plans_: [Manager Bootstrap Unification Plan](../plans/manager-bootstrap-unification-plan.md), [Manager Lifecycle Command Consolidation Plan](../plans/manager-lifecycle-command-consolidation-plan.md), [Weft Serve Supervised Manager Plan](../plans/weft-serve-supervised-manager-plan.md)
+
+_Implementation mapping_: `weft/commands/_manager_bootstrap.py` (builds the canonical manager TaskSpec, launches `weft.manager_process` for detached bootstrap, runs the same manager runtime in-process for `weft serve`, normalizes `weft.state.workers` registry replay, selects only canonical `weft.spawn.requests` managers for bootstrap, and drives CLI-side STOP / force-stop observation). `weft/commands/worker.py` (`start_command`, `stop_command`, `list_command`, `status_command` are thin wrappers over the shared lifecycle helper). `weft/commands/serve.py` (`serve_command` is the foreground supervision wrapper). `weft/commands/status.py` (`_collect_manager_records` reuses the same shared lifecycle reader for manager status output). `weft/manager_process.py` (`run_manager_process`, `main` share the manager runtime entry). `weft/core/manager.py` (`Manager.__init__` calls `_register_worker` to write to `weft.state.workers`, sets up `weft.spawn.requests` watcher, runs autostart on first tick, and `Manager.handle_termination_signal` maps TERM/INT to manager drain while leaving SIGUSR1 on the kill path; `Manager._maybe_yield_leadership` handles leader election among concurrent canonical managers).
 
 ### 8. Failure Recovery Flow
 _Implementation_: Reserved queue policies (`keep`, `requeue`, `clear`) are enforced by `BaseTask._apply_reserved_policy`.
@@ -605,6 +623,7 @@ class QueueLifecycleManager:
 - [`docs/plans/piped-input-support-plan.md`](../plans/piped-input-support-plan.md)
 - [`docs/plans/agent-runtime-implementation-plan.md`](../plans/agent-runtime-implementation-plan.md) (references MF-1, MF-2, MF-6)
 - [`docs/plans/agent-runtime-boundary-cleanup-plan.md`](../plans/agent-runtime-boundary-cleanup-plan.md)
+- [`docs/plans/manager-lifecycle-command-consolidation-plan.md`](../plans/manager-lifecycle-command-consolidation-plan.md) (references MF-7)
 - [`docs/plans/persistent-agent-runtime-implementation-plan.md`](../plans/persistent-agent-runtime-implementation-plan.md)
 - [`docs/plans/simplebroker-backend-generalization-plan.md`](../plans/simplebroker-backend-generalization-plan.md)
 - [`docs/plans/taskspec-clean-design-plan.md`](../plans/taskspec-clean-design-plan.md)

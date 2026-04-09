@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 
+import weft.commands._manager_bootstrap as manager_lifecycle
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import (
     WEFT_GLOBAL_LOG_QUEUE,
@@ -212,23 +213,26 @@ def test_start_manager_does_not_terminate_competing_startup_manager(
     fake_process = _FakePopen()
     competing_record = {"tid": "1775619800000000000", "pid": 31337}
 
-    monkeypatch.setattr("weft.commands.run._generate_tid", lambda context: "9" * 19)
     monkeypatch.setattr(
-        "weft.commands.run._build_manager_spec",
+        "weft.commands._manager_bootstrap._generate_tid",
+        lambda context: "9" * 19,
+    )
+    monkeypatch.setattr(
+        "weft.commands._manager_bootstrap._build_manager_spec",
         lambda context, tid: _FakeManagerSpec(),
     )
     monkeypatch.setattr(
-        "weft.commands.run.serialize_broker_target",
+        "weft.commands._manager_bootstrap.serialize_broker_target",
         lambda target: "{}",
     )
     monkeypatch.setattr(
-        "weft.commands.run.subprocess.Popen",
+        "weft.commands._manager_bootstrap.subprocess.Popen",
         lambda *args, **kwargs: fake_process,
     )
 
     records = iter([competing_record, competing_record])
     monkeypatch.setattr(
-        "weft.commands.run._select_active_manager",
+        "weft.commands._manager_bootstrap._select_active_manager",
         lambda context: next(records),
     )
 
@@ -239,7 +243,7 @@ def test_start_manager_does_not_terminate_competing_startup_manager(
         terminated = True
 
     monkeypatch.setattr(
-        "weft.commands.run._terminate_manager_process",
+        "weft.commands._manager_bootstrap._terminate_manager_process",
         _unexpected_terminate,
     )
 
@@ -519,7 +523,7 @@ def test_select_active_manager_ignores_zombie_registry_pid(
 
     process = subprocess.Popen([sys.executable, "-c", "import os; os._exit(0)"])
     try:
-        time.sleep(0.1)
+        process.wait(timeout=2.0)
         registry = ctx.queue(WEFT_WORKERS_REGISTRY_QUEUE, persistent=False)
         try:
             registry.write(
@@ -545,3 +549,197 @@ def test_select_active_manager_ignores_zombie_registry_pid(
         assert _select_active_manager(ctx) is None
     finally:
         process.wait()
+
+
+def test_select_active_manager_ignores_noncanonical_request_queue(
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    registry = ctx.queue(WEFT_WORKERS_REGISTRY_QUEUE, persistent=False)
+    try:
+        registry.write(
+            json.dumps(
+                {
+                    "tid": "1775622400000000002",
+                    "name": "manager",
+                    "status": "active",
+                    "pid": os.getpid(),
+                    "timestamp": registry.generate_timestamp(),
+                    "inbox": "custom.manager.requests",
+                    "requests": "custom.manager.requests",
+                    "ctrl_in": "custom.manager.ctrl_in",
+                    "ctrl_out": "custom.manager.ctrl_out",
+                    "outbox": "custom.manager.outbox",
+                    "role": "manager",
+                }
+            )
+        )
+    finally:
+        registry.close()
+
+    assert _select_active_manager(ctx) is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX only")
+def test_list_manager_records_prunes_dead_active_and_preserves_stopped_history(
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    registry = ctx.queue(WEFT_WORKERS_REGISTRY_QUEUE, persistent=False)
+    dead_tid = "1775622400000000003"
+    stopped_tid = "1775622400000000004"
+
+    dead_process = subprocess.Popen([sys.executable, "-c", "import os; os._exit(0)"])
+    try:
+        dead_process.wait(timeout=2.0)
+        registry.write(
+            json.dumps(
+                {
+                    "tid": dead_tid,
+                    "name": "dead-manager",
+                    "status": "active",
+                    "pid": dead_process.pid,
+                    "timestamp": registry.generate_timestamp(),
+                    "requests": "custom.manager.requests",
+                    "ctrl_in": "custom.manager.ctrl_in",
+                    "ctrl_out": "custom.manager.ctrl_out",
+                    "outbox": "custom.manager.outbox",
+                    "role": "manager",
+                }
+            )
+        )
+        registry.write(
+            json.dumps(
+                {
+                    "tid": stopped_tid,
+                    "name": "stopped-manager",
+                    "status": "stopped",
+                    "pid": dead_process.pid,
+                    "timestamp": registry.generate_timestamp(),
+                    "requests": WEFT_SPAWN_REQUESTS_QUEUE,
+                    "ctrl_in": f"T{stopped_tid}.ctrl_in",
+                    "ctrl_out": f"T{stopped_tid}.ctrl_out",
+                    "outbox": "weft.manager.outbox",
+                    "role": "manager",
+                }
+            )
+        )
+    finally:
+        registry.close()
+
+    first = manager_lifecycle._list_manager_records(
+        ctx,
+        include_stopped=True,
+        canonical_only=False,
+    )
+    second = manager_lifecycle._list_manager_records(
+        ctx,
+        include_stopped=True,
+        canonical_only=False,
+    )
+
+    assert {record["tid"] for record in first} == {stopped_tid}
+    assert {record["tid"] for record in second} == {stopped_tid}
+
+    registry_reader = ctx.queue(WEFT_WORKERS_REGISTRY_QUEUE, persistent=False)
+    try:
+        entries = [
+            payload
+            for payload, _timestamp in manager_lifecycle.iter_queue_json_entries(
+                registry_reader
+            )
+        ]
+    finally:
+        registry_reader.close()
+
+    assert [entry["tid"] for entry in entries] == [stopped_tid]
+
+
+def test_stop_manager_waits_for_pid_exit_after_stopped_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = "1775622400000000005"
+    seen_pids: list[int | None] = []
+
+    responses = iter(
+        [
+            {"tid": tid, "status": "active", "pid": 4321},
+            {"tid": tid, "status": "stopped", "pid": 4321},
+            {"tid": tid, "status": "stopped", "pid": 4321},
+            None,
+        ]
+    )
+    pid_states = iter([True, True, False, False])
+
+    monkeypatch.setattr(manager_lifecycle, "_send_stop", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        manager_lifecycle,
+        "_manager_record",
+        lambda *args, **kwargs: next(responses),
+    )
+
+    def fake_pid_alive(pid: int | None) -> bool:
+        seen_pids.append(pid)
+        return next(pid_states)
+
+    monkeypatch.setattr(manager_lifecycle, "_is_pid_alive", fake_pid_alive)
+
+    stopped, message = manager_lifecycle._stop_manager(
+        ctx,
+        None,
+        tid=tid,
+        timeout=1.0,
+        stop_if_absent=True,
+    )
+
+    assert stopped is True
+    assert message is None
+    assert seen_pids.count(4321) >= 2
+
+
+def test_stop_manager_force_prefers_process_tree_kill_when_pid_known(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = "1775622400000000006"
+    killed: list[tuple[int, float]] = []
+
+    monkeypatch.setattr(manager_lifecycle, "_send_stop", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        manager_lifecycle, "_manager_record", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        manager_lifecycle, "_lookup_manager_pid", lambda *args, **kwargs: 8765
+    )
+    monkeypatch.setattr(manager_lifecycle, "_is_pid_alive", lambda pid: pid == 8765)
+
+    def fake_terminate_process_tree(
+        pid: int, *, timeout: float, kill_after: bool = True
+    ):
+        killed.append((pid, timeout))
+        return {pid}
+
+    monkeypatch.setattr(
+        manager_lifecycle,
+        "terminate_process_tree",
+        fake_terminate_process_tree,
+    )
+
+    stopped, message = manager_lifecycle._stop_manager(
+        ctx,
+        None,
+        tid=tid,
+        timeout=0.0,
+        force=True,
+    )
+
+    assert stopped is True
+    assert message is None
+    assert killed == [(8765, 0.0)]

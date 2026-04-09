@@ -8,151 +8,27 @@ Spec references:
 from __future__ import annotations
 
 import json
-import time
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 
-from simplebroker import BrokerTarget, Queue
-from weft._constants import (
-    WEFT_TID_MAPPINGS_QUEUE,
-    WEFT_WORKERS_REGISTRY_QUEUE,
+from weft.commands._manager_bootstrap import (
+    _ensure_manager,
+    _list_manager_records,
+    _manager_record,
+    _stop_manager,
 )
 from weft.context import build_context
-from weft.core import Manager, launch_task_process
-from weft.core.taskspec import TaskSpec
-from weft.helpers import iter_queue_json_entries, pid_is_live, terminate_process_tree
 
 
-def _load_taskspec(path: Path) -> TaskSpec:
-    try:
-        return TaskSpec.model_validate_json(path.read_text(encoding="utf-8"))
-    except Exception as exc:  # pragma: no cover - validation tested elsewhere
-        raise ValueError(f"Failed to load TaskSpec: {exc}") from exc
+def start_command(*, context_path: Path | None = None) -> tuple[int, str | None]:
+    context = build_context(context_path)
+    record, started_here, _process_handle = _ensure_manager(context, verbose=False)
+    tid = cast(str, record.get("tid"))
+    pid = record.get("pid")
 
-
-def _registry_snapshot(
-    db_path: BrokerTarget | str, config: dict[str, Any]
-) -> dict[str, dict[str, Any]]:
-    queue = Queue(
-        WEFT_WORKERS_REGISTRY_QUEUE,
-        db_path=db_path,
-        persistent=False,
-        config=config,
-    )
-    snapshot: dict[str, dict[str, Any]] = {}
-    for data, timestamp in iter_queue_json_entries(queue):
-        data["_timestamp"] = timestamp
-        tid = data.get("tid")
-        if tid:
-            snapshot[tid] = data
-    return snapshot
-
-
-def _registry_entry_for_tid(
-    db_path: BrokerTarget | str, config: dict[str, Any], tid: str
-) -> dict[str, Any] | None:
-    queue = Queue(
-        WEFT_WORKERS_REGISTRY_QUEUE,
-        db_path=db_path,
-        persistent=False,
-        config=config,
-    )
-    try:
-        generator = queue.peek_generator(with_timestamps=True)
-    except Exception:  # pragma: no cover - queue errors
-        queue.close()
-        return None
-
-    latest: tuple[dict[str, Any], int] | None = None
-    try:
-        for entry in generator:
-            if isinstance(entry, tuple) and len(entry) == 2:
-                body, timestamp = entry
-            else:
-                body, timestamp = entry, 0
-            try:
-                data = json.loads(body)
-            except json.JSONDecodeError:
-                continue
-            if data.get("tid") != tid:
-                continue
-            if latest is None or timestamp >= latest[1]:
-                latest = (data, timestamp)
-    finally:
-        queue.close()
-
-    return None if latest is None else latest[0]
-
-
-def start_command(
-    taskspec_path: Path,
-    *,
-    foreground: bool,
-) -> tuple[int, str | None]:
-    spec = _load_taskspec(taskspec_path)
-    context = build_context(spec.spec.weft_context)
-    db_path = context.broker_target
-
-    if foreground:
-        worker = Manager(db_path, spec, config=context.config)
-        try:
-            worker.run_until_stopped()
-        except KeyboardInterrupt:  # pragma: no cover - interactive guard
-            worker.should_stop = True
-        finally:
-            worker.cleanup()
-        return 0, None
-
-    process = launch_task_process(Manager, db_path, spec, config=context.config)
-    message = f"Started worker {spec.tid} (pid {process.pid})"
-    return 0, message
-
-
-def _send_stop(
-    db_path: BrokerTarget | str,
-    config: dict[str, Any],
-    tid: str,
-    *,
-    entry: dict[str, Any] | None = None,
-) -> None:
-    queue_name = None
-    if isinstance(entry, dict):
-        ctrl_in = entry.get("ctrl_in")
-        if isinstance(ctrl_in, str) and ctrl_in:
-            queue_name = ctrl_in
-    if queue_name is None:
-        queue_name = f"T{tid}.ctrl_in"
-
-    ctrl_queue = Queue(
-        queue_name,
-        db_path=db_path,
-        persistent=False,
-        config=config,
-    )
-    ctrl_queue.write("STOP")
-
-
-def _lookup_pid(
-    db_path: BrokerTarget | str,
-    config: dict[str, Any],
-    tid: str,
-) -> int | None:
-    queue = Queue(
-        WEFT_TID_MAPPINGS_QUEUE,
-        db_path=db_path,
-        persistent=False,
-        config=config,
-    )
-    for data, _timestamp in iter_queue_json_entries(queue):
-        if data.get("full") == tid and "pid" in data:
-            pid_value = data["pid"]
-            return cast(int, pid_value)
-    return None
-
-
-def _pid_alive(pid: int | None) -> bool:
-    """Cross-platform liveness probe using psutil (avoids os.kill(0) on Windows)."""
-    return pid_is_live(pid)
+    if started_here:
+        return 0, f"Started manager {tid} (pid {pid})"
+    return 0, f"Manager {tid} already running (pid {pid})"
 
 
 def stop_command(
@@ -164,67 +40,21 @@ def stop_command(
     stop_if_absent: bool = False,
 ) -> tuple[int, str | None]:
     context = build_context(context_path)
-    db_path = context.broker_target
-
-    current_entry = _registry_entry_for_tid(db_path, context.broker_config, tid)
-    if current_entry is None:
-        _send_stop(db_path, context.broker_config, tid)
-    else:
-        if current_entry.get("status") == "stopped":
-            pid = current_entry.get("pid")
-            if not _pid_alive(cast(int | None, pid)):
-                return 0, None
-        _send_stop(
-            db_path,
-            context.broker_config,
-            tid,
-            entry=current_entry,
-        )
-
-    deadline = time.time() + timeout
-    entry_observed = current_entry is not None
-    last_entry: dict[str, Any] | None = current_entry
-    pid_checked_at: float = 0.0
-
-    while time.time() < deadline:
-        entry = _registry_entry_for_tid(db_path, context.broker_config, tid)
-        if entry is None:
-            if stop_if_absent or entry_observed:
-                last_pid = (
-                    last_entry.get("pid") if isinstance(last_entry, dict) else None
-                )
-                if not _pid_alive(cast(int | None, last_pid)):
-                    return 0, None
-        else:
-            entry_observed = True
-            last_entry = entry
-            status = entry.get("status")
-            pid = entry.get("pid")
-            if status == "stopped" and not _pid_alive(cast(int | None, pid)):
-                return 0, None
-            if stop_if_absent:
-                now = time.time()
-                if now - pid_checked_at >= 0.5:
-                    pid_checked_at = now
-                    if not _pid_alive(cast(int | None, pid)):
-                        return 0, None
-        time.sleep(0.1)
-
-    if force:
-        if last_entry is None:
-            return 0, None
-        pid = _lookup_pid(db_path, context.broker_config, tid)
-        if pid is None or not _pid_alive(pid):
-            return 0, None
-        try:
-            terminate_process_tree(pid, timeout=timeout)
-        except (ProcessLookupError, OSError):
-            return 0, None
-        except PermissionError:  # pragma: no cover - unlikely in tests
-            return 1, f"Permission denied sending SIGTERM to PID {pid}"
+    stopped, message = _stop_manager(
+        context,
+        None,
+        tid=tid,
+        timeout=timeout,
+        force=force,
+        stop_if_absent=stop_if_absent,
+    )
+    if stopped:
         return 0, None
-
-    return 1, f"Worker {tid} did not stop within {timeout:.1f}s"
+    if message is None:
+        return 1, f"Worker {tid} did not stop within {timeout:.1f}s"
+    if message.startswith("Manager ") and " did not stop within " in message:
+        return 1, message.replace("Manager", "Worker", 1)
+    return 1, message
 
 
 def list_command(
@@ -233,17 +63,22 @@ def list_command(
     context_path: Path | None = None,
 ) -> tuple[int, str | None]:
     context = build_context(context_path)
-    snapshot = _registry_snapshot(context.broker_target, context.broker_config)
+    records = _list_manager_records(
+        context,
+        include_stopped=False,
+        canonical_only=False,
+    )
 
     if json_output:
-        payload = json.dumps(list(snapshot.values()), indent=2)
+        payload = json.dumps(records, indent=2)
         return 0, payload
 
-    if not snapshot:
+    if not records:
         return 0, "No registered workers"
 
     lines = ["TID        STATUS    NAME"]
-    for tid, data in sorted(snapshot.items(), key=lambda item: item[0]):
+    for data in sorted(records, key=lambda record: str(record.get("tid", ""))):
+        tid = str(data.get("tid", ""))
         status = data.get("status", "unknown")
         name = data.get("name", "")
         lines.append(f"{tid}  {status:<9} {name}")
@@ -257,8 +92,7 @@ def status_command(
     context_path: Path | None = None,
 ) -> tuple[int, str | None]:
     context = build_context(context_path)
-    snapshot = _registry_snapshot(context.broker_target, context.broker_config)
-    record = snapshot.get(tid)
+    record = _manager_record(context, tid)
 
     if not record:
         return 1, f"Worker {tid} not found"

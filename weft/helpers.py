@@ -23,7 +23,7 @@ import psutil
 
 from simplebroker import Queue
 from simplebroker import commands as sb_commands
-from weft._constants import load_config
+from weft._constants import WEFT_SPAWN_REQUESTS_QUEUE, load_config
 
 # Load configuration once at module level for efficiency
 _config = load_config()
@@ -252,6 +252,17 @@ def pid_is_live(pid: int | None) -> bool:
         return True
     except psutil.Error:
         return False
+
+
+def is_canonical_manager_record(record: Mapping[str, Any]) -> bool:
+    """Return whether a registry record represents the canonical spawn-queue manager.
+
+    Spec: docs/specifications/03-Worker_Architecture.md [WA-3]
+    """
+
+    role = record.get("role", "manager")
+    requests = record.get("requests", WEFT_SPAWN_REQUESTS_QUEUE)
+    return bool(role == "manager" and requests == WEFT_SPAWN_REQUESTS_QUEUE)
 
 
 def terminate_process_tree(

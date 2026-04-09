@@ -22,6 +22,9 @@ Managers consume those requests, expand the TaskSpec, launch child Consumers via
 ## Related Plans
 
 - [Task Lifecycle Stop/Drain Audit Plan](../plans/task-lifecycle-stop-drain-audit-plan.md) – Audit manager drain, registry semantics, and lifecycle ownership before changing worker behavior.
+- [Manager Bootstrap Unification Plan](../plans/manager-bootstrap-unification-plan.md) – Collapse `weft worker start` onto the canonical manager bootstrap path used by `weft run`.
+- [Manager Lifecycle Command Consolidation Plan](../plans/manager-lifecycle-command-consolidation-plan.md) – Collapse remaining `worker list|status|stop` and `weft status` manager lifecycle reads onto the same shared control-plane helper as bootstrap.
+- [Weft Serve Supervised Manager Plan](../plans/weft-serve-supervised-manager-plan.md) – Add a minimal foreground `weft serve` command for supervisor-managed persistent managers and align manager TERM/INT with graceful drain.
 - [Agent Runtime Implementation Plan](../plans/agent-runtime-implementation-plan.md) – references `WA-2` TID correlation.
 - [Persistent Agent Runtime Implementation Plan](../plans/persistent-agent-runtime-implementation-plan.md) – references Worker Architecture for long-lived agent sessions.
 - [TaskSpec Clean Design Plan](../plans/taskspec-clean-design-plan.md) – references Worker Architecture for TaskSpec schema alignment.
@@ -99,14 +102,26 @@ _Implementation mapping_:
 and launching `weft.manager_process` when required. The helper waits for the
 registry entry to appear, prints diagnostic information (TID, PID, queue names),
 and then exits—leaving the dedicated manager process running in the background.
-Operators can also manage managers explicitly via `weft worker start|stop|list|status`.
+Operators can also manage managers explicitly via
+`weft worker start|stop|list|status` and `weft serve`. `weft worker start` is a
+thin operator wrapper over the same bootstrap helper as `weft run`; it does not
+accept an arbitrary manager TaskSpec. `weft serve` uses that same canonical
+manager TaskSpec but runs it in the foreground for `systemd`, `launchd`, or
+`supervisord` style supervision, forcing `idle_timeout=0.0` for that
+invocation only. The canonical manager for bootstrap and leadership is the live
+manager registered for `weft.spawn.requests`. Manager records bound to another
+request queue do not participate in default-manager selection. External
+`SIGTERM` and `SIGINT` against a Manager enter the same drain path as STOP;
+`SIGUSR1` retains immediate kill semantics.
 
 _Implementation mapping_:
-- Manager bootstrap — `weft/commands/run.py` :: `_ensure_manager` (checks for existing active manager, delegates to `_start_manager` if none found).
-- Manager process launch — `weft/commands/run.py` :: `_start_manager` (builds manager TaskSpec, launches `weft.manager_process` via `subprocess.Popen`, polls registry until entry appears).
-- Manager process entry point — `weft/manager_process.py` (standalone module invoked via `python -m weft.manager_process`).
-- Leadership election — `weft/core/manager.py` :: `Manager._maybe_yield_leadership`, `Manager._leader_tid`, `Manager._active_manager_records` (lowest-TID manager wins; duplicates self-cancel).
-- CLI management — `weft/commands/worker.py` :: `start_command`, `stop_command`, `list_command`, `status_command`; registered via `weft/cli.py` as `weft worker start|stop|list|status`.
+- Shared manager lifecycle helper — `weft/commands/_manager_bootstrap.py` :: `_ensure_manager`, `_serve_manager_foreground`, `_list_manager_records`, `_manager_record`, `_stop_manager` (owns canonical manager bootstrap, foreground serve, normalized registry replay, and graceful/forced stop observation for CLI callers).
+- Manager process launch — `weft/commands/_manager_bootstrap.py` :: `_start_manager` (builds manager TaskSpec, launches `weft.manager_process` via `subprocess.Popen`, polls registry until entry appears).
+- Manager process entry point — `weft/manager_process.py` :: `run_manager_process`, `main` (shared runtime helper plus standalone module invoked via `python -m weft.manager_process`).
+- Leadership election — `weft/core/manager.py` :: `Manager._maybe_yield_leadership`, `Manager._leader_tid`, `Manager._active_manager_records` (lowest-TID canonical manager wins; duplicates self-cancel).
+- External signal handling — `weft/core/manager.py` :: `Manager.handle_termination_signal` (TERM/INT drain, SIGUSR1 kill).
+- CLI management — `weft/commands/worker.py` :: `start_command`, `stop_command`, `list_command`, `status_command`; these commands are thin wrappers over the shared lifecycle helper. `weft/commands/status.py` :: `_collect_manager_records` and `weft/cli.py` :: `list_tasks(..., workers=True)` reuse the same lifecycle reader for manager views.
+- Foreground supervision command — `weft/commands/serve.py` :: `serve_command`, registered in `weft/cli.py` as `weft serve`.
 
 ## Specialisation and Future Work [WA-4]
 
