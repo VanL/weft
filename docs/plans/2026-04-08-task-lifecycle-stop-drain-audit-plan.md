@@ -37,9 +37,9 @@ Source specs:
 
 Existing plans and current context:
 
-- [`docs/plans/active-control-main-thread-plan.md`](./active-control-main-thread-plan.md)
-- [`docs/plans/runner-extension-point-plan.md`](./runner-extension-point-plan.md)
-- [`docs/plans/release-helper-plan.md`](./release-helper-plan.md)
+- [`docs/plans/2026-04-07-active-control-main-thread-plan.md`](./2026-04-07-active-control-main-thread-plan.md)
+- [`docs/plans/2026-04-06-runner-extension-point-plan.md`](./2026-04-06-runner-extension-point-plan.md)
+- [`docs/plans/2026-04-06-release-helper-plan.md`](./2026-04-06-release-helper-plan.md)
 - [`docs/lessons.md`](../lessons.md)
 
 Repo guidance:
@@ -67,9 +67,9 @@ Source spec note:
 Use fixed sibling files so the audit does not sprawl across ad hoc notes:
 
 - Audit log:
-  [`docs/plans/task-lifecycle-stop-drain-audit-log.md`](./task-lifecycle-stop-drain-audit-log.md)
+  [`docs/plans/2026-04-08-task-lifecycle-stop-drain-audit-log.md`](./2026-04-08-task-lifecycle-stop-drain-audit-log.md)
 - Findings document:
-  [`docs/plans/task-lifecycle-stop-drain-findings.md`](./task-lifecycle-stop-drain-findings.md)
+  [`docs/plans/2026-04-08-task-lifecycle-stop-drain-findings.md`](./2026-04-08-task-lifecycle-stop-drain-findings.md)
 
 Rules:
 
@@ -461,7 +461,7 @@ Optional follow-up tasks, if needed, are listed later under
   A written matrix exists showing each known failure, where it was seen, what
   it means, and which code surface it implicates.
 - Files to modify:
-  - `docs/plans/task-lifecycle-stop-drain-audit-log.md`
+  - `docs/plans/2026-04-08-task-lifecycle-stop-drain-audit-log.md`
 - Read first:
   - the failing test files named above
   - `docs/lessons.md`
@@ -682,7 +682,7 @@ Optional follow-up tasks, if needed, are listed later under
   - disproved theories,
   - and recommended next fixes ordered by blast radius.
 - Files to modify:
-  - `docs/plans/task-lifecycle-stop-drain-findings.md`
+  - `docs/plans/2026-04-08-task-lifecycle-stop-drain-findings.md`
 - Required work:
   - Findings must be presented first, ordered by severity.
   - Each finding must name:
@@ -721,7 +721,7 @@ that the host/harness audit could not answer.
   - `weft/core/runners/host.py`
   - `extensions/weft_docker/weft_docker/plugin.py`
   - `extensions/weft_macos_sandbox/weft_macos_sandbox/plugin.py`
-  - `docs/plans/runner-extension-point-plan.md`
+  - `docs/plans/2026-04-06-runner-extension-point-plan.md`
 - Required work:
   - For host, Docker, and macOS sandbox, record the current source of:
     - runtime liveness
@@ -1004,7 +1004,7 @@ experiment, record:
 
 Use:
 
-- [`docs/plans/task-lifecycle-stop-drain-audit-log.md`](./task-lifecycle-stop-drain-audit-log.md)
+- [`docs/plans/2026-04-08-task-lifecycle-stop-drain-audit-log.md`](./2026-04-08-task-lifecycle-stop-drain-audit-log.md)
 
 - date/time
 - exact command

@@ -309,7 +309,7 @@ management live in the companion doc:
 
 ## Related Plans
 
-- [`docs/plans/spec-corpus-current-vs-planned-split-plan.md`](../plans/spec-corpus-current-vs-planned-split-plan.md)
-- [`docs/plans/manager-bootstrap-unification-plan.md`](../plans/manager-bootstrap-unification-plan.md)
-- [`docs/plans/pipeline-spec-expansion-plan.md`](../plans/pipeline-spec-expansion-plan.md)
-- [`docs/plans/result-stream-implementation-plan.md`](../plans/result-stream-implementation-plan.md)
+- [`docs/plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md`](../plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md)
+- [`docs/plans/2026-04-09-manager-bootstrap-unification-plan.md`](../plans/2026-04-09-manager-bootstrap-unification-plan.md)
+- [`docs/plans/2026-04-13-pipeline-spec-expansion-plan.md`](../plans/2026-04-13-pipeline-spec-expansion-plan.md)
+- [`docs/plans/2026-04-13-result-stream-implementation-plan.md`](../plans/2026-04-13-result-stream-implementation-plan.md)

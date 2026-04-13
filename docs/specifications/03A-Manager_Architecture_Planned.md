@@ -26,5 +26,5 @@ control, and lifecycle invariants rather than bypassing them.
 
 ## Related Plans
 
-- [`docs/plans/spec-corpus-current-vs-planned-split-plan.md`](../plans/spec-corpus-current-vs-planned-split-plan.md)
-- [`docs/plans/manager-lifecycle-command-consolidation-plan.md`](../plans/manager-lifecycle-command-consolidation-plan.md)
+- [`docs/plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md`](../plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md)
+- [`docs/plans/2026-04-09-manager-lifecycle-command-consolidation-plan.md`](../plans/2026-04-09-manager-lifecycle-command-consolidation-plan.md)

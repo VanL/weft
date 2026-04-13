@@ -37,5 +37,5 @@ desire to recreate the older planned object model.
 
 ## Related Plans
 
-- [`docs/plans/spec-corpus-current-vs-planned-split-plan.md`](../plans/spec-corpus-current-vs-planned-split-plan.md)
-- [`docs/plans/runner-extension-point-plan.md`](../plans/runner-extension-point-plan.md)
+- [`docs/plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md`](../plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md)
+- [`docs/plans/2026-04-06-runner-extension-point-plan.md`](../plans/2026-04-06-runner-extension-point-plan.md)

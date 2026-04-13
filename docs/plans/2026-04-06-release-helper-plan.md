@@ -30,7 +30,7 @@ Files to modify:
 
 Files to add for process traceability:
 
-- `docs/plans/release-helper-plan.md`
+- `docs/plans/2026-04-06-release-helper-plan.md`
 
 Read first:
 

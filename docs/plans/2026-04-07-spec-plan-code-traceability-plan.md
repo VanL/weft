@@ -42,7 +42,7 @@ Read for current behavior:
 Files to modify:
 
 - `docs/agent-context/runbooks/writing-plans.md`
-- `docs/plans/spec-plan-code-traceability-plan.md`
+- `docs/plans/2026-04-07-spec-plan-code-traceability-plan.md`
 
 Read first:
 
@@ -175,10 +175,10 @@ Style and guidance to preserve:
      work in a materially different direction than requested.
    - Files to touch:
      - `docs/agent-context/runbooks/writing-plans.md`
-     - `docs/plans/spec-plan-code-traceability-plan.md`
+     - `docs/plans/2026-04-07-spec-plan-code-traceability-plan.md`
    - Read first:
      - `docs/agent-context/runbooks/writing-plans.md`
-     - `docs/plans/spec-plan-code-traceability-plan.md`
+     - `docs/plans/2026-04-07-spec-plan-code-traceability-plan.md`
    - Reuse:
      - existing “Out of Scope” and anti-pattern structure
    - Constraints:
@@ -192,7 +192,7 @@ Style and guidance to preserve:
 6. Review this plan and tighten it until it is executable without follow-up.
    - Outcome: this plan itself models the runbook behavior it is introducing.
    - Files to touch:
-     - `docs/plans/spec-plan-code-traceability-plan.md`
+     - `docs/plans/2026-04-07-spec-plan-code-traceability-plan.md`
    - Read first:
      - the entire updated runbook draft
      - the entire plan draft

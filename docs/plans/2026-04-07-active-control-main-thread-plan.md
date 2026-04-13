@@ -506,7 +506,7 @@ confidence alone.
   available in the current environment.
 - Reviewer prompt:
 
-> Read `docs/plans/active-control-main-thread-plan.md` and the touched code.
+> Read `docs/plans/2026-04-07-active-control-main-thread-plan.md` and the touched code.
 > Look for errors, bad ideas, and latent ambiguities. Could you implement or
 > sign off on this confidently and correctly?
 

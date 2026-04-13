@@ -16,7 +16,8 @@
 ## Project Conventions
 
 - Specs live in `docs/specifications/`.
-- Plans live in `docs/plans/`.
+- Plans live in `docs/plans/` (nowhere else). Filename format:
+  `YYYY-MM-DD-<descriptive-name>.md`.
 - Durable lessons learned live in `docs/lessons.md`.
 - Documentation maintenance is part of the definition of done for spec-driven
   and risky changes.

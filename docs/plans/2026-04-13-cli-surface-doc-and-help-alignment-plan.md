@@ -32,7 +32,7 @@ Files to modify:
 - `README.md`
 - `docs/specifications/10-CLI_Interface.md`
 - `docs/specifications/04-SimpleBroker_Integration.md`
-- `docs/plans/cli-surface-doc-and-help-alignment-plan.md`
+- `docs/plans/2026-04-13-cli-surface-doc-and-help-alignment-plan.md`
 - `weft/cli.py`
 - `tests/cli/test_cli_init.py`
 - `tests/cli/test_cli_run.py`
@@ -193,7 +193,7 @@ Rollback:
    - Files to touch:
      - `docs/specifications/10-CLI_Interface.md`
      - `docs/specifications/04-SimpleBroker_Integration.md`
-     - `docs/plans/cli-surface-doc-and-help-alignment-plan.md`
+     - `docs/plans/2026-04-13-cli-surface-doc-and-help-alignment-plan.md`
    - Constraints:
      - if review argues for changing `weft init` behavior, record why that is
        out of scope for this slice instead of silently changing direction

@@ -32,8 +32,8 @@ Repo guidance:
 
 Relevant existing plans and reports:
 
-- [`docs/plans/manager-bootstrap-unification-plan.md`](./manager-bootstrap-unification-plan.md)
-- [`docs/plans/weft-serve-supervised-manager-plan.md`](./weft-serve-supervised-manager-plan.md)
+- [`docs/plans/2026-04-09-manager-bootstrap-unification-plan.md`](./2026-04-09-manager-bootstrap-unification-plan.md)
+- [`docs/plans/2026-04-09-weft-serve-supervised-manager-plan.md`](./2026-04-09-weft-serve-supervised-manager-plan.md)
 - [`problem-report-detached-manager-bootstrap.md`](../../problem-report-detached-manager-bootstrap.md)
 - [`problem-report-manager-status-surface-divergence.md`](../../problem-report-manager-status-surface-divergence.md)
 

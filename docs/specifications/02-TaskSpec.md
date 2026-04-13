@@ -350,11 +350,11 @@ _Implementation mapping_: `weft/core/tasks/base.py` (`BaseTask._apply_reserved_p
 
 ## Related Plans
 
-- [`docs/plans/piped-input-support-plan.md`](../plans/piped-input-support-plan.md)
-- [`docs/plans/pipeline-spec-expansion-plan.md`](../plans/pipeline-spec-expansion-plan.md)
-- [`docs/plans/runner-extension-point-plan.md`](../plans/runner-extension-point-plan.md)
-- [`docs/plans/runner-monitor-result-waiter-and-liveness-fixes-plan.md`](../plans/runner-monitor-result-waiter-and-liveness-fixes-plan.md)
-- [`docs/plans/taskspec-clean-design-plan.md`](../plans/taskspec-clean-design-plan.md)
-- [`docs/plans/agent-runtime-implementation-plan.md`](../plans/agent-runtime-implementation-plan.md)
-- [`docs/plans/persistent-agent-runtime-implementation-plan.md`](../plans/persistent-agent-runtime-implementation-plan.md)
-- [`docs/plans/agent-runtime-boundary-cleanup-plan.md`](../plans/agent-runtime-boundary-cleanup-plan.md)
+- [`docs/plans/2026-04-06-piped-input-support-plan.md`](../plans/2026-04-06-piped-input-support-plan.md)
+- [`docs/plans/2026-04-13-pipeline-spec-expansion-plan.md`](../plans/2026-04-13-pipeline-spec-expansion-plan.md)
+- [`docs/plans/2026-04-06-runner-extension-point-plan.md`](../plans/2026-04-06-runner-extension-point-plan.md)
+- [`docs/plans/2026-04-13-runner-monitor-result-waiter-and-liveness-fixes-plan.md`](../plans/2026-04-13-runner-monitor-result-waiter-and-liveness-fixes-plan.md)
+- [`docs/plans/2026-04-06-taskspec-clean-design-plan.md`](../plans/2026-04-06-taskspec-clean-design-plan.md)
+- [`docs/plans/2026-04-06-agent-runtime-implementation-plan.md`](../plans/2026-04-06-agent-runtime-implementation-plan.md)
+- [`docs/plans/2026-04-06-persistent-agent-runtime-implementation-plan.md`](../plans/2026-04-06-persistent-agent-runtime-implementation-plan.md)
+- [`docs/plans/2026-04-06-agent-runtime-boundary-cleanup-plan.md`](../plans/2026-04-06-agent-runtime-boundary-cleanup-plan.md)

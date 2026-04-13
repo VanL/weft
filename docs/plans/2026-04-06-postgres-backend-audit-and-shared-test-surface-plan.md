@@ -37,7 +37,7 @@ Read these before implementing anything:
 11. [`docs/specifications/08-Testing_Strategy.md`](../specifications/08-Testing_Strategy.md)
 12. [`docs/specifications/10-CLI_Interface.md`](../specifications/10-CLI_Interface.md)
 13. [`README.md`](../../README.md)
-14. [`docs/plans/simplebroker-backend-generalization-plan.md`](./simplebroker-backend-generalization-plan.md)
+14. [`docs/plans/2026-04-06-simplebroker-backend-generalization-plan.md`](./2026-04-06-simplebroker-backend-generalization-plan.md)
 15. [`docs/TODO-simplebroker-backend-followups.md`](../TODO-simplebroker-backend-followups.md)
 
 Read these Weft runtime and test files next:

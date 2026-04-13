@@ -914,8 +914,8 @@ before it has a solid, first-class, linear, task-shaped pipeline run.
 
 ## Related Plans
 
-- [`docs/plans/pipeline-spec-expansion-plan.md`](../plans/pipeline-spec-expansion-plan.md)
-- [`docs/plans/pipeline-first-class-runtime-implementation-plan.md`](../plans/pipeline-first-class-runtime-implementation-plan.md)
+- [`docs/plans/2026-04-13-pipeline-spec-expansion-plan.md`](../plans/2026-04-13-pipeline-spec-expansion-plan.md)
+- [`docs/plans/2026-04-13-pipeline-first-class-runtime-implementation-plan.md`](../plans/2026-04-13-pipeline-first-class-runtime-implementation-plan.md)
 
 ## Related Documents
 

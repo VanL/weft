@@ -20,7 +20,7 @@ Additional task and process discovery helpers remain planned as convenience surf
 
 ## Related Plans
 
-- [`docs/plans/result-stream-implementation-plan.md`](../plans/result-stream-implementation-plan.md)
+- [`docs/plans/2026-04-13-result-stream-implementation-plan.md`](../plans/2026-04-13-result-stream-implementation-plan.md)
 
 ## Backlinks [10A-3]
 
