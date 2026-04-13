@@ -89,7 +89,7 @@ field.
     "stream_output": false,                  // OPTIONAL. Stream stdout/stderr to queues. If false, all output will be written in one message.
     "cleanup_on_exit": true,                 // OPTIONAL. Delete empty task queues on completion (outbox retained until consumed)
     "reserved_policy_on_stop": "keep",      // OPTIONAL. Behaviour for messages left in T{tid}.reserved when STOP is received. Options: "keep", "requeue", "clear". Default is "keep".
-    "reserved_policy_on_error": "keep",     // OPTIONAL. Behaviour for messages left in T{tid}.reserved when execution fails. Same options and default as above.
+    "reserved_policy_on_error": "keep",     // OPTIONAL. Behaviour for messages left in T{tid}.reserved when execution fails, times out, or is killed. Same options and default as above.
     "polling_interval": 1,                   // OPTIONAL. psutil polling interval in seconds. Defaults to 1 second.
     "reporting_interval": "poll" | "transition",  // OPTIONAL. Send reports to weft.log.tasks either on each transition or on each polling interval. Defaults to "transition"
     "monitor_class": "weft.core.resource_monitor.ResourceMonitor",   // OPTIONAL. Default value is "weft.core.resource_monitor.ResourceMonitor". A class conforming to the ResourceMonitor spec that will be used to wrap the target. NOTE: Module will be created at weft/core.resource_monitor.py
@@ -197,7 +197,7 @@ _Per-field implementation status_:
 - `spec.env`, `spec.working_dir`: Implemented. Passed to runner in `Consumer.__init__()`.
 - `spec.weft_context`: Implemented. Resolved by Manager at spawn time via `resolve_taskspec_payload()`.
 - `spec.interactive`: Implemented. `InteractiveTaskMixin` in `weft/core/tasks/interactive.py`.
-- `spec.stream_output`: Implemented. Consumer streaming path in `weft/core/tasks/consumer.py`.
+- `spec.stream_output`: Implemented. One-shot command producers stream incrementally via `weft/core/runners/subprocess_runner.py`, `weft/core/runners/host.py`, and `weft/core/tasks/consumer.py`; non-command results still use the consumer chunking path.
 - `spec.cleanup_on_exit`: Implemented. `BaseTask._cleanup_reserved_on_exit()`, `BaseTask._cleanup_spill_dirs()`.
 - `spec.reserved_policy_on_stop`, `spec.reserved_policy_on_error`: Implemented. `BaseTask._apply_reserved_policy()`, `Consumer._apply_reserved_policy_on_error()`.
 - `spec.polling_interval`, `spec.reporting_interval`: Implemented. `BaseTask._maybe_emit_poll_report()`.
@@ -208,6 +208,32 @@ _Per-field implementation status_:
 - `io.*`: Implemented. `IOSection` — `inputs`, `outputs`, `control` with required-queue validation.
 - `state.*`: Implemented. `StateSection` — all fields including peaks, with consistency validation.
 - `metadata`: Implemented. Mutable dict, supports `update_metadata` control messages.
+
+### State vs Metadata ownership [TS-1.4]
+
+Both `state` and `metadata` are mutable at runtime, but they have distinct
+ownership:
+
+- **`state` is system-owned.** Weft's task lifecycle writes all `state` fields
+  automatically: `status`, `pid`, `started_at`, `completed_at`, `return_code`,
+  `error`, resource metrics (`memory`, `cpu`, `fds`, `net_connections`), and
+  their peak variants. External code should treat `state` as read-only — it
+  reflects what the system observes.
+
+- **`metadata` is caller-owned.** The task creator sets tags, owner identifiers,
+  session IDs, and any application-specific key-value pairs. Running tasks and
+  external callers can update metadata via `update_metadata` control messages
+  over `ctrl_in`. Weft does not interpret metadata contents.
+
+Rule of thumb: if Weft writes it automatically, it belongs in `state`. If the
+user or application writes it, it belongs in `metadata`.
+
+_Implementation mapping_: `StateSection` fields are written by
+`BaseTask._report_state_change()` (lifecycle events, resource metrics) and
+`Consumer._finalize_result()` (return_code, completed_at, final metrics).
+`metadata` is a plain mutable dict on `TaskSpec`; it is updated via
+`TaskSpec.update_metadata()` at creation time or from ctrl_in messages
+(see the `update_metadata` key in the schema comment at line 129 above).
 
 ### Runner Selection and Extensibility [TS-1.3]
 
@@ -315,6 +341,10 @@ Reserved queue policy semantics are defined in
 [05-Message_Flow_and_State.md](05-Message_Flow_and_State.md#8-failure-recovery-flow).
 TaskSpec exposes `reserved_policy_on_stop` and `reserved_policy_on_error`, each
 accepting `keep` (default), `requeue`, or `clear`.
+
+Timeouts are treated as error exits for reserved-policy purposes:
+`reserved_policy_on_error` applies when a task exceeds its timeout, is
+killed, or fails with a non-zero exit code.
 
 _Implementation mapping_: `weft/core/tasks/base.py` (`BaseTask._apply_reserved_policy()`), `weft/core/tasks/consumer.py` (`Consumer._apply_reserved_policy_on_error()`, `Consumer._handle_stop()`, `Consumer._handle_kill()`), `weft/core/tasks/interactive.py` (`InteractiveTaskMixin` — applies policies on stop/kill/error for interactive sessions). The `ReservedPolicy` enum lives in `weft/core/taskspec.py`.
 
