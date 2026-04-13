@@ -285,8 +285,9 @@ Tool resolution: `weft/core/agent_tools.py` (`resolve_agent_tools`,
 ## Persistent Session Boundary [AR-6]
 
 Persistent agent tasks with `conversation_scope="per_task"` keep their outer
-task lifecycle in normal Weft code, but may run the live model conversation in
-a dedicated subprocess.
+task lifecycle in normal Weft code, but run the live model conversation in a
+dedicated subprocess. This subprocess is always created — there is no in-process
+fallback for `per_task` scope.
 
 That parent/subprocess link uses a private JSON protocol. It is allowed to be
 explicit and versioned because it is **not** part of the public queue surface.
