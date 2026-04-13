@@ -359,7 +359,7 @@ flags, and future queue or control ergonomics live in the companion doc:
 
 ## Related Plans
 
-- [`docs/plans/result-stream-implementation-plan.md`](../plans/result-stream-implementation-plan.md)
+- [`docs/plans/2026-04-13-result-stream-implementation-plan.md`](../plans/2026-04-13-result-stream-implementation-plan.md)
 
 ## Related Documents
 

@@ -14,10 +14,10 @@ See also:
 
 ## Related Plans
 
-- [`docs/plans/spec-corpus-current-vs-planned-split-plan.md`](../plans/spec-corpus-current-vs-planned-split-plan.md)
-- [`docs/plans/runner-extension-point-plan.md`](../plans/runner-extension-point-plan.md)
-- [`docs/plans/persistent-agent-runtime-implementation-plan.md`](../plans/persistent-agent-runtime-implementation-plan.md)
-- [`docs/plans/active-control-main-thread-plan.md`](../plans/active-control-main-thread-plan.md)
+- [`docs/plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md`](../plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md)
+- [`docs/plans/2026-04-06-runner-extension-point-plan.md`](../plans/2026-04-06-runner-extension-point-plan.md)
+- [`docs/plans/2026-04-06-persistent-agent-runtime-implementation-plan.md`](../plans/2026-04-06-persistent-agent-runtime-implementation-plan.md)
+- [`docs/plans/2026-04-07-active-control-main-thread-plan.md`](../plans/2026-04-07-active-control-main-thread-plan.md)
 
 ## 1. TaskSpec (`weft/core/taskspec.py`) [CC-1]
 

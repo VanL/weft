@@ -42,7 +42,7 @@ Repo guidance:
 Relevant current context:
 
 - [`docs/lessons.md`](../lessons.md)
-- [`docs/plans/runner-monitor-result-waiter-and-liveness-fixes-plan.md`](./runner-monitor-result-waiter-and-liveness-fixes-plan.md)
+- [`docs/plans/2026-04-13-runner-monitor-result-waiter-and-liveness-fixes-plan.md`](./2026-04-13-runner-monitor-result-waiter-and-liveness-fixes-plan.md)
 
 ## Context and Key Files
 
@@ -447,7 +447,7 @@ Reviewer preference:
 
 Suggested review prompt:
 
-> Read the plan at `docs/plans/result-stream-implementation-plan.md`.
+> Read the plan at `docs/plans/2026-04-13-result-stream-implementation-plan.md`.
 > Carefully examine the plan and the associated `weft result` code paths. Look
 > for errors, bad ideas, and latent ambiguities. Do not implement anything.
 > Could you carry out this plan confidently and correctly as written?

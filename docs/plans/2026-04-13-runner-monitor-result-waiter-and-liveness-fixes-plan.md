@@ -37,8 +37,8 @@ Repo guidance:
 
 Relevant existing plans and context:
 
-- [`docs/plans/runner-extension-point-plan.md`](./runner-extension-point-plan.md)
-- [`docs/plans/task-lifecycle-stop-drain-audit-plan.md`](./task-lifecycle-stop-drain-audit-plan.md)
+- [`docs/plans/2026-04-06-runner-extension-point-plan.md`](./2026-04-06-runner-extension-point-plan.md)
+- [`docs/plans/2026-04-08-task-lifecycle-stop-drain-audit-plan.md`](./2026-04-08-task-lifecycle-stop-drain-audit-plan.md)
 - [`docs/lessons.md`](../lessons.md)
 
 ## Context and Key Files

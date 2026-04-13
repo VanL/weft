@@ -32,11 +32,11 @@ Source specs:
 
 Current code and prior audit context:
 
-- [`docs/plans/task-lifecycle-stop-drain-audit-plan.md`](./task-lifecycle-stop-drain-audit-plan.md)
-- [`docs/plans/task-lifecycle-stop-drain-findings.md`](./task-lifecycle-stop-drain-findings.md)
-- [`docs/plans/task-lifecycle-stop-drain-audit-log.md`](./task-lifecycle-stop-drain-audit-log.md)
-- [`docs/plans/release-helper-plan.md`](./release-helper-plan.md)
-- [`docs/plans/release-helper-retag-plan.md`](./release-helper-retag-plan.md)
+- [`docs/plans/2026-04-08-task-lifecycle-stop-drain-audit-plan.md`](./2026-04-08-task-lifecycle-stop-drain-audit-plan.md)
+- [`docs/plans/2026-04-08-task-lifecycle-stop-drain-findings.md`](./2026-04-08-task-lifecycle-stop-drain-findings.md)
+- [`docs/plans/2026-04-08-task-lifecycle-stop-drain-audit-log.md`](./2026-04-08-task-lifecycle-stop-drain-audit-log.md)
+- [`docs/plans/2026-04-06-release-helper-plan.md`](./2026-04-06-release-helper-plan.md)
+- [`docs/plans/2026-04-06-release-helper-retag-plan.md`](./2026-04-06-release-helper-retag-plan.md)
 - [`docs/lessons.md`](../lessons.md)
 
 Repo guidance:
@@ -62,9 +62,9 @@ Use fixed sibling files so the investigation does not sprawl across terminal
 notes or stale thread memory:
 
 - Audit log:
-  [`docs/plans/release-gate-failure-audit-log.md`](./release-gate-failure-audit-log.md)
+  [`docs/plans/2026-04-08-release-gate-failure-audit-log.md`](./2026-04-08-release-gate-failure-audit-log.md)
 - Findings document:
-  [`docs/plans/release-gate-failure-findings.md`](./release-gate-failure-findings.md)
+  [`docs/plans/2026-04-08-release-gate-failure-findings.md`](./2026-04-08-release-gate-failure-findings.md)
 
 Rules:
 
@@ -203,9 +203,9 @@ Record this once so nobody burns time on the wrong explanation:
 
 Normal audit outputs:
 
-- `docs/plans/release-gate-failure-audit-plan.md`
-- `docs/plans/release-gate-failure-audit-log.md`
-- `docs/plans/release-gate-failure-findings.md`
+- `docs/plans/2026-04-08-release-gate-failure-audit-plan.md`
+- `docs/plans/2026-04-08-release-gate-failure-audit-log.md`
+- `docs/plans/2026-04-08-release-gate-failure-findings.md`
 
 Temporary local-only instrumentation, if needed:
 
@@ -375,7 +375,7 @@ This section exists to stop repeated dead ends.
 - Outcome: every repro and every finding is tagged to the exact commit under
   test.
 - Files to touch:
-  - `docs/plans/release-gate-failure-audit-log.md`
+  - `docs/plans/2026-04-08-release-gate-failure-audit-log.md`
 - Read first:
   - this plan
   - `git log --oneline --decorate -8`
@@ -408,7 +408,7 @@ This section exists to stop repeated dead ends.
   bounded tightly enough that the audit can proceed with CI logs plus local
   instrumentation.
 - Files to touch:
-  - `docs/plans/release-gate-failure-audit-log.md`
+  - `docs/plans/2026-04-08-release-gate-failure-audit-log.md`
   - optionally temporary local-only instrumentation in:
     - `tests/cli/test_cli_list_task.py`
     - `tests/helpers/weft_harness.py`
@@ -439,7 +439,7 @@ This section exists to stop repeated dead ends.
 - Outcome: the interactive quit failure is reproduced locally or narrowed to a
   concrete state mismatch.
 - Files to touch:
-  - `docs/plans/release-gate-failure-audit-log.md`
+  - `docs/plans/2026-04-08-release-gate-failure-audit-log.md`
   - optionally temporary local-only instrumentation in:
     - `tests/cli/test_cli_run_interactive_tty.py`
     - `weft/commands/run.py`
@@ -469,8 +469,8 @@ This section exists to stop repeated dead ends.
 - Outcome: determine whether local unpublished commits genuinely fix, mask, or
   merely avoid the audited failures.
 - Files to touch:
-  - `docs/plans/release-gate-failure-audit-log.md`
-  - `docs/plans/release-gate-failure-findings.md`
+  - `docs/plans/2026-04-08-release-gate-failure-audit-log.md`
+  - `docs/plans/2026-04-08-release-gate-failure-findings.md`
 - Read first:
   - `git log --oneline --decorate -8`
   - the log entries from Tasks 2 and 3
@@ -493,7 +493,7 @@ This section exists to stop repeated dead ends.
   - the disproved theories
   - the smallest correct next fix slice
 - Files to touch:
-  - `docs/plans/release-gate-failure-findings.md`
+  - `docs/plans/2026-04-08-release-gate-failure-findings.md`
 - Read first:
   - the complete audit log
   - this plan

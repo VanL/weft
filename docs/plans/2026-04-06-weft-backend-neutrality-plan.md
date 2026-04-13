@@ -48,7 +48,7 @@ Read these before changing code:
 12. [`docs/specifications/10-CLI_Interface.md`](../specifications/10-CLI_Interface.md)
 13. [`README.md`](../../README.md)
 14. [`docs/TODO-simplebroker-backend-followups.md`](../TODO-simplebroker-backend-followups.md)
-15. [`docs/plans/postgres-backend-audit-and-shared-test-surface-plan.md`](./postgres-backend-audit-and-shared-test-surface-plan.md)
+15. [`docs/plans/2026-04-06-postgres-backend-audit-and-shared-test-surface-plan.md`](./2026-04-06-postgres-backend-audit-and-shared-test-surface-plan.md)
 
 Source spec relationship:
 

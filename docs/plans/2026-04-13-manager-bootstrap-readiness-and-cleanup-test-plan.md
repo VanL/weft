@@ -28,8 +28,8 @@ Repo guidance:
 
 Related plans:
 
-- [`docs/plans/detached-manager-bootstrap-hardening-plan.md`](./detached-manager-bootstrap-hardening-plan.md)
-- [`docs/plans/task-lifecycle-stop-drain-findings.md`](./task-lifecycle-stop-drain-findings.md)
+- [`docs/plans/2026-04-13-detached-manager-bootstrap-hardening-plan.md`](./2026-04-13-detached-manager-bootstrap-hardening-plan.md)
+- [`docs/plans/2026-04-08-task-lifecycle-stop-drain-findings.md`](./2026-04-08-task-lifecycle-stop-drain-findings.md)
 
 ## Context and Key Files
 

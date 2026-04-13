@@ -6,7 +6,7 @@ adding **persistent agent tasks with continuation** without duplicating
 lifecycle semantics inside `spec.agent`.
 
 This plan supersedes the previous prototype-oriented plan in
-[`docs/plans/agent-runtime-implementation-plan.md`](./agent-runtime-implementation-plan.md)
+[`docs/plans/2026-04-06-agent-runtime-implementation-plan.md`](./2026-04-06-agent-runtime-implementation-plan.md)
 for all work related to persistent agents.
 
 It is written for an engineer who is strong in Python but has **almost no

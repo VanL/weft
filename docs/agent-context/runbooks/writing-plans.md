@@ -73,10 +73,11 @@ true:
 
 ## File Placement
 
-- Put plans in `docs/plans/`.
-- Prefer descriptive filenames.
-- A date prefix is fine for multi-iteration work, but do not rename existing
-  historical plans just to enforce a naming convention.
+- Put plans in `docs/plans/` — no other location (not `docs/superpowers/plans/`,
+  not project subdirectories, not alongside specs).
+- **Always** use a date-prefixed filename: `YYYY-MM-DD-<descriptive-name>.md`.
+  The date is the creation date of the plan.
+- Do not rename existing historical plans just to enforce a naming convention.
 
 ## Required Plan Sections
 
