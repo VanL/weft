@@ -244,7 +244,7 @@ def pid_is_live(pid: int | None) -> bool:
         return False
 
     try:
-        return process.status() != psutil.STATUS_ZOMBIE
+        return bool(process.status() != psutil.STATUS_ZOMBIE)
     except psutil.ZombieProcess:
         return False
     except psutil.AccessDenied:
