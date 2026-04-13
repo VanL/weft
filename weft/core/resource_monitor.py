@@ -18,13 +18,13 @@ from simplebroker import BrokerTarget, Queue
 
 logger = logging.getLogger(__name__)
 
-_psutil_module: Any | None
+_psutil_imported: Any | None
 try:  # pragma: no cover - psutil optional at import time
-    import psutil as _psutil_module
+    import psutil as _psutil_imported
 except Exception:  # pragma: no cover
-    _psutil_module = None
+    _psutil_imported = None
 
-psutil: Any | None = _psutil_module
+psutil: Any | None = _psutil_imported
 
 PsutilProcess = Any
 
