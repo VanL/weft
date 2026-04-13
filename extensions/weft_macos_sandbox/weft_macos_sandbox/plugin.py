@@ -82,6 +82,8 @@ class MacOSSandboxRunner:
         cancel_requested: Callable[[], bool] | None = None,
         on_worker_started: Callable[[int | None], None] | None = None,
         on_runtime_handle_started: Callable[[RunnerHandle], None] | None = None,
+        on_stdout_chunk: Callable[[str, bool], None] | None = None,
+        on_stderr_chunk: Callable[[str, bool], None] | None = None,
     ) -> RunnerOutcome:
         command, stdin_data = prepare_command_invocation(
             self._process_target,
@@ -128,6 +130,8 @@ class MacOSSandboxRunner:
             cancel_requested=cancel_requested,
             on_worker_started=on_worker_started,
             on_runtime_handle_started=on_runtime_handle_started,
+            on_stdout_chunk=on_stdout_chunk,
+            on_stderr_chunk=on_stderr_chunk,
             stop_runtime=_stop_runtime,
             kill_runtime=_kill_runtime,
             worker_pid=process.pid,

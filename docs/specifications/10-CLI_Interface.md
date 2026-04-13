@@ -155,7 +155,8 @@ This exists so operators can supervise Weft under tools like `systemd`,
 Detached manager bootstrap for `weft run` and `weft manager start` remains a
 separate contract from `manager serve`: it starts the canonical manager through
 the shared bootstrap helper, reports success only after matching pid-plus-registry
-stability is observed, and surfaces early detached-start diagnostics on failure.
+readiness is observed and the detached launcher can still acknowledge success,
+and surfaces early detached-start diagnostics on failure.
 
 ### `init` - Initialize a project
 
@@ -243,7 +244,8 @@ Current manager-control surfaces:
 `weft manager start` is the detached operator wrapper over the same canonical
 bootstrap helper used by `weft run`. It returns success only after the launched
 manager PID is live and the canonical registry record for the same manager
-TID/PID remains stable through a bounded startup window. `weft manager serve`
+TID/PID is present while the detached launcher is still healthy enough to
+acknowledge success. `weft manager serve`
 remains the foreground supervisor path and is not interchangeable with
 `manager start`.
 

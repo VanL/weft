@@ -69,6 +69,7 @@ def process_outbox_message(
         return True, DecodedOutboxValue(decode_result_payload(raw))
 
     if isinstance(envelope, dict) and envelope.get("type") == "stream":
+        stream_name = str(envelope.get("stream") or "stdout")
         encoding = envelope.get("encoding", "text")
         data = envelope.get("data", "")
         if encoding == "base64":
@@ -81,12 +82,14 @@ def process_outbox_message(
             text = str(data)
         if text:
             if emit_stream:
-                typer.echo(text, nl=False)
+                typer.echo(text, err=stream_name == "stderr", nl=False)
             stream_buffer.append(text)
         if envelope.get("final"):
             if emit_stream:
-                typer.echo()
+                typer.echo(err=stream_name == "stderr")
             value = "".join(stream_buffer)
+            if envelope.get("result_transform") == "strip":
+                value = value.strip()
             stream_buffer.clear()
             return True, DecodedOutboxValue(value, emitted=emit_stream)
         return False, None

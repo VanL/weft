@@ -353,11 +353,7 @@ def test_start_manager_builds_detached_launch_from_shared_runtime_invocation(
     )
     monkeypatch.setattr(
         "weft.commands._manager_bootstrap._select_active_manager",
-        lambda context: {"tid": invocation.tid, "pid": fake_process.pid},
-    )
-    monkeypatch.setattr(
-        "weft.commands._manager_bootstrap._manager_record",
-        lambda context, tid, prune_stale=True: {
+        lambda context: {
             "tid": invocation.tid,
             "pid": fake_process.pid,
             "status": "active",
@@ -376,10 +372,6 @@ def test_start_manager_builds_detached_launch_from_shared_runtime_invocation(
     monkeypatch.setattr(
         "weft.commands._manager_bootstrap.time.sleep",
         lambda seconds: None,
-    )
-    monkeypatch.setattr(
-        "weft.commands._manager_bootstrap._MANAGER_STARTUP_STABILITY_WINDOW",
-        0.0,
     )
 
     record, started_here, handle = _start_manager(ctx, verbose=False)
