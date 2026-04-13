@@ -149,6 +149,18 @@ export WEFT_BACKEND_SCHEMA='weft'
 If Postgres is selected without the plugin installed, Weft will fail with an
 install hint for `uv add 'weft[pg]'`.
 
+#### Quick Comparison
+
+| | SQLite (default) | Postgres |
+|---|---|---|
+| Setup | Zero config | Requires running Postgres |
+| Concurrency | Single-writer (fine for most workloads) | Full MVCC |
+| Persistence | File on disk | Database server |
+| Best for | Local dev, single-machine agents, CI | Multi-host, high-concurrency production |
+
+SQLite is the right default for most users. Switch to Postgres when you need
+multi-host task submission or high write concurrency.
+
 ### Task IDs (TIDs)
 
 Every task receives a unique 64-bit SimpleBroker timestamp (hybrid microseconds + logical counter), typically 19 digits:
@@ -216,6 +228,17 @@ weft-proj-0161025:manager:completed
 ```
 
 Format: `weft-{context_short}-{short_tid}:{name}:{status}[:details]`
+
+## Going Deeper
+
+| Topic | Where to look |
+|-------|--------------|
+| Agent tasks (LLM-powered) | [Agent Runtime spec](docs/specifications/13-Agent_Runtime.md) |
+| Pipeline composition | [Pipeline spec](docs/specifications/12-Pipeline_Composition_and_UX.md) |
+| TaskSpec schema reference | [TaskSpec spec](docs/specifications/02-TaskSpec.md) |
+| Queue patterns and state | [Message Flow spec](docs/specifications/05-Message_Flow_and_State.md) |
+| System invariants | [Invariants spec](docs/specifications/07-System_Invariants.md) |
+| Runner plugins (Docker, sandbox) | [Core Components spec](docs/specifications/01-Core_Components.md) |
 
 ## Command Reference
 
