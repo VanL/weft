@@ -1087,7 +1087,27 @@ def cmd_run(
     persistent_override: bool | None,
     autostart_enabled: bool,
 ) -> int:
-    """Execute an inline target or a TaskSpec JSON file."""
+    """Execute a command, function, task spec, or pipeline.
+
+    Four execution modes (mutually exclusive):
+
+    \b
+      weft run COMMAND [ARGS...]        Run a shell command
+      weft run --function mod:fn        Call a Python function
+      weft run --spec task.json         Run a TaskSpec file or stored spec
+      weft run --pipeline pipe.json     Run a pipeline spec
+
+    \b
+    Common patterns:
+      weft run echo "hello"                     Simple command
+      weft run --timeout 60 --memory 512 heavy  With resource limits
+      weft run --no-wait long-task.sh            Fire and forget
+      printf "data" | weft run -- processor     Pipe stdin
+      weft run --function mymod:fn --arg x      Function with args
+
+    By default, waits for the task to complete and prints output.
+    Use --no-wait to submit and return immediately (prints TID).
+    """
     if pipeline is not None:
         if spec is not None or command or function:
             raise typer.BadParameter(
