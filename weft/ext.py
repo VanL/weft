@@ -123,6 +123,8 @@ class TaskRunnerBackend(Protocol):
         cancel_requested: Callable[[], bool] | None = None,
         on_worker_started: Callable[[int | None], None] | None = None,
         on_runtime_handle_started: Callable[[RunnerHandle], None] | None = None,
+        on_stdout_chunk: Callable[[str, bool], None] | None = None,
+        on_stderr_chunk: Callable[[str, bool], None] | None = None,
     ) -> RunnerOutcome: ...
 
     def start_session(self) -> CommandSession: ...

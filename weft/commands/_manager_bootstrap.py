@@ -42,7 +42,6 @@ from weft.manager_process import run_manager_process
 _MANAGER_POLL_INTERVAL = 0.05
 _MANAGER_TASK_CLASS_PATH = "weft.core.manager.Manager"
 _MANAGER_STARTUP_TIMEOUT = 10.0
-_MANAGER_STARTUP_STABILITY_WINDOW = 0.5
 _MANAGER_STARTUP_LOG_DIRNAME = "manager-startup"
 _LAUNCHER_SIGNAL_SUCCESS = "SUCCESS"
 _LAUNCHER_SIGNAL_ABORT = "ABORT"
@@ -594,39 +593,27 @@ def _start_manager(
 
     deadline = time.time() + _MANAGER_STARTUP_TIMEOUT
     competing_record: dict[str, Any] | None = None
-    stable_since: float | None = None
     while time.time() < deadline:
         selected_record = _select_active_manager(context)
         if selected_record is not None:
             if selected_record.get("tid") != manager_tid:
                 competing_record = selected_record
             else:
-                record = _manager_record(context, manager_tid)
-                record_pid = record.get("pid") if isinstance(record, dict) else None
                 if (
-                    isinstance(record, dict)
-                    and record.get("status") == "active"
-                    and is_canonical_manager_record(record)
-                    and record_pid == launch.pid
+                    selected_record.get("status") == "active"
+                    and is_canonical_manager_record(selected_record)
+                    and selected_record.get("pid") == launch.pid
                     and _is_pid_alive(launch.pid)
                 ):
-                    now = time.time()
-                    if stable_since is None:
-                        stable_since = now
-                    elif now - stable_since >= _MANAGER_STARTUP_STABILITY_WINDOW:
-                        try:
-                            _acknowledge_manager_launch_success(launch)
-                        except RuntimeError as exc:
-                            typer.echo(str(exc), err=True)
-                            raise typer.Exit(code=1) from exc
-                        _cleanup_startup_stderr(launch.stderr_path)
-                        if verbose:
-                            _emit_manager_registry_snapshot(record)
-                        return record, True, None
-                else:
-                    stable_since = None
-        else:
-            stable_since = None
+                    try:
+                        _acknowledge_manager_launch_success(launch)
+                    except RuntimeError as exc:
+                        typer.echo(str(exc), err=True)
+                        raise typer.Exit(code=1) from exc
+                    _cleanup_startup_stderr(launch.stderr_path)
+                    if verbose:
+                        _emit_manager_registry_snapshot(selected_record)
+                    return selected_record, True, None
 
         if launch.launcher_process.poll() is not None:
             if competing_record is not None:

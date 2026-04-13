@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import time
 
 import pytest
@@ -122,6 +123,81 @@ def test_result_stream_outputs_streamed_task_once(workdir, weft_harness) -> None
 
     assert rc == 0
     assert out == "stream-once"
+    assert err == ""
+
+
+def test_result_stream_attaches_to_running_command_and_emits_live_output(
+    workdir,
+    weft_harness,
+) -> None:
+    rc, out, err = run_cli(
+        "run",
+        "--no-wait",
+        "--stream-output",
+        "--",
+        sys.executable,
+        "-c",
+        (
+            "import time; "
+            "print('first', flush=True); "
+            "time.sleep(2); "
+            "print('second', flush=True)"
+        ),
+        cwd=workdir,
+        harness=weft_harness,
+    )
+    assert rc == 0, err
+    tid = out.strip()
+    weft_harness.register_tid(tid)
+
+    rc, out, err = run_cli(
+        "result",
+        tid,
+        "--stream",
+        "--timeout",
+        "1",
+        cwd=workdir,
+        harness=weft_harness,
+    )
+
+    assert rc == 124
+    assert out == "first"
+    assert "Timed out after" in err
+    assert f"waiting for task {tid}" in err
+    weft_harness.wait_for_completion(tid)
+
+
+def test_result_streamed_command_preserves_trimmed_result_shape(
+    workdir,
+    weft_harness,
+) -> None:
+    rc, out, err = run_cli(
+        "run",
+        "--no-wait",
+        "--stream-output",
+        "--",
+        sys.executable,
+        "-c",
+        ("print('first'); print('second')"),
+        cwd=workdir,
+        harness=weft_harness,
+    )
+    assert rc == 0, err
+    tid = out.strip()
+    weft_harness.register_tid(tid)
+    weft_harness.wait_for_completion(tid)
+
+    rc, out, err = run_cli(
+        "result",
+        tid,
+        "--timeout",
+        "5",
+        cwd=workdir,
+        harness=weft_harness,
+    )
+
+    assert rc == 0
+    assert out == "first\nsecond"
     assert err == ""
 
 

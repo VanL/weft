@@ -20,7 +20,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from multiprocessing.process import BaseProcess
 from multiprocessing.queues import Queue as MPQueue
-from typing import Any, TextIO
+from typing import Any, TextIO, cast
 
 import weft.core.agents  # noqa: F401 - register built-in agent runtimes
 from simplebroker import BrokerTarget
@@ -31,6 +31,10 @@ from weft.core.agent_runtime import (
     start_agent_runtime_session,
 )
 from weft.core.resource_monitor import ResourceMetrics, load_resource_monitor
+from weft.core.runners.subprocess_runner import (
+    prepare_command_invocation,
+    run_monitored_subprocess,
+)
 from weft.core.targets import execute_command_target, execute_function_target
 from weft.core.tasks.agent_session_protocol import (
     make_ready_response,
@@ -250,11 +254,23 @@ class HostTaskRunner:
         cancel_requested: Callable[[], bool] | None = None,
         on_worker_started: Callable[[int | None], None] | None = None,
         on_runtime_handle_started: Callable[[RunnerHandle], None] | None = None,
+        on_stdout_chunk: Callable[[str, bool], None] | None = None,
+        on_stderr_chunk: Callable[[str, bool], None] | None = None,
     ) -> RunnerOutcome:
         """Execute a work item with optional lifecycle hooks.
 
         Spec: [RM-5], [RM-5.1] (resource monitor polling and limit enforcement)
         """
+        if self._spec_data["type"] == "command":
+            return self._run_command_with_hooks(
+                work_item,
+                cancel_requested=cancel_requested,
+                on_worker_started=on_worker_started,
+                on_runtime_handle_started=on_runtime_handle_started,
+                on_stdout_chunk=on_stdout_chunk,
+                on_stderr_chunk=on_stderr_chunk,
+            )
+
         result_queue = self._ctx.Queue()
         process = self._ctx.Process(
             target=_worker_entry,
@@ -422,6 +438,84 @@ class HostTaskRunner:
         outcome.worker_pid = worker_pid
         outcome.runtime_handle = outcome.runtime_handle or runtime_handle
         return outcome
+
+    def _run_command_with_hooks(
+        self,
+        work_item: Any,
+        *,
+        cancel_requested: Callable[[], bool] | None = None,
+        on_worker_started: Callable[[int | None], None] | None = None,
+        on_runtime_handle_started: Callable[[RunnerHandle], None] | None = None,
+        on_stdout_chunk: Callable[[str, bool], None] | None = None,
+        on_stderr_chunk: Callable[[str, bool], None] | None = None,
+    ) -> RunnerOutcome:
+        process_target_obj = self._spec_data.get("process_target")
+        if not isinstance(process_target_obj, str) or not process_target_obj:
+            raise TypeError("process_target must be a non-empty command string")
+
+        command, stdin_data = prepare_command_invocation(
+            process_target_obj,
+            work_item,
+            args=cast(Sequence[Any] | None, self._spec_data.get("args")),
+        )
+
+        env_vars: dict[str, str] = dict(os.environ)
+        env_override = self._spec_data.get("env") or {}
+        if isinstance(env_override, Mapping):
+            env_vars.update({str(k): str(v) for k, v in env_override.items()})
+        else:
+            raise TypeError("Spec env must be a mapping of string keys to values")
+
+        working_dir_obj = self._spec_data.get("working_dir")
+        cwd_value: str | None = str(working_dir_obj) if working_dir_obj else None
+
+        creation_flags = 0
+        if sys.platform == "win32":
+            creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP
+
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE if stdin_data is not None else None,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            cwd=cwd_value,
+            env=env_vars,
+            creationflags=creation_flags,
+        )
+
+        runtime_handle = _host_handle(process.pid)
+        if runtime_handle is None:
+            raise RuntimeError("Command process did not expose a PID")
+
+        def _stop_runtime() -> None:
+            terminate_process_tree(process.pid or -1, timeout=0.2)
+
+        def _kill_runtime() -> None:
+            kill_process_tree(process.pid or -1, timeout=0.2)
+
+        return run_monitored_subprocess(
+            process=process,
+            stdin_data=stdin_data,
+            timeout=self._timeout,
+            limits=self._limits,
+            monitor_class=self._monitor_class,
+            monitor_interval=self._monitor_interval,
+            monitor=None,
+            db_path=self._db_path,
+            config=self._config,
+            runtime_handle=runtime_handle,
+            cancel_requested=cancel_requested,
+            on_worker_started=on_worker_started,
+            on_runtime_handle_started=on_runtime_handle_started,
+            on_stdout_chunk=on_stdout_chunk,
+            on_stderr_chunk=on_stderr_chunk,
+            stop_runtime=_stop_runtime,
+            kill_runtime=_kill_runtime,
+            worker_pid=process.pid,
+        )
 
     @staticmethod
     def _stop_process(process: BaseProcess, *, timeout: float = 0.2) -> None:

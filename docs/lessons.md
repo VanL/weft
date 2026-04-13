@@ -274,7 +274,10 @@ runbook needs to become stricter.
 - For background control-plane bootstrap, "registry entry appeared once" is not
   a sufficient success criterion. Detached startup has to prove an independent
   lifecycle boundary and then prove that the expected pid and canonical registry
-  record stay live through a bounded startup window before returning success.
+  record are live at the same time the detached launcher still accepts success
+  acknowledgement. Fixed startup sleep windows are a poor substitute because
+  they make repeated manager-start stress tests pay latency that is not tied to
+  real readiness.
 - If a detached child can fail before steady-state logging is durable, startup
   stderr or exit status must be captured in the bootstrap path itself. Otherwise
   later status reconciliation can only infer failure after the fact.

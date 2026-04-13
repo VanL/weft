@@ -8,6 +8,7 @@ Spec references:
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
@@ -115,18 +116,31 @@ class TaskRunner:
         cancel_requested: Callable[[], bool] | None = None,
         on_worker_started: Callable[[int | None], None] | None = None,
         on_runtime_handle_started: Callable[[RunnerHandle], None] | None = None,
+        on_stdout_chunk: Callable[[str, bool], None] | None = None,
+        on_stderr_chunk: Callable[[str, bool], None] | None = None,
     ) -> RunnerOutcome:
         """Execute *work_item* with optional lifecycle hooks.
 
         Spec: [CC-3], [RM-5.1]
         """
         self._plugin.validate_taskspec(self._taskspec_payload, preflight=True)
+        kwargs: dict[str, Any] = {
+            "cancel_requested": cancel_requested,
+            "on_worker_started": on_worker_started,
+            "on_runtime_handle_started": on_runtime_handle_started,
+        }
+        if self.supports_stream_callbacks():
+            kwargs["on_stdout_chunk"] = on_stdout_chunk
+            kwargs["on_stderr_chunk"] = on_stderr_chunk
         return self._backend.run_with_hooks(
             work_item,
-            cancel_requested=cancel_requested,
-            on_worker_started=on_worker_started,
-            on_runtime_handle_started=on_runtime_handle_started,
+            **kwargs,
         )
+
+    def supports_stream_callbacks(self) -> bool:
+        """Return whether the backend accepts live stdout/stderr callbacks."""
+        parameters = inspect.signature(self._backend.run_with_hooks).parameters
+        return "on_stdout_chunk" in parameters and "on_stderr_chunk" in parameters
 
     def start_session(self) -> CommandSession:
         """Start an interactive command session for the configured runner."""

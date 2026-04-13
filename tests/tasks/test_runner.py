@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -11,6 +12,7 @@ import pytest
 
 from tests.fixtures.llm_test_models import TEST_MODEL_ID
 from weft.core.resource_monitor import ResourceMetrics
+from weft.core.runners import RunnerOutcome
 from weft.core.runners.subprocess_runner import run_monitored_subprocess
 from weft.core.tasks.runner import TaskRunner
 from weft.core.taskspec import LimitsSection
@@ -114,6 +116,79 @@ def test_run_monitored_subprocess_uses_supplied_monitor(
     assert monitor.stopped is True
     assert outcome.metrics == monitor.metrics
     assert load_calls == 0
+
+
+def test_run_monitored_subprocess_emits_live_chunks_before_exit() -> None:
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys, time; "
+                "print('first', flush=True); "
+                "print('warn', file=sys.stderr, flush=True); "
+                "time.sleep(0.5); "
+                "print('second', flush=True)"
+            ),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+
+    stdout_chunks: list[tuple[str, bool]] = []
+    stderr_chunks: list[tuple[str, bool]] = []
+    first_stdout_seen = threading.Event()
+    outcome_holder: dict[str, RunnerOutcome] = {}
+
+    def _on_stdout_chunk(chunk: str, final: bool) -> None:
+        stdout_chunks.append((chunk, final))
+        if chunk:
+            first_stdout_seen.set()
+
+    def _on_stderr_chunk(chunk: str, final: bool) -> None:
+        stderr_chunks.append((chunk, final))
+
+    def _run() -> None:
+        outcome_holder["outcome"] = run_monitored_subprocess(
+            process=process,
+            stdin_data=None,
+            timeout=5.0,
+            limits=None,
+            monitor_class=None,
+            monitor_interval=0.05,
+            monitor=None,
+            db_path=None,
+            config=None,
+            runtime_handle=RunnerHandle(runner_name="host", runtime_id="live-stream"),
+            cancel_requested=None,
+            on_worker_started=None,
+            on_runtime_handle_started=None,
+            on_stdout_chunk=_on_stdout_chunk,
+            on_stderr_chunk=_on_stderr_chunk,
+            stop_runtime=lambda: None,
+            kill_runtime=lambda: None,
+        )
+
+    worker = threading.Thread(target=_run, daemon=True)
+    worker.start()
+    try:
+        assert first_stdout_seen.wait(timeout=0.2), "expected live stdout before exit"
+        assert worker.is_alive(), "process should still be running after first chunk"
+    finally:
+        worker.join(timeout=5.0)
+
+    outcome = outcome_holder["outcome"]
+    assert outcome.status == "ok"
+    assert outcome.value == "first\nsecond"
+    assert outcome.stderr == "warn\n"
+    assert stdout_chunks[0] == ("first\n", False)
+    assert stdout_chunks[-1] == ("", True)
+    assert stderr_chunks[0] == ("warn\n", False)
+    assert stderr_chunks[-1] == ("", True)
 
 
 def _write_descendant_scripts(tmp_path: Path) -> tuple[Path, Path]:

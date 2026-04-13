@@ -141,8 +141,9 @@ Current rules:
 - detached bootstrap launches the real manager runtime through a short-lived
   detached wrapper rather than keeping it as a plain CLI child
 - detached bootstrap returns success only after the launched manager PID is
-  live and the canonical registry record for that same manager TID/PID remains
-  visible through a bounded startup-stability window
+  live, the canonical registry record for that same manager TID/PID is visible,
+  and the detached launcher can still acknowledge success without reporting an
+  early child exit
 - early detached-bootstrap failure surfaces child exit status and startup
   stderr context
 - foreground serve forces `idle_timeout=0.0` for that invocation
