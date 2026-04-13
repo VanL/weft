@@ -4,6 +4,7 @@ Spec references:
 - docs/specifications/10-CLI_Interface.md [CLI-1.2.1]
 - docs/specifications/10-CLI_Interface.md [CLI-1.3]
 - docs/specifications/01-Core_Components.md [CC-3.2]
+- docs/specifications/12-Pipeline_Composition_and_UX.md [PL-5.2], [PL-5.3]
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ import os
 import signal
 import time
 from collections.abc import Iterable
+from dataclasses import replace
 from fnmatch import fnmatchcase
 from typing import Any
 
@@ -35,7 +37,7 @@ from weft.helpers import (
 )
 
 from . import status as status_cmd
-from .result import _load_taskspec_payload
+from ._task_history import load_latest_taskspec_payload, pipeline_status_queue_name
 
 
 def _resolve_context(context_path: str | os.PathLike[str] | None) -> WeftContext:
@@ -139,18 +141,180 @@ def task_status(
 ) -> status_cmd.TaskSnapshot | None:
     ctx = _resolve_context(context_path)
     full_tid = resolve_full_tid(ctx, tid) or tid.strip().lstrip("T")
+    pipeline_snapshot = _latest_pipeline_status_snapshot(ctx, full_tid)
     snapshots = status_cmd._collect_task_snapshots(
         ctx,
         include_terminal=include_terminal,
         tid_filters={full_tid, full_tid[-TASKSPEC_TID_SHORT_LENGTH:]},
     )
-    if not snapshots:
+    base_snapshot = snapshots[0] if snapshots else None
+    if pipeline_snapshot is not None and _prefer_pipeline_snapshot(
+        pipeline_snapshot, base_snapshot
+    ):
+        return _pipeline_task_snapshot(ctx, full_tid, pipeline_snapshot, base_snapshot)
+    if pipeline_snapshot is not None and base_snapshot is not None:
+        return replace(base_snapshot, pipeline_status=pipeline_snapshot)
+    return base_snapshot
+
+
+def _pipeline_snapshot_timestamp(pipeline_status: dict[str, Any]) -> int | None:
+    timestamp_raw = pipeline_status.get("timestamp")
+    if isinstance(timestamp_raw, int):
+        return timestamp_raw
+    if isinstance(timestamp_raw, float):
+        return int(timestamp_raw)
+    if isinstance(timestamp_raw, str) and timestamp_raw.isdigit():
+        return int(timestamp_raw)
+    return None
+
+
+def _prefer_pipeline_snapshot(
+    pipeline_status: dict[str, Any],
+    base_snapshot: status_cmd.TaskSnapshot | None,
+) -> bool:
+    if base_snapshot is None:
+        return True
+    pipeline_timestamp = _pipeline_snapshot_timestamp(pipeline_status)
+    if pipeline_timestamp is None:
+        return False
+    return pipeline_timestamp >= base_snapshot.last_timestamp
+
+
+def _latest_pipeline_status_snapshot(
+    ctx: WeftContext,
+    tid: str,
+) -> dict[str, Any] | None:
+    taskspec_payload = load_latest_taskspec_payload(ctx, tid)
+    if not isinstance(taskspec_payload, dict):
         return None
-    return snapshots[0]
+    status_queue = pipeline_status_queue_name(tid, taskspec_payload)
+    if not isinstance(status_queue, str) or not status_queue:
+        return None
+
+    queue = Queue(
+        status_queue,
+        db_path=ctx.broker_target,
+        persistent=True,
+        config=ctx.broker_config,
+    )
+    latest: dict[str, Any] | None = None
+    for payload, _timestamp in iter_queue_json_entries(queue):
+        payload_tid = payload.get("pipeline_tid")
+        if payload.get("type") != "pipeline_status":
+            continue
+        if isinstance(payload_tid, str) and payload_tid != tid:
+            continue
+        latest = payload
+    return latest
+
+
+def _pipeline_task_snapshot(
+    ctx: WeftContext,
+    tid: str,
+    pipeline_status: dict[str, Any],
+    base_snapshot: status_cmd.TaskSnapshot | None,
+) -> status_cmd.TaskSnapshot:
+    taskspec_payload = load_latest_taskspec_payload(ctx, tid) or {}
+    state = taskspec_payload.get("state") if isinstance(taskspec_payload, dict) else {}
+    state = state if isinstance(state, dict) else {}
+    started_at = (
+        base_snapshot.started_at
+        if base_snapshot is not None
+        else state.get("started_at")
+        if isinstance(state.get("started_at"), int)
+        else None
+    )
+    completed_at = (
+        base_snapshot.completed_at
+        if base_snapshot is not None
+        else state.get("completed_at")
+        if isinstance(state.get("completed_at"), int)
+        else None
+    )
+    timestamp_raw = pipeline_status.get("timestamp")
+    last_timestamp = (
+        int(timestamp_raw)
+        if isinstance(timestamp_raw, int | float | str) and str(timestamp_raw).isdigit()
+        else base_snapshot.last_timestamp
+        if base_snapshot is not None
+        else 0
+    )
+    now_ns = time.time_ns()
+    if isinstance(started_at, int) and not isinstance(completed_at, int):
+        duration = max(0.0, (now_ns - started_at) / 1_000_000_000)
+    elif isinstance(started_at, int) and isinstance(completed_at, int):
+        duration = max(0.0, (completed_at - started_at) / 1_000_000_000)
+    else:
+        duration = None
+
+    status_value = pipeline_status.get("status")
+    status_text = status_value if isinstance(status_value, str) else "created"
+    runner = base_snapshot.runner if base_snapshot is not None else None
+    runtime_handle = base_snapshot.runtime_handle if base_snapshot is not None else None
+    runtime = base_snapshot.runtime if base_snapshot is not None else None
+
+    if base_snapshot is None:
+        mapping_entry = mapping_for_tid(ctx, tid)
+        runner = status_cmd._runner_name_for_snapshot(
+            taskspec=taskspec_payload if isinstance(taskspec_payload, dict) else {},
+            mapping_entry=mapping_entry,
+        )
+        runtime_handle_obj = status_cmd._runtime_handle_from_mapping(
+            mapping_entry or {}
+        )
+        runtime_handle = (
+            runtime_handle_obj.to_dict() if runtime_handle_obj is not None else None
+        )
+        runtime = status_cmd._describe_runtime_handle(runtime_handle_obj)
+        status_text = status_cmd._effective_public_status(
+            status_text,
+            runner_name=runner,
+            mapping_entry=mapping_entry,
+            runtime_description=runtime,
+        )
+
+    activity = pipeline_status.get("activity")
+    waiting_on = pipeline_status.get("waiting_on")
+    if status_text in status_cmd.TERMINAL_STATUSES:
+        activity = None
+        waiting_on = None
+
+    metadata: dict[str, Any] = {}
+    if base_snapshot is not None:
+        metadata.update(base_snapshot.metadata)
+    task_metadata = taskspec_payload.get("metadata")
+    if isinstance(task_metadata, dict):
+        metadata.update(task_metadata)
+    pipeline_name = pipeline_status.get("pipeline_name")
+    if isinstance(pipeline_name, str) and pipeline_name:
+        snapshot_name = pipeline_name
+    elif base_snapshot is not None:
+        snapshot_name = base_snapshot.name
+    else:
+        snapshot_name = str(taskspec_payload.get("name") or tid)
+
+    return status_cmd.TaskSnapshot(
+        tid=tid,
+        tid_short=tid[-TASKSPEC_TID_SHORT_LENGTH:],
+        name=snapshot_name,
+        status=status_text,
+        event="pipeline_status",
+        activity=activity if isinstance(activity, str) and activity else None,
+        waiting_on=waiting_on if isinstance(waiting_on, str) and waiting_on else None,
+        started_at=started_at if isinstance(started_at, int) else None,
+        completed_at=completed_at if isinstance(completed_at, int) else None,
+        last_timestamp=last_timestamp,
+        duration_seconds=duration,
+        runner=runner,
+        runtime_handle=runtime_handle,
+        runtime=runtime,
+        metadata=metadata,
+        pipeline_status=pipeline_status,
+    )
 
 
 def _ctrl_in_for_tid(ctx: WeftContext, tid: str) -> str:
-    taskspec = _load_taskspec_payload(ctx, tid)
+    taskspec = load_latest_taskspec_payload(ctx, tid)
     if taskspec:
         io_section = taskspec.get("io") or {}
         control = io_section.get("control") or {}

@@ -1,4 +1,4 @@
-"""CLI tests for `weft list` and `weft task` commands."""
+"""CLI tests for `weft task list` and `weft task` commands."""
 
 from __future__ import annotations
 
@@ -26,11 +26,11 @@ def _submit_task(workdir, harness) -> str:
     return tid
 
 
-def test_list_and_task_status(workdir, weft_harness) -> None:
+def test_task_list_and_task_status(workdir, weft_harness) -> None:
     tid = _submit_task(workdir, weft_harness)
     weft_harness.wait_for_completion(tid)
 
-    rc, out, err = run_cli("list", "--all", "--json", cwd=workdir)
+    rc, out, err = run_cli("task", "list", "--all", "--json", cwd=workdir)
     assert rc == 0
     data = json.loads(out)
     entry = next(item for item in data if item["tid"] == tid)

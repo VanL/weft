@@ -13,16 +13,20 @@ import pytest
 
 from weft._constants import (
     CONTROL_STOP,
+    INTERNAL_RUNTIME_TASK_CLASS_KEY,
+    INTERNAL_RUNTIME_TASK_CLASS_PIPELINE,
+    INTERNAL_RUNTIME_TASK_CLASS_PIPELINE_EDGE,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MANAGER_CTRL_IN_QUEUE,
     WEFT_MANAGER_CTRL_OUT_QUEUE,
     WEFT_MANAGER_OUTBOX_QUEUE,
+    WEFT_MANAGERS_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
-    WEFT_WORKERS_REGISTRY_QUEUE,
     load_config,
 )
 from weft.core.manager import ManagedChild, Manager
+from weft.core.tasks import Consumer, PipelineEdgeTask, PipelineTask
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 
 
@@ -121,7 +125,7 @@ def test_manager_spawns_child(manager_setup) -> None:
     manager, make_queue = manager_setup
     inbox_queue = make_queue(manager._queue_names["inbox"])
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
-    registry_queue = make_queue(WEFT_WORKERS_REGISTRY_QUEUE)
+    registry_queue = make_queue(WEFT_MANAGERS_REGISTRY_QUEUE)
     drain(log_queue)
     drain(registry_queue)
 
@@ -155,9 +159,81 @@ def test_manager_spawns_child(manager_setup) -> None:
     assert reference["type"] == "large_output"
 
 
+def test_manager_launches_consumer_when_no_internal_task_class_is_set(
+    manager_setup,
+) -> None:
+    manager, _make_queue = manager_setup
+    child_spec = manager._build_child_spec(make_child_spec(), int(time.time_ns()))
+    assert child_spec is not None
+
+    assert manager._resolve_child_task_class(child_spec) is Consumer
+
+
+def test_manager_launches_pipeline_task_for_reserved_internal_class(
+    manager_setup,
+) -> None:
+    manager, _make_queue = manager_setup
+    child_spec = TaskSpec(
+        tid=str(time.time_ns()),
+        name="pipeline-child",
+        spec=SpecSection(
+            type="function",
+            function_target="weft.core.tasks.pipeline:runtime",
+        ),
+        io=IOSection(
+            inputs={"inbox": "P123.inbox"},
+            outputs={"outbox": "P123.outbox"},
+            control={"ctrl_in": "P123.ctrl_in", "ctrl_out": "P123.ctrl_out"},
+        ),
+        state=StateSection(),
+        metadata={
+            INTERNAL_RUNTIME_TASK_CLASS_KEY: INTERNAL_RUNTIME_TASK_CLASS_PIPELINE
+        },
+    )
+
+    assert manager._resolve_child_task_class(child_spec) is PipelineTask
+
+    edge_spec = TaskSpec.model_validate(
+        {
+            **child_spec.model_dump(mode="json"),
+            "metadata": {
+                **child_spec.metadata,
+                INTERNAL_RUNTIME_TASK_CLASS_KEY: INTERNAL_RUNTIME_TASK_CLASS_PIPELINE_EDGE,
+            },
+        }
+    )
+    assert manager._resolve_child_task_class(edge_spec) is PipelineEdgeTask
+
+
+def test_manager_rejects_unknown_internal_task_class(manager_setup) -> None:
+    manager, make_queue = manager_setup
+    child_spec = TaskSpec(
+        tid=str(time.time_ns()),
+        name="bad-child",
+        spec=SpecSection(
+            type="function",
+            function_target="tests.tasks.sample_targets:echo_payload",
+        ),
+        io=IOSection(
+            inputs={"inbox": "bad.inbox"},
+            outputs={"outbox": "bad.outbox"},
+            control={"ctrl_in": "bad.ctrl_in", "ctrl_out": "bad.ctrl_out"},
+        ),
+        state=StateSection(),
+        metadata={INTERNAL_RUNTIME_TASK_CLASS_KEY: "mystery"},
+    )
+
+    launched = manager._launch_child_task(child_spec, None)
+
+    assert launched is False
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    events = [json.loads(item) for item in drain(log_queue)]
+    assert any(event.get("event") == "task_spawn_rejected" for event in events)
+
+
 def test_manager_registry_entries(manager_setup) -> None:
     manager, make_queue = manager_setup
-    registry_queue = make_queue(WEFT_WORKERS_REGISTRY_QUEUE)
+    registry_queue = make_queue(WEFT_MANAGERS_REGISTRY_QUEUE)
     entries = [json.loads(item) for item in drain(registry_queue)]
     relevant = [entry for entry in entries if entry.get("tid") == manager.tid]
     assert len(relevant) == 1
@@ -575,7 +651,7 @@ def test_manager_leadership_yield_drains_nonpersistent_children(
 
     monkeypatch.setattr(manager, "_leader_tid", lambda: lower_leader_tid)
     monkeypatch.setattr(
-        manager, "_unregister_worker", lambda: unregister_calls.append(True)
+        manager, "_unregister_manager", lambda: unregister_calls.append(True)
     )
 
     yielded = manager._maybe_yield_leadership(force=True)
@@ -645,7 +721,7 @@ def test_manager_leadership_ignores_noncanonical_lower_manager(
     manager_setup,
 ) -> None:
     manager, make_queue = manager_setup
-    registry_queue = make_queue(WEFT_WORKERS_REGISTRY_QUEUE)
+    registry_queue = make_queue(WEFT_MANAGERS_REGISTRY_QUEUE)
     lower_tid = str(int(manager.tid) - 1)
     registry_queue.write(
         json.dumps(

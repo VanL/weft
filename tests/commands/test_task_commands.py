@@ -43,6 +43,41 @@ def _make_taskspec(tid: str) -> TaskSpec:
     )
 
 
+def _write_logged_pipeline_task(ctx, tid: str) -> None:
+    log_queue = ctx.queue("weft.log.tasks", persistent=False)
+    log_queue.write(
+        json.dumps(
+            {
+                "event": "task_started",
+                "status": "running",
+                "tid": tid,
+                "taskspec": {
+                    "tid": tid,
+                    "name": "demo-pipeline",
+                    "spec": {
+                        "type": "function",
+                        "function_target": "weft.core.tasks.pipeline:runtime",
+                    },
+                    "io": {
+                        "outputs": {"outbox": f"P{tid}.outbox"},
+                        "control": {
+                            "ctrl_in": f"P{tid}.ctrl_in",
+                            "ctrl_out": f"P{tid}.ctrl_out",
+                        },
+                    },
+                    "state": {"status": "running"},
+                    "metadata": {
+                        "role": "pipeline",
+                        "_weft_pipeline_runtime": {
+                            "queues": {"status": f"P{tid}.status"},
+                        },
+                    },
+                },
+            }
+        )
+    )
+
+
 def _wait_for_worker_pid(parent_pid: int, timeout: float = 5.0) -> int | None:
     psutil = pytest.importorskip("psutil")
     deadline = time.time() + timeout
@@ -311,6 +346,43 @@ def test_kill_tasks_uses_runner_handle_when_available(
     ]
 
 
+def test_task_stop_stops_pipeline_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    ctrl_queue = ctx.queue(f"P{tid}.ctrl_in", persistent=False)
+    _write_logged_pipeline_task(ctx, tid)
+    monkeypatch.setattr(
+        task_cmd, "_await_control_surface", lambda ctx, tid: (None, None)
+    )
+
+    stopped = task_cmd.stop_tasks([tid], context_path=root)
+
+    assert stopped == 1
+    assert ctrl_queue.read_one() == "STOP"
+
+
+def test_task_kill_kills_pipeline_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    ctrl_queue = ctx.queue(f"P{tid}.ctrl_in", persistent=False)
+    _write_logged_pipeline_task(ctx, tid)
+    monkeypatch.setattr(
+        task_cmd, "_await_control_surface", lambda ctx, tid: (None, None)
+    )
+    monkeypatch.setattr(task_cmd, "_kill_via_fallback", lambda _entry: True)
+
+    killed = task_cmd.kill_tasks([tid], context_path=root)
+
+    assert killed == 1
+    assert ctrl_queue.read_one() == "KILL"
+
+
 def test_stop_tasks_does_not_force_terminal_consumer_for_external_runner(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -350,6 +422,8 @@ def test_stop_tasks_does_not_force_terminal_consumer_for_external_runner(
             name="docker-task",
             status="cancelled",
             event="control_stop",
+            activity=None,
+            waiting_on=None,
             started_at=None,
             completed_at=None,
             last_timestamp=time.time_ns(),
@@ -418,6 +492,8 @@ def test_stop_tasks_does_not_force_stop_consumer_without_runner_handle(
             name="host-task",
             status="running",
             event="work_started",
+            activity=None,
+            waiting_on=None,
             started_at=None,
             completed_at=None,
             last_timestamp=time.time_ns(),
@@ -480,6 +556,8 @@ def test_kill_tasks_does_not_force_terminal_consumer_for_external_runner(
             name="sandbox-task",
             status="killed",
             event="control_kill",
+            activity=None,
+            waiting_on=None,
             started_at=None,
             completed_at=None,
             last_timestamp=time.time_ns(),

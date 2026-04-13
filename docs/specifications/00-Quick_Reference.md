@@ -15,6 +15,17 @@ Per-task queues (generated from TID):
 | `T{tid}.ctrl_in` | Control messages (STOP, STATUS, PING) |
 | `T{tid}.ctrl_out` | Control responses |
 
+Per-pipeline queues (generated from pipeline TID):
+
+| Pattern | Purpose |
+|---------|---------|
+| `P{tid}.inbox` | Pipeline input messages |
+| `P{tid}.outbox` | Final pipeline result |
+| `P{tid}.ctrl_in` | Pipeline control messages |
+| `P{tid}.ctrl_out` | Pipeline control replies |
+| `P{tid}.status` | Retained pipeline status snapshots |
+| `P{tid}.events` | Private child-owner coordination |
+
 Global queues:
 
 | Name | Purpose | Persisted in dump? |
@@ -24,15 +35,16 @@ Global queues:
 | `weft.manager.ctrl_in` | Manager control input | Yes |
 | `weft.manager.ctrl_out` | Manager control output | Yes |
 | `weft.manager.outbox` | Manager informational output | Yes |
-| `weft.state.workers` | Active manager registry | No (runtime state) |
+| `weft.state.managers` | Active manager registry | No (runtime state) |
 | `weft.state.tid_mappings` | Short→full TID mappings | No (runtime state) |
 | `weft.state.streaming` | Active streaming sessions | No (runtime state) |
+| `weft.state.pipelines` | Active pipeline registry | No (runtime state) |
 
 Notes:
 - `weft.state.*` queues are runtime state and are excluded from dumps by default.
 - Full queue behaviors are defined in `05-Message_Flow_and_State.md`.
 
-_Implementation mapping_: `weft/_constants.py` (global queue constants), `weft/core/tasks/base.py` (queue wiring), `weft/core/manager.py` (worker registry).
+_Implementation mapping_: `weft/_constants.py` (global queue constants), `weft/core/tasks/base.py` (queue wiring), `weft/core/manager.py` (manager registry), `weft/core/pipelines.py` (pipeline queue compilation), `weft/core/tasks/pipeline.py` (pipeline runtime queues).
 
 ## Task States
 
@@ -72,13 +84,13 @@ Format rules and sanitization live in `01-Core_Components.md`.
 | `WEFT_DIR` | Default project directory |
 | `WEFT_DB` | Database filename |
 | `WEFT_TIMEOUT` | Default task timeout |
-| `WEFT_WORKERS` | Default worker/manager count |
+| `WEFT_MANAGER_LIFETIME_TIMEOUT` | Default manager idle timeout |
 | `WEFT_LOG_LEVEL` | Logging level |
 
 ## Spec Breaking Notes
 
 - Queue renames: `weft.tasks.log` → `weft.log.tasks`, `weft.workers.registry` →
-  `weft.state.workers`, `weft.state.process.tid_mappings` →
+  `weft.state.managers`, `weft.state.process.tid_mappings` →
   `weft.state.tid_mappings`, `weft.state.streaming.sessions` →
   `weft.state.streaming`.
 - Task state peak metrics renamed: `max_*` → `peak_*`.

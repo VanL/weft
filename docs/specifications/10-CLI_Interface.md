@@ -2,958 +2,366 @@
 
 ## Overview [CLI-0]
 
-The Weft CLI follows SimpleBroker's design philosophy: simple, intuitive commands that work with Unix pipes and require zero configuration. The CLI provides straightforward access to task management, queue operations, and system monitoring.
+The Weft CLI is the main operator surface for task submission, inspection,
+control, queue access, and maintenance.
 
-_Implementation snapshot_: Current code implements queue helpers
-(`weft/commands/queue.py`), task submission via `weft run`
-(`weft/commands/run.py`), status/list/result reporting, spec/task/system
-management, and sequential pipeline execution. Task submission always flows
-through SimpleBroker queues: the CLI **Client** builds a validated TaskSpec
-template, enqueues it for the Manager, and the spawn-request message ID becomes
-the task TID. The Client can optionally wait for completion by watching the
-task log/outbox queues. `weft run --spec` also supports `spec.type="agent"`
-TaskSpecs in the current MVP.
+The design intent is conservative:
 
-_Implementation mapping_: `weft/cli.py` (command registration), `weft/commands/run.py`, `weft/commands/status.py`, `weft/commands/result.py`, `weft/commands/queue.py`, `weft/commands/worker.py`, `weft/commands/tasks.py`, `weft/commands/specs.py`, `weft/commands/init.py`, `weft/commands/dump.py`, `weft/commands/load.py`, `weft/commands/tidy.py`, `weft/commands/validate_taskspec.py` (spec validate).
+- keep the core verbs small
+- route real work through the manager and broker
+- make current behavior explicit
+- avoid CLI sugar that hides which project or broker target is in play
 
-_Implemented commands_: `init`, `run`, `status`, `result`, `list`, `queue *`, `worker *`, `task *`, `spec *`, `system *`, `pipeline`.
+_Implementation mapping_: `weft/cli.py` (command registration),
+`weft/commands/run.py`, `weft/commands/status.py`, `weft/commands/result.py`,
+`weft/commands/queue.py`, `weft/commands/manager.py`,
+`weft/commands/tasks.py`, `weft/commands/specs.py`,
+`weft/commands/init.py`, `weft/commands/dump.py`,
+`weft/commands/load.py`, `weft/commands/tidy.py`,
+`weft/commands/validate_taskspec.py`.
+
+See also:
+
+- planned companion:
+  [`10A-CLI_Interface_Planned.md`](10A-CLI_Interface_Planned.md)
+- current CLI-to-code ownership map:
+  [`11-CLI_Architecture_Crosswalk.md`](11-CLI_Architecture_Crosswalk.md)
 
 ## Design Principles [CLI-0.1]
 
-1. **Zero Configuration** - Works immediately with the default broker target for the
-   project (`.weft/broker.db` on SQLite, project-configured target on other backends)
-2. **Simple Verbs** - Use familiar commands: run, status, result, list
-3. **Pipe-Friendly** - Input/output works with standard Unix tools
-4. **JSON Safety** - All commands support `--json` for safe handling
-5. **Exit Codes** - Meaningful codes for scripting (0=success, 1=error, 2=not found)
-6. **SimpleBroker Integration** - Queue operations delegate to SimpleBroker
-7. **Progressive Disclosure** - Power features (pipelines, stored task specs, control) are opt-in; the default path stays minimal.
+1. **Zero-surprise defaults**: current commands should behave predictably from a
+   project root or nested directory.
+2. **Stable verbs**: new capability should prefer existing verbs over a second
+   workflow language.
+3. **Pipe-friendly IO**: commands should compose with normal shell tools.
+4. **Backend-neutral targeting**: CLI surfaces should speak in terms of project
+   context and broker targets, not SQLite-only file assumptions.
+5. **Thin command handlers**: commands should stay close to the runtime and
+   broker semantics they expose.
 
 ## Command Structure [CLI-0.2]
 
-```
-weft [global-options] <command> [command-options] [arguments]
-weft [global-options] task <subcommand> [arguments]
-weft [global-options] spec <subcommand> [arguments]
-weft [global-options] system <subcommand> [arguments]
+```text
+weft <command> [options]
+weft manager <subcommand> [options]
+weft task <subcommand> [options]
+weft spec <subcommand> [options]
+weft queue <subcommand> [options]
+weft system <subcommand> [options]
 ```
 
 ## Global Options [CLI-0.3]
 
-_Implementation mapping_: `weft/cli.py` `main()` callback. The CLI uses Typer
-(not Click) and does not expose `-d`/`-f`/`-q`/`--cleanup`/`--vacuum` as global
-options. Context discovery is per-command via `--context`. `--version` is
-implemented.
+The current root-level global options are intentionally small.
 
-| Option | Description |
-|--------|-------------|
-| `-d, --dir PATH` | Use PATH as the project root (where `.weft/` lives) **[NOT YET IMPLEMENTED as global option; per-command `--context` used instead]** |
-| `-f, --file NAME` | SQLite database filename (default: `.weft/broker.db`) **[NOT YET IMPLEMENTED as global option]** |
-| `-q, --quiet` | Suppress non-error output **[NOT YET IMPLEMENTED as global option; per-command `--quiet` on `init`]** |
-| `--cleanup` | Delete database and exit **[NOT YET IMPLEMENTED]** |
-| `--vacuum` | Clean up completed tasks and exit **[NOT YET IMPLEMENTED; use `weft system tidy`]** |
+_Implementation mapping_: `weft/cli.py` `app` and `main()` callback.
+
+| Option | Current behavior |
+| --- | --- |
 | `--version` | Show version information |
-| `--help` | Show help message |
-
-## Core Commands [CLI-1]
-
-### Task Execution [CLI-1.1]
-
-#### `run` - Execute a task [CLI-1.1.1]
-_Implementation today_: `weft/commands/run.py` always routes execution through the Manager. The Client:
-
-1. Collects CLI options and builds a canonical TaskSpec template (no `tid`, `io`, or `state`).
-2. Validates it locally with `TaskSpec.model_validate(...)` so user errors fail fast.
-3. Enqueues the template on the manager request queue.
-4. Uses the spawn-request message ID returned by SimpleBroker as the task TID.
-
-For TaskSpecs loaded through `--spec`, `weft run` preserves the declared
-`spec.runner`. Inline command/function invocations synthesize TaskSpecs that use
-the default `host` runner.
-
-If `--wait` (current default) is provided the Client then waits for task
-completion using the task log plus task-local queues. Ordinary one-shot runs
-tail `weft.log.tasks` and the outbox until a terminal event appears. Interactive
-command runs use their task-local `outbox`/`ctrl_out` channels for live output
-and terminal completion. When `--no-wait` is provided the CLI simply enqueues
-the request, reports the TID, and returns; the Manager is unaware of the
-distinction.
-
-Interactive command mode is line-oriented. `weft run --interactive` forwards
-stdin lines to the task inbox and renders stdout/stderr from the task-local
-queues. It is intentionally **not** a PTY/TTY terminal-emulation feature; the
-interactive contract is durable queue-mediated IO, not remote terminal fidelity.
-
-```bash
-# Run a command
-weft run ls -la /tmp
-
-# Run from stored task spec
-weft run --spec git-clone
-
-# Run from JSON spec
-weft run --spec task.json
-
-# Run an agent TaskSpec from disk
-weft run --spec review-agent.json
-
-# Run a Python function
-weft run --function mymodule:process_data --arg input.csv --kw mode=fast
-
-# Pipe raw stdin into the initial task input
-echo "data" | weft run -- python process.py
-echo "data" | weft run --spec task.json
-echo "data" | weft run --pipeline etl-job
-
-# With timeout
-weft run --timeout 30 long-task
-
-# With resource limits
-weft run --memory 512 --cpu 50 heavy-task
-```
-
-**Options:**
-- `-s, --spec NAME|PATH` - Execute a task spec by name or JSON file (implemented as `--spec PATH` only; stored-spec name lookup via `weft/commands/specs.py`)
-- `-p, --pipeline NAME|PATH` - Execute a pipeline by name or JSON file
-- `--function MODULE:FUNC` - Execute a Python function by import path
-- `--arg VALUE` - Positional argument for `--function` (repeatable)
-- `--kw KEY=VALUE` - Keyword argument for `--function` (repeatable)
-- `--outbox QUEUE|@alias` - Route final output to the specified queue (implies `--no-wait`) **[NOT YET IMPLEMENTED]**
-- `--timeout SECONDS` - Set execution timeout
-- `--memory MB` - Set memory limit
-- `--cpu PERCENT` - Set CPU limit (0-100)
-- `--env KEY=VALUE` - Set environment variable
-- `--wait` - Wait for completion before returning
-- `--autostart/--no-autostart` - Enable or disable loading autostart manifests from `.weft/autostart/` when the Manager boots for this invocation
-
-`--spec`, `--pipeline`, and `--function` are mutually exclusive with explicit
-command arguments. `weft run` selects exactly one execution target. When
-invoking `--function`, `--arg`/`--kw` may be repeated and can be interleaved;
-`--arg` values preserve order, `--kw` values merge into a dict (last write wins).
-Agent execution is currently available only through TaskSpecs loaded by
-`--spec` (stored or JSON). The current implementation supports `llm` runtime,
-Python tools only, `output_mode` values `text`/`json`/`messages`, and
-persistent tasks when `spec.persistent=true`.
-
-**Piped stdin**
-- When stdin is not a TTY, `weft run` reads it once and treats it as the initial task input.
-- Inline command targets receive piped stdin as command stdin.
-- Inline function targets receive piped stdin as the initial work item (raw text, not auto-parsed JSON).
-- `weft run --spec` applies the same mapping based on `spec.type`.
-- `weft run --pipeline` uses piped stdin as the first stage input only when `--input` is absent.
-- `--input` and piped stdin are mutually exclusive for pipelines.
-- Piped stdin is limited by the active broker max-message-size setting.
-
-**Interactive stdin/stdout**
-- `weft run --interactive` keeps a command task alive and routes follow-up input through `T{tid}.inbox`.
-- Interactive stdout streams on `T{tid}.outbox`; interactive stderr, control replies, and terminal completion stream on `T{tid}.ctrl_out`.
-- Interactive completion is task-local and does not require watching `weft.log.tasks`.
-- Terminal-oriented applications may still run if they behave over streamed stdin/stdout, but Weft does not promise PTY/TTY semantics.
-
-**Resolution rules for NAME|PATH**
-1. If the argument contains a path separator (`/`, `./`, `../`, `~`) or ends
-   with `.json`, treat it as a file path.
-2. Otherwise, treat it as a saved spec name.
-3. If both a saved spec and a file exist with the same bare name, the saved
-   spec wins. This avoids accidentally shadowing vetted saved specs with
-   arbitrary local files. To force a file, use an explicit path (`./name.json`).
+| `--help` | Show root help |
+| `--install-completion` | Install shell completion |
+| `--show-completion` | Print shell completion script |
 
-When `--outbox` is supplied, the CLI resolves `@alias` values to canonical
-queue names before submission. The task writes its final output to the resolved
-outbox queue, `weft run` returns the task TID, and no local result is printed.
+Removed or superseded surfaces:
 
-Autostart manifests live in `.weft/autostart/`. `weft init` materializes the
-directory (unless `--no-autostart` is supplied) so operators can drop manifest
-JSON files that should be launched whenever a manager starts. Manifests declare
-`once` or `ensure` lifecycle policy and point at task specs/pipelines. `weft run
---no-autostart` temporarily disables the feature, allowing one-off runs without
-booting background agents.
+- global `--dir` / `--file` are not part of the current CLI. They were removed
+  as the system moved to backend-neutral broker targeting.
+- project-aware commands use per-command `--context` instead.
+- maintenance actions such as cleanup or compaction live under `weft system`,
+  not as root-level one-off flags.
 
-**Exit codes:**
-- `0` - TaskSpec enqueued successfully (or completed if `--wait`)
-- `1` - Worker unavailable or enqueue failure
-- `2` - Invalid arguments or TaskSpec JSON
+## Submission and Bootstrap [CLI-1.1]
 
-> **Note:** Bare-name shortcuts (for example `weft run git-clone ...`) and additional convenience flags remain planned; today only direct command/function/spec submission is implemented.
+### `run` - Execute a task [CLI-1.1.1]
 
-#### `serve` - Run a foreground Manager [CLI-1.1.2]
-_Implementation mapping_: `weft/commands/serve.py` `serve_command()`, registered in `weft/cli.py` as `weft serve`. The command reuses the canonical manager TaskSpec builder and shared manager runtime path from `weft/commands/_manager_bootstrap.py` and `weft/manager_process.py`.
+`weft run` is the center of gravity for execution. It always routes work
+through the manager path rather than bypassing the runtime.
 
-`weft serve` is the operator entrypoint for `systemd`, `launchd`, and
-`supervisord` style supervision. Unlike `weft worker start`, it does not
-daemonize and return. It runs the canonical manager in the foreground in the
-current process, forcing `idle_timeout=0.0` for that invocation so the manager
-stays alive until explicitly stopped or until leadership yield makes it drain
-and exit. If another live canonical manager already exists for the chosen
-context, `weft serve` exits with code `1` and reports the existing manager
-instead of attaching to it.
+_Implementation mapping_: `weft/commands/run.py` `cmd_run()` and helpers;
+manager bootstrap in `weft/commands/_manager_bootstrap.py`.
 
-```bash
-# Run the canonical manager in the foreground for the current context
-weft serve
+Current behavior:
 
-# Run the canonical manager in the foreground for another project
-weft serve --context /path/to/project
-```
+1. build a TaskSpec template from the CLI input
+2. validate locally so obvious user errors fail fast
+3. enqueue the request on `weft.spawn.requests`
+4. use the spawn-request message ID as the task TID
+5. optionally wait for completion using task-local queues and task-log events
 
-#### `init` - Initialize a project
+Current execution targets:
 
-_Implementation mapping_: `weft/commands/init.py` `cmd_init()`, registered in `weft/cli.py` as `weft init`.
+- inline command
+- `--function MODULE:FUNC`
+- `--spec FILE`
+- `--pipeline NAME|PATH`
 
-```bash
-# Initialize .weft/ in the current directory
-weft init
+Current options:
 
-# Initialize a specific directory
-weft init /path/to/project
-```
+- `--spec FILE`
+- `--pipeline NAME|PATH`
+- `--input VALUE`
+- `--function MODULE:FUNC`
+- `--arg VALUE`
+- `--kw KEY=VALUE`
+- `--timeout SECONDS`
+- `--memory MB`
+- `--cpu PERCENT`
+- `--env KEY=VALUE`
+- `--wait` / `--no-wait`
+- `--interactive`
+- `--autostart` / `--no-autostart`
 
-### Task Monitoring [CLI-1.2]
+Current rules:
 
-#### `status` - Broker status snapshot [CLI-1.2.1]
+- `--spec`, `--pipeline`, and `--function` are mutually exclusive
+- `--spec FILE` always means an explicit TaskSpec JSON path
+- stored pipeline names are resolved only under `--pipeline`
+- inline command and function runs synthesize a TaskSpec using the default
+  `host` runner unless the spec itself says otherwise
+- agent execution is currently available through `--spec FILE` with
+  `spec.type="agent"`
 
-`weft status` answers "how is the system doing?" and can optionally filter task snapshots by TID or status. For detailed per-task inspection use `weft task status`.
+Current stdin behavior:
 
-_Implementation mapping_: `weft/commands/status.py` `cmd_status()`, registered in `weft/cli.py` as `weft status`. Key helpers: `collect_broker_status()`, `_collect_task_snapshots()`, `_collect_manager_records()`, `_watch_task_events()`. Manager registry replay for both `weft status` and `weft list --workers` is normalized through `weft/commands/_manager_bootstrap.py`.
+- non-TTY stdin is read once as initial task input
+- inline command targets receive piped stdin as command stdin
+- inline function targets receive piped stdin as the initial work item
+- pipeline runs use piped stdin as first-stage input when `--input` is absent
 
-_Implementation today_: `weft status` surfaces SimpleBroker metrics for the active project database, manager registry entries, and recent task snapshots from `weft.log.tasks`. Optional filters include TID (full or short), `--status`, and `--all` to include terminal tasks. `--watch` streams task events as they arrive.
+Current interactive behavior:
 
-```bash
-# Default human-readable output
-weft status
+- `--interactive` is queue-mediated line IO, not PTY emulation
+- follow-up input goes through `T{tid}.inbox`
+- stdout goes through `T{tid}.outbox`
+- stderr, status, and terminal control replies go through `T{tid}.ctrl_out`
 
-# JSON payload for scripting
-weft status --json
+### `manager serve` - Run the manager in the foreground [CLI-1.1.2]
 
-# Filter to running tasks
-weft status --status running
+_Implementation mapping_: `weft/commands/serve.py` `serve_command()`,
+registered in `weft/cli.py` as `weft manager serve`.
 
-# Watch a single task
-weft status T1837025672140161024 --watch
+Current behavior:
 
-```
+- runs the canonical manager in the foreground
+- forces the served manager to stay alive until explicitly stopped or until it
+  yields leadership and drains
+- exits with code `1` if another live canonical manager already exists for the
+  same context
 
-**Output fields:**
-- `total_messages` – Total messages across all queues
-- `last_timestamp` – Highest SimpleBroker timestamp observed (text output also shows the relative age)
-- `db_size` – Size of the broker database file in bytes (text output also shows a human-friendly unit)
-- JSON payload nests these under `broker` and includes `managers` and `tasks` arrays summarising registry entries and task snapshots.
-- Task snapshots include runner-facing observability fields:
-  - `runner` – selected runner name
-  - `runtime_handle` – persisted control metadata when available
-  - `runtime` – runner-native status/description payload when available
+This exists so operators can supervise Weft under tools like `systemd`,
+`launchd`, or `supervisord` without a separate runtime entrypoint.
 
-**Options:**
-- `-j, --json` – Emit the payload as JSON
-- `--all` – Include terminal tasks in snapshots
-- `--status STATUS` – Filter task snapshots by status
-- `--watch` – Stream task events as they arrive
-- `--interval SECONDS` – Polling interval for `--watch`
+Detached manager bootstrap for `weft run` and `weft manager start` remains a
+separate contract from `manager serve`: it starts the canonical manager through
+the shared bootstrap helper, reports success only after matching pid-plus-registry
+stability is observed, and surfaces early detached-start diagnostics on failure.
 
-#### `result` - Get task output
+### `init` - Initialize a project
 
-_Implementation mapping_: `weft/commands/result.py` `cmd_result()`, registered in `weft/cli.py` as `weft result`. Key helpers: `_await_single_result()`, `_collect_all_results()`.
+_Implementation mapping_: `weft/commands/init.py` `cmd_init()`, registered in
+`weft/cli.py` as `weft init`.
 
-```bash
-# Get result (blocks until complete)
-weft result T1837025672140161024
+Current behavior:
 
-# With timeout
-weft result T1837025672140161024 --timeout 30
+- `weft init` initializes the current directory
+- `weft init PATH` initializes another directory explicitly
+- `init` does not take `--context`
+- `init` materializes `.weft/` and broker-facing project state for the selected
+  root
 
-# Stream output as it arrives
-weft result T1837025672140161024 --stream
+This is intentionally git-like. `init` chooses or creates the project root;
+other commands operate within an existing root.
 
-# Get all completed results (ignores queues still streaming)
-weft result --all
+## Inspection Commands [CLI-1.2]
 
-# Peek at all results without consuming them
-weft result --all --peek
+### `status` - Show project status [CLI-1.2.1]
 
-# JSON output with metadata
-weft result T1837025672140161024 --json
-```
+_Implementation mapping_: `weft/commands/status.py` `cmd_status()`, registered
+in `weft/cli.py` as `weft status`.
 
-**Options:**
-- `--timeout SECONDS` - Maximum wait time
-- `--stream` - Stream output as it arrives **[Flag accepted but single-task incremental streaming NOT YET IMPLEMENTED; blocks until completion]**
-- `-a, --all` - Get all available (non-streaming) results
-- `--peek` - Inspect `--all` output without consuming queue messages
-- `-j, --json` - Include metadata in JSON format
-- `--error` - Show stderr instead of stdout
+Current behavior:
 
-When `--all` is provided, the CLI enumerates task outbox queues and filters out any queues that are still listed in `weft.state.streaming` (Implementation: `weft/commands/result.py` `_collect_all_results`).
+- summarizes the active context
+- shows manager registry information and task snapshots
+- can emit JSON
+- uses task-log replay plus manager/task registry queues rather than a separate
+  state database
 
-For agent tasks, public outbox payloads remain plain strings or JSON values.
-`weft result TID` does not require a public wrapper format. For persistent
-tasks it uses `work_item_completed` log events to return the next completed
-batch of outbox payloads for that task.
+`weft status` is the project-wide summary command. More specific inspection
+surfaces live under `weft task ...` and `weft result`.
 
-#### `list` - List tasks
+### `result` - Read task output [CLI-1.2]
 
-_Implementation mapping_: `weft/commands/tasks.py` `list_tasks()`, registered in `weft/cli.py` as `weft list`. Uses `status.py` `_collect_task_snapshots()` internally.
+_Implementation mapping_: `weft/commands/result.py` `cmd_result()`,
+`_await_single_result()`, `_collect_all_results()`.
 
-```bash
-# Basic listing
-weft list
+Current behavior:
 
-# With statistics
-weft list --stats
+- `weft result TID` waits for or reads the next completed result for a task
+- `weft result TID --stream` follows unread outbox stream chunks for that one
+  task while still using the same task-log completion and grace rules
+- `weft result --all` aggregates completed outbox results from non-streaming
+  tasks
+- `--peek` inspects `--all` results without consuming them
+- `--error` selects stderr-oriented output where available
+- `--json` includes metadata
+- `--stream` is single-task only and cannot be combined with `--all` or
+  `--json`
 
-# Filter by status
-weft list --status failed
+### `task list`, `task status`, and `task tid` [CLI-1.2]
 
-# Show workers only
-weft list --workers
+_Implementation mapping_: `weft/commands/tasks.py`.
 
-# JSON output
-weft list --json
-```
+Current behavior:
 
-**Output format:**
-```
-NAME                STATUS      STARTED           TIME
-git-clone          running     2024-01-15 14:30  00:02:15
-data-process       completed   2024-01-15 14:25  00:05:43
-analyze-spec       failed      2024-01-15 14:20  00:00:12
+- `weft task list` lists task snapshots and can filter by status or emit JSON
+- `weft task status TID` shows one task, optionally with process information
+- `weft task tid` resolves short TIDs or reverse lookups via the TID-mapping
+  queue
 
-Summary: 1 running, 1 completed, 1 failed
-```
+These commands exist because project-level status and task-level inspection are
+different operator questions.
 
-**Options:**
-- `--stats` - Include per-status summary counts
-- `--status STATUS` - Filter by status
-- `--workers` - Show managers/workers only
-- `-j, --json` - Emit the payload as JSON
+## Control Commands [CLI-1.3]
 
-### Task Operations (`weft task …`) [CLI-1.3]
+_Implementation mapping_: `weft/commands/tasks.py`,
+`weft/commands/manager.py`.
 
-Task lifecycle and operator tooling live under the `task` namespace to keep a
-clear separation between read-only status (`weft status`, `weft list`) and
-state-changing controls. The spec standard is `weft task <subcommand>`.
+Current task-control surfaces:
 
-#### `task stop` - Stop a task gracefully
+- `weft task stop TID`
+- `weft task kill TID`
 
-_Implementation mapping_: `weft/commands/tasks.py` `stop_tasks()`, registered in `weft/cli.py` as `weft task stop`. Supports `--all` and `--pattern`.
+Current manager-control surfaces:
 
-```bash
-weft task stop T1837025672140161024
-weft task stop 0161024  # Short TID
-weft task stop --all    # Stop all tasks
-```
+- `weft manager start`
+- `weft manager stop`
+- `weft manager list`
+- `weft manager status`
 
-#### `task kill` - Force terminate a task
+`weft manager start` is the detached operator wrapper over the same canonical
+bootstrap helper used by `weft run`. It returns success only after the launched
+manager PID is live and the canonical registry record for the same manager
+TID/PID remains stable through a bounded startup window. `weft manager serve`
+remains the foreground supervisor path and is not interchangeable with
+`manager start`.
 
-_Implementation mapping_: `weft/commands/tasks.py` `kill_tasks()`, registered in `weft/cli.py` as `weft task kill`. Supports `--all` and `--pattern`.
-
-```bash
-weft task kill T1837025672140161024
-weft task kill --pattern "analyze"  # Kill matching tasks
-```
-
-Patterned invocations reuse `queue broadcast --pattern 'T*.ctrl_in'` to fan
-control messages to every matching task. Patterns match canonical queue names;
-use `@alias` when you want alias resolution before broadcast.
-
-When a live task has a persisted runner handle, stop/kill flows dispatch
-through the owning runner plugin before falling back to host-PID termination.
-Control flows first wait for the durable terminal task snapshot published
-through `weft.log.tasks`; runtime-handle or PID escalation is a fallback, not
-the primary success signal. This keeps the operator lifecycle surface
-consistent across host and non-host backends without racing the task-owned
-state transition.
-
-## Queue Operations
-
-Direct queue access using SimpleBroker commands:
-
-#### `queue` - Queue operations
-
-_Implementation_: Implemented via `weft/commands/queue.py` (read, write, peek, move, list, watch) with additional helpers for selective broadcast and alias management.
-
-```bash
-# Read from queue
-weft queue read T1837025672140161024.inbox
-
-# Write to queue
-weft queue write T1837025672140161024.ctrl_in "STOP"
-printf "STOP" | weft queue write T1837025672140161024.ctrl_in
-
-# Peek at queue
-weft queue peek T1837025672140161024.reserved
-
-# Move between queues
-weft queue move T1837025672140161024.reserved T1837025672140161024.inbox
-
-# List all queues
-weft queue list
-
-# Watch queue for messages
-weft queue watch T1837025672140161024.outbox
-
-# Broadcast to matching queues using fnmatch-style pattern
-weft queue broadcast STOP --pattern 'T*.ctrl_in'
-printf "STOP" | weft queue broadcast --pattern 'T*.ctrl_in'
-
-# Manage aliases for pipeline wiring
-weft queue alias add agent1.outbox T1837025672140161024.outbox
-weft queue alias add agent2.inbox T1837025672140161024.outbox
-weft queue alias list --target T1837025672140161024.outbox
-weft queue alias remove agent1.outbox
-```
-
-**Notes:**
-- Queue commands delegate directly to SimpleBroker's Queue API while respecting Weft context discovery.
-- `queue write` and `queue broadcast` accept either an explicit message, `-`, or omitted message content from piped stdin. Omitting the message while stdin is a TTY is an error.
-- Broadcast patterns apply to canonical queue names (`T*.ctrl_in`). Use `@alias` when invoking other commands to resolve-friendly names first.
-- Alias commands create durable mappings so multiple agents can rendezvous on a shared queue without extra move steps.
-
-## Worker Management
-
-The `worker` commands manage long-lived Manager instances (Spec: [WA-0]–[WA-4]). The naming of the CLI command remains `worker` for compatibility, even though the runtime role is now called Manager.
-
-_Implementation mapping_: `weft/commands/worker.py` (`start_command`, `stop_command`, `list_command`, `status_command`), registered in `weft/cli.py` under the `worker` sub-app. These wrappers delegate manager bootstrap, registry replay, and STOP / force-stop observation to `weft/commands/_manager_bootstrap.py`.
-
-#### `worker start` – launch a Manager
-
-```bash
-# Start the canonical manager for the current project context
-weft worker start
-
-# Start the canonical manager for another project context
-weft worker start --context /path/to/project
-```
-
-`worker start` is idempotent at the manager level: if a canonical manager is
-already running for the chosen context, the command reports that manager instead
-of launching a second startup path. It remains a detached bootstrap command and
-is not the right `ExecStart` / `ProgramArguments` / `command` target for a
-service manager. Use `weft serve` for supervised foreground operation.
-
-#### `worker stop` – request a worker shutdown
-
-```bash
-# Gracefully stop the worker
-weft worker stop W1837025672140161024
-
-# Force terminate after timeout
-weft worker stop W1837025672140161024 --force --timeout 2
-```
-
-#### `worker list` – view registered workers
-
-```bash
-weft worker list
-weft worker list --json
-```
-
-#### `worker status` – inspect a specific worker
-
-```bash
-weft worker status W1837025672140161024
-weft worker status W1837025672140161024 --json
-
-Worker subcommands operate on the current project context.
-```
-
-#### Manager lifecycle (implicit)
-
-`weft run` ensures a manager is available, starting one automatically when
-needed. Operators who want explicit control can use
-`weft worker start|stop` for detached lifecycle management or `weft serve` for
-foreground supervision. `weft worker start` uses the same canonical bootstrap
-helper as `weft run`.
-`weft worker list|status|stop` and the manager section of `weft status` use the
-same shared lifecycle helper for registry replay and liveness decisions.
-
-_Related plans_: [Manager Bootstrap Unification Plan](../plans/manager-bootstrap-unification-plan.md), [Manager Lifecycle Command Consolidation Plan](../plans/manager-lifecycle-command-consolidation-plan.md), [Weft Serve Supervised Manager Plan](../plans/weft-serve-supervised-manager-plan.md)
-
-## Task Process Tools (`weft task …`)
-
-#### `task status` - Task details (optional process view)
-
-_Implementation mapping_: `weft/commands/tasks.py` `task_status()`, registered in `weft/cli.py` as `weft task status`. Supports `--process`, `--watch`, `--json`.
-
-`weft task status` answers "how is this task doing?" It always targets a
-specific TID.
-
-```bash
-# Show a task status snapshot
-weft task status T1837025672140161024
-
-# Include process metrics (PID/CPU/MEM)
-weft task status T1837025672140161024 --process
-
-# Watch status updates
-weft task status T1837025672140161024 --watch
-```
-
-**Output format (with --process):**
-```
-PID    TID_SHORT  NAME           STATUS    CPU   MEM    TIME
-12345  0161024    git-clone      running   12%   45MB   00:02:31
-```
-
-#### `task tid` - TID operations
-
-_Implementation mapping_: `weft/commands/tasks.py` `task_tid()`, registered in `weft/cli.py` as `weft task tid`. All three modes (short-to-full, `--pid`, `--reverse`) are implemented.
-
-```bash
-# Lookup full TID from short form
-weft task tid 0161024
-
-# Find TID for process
-weft task tid --pid 12345
-
-# Reverse lookup
-weft task tid --reverse T1837025672140161024
-```
+Pattern-based task stop/kill reuse queue broadcast and control messages rather
+than inventing a second control channel.
 
 ## Spec Management (`weft spec …`) [CLI-1.4]
 
-Task specs (single-task) and pipeline specs (multi-stage) are managed under a
-single namespace so authoring/validation stay discoverable without adding
-top-level verbs. Running a stored spec still happens through `weft run`.
+Task specs and pipeline specs share one namespace so authoring stays
+discoverable without adding more top-level verbs.
 
-_Implementation mapping_: `weft/commands/specs.py` (`create_spec`, `list_specs`, `load_spec`, `delete_spec`, `validate_spec`, `generate_spec`), registered in `weft/cli.py` under the `spec` sub-app.
+_Implementation mapping_: `weft/commands/specs.py` (`create_spec`, `list_specs`,
+`load_spec`, `delete_spec`, `validate_spec`, `generate_spec()`), registered in
+`weft/cli.py` under the `spec` sub-app.
 
-#### `spec create` - Store a task or pipeline spec
+Current subcommands:
 
-```bash
-# Create from a TaskSpec JSON
-weft spec create git-clone --type task --file git_clone.json
+- `weft spec create`
+- `weft spec list`
+- `weft spec show`
+- `weft spec delete`
+- `weft spec validate`
+- `weft spec generate`
 
-# Create a pipeline
-weft spec create etl-job --type pipeline \
-  --stage extract:s3_download \
-  --stage transform:clean_data \
-  --stage load:db_insert
+Current rules:
 
-# List / show / delete (all types)
-weft spec list
-weft spec show git-clone --type task
-weft spec delete etl-job --type pipeline
+- task specs run through `weft run --spec FILE`
+- stored pipeline specs run through `weft run --pipeline NAME|PATH`
+- `weft spec list` can show both tasks and pipelines
+- `--type` filters or disambiguates task vs pipeline names
 
-# Run stored specs
-weft run --spec git-clone --arg https://github.com/org/repo
-weft run --pipeline etl-job --input data.csv
-```
+### `spec validate` - Validate a task or pipeline spec [CLI-1.4.1]
 
-`weft spec list` shows both tasks and pipelines. Use `--type` to filter the
-list or disambiguate collisions.
+_Implementation mapping_: `weft/commands/specs.py` `validate_spec()`;
+task-spec runner validation reuses `weft/commands/validate_taskspec.py`
+`cmd_validate_taskspec()` and `weft/core/runner_validation.py`.
 
-**Queue aliases in pipelines**
+Current validation layers:
 
-Pipeline stages may reference SimpleBroker queue aliases using the `@alias`
-syntax when wiring inbox/outbox overrides or when supplying explicit queue
-names for stage inputs.
+- default validation checks the schema only
+- `--load-runner` requires that the named runner plugin can be resolved
+- `--preflight` runs runner-specific availability checks and implies
+  `--load-runner`
 
-Stage definitions may include an optional `io_overrides` object with
-`inputs`/`outputs`/`control` keys. Queue values can use `@alias` and are resolved
-before task submission.
+## Queue Operations [CLI-4]
 
-```jsonc
-{
-  "name": "etl-job",
-  "stages": [
-    {
-      "name": "extract",
-      "task": "s3_download",
-      "io_overrides": {
-        "inputs": {"inbox": "@ingest.inbox"}
-      }
-    }
-  ]
-}
-```
+_Implementation mapping_: `weft/commands/queue.py`, registered in `weft/cli.py`
+under the `queue` sub-app.
 
-#### `spec validate` - Validate a TaskSpec or pipeline spec
+Current queue subcommands:
 
-_Implementation mapping_: `weft/commands/specs.py` `validate_spec()`, registered in `weft/cli.py` as `weft spec validate`. Also available as standalone `weft validate-taskspec` via `weft/commands/validate_taskspec.py` `cmd_validate_taskspec()`.
+- `read`
+- `write`
+- `peek`
+- `move`
+- `list`
+- `watch`
+- `delete`
+- `broadcast`
+- `alias add`
+- `alias remove`
+- `alias list`
 
-```bash
-weft spec validate task.json
-weft spec validate pipeline.json
-```
+These commands intentionally stay close to SimpleBroker behavior. Weft adds
+project resolution, aliases, and task/runtime conventions on top.
 
-#### `validate-taskspec` - Validate a TaskSpec JSON file [CLI-1.4.1]
+## Configuration [CLI-5]
 
-_Implementation mapping_: `weft/cli.py` (`validate_taskspec` command), `weft/commands/validate_taskspec.py` (`cmd_validate_taskspec()`), `weft/core/taskspec.py` (`validate_taskspec()`), `weft/core/runner_validation.py` (`validate_taskspec_runner()`).
+_Implementation mapping_: `weft/_constants.py` `load_config()`,
+`weft/context.py` `build_context()`.
 
-```bash
-weft validate-taskspec task.json
-weft validate-taskspec task.json --load-runner
-weft validate-taskspec task.json --preflight
-```
+Current configuration sources:
 
-**Options:**
-- `--load-runner` - Require that the configured runner plugin can be resolved and loaded
-- `--preflight` - Run runner-specific runtime availability checks; implies `--load-runner`
+- environment variables
+- `.simplebroker.toml`
+- Weft project metadata under `.weft/`
 
-Validation is intentionally layered:
+The CLI should not imply that runtime broker configuration lives in a
+SQLite-only `.weft/broker.db` flag model. That is why the current contract uses
+context discovery plus backend-aware broker resolution.
 
-- default validation is TaskSpec schema-only
-- `--load-runner` adds runner capability/plugin validation
-- `--preflight` adds machine-local runtime checks such as installed binaries or reachable runtimes
+## System Maintenance (`weft system …`) [CLI-6]
 
-#### `spec generate` - Generate skeleton specs
+_Implementation mapping_: `weft/commands/tidy.py` `cmd_tidy()`,
+`weft/commands/dump.py` `cmd_dump()`, `weft/commands/load.py` `cmd_load()`,
+registered in `weft/cli.py` under the `system` sub-app.
 
-_Implementation mapping_: `weft/commands/specs.py` `generate_spec()`, registered in `weft/cli.py` as `weft spec generate`.
+Current subcommands:
 
-```bash
-weft spec generate --type task > task.json
-weft spec generate --type pipeline > pipeline.json
-```
+- `weft system tidy`
+- `weft system dump`
+- `weft system load`
 
-## Batch Processing (Composition)
+Current behavior:
 
-Weft composes with standard Unix tools for batch submission:
+- `system tidy` delegates maintenance/compaction to the active backend
+- `system dump` exports broker state while excluding runtime-only
+  `weft.state.*` queues
+- `system load` imports a dump and returns exit code `3` on alias conflicts
+  before writes begin
+- file-backed sqlite contexts can use snapshot rollback on apply failure
+- non-file-backed backends report partial-apply risk if a failure happens after
+  writes begin
 
-```bash
-# Run a command per line
-cat urls.txt | xargs -n1 weft run fetch-url
+## Scope Boundary
 
-# Parallel execution
-cat files.txt | xargs -P4 -n1 weft run process-file
+Planned CLI follow-ups such as richer result streaming, additional convenience
+flags, and future queue or control ergonomics live in the companion doc:
 
-# JSON TaskSpecs from a file
-cat tasks.jsonl | while read -r line; do weft run --spec <(echo "$line"); done
-```
-
-## Configuration
-
-_Implementation mapping_: `weft/_constants.py` `load_config()` and `weft/context.py` `build_context()`. Configuration is loaded from environment variables and `.simplebroker.toml` (not `.weft/config.json`).
-
-Configuration is stored in `.weft/config.json` and environment variables
-(`WEFT_*`, `BROKER_*`). Operators can edit the file directly or set env vars
-for ephemeral overrides. **[NOTE: `.weft/config.json` is not currently used; configuration comes from environment variables and `.simplebroker.toml`.]**
-
-## System Maintenance (`weft system …`)
-
-Maintenance commands live under a system namespace to keep the core surface
-area minimal.
-
-_Implementation mapping_: `weft/commands/tidy.py` `cmd_tidy()`, `weft/commands/dump.py` `cmd_dump()`, `weft/commands/load.py` `cmd_load()`, registered in `weft/cli.py` under the `system` sub-app.
-
-System dumps exclude `weft.state.*` queues by default (runtime-only state).
-
-```bash
-# Compact the active broker using backend-native maintenance
-weft system tidy
-
-# Dump broker state
-weft system dump --output weft.dump
-
-# Load broker state
-weft system load --input weft.dump
-```
-
-`system tidy` delegates compaction to the active SimpleBroker backend for the
-resolved context.
-
-**Exit codes:** `system load` returns `3` on alias conflicts (existing alias points
-to a different target) so callers can distinguish conflicts from general errors.
-Conflict detection happens before any writes begin. For file-backed sqlite
-contexts, `system load` uses a snapshot rollback on apply failure. For non-file
-backends, an apply-phase failure after writes begin is reported as a possible
-partial import.
-
-## Example Workflows
-
-### Basic Task Execution
-
-```bash
-# Run a simple command
-$ weft run echo "Hello, World!"
-T1837025672140161024
-
-$ weft result T1837025672140161024
-Hello, World!
-```
-
-### Pipeline Processing
-
-```bash
-# Process piped stdin through sequential pipeline stages
-$ cat access.log | weft run --pipeline log-analysis
-T1837025672140161025
-
-$ weft result T1837025672140161025 --json
-```
-
-### Failure Recovery
-
-```bash
-# Check failed tasks
-$ weft list --status failed
-T1837025672140161026: failed (timeout after 30s)
-
-# Inspect the failure
-$ weft queue peek T1837025672140161026.reserved
-
-# Retry with longer timeout
-```
-
-### Batch Processing (Composition)
-
-```bash
-# Process multiple files in parallel
-$ ls *.csv | xargs -P4 -n1 weft run process-csv
-
-$ weft list --stats
-Summary: 8 completed, 2 running
-```
-
-### Emergency Management
-
-```bash
-# Kill all failed tasks (shell-friendly!)
-$ weft list --status failed | awk '{print $1}' | xargs weft task kill
-
-# Or use standard Unix tools directly
-$ pkill -f "weft-.*:failed"
-```
-
-## Environment Variables
-
-Environment variables are listed in
-[00-Quick_Reference.md](00-Quick_Reference.md).
-
-## Exit Codes
-
-- `0` - Success
-- `1` - General error
-- `2` - Not found (task, queue, spec)
-- `124` - Timeout (follows GNU coreutils convention)
-- `130` - Interrupted (Ctrl+C)
-
-## JSON Output Format
-
-All commands support `--json` for structured output:
-
-```json
-{
-  "tid": "1837025672140161024",
-  "tid_short": "0161024",
-  "name": "git-clone",
-  "status": "running",
-  "started_at": 1837025672140161024,
-  "pid": 12345,
-  "resources": {
-    "cpu_percent": 23.5,
-    "memory_mb": 89.2,
-    "open_files": 15
-  },
-  "queues": {
-    "inbox": 0,
-    "reserved": 0,
-    "outbox": 12
-  }
-}
-```
-
-## Shell Completion
-
-_Implementation mapping_: Provided by Typer's built-in completion support (no custom code needed).
-
-Typer provides completion helpers automatically. Use the built-in flags:
-
-```bash
-# Install completion for the current shell
-weft --install-completion
-
-# Show completion script for the current shell
-weft --show-completion
-```
-
-## CLI Implementation Architecture
-
-**[NOTE: The pseudocode below describes a Click-based class pattern that was
-never implemented. The actual CLI uses Typer with function-based commands; see
-`weft/cli.py`. The pseudocode is retained as design intent reference only.]**
-
-### Command Structure
-
-```python
-class WeftCLI:
-    """Main CLI application following Click framework patterns."""
-    
-    def __init__(self):
-        self.context = None  # Set via global options
-        
-    @click.group()
-    @click.option('-d', '--dir', 'context_dir', 
-                  help='Database directory')
-    @click.option('-f', '--file', 'db_file', default='.weft/broker.db',
-                  help='Database filename')
-    @click.option('-q', '--quiet', is_flag=True,
-                  help='Suppress non-error output')
-    @click.pass_context
-    def cli(ctx, context_dir, db_file, quiet):
-        """Weft task execution system."""
-        ctx.ensure_object(dict)
-        ctx.obj['context'] = WeftContext(context_dir) if context_dir else WeftContext()
-        ctx.obj['db_file'] = db_file
-        ctx.obj['quiet'] = quiet
-```
-
-### Command Implementation Pattern
-
-```python
-@cli.command()
-@click.argument('command_args', nargs=-1)
-@click.option('--spec', type=click.File('r'), help='TaskSpec JSON file')
-@click.option('--timeout', type=int, help='Timeout in seconds')
-@click.option('--memory', type=int, help='Memory limit in MB')
-@click.option('--cpu', type=int, help='CPU limit percentage')
-@click.option('--wait', is_flag=True, help='Wait for completion')
-@click.pass_context
-def run(ctx, command_args, spec, timeout, memory, cpu, wait):
-    """Execute a task."""
-    context = ctx.obj['context']
-    
-    if spec:
-        # Load from JSON file
-        taskspec_data = json.load(spec)
-        taskspec = TaskSpec.model_validate(taskspec_data)
-    else:
-        # Create from command arguments
-        taskspec = create_taskspec_from_args(
-            command_args, timeout, memory, cpu
-        )
-    
-    # Submit task
-    task_manager = Client(context)
-    tid = task_manager.submit(taskspec)
-    
-    if wait:
-        result = task_manager.wait_for_completion(tid)
-        click.echo(result)
-    else:
-        click.echo(tid)
-```
-
-### Process Integration
-
-**[NOT YET IMPLEMENTED as a class. Process lookup for tasks uses `weft/commands/tasks.py` `mapping_for_tid()` and TID mapping queue entries. The `ps`-based scanning below is not implemented.]**
-
-```python
-class ProcessIntegration:
-    """Integration with OS process management."""
-    
-    def find_weft_processes(self, pattern: str = None) -> list[dict]:
-        """Find weft processes using ps command."""
-        try:
-            # Use ps to find weft processes
-            cmd = ["ps", "aux"]
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            
-            processes = []
-            for line in result.stdout.splitlines():
-                if "weft-" in line:
-                    process_info = self.parse_ps_line(line)
-                    if not pattern or pattern in process_info['name']:
-                        processes.append(process_info)
-            
-            return processes
-        except Exception as e:
-            raise CLIError(f"Failed to list processes: {e}")
-    
-    def parse_ps_line(self, line: str) -> dict:
-        """Parse ps output line for weft process."""
-        parts = line.split()
-        pid = int(parts[1])
-        
-        # Extract weft info from command
-        command = " ".join(parts[10:])
-        if "weft-" in command:
-            # Parse: weft-{tid_short}:{name}:{status}
-            weft_part = [p for p in parts if p.startswith("weft-")][0]
-            tid_short, name, status = weft_part.split(":", 2)
-            tid_short = tid_short.replace("weft-", "")
-            
-            return {
-                "pid": pid,
-                "tid_short": tid_short,
-                "name": name,
-                "status": status,
-                "cpu": parts[2],
-                "memory": parts[3],
-                "command": command
-            }
-        
-        return {"pid": pid, "command": command}
-```
-
-### TID Resolution
-
-_Implementation mapping_: TID resolution is implemented as functions in `weft/commands/tasks.py` (`resolve_full_tid()`, `task_tid()`) rather than as a class. The queue-based approach matches the spec but uses a simpler functional style.
-
-```python
-class TIDResolver:
-    """Resolve between short and full TIDs."""
-    
-    def __init__(self, context: WeftContext):
-        self.context = context
-        self.mapping_queue = context.get_queue("weft.state.tid_mappings")
-    
-    def resolve_short_tid(self, tid_short: str) -> str:
-        """Resolve short TID to full TID."""
-        # Search mapping queue
-        for msg_str in self.mapping_queue.peek_all():
-            try:
-                mapping = json.loads(msg_str)
-                if mapping.get("short") == tid_short:
-                    return mapping["full"]
-            except (json.JSONDecodeError, KeyError):
-                continue
-        
-        raise CLIError(f"Short TID not found: {tid_short}")
-    
-    def find_tid_by_pid(self, pid: int) -> str:
-        """Find TID for given process ID."""
-        for msg_str in self.mapping_queue.peek_all():
-            try:
-                mapping = json.loads(msg_str)
-                if mapping.get("pid") == pid:
-                    return mapping["full"]
-            except (json.JSONDecodeError, KeyError):
-                continue
-        
-        raise CLIError(f"No TID found for PID: {pid}")
-```
-
-## Summary
-
-The Weft CLI provides a complete interface for task management that:
-- Follows SimpleBroker's proven patterns
-- Works seamlessly with Unix tools
-- Provides safe JSON output for scripting
-- Enables emergency management via process titles
-- Supports both simple and complex workflows
-
-The CLI follows SimpleBroker's command patterns and integrates with standard Unix commands. It supports both simple interactive use and production automation scenarios.
+- [`10A-CLI_Interface_Planned.md`](10A-CLI_Interface_Planned.md)
 
 ## Related Plans
 
-- [`docs/plans/task-lifecycle-stop-drain-audit-plan.md`](../plans/task-lifecycle-stop-drain-audit-plan.md)
-- [`docs/plans/active-control-main-thread-plan.md`](../plans/active-control-main-thread-plan.md)
-- [`docs/plans/piped-input-support-plan.md`](../plans/piped-input-support-plan.md)
-- [`docs/plans/runner-extension-point-plan.md`](../plans/runner-extension-point-plan.md)
-- [`docs/plans/agent-runtime-boundary-cleanup-plan.md`](../plans/agent-runtime-boundary-cleanup-plan.md)
-- [`docs/plans/agent-runtime-implementation-plan.md`](../plans/agent-runtime-implementation-plan.md)
-- [`docs/plans/manager-lifecycle-command-consolidation-plan.md`](../plans/manager-lifecycle-command-consolidation-plan.md)
-- [`docs/plans/persistent-agent-runtime-implementation-plan.md`](../plans/persistent-agent-runtime-implementation-plan.md)
-- [`docs/plans/simplebroker-backend-generalization-plan.md`](../plans/simplebroker-backend-generalization-plan.md)
-- [`docs/plans/weft-backend-neutrality-plan.md`](../plans/weft-backend-neutrality-plan.md)
-- [`docs/plans/postgres-backend-audit-and-shared-test-surface-plan.md`](../plans/postgres-backend-audit-and-shared-test-surface-plan.md)
-- [`docs/plans/taskspec-clean-design-plan.md`](../plans/taskspec-clean-design-plan.md)
+- [`docs/plans/result-stream-implementation-plan.md`](../plans/result-stream-implementation-plan.md)
 
 ## Related Documents
 
-- **[00-Overview_and_Architecture.md](00-Overview_and_Architecture.md)** - System overview and design principles
-- **[01-TaskSpec.md](01-TaskSpec.md)** - Task configuration specification
-- **[02-Core_Components.md](02-Core_Components.md)** - Detailed component architecture
-- **[03-Worker_Architecture.md](03-Worker_Architecture.md)** - Recursive worker model
-- **[04-SimpleBroker_Integration.md](04-SimpleBroker_Integration.md)** - Queue system integration
-- **[09-Implementation_Plan.md](09-Implementation_Plan.md)** - Development roadmap
+- [`04-SimpleBroker_Integration.md`](04-SimpleBroker_Integration.md)
+- [`11-CLI_Architecture_Crosswalk.md`](11-CLI_Architecture_Crosswalk.md)
+- [`12-Pipeline_Composition_and_UX.md`](12-Pipeline_Composition_and_UX.md)
+- [`13-Agent_Runtime.md`](13-Agent_Runtime.md)

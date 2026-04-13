@@ -1,4 +1,11 @@
-"""CLI entry point for Weft."""
+"""Typer entry point for the current Weft CLI surface.
+
+Spec references:
+- docs/specifications/10-CLI_Interface.md [CLI-0], [CLI-0.3], [CLI-1.1]
+- docs/specifications/11-CLI_Architecture_Crosswalk.md [CLI-X0], [CLI-X1]
+"""
+
+from __future__ import annotations
 
 import json
 from pathlib import Path
@@ -7,16 +14,18 @@ from typing import Annotated, Any
 import typer
 
 from ._constants import PROG_NAME, __version__
-from .commands import cmd_init, cmd_status, cmd_tidy, cmd_validate_taskspec
+from .commands import cmd_init, cmd_status, cmd_tidy
+from .commands import manager as manager_cmd
 from .commands import queue as queue_cmd
 from .commands import serve as serve_cmd
 from .commands import specs as spec_cmd
+from .commands import status as status_cmd
 from .commands import tasks as task_cmd
-from .commands import worker as worker_cmd
 from .commands.dump import cmd_dump
 from .commands.load import cmd_load
 from .commands.result import cmd_result
 from .commands.run import cmd_run
+from .commands.validate_taskspec import cmd_validate_taskspec
 
 app = typer.Typer(
     name=PROG_NAME,
@@ -27,7 +36,7 @@ app = typer.Typer(
 )
 
 queue_app = typer.Typer(help="Queue passthrough operations")
-worker_app = typer.Typer(help="Worker lifecycle management")
+manager_app = typer.Typer(help="Manager lifecycle management")
 spec_app = typer.Typer(help="Spec management")
 task_app = typer.Typer(help="Task management")
 system_app = typer.Typer(help="System maintenance")
@@ -355,115 +364,6 @@ def main(
     pass
 
 
-@app.command("validate-taskspec")
-def validate_taskspec(
-    file: Annotated[
-        Path,
-        typer.Argument(
-            help="Path to the TaskSpec JSON file to validate",
-            exists=True,
-            file_okay=True,
-            dir_okay=False,
-            readable=True,
-        ),
-    ],
-    load_runner: Annotated[
-        bool,
-        typer.Option(
-            "--load-runner",
-            help="Require that the configured runner plugin can be loaded",
-        ),
-    ] = False,
-    preflight: Annotated[
-        bool,
-        typer.Option(
-            "--preflight",
-            help="Verify the configured runner runtime is available",
-        ),
-    ] = False,
-) -> None:
-    """Validate a TaskSpec JSON file."""
-    cmd_validate_taskspec(file, load_runner=load_runner, preflight=preflight)
-
-
-@app.command("list")
-def list_tasks(
-    status_filter: Annotated[
-        str | None,
-        typer.Option("--status", help="Filter by task status"),
-    ] = None,
-    include_terminal: Annotated[
-        bool,
-        typer.Option("--all", help="Include completed/failed tasks"),
-    ] = False,
-    workers: Annotated[
-        bool,
-        typer.Option("--workers", help="List managers instead of tasks"),
-    ] = False,
-    stats: Annotated[
-        bool,
-        typer.Option("--stats", help="Summarize counts by status"),
-    ] = False,
-    json_output: Annotated[
-        bool,
-        typer.Option("--json", help="Output as JSON"),
-    ] = False,
-    context_dir: Annotated[
-        Path | None,
-        typer.Option("--context", help="Project root (defaults to auto-discovery)"),
-    ] = None,
-) -> None:
-    if workers:
-        from .commands import status as status_cmd
-        from .commands._manager_bootstrap import _list_manager_records
-
-        context = status_cmd._resolve_context(context_dir)
-        managers = _list_manager_records(
-            context,
-            include_stopped=include_terminal,
-            canonical_only=False,
-        )
-        if json_output:
-            typer.echo(json.dumps(managers, ensure_ascii=False))
-            return
-        if not managers:
-            typer.echo("Managers: none registered")
-            return
-        for mgr in managers:
-            tid = mgr.get("tid")
-            status = mgr.get("status")
-            name = mgr.get("name", "manager")
-            typer.echo(f"{tid} {status} {name}")
-        return
-
-    snapshots = task_cmd.list_tasks(
-        status_filter=status_filter,
-        include_terminal=include_terminal,
-        context_path=context_dir,
-    )
-    if stats:
-        counts: dict[str, int] = {}
-        for snap in snapshots:
-            counts[snap.status] = counts.get(snap.status, 0) + 1
-        if json_output:
-            typer.echo(json.dumps(counts, ensure_ascii=False))
-        else:
-            for status, count in sorted(counts.items()):
-                typer.echo(f"{status}: {count}")
-        return
-
-    if json_output:
-        typer.echo(
-            json.dumps([snap.to_dict() for snap in snapshots], ensure_ascii=False)
-        )
-        return
-    if not snapshots:
-        typer.echo("Tasks: none")
-        return
-    for snap in snapshots:
-        typer.echo(f"{snap.tid} {snap.status} {snap.runner or '-'} {snap.name}")
-
-
 @spec_app.command("create")
 def spec_create(
     name: Annotated[str, typer.Argument(help="Spec name")],
@@ -580,13 +480,44 @@ def spec_validate(
         str | None,
         typer.Option("--type", help="Spec type (task or pipeline)"),
     ] = None,
+    load_runner: Annotated[
+        bool,
+        typer.Option(
+            "--load-runner",
+            help="Require that the configured task runner plugin can be loaded",
+        ),
+    ] = False,
+    preflight: Annotated[
+        bool,
+        typer.Option(
+            "--preflight",
+            help="Verify the configured task runner runtime is available",
+        ),
+    ] = False,
 ) -> None:
     try:
-        normalized = spec_cmd.normalize_spec_type(spec_type) if spec_type else None
-        ok, errors = spec_cmd.validate_spec(file, spec_type=normalized)
+        normalized = (
+            spec_cmd.normalize_spec_type(spec_type)
+            if spec_type
+            else spec_cmd.infer_spec_type(file)
+        )
     except Exception as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=2) from exc
+    if normalized == spec_cmd.SPEC_TYPE_TASK:
+        exit_code = cmd_validate_taskspec(
+            file,
+            load_runner=load_runner,
+            preflight=preflight,
+        )
+        raise typer.Exit(code=exit_code)
+    if load_runner or preflight:
+        typer.echo(
+            "--load-runner and --preflight only apply to task specs",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    ok, errors = spec_cmd.validate_spec(file, spec_type=normalized)
     if ok:
         typer.echo("Spec is valid")
         return
@@ -610,6 +541,60 @@ def spec_generate(
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=2) from exc
     typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+@task_app.command("list")
+def task_list(
+    status_filter: Annotated[
+        str | None,
+        typer.Option("--status", help="Filter by task status"),
+    ] = None,
+    include_terminal: Annotated[
+        bool,
+        typer.Option("--all", help="Include completed/terminal tasks"),
+    ] = False,
+    stats: Annotated[
+        bool,
+        typer.Option("--stats", help="Summarize counts by status"),
+    ] = False,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Output as JSON"),
+    ] = False,
+    context_dir: Annotated[
+        Path | None,
+        typer.Option("--context", help="Project root (defaults to auto-discovery)"),
+    ] = None,
+) -> None:
+    snapshots = task_cmd.list_tasks(
+        status_filter=status_filter,
+        include_terminal=include_terminal,
+        context_path=context_dir,
+    )
+    if stats:
+        counts: dict[str, int] = {}
+        for snap in snapshots:
+            counts[snap.status] = counts.get(snap.status, 0) + 1
+        if json_output:
+            typer.echo(json.dumps(counts, ensure_ascii=False))
+        else:
+            for status, count in sorted(counts.items()):
+                typer.echo(f"{status}: {count}")
+        return
+
+    if json_output:
+        typer.echo(
+            json.dumps([snap.to_dict() for snap in snapshots], ensure_ascii=False)
+        )
+        return
+    if not snapshots:
+        typer.echo("Tasks: none")
+        return
+    for snap in snapshots:
+        activity = f" [{snap.activity}]" if snap.activity else ""
+        typer.echo(
+            f"{snap.tid} {snap.status} {snap.runner or '-'} {snap.name}{activity}"
+        )
 
 
 @task_app.command("status")
@@ -652,8 +637,19 @@ def task_status(
     if process:
         ctx = task_cmd._resolve_context(context_dir)
         mapping = task_cmd.mapping_for_tid(ctx, snapshot.tid) or {}
-        status_payload["pid"] = mapping.get("pid") or mapping.get("task_pid")
-        status_payload["managed_pids"] = mapping.get("managed_pids") or []
+        pid = mapping.get("pid") or mapping.get("task_pid")
+        managed_pids = mapping.get("managed_pids") or []
+        live_managed_pids = [
+            managed_pid
+            for managed_pid in managed_pids
+            if isinstance(managed_pid, int) and status_cmd._pid_alive(managed_pid)
+        ]
+        status_payload["pid"] = pid
+        status_payload["pid_alive"] = (
+            status_cmd._pid_alive(pid) if isinstance(pid, int) else False
+        )
+        status_payload["managed_pids"] = managed_pids
+        status_payload["live_managed_pids"] = live_managed_pids
     if json_output:
         typer.echo(json.dumps(status_payload, ensure_ascii=False))
         return
@@ -661,10 +657,19 @@ def task_status(
         f"{snapshot.tid} {snapshot.status} {snapshot.runner or '-'} "
         f"{snapshot.name} ({snapshot.event})"
     )
+    if snapshot.activity:
+        typer.echo(f"activity: {snapshot.activity}")
+    if snapshot.waiting_on:
+        typer.echo(f"waiting_on: {snapshot.waiting_on}")
     if process:
         pid = status_payload.get("pid")
         managed = status_payload.get("managed_pids")
-        typer.echo(f"pid: {pid} managed_pids: {managed}")
+        pid_state = "live" if status_payload.get("pid_alive") else "dead"
+        live_managed = status_payload.get("live_managed_pids")
+        typer.echo(
+            f"pid: {pid} ({pid_state}) managed_pids: {managed} "
+            f"live_managed_pids: {live_managed}"
+        )
 
 
 @task_app.command("stop")
@@ -814,10 +819,6 @@ def tidy(
 
 @app.command("status")
 def status_command(
-    tid: Annotated[
-        str | None,
-        typer.Argument(help="Optional task ID (full or short) to filter"),
-    ] = None,
     all_tasks: Annotated[
         bool,
         typer.Option("--all", help="Include completed/terminal tasks in the summary"),
@@ -849,7 +850,7 @@ def status_command(
     """Display task, manager, and broker status information."""
 
     exit_code, payload = cmd_status(
-        tid=tid,
+        tid=None,
         include_terminal=all_tasks,
         status_filter=status_filter,
         json_output=json_output,
@@ -1037,7 +1038,11 @@ def run_command(
     ] = False,
     monitor: Annotated[
         bool,
-        typer.Option("--monitor", help="Run TaskSpec in monitor mode (with --spec)"),
+        typer.Option(
+            "--monitor",
+            help="Run TaskSpec in monitor mode (with --spec)",
+            hidden=True,
+        ),
     ] = False,
     continuous: Annotated[
         bool | None,
@@ -1086,8 +1091,21 @@ def run_command(
     raise typer.Exit(code=exit_code)
 
 
-@app.command("serve")
-def serve_cli_command(
+@manager_app.command("start")
+def manager_start_command(
+    context: Annotated[
+        Path | None,
+        typer.Option("--context", help="Weft project directory"),
+    ] = None,
+) -> None:
+    exit_code, payload = manager_cmd.start_command(context_path=context)
+    if payload:
+        typer.echo(payload)
+    raise typer.Exit(code=exit_code)
+
+
+@manager_app.command("serve")
+def manager_serve_command(
     context: Annotated[
         Path | None,
         typer.Option("--context", help="Weft project directory"),
@@ -1101,25 +1119,12 @@ def serve_cli_command(
     raise typer.Exit(code=exit_code)
 
 
-@worker_app.command("start")
-def worker_start_command(
-    context: Annotated[
-        Path | None,
-        typer.Option("--context", help="Weft project directory"),
-    ] = None,
-) -> None:
-    exit_code, payload = worker_cmd.start_command(context_path=context)
-    if payload:
-        typer.echo(payload)
-    raise typer.Exit(code=exit_code)
-
-
-@worker_app.command("stop")
-def worker_stop_command(
-    tid: Annotated[str, typer.Argument(help="Worker TID")],
+@manager_app.command("stop")
+def manager_stop_command(
+    tid: Annotated[str, typer.Argument(help="Manager TID")],
     force: Annotated[
         bool,
-        typer.Option("--force", help="Force terminate the worker process"),
+        typer.Option("--force", help="Force terminate the manager process"),
     ] = False,
     timeout: Annotated[
         float,
@@ -1130,7 +1135,7 @@ def worker_stop_command(
         typer.Option("--context", help="Weft project directory"),
     ] = None,
 ) -> None:
-    exit_code, payload = worker_cmd.stop_command(
+    exit_code, payload = manager_cmd.stop_command(
         tid=tid, force=force, timeout=timeout, context_path=context
     )
     if payload:
@@ -1138,38 +1143,44 @@ def worker_stop_command(
     raise typer.Exit(code=exit_code)
 
 
-@worker_app.command("list")
-def worker_list_command(
+@manager_app.command("list")
+def manager_list_command(
+    include_stopped: Annotated[
+        bool,
+        typer.Option("--all", help="Include stopped managers"),
+    ] = False,
     json_output: Annotated[
         bool,
-        typer.Option("--json", help="Output worker statuses as JSON"),
+        typer.Option("--json", help="Output manager statuses as JSON"),
     ] = False,
     context: Annotated[
         Path | None,
         typer.Option("--context", help="Weft project directory"),
     ] = None,
 ) -> None:
-    exit_code, payload = worker_cmd.list_command(
-        json_output=json_output, context_path=context
+    exit_code, payload = manager_cmd.list_command(
+        json_output=json_output,
+        include_stopped=include_stopped,
+        context_path=context,
     )
     if payload:
         typer.echo(payload)
     raise typer.Exit(code=exit_code)
 
 
-@worker_app.command("status")
-def worker_status_command(
-    tid: Annotated[str, typer.Argument(help="Worker TID")],
+@manager_app.command("status")
+def manager_status_command(
+    tid: Annotated[str, typer.Argument(help="Manager TID")],
     json_output: Annotated[
         bool,
-        typer.Option("--json", help="Output worker status as JSON"),
+        typer.Option("--json", help="Output manager status as JSON"),
     ] = False,
     context: Annotated[
         Path | None,
         typer.Option("--context", help="Weft project directory"),
     ] = None,
 ) -> None:
-    exit_code, payload = worker_cmd.status_command(
+    exit_code, payload = manager_cmd.status_command(
         tid=tid, json_output=json_output, context_path=context
     )
     if payload:
@@ -1236,7 +1247,7 @@ def load_command(
 
 
 app.add_typer(queue_app, name="queue")
-app.add_typer(worker_app, name="worker")
+app.add_typer(manager_app, name="manager")
 app.add_typer(spec_app, name="spec")
 app.add_typer(task_app, name="task")
 app.add_typer(system_app, name="system")

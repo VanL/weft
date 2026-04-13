@@ -178,13 +178,31 @@ def test_process_titles_update(task_factory, unique_tid) -> None:
     task._update_process_title("running")
     task._update_process_title("completed")
 
-    assert any(title.endswith(":init") for title in calls)
-    assert any(title.endswith(":running") for title in calls)
+    assert any(title.endswith(":init:waiting") for title in calls)
+    assert any(title.endswith(":running:waiting") for title in calls)
     assert any(title.endswith(":completed") for title in calls)
     expected_prefix = (
         f"weft-ctx-root-{unique_tid[-TASKSPEC_TID_SHORT_LENGTH:]}:observability-task:"
     )
     assert any(title.startswith(expected_prefix) for title in calls)
+
+
+def test_process_title_keeps_status_token_and_uses_activity_detail(
+    task_factory, unique_tid
+) -> None:
+    calls: list[str] = []
+    fake_module = types.SimpleNamespace(setproctitle=lambda title: calls.append(title))
+    spec = build_function_spec(unique_tid, enable_title=False)
+    task = task_factory(spec)
+    task._setproctitle_module = fake_module
+    task.enable_process_title = True
+    task.taskspec.mark_started(pid=task._task_pid)
+    task.taskspec.mark_running(pid=task._task_pid)
+    task._set_activity("waiting", waiting_on=task._queue_names["inbox"])
+    task._update_process_title("running")
+
+    assert calls
+    assert any(title.endswith(":running:waiting") for title in calls)
 
 
 def test_state_logging_records_events(broker_env, task_factory, unique_tid) -> None:
@@ -252,6 +270,33 @@ def test_control_stop_logged_and_cancelled(
     assert statuses[-1] == "cancelled"
     assert task.should_stop is True
     assert task.taskspec.state.status == "cancelled"
+
+
+def test_activity_change_emits_one_lightweight_log_event(
+    broker_env, task_factory, unique_tid
+) -> None:
+    _db_path, make_queue = broker_env
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    drain_queue(log_queue)
+
+    spec = build_function_spec(unique_tid)
+    task = task_factory(spec)
+    drain_queue(log_queue)
+
+    task._set_activity("working")
+    task._set_activity("working")
+    task._set_activity("waiting", waiting_on=task._queue_names["inbox"])
+
+    records = [json.loads(msg) for msg in drain_queue(log_queue)]
+    activity_records = [
+        record for record in records if record["event"] == "task_activity"
+    ]
+
+    assert len(activity_records) == 2
+    assert activity_records[0]["activity"] == "working"
+    assert "waiting_on" not in activity_records[0]
+    assert activity_records[1]["activity"] == "waiting"
+    assert activity_records[1]["waiting_on"] == task._queue_names["inbox"]
 
 
 def test_poll_reporting_emits_periodic_events(
@@ -327,6 +372,8 @@ def test_state_logging_respects_redaction(
     records = [json.loads(msg) for msg in drain_queue(log_queue)]
     assert records, "expected state change records"
     for record in records:
+        if "taskspec" not in record:
+            continue
         dump = record["taskspec"]
         assert dump["spec"]["env"]["SECRET"] == "[REDACTED]"
         assert dump["spec"]["env"]["VISIBLE"] == "keep"
@@ -353,6 +400,8 @@ def test_state_logging_respects_redaction(
     records = [json.loads(msg) for msg in drain_queue(log_queue)]
     assert records, "expected state change records"
     for record in records:
+        if "taskspec" not in record:
+            continue
         dump = record["taskspec"]
         assert dump["spec"]["env"]["SECRET"] == "value"
         assert dump["spec"]["env"]["VISIBLE"] == "keep"

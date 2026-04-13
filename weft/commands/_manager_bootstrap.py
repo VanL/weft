@@ -1,7 +1,7 @@
 """Shared manager lifecycle helpers for CLI commands.
 
 Spec references:
-- docs/specifications/03-Worker_Architecture.md [WA-1], [WA-3]
+- docs/specifications/03-Manager_Architecture.md [MA-1], [MA-3]
 - docs/specifications/05-Message_Flow_and_State.md [MF-7]
 """
 
@@ -12,7 +12,9 @@ import json
 import subprocess
 import sys
 import time
-from typing import Any
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, NoReturn
 
 import typer
 
@@ -22,11 +24,12 @@ from weft._constants import (
     QUEUE_CTRL_OUT_SUFFIX,
     WEFT_MANAGER_LIFETIME_TIMEOUT,
     WEFT_MANAGER_OUTBOX_QUEUE,
+    WEFT_MANAGERS_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
-    WEFT_WORKERS_REGISTRY_QUEUE,
 )
 from weft.context import WeftContext
+from weft.core.spawn_requests import generate_spawn_request_timestamp
 from weft.core.taskspec import TaskSpec, resolve_taskspec_payload
 from weft.helpers import (
     is_canonical_manager_record,
@@ -37,22 +40,48 @@ from weft.helpers import (
 from weft.manager_process import run_manager_process
 
 _MANAGER_POLL_INTERVAL = 0.05
+_MANAGER_TASK_CLASS_PATH = "weft.core.manager.Manager"
+_MANAGER_STARTUP_TIMEOUT = 10.0
+_MANAGER_STARTUP_STABILITY_WINDOW = 0.5
+_MANAGER_STARTUP_LOG_DIRNAME = "manager-startup"
+_LAUNCHER_SIGNAL_SUCCESS = "SUCCESS"
+_LAUNCHER_SIGNAL_ABORT = "ABORT"
+
+
+@dataclass(frozen=True)
+class _ManagerRuntimeInvocation:
+    """Canonical manager runtime inputs shared by detached and foreground launchers.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-3]
+    """
+
+    task_cls_path: str
+    tid: str
+    spec: TaskSpec
+
+
+@dataclass(frozen=True)
+class _DetachedManagerLaunch:
+    """Bootstrap metadata for a detached manager runtime."""
+
+    pid: int
+    stderr_path: Path
+    launcher_process: subprocess.Popen[str]
 
 
 def _generate_tid(context: WeftContext) -> str:
-    """Generate a unique TID via broker timestamp (Spec: [WA-2])."""
-    queue = Queue(
-        WEFT_SPAWN_REQUESTS_QUEUE,
-        db_path=context.broker_target,
-        persistent=False,
-        config=context.broker_config,
+    """Generate a unique TID via broker timestamp (Spec: [MA-2])."""
+    return str(
+        generate_spawn_request_timestamp(
+            context.broker_target,
+            config=context.broker_config,
+        )
     )
-    return str(queue.generate_timestamp())
 
 
 def _registry_queue(context: WeftContext) -> Queue:
     return Queue(
-        WEFT_WORKERS_REGISTRY_QUEUE,
+        WEFT_MANAGERS_REGISTRY_QUEUE,
         db_path=context.broker_target,
         persistent=False,
         config=context.broker_config,
@@ -235,14 +264,39 @@ def _build_manager_spec(
     return TaskSpec.model_validate(resolved_payload, context={"auto_expand": False})
 
 
-def _start_manager(
-    context: WeftContext, *, verbose: bool
-) -> tuple[dict[str, Any], bool, subprocess.Popen[bytes] | None]:
-    """Launch a new Manager process and wait for its registry entry (Spec: [WA-3])."""
-    manager_tid = _generate_tid(context)
-    manager_spec = _build_manager_spec(context, manager_tid)
+def _build_manager_runtime_invocation(
+    context: WeftContext,
+    *,
+    idle_timeout_override: float | None = None,
+) -> _ManagerRuntimeInvocation:
+    """Build canonical manager runtime inputs for all launcher modes.
 
-    spec_json = manager_spec.model_dump_json()
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-3]
+    """
+
+    manager_tid = _generate_tid(context)
+    manager_spec = _build_manager_spec(
+        context,
+        manager_tid,
+        idle_timeout_override=idle_timeout_override,
+    )
+    return _ManagerRuntimeInvocation(
+        task_cls_path=_MANAGER_TASK_CLASS_PATH,
+        tid=manager_tid,
+        spec=manager_spec,
+    )
+
+
+def _build_manager_process_command(
+    context: WeftContext,
+    invocation: _ManagerRuntimeInvocation,
+) -> list[str]:
+    """Encode the shared manager runtime invocation for detached startup.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-3]
+    """
+
+    spec_json = invocation.spec.model_dump_json()
     broker_target_json = serialize_broker_target(context.broker_target)
     config_json = json.dumps(context.config)
 
@@ -252,66 +306,368 @@ def _start_manager(
     spec_b64 = base64.b64encode(spec_json.encode("utf-8")).decode("ascii")
     config_b64 = base64.b64encode(config_json.encode("utf-8")).decode("ascii")
 
-    cmd = [
+    return [
         sys.executable,
         "-m",
         "weft.manager_process",
-        "weft.core.manager.Manager",
+        invocation.task_cls_path,
         broker_target_b64,
         spec_b64,
         config_b64,
         str(_MANAGER_POLL_INTERVAL),
     ]
 
-    process = subprocess.Popen(
-        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+
+def _build_manager_detached_launcher_command(
+    context: WeftContext,
+    invocation: _ManagerRuntimeInvocation,
+    stderr_path: Path,
+) -> list[str]:
+    """Build the detached-launch wrapper command for manager bootstrap.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-3]
+    """
+
+    payload = {
+        "command": _build_manager_process_command(context, invocation),
+        "stderr_path": str(stderr_path),
+    }
+    payload_b64 = base64.b64encode(json.dumps(payload).encode("utf-8")).decode("ascii")
+    return [
+        sys.executable,
+        "-m",
+        "weft.manager_detached_launcher",
+        payload_b64,
+    ]
+
+
+def _manager_startup_stderr_path(context: WeftContext, tid: str) -> Path:
+    startup_dir = context.logs_dir / _MANAGER_STARTUP_LOG_DIRNAME
+    startup_dir.mkdir(parents=True, exist_ok=True)
+    return startup_dir / f"manager-{tid}.stderr.log"
+
+
+def _parse_launcher_event(line: str) -> dict[str, Any] | None:
+    text = line.strip()
+    if not text:
+        return None
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _collect_launcher_events(stdout_text: str) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    for line in stdout_text.splitlines():
+        payload = _parse_launcher_event(line)
+        if payload is not None:
+            events.append(payload)
+    return events
+
+
+def _tail_startup_stderr(path: Path, *, limit: int = 4000) -> str | None:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return None
+    if not text:
+        return None
+    return text[-limit:].strip() or None
+
+
+def _cleanup_startup_stderr(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+    except OSError:
+        return
+
+
+def _launch_detached_manager(
+    context: WeftContext,
+    invocation: _ManagerRuntimeInvocation,
+) -> _DetachedManagerLaunch:
+    stderr_path = _manager_startup_stderr_path(context, invocation.tid)
+    launcher_process = subprocess.Popen(
+        _build_manager_detached_launcher_command(context, invocation, stderr_path),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
     )
+    first_line = ""
+    if launcher_process.stdout is not None:
+        first_line = launcher_process.stdout.readline()
+    event = _parse_launcher_event(first_line)
+    if event is None or event.get("event") != "spawned":
+        _terminate_manager_process(launcher_process, timeout=1.0)
+        stdout_text = first_line
+        stderr_text = ""
+        try:
+            stdout_tail, stderr_text = launcher_process.communicate(timeout=1.0)
+            stdout_text += stdout_tail
+        except subprocess.TimeoutExpired:
+            stdout_text = stdout_text.strip()
+            stderr_text = (
+                stderr_text.strip()
+                or "Detached manager launcher produced no startup event."
+            )
+        error = "Detached manager launcher did not report a spawned manager PID."
+        for payload in _collect_launcher_events(stdout_text):
+            if payload.get("event") == "spawn_failed":
+                reported_error = payload.get("error")
+                if isinstance(reported_error, str) and reported_error:
+                    error = reported_error
+                    break
+        details = [f"Failed to start Manager process: {error}"]
+        if stderr_text.strip():
+            details.append(stderr_text.strip())
+        raise RuntimeError("\n".join(details))
+
+    pid = event.get("pid")
+    if not isinstance(pid, int) or pid <= 0:
+        _terminate_manager_process(launcher_process, timeout=1.0)
+        try:
+            launcher_process.communicate(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            pass
+        raise RuntimeError(
+            "Failed to start Manager process: detached launcher reported an invalid PID."
+        )
+
+    reported_path = event.get("stderr_path")
+    launch_stderr_path = (
+        Path(reported_path)
+        if isinstance(reported_path, str) and reported_path
+        else stderr_path
+    )
+    return _DetachedManagerLaunch(
+        pid=pid,
+        stderr_path=launch_stderr_path,
+        launcher_process=launcher_process,
+    )
+
+
+def _send_launcher_signal(
+    process: subprocess.Popen[str], signal_name: str
+) -> tuple[bool, str | None]:
+    if process.poll() is not None:
+        return False, None
+    if process.stdin is None:
+        return False, "Detached manager launcher stdin is unavailable."
+    try:
+        process.stdin.write(f"{signal_name}\n")
+        process.stdin.flush()
+    except BrokenPipeError:
+        return False, None
+    except OSError as exc:
+        return False, str(exc)
+    return True, None
+
+
+def _communicate_launcher(
+    process: subprocess.Popen[str], *, timeout: float
+) -> tuple[list[dict[str, Any]], str]:
+    try:
+        stdout_text, stderr_text = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _terminate_manager_process(process, timeout=1.0)
+        stdout_text, stderr_text = process.communicate()
+    return _collect_launcher_events(stdout_text), stderr_text.strip()
+
+
+def _format_manager_start_failure(
+    *,
+    message: str,
+    launch: _DetachedManagerLaunch,
+    launcher_events: list[dict[str, Any]],
+    launcher_stderr: str,
+) -> str:
+    parts = [message]
+    child_exit = next(
+        (
+            payload
+            for payload in launcher_events
+            if payload.get("event") == "child_exit"
+        ),
+        None,
+    )
+    if child_exit is not None:
+        returncode = child_exit.get("returncode")
+        if isinstance(returncode, int):
+            parts.append(
+                f"Detached manager exited early with return code {returncode}."
+            )
+    elif launch.launcher_process.returncode is not None:
+        parts.append(
+            f"Detached manager launcher exited with return code "
+            f"{launch.launcher_process.returncode}."
+        )
+
+    stderr_tail = _tail_startup_stderr(launch.stderr_path)
+    if stderr_tail:
+        parts.append("Startup stderr tail:")
+        parts.append(stderr_tail)
+    elif launcher_stderr:
+        parts.append("Detached launcher stderr:")
+        parts.append(launcher_stderr)
+    return "\n".join(parts)
+
+
+def _fail_manager_start(
+    *,
+    launch: _DetachedManagerLaunch,
+    message: str,
+    abort_launcher: bool,
+) -> NoReturn:
+    launcher_events: list[dict[str, Any]] = []
+    launcher_stderr = ""
+    if abort_launcher:
+        _send_launcher_signal(launch.launcher_process, _LAUNCHER_SIGNAL_ABORT)
+    if launch.launcher_process.poll() is not None or abort_launcher:
+        launcher_events, launcher_stderr = _communicate_launcher(
+            launch.launcher_process,
+            timeout=1.0,
+        )
+    typer.echo(
+        _format_manager_start_failure(
+            message=message,
+            launch=launch,
+            launcher_events=launcher_events,
+            launcher_stderr=launcher_stderr,
+        ),
+        err=True,
+    )
+    raise typer.Exit(code=1)
+
+
+def _acknowledge_manager_launch_success(launch: _DetachedManagerLaunch) -> None:
+    sent, error = _send_launcher_signal(
+        launch.launcher_process,
+        _LAUNCHER_SIGNAL_SUCCESS,
+    )
+    launcher_events, launcher_stderr = _communicate_launcher(
+        launch.launcher_process,
+        timeout=2.0,
+    )
+    if sent and launch.launcher_process.returncode == 0:
+        return
+    message = "Detached manager launcher did not exit cleanly after success."
+    if error:
+        message = f"{message} {error}"
+    raise RuntimeError(
+        _format_manager_start_failure(
+            message=message,
+            launch=launch,
+            launcher_events=launcher_events,
+            launcher_stderr=launcher_stderr,
+        )
+    )
+
+
+def _start_manager(
+    context: WeftContext, *, verbose: bool
+) -> tuple[dict[str, Any], bool, subprocess.Popen[Any] | None]:
+    """Launch a new Manager process and wait for its registry entry (Spec: [MA-3])."""
+    invocation = _build_manager_runtime_invocation(context)
+    manager_tid = invocation.tid
+    launch = _launch_detached_manager(context, invocation)
 
     if verbose:
         typer.echo(
             json.dumps(
                 {
                     "manager_tid": manager_tid,
-                    "pid": process.pid,
+                    "pid": launch.pid,
                     "db": context.broker_display_target,
                 },
                 ensure_ascii=False,
             )
         )
 
-    deadline = time.time() + 10.0
+    deadline = time.time() + _MANAGER_STARTUP_TIMEOUT
     competing_record: dict[str, Any] | None = None
+    stable_since: float | None = None
     while time.time() < deadline:
-        record = _select_active_manager(context)
-        if record:
-            if record.get("tid") != manager_tid:
-                competing_record = record
+        selected_record = _select_active_manager(context)
+        if selected_record is not None:
+            if selected_record.get("tid") != manager_tid:
+                competing_record = selected_record
             else:
-                if verbose:
-                    _emit_manager_registry_snapshot(record)
-                return record, True, process
-        if process.poll() is not None:
+                record = _manager_record(context, manager_tid)
+                record_pid = record.get("pid") if isinstance(record, dict) else None
+                if (
+                    isinstance(record, dict)
+                    and record.get("status") == "active"
+                    and is_canonical_manager_record(record)
+                    and record_pid == launch.pid
+                    and _is_pid_alive(launch.pid)
+                ):
+                    now = time.time()
+                    if stable_since is None:
+                        stable_since = now
+                    elif now - stable_since >= _MANAGER_STARTUP_STABILITY_WINDOW:
+                        try:
+                            _acknowledge_manager_launch_success(launch)
+                        except RuntimeError as exc:
+                            typer.echo(str(exc), err=True)
+                            raise typer.Exit(code=1) from exc
+                        _cleanup_startup_stderr(launch.stderr_path)
+                        if verbose:
+                            _emit_manager_registry_snapshot(record)
+                        return record, True, None
+                else:
+                    stable_since = None
+        else:
+            stable_since = None
+
+        if launch.launcher_process.poll() is not None:
             if competing_record is not None:
+                _cleanup_startup_stderr(launch.stderr_path)
                 return competing_record, False, None
             refreshed_record = _select_active_manager(context)
             if refreshed_record is not None:
                 return refreshed_record, False, None
-            break
+            _fail_manager_start(
+                launch=launch,
+                message="Failed to start Manager process; detached launcher exited before startup stabilized.",
+                abort_launcher=False,
+            )
+        if not _is_pid_alive(launch.pid):
+            if competing_record is not None:
+                _send_launcher_signal(launch.launcher_process, _LAUNCHER_SIGNAL_ABORT)
+                _communicate_launcher(launch.launcher_process, timeout=1.0)
+                _cleanup_startup_stderr(launch.stderr_path)
+                return competing_record, False, None
+            _fail_manager_start(
+                launch=launch,
+                message="Failed to start Manager process; detached manager PID exited before startup stabilized.",
+                abort_launcher=True,
+            )
         time.sleep(0.1)
 
     if competing_record is not None:
+        _send_launcher_signal(launch.launcher_process, _LAUNCHER_SIGNAL_ABORT)
+        _communicate_launcher(launch.launcher_process, timeout=1.0)
+        _cleanup_startup_stderr(launch.stderr_path)
         return competing_record, False, None
 
-    _terminate_manager_process(process)
-    typer.echo(
-        "Failed to start Manager process; no registry entry appeared.",
-        err=True,
+    _fail_manager_start(
+        launch=launch,
+        message="Failed to start Manager process; no stable canonical registry entry appeared.",
+        abort_launcher=True,
     )
-    raise typer.Exit(code=1)
 
 
 def _terminate_manager_process(
-    process: subprocess.Popen[bytes], *, timeout: float = 1.0
+    process: subprocess.Popen[Any], *, timeout: float = 1.0
 ) -> None:
     if process.poll() is not None:
         return
@@ -351,7 +707,7 @@ def _emit_manager_registry_snapshot(record: dict[str, Any]) -> None:
 
 def _ensure_manager(
     context: WeftContext, *, verbose: bool
-) -> tuple[dict[str, Any], bool, subprocess.Popen[bytes] | None]:
+) -> tuple[dict[str, Any], bool, subprocess.Popen[Any] | None]:
     """Guarantee a canonical active manager exists, starting one if necessary."""
     record = _select_active_manager(context)
     if record:
@@ -376,16 +732,14 @@ def _serve_manager_foreground(context: WeftContext) -> tuple[int, str | None]:
             f"Manager {existing.get('tid')} already running (pid {existing.get('pid')})",
         )
 
-    manager_tid = _generate_tid(context)
-    manager_spec = _build_manager_spec(
+    invocation = _build_manager_runtime_invocation(
         context,
-        manager_tid,
         idle_timeout_override=0.0,
     )
     run_manager_process(
-        "weft.core.manager.Manager",
+        invocation.task_cls_path,
         context.broker_target,
-        manager_spec,
+        invocation.spec,
         context.config,
         _MANAGER_POLL_INTERVAL,
     )
@@ -395,7 +749,7 @@ def _serve_manager_foreground(context: WeftContext) -> tuple[int, str | None]:
 def _stop_manager(
     context: WeftContext,
     record: dict[str, Any] | None,
-    process: subprocess.Popen[bytes] | None = None,
+    process: subprocess.Popen[Any] | None = None,
     *,
     tid: str | None = None,
     timeout: float = 5.0,

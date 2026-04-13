@@ -22,8 +22,6 @@ from multiprocessing.process import BaseProcess
 from multiprocessing.queues import Queue as MPQueue
 from typing import Any, TextIO
 
-import psutil
-
 import weft.core.agents  # noqa: F401 - register built-in agent runtimes
 from simplebroker import BrokerTarget
 from weft._constants import ACTIVE_CONTROL_POLL_INTERVAL
@@ -48,7 +46,7 @@ from weft.ext import (
     RunnerPlugin,
     RunnerRuntimeDescription,
 )
-from weft.helpers import kill_process_tree, terminate_process_tree
+from weft.helpers import kill_process_tree, pid_is_live, terminate_process_tree
 
 
 @dataclass(slots=True)
@@ -678,7 +676,7 @@ class HostRunnerPlugin:
     def describe(self, handle: RunnerHandle) -> RunnerRuntimeDescription | None:
         primary_pid = handle.primary_pid
         state = "missing"
-        if primary_pid is not None and psutil.pid_exists(primary_pid):
+        if primary_pid is not None and pid_is_live(primary_pid):
             state = "running"
         return RunnerRuntimeDescription(
             runner_name="host",

@@ -1,4 +1,4 @@
-"""Tests for worker CLI command helpers."""
+"""Tests for manager CLI command helpers."""
 
 from __future__ import annotations
 
@@ -12,8 +12,8 @@ import pytest
 import weft.commands._manager_bootstrap as manager_lifecycle
 from simplebroker import Queue
 from tests.helpers.test_backend import prepare_project_root
-from weft._constants import WEFT_WORKERS_REGISTRY_QUEUE
-from weft.commands import worker as worker_cmd
+from weft._constants import WEFT_MANAGERS_REGISTRY_QUEUE
+from weft.commands import manager as manager_cmd
 from weft.context import build_context
 
 pytestmark = [pytest.mark.shared]
@@ -24,7 +24,7 @@ def test_start_command_delegates_to_shared_bootstrap(tmp_path, monkeypatch):
     context = build_context(context_root)
     calls: list[str] = []
 
-    monkeypatch.setattr(worker_cmd, "build_context", lambda spec_context=None: context)
+    monkeypatch.setattr(manager_cmd, "build_context", lambda spec_context=None: context)
 
     def _fake_ensure(context_arg, *, verbose):
         assert context_arg is context
@@ -36,9 +36,9 @@ def test_start_command_delegates_to_shared_bootstrap(tmp_path, monkeypatch):
             None,
         )
 
-    monkeypatch.setattr(worker_cmd, "_ensure_manager", _fake_ensure)
+    monkeypatch.setattr(manager_cmd, "_ensure_manager", _fake_ensure)
 
-    exit_code, message = worker_cmd.start_command(context_path=context_root)
+    exit_code, message = manager_cmd.start_command(context_path=context_root)
 
     assert exit_code == 0
     assert message == "Started manager 1761000000000000000 (pid 12345)"
@@ -49,9 +49,9 @@ def test_start_command_reports_existing_manager(tmp_path, monkeypatch):
     context_root = prepare_project_root(tmp_path / "proj")
     context = build_context(context_root)
 
-    monkeypatch.setattr(worker_cmd, "build_context", lambda spec_context=None: context)
+    monkeypatch.setattr(manager_cmd, "build_context", lambda spec_context=None: context)
     monkeypatch.setattr(
-        worker_cmd,
+        manager_cmd,
         "_ensure_manager",
         lambda context_arg, *, verbose: (
             {"tid": "1761000000000000001", "pid": 54321},
@@ -60,7 +60,7 @@ def test_start_command_reports_existing_manager(tmp_path, monkeypatch):
         ),
     )
 
-    exit_code, message = worker_cmd.start_command(context_path=context_root)
+    exit_code, message = manager_cmd.start_command(context_path=context_root)
 
     assert exit_code == 0
     assert message == "Manager 1761000000000000001 already running (pid 54321)"
@@ -71,7 +71,7 @@ def test_stop_command_delegates_to_shared_lifecycle_helper(tmp_path, monkeypatch
     context = build_context(context_root)
     calls: list[tuple[object, object, object, object, object]] = []
 
-    monkeypatch.setattr(worker_cmd, "build_context", lambda spec_context=None: context)
+    monkeypatch.setattr(manager_cmd, "build_context", lambda spec_context=None: context)
 
     def fake_stop_manager(
         context_arg,
@@ -87,9 +87,9 @@ def test_stop_command_delegates_to_shared_lifecycle_helper(tmp_path, monkeypatch
         assert stop_if_absent is False
         return True, None
 
-    monkeypatch.setattr(worker_cmd, "_stop_manager", fake_stop_manager)
+    monkeypatch.setattr(manager_cmd, "_stop_manager", fake_stop_manager)
 
-    exit_code, message = worker_cmd.stop_command(
+    exit_code, message = manager_cmd.stop_command(
         tid="1761000000000000001",
         force=False,
         timeout=0.1,
@@ -105,9 +105,9 @@ def test_stop_command_rewrites_timeout_message(tmp_path, monkeypatch):
     context_root = prepare_project_root(tmp_path / "ctx")
     context = build_context(context_root)
 
-    monkeypatch.setattr(worker_cmd, "build_context", lambda spec_context=None: context)
+    monkeypatch.setattr(manager_cmd, "build_context", lambda spec_context=None: context)
     monkeypatch.setattr(
-        worker_cmd,
+        manager_cmd,
         "_stop_manager",
         lambda *args, **kwargs: (
             False,
@@ -115,7 +115,7 @@ def test_stop_command_rewrites_timeout_message(tmp_path, monkeypatch):
         ),
     )
 
-    exit_code, message = worker_cmd.stop_command(
+    exit_code, message = manager_cmd.stop_command(
         tid="1761000000000000001",
         force=False,
         timeout=0.1,
@@ -123,23 +123,23 @@ def test_stop_command_rewrites_timeout_message(tmp_path, monkeypatch):
     )
 
     assert exit_code == 1
-    assert message == "Worker 1761000000000000001 did not stop within 0.1s"
+    assert message == "Manager 1761000000000000001 did not stop within 0.1s"
 
 
-def test_stop_command_writes_stop_for_active_worker(tmp_path):
+def test_stop_command_writes_stop_for_active_manager(tmp_path):
     context_root = prepare_project_root(tmp_path / "ctx")
     context = build_context(context_root)
     tid = "1761000000000000001"
 
     registry_queue = Queue(
-        WEFT_WORKERS_REGISTRY_QUEUE,
+        WEFT_MANAGERS_REGISTRY_QUEUE,
         db_path=context.broker_target,
         persistent=False,
         config=context.config,
     )
     registry_queue.write(json.dumps({"tid": tid, "status": "active"}))
 
-    exit_code, message = worker_cmd.stop_command(
+    exit_code, message = manager_cmd.stop_command(
         tid=tid,
         force=False,
         timeout=0.1,
@@ -158,20 +158,20 @@ def test_stop_command_writes_stop_for_active_worker(tmp_path):
     assert ctrl_queue.read_one() == "STOP"
 
 
-def test_stop_command_noops_for_stopped_worker(tmp_path):
+def test_stop_command_noops_for_stopped_manager(tmp_path):
     context_root = prepare_project_root(tmp_path / "ctx")
     context = build_context(context_root)
     tid = "1761000000000000002"
 
     registry_queue = Queue(
-        WEFT_WORKERS_REGISTRY_QUEUE,
+        WEFT_MANAGERS_REGISTRY_QUEUE,
         db_path=context.broker_target,
         persistent=False,
         config=context.config,
     )
     registry_queue.write(json.dumps({"tid": tid, "status": "stopped"}))
 
-    exit_code, message = worker_cmd.stop_command(
+    exit_code, message = manager_cmd.stop_command(
         tid=tid,
         force=False,
         timeout=0.1,
@@ -195,7 +195,7 @@ def test_stop_command_uses_registry_control_queue(tmp_path):
     tid = "1761000000000000003"
 
     registry_queue = Queue(
-        WEFT_WORKERS_REGISTRY_QUEUE,
+        WEFT_MANAGERS_REGISTRY_QUEUE,
         db_path=context.broker_target,
         persistent=False,
         config=context.config,
@@ -205,12 +205,12 @@ def test_stop_command_uses_registry_control_queue(tmp_path):
             {
                 "tid": tid,
                 "status": "active",
-                "ctrl_in": f"worker.{tid}.ctrl_in",
+                "ctrl_in": f"manager.{tid}.ctrl_in",
             }
         )
     )
 
-    exit_code, message = worker_cmd.stop_command(
+    exit_code, message = manager_cmd.stop_command(
         tid=tid,
         force=False,
         timeout=0.1,
@@ -221,7 +221,7 @@ def test_stop_command_uses_registry_control_queue(tmp_path):
     assert message is not None
     assert "did not stop" in message
     ctrl_queue = Queue(
-        f"worker.{tid}.ctrl_in",
+        f"manager.{tid}.ctrl_in",
         db_path=context.broker_target,
         persistent=False,
         config=context.config,
@@ -234,7 +234,7 @@ def test_stop_command_stop_if_absent_still_sends_stop(tmp_path):
     context = build_context(context_root)
     tid = "1761000000000000004"
 
-    exit_code, message = worker_cmd.stop_command(
+    exit_code, message = manager_cmd.stop_command(
         tid=tid,
         force=False,
         timeout=0.1,
@@ -259,12 +259,12 @@ def test_stop_command_waits_for_pid_exit_after_stopped_status(
     context_root = prepare_project_root(tmp_path / "ctx")
     context = build_context(context_root)
 
-    monkeypatch.setattr(worker_cmd, "build_context", lambda spec_context=None: context)
+    monkeypatch.setattr(manager_cmd, "build_context", lambda spec_context=None: context)
     monkeypatch.setattr(
-        worker_cmd, "_stop_manager", lambda *args, **kwargs: (True, None)
+        manager_cmd, "_stop_manager", lambda *args, **kwargs: (True, None)
     )
 
-    exit_code, message = worker_cmd.stop_command(
+    exit_code, message = manager_cmd.stop_command(
         tid="1761000000000000005",
         force=False,
         timeout=1.0,
@@ -277,7 +277,7 @@ def test_stop_command_waits_for_pid_exit_after_stopped_status(
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX only")
-def test_list_command_omits_stale_active_worker(tmp_path) -> None:
+def test_list_command_omits_stale_active_manager(tmp_path) -> None:
     context_root = prepare_project_root(tmp_path / "ctx")
     context = build_context(context_root)
     tid = "1761000000000000006"
@@ -286,7 +286,7 @@ def test_list_command_omits_stale_active_worker(tmp_path) -> None:
     try:
         process.wait(timeout=2.0)
         registry_queue = Queue(
-            WEFT_WORKERS_REGISTRY_QUEUE,
+            WEFT_MANAGERS_REGISTRY_QUEUE,
             db_path=context.broker_target,
             persistent=False,
             config=context.config,
@@ -303,7 +303,7 @@ def test_list_command_omits_stale_active_worker(tmp_path) -> None:
                 }
             )
         )
-        exit_code, payload = worker_cmd.list_command(
+        exit_code, payload = manager_cmd.list_command(
             json_output=True, context_path=context_root
         )
     finally:
@@ -322,7 +322,7 @@ def test_stop_command_force_ignores_registry_only_pid_without_mapping(
     tid = "1761000000000000007"
 
     registry_queue = Queue(
-        WEFT_WORKERS_REGISTRY_QUEUE,
+        WEFT_MANAGERS_REGISTRY_QUEUE,
         db_path=context.broker_target,
         persistent=False,
         config=context.config,
@@ -348,7 +348,7 @@ def test_stop_command_force_ignores_registry_only_pid_without_mapping(
         ),
     )
 
-    exit_code, message = worker_cmd.stop_command(
+    exit_code, message = manager_cmd.stop_command(
         tid=tid,
         force=True,
         timeout=0.0,
@@ -364,14 +364,14 @@ def test_list_command_returns_table(tmp_path):
     context_root = prepare_project_root(tmp_path / "ctx")
     context = build_context(context_root)
     registry_queue = Queue(
-        WEFT_WORKERS_REGISTRY_QUEUE,
+        WEFT_MANAGERS_REGISTRY_QUEUE,
         db_path=context.broker_target,
         persistent=False,
         config=context.config,
     )
     registry_queue.write(json.dumps({"tid": "1", "status": "active", "name": "alpha"}))
 
-    exit_code, payload = worker_cmd.list_command(
+    exit_code, payload = manager_cmd.list_command(
         json_output=False, context_path=context_root
     )
     assert exit_code == 0
@@ -381,7 +381,7 @@ def test_list_command_returns_table(tmp_path):
 def test_status_command_not_found(tmp_path):
     context_root = prepare_project_root(tmp_path / "ctx")
     build_context(context_root)
-    exit_code, payload = worker_cmd.status_command(
+    exit_code, payload = manager_cmd.status_command(
         tid="999", json_output=False, context_path=context_root
     )
     assert exit_code == 1

@@ -1,4 +1,10 @@
-"""Interactive session helpers."""
+"""Session helpers for interactive commands and persistent agent runtimes.
+
+Spec references:
+- docs/specifications/01-Core_Components.md [CC-3.2]
+- docs/specifications/06-Resource_Management.md [RM-5], [RM-5.1]
+- docs/specifications/13-Agent_Runtime.md [AR-6], [AR-9]
+"""
 
 from __future__ import annotations
 

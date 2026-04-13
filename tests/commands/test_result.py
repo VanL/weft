@@ -20,6 +20,18 @@ from weft.context import build_context
 pytestmark = [pytest.mark.shared]
 
 
+def _capture_stream_echo(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    rendered: list[str] = []
+
+    def _fake_echo(message: object = "", **kwargs: object) -> None:
+        rendered.append(
+            f"{message}{'' if kwargs.get('nl', True) is False else chr(10)}"
+        )
+
+    monkeypatch.setattr("weft.commands._streaming.typer.echo", _fake_echo)
+    return rendered
+
+
 def test_load_taskspec_payload_reads_full_log_history(tmp_path) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
@@ -173,6 +185,35 @@ def test_await_single_result_aggregates_multiple_outbox_messages(tmp_path) -> No
     assert error is None
 
 
+def test_await_single_result_classifies_timeout_event_as_timeout(tmp_path) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    log_queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
+
+    log_queue.write(
+        json.dumps(
+            {
+                "tid": tid,
+                "status": "timeout",
+                "event": "work_timeout",
+                "error": "Target execution timed out",
+            }
+        )
+    )
+
+    status, result, error = _await_single_result(
+        ctx,
+        tid,
+        timeout=1.0,
+        show_stderr=False,
+    )
+
+    assert status == "timeout"
+    assert result is None
+    assert error == "Target execution timed out"
+
+
 def test_await_single_result_persistent_returns_one_work_item_batch(tmp_path) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
@@ -232,6 +273,166 @@ def test_await_single_result_persistent_returns_one_work_item_batch(tmp_path) ->
     assert first_status == "completed"
     assert first_result == ["first", "second"]
     assert first_error is None
+    assert second_status == "completed"
+    assert second_result == "third"
+    assert second_error is None
+
+
+def test_await_single_result_stream_mode_emits_chunks_without_replay(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    log_queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
+    outbox_queue = ctx.queue(f"T{tid}.outbox", persistent=True)
+    rendered = _capture_stream_echo(monkeypatch)
+
+    log_queue.write(
+        json.dumps(
+            {
+                "tid": tid,
+                "status": "completed",
+                "event": "work_completed",
+            }
+        )
+    )
+
+    def _write_outputs() -> None:
+        time.sleep(0.05)
+        outbox_queue.write(
+            json.dumps(
+                {
+                    "type": "stream",
+                    "stream": "stdout",
+                    "chunk": 0,
+                    "final": False,
+                    "encoding": "text",
+                    "data": "hello ",
+                }
+            )
+        )
+        outbox_queue.write(
+            json.dumps(
+                {
+                    "type": "stream",
+                    "stream": "stdout",
+                    "chunk": 1,
+                    "final": True,
+                    "encoding": "text",
+                    "data": "world",
+                }
+            )
+        )
+
+    writer = threading.Thread(target=_write_outputs, daemon=True)
+    writer.start()
+    try:
+        status, result, error = _await_single_result(
+            ctx,
+            tid,
+            timeout=1.0,
+            show_stderr=False,
+            emit_stream=True,
+        )
+    finally:
+        writer.join(timeout=1.0)
+
+    assert status == "completed"
+    assert result is None
+    assert error is None
+    assert "".join(rendered) == "hello world\n"
+
+
+def test_await_single_result_persistent_stream_mode_keeps_next_batch(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    log_queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
+    outbox_queue = ctx.queue(f"T{tid}.outbox", persistent=True)
+    rendered = _capture_stream_echo(monkeypatch)
+
+    taskspec_payload = {
+        "tid": tid,
+        "name": "persistent-agent",
+        "spec": {"type": "agent", "persistent": True},
+        "io": {
+            "outputs": {"outbox": f"T{tid}.outbox"},
+            "control": {"ctrl_out": f"T{tid}.ctrl_out"},
+        },
+        "state": {"status": "running"},
+        "metadata": {},
+    }
+
+    outbox_queue.write(
+        json.dumps(
+            {
+                "type": "stream",
+                "stream": "stdout",
+                "chunk": 0,
+                "final": False,
+                "encoding": "text",
+                "data": "first ",
+            }
+        )
+    )
+    outbox_queue.write(
+        json.dumps(
+            {
+                "type": "stream",
+                "stream": "stdout",
+                "chunk": 1,
+                "final": True,
+                "encoding": "text",
+                "data": "batch",
+            }
+        )
+    )
+    log_queue.write(
+        json.dumps(
+            {
+                "tid": tid,
+                "status": "running",
+                "event": "work_item_completed",
+                "taskspec": taskspec_payload,
+            }
+        )
+    )
+    outbox_queue.write("third")
+    log_queue.write(
+        json.dumps(
+            {
+                "tid": tid,
+                "status": "running",
+                "event": "work_item_completed",
+                "taskspec": taskspec_payload,
+            }
+        )
+    )
+
+    first_status, first_result, first_error = _await_single_result(
+        ctx,
+        tid,
+        timeout=1.0,
+        show_stderr=False,
+        emit_stream=True,
+    )
+    second_status, second_result, second_error = _await_single_result(
+        ctx,
+        tid,
+        timeout=1.0,
+        show_stderr=False,
+        emit_stream=True,
+    )
+
+    assert first_status == "completed"
+    assert first_result is None
+    assert first_error is None
+    assert "".join(rendered) == "first batch\n"
     assert second_status == "completed"
     assert second_result == "third"
     assert second_error is None
@@ -301,3 +502,119 @@ def test_cmd_result_waits_for_custom_result_channels_to_materialize(tmp_path) ->
 
     assert exit_code == 0
     assert payload == "hello"
+
+
+def test_cmd_result_rejects_stream_json_combination(tmp_path) -> None:
+    root = prepare_project_root(tmp_path)
+
+    exit_code, payload = cmd_result(
+        tid="123",
+        all_results=False,
+        peek=False,
+        timeout=1.0,
+        stream=True,
+        json_output=True,
+        show_stderr=False,
+        context_path=str(root),
+    )
+
+    assert exit_code == 2
+    assert payload == "weft result: --stream cannot be used with --json"
+
+
+def test_cmd_result_stream_preserves_error_payload_selection(tmp_path) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    log_queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
+    outbox_queue = ctx.queue(f"T{tid}.outbox", persistent=True)
+
+    log_queue.write(
+        json.dumps(
+            {
+                "tid": tid,
+                "status": "completed",
+                "event": "work_completed",
+            }
+        )
+    )
+    outbox_queue.write(json.dumps({"stdout": "out", "stderr": "err"}))
+
+    exit_code, payload = cmd_result(
+        tid=tid,
+        all_results=False,
+        peek=False,
+        timeout=1.0,
+        stream=True,
+        json_output=False,
+        show_stderr=True,
+        context_path=str(root),
+    )
+
+    assert exit_code == 0
+    assert payload == "err"
+
+
+def test_result_reads_pipeline_outbox_by_pipeline_tid(tmp_path) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    log_queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
+    outbox_queue = ctx.queue(f"P{tid}.outbox", persistent=True)
+    status_queue = ctx.queue(f"P{tid}.status", persistent=True)
+
+    outbox_queue.write("pipeline-result")
+    status_queue.write(
+        json.dumps(
+            {
+                "type": "pipeline_status",
+                "pipeline_tid": tid,
+                "status": "running",
+            }
+        )
+    )
+    log_queue.write(
+        json.dumps(
+            {
+                "tid": tid,
+                "status": "completed",
+                "event": "work_completed",
+                "taskspec": {
+                    "tid": tid,
+                    "name": "demo-pipeline",
+                    "io": {
+                        "outputs": {"outbox": f"P{tid}.outbox"},
+                        "control": {"ctrl_out": f"P{tid}.ctrl_out"},
+                    },
+                    "state": {
+                        "status": "completed",
+                        "started_at": time.time_ns() - 10,
+                        "completed_at": time.time_ns(),
+                    },
+                    "metadata": {
+                        "role": "pipeline",
+                        "_weft_pipeline_runtime": {
+                            "queues": {"status": f"P{tid}.status"},
+                        },
+                    },
+                },
+            }
+        )
+    )
+
+    exit_code, payload = cmd_result(
+        tid=tid,
+        all_results=False,
+        peek=False,
+        timeout=1.0,
+        stream=False,
+        json_output=False,
+        show_stderr=False,
+        context_path=str(root),
+    )
+
+    assert exit_code == 0
+    assert payload == "pipeline-result"
+    retained_status = status_queue.peek_one()
+    assert retained_status is not None
+    assert json.loads(retained_status)["type"] == "pipeline_status"

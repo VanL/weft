@@ -16,11 +16,11 @@ from weft._constants import (
     CONTROL_STOP,
     QUEUE_OUTBOX_SUFFIX,
     WEFT_GLOBAL_LOG_QUEUE,
+    WEFT_MANAGERS_REGISTRY_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
-    WEFT_WORKERS_REGISTRY_QUEUE,
 )
+from weft.commands import manager as manager_cmd
 from weft.commands import tasks as task_cmd
-from weft.commands import worker as worker_cmd
 from weft.context import WeftContext, build_context
 from weft.helpers import iter_queue_json_entries, pid_is_live, terminate_process_tree
 
@@ -51,7 +51,7 @@ class WeftTestHarness:
         self._registered_owner_pids: set[int] = set()
         self._registered_managed_pids: set[int] = set()
         self._registered_tids: set[str] = set()
-        self._registered_worker_tids: set[str] = set()
+        self._registered_manager_tids: set[str] = set()
         self._closed = False
         self._self_pid = os.getpid()
         self._safe_pids = self._compute_safe_pid_set()
@@ -108,15 +108,15 @@ class WeftTestHarness:
         if tid:
             self._registered_tids.add(tid)
 
-    def register_worker_tid(self, tid: str) -> None:
+    def register_manager_tid(self, tid: str) -> None:
         if tid:
-            self._registered_worker_tids.add(tid)
+            self._registered_manager_tids.add(tid)
 
     def registered_tids(self) -> set[str]:
         return set(self._registered_tids)
 
-    def registered_worker_tids(self) -> set[str]:
-        return set(self._registered_worker_tids)
+    def registered_manager_tids(self) -> set[str]:
+        return set(self._registered_manager_tids)
 
     @staticmethod
     def _format_debug_payload(payload: object) -> str:
@@ -239,7 +239,7 @@ class WeftTestHarness:
             "WeftTestHarness snapshot:",
             f"  root={self.root}",
             f"  registered_tids={sorted(self._registered_tids)}",
-            f"  registered_worker_tids={sorted(self._registered_worker_tids)}",
+            f"  registered_manager_tids={sorted(self._registered_manager_tids)}",
             f"  registered_pids={sorted(self._registered_pids)}",
         ]
 
@@ -251,7 +251,7 @@ class WeftTestHarness:
         lines.append(f"  database_path={context.database_path}")
 
         registry_dump = self._peek_queue_lines(
-            WEFT_WORKERS_REGISTRY_QUEUE,
+            WEFT_MANAGERS_REGISTRY_QUEUE,
             persistent=False,
             limit=10,
         )
@@ -343,7 +343,7 @@ class WeftTestHarness:
                 self._cleanup_preserving_database()
                 return
 
-            self._stop_active_workers(
+            self._stop_active_managers(
                 force=True,
                 drain_registry=True,
                 stop_tasks=True,
@@ -475,7 +475,7 @@ class WeftTestHarness:
         terminal_events = self._latest_task_events()
         for full_tid, data in self._latest_tid_mapping_payloads().items():
             if (
-                full_tid in self._registered_worker_tids
+                full_tid in self._registered_manager_tids
                 or self._mapping_role(data) == "manager"
                 or self._mapping_has_safe_owner(data)
                 or terminal_events.get(full_tid) in TERMINAL_TASK_EVENTS
@@ -502,9 +502,9 @@ class WeftTestHarness:
 
         return sorted(set(live_tids))
 
-    def _list_active_worker_records(self) -> list[dict[str, object]]:
+    def _list_active_manager_records(self) -> list[dict[str, object]]:
         context_path = self.context.root
-        exit_code, payload = worker_cmd.list_command(
+        exit_code, payload = manager_cmd.list_command(
             json_output=True,
             context_path=context_path,
         )
@@ -525,18 +525,18 @@ class WeftTestHarness:
             active_records.append(record)
         return active_records
 
-    def _cleanup_worker_records(self) -> dict[str, dict[str, object]]:
-        worker_records: dict[str, dict[str, object]] = {}
-        for record in self._list_active_worker_records():
+    def _cleanup_manager_records(self) -> dict[str, dict[str, object]]:
+        manager_records: dict[str, dict[str, object]] = {}
+        for record in self._list_active_manager_records():
             tid = record.get("tid")
             if isinstance(tid, str):
-                self.register_worker_tid(tid)
-                worker_records[tid] = record
-        for tid in self._registered_worker_tids:
-            worker_records.setdefault(tid, {"tid": tid})
-        return worker_records
+                self.register_manager_tid(tid)
+                manager_records[tid] = record
+        for tid in self._registered_manager_tids:
+            manager_records.setdefault(tid, {"tid": tid})
+        return manager_records
 
-    def _send_worker_stop(self, tid: str, *, record: dict[str, object]) -> None:
+    def _send_manager_stop(self, tid: str, *, record: dict[str, object]) -> None:
         ctrl_in = record.get("ctrl_in")
         queue_name = (
             ctrl_in if isinstance(ctrl_in, str) and ctrl_in else f"T{tid}.ctrl_in"
@@ -558,7 +558,7 @@ class WeftTestHarness:
     def _send_task_stop(self, tid: str) -> None:
         task_cmd._send_control(self.context, tid, CONTROL_STOP)
 
-    def _stop_active_workers(
+    def _stop_active_managers(
         self,
         *,
         force: bool = True,
@@ -567,11 +567,11 @@ class WeftTestHarness:
     ) -> None:
         context_path = self.context.root
         issued_task_stops: set[str] = set()
-        worker_records = self._cleanup_worker_records()
+        manager_records = self._cleanup_manager_records()
         stop_timeout = max(6.0, min(self._manager_timeout, 10.0))
 
-        for tid, record in sorted(worker_records.items()):
-            self._send_worker_stop(tid, record=record)
+        for tid, record in sorted(manager_records.items()):
+            self._send_manager_stop(tid, record=record)
 
         for _ in range(3):
             self._collect_pid_mappings()
@@ -588,8 +588,8 @@ class WeftTestHarness:
         if force and issued_task_stops:
             task_cmd.kill_tasks(sorted(issued_task_stops), context_path=context_path)
         if force:
-            for tid in sorted(worker_records):
-                worker_cmd.stop_command(
+            for tid in sorted(manager_records):
+                manager_cmd.stop_command(
                     tid=tid,
                     force=True,
                     timeout=stop_timeout,
@@ -597,7 +597,7 @@ class WeftTestHarness:
                     stop_if_absent=True,
                 )
 
-        if issued_task_stops or worker_records:
+        if issued_task_stops or manager_records:
             self._collect_pid_mappings()
             self._wait_for_registered_pids_to_exit()
             time.sleep(0.1)
@@ -621,10 +621,10 @@ class WeftTestHarness:
         while time.time() < deadline:
             self._collect_pid_mappings()
 
-            for tid in sorted(self._registered_worker_tids):
+            for tid in sorted(self._registered_manager_tids):
                 if tid in issued_worker_stops:
                     continue
-                self._send_worker_stop(tid, record={"tid": tid})
+                self._send_manager_stop(tid, record={"tid": tid})
                 issued_worker_stops.add(tid)
 
             last_live_task_tids = self._live_task_tids_from_mappings()
@@ -669,7 +669,7 @@ class WeftTestHarness:
 
     def _drain_registry_queue(self) -> None:
         queue = Queue(
-            WEFT_WORKERS_REGISTRY_QUEUE,
+            WEFT_MANAGERS_REGISTRY_QUEUE,
             db_path=self.context.broker_target,
             persistent=False,
             config=self.context.broker_config,
@@ -685,9 +685,9 @@ class WeftTestHarness:
             full_tid = data.get("full")
             if isinstance(full_tid, str) and full_tid:
                 if self._mapping_role(data) == "manager":
-                    self.register_worker_tid(full_tid)
+                    self.register_manager_tid(full_tid)
                 elif (
-                    full_tid not in self._registered_worker_tids
+                    full_tid not in self._registered_manager_tids
                     and not self._mapping_has_safe_owner(data)
                 ):
                     self.register_tid(full_tid)

@@ -3,7 +3,7 @@
 ## Goal
 
 Remove the remaining divergent manager lifecycle code paths after bootstrap
-unification. `weft run`, `weft worker list|status|stop`, and `weft status`
+unification. `weft run`, `weft manager list|status|stop`, and `weft status`
 should all read manager registry state through one shared control-plane helper,
 use the same stale-record and canonical-manager rules, and reuse the same
 graceful-stop / force-stop path where applicable. The CLI commands may still
@@ -14,9 +14,9 @@ managers are live.
 
 Source specs:
 
-- [`docs/specifications/03-Worker_Architecture.md`](../specifications/03-Worker_Architecture.md) [WA-1], [WA-3]
+- [`docs/specifications/03-Manager_Architecture.md`](../specifications/03-Manager_Architecture.md) [MA-1], [MA-3]
 - [`docs/specifications/05-Message_Flow_and_State.md`](../specifications/05-Message_Flow_and_State.md) [MF-7]
-- [`docs/specifications/07-System_Invariants.md`](../specifications/07-System_Invariants.md) [WORKER.1], [WORKER.3], [WORKER.6], [WORKER.7]
+- [`docs/specifications/07-System_Invariants.md`](../specifications/07-System_Invariants.md) [MANAGER.1], [MANAGER.3], [MANAGER.6], [MANAGER.7]
 - [`docs/specifications/10-CLI_Interface.md`](../specifications/10-CLI_Interface.md) (`weft status` and `worker` command sections)
 
 Repo guidance:
@@ -41,13 +41,13 @@ Files to modify:
 
 - `weft/commands/_manager_bootstrap.py`
 - `weft/commands/run.py`
-- `weft/commands/worker.py`
+- `weft/commands/manager.py`
 - `weft/commands/status.py`
 - `tests/commands/test_run.py`
-- `tests/commands/test_worker_commands.py`
-- `tests/cli/test_cli_worker.py`
+- `tests/commands/test_manager_commands.py`
+- `tests/cli/test_cli_manager.py`
 - `tests/cli/test_status.py`
-- `docs/specifications/03-Worker_Architecture.md`
+- `docs/specifications/03-Manager_Architecture.md`
 - `docs/specifications/05-Message_Flow_and_State.md`
 - `docs/specifications/07-System_Invariants.md`
 - `docs/specifications/10-CLI_Interface.md`
@@ -56,15 +56,15 @@ Read first:
 
 - `weft/commands/_manager_bootstrap.py` — shared bootstrap path and the current
   `run`-side manager stop helper.
-- `weft/commands/worker.py` — still owns private registry replay, TID lookup,
+- `weft/commands/manager.py` — still owns private registry replay, TID lookup,
   STOP dispatch, PID liveness checks, and force-stop fallback.
 - `weft/commands/status.py` — still owns a separate `_collect_manager_records`
   registry replay path.
 - `weft/core/manager.py` — manager-side STOP drain, leadership yield, idle
   timeout, and registry writes. This plan does not redesign those semantics.
-- `tests/commands/test_worker_commands.py` — command-helper seams that will
+- `tests/commands/test_manager_commands.py` — command-helper seams that will
   change once private worker lifecycle helpers disappear.
-- `tests/cli/test_cli_worker.py` and `tests/cli/test_status.py` — operator
+- `tests/cli/test_cli_manager.py` and `tests/cli/test_status.py` — operator
   surfaces that should agree after the consolidation.
 
 Style and guidance:
@@ -84,17 +84,17 @@ Shared paths to reuse:
 
 Current structure:
 
-- `weft run` and `weft worker start` already share canonical bootstrap through
+- `weft run` and `weft manager start` already share canonical bootstrap through
   `weft/commands/_manager_bootstrap.py`.
-- `weft worker stop` still uses a separate lifecycle path in
-  `weft/commands/worker.py` for registry lookup, STOP writes, wait loops, PID
+- `weft manager stop` still uses a separate lifecycle path in
+  `weft/commands/manager.py` for registry lookup, STOP writes, wait loops, PID
   checks, and force termination.
-- `weft worker list|status` and `weft status` still replay
-  `weft.state.workers` independently and therefore do not share the same
+- `weft manager list|status` and `weft status` still replay
+  `weft.state.managers` independently and therefore do not share the same
   stale-record pruning or liveness interpretation as bootstrap.
 - Today only `_snapshot_registry()` prunes stale active canonical managers.
   Operator surfaces can still report a dead manager as `active`, and
-  `weft worker stop` can wait on a stale entry that bootstrap would have
+  `weft manager stop` can wait on a stale entry that bootstrap would have
   discarded.
 
 Comprehension checks before editing:
@@ -102,13 +102,13 @@ Comprehension checks before editing:
 - Which helper currently deletes stale active manager records, and which
   commands bypass that helper today?
 - Which module currently owns the `run` post-task manager stop path, and how is
-  `worker stop` different from it?
+  `manager stop` different from it?
 - Which commands should continue to show non-canonical manager records for
   operator visibility, and which path should continue to consider only
   canonical `weft.spawn.requests` managers?
 - What normalized record shape should shared lifecycle readers return
   (`timestamp` field name, `requests` backfill, and `ctrl_in` fallback), so
-  `worker.py` and `status.py` do not drift again?
+  `manager.py` and `status.py` do not drift again?
 
 ## Invariants and Constraints
 
@@ -166,11 +166,11 @@ Out of scope:
    - Files to touch:
      - `weft/commands/_manager_bootstrap.py`
      - `weft/commands/run.py`
-     - `weft/commands/worker.py`
+     - `weft/commands/manager.py`
      - `weft/commands/status.py`
    - Read first:
      - `weft/commands/_manager_bootstrap.py`
-     - `weft/commands/worker.py`
+     - `weft/commands/manager.py`
      - `weft/commands/status.py`
    - Reuse:
      - existing `_ensure_manager()` and `_stop_manager()` entry points
@@ -178,14 +178,14 @@ Out of scope:
    - Constraints:
      - command modules should import the shared helper; they should not call
        each other
-     - keep output formatting local to `worker.py` and `status.py`
+     - keep output formatting local to `manager.py` and `status.py`
    - Stop if:
-     - the change starts routing `worker list` through `cmd_status()` or vice
+     - the change starts routing `manager list` through `cmd_status()` or vice
        versa
      - module renaming becomes the main diff instead of the lifecycle
        consolidation
    - Done when:
-     - `worker.py` no longer owns private registry replay or stop-control loops
+     - `manager.py` no longer owns private registry replay or stop-control loops
      - `status.py` no longer owns a separate manager-registry replay function
 
 2. Centralize registry replay, stale pruning, and canonical filtering.
@@ -194,10 +194,10 @@ Out of scope:
      are shown.
    - Files to touch:
      - `weft/commands/_manager_bootstrap.py`
-     - `weft/commands/worker.py`
+     - `weft/commands/manager.py`
      - `weft/commands/status.py`
      - `tests/commands/test_run.py`
-     - `tests/cli/test_cli_worker.py`
+     - `tests/cli/test_cli_manager.py`
      - `tests/cli/test_status.py`
    - Read first:
      - current `_snapshot_registry()` in `weft/commands/_manager_bootstrap.py`
@@ -212,7 +212,7 @@ Out of scope:
      - keep canonical filtering opt-in so operator views can still expose
        non-canonical managers while bootstrap stays strict
    - Tests:
-     - add a regression proving `weft worker list --json` and `weft status --json`
+     - add a regression proving `weft manager list --json` and `weft status --json`
        agree on manager liveness for at least one stale active record
      - add a regression proving stale active-record deletion is idempotent and
        does not delete stopped-history records
@@ -228,21 +228,21 @@ Out of scope:
        manager
 
 3. Centralize graceful stop and force-stop behavior.
-   - Outcome: `weft run` post-task manager shutdown and `weft worker stop`
+   - Outcome: `weft run` post-task manager shutdown and `weft manager stop`
      share the same STOP send, wait, PID-liveness, and force-terminate logic.
    - Files to touch:
      - `weft/commands/_manager_bootstrap.py`
      - `weft/commands/run.py`
-     - `weft/commands/worker.py`
-     - `tests/commands/test_worker_commands.py`
-     - `tests/cli/test_cli_worker.py`
+     - `weft/commands/manager.py`
+     - `tests/commands/test_manager_commands.py`
+     - `tests/cli/test_cli_manager.py`
    - Read first:
      - current `_stop_manager()` in `weft/commands/_manager_bootstrap.py`
-     - current `stop_command()` helpers in `weft/commands/worker.py`
+     - current `stop_command()` helpers in `weft/commands/manager.py`
    - Required action:
      - extend the shared stop helper so it can stop by resolved record or by
        explicit TID lookup
-     - preserve the `stop_if_absent` and `force` behaviors that `worker stop`
+     - preserve the `stop_if_absent` and `force` behaviors that `manager stop`
        needs
      - keep force terminate as a fallback after the graceful wait path, not as
        a replacement for STOP drain
@@ -266,27 +266,27 @@ Out of scope:
      - the fallback kill path starts bypassing the graceful wait for live
        managers
    - Done when:
-     - `run.py` and `worker.py` both call the same manager stop helper
-     - no private STOP wait loop remains in `worker.py`
+     - `run.py` and `manager.py` both call the same manager stop helper
+     - no private STOP wait loop remains in `manager.py`
 
 4. Rewire command wrappers and keep presentation thin.
    - Outcome: `run`, `worker`, and `status` become thin wrappers over the same
      manager lifecycle backend.
    - Files to touch:
      - `weft/commands/run.py`
-     - `weft/commands/worker.py`
+     - `weft/commands/manager.py`
      - `weft/commands/status.py`
    - Required action:
      - keep `run.py` responsible for task submission and optional post-task
        manager shutdown only
-     - keep `worker.py` responsible for command-local output text only
+     - keep `manager.py` responsible for command-local output text only
      - keep `status.py` responsible for the overall broker/task report and the
        manager-summary formatting only
    - Tests:
      - update helper tests so they assert wrapper delegation instead of private
        registry logic
-     - keep at least one CLI-level assertion for each of `worker list`,
-       `worker status`, and `status --json`
+     - keep at least one CLI-level assertion for each of `manager list`,
+       `manager status`, and `status --json`
    - Stop if:
      - command wrappers start rebuilding normalized manager snapshots locally
    - Done when:
@@ -297,7 +297,7 @@ Out of scope:
    - Outcome: the specs describe one shared manager lifecycle backend rather
      than a shared bootstrap path plus separate operator lifecycle readers.
    - Files to touch:
-     - `docs/specifications/03-Worker_Architecture.md`
+     - `docs/specifications/03-Manager_Architecture.md`
      - `docs/specifications/05-Message_Flow_and_State.md`
      - `docs/specifications/07-System_Invariants.md`
      - `docs/specifications/10-CLI_Interface.md`
@@ -317,32 +317,32 @@ Out of scope:
 
 Run in sequence:
 
-1. `uv run pytest tests/commands/test_run.py tests/commands/test_worker_commands.py -q`
-2. `uv run pytest tests/cli/test_cli_worker.py tests/cli/test_status.py -q`
+1. `uv run pytest tests/commands/test_run.py tests/commands/test_manager_commands.py -q`
+2. `uv run pytest tests/cli/test_cli_manager.py tests/cli/test_status.py -q`
 3. `uv run pytest tests/core/test_manager.py -q`
 4. `uv run mypy weft`
 5. `uv run ruff check weft`
 
 Keep real:
 
-- broker-backed `weft.state.workers` and `weft.state.tid_mappings` queues
+- broker-backed `weft.state.managers` and `weft.state.tid_mappings` queues
 - at least one real manager start/stop CLI flow
 - manager-side STOP drain semantics in `weft/core/manager.py`
 
 Acceptable narrow mocking:
 
-- PID liveness edges and timeout loops inside unit tests for `worker stop`
+- PID liveness edges and timeout loops inside unit tests for `manager stop`
 - helper delegation assertions where the contract is specifically "wrapper
   calls shared helper"
 
 ## Observable Success
 
-- A dead active manager record no longer appears as `active` in `weft worker list`
+- A dead active manager record no longer appears as `active` in `weft manager list`
   while disappearing or changing differently in `weft status`; both commands
   now agree on liveness.
-- `weft worker stop` and `weft run` manager-reuse shutdown wait on the same
+- `weft manager stop` and `weft run` manager-reuse shutdown wait on the same
   stop conditions.
-- `weft worker status <tid>` does not report a dead active manager as live just
+- `weft manager status <tid>` does not report a dead active manager as live just
   because a stale registry entry still exists.
 - Shared manager records exposed to command wrappers use one normalized shape:
   `timestamp` is stable, `requests` is always present, and `ctrl_in` fallback
@@ -364,12 +364,12 @@ Rollout:
 Rollback:
 
 - Revert the shared lifecycle-helper changes and wrapper imports together.
-  Do not partially roll back `worker.py` or `status.py` while leaving `run.py`
+  Do not partially roll back `manager.py` or `status.py` while leaving `run.py`
   on the new shared stop/read semantics.
 - If stale-record pruning behavior changes during the slice, roll back the
   shared normalization helper first so all commands return to the same old
   interpretation together.
-- Stale-record deletion in `weft.state.workers` is a one-way runtime cleanup.
+- Stale-record deletion in `weft.state.managers` is a one-way runtime cleanup.
   Rollback will not recreate deleted stale active entries. That is acceptable
   only because this queue is runtime-only and those entries are already dead.
   If implementation pressure expands pruning beyond dead active records, stop

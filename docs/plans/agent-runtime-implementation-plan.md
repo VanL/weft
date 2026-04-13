@@ -56,7 +56,7 @@ Before touching code, read these in this order:
 1. [`AGENTS.md`](../../AGENTS.md)
 2. [`docs/specifications/00-Overview_and_Architecture.md`](../specifications/00-Overview_and_Architecture.md)
 3. [`docs/specifications/02-TaskSpec.md`](../specifications/02-TaskSpec.md)
-4. [`docs/specifications/03-Worker_Architecture.md`](../specifications/03-Worker_Architecture.md)
+4. [`docs/specifications/03-Manager_Architecture.md`](../specifications/03-Manager_Architecture.md)
 5. [`docs/specifications/05-Message_Flow_and_State.md`](../specifications/05-Message_Flow_and_State.md)
 6. [`docs/specifications/07-System_Invariants.md`](../specifications/07-System_Invariants.md)
 7. [`docs/specifications/08-Testing_Strategy.md`](../specifications/08-Testing_Strategy.md)
@@ -639,7 +639,7 @@ flags.
 - [`tests/cli/test_cli_run.py`](../../tests/cli/test_cli_run.py)
 - [`tests/cli/test_cli_spec.py`](../../tests/cli/test_cli_spec.py)
 - [`tests/specs/message_flow/test_agent_spawning_transition.py`](../../tests/specs/message_flow/test_agent_spawning_transition.py) (new)
-- [`tests/specs/worker_architecture/test_agent_spawn.py`](../../tests/specs/worker_architecture/test_agent_spawn.py) (new)
+- [`tests/specs/manager_architecture/test_agent_spawn.py`](../../tests/specs/manager_architecture/test_agent_spawn.py) (new)
 - [`weft/commands/validate_taskspec.py`](../../weft/commands/validate_taskspec.py)
 - [`weft/commands/handlers.py`](../../weft/commands/handlers.py) only if you
   intentionally extract a shared summary helper
@@ -650,7 +650,7 @@ flags.
 - Do not add `weft run --agent` in the MVP.
 - The CLI tests should use `WeftTestHarness`.
 - Confirm the live validate path before editing:
-  - the top-level `weft validate-taskspec` command is currently wired through
+  - the `weft spec validate --type task` command path is currently wired through
     [`weft/commands/validate_taskspec.py`](../../weft/commands/validate_taskspec.py),
   - [`weft/commands/handlers.py`](../../weft/commands/handlers.py) contains
     near-duplicate summary code but is not the primary CLI entry point.
@@ -680,14 +680,14 @@ flags.
 
 #### Invariants To Protect
 
-- `WA-2` TID correlation
+- `MA-2` TID correlation
 - `MF-1`, `MF-2`, `MF-6`
 - normal CLI behavior for command/function specs must remain unchanged
 
 #### Verify
 
 ```bash
-uv run pytest tests/cli/test_cli_run.py tests/cli/test_cli_spec.py tests/specs/message_flow/test_agent_spawning_transition.py tests/specs/worker_architecture/test_agent_spawn.py -q
+uv run pytest tests/cli/test_cli_run.py tests/cli/test_cli_spec.py tests/specs/message_flow/test_agent_spawning_transition.py tests/specs/manager_architecture/test_agent_spawn.py -q
 uv run mypy weft
 uv run ruff check --fix weft tests
 ```

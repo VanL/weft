@@ -98,7 +98,7 @@ Read these files in this order before editing code:
 1. [`AGENTS.md`](../../AGENTS.md)
 2. [`docs/specifications/00-Overview_and_Architecture.md`](../specifications/00-Overview_and_Architecture.md)
 3. [`docs/specifications/02-TaskSpec.md`](../specifications/02-TaskSpec.md)
-4. [`docs/specifications/03-Worker_Architecture.md`](../specifications/03-Worker_Architecture.md)
+4. [`docs/specifications/03-Manager_Architecture.md`](../specifications/03-Manager_Architecture.md)
 5. [`docs/specifications/05-Message_Flow_and_State.md`](../specifications/05-Message_Flow_and_State.md)
 6. [`docs/specifications/07-System_Invariants.md`](../specifications/07-System_Invariants.md)
 7. [`docs/specifications/08-Testing_Strategy.md`](../specifications/08-Testing_Strategy.md)
@@ -112,8 +112,8 @@ Read these files in this order before editing code:
 15. [`tests/taskspec/test_taskspec.py`](../../tests/taskspec/test_taskspec.py)
 16. [`tests/core/test_manager.py`](../../tests/core/test_manager.py)
 17. [`tests/cli/test_cli_run.py`](../../tests/cli/test_cli_run.py)
-18. [`tests/specs/worker_architecture/test_tid_correlation.py`](../../tests/specs/worker_architecture/test_tid_correlation.py)
-19. [`tests/specs/worker_architecture/test_agent_spawn.py`](../../tests/specs/worker_architecture/test_agent_spawn.py)
+18. [`tests/specs/manager_architecture/test_tid_correlation.py`](../../tests/specs/manager_architecture/test_tid_correlation.py)
+19. [`tests/specs/manager_architecture/test_agent_spawn.py`](../../tests/specs/manager_architecture/test_agent_spawn.py)
 20. [`tests/helpers/weft_harness.py`](../../tests/helpers/weft_harness.py)
 21. [`tests/conftest.py`](../../tests/conftest.py)
 
@@ -201,7 +201,7 @@ Run focused tests while iterating, then run the full gates **sequentially**:
 
 ```bash
 uv run pytest tests/taskspec/test_taskspec.py -q
-uv run pytest tests/core/test_manager.py tests/cli/test_cli_run.py tests/specs/worker_architecture/test_tid_correlation.py tests/specs/worker_architecture/test_agent_spawn.py -q
+uv run pytest tests/core/test_manager.py tests/cli/test_cli_run.py tests/specs/manager_architecture/test_tid_correlation.py tests/specs/manager_architecture/test_agent_spawn.py -q
 uv run pytest
 uv run pytest -m ""
 uv run ruff check weft tests
@@ -496,7 +496,7 @@ runtime code.
 #### Invariants
 
 - IMMUT.1, IMMUT.2, IMMUT.3, IMMUT.4
-- WORKER.4
+- MANAGER.4
 - QUEUE.3
 
 #### Gate
@@ -597,7 +597,7 @@ Do not keep a mutation-oriented API just because it already exists.
 Run:
 
 ```bash
-uv run pytest tests/taskspec/test_taskspec.py tests/core/test_manager.py tests/cli/test_cli_run.py tests/specs/worker_architecture/test_tid_correlation.py tests/specs/worker_architecture/test_agent_spawn.py -q
+uv run pytest tests/taskspec/test_taskspec.py tests/core/test_manager.py tests/cli/test_cli_run.py tests/specs/manager_architecture/test_tid_correlation.py tests/specs/manager_architecture/test_agent_spawn.py -q
 ```
 
 ### Task 3: Remove the Remaining Post-Validation Mutation Sites
@@ -648,7 +648,7 @@ If the answer is yes, this task is not done.
 Run:
 
 ```bash
-uv run pytest tests/core/test_manager.py tests/cli/test_cli_run.py tests/specs/worker_architecture/test_tid_correlation.py tests/specs/worker_architecture/test_agent_spawn.py -q
+uv run pytest tests/core/test_manager.py tests/cli/test_cli_run.py tests/specs/manager_architecture/test_tid_correlation.py tests/specs/manager_architecture/test_agent_spawn.py -q
 ```
 
 ### Task 4: Introduce Real Immutable Containers for Frozen Sections
@@ -709,7 +709,7 @@ Freezing should happen as part of resolved-object construction.
 Run:
 
 ```bash
-uv run pytest tests/taskspec/test_taskspec.py tests/core/test_manager.py tests/cli/test_cli_run.py tests/specs/worker_architecture/test_tid_correlation.py tests/specs/worker_architecture/test_agent_spawn.py -q
+uv run pytest tests/taskspec/test_taskspec.py tests/core/test_manager.py tests/cli/test_cli_run.py tests/specs/manager_architecture/test_tid_correlation.py tests/specs/manager_architecture/test_agent_spawn.py -q
 ```
 
 ### Task 5: Remove or Reframe Bad Mutation APIs
@@ -875,7 +875,7 @@ Before claiming the slice is done, all of the following must pass:
 
 ```bash
 uv run pytest tests/taskspec/test_taskspec.py -q
-uv run pytest tests/core/test_manager.py tests/cli/test_cli_run.py tests/specs/worker_architecture/test_tid_correlation.py tests/specs/worker_architecture/test_agent_spawn.py -q
+uv run pytest tests/core/test_manager.py tests/cli/test_cli_run.py tests/specs/manager_architecture/test_tid_correlation.py tests/specs/manager_architecture/test_agent_spawn.py -q
 uv run pytest
 uv run pytest -m ""
 uv run ruff check weft tests

@@ -97,6 +97,78 @@ def test_result_json_output(workdir, weft_harness) -> None:
     assert payload["result"]["data"] == "payload"
 
 
+def test_result_stream_outputs_streamed_task_once(workdir, weft_harness) -> None:
+    tid = _submit_task(
+        workdir,
+        weft_harness,
+        "--function",
+        "tests.tasks.sample_targets:echo_payload",
+        "--arg",
+        "stream-once",
+        "--stream-output",
+    )
+
+    weft_harness.wait_for_completion(tid)
+
+    rc, out, err = run_cli(
+        "result",
+        tid,
+        "--timeout",
+        "5",
+        "--stream",
+        cwd=workdir,
+        harness=weft_harness,
+    )
+
+    assert rc == 0
+    assert out == "stream-once"
+    assert err == ""
+
+
+def test_result_stream_with_error_preserves_stderr_payload_selection(
+    workdir,
+    weft_harness,
+) -> None:
+    tid = _submit_task(
+        workdir,
+        weft_harness,
+        "--function",
+        "tests.tasks.sample_targets:provide_stdio",
+    )
+
+    weft_harness.wait_for_completion(tid)
+
+    rc, out, err = run_cli(
+        "result",
+        tid,
+        "--timeout",
+        "5",
+        "--stream",
+        "--error",
+        cwd=workdir,
+        harness=weft_harness,
+    )
+
+    assert rc == 0
+    assert out == "stderr"
+    assert err == ""
+
+
+def test_result_stream_rejects_json_output(workdir, weft_harness) -> None:
+    rc, out, err = run_cli(
+        "result",
+        "123",
+        "--stream",
+        "--json",
+        cwd=workdir,
+        harness=weft_harness,
+    )
+
+    assert rc == 2
+    assert out == ""
+    assert "cannot be used with --json" in err
+
+
 def test_result_missing_task_reports_error(workdir, weft_harness) -> None:
     rc, out, err = run_cli(
         "result",

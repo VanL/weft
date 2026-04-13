@@ -237,8 +237,8 @@ Recommended task shape:
      - weft/core/manager.py
      - tests/core/test_manager.py
    - Read first:
-     - docs/specifications/03-Worker_Architecture.md [WA-1], [WA-3]
-     - docs/specifications/07-System_Invariants.md [WORKER.3], [WORKER.4]
+     - docs/specifications/03-Manager_Architecture.md [MA-1], [MA-3]
+     - docs/specifications/07-System_Invariants.md [MANAGER.3], [MANAGER.4]
      - existing manager startup tests
    - Reuse:
      - existing registry payload helpers

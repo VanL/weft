@@ -38,6 +38,7 @@ from weft._constants import (
     CONTROL_KILL,
     CONTROL_STOP,
     DEFAULT_OUTPUT_SIZE_LIMIT_MB,
+    PIPELINE_OWNER_METADATA_KEY,
     QUEUE_CTRL_IN_SUFFIX,
     QUEUE_CTRL_OUT_SUFFIX,
     QUEUE_INBOX_SUFFIX,
@@ -65,6 +66,9 @@ logger = logging.getLogger(__name__)
 
 
 STREAM_CHUNK_SIZE_BYTES = 512 * 1024
+TERMINAL_TASK_STATUSES = frozenset(
+    {"completed", "failed", "timeout", "cancelled", "killed"}
+)
 
 
 class BaseTask(MultiQueueWatcher, ABC):
@@ -127,6 +131,8 @@ class BaseTask(MultiQueueWatcher, ABC):
         self._spilled_output_dirs: set[Path] = set()
         self._last_poll_report_at = time.monotonic()
         self._last_reported_status: str | None = None
+        self._activity: str | None = None
+        self._waiting_on: str | None = None
 
         self._queue_names = self._resolve_queue_names()
         queue_configs = self._build_queue_configs()
@@ -599,6 +605,13 @@ class BaseTask(MultiQueueWatcher, ABC):
                 taskspec_dump, self._taskspec_redaction_paths
             ),
         }
+        if (
+            self._activity is not None
+            and self.taskspec.state.status not in TERMINAL_TASK_STATUSES
+        ):
+            payload["activity"] = self._activity
+            if self._waiting_on is not None:
+                payload["waiting_on"] = self._waiting_on
         payload.update(extra)
         payload.setdefault("task_pid", self._task_pid)
         payload.setdefault(
@@ -635,6 +648,13 @@ class BaseTask(MultiQueueWatcher, ABC):
             "tid": self.tid,
             "timestamp": time.time_ns(),
         }
+        if (
+            self._activity is not None
+            and self.taskspec.state.status not in TERMINAL_TASK_STATUSES
+        ):
+            payload.setdefault("activity", self._activity)
+            if self._waiting_on is not None:
+                payload.setdefault("waiting_on", self._waiting_on)
         payload.update(extra)
         try:
             self._ctrl_out_queue.write(json.dumps(payload))
@@ -686,7 +706,12 @@ class BaseTask(MultiQueueWatcher, ABC):
         terminal_states = {"completed", "failed", "timeout", "cancelled", "killed"}
         if self.taskspec.state.status not in terminal_states:
             self.taskspec.mark_cancelled(reason=reason)
+            self._clear_activity()
             self._report_state_change(event=event, message_id=message_id)
+            self._emit_pipeline_terminal_event(
+                status="cancelled",
+                error=self.taskspec.state.error,
+            )
             self._update_process_title("cancelled")
 
         if apply_reserved_policy:
@@ -714,7 +739,12 @@ class BaseTask(MultiQueueWatcher, ABC):
         terminal_states = {"completed", "failed", "timeout", "cancelled", "killed"}
         if self.taskspec.state.status not in terminal_states:
             self.taskspec.mark_killed(reason=reason)
+            self._clear_activity()
             self._report_state_change(event=event, message_id=message_id)
+            self._emit_pipeline_terminal_event(
+                status="killed",
+                error=self.taskspec.state.error,
+            )
             self._update_process_title("killed")
 
         if apply_reserved_policy:
@@ -781,7 +811,15 @@ class BaseTask(MultiQueueWatcher, ABC):
                 return
 
         try:
-            title = self._format_process_title(status, details)
+            detail_value = details
+            if (
+                detail_value is None
+                and self._activity is not None
+                and status not in TERMINAL_TASK_STATUSES
+                and self._activity != status
+            ):
+                detail_value = self._activity
+            title = self._format_process_title(status, detail_value)
             assert self._setproctitle_module is not None  # typing guard
             self._setproctitle_module.setproctitle(title)
             setthreadtitle = getattr(self._setproctitle_module, "setthreadtitle", None)
@@ -832,7 +870,7 @@ class BaseTask(MultiQueueWatcher, ABC):
     def _register_tid_mapping(self) -> None:
         """Register the task's short ID mapping for external observability tooling.
 
-        Spec: [CC-2.4], [WA-2]
+        Spec: [CC-2.4], [MA-2]
         """
         mapping = self._build_tid_mapping_payload()
         queue = self._queue(WEFT_TID_MAPPINGS_QUEUE)
@@ -883,7 +921,7 @@ class BaseTask(MultiQueueWatcher, ABC):
     def _build_tid_mapping_payload(self) -> dict[str, Any]:
         runtime_handle = self._runtime_handle
         role = self.taskspec.metadata.get("role")
-        return {
+        payload = {
             "short": self.tid_short,
             "full": self.tid,
             "pid": self._task_pid,
@@ -899,6 +937,144 @@ class BaseTask(MultiQueueWatcher, ABC):
             "started": time.time_ns(),
             "hostname": socket.gethostname(),
         }
+        if (
+            self._activity is not None
+            and self.taskspec.state.status not in TERMINAL_TASK_STATUSES
+        ):
+            payload["activity"] = self._activity
+            if self._waiting_on is not None:
+                payload["waiting_on"] = self._waiting_on
+        return payload
+
+    def _set_activity(
+        self,
+        activity: str | None,
+        *,
+        waiting_on: str | None = None,
+    ) -> None:
+        """Update live activity without changing durable task lifecycle state."""
+
+        normalized_activity = activity.strip() if isinstance(activity, str) else None
+        normalized_waiting_on = (
+            waiting_on.strip()
+            if isinstance(waiting_on, str) and waiting_on.strip()
+            else None
+        )
+        if self.taskspec.state.status in TERMINAL_TASK_STATUSES:
+            normalized_activity = None
+            normalized_waiting_on = None
+        if (
+            normalized_activity == self._activity
+            and normalized_waiting_on == self._waiting_on
+        ):
+            return
+        self._activity = normalized_activity
+        self._waiting_on = normalized_waiting_on
+        self._emit_activity_event()
+        self._register_tid_mapping()
+        self._update_process_title(self.taskspec.state.status)
+
+    def _clear_activity(self) -> None:
+        self._set_activity(None)
+
+    def _emit_activity_event(self) -> None:
+        payload = {
+            "event": "task_activity",
+            "tid": self.tid,
+            "tid_short": self.tid_short,
+            "status": self.taskspec.state.status,
+            "timestamp": time.time_ns(),
+        }
+        if self._activity is not None:
+            payload["activity"] = self._activity
+        if self._waiting_on is not None:
+            payload["waiting_on"] = self._waiting_on
+        try:
+            self._queue(WEFT_GLOBAL_LOG_QUEUE).write(json.dumps(payload))
+        except Exception:
+            logger.debug(
+                "Failed to write task activity event %s", payload, exc_info=True
+            )
+
+    def _pipeline_owner_config(self) -> dict[str, Any] | None:
+        payload = self.taskspec.metadata.get(PIPELINE_OWNER_METADATA_KEY)
+        return payload if isinstance(payload, dict) else None
+
+    def _emit_pipeline_owner_event(self, event_type: str, **extra: Any) -> None:
+        owner = self._pipeline_owner_config()
+        if owner is None:
+            return
+        events_queue = owner.get("events_queue")
+        pipeline_tid = owner.get("pipeline_tid")
+        if not isinstance(events_queue, str) or not isinstance(pipeline_tid, str):
+            return
+        payload = {
+            "type": event_type,
+            "pipeline_tid": pipeline_tid,
+            "child_tid": self.tid,
+            "timestamp": time.time_ns(),
+        }
+        payload.update(extra)
+        try:
+            self._queue(events_queue).write(json.dumps(payload))
+        except Exception:
+            logger.debug(
+                "Failed to write pipeline owner event %s",
+                payload,
+                exc_info=True,
+            )
+
+    def _emit_pipeline_started_event(self) -> None:
+        owner = self._pipeline_owner_config()
+        if owner is None:
+            return
+
+        payload: dict[str, Any] = {
+            "status": self.taskspec.state.status,
+        }
+        if self._activity is not None:
+            payload["activity"] = self._activity
+        if self._waiting_on is not None:
+            payload["waiting_on"] = self._waiting_on
+
+        role = owner.get("role")
+        if role == "pipeline_stage":
+            payload["stage_name"] = owner.get("stage_name")
+            self._emit_pipeline_owner_event("stage_started", **payload)
+            return
+        if role == "pipeline_edge":
+            payload["edge_name"] = owner.get("edge_name")
+            self._emit_pipeline_owner_event("edge_started", **payload)
+
+    def _emit_pipeline_terminal_event(
+        self,
+        *,
+        status: str,
+        error: str | None = None,
+    ) -> None:
+        owner = self._pipeline_owner_config()
+        if owner is None:
+            return
+
+        role = owner.get("role")
+        if role == "pipeline_stage":
+            payload: dict[str, Any] = {
+                "stage_name": owner.get("stage_name"),
+                "status": status,
+            }
+            if error:
+                payload["error"] = error
+            self._emit_pipeline_owner_event("stage_terminal", **payload)
+            return
+
+        if role == "pipeline_edge":
+            payload = {
+                "edge_name": owner.get("edge_name"),
+                "status": status,
+            }
+            if error:
+                payload["error"] = error
+            self._emit_pipeline_owner_event("edge_terminal", **payload)
 
     def _locate_streaming_session(self, queue: Queue, session_id: str) -> int | None:
         """Look up the message id for an active streaming record (Spec: [CC-2.4])."""

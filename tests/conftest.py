@@ -49,8 +49,8 @@ _SHARED_MODULES = frozenset(
         "tests/cli/test_cli_system.py",
         "tests/cli/test_status.py",
         "tests/commands/test_queue.py",
-        "tests/specs/worker_architecture/test_agent_spawn.py",
-        "tests/specs/worker_architecture/test_tid_correlation.py",
+        "tests/specs/manager_architecture/test_agent_spawn.py",
+        "tests/specs/manager_architecture/test_tid_correlation.py",
     }
 )
 _SQLITE_ONLY_MODULES = frozenset(
@@ -86,7 +86,7 @@ _UNAUDITED_MODULE_ALLOWLIST = frozenset(
         "tests/commands/test_queue.py",
         "tests/shell/test_known_interpreters.py",
         "tests/specs/quick_reference/test_queue_names.py",
-        "tests/specs/worker_architecture/test_manager_state_events.py",
+        "tests/specs/manager_architecture/test_manager_state_events.py",
         "tests/system/test_helpers.py",
         "tests/system/test_release_script.py",
     }
@@ -138,7 +138,7 @@ def _pg_cli_requires_active_env(args: tuple[object, ...]) -> bool:
     command = str(args[0])
     if command == "run":
         return True
-    if command == "worker":
+    if command == "manager":
         return True
     return False
 
@@ -363,21 +363,21 @@ def _register_cli_outputs(
     _extract_ids(harness, stdout)
     _extract_ids(harness, stderr)
 
-    worker_command = bool(args and args[0] == "worker" and len(args) > 1)
+    manager_command = bool(args and args[0] == "manager" and len(args) > 1)
     for blob in (stdout, stderr):
         for line in blob.splitlines():
             try:
                 payload = json.loads(line)
             except Exception:
                 continue
-            _register_from_json(harness, payload, worker_command=worker_command)
+            _register_from_json(harness, payload, manager_command=manager_command)
 
-    if worker_command:
+    if manager_command:
         subcommand = args[1]
         if subcommand in {"start", "stop", "status", "list"}:
             for arg in args:
                 if isinstance(arg, str) and arg.isdigit() and len(arg) == 19:
-                    harness.register_worker_tid(arg)
+                    harness.register_manager_tid(arg)
 
 
 def _extract_ids(harness: WeftTestHarness, text: str) -> None:
@@ -400,7 +400,7 @@ def _register_from_json(
     harness: WeftTestHarness,
     payload: Any,
     *,
-    worker_command: bool = False,
+    manager_command: bool = False,
 ) -> None:
     if isinstance(payload, dict):
         metadata = payload.get("metadata")
@@ -408,11 +408,11 @@ def _register_from_json(
         tid = payload.get("tid")
         if isinstance(tid, str):
             if (
-                worker_command
+                manager_command
                 or payload.get("role") == "manager"
                 or metadata_role == "manager"
             ):
-                harness.register_worker_tid(tid)
+                harness.register_manager_tid(tid)
             else:
                 harness.register_tid(tid)
         pid = payload.get("pid")
@@ -430,14 +430,14 @@ def _register_from_json(
             _register_from_json(
                 harness,
                 value,
-                worker_command=worker_command,
+                manager_command=manager_command,
             )
     elif isinstance(payload, list):
         for item in payload:
             _register_from_json(
                 harness,
                 item,
-                worker_command=worker_command,
+                manager_command=manager_command,
             )
 
 

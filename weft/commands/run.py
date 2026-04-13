@@ -9,11 +9,9 @@ Spec references:
 from __future__ import annotations
 
 import base64
-import copy
 import json
 import subprocess
 import sys
-import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -30,10 +28,6 @@ from weft._constants import (
     QUEUE_CTRL_OUT_SUFFIX,
     QUEUE_INBOX_SUFFIX,
     QUEUE_OUTBOX_SUFFIX,
-    WEFT_COMPLETED_RESULT_GRACE_SECONDS,
-    WEFT_GLOBAL_LOG_QUEUE,
-    WEFT_SPAWN_REQUESTS_QUEUE,
-    WORK_ENVELOPE_START,
 )
 from weft.commands import specs as spec_cmd
 from weft.commands._manager_bootstrap import (
@@ -44,26 +38,22 @@ from weft.commands._manager_bootstrap import (
     _start_manager,
     _stop_manager,
 )
-from weft.commands._streaming import (
-    aggregate_public_outputs as _aggregate_public_outputs,
-)
+from weft.commands._result_wait import await_one_shot_result
 from weft.commands._streaming import (
     collect_interactive_queue_output as _collect_interactive_queue_output,
 )
-from weft.commands._streaming import (
-    drain_available_outbox_values as _drain_available_outbox_values,
-)
-from weft.commands._streaming import (
-    handle_ctrl_stream as _handle_ctrl_stream,
-)
-from weft.commands._streaming import (
-    poll_log_events as _poll_log_events,
-)
-from weft.commands._streaming import (
-    process_outbox_message as _process_outbox_message,
-)
+from weft.commands._task_history import is_pipeline_taskspec_payload
 from weft.commands.interactive import InteractiveStreamClient
 from weft.context import WeftContext, build_context
+from weft.core.pipelines import (
+    PipelineSpec,
+    compile_linear_pipeline,
+    load_pipeline_spec_payload,
+)
+from weft.core.spawn_requests import (
+    delete_spawn_request as delete_spawn_request_message,
+)
+from weft.core.spawn_requests import submit_spawn_request
 from weft.core.taskspec import TaskSpec, resolve_taskspec_payload
 from weft.helpers import (
     read_limited_stdin,
@@ -91,7 +81,7 @@ def _load_pipeline_spec(
     pipeline: str | Path,
     *,
     context_dir: Path | None,
-) -> dict[str, Any]:
+) -> tuple[PipelineSpec, str | None]:
     path = Path(pipeline)
     if path.exists():
         try:
@@ -100,16 +90,17 @@ def _load_pipeline_spec(
             raise typer.BadParameter(f"Failed to read pipeline: {exc}") from exc
         if not isinstance(payload, dict):
             raise typer.BadParameter("Pipeline spec must be a JSON object")
-        return payload
+        return load_pipeline_spec_payload(payload), str(path.resolve())
 
-    kind, _path, payload = spec_cmd.load_spec(
+    kind, spec_path, payload = spec_cmd.load_spec(
         str(pipeline),
         spec_type=spec_cmd.SPEC_TYPE_PIPELINE,
         context_path=context_dir,
     )
     if kind != spec_cmd.SPEC_TYPE_PIPELINE:
         raise typer.BadParameter("Pipeline name must reference a pipeline spec")
-    return payload
+    source_ref = str(spec_path) if spec_path is not None else str(pipeline)
+    return load_pipeline_spec_payload(payload), source_ref
 
 
 # -----------------------------------------------------------------------------
@@ -213,53 +204,29 @@ def _enqueue_taskspec(
     context: WeftContext,
     taskspec: TaskSpec,
     work_payload: Any,
+    *,
+    seed_start_envelope: bool = True,
 ) -> int:
-    # Spec: docs/specifications/03-Worker_Architecture.md#tid-correlation-wa-2, [MF-1]
+    # Spec: docs/specifications/03-Manager_Architecture.md#tid-correlation-wa-2, [MF-1]
     task_tid = taskspec.tid or _generate_tid(context)
-    taskspec_payload = resolve_taskspec_payload(
-        taskspec.model_dump(mode="json"),
+    return submit_spawn_request(
+        context.broker_target,
+        taskspec=taskspec,
+        work_payload=work_payload,
+        config=context.broker_config,
         tid=task_tid,
         inherited_weft_context=taskspec.spec.weft_context,
+        seed_start_envelope=seed_start_envelope,
     )
-    inbox_message = work_payload
-    if inbox_message is None and not bool(
-        taskspec_payload.get("spec", {}).get("persistent")
-    ):
-        inbox_message = WORK_ENVELOPE_START
-    message: dict[str, Any] = {
-        "taskspec": taskspec_payload,
-        "inbox_message": inbox_message,
-    }
-    message_json = json.dumps(message)
-    message_timestamp = int(task_tid)
-
-    with context.broker() as db:
-        db._run_with_retry(
-            lambda: db._do_write_transaction(
-                WEFT_SPAWN_REQUESTS_QUEUE,
-                message_json,
-                message_timestamp,
-            )
-        )
-
-    return message_timestamp
 
 
 def _delete_spawn_request(context: WeftContext, message_timestamp: int) -> None:
     """Best-effort removal of a queued spawn request after submission failure."""
-
-    queue = Queue(
-        WEFT_SPAWN_REQUESTS_QUEUE,
-        db_path=context.broker_target,
-        persistent=False,
+    delete_spawn_request_message(
+        context.broker_target,
+        message_timestamp=message_timestamp,
         config=context.broker_config,
     )
-    try:
-        queue.delete(message_id=message_timestamp)
-    except Exception:
-        pass
-    finally:
-        queue.close()
 
 
 def _wait_for_task_completion(
@@ -269,8 +236,8 @@ def _wait_for_task_completion(
     json_output: bool,
     verbose: bool,
 ) -> tuple[str, Any | None, str | None]:
-    db_path = context.broker_target
-    config = context.broker_config
+    _ = json_output, verbose
+    assert taskspec.tid is not None
     outbox_name = taskspec.io.outputs.get("outbox")
     ctrl_out_name = taskspec.io.control.get("ctrl_out")
 
@@ -278,104 +245,20 @@ def _wait_for_task_completion(
         outbox_name = f"T{taskspec.tid}.{QUEUE_OUTBOX_SUFFIX}"
     if ctrl_out_name is None:
         ctrl_out_name = f"T{taskspec.tid}.{QUEUE_CTRL_OUT_SUFFIX}"
-
-    outbox_queue = Queue(
-        outbox_name,
-        db_path=db_path,
-        persistent=True,
-        config=config,
-    )
-    ctrl_queue = Queue(
-        ctrl_out_name,
-        db_path=db_path,
-        persistent=False,
-        config=config,
-    )
-    log_queue = Queue(
-        WEFT_GLOBAL_LOG_QUEUE,
-        db_path=db_path,
-        persistent=False,
-        config=config,
+    ctrl_out_for_wait = (
+        None
+        if is_pipeline_taskspec_payload(taskspec.model_dump(mode="json"))
+        else ctrl_out_name
     )
 
-    stream_buffer: list[str] = []
-    log_last_timestamp: int | None = None
-    status = "running"
-    result_values: list[Any] = []
-    result_value: Any | None = None
-    error_message: str | None = None
-    completed_at: float | None = None
-
-    try:
-        while True:
-            assert taskspec.tid is not None
-            while True:
-                ctrl_raw = ctrl_queue.read_one()
-                if ctrl_raw is None:
-                    break
-                ctrl_payload = ctrl_raw[0] if isinstance(ctrl_raw, tuple) else ctrl_raw
-                _handle_ctrl_stream(str(ctrl_payload))
-
-            ready_values, drained_outbox = _drain_available_outbox_values(
-                outbox_queue,
-                stream_buffer,
-            )
-            if ready_values:
-                result_values.extend(ready_values)
-            if drained_outbox:
-                continue
-
-            events, log_last_timestamp = _poll_log_events(
-                log_queue,
-                log_last_timestamp,
-                taskspec.tid,
-            )
-            for payload, _ts in events:
-                event = payload.get("event")
-                if event in {"work_failed", "work_timeout", "work_limit_violation"}:
-                    status = "failed"
-                    error_message = payload.get("error") or event.replace("_", " ")
-                    break
-                if event == "work_completed" and completed_at is None:
-                    completed_at = time.monotonic()
-
-            if status != "running":
-                break
-
-            for payload, _ts in events:
-                event = payload.get("event")
-                if event in {"control_stop", "task_signal_stop"}:
-                    status = "cancelled"
-                    error_message = payload.get("error") or "Task cancelled"
-                    break
-                if event in {"control_kill", "task_signal_kill"}:
-                    status = "killed"
-                    error_message = payload.get("error") or "Task killed"
-                    break
-
-            if status != "running":
-                break
-
-            if completed_at is not None and (
-                time.monotonic() - completed_at >= WEFT_COMPLETED_RESULT_GRACE_SECONDS
-            ):
-                late_values, _ = _drain_available_outbox_values(
-                    outbox_queue,
-                    stream_buffer,
-                )
-                if late_values:
-                    result_values.extend(late_values)
-                result_value = _aggregate_public_outputs(result_values)
-                status = "completed"
-                break
-
-            time.sleep(0.05)
-    finally:
-        outbox_queue.close()
-        ctrl_queue.close()
-        log_queue.close()
-
-    return status, result_value, error_message
+    return await_one_shot_result(
+        context,
+        taskspec.tid,
+        outbox_name=outbox_name,
+        ctrl_out_name=ctrl_out_for_wait,
+        timeout=None,
+        show_stderr=False,
+    )
 
 
 def _run_interactive_session(
@@ -888,20 +771,26 @@ def _run_inline(
                 typer.echo(str(result_value))
         return 0
 
+    display_error = error_message
+    if status == "cancelled":
+        display_error = "Task cancelled"
+    elif status == "killed":
+        display_error = "Task killed"
+
     if json_output:
         typer.echo(
             json.dumps(
                 {
                     "tid": tid,
                     "status": status,
-                    "error": error_message,
+                    "error": display_error,
                 },
                 ensure_ascii=False,
             )
         )
     else:
-        typer.echo(f"Error executing task: {error_message}", err=True)
-    return 1
+        typer.echo(f"Error executing task: {display_error}", err=True)
+    return 124 if status == "timeout" else 1
 
 
 def _run_spec_via_manager(
@@ -1033,170 +922,96 @@ def _run_pipeline(
     verbose: bool,
     autostart_enabled: bool,
 ) -> int:
-    if not wait:
-        raise typer.BadParameter("--no-wait is not supported for pipelines")
-
-    pipeline_spec = _load_pipeline_spec(pipeline, context_dir=context_dir)
-    stages = pipeline_spec.get("stages")
-    if not isinstance(stages, list) or not stages:
-        raise typer.BadParameter("Pipeline spec must include stages")
-
     context = build_context(spec_context=context_dir, autostart=autostart_enabled)
+    pipeline_spec, source_ref = _load_pipeline_spec(pipeline, context_dir=context_dir)
     stdin_data = _read_piped_stdin(context)
     if pipeline_input is not None and stdin_data is not None:
         raise typer.BadParameter("--input cannot be used together with piped stdin")
 
-    stage_input: Any = None
+    requested_input: Any = None
     if pipeline_input is not None:
-        stage_input = _parse_cli_value(pipeline_input)
+        requested_input = _parse_cli_value(pipeline_input)
     elif stdin_data is not None:
-        stage_input = stdin_data
+        requested_input = stdin_data
+
+    def _load_pipeline_stage(task_name: str) -> dict[str, Any]:
+        kind, _path, payload = spec_cmd.load_spec(
+            task_name,
+            spec_type=spec_cmd.SPEC_TYPE_TASK,
+            context_path=context_dir,
+        )
+        if kind != spec_cmd.SPEC_TYPE_TASK:
+            raise typer.BadParameter(
+                f"Pipeline stage '{task_name}' must reference a task spec"
+            )
+        return payload
+
+    compiled = compile_linear_pipeline(
+        pipeline_spec,
+        context=context,
+        task_loader=_load_pipeline_stage,
+        source_ref=source_ref,
+    )
+    work_payload = (
+        requested_input
+        if requested_input is not None
+        else compiled.bootstrap_input_fallback
+    )
+
     manager_record: dict[str, Any] | None = None
     process_handle: subprocess.Popen[bytes] | None = None
     manager_started_here = False
     reuse_enabled = bool(context.config.get("WEFT_MANAGER_REUSE_ENABLED", True))
 
     try:
-        for stage in stages:
-            if not isinstance(stage, dict):
-                raise typer.BadParameter("Pipeline stages must be objects")
-            task_name = stage.get("task")
-            if not isinstance(task_name, str) or not task_name:
-                raise typer.BadParameter("Pipeline stage missing task name")
-
-            _kind, _path, taskspec_payload = spec_cmd.load_spec(
-                task_name,
-                spec_type=spec_cmd.SPEC_TYPE_TASK,
-                context_path=context_dir,
-            )
-
-            candidate = copy.deepcopy(taskspec_payload)
-            candidate.pop("tid", None)
-            candidate.setdefault("spec", {})
-            candidate.setdefault("metadata", {})
-
-            defaults = stage.get("defaults")
-            if not isinstance(defaults, dict):
-                defaults = stage
-
-            spec_section = candidate.get("spec")
-            if not isinstance(spec_section, dict):
-                spec_section = {}
-                candidate["spec"] = spec_section
-
-            args = defaults.get("args") if isinstance(defaults, dict) else None
-            if isinstance(args, list):
-                spec_section.setdefault("args", [])
-                if isinstance(spec_section["args"], list):
-                    spec_section["args"].extend(args)
-
-            keyword_args = (
-                defaults.get("keyword_args") if isinstance(defaults, dict) else None
-            )
-            if isinstance(keyword_args, dict):
-                spec_section.setdefault("keyword_args", {})
-                if isinstance(spec_section["keyword_args"], dict):
-                    spec_section["keyword_args"].update(keyword_args)
-
-            env = defaults.get("env") if isinstance(defaults, dict) else None
-            if isinstance(env, dict):
-                spec_section.setdefault("env", {})
-                if isinstance(spec_section["env"], dict):
-                    spec_section["env"].update(env)
-
-            io_overrides = stage.get("io_overrides")
-            if isinstance(io_overrides, dict):
-                candidate.setdefault("io", {})
-                io_section = candidate.get("io")
-                if isinstance(io_section, dict):
-                    for key in ("inputs", "outputs", "control"):
-                        overrides = io_overrides.get(key)
-                        if isinstance(overrides, dict):
-                            io_section.setdefault(key, {})
-                            if isinstance(io_section[key], dict):
-                                io_section[key].update(overrides)
-
-            taskspec = TaskSpec.model_validate(
-                candidate, context={"auto_expand": False, "template": True}
-            )
-            work_payload = stage_input
-            if isinstance(defaults, dict) and "input" in defaults:
-                work_payload = defaults.get("input")
-            tid_int = _enqueue_taskspec(
+        tid_int = _enqueue_taskspec(
+            context,
+            compiled.pipeline_taskspec,
+            work_payload,
+            seed_start_envelope=False,
+        )
+        try:
+            manager_record, started_here, process_handle = _ensure_manager(
                 context,
-                taskspec,
-                work_payload,
-            )
-            try:
-                manager_record, started_here, process_handle = _ensure_manager(
-                    context,
-                    verbose=verbose,
-                )
-            except Exception:
-                _delete_spawn_request(context, tid_int)
-                raise
-            tid = str(tid_int)
-            if started_here:
-                manager_started_here = True
-
-            resolved_payload = resolve_taskspec_payload(
-                taskspec.model_dump(mode="json"),
-                tid=tid,
-                inherited_weft_context=taskspec.spec.weft_context,
-            )
-            resolved_spec = TaskSpec.model_validate(
-                resolved_payload, context={"auto_expand": False}
-            )
-
-            status, result_value, error_message = _wait_for_task_completion(
-                context,
-                resolved_spec,
-                json_output=json_output,
                 verbose=verbose,
             )
-            if status == "completed" and result_value is None:
-                outbox_name = (
-                    resolved_spec.io.outputs.get("outbox")
-                    or f"T{resolved_spec.tid}.{QUEUE_OUTBOX_SUFFIX}"
+        except Exception:
+            _delete_spawn_request(context, tid_int)
+            raise
+        tid = str(tid_int)
+        if started_here:
+            manager_started_here = True
+
+        if verbose:
+            typer.echo(
+                json.dumps(
+                    {
+                        "tid": tid,
+                        "pipeline": compiled.runtime.pipeline_name,
+                        "db": context.broker_display_target,
+                    },
+                    indent=2,
                 )
-                outbox_queue = Queue(
-                    outbox_name,
-                    db_path=context.broker_target,
-                    persistent=True,
-                    config=context.broker_config,
-                )
-                try:
-                    while True:
-                        outbox_raw = outbox_queue.read_one()
-                        if outbox_raw is None:
-                            break
-                        outbox_payload = (
-                            outbox_raw[0]
-                            if isinstance(outbox_raw, tuple)
-                            else outbox_raw
-                        )
-                        final, value = _process_outbox_message(str(outbox_payload), [])
-                        if final:
-                            result_value = value
-                            break
-                finally:
-                    outbox_queue.close()
-            if status != "completed":
-                if json_output:
-                    typer.echo(
-                        json.dumps(
-                            {
-                                "tid": tid,
-                                "status": status,
-                                "error": error_message,
-                            },
-                            ensure_ascii=False,
-                        )
+            )
+
+        if not wait:
+            if json_output:
+                typer.echo(
+                    json.dumps(
+                        {"tid": tid, "status": "queued"},
+                        ensure_ascii=False,
                     )
-                else:
-                    typer.echo(f"Pipeline stage failed: {error_message}", err=True)
-                return 1
-            stage_input = result_value
+                )
+            else:
+                typer.echo(tid)
+            return 0
+
+        status, result_value, error_message = _wait_for_task_completion(
+            context,
+            compiled.pipeline_taskspec,
+            json_output=json_output,
+            verbose=verbose,
+        )
 
     finally:
         if (
@@ -1207,22 +1022,39 @@ def _run_pipeline(
         ):
             _stop_manager(context, manager_record, process_handle)
 
+    if status == "completed":
+        if json_output:
+            typer.echo(
+                json.dumps(
+                    {
+                        "tid": tid,
+                        "status": status,
+                        "result": result_value,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        else:
+            if isinstance(result_value, (dict, list)):
+                typer.echo(json.dumps(result_value, ensure_ascii=False))
+            elif result_value not in (None, ""):
+                typer.echo(str(result_value))
+        return 0
+
     if json_output:
         typer.echo(
             json.dumps(
                 {
-                    "status": "completed",
-                    "result": stage_input,
+                    "tid": tid,
+                    "status": status,
+                    "error": error_message,
                 },
                 ensure_ascii=False,
             )
         )
     else:
-        if isinstance(stage_input, (dict, list)):
-            typer.echo(json.dumps(stage_input, ensure_ascii=False))
-        elif stage_input not in (None, ""):
-            typer.echo(str(stage_input))
-    return 0
+        typer.echo(f"Pipeline failed: {error_message}", err=True)
+    return 124 if status == "timeout" else 1
 
 
 # -----------------------------------------------------------------------------

@@ -249,7 +249,7 @@ def cli_context_root(args: Sequence[object], cwd: Path) -> Path:
         if arg == "--context" and index + 1 < len(arg_list):
             return _resolve_cli_path(arg_list[index + 1], cwd)
 
-    if len(arg_list) >= 3 and arg_list[0] == "worker" and arg_list[1] == "start":
+    if len(arg_list) >= 3 and arg_list[0] == "manager" and arg_list[1] == "start":
         spec_path = _resolve_cli_path(arg_list[2], cwd)
         spec_context = _taskspec_context_root(spec_path)
         if spec_context is not None:

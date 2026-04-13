@@ -1,4 +1,8 @@
-"""Built-in agent runtime backends."""
+"""Built-in agent runtime backends.
+
+Spec references:
+- docs/specifications/13-Agent_Runtime.md [AR-7], [AR-9]
+"""
 
 from __future__ import annotations
 
@@ -8,7 +12,7 @@ from .llm_backend import LLMBackend
 
 
 def register_builtin_agent_runtimes() -> None:
-    """Register built-in runtime adapters."""
+    """Register built-in runtime adapters (Spec: [AR-7], [AR-9])."""
     try:
         register_agent_runtime("llm", LLMBackend())
     except ValueError as exc:

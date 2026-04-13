@@ -1,8 +1,8 @@
-"""Worker management commands for the Weft CLI.
+"""Manager lifecycle commands for the Weft CLI.
 
 Spec references:
-- docs/specifications/10-CLI_Interface.md (worker start, stop, list, status)
-- docs/specifications/03-Worker_Architecture.md [WA-0]--[WA-4]
+- docs/specifications/10-CLI_Interface.md (manager start, stop, list, status, serve)
+- docs/specifications/03-Manager_Architecture.md [MA-0]--[MA-4]
 """
 
 from __future__ import annotations
@@ -51,21 +51,20 @@ def stop_command(
     if stopped:
         return 0, None
     if message is None:
-        return 1, f"Worker {tid} did not stop within {timeout:.1f}s"
-    if message.startswith("Manager ") and " did not stop within " in message:
-        return 1, message.replace("Manager", "Worker", 1)
+        return 1, f"Manager {tid} did not stop within {timeout:.1f}s"
     return 1, message
 
 
 def list_command(
     *,
     json_output: bool,
+    include_stopped: bool = False,
     context_path: Path | None = None,
 ) -> tuple[int, str | None]:
     context = build_context(context_path)
     records = _list_manager_records(
         context,
-        include_stopped=False,
+        include_stopped=include_stopped,
         canonical_only=False,
     )
 
@@ -74,7 +73,7 @@ def list_command(
         return 0, payload
 
     if not records:
-        return 0, "No registered workers"
+        return 0, "No registered managers"
 
     lines = ["TID        STATUS    NAME"]
     for data in sorted(records, key=lambda record: str(record.get("tid", ""))):
@@ -95,13 +94,13 @@ def status_command(
     record = _manager_record(context, tid)
 
     if not record:
-        return 1, f"Worker {tid} not found"
+        return 1, f"Manager {tid} not found"
 
     if json_output:
         return 0, json.dumps(record, indent=2)
 
     parts = [
-        f"Worker {tid}",
+        f"Manager {tid}",
         f"Name: {record.get('name', '')}",
         f"Status: {record.get('status', 'unknown')}",
     ]

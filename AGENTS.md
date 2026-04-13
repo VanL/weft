@@ -105,7 +105,7 @@ User ──► weft run ──► Manager (background) ──► Consumer (child
 Per-task:           T{tid}.inbox, T{tid}.reserved, T{tid}.outbox, T{tid}.ctrl_in, T{tid}.ctrl_out
 Global logs:        weft.log.tasks, weft.spawn.requests
 Manager:            weft.manager.ctrl_in, weft.manager.ctrl_out, weft.manager.outbox
-Runtime state:      weft.state.workers, weft.state.tid_mappings, weft.state.streaming
+Runtime state:      weft.state.managers, weft.state.tid_mappings, weft.state.streaming
 ```
 
 ## 3. Invariants
@@ -571,12 +571,18 @@ def handle_command(user_input: str) -> None:
 
 **Run tests**:
 ```bash
-uv run pytest                    # Fast tests only
-uv run pytest -m ""              # All tests including slow
-uv run pytest tests/cli/ -v      # Specific directory
-uv run mypy weft                 # Type check
-uv run ruff check weft           # Lint
+. ./.envrc                       # Or `direnv allow` if you use direnv
+uv sync --all-extras             # Install dev tools into the repo env
+./.venv/bin/python -m pytest     # Fast tests only
+./.venv/bin/python -m pytest -m ""  # All tests including slow
+./.venv/bin/python -m pytest tests/cli/ -v  # Specific directory
+./.venv/bin/mypy weft            # Type check
+./.venv/bin/ruff check weft      # Lint
 ```
+
+Do not assume `pytest`, `mypy`, or `ruff` are installed globally. Load
+`.envrc` first, then use the in-repo virtualenv binaries so verification uses
+the repo-managed toolchain and local `bin/` wiring.
 
 ## 5.1 How to Work (Bite‑Sized Tasks)
 
@@ -623,7 +629,7 @@ uv run ruff check weft           # Lint
 **Debug a task**:
 ```bash
 weft status                      # System overview
-weft list --status failed        # Find failed tasks
+weft task list --status failed   # Find failed tasks
 weft queue peek T{tid}.reserved  # Check failed messages
 weft queue peek weft.log.tasks   # Check state events
 ```
@@ -648,7 +654,7 @@ weft run --timeout 60 --memory 512 --cpu 50 heavy-task
 for file in *.py; do
   weft run --no-wait --tag file=$file analyze.py "$file"
 done
-weft list --json | jq '.[] | select(.status=="completed")'
+weft task list --json | jq '.[] | select(.status=="completed")'
 ```
 
 ## 6. CLI Quick Reference
@@ -658,12 +664,13 @@ weft list --json | jq '.[] | select(.status=="completed")'
 | `weft run CMD` | Execute a command |
 | `weft run --spec NAME` | Execute stored task spec |
 | `weft status` | System overview |
-| `weft list` | List tasks |
+| `weft task list` | List tasks |
+| `weft task status TID` | Inspect one task |
 | `weft result TID` | Get task output |
 | `weft task stop TID` | Graceful stop |
 | `weft task kill TID` | Force terminate |
 | `weft queue read/write/peek/move/list/watch` | Direct queue ops |
-| `weft worker list/start/stop` | Manager lifecycle |
+| `weft manager list/start/stop/serve` | Manager lifecycle |
 | `weft spec create/list/show/delete/validate` | Manage stored specs |
 | `weft system tidy/dump/load` | Maintenance |
 

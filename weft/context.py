@@ -7,7 +7,7 @@ Weft (environment overrides, `.weft/` ancillary directories, and project
 metadata).
 
 Spec references: docs/specifications/04-SimpleBroker_Integration.md [SB-0], [SB-0.4]
-and docs/specifications/03-Worker_Architecture.md [WA-3].
+and docs/specifications/03-Manager_Architecture.md [MA-3].
 
 Key behaviours
 --------------
@@ -87,7 +87,7 @@ __all__ = [
 
 @dataclass(frozen=True)
 class WeftContext:
-    """Resolved context information for a Weft project (Spec: [SB-0], [SB-0.1], [WA-3])."""
+    """Resolved context information for a Weft project (Spec: [SB-0], [SB-0.1], [MA-3])."""
 
     root: Path
     """Project root directory."""
@@ -186,7 +186,7 @@ def build_context(
     Returns:
         Fully-populated :class:`WeftContext`.
 
-    Spec: [SB-0], [SB-0.1], [SB-0.4], [WA-3]
+    Spec: [SB-0], [SB-0.1], [SB-0.4], [MA-3]
     """
     config = dict(load_config())
     root, broker_target, discovered = _resolve_root_and_target(spec_context, config)

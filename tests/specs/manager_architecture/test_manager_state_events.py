@@ -1,4 +1,4 @@
-"""Spec checks for manager state transition logging (MF-5, WA-1)."""
+"""Spec checks for manager state transition logging (MF-5, MA-1)."""
 
 from __future__ import annotations
 

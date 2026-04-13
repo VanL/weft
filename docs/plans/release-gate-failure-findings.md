@@ -86,7 +86,7 @@ What failed:
 - On commit `90fa5cc`, both `test_list_and_task_status` and
   `test_task_tid_reverse` time out in `WeftTestHarness.wait_for_completion()`
   after `_submit_task()` already returned a TID.
-- This is a completion-path failure before any `weft list` or `weft task
+- This is a completion-path failure before any `weft task list` or `weft task
   status` assertion executes.
 
 Why it matters:

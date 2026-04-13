@@ -79,7 +79,7 @@ Before touching code, read these in this order:
 2. [`docs/specifications/00-Overview_and_Architecture.md`](../specifications/00-Overview_and_Architecture.md)
 3. [`docs/specifications/01-Core_Components.md`](../specifications/01-Core_Components.md)
 4. [`docs/specifications/02-TaskSpec.md`](../specifications/02-TaskSpec.md)
-5. [`docs/specifications/03-Worker_Architecture.md`](../specifications/03-Worker_Architecture.md)
+5. [`docs/specifications/03-Manager_Architecture.md`](../specifications/03-Manager_Architecture.md)
 6. [`docs/specifications/05-Message_Flow_and_State.md`](../specifications/05-Message_Flow_and_State.md)
 7. [`docs/specifications/07-System_Invariants.md`](../specifications/07-System_Invariants.md)
 8. [`docs/specifications/08-Testing_Strategy.md`](../specifications/08-Testing_Strategy.md)

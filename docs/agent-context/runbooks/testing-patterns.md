@@ -5,28 +5,33 @@ failure modes when working with real broker-backed tests.
 
 ## Quick Reference
 
+All commands below assume you have first loaded the repo environment with
+`direnv allow` or `. ./.envrc`, then run `uv sync --all-extras`, and that you
+invoke the tools from the in-repo virtualenv. Do not assume `pytest`, `mypy`,
+or `ruff` are installed globally.
+
 ### Test Command Cheat Sheet
 
 ```bash
 # Fast/default suite
-uv run pytest
+./.venv/bin/python -m pytest
 
 # Include slow tests
-uv run pytest -m ""
+./.venv/bin/python -m pytest -m ""
 
 # Targeted directories
-uv run pytest tests/cli/ -v
-uv run pytest tests/core/ -v
-uv run pytest tests/specs/worker_architecture/ -v
+./.venv/bin/python -m pytest tests/cli/ -v
+./.venv/bin/python -m pytest tests/core/ -v
+./.venv/bin/python -m pytest tests/specs/manager_architecture/ -v
 
 # Single file or test
-uv run pytest tests/commands/test_run.py -q
-uv run pytest tests/core/test_manager.py -q
-uv run pytest tests/core/test_manager.py -k manager_reuse -q
+./.venv/bin/python -m pytest tests/commands/test_run.py -q
+./.venv/bin/python -m pytest tests/core/test_manager.py -q
+./.venv/bin/python -m pytest tests/core/test_manager.py -k manager_reuse -q
 
 # Static checks
-uv run mypy weft
-uv run ruff check weft
+./.venv/bin/mypy weft
+./.venv/bin/ruff check weft
 ```
 
 ## Harness Selection

@@ -1,6 +1,6 @@
 # Weft
 
-*A durable task execution system. Persistent workers, multiprocess isolation, comprehensive observability.*
+*A durable task execution system. Persistent managers, multiprocess isolation, comprehensive observability.*
 
 ```bash
 $ weft run echo "hello world"
@@ -51,9 +51,9 @@ through `spec.runner`.
 ## Quick Start
 
 ```bash
-# Initialize project
+# Initialize the current directory (like `git init`)
 $ weft init
-Initialized weft in .weft/
+Initialized Weft project in /path/to/project
 
 # Run a simple command
 $ weft run echo "hello world"
@@ -65,13 +65,13 @@ $ weft run --memory 100 --cpu 50 python script.py
 # Run and wait for completion
 $ weft run --wait --timeout 30 ./long-task.sh
 
-# Run a saved task spec (from .weft/tasks/)
-$ weft run --spec data-cleanup
+# Run a task spec JSON file
+$ weft run --spec .weft/tasks/data-cleanup.json
 
 # Run a pipeline spec (from .weft/pipelines/)
 $ weft run --pipeline etl-job
 
-# Pipe stdin into an inline command, stored spec, or pipeline
+# Pipe stdin into an inline command, task spec file, or pipeline
 $ printf "hello\n" | weft run -- python summarize.py
 $ printf "hello\n" | weft run --spec summarize.json
 $ printf "hello\n" | weft run --pipeline etl-job
@@ -110,6 +110,11 @@ myproject/
 ```
 
 Run `weft` commands from anywhere in the project tree - it searches upward to find `.weft/`.
+
+`weft init` follows the same targeting model as tools like `git init`: it
+defaults to the current directory, or you can pass a positional directory to
+initialize another root explicitly. It does not take `--context`; `--context`
+is for commands that operate inside an already existing Weft project.
 
 For non-file-backed backends such as Postgres, `.weft/` still holds Weft
 metadata, logs, outputs, and autostart manifests, but the broker target is
@@ -167,7 +172,7 @@ T{tid}.ctrl_out   # Status responses
 
 weft.log.tasks           # Global state log (all tasks)
 weft.spawn.requests      # Task spawn requests to manager
-weft.state.workers       # Manager liveness tracking (runtime state)
+weft.state.managers       # Manager liveness tracking (runtime state)
 weft.state.tid_mappings  # Short->full TID mappings (runtime state)
 weft.state.streaming     # Active streaming sessions (runtime state)
 ```
@@ -193,7 +198,7 @@ Configurable policies (`keep`, `requeue`, `clear`) control reserved queue behavi
 
 ### Managers
 
-Persistent worker processes that:
+Persistent manager processes that:
 - Monitor `weft.spawn.requests` for new tasks
 - Launch child task processes
 - Track process lifecycle
@@ -207,7 +212,7 @@ Tasks update their process title for observability:
 ```bash
 $ ps aux | grep weft
 weft-proj-0161024:mytask:running
-weft-proj-0161025:worker:completed
+weft-proj-0161025:manager:completed
 ```
 
 Format: `weft-{context_short}-{short_tid}:{name}:{status}[:details]`
@@ -218,7 +223,7 @@ Format: `weft-{context_short}-{short_tid}:{name}:{status}[:details]`
 
 ```bash
 # Initialize new project
-weft init [--autostart/--no-autostart]
+weft init [DIRECTORY] [--autostart/--no-autostart]
 
 # Show system status
 weft status [--json]
@@ -227,7 +232,10 @@ weft status [--json]
 weft task status TID [--process] [--watch] [--json]
 
 # List tasks
-weft list [--stats] [--status STATUS] [--json]
+weft task list [--stats] [--status STATUS] [--json]
+
+# List managers
+weft manager list [--json]
 
 # System maintenance
 weft system tidy            # backend-native broker compaction
@@ -235,7 +243,7 @@ weft system dump -o FILE
 weft system load -i FILE    # preflight import; exits 3 on alias conflicts
 
 # Validate a TaskSpec and optionally verify its runner
-weft validate-taskspec FILE [--load-runner] [--preflight]
+weft spec validate --type task FILE [--load-runner] [--preflight]
 ```
 
 ### Task Execution
@@ -243,7 +251,7 @@ weft validate-taskspec FILE [--load-runner] [--preflight]
 ```bash
 # Run command
 weft run COMMAND [args...]
-weft run --spec NAME|PATH
+weft run --spec FILE
 weft run --pipeline NAME|PATH
 weft run --function module:func [--arg VALUE] [--kw KEY=VALUE]
 
@@ -251,6 +259,7 @@ weft run --function module:func [--arg VALUE] [--kw KEY=VALUE]
 printf "hello\n" | weft run -- python worker.py
 printf "hello\n" | weft run --spec summarize.json
 printf "hello\n" | weft run --pipeline etl-job
+# Stored pipeline names are supported here; task specs use explicit JSON paths.
 # --input is still available for structured pipeline input and cannot be mixed
 # with piped stdin.
 
@@ -295,6 +304,11 @@ Weft now classifies backend coverage explicitly:
 
 - `shared`: backend-agnostic tests intended to pass on both SQLite and Postgres
 - `sqlite_only`: tests that intentionally validate SQLite or file-backed behavior
+
+For local development, do not assume `pytest`, `mypy`, or `ruff` are installed
+globally. This repo expects you to install the development extras once with
+`uv sync --all-extras` and then run checks through `uv run ...` so they use the
+project's pinned toolchain.
 
 The default local suite remains SQLite-first. To run the audited shared suite
 against Postgres, use [`bin/pytest-pg`](./bin/pytest-pg), which provisions a
@@ -508,7 +522,7 @@ $ weft run --timeout 60 --memory 500 ./task.sh
 ### Components
 
 - **TaskSpec**: Validated task configuration with partial immutability
-- **Manager**: Persistent worker process for task spawning
+- **Manager**: Persistent manager process for task spawning
 - **Consumer**: Task executor with reservation pattern
 - **BaseTask**: Abstract base providing queue wiring and state tracking
 - **TaskRunner**: Multiprocess execution wrapper with timeout/monitoring
@@ -540,19 +554,55 @@ Tasks execute in separate processes using `multiprocessing.spawn`:
 
 ## Development
 
+For local verification, load the repo environment first. This repo's
+[`.envrc`](./.envrc) sets `UV_PROJECT_ENVIRONMENT=.venv`, prepends the repo's
+`bin/`, activates `.venv`, and, when present, wires a sibling
+`../simplebroker` checkout into `PYTHONPATH`.
+
+If you use `direnv`, run:
+
 ```bash
+direnv allow
+```
+
+If you do not use `direnv`, source the file in your shell before running local
+commands:
+
+```bash
+. ./.envrc
+```
+
+Then use the repo-managed toolchain. For deterministic local verification,
+prefer the in-repo virtualenv binaries directly. That avoids the common failure
+mode where an agent or developer assumes `pytest`, `mypy`, or `ruff` should
+already exist on the global `PATH`, and it avoids ambiguity about which `uv`
+wrapper or shell environment is active.
+
+```bash
+# Load repo environment first if direnv is not already doing it
+. ./.envrc
+
 # Install development dependencies
 uv sync --all-extras
 
-# Run tests
-uv run pytest
-uv run pytest tests/tasks/
-uv run pytest tests/cli/
+# Fast/default suite
+./.venv/bin/python -m pytest
 
-# Linting
-uv run ruff check weft tests
-uv run ruff format weft tests
-uv run mypy weft
+# Include slow tests when needed
+./.venv/bin/python -m pytest -m ""
+
+# Target the smallest relevant scope first
+./.venv/bin/python -m pytest tests/tasks/ -q
+./.venv/bin/python -m pytest tests/cli/ -q
+./.venv/bin/python -m pytest tests/commands/test_run.py -q
+
+# Shared Postgres-compatible suite
+./.venv/bin/python bin/pytest-pg --all
+
+# Static checks
+./.venv/bin/ruff check weft tests
+./.venv/bin/ruff format weft tests
+./.venv/bin/mypy weft
 
 # Build
 uv build
@@ -660,25 +710,25 @@ Prerequisite:
 
 ## Supervised Manager
 
-Use `weft serve` when you want a persistent manager owned by `systemd`,
+Use `weft manager serve` when you want a persistent manager owned by `systemd`,
 `launchd`, `supervisord`, or a similar service manager:
 
 ```bash
-weft serve --context /path/to/project
+weft manager serve --context /path/to/project
 ```
 
-`weft serve` runs the canonical manager in the foreground and keeps it alive
+`weft manager serve` runs the canonical manager in the foreground and keeps it alive
 until it is explicitly stopped. It forces `idle_timeout=0.0` for that
 invocation, so the manager does not self-exit for inactivity.
 
-`weft worker start` is different. It starts a detached manager and exits, which
+`weft manager start` is different. It starts a detached manager and exits, which
 means the service manager would only supervise the short-lived CLI wrapper, not
 the actual manager process.
 
 Operational notes:
 
 - Put restart policy in the service manager, not in Weft.
-- `weft worker stop <tid>` still sends a graceful STOP, but an auto-restarting
+- `weft manager stop <tid>` still sends a graceful STOP, but an auto-restarting
   service manager may start the manager again unless the service itself is
   stopped.
 - This minimal supervised mode does not add a separate Weft-side drain timeout

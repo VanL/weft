@@ -1,6 +1,6 @@
 """Command handlers exposed via the `weft.commands` package."""
 
-from . import worker
+from . import manager
 from .init import cmd_init
 from .result import cmd_result
 from .run import cmd_run
@@ -17,7 +17,7 @@ __all__ = [
     "cmd_status",
     "cmd_tidy",
     "cmd_validate_taskspec",
-    "worker",
+    "manager",
 ]
 
 # ~

@@ -17,8 +17,8 @@ from tests.helpers.weft_harness import WeftTestHarness
 from tests.taskspec import fixtures as taskspec_fixtures
 from weft._constants import (
     WEFT_GLOBAL_LOG_QUEUE,
+    WEFT_MANAGERS_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
-    WEFT_WORKERS_REGISTRY_QUEUE,
 )
 from weft.commands import tasks as task_cmd
 from weft.context import build_context
@@ -154,6 +154,23 @@ def test_cli_run_command_inline(workdir, weft_harness) -> None:
     assert rc == 0
     assert "cmd-output" in out
     assert err == ""
+
+
+def test_cli_run_help_hides_monitor_and_documents_spec_file(
+    workdir, weft_harness
+) -> None:
+    rc, out, err = run_cli(
+        "run",
+        "--help",
+        cwd=workdir,
+        harness=weft_harness,
+    )
+
+    assert rc == 0
+    assert err == ""
+    assert "--spec FILE" in out
+    assert "Execute an existing TaskSpec JSON file" in out
+    assert "--monitor" not in out
 
 
 def test_cli_run_reads_stdin(workdir, weft_harness) -> None:
@@ -1019,9 +1036,28 @@ def test_cli_run_wait_reports_cancelled_task(workdir, weft_harness) -> None:
     _wait_for_task_process_exit(weft_harness, tid=task_tid)
 
 
+def test_cli_run_wait_returns_timeout_exit_code(workdir, weft_harness) -> None:
+    rc, out, err = run_cli(
+        "run",
+        "--timeout",
+        "0.1",
+        "--",
+        sys.executable,
+        "-c",
+        "import time; time.sleep(1)",
+        cwd=workdir,
+        harness=weft_harness,
+        timeout=20.0,
+    )
+
+    assert rc == 124
+    assert out == ""
+    assert "timed out" in err.lower()
+
+
 def test_cli_run_prunes_stale_manager(workdir, weft_harness) -> None:
     context = weft_harness.context
-    registry = context.queue(WEFT_WORKERS_REGISTRY_QUEUE, persistent=False)
+    registry = context.queue(WEFT_MANAGERS_REGISTRY_QUEUE, persistent=False)
     stale_pid = 999_999
     registry.write(
         json.dumps(

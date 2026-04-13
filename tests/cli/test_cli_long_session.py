@@ -429,7 +429,7 @@ def test_cli_long_session_produces_identical_transcript_across_backends(
         workdir,
         weft_harness,
         env,
-        "worker",
+        "manager",
         "stop",
         manager_tid,
         "--timeout",

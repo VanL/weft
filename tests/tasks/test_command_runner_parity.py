@@ -124,7 +124,8 @@ def test_docker_runner_is_skipped_on_windows(
     monkeypatch: pytest.MonkeyPatch,
     sandbox_profile: Path,
 ) -> None:
-    monkeypatch.setattr("weft_docker.plugin.os.name", "nt")
+    plugin_module = pytest.importorskip("weft_docker.plugin")
+    monkeypatch.setattr(plugin_module.os, "name", "nt")
 
     with pytest.raises(pytest.skip.Exception, match="docker runner unavailable"):
         _skip_unavailable_runner("docker", sandbox_profile=sandbox_profile)

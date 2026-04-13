@@ -26,7 +26,7 @@ runbook needs to become stricter.
   wiring. Do not re-implement `.weft` discovery or infer Weft artifact paths
   from broker DB naming.
 - For append-only queues such as `weft.log.tasks`, `weft.state.tid_mappings`,
-  and `weft.state.workers`, use generator-based history reads or the helper
+  and `weft.state.managers`, use generator-based history reads or the helper
   iterators. Fixed `peek_many(limit=N)` reads are not reliable for
   correctness-critical history scans.
 - Keep the TaskSpec boundary clean: templates stay partial, resolved TaskSpecs
@@ -58,8 +58,8 @@ runbook needs to become stricter.
   pool-worker shutdown.
 - In PG-backed tests, only wrap CLI subprocesses in `uv run --active` when the
   command may launch descendants that outlive the parent CLI process, such as
-  `weft run` or `weft worker start`. Using nested `uv` for one-shot commands
-  like `init`, `queue`, `status`, or `validate-taskspec` adds material test
+  `weft run` or `weft manager start`. Using nested `uv` for one-shot commands
+  like `init`, `queue`, `status`, or `spec validate` adds material test
   runtime without buying correctness.
 
 ## 2026-04-06 Process Trees
@@ -79,7 +79,7 @@ runbook needs to become stricter.
 
 ## 2026-04-07 Manager Startup Races
 
-- When a CLI launcher is waiting for manager startup in `weft.state.workers`,
+- When a CLI launcher is waiting for manager startup in `weft.state.managers`,
   do not reduce the registry to only the latest active manager if the caller
   still needs to recognize its own just-started process. Concurrent starters can
   all register successfully while older entries become invisible to their own
@@ -200,7 +200,7 @@ runbook needs to become stricter.
 ## 2026-04-08 Zombie PID Liveness
 
 - `psutil.Process(pid).is_running()` is not a sufficient liveness check for
-  manager or worker registries. Zombie processes still report `True`, so any
+  manager registries. Zombie processes still report `True`, so any
   PID-backed registry or status surface must also reject `STATUS_ZOMBIE`.
 - When a manager can register before it is fully ready, treating zombies as
   live lets launchers and leader-election code select a dead manager and route
@@ -220,7 +220,7 @@ runbook needs to become stricter.
 ## 2026-04-09 Manager Bootstrap Unification
 
 - Operator-facing manager startup must wrap the same canonical bootstrap helper
-  as `weft run`. Allowing `weft worker start` to launch arbitrary manager
+  as `weft run`. Allowing `weft manager start` to launch arbitrary manager
   TaskSpecs creates a second execution path and lets registry selection adopt a
   live manager that is not bound to `weft.spawn.requests`.
 - Canonical manager election should use the request-queue contract already
@@ -230,8 +230,8 @@ runbook needs to become stricter.
 ## 2026-04-09 Manager Lifecycle Command Consolidation
 
 - Manager control-plane commands must share one registry replay and liveness
-  path. If `weft run`, `weft worker list|status|stop`, and `weft status` each
-  interpret `weft.state.workers` separately, dead active records persist on one
+  path. If `weft run`, `weft manager list|status|stop`, and `weft status` each
+  interpret `weft.state.managers` separately, dead active records persist on one
   surface and disappear on another.
 - Shared registry readers should normalize record shape at the boundary
   (`timestamp`, `requests` backfill, canonical `T{tid}.ctrl_in` fallback) and
@@ -252,6 +252,36 @@ runbook needs to become stricter.
   parent fixture should wait briefly for that signal before entering its long
   sleep. That makes the test measure subtree cleanup instead of scheduler luck.
 
+## 2026-04-12 Local Test Tooling
+
+- Developer-facing docs must say plainly that local `pytest`, `mypy`, and
+  `ruff` must come from the repo-managed environment, not from the global
+  `PATH`. If that rule is left implicit, zero-context engineers and external
+  agents infer that the repo is missing basic tooling instead of using an
+  isolated project environment by design.
+- In this repo, that guidance is incomplete unless it also says to load
+  `.envrc` first. `.envrc` is part of the local-dev contract because it points
+  `uv` at `.venv`, prepends the repo `bin/`, and may wire a sibling
+  `../simplebroker` checkout into `PYTHONPATH`.
+- When the goal is deterministic local verification, docs should prefer the
+  explicit in-repo virtualenv binaries such as `./.venv/bin/python -m pytest`,
+  `./.venv/bin/mypy`, and `./.venv/bin/ruff` over ambient `uv run ...`
+  invocations. That removes ambiguity about which `uv` binary or shell wrapper
+  is active.
+
+## 2026-04-13 Detached Bootstrap Proof
+
+- For background control-plane bootstrap, "registry entry appeared once" is not
+  a sufficient success criterion. Detached startup has to prove an independent
+  lifecycle boundary and then prove that the expected pid and canonical registry
+  record stay live through a bounded startup window before returning success.
+- If a detached child can fail before steady-state logging is durable, startup
+  stderr or exit status must be captured in the bootstrap path itself. Otherwise
+  later status reconciliation can only infer failure after the fact.
+- Tests for detached bootstrap should prove structural separation, not only
+  happy-path liveness. On POSIX, a strong proof is that the live manager is no
+  longer in the caller CLI process group after `manager start` returns.
+
 ## 2026-04-09 Cancelled Task Teardown
 
 - Cancelled-task integration tests must not stop at the first `control_stop`
@@ -268,15 +298,15 @@ runbook needs to become stricter.
 ## 2026-04-08 Manager Role Identity
 
 - Manager identity has to stay consistent across every observability surface,
-  especially the worker registry and `weft.state.tid_mappings`. If the registry
+  especially the manager registry and `weft.state.tid_mappings`. If the registry
   says a TID is a manager but the tid-mapping payload omits `role="manager"`,
   cleanup code can misclassify that manager as a task and send task-kill
   signals to the wrong process.
 - For manager tasks, `role="manager"` is structural and must be emitted
   unconditionally by the manager itself rather than inherited from mutable
   TaskSpec metadata.
-- Test harness cleanup should treat active worker records as authoritative
-  worker tids before it fans out task STOP/KILL calls. That keeps teardown safe
+- Test harness cleanup should treat active manager records as authoritative
+  manager tids before it fans out task STOP/KILL calls. That keeps teardown safe
   even if a future regression drops manager role metadata from one surface.
 - Test harness cleanup must also treat tasks whose owner PID is the current
   pytest process as local-only, not as external task-control targets. In-process

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -9,8 +10,11 @@ from pathlib import Path
 import pytest
 
 from tests.fixtures.llm_test_models import TEST_MODEL_ID
+from weft.core.resource_monitor import ResourceMetrics
+from weft.core.runners.subprocess_runner import run_monitored_subprocess
 from weft.core.tasks.runner import TaskRunner
 from weft.core.taskspec import LimitsSection
+from weft.ext import RunnerHandle
 
 
 def test_task_runner_executes_function_successfully():
@@ -38,6 +42,78 @@ def test_task_runner_executes_function_successfully():
 
 
 PROCESS_SCRIPT = str(Path(__file__).resolve().parent / "process_target.py")
+
+
+def test_run_monitored_subprocess_uses_supplied_monitor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = subprocess.Popen(
+        [sys.executable, "-c", "print('ok')"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    class FakeMonitor:
+        def __init__(self) -> None:
+            self.started_with: int | None = None
+            self.stopped = False
+            self.metrics = ResourceMetrics(memory_mb=12.5)
+
+        def start(self, pid: int) -> None:
+            self.started_with = pid
+
+        def check_limits(self) -> tuple[bool, str | None]:
+            return True, None
+
+        def last_metrics(self) -> ResourceMetrics | None:
+            return self.metrics
+
+        def snapshot(self) -> ResourceMetrics:
+            return self.metrics
+
+        def stop(self) -> None:
+            self.stopped = True
+
+    monitor = FakeMonitor()
+    runtime_handle = RunnerHandle(runner_name="docker", runtime_id="container-123")
+    load_calls = 0
+
+    def _unexpected_load(*args: object, **kwargs: object) -> object:
+        nonlocal load_calls
+        load_calls += 1
+        raise AssertionError("load_resource_monitor() should not run")
+
+    monkeypatch.setattr(
+        "weft.core.runners.subprocess_runner.load_resource_monitor",
+        _unexpected_load,
+    )
+
+    outcome = run_monitored_subprocess(
+        process=process,
+        stdin_data=None,
+        timeout=5.0,
+        limits=None,
+        monitor_class="weft.core.resource_monitor.ResourceMonitor",
+        monitor_interval=0.05,
+        monitor=monitor,
+        db_path=None,
+        config=None,
+        runtime_handle=runtime_handle,
+        cancel_requested=None,
+        on_worker_started=None,
+        on_runtime_handle_started=None,
+        stop_runtime=lambda: None,
+        kill_runtime=lambda: None,
+    )
+
+    assert outcome.status == "ok"
+    assert outcome.value == "ok"
+    assert monitor.started_with == process.pid
+    assert monitor.stopped is True
+    assert outcome.metrics == monitor.metrics
+    assert load_calls == 0
 
 
 def _write_descendant_scripts(tmp_path: Path) -> tuple[Path, Path]:

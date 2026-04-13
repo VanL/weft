@@ -145,17 +145,23 @@ WEFT_GLOBAL_LOG_QUEUE: Final[str] = "weft.log.tasks"
 WEFT_TID_MAPPINGS_QUEUE: Final[str] = "weft.state.tid_mappings"
 """Global queue for TID short->full mappings for process management."""
 
-WEFT_WORKERS_REGISTRY_QUEUE: Final[str] = "weft.state.workers"
-"""Queue where workers register their capabilities and status."""
+WEFT_MANAGERS_REGISTRY_QUEUE: Final[str] = "weft.state.managers"
+"""Queue where managers register their capabilities and status."""
 
 WEFT_STREAMING_SESSIONS_QUEUE: Final[str] = "weft.state.streaming"
 """Queue tracking active streaming sessions (interactive/streaming outputs)."""
+
+WEFT_PIPELINES_STATE_QUEUE: Final[str] = "weft.state.pipelines"
+"""Queue tracking active first-class pipeline runs."""
+
+PIPELINE_STATUS_QUEUE_SUFFIX: Final[str] = "status"
+"""Suffix for pipeline status queues (P{tid}.status)."""
 
 WEFT_STATE_QUEUE_PREFIX: Final[str] = "weft.state."
 """Prefix for runtime-only state queues excluded from system dumps."""
 
 WEFT_SPAWN_REQUESTS_QUEUE: Final[str] = "weft.spawn.requests"
-"""Global queue for worker spawn requests."""
+"""Global queue for manager-consumed task spawn requests."""
 
 WEFT_MANAGER_CTRL_IN_QUEUE: Final[str] = "weft.manager.ctrl_in"
 """Control inbox for manager lifecycle commands."""
@@ -168,6 +174,24 @@ WEFT_MANAGER_OUTBOX_QUEUE: Final[str] = "weft.manager.outbox"
 
 WORK_ENVELOPE_START: Final[dict[str, bool]] = {"__weft_start__": True}
 """Sentinel payload the Manager uses to trigger Consumer startup."""
+
+INTERNAL_RUNTIME_TASK_CLASS_KEY: Final[str] = "_weft_runtime_task_class"
+"""Reserved metadata key selecting an internal runtime-owned task class."""
+
+INTERNAL_RUNTIME_TASK_CLASS_PIPELINE: Final[str] = "pipeline"
+"""Reserved internal runtime-owned class selector for PipelineTask."""
+
+INTERNAL_RUNTIME_TASK_CLASS_PIPELINE_EDGE: Final[str] = "pipeline_edge"
+"""Reserved internal runtime-owned class selector for PipelineEdgeTask."""
+
+PIPELINE_RUNTIME_METADATA_KEY: Final[str] = "_weft_pipeline_runtime"
+"""Reserved metadata key carrying a precompiled pipeline runtime plan."""
+
+PIPELINE_EDGE_RUNTIME_METADATA_KEY: Final[str] = "_weft_edge_runtime"
+"""Reserved metadata key carrying compiled edge runtime configuration."""
+
+PIPELINE_OWNER_METADATA_KEY: Final[str] = "_weft_pipeline_owner"
+"""Reserved metadata key carrying compact pipeline-owner event configuration."""
 
 # State Section Defaults
 # ----------------------

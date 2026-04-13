@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 
 def echo_payload(payload: str, *, suffix: str = "") -> str:
     """Return the payload with an optional suffix."""
@@ -53,3 +55,21 @@ def large_output(size: int = 4_194_304, *, char: str = "x") -> str:
 def provide_payload(value: str = "payload") -> dict[str, str]:
     """Return a dictionary payload for interactive consumer tests."""
     return {"data": value}
+
+
+def provide_stdio(
+    stdout: str = "stdout",
+    stderr: str = "stderr",
+) -> dict[str, str]:
+    """Return a structured stdout/stderr payload for result-command tests."""
+    return {"stdout": stdout, "stderr": stderr}
+
+
+def streaming_echo(
+    value: str = "streaming",
+    *,
+    delay: float = 2.0,
+) -> str:
+    """Sleep long enough for queue-surface tests to observe a running task."""
+    time.sleep(delay)
+    return value

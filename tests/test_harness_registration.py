@@ -12,8 +12,8 @@ from tests.conftest import _register_from_json
 from tests.helpers import weft_harness as harness_mod
 from tests.helpers.weft_harness import WeftTestHarness
 from weft._constants import WEFT_GLOBAL_LOG_QUEUE, WEFT_TID_MAPPINGS_QUEUE
+from weft.commands import manager as manager_cmd
 from weft.commands import tasks as task_cmd
-from weft.commands import worker as worker_cmd
 
 
 @pytest.mark.sqlite_only
@@ -43,7 +43,7 @@ def test_register_from_json_routes_manager_tids_to_worker_tracking() -> None:
             },
         )
 
-        assert harness.registered_worker_tids() == {"1775630560447778816"}
+        assert harness.registered_manager_tids() == {"1775630560447778816"}
         assert harness.registered_tids() == {"1775630560739303424"}
     finally:
         harness.cleanup()
@@ -86,7 +86,7 @@ def test_harness_cleanup_preserve_database_avoids_force_termination(
         monkeypatch.setattr(harness, "_collect_pid_mappings", lambda: None)
         monkeypatch.setattr(
             harness,
-            "_cleanup_worker_records",
+            "_cleanup_manager_records",
             lambda: {},
         )
         monkeypatch.setattr(
@@ -115,17 +115,17 @@ def test_harness_cleanup_preserve_database_avoids_force_termination(
 
 
 @pytest.mark.sqlite_only
-def test_harness_stop_active_workers_stops_registered_task_and_worker_tids(
+def test_harness_stop_active_managers_stops_registered_task_and_manager_tids(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     harness = WeftTestHarness()
     try:
         harness.__enter__()
         harness.register_tid("1775630560739303424")
-        harness.register_worker_tid("1775630560447778816")
+        harness.register_manager_tid("1775630560447778816")
         monkeypatch.setattr(
             harness,
-            "_list_active_worker_records",
+            "_list_active_manager_records",
             lambda: [{"tid": "1775630560999999999", "status": "active"}],
         )
         monkeypatch.setattr(harness, "_collect_pid_mappings", lambda: None)
@@ -136,13 +136,13 @@ def test_harness_stop_active_workers_stops_registered_task_and_worker_tids(
         )
         monkeypatch.setattr(harness, "_drain_registry_queue", lambda: None)
 
-        worker_calls: list[str] = []
+        manager_calls: list[str] = []
         task_calls: list[str] = []
 
         monkeypatch.setattr(
             harness,
-            "_send_worker_stop",
-            lambda tid, *, record: worker_calls.append(tid),
+            "_send_manager_stop",
+            lambda tid, *, record: manager_calls.append(tid),
         )
         monkeypatch.setattr(
             harness,
@@ -153,21 +153,21 @@ def test_harness_stop_active_workers_stops_registered_task_and_worker_tids(
             task_cmd, "kill_tasks", lambda tids, **kwargs: len(tuple(tids))
         )
         monkeypatch.setattr(
-            worker_cmd,
+            manager_cmd,
             "stop_command",
             lambda **kwargs: (0, None),
         )
 
-        harness._stop_active_workers()
+        harness._stop_active_managers()
 
-        assert worker_calls == ["1775630560447778816", "1775630560999999999"]
+        assert manager_calls == ["1775630560447778816", "1775630560999999999"]
         assert task_calls == ["1775630560739303424"]
     finally:
         harness.cleanup()
 
 
 @pytest.mark.sqlite_only
-def test_harness_stop_active_workers_does_not_fan_out_worker_tid_as_task(
+def test_harness_stop_active_managers_does_not_fan_out_worker_tid_as_task(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     harness = WeftTestHarness()
@@ -176,7 +176,7 @@ def test_harness_stop_active_workers_does_not_fan_out_worker_tid_as_task(
         harness.__enter__()
         monkeypatch.setattr(
             harness,
-            "_list_active_worker_records",
+            "_list_active_manager_records",
             lambda: [{"tid": "1775630560447778816", "status": "active"}],
         )
         harness._load_tid_mapping_payloads = lambda: [  # type: ignore[method-assign]
@@ -194,14 +194,14 @@ def test_harness_stop_active_workers_does_not_fan_out_worker_tid_as_task(
         )
         monkeypatch.setattr(harness, "_drain_registry_queue", lambda: None)
 
-        worker_calls: list[str] = []
+        manager_calls: list[str] = []
         task_calls: list[str] = []
         kill_calls: list[tuple[str, ...]] = []
 
         monkeypatch.setattr(
             harness,
-            "_send_worker_stop",
-            lambda tid, *, record: worker_calls.append(tid),
+            "_send_manager_stop",
+            lambda tid, *, record: manager_calls.append(tid),
         )
         monkeypatch.setattr(
             harness,
@@ -214,14 +214,14 @@ def test_harness_stop_active_workers_does_not_fan_out_worker_tid_as_task(
             lambda tids, **kwargs: kill_calls.append(tuple(tids)),
         )
         monkeypatch.setattr(
-            worker_cmd,
+            manager_cmd,
             "stop_command",
             lambda **kwargs: (0, None),
         )
 
-        harness._stop_active_workers()
+        harness._stop_active_managers()
 
-        assert worker_calls == ["1775630560447778816"]
+        assert manager_calls == ["1775630560447778816"]
         assert task_calls == []
         assert kill_calls == []
     finally:
@@ -231,14 +231,14 @@ def test_harness_stop_active_workers_does_not_fan_out_worker_tid_as_task(
 
 
 @pytest.mark.sqlite_only
-def test_harness_stop_active_workers_does_not_fan_out_in_process_task_tid(
+def test_harness_stop_active_managers_does_not_fan_out_in_process_task_tid(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     harness = WeftTestHarness()
     repo_cwd = os.getcwd()
     try:
         harness.__enter__()
-        monkeypatch.setattr(harness, "_list_active_worker_records", lambda: [])
+        monkeypatch.setattr(harness, "_list_active_manager_records", lambda: [])
         harness._load_tid_mapping_payloads = lambda: [  # type: ignore[method-assign]
             {
                 "full": "1775630561555555555",
@@ -268,12 +268,12 @@ def test_harness_stop_active_workers_does_not_fan_out_in_process_task_tid(
             lambda tids, **kwargs: kill_calls.append(tuple(tids)),
         )
         monkeypatch.setattr(
-            worker_cmd,
+            manager_cmd,
             "stop_command",
             lambda **kwargs: (0, None),
         )
 
-        harness._stop_active_workers()
+        harness._stop_active_managers()
 
         assert task_calls == []
         assert kill_calls == []
@@ -446,7 +446,7 @@ def test_harness_cleanup_preserve_database_raises_if_database_stays_locked(
 def test_collect_pid_mappings_registers_discovered_task_tids() -> None:
     harness = WeftTestHarness()
     try:
-        harness._registered_worker_tids.add("1775630560447778816")
+        harness._registered_manager_tids.add("1775630560447778816")
         monkeypatch_payloads = [
             {
                 "full": "1775630560739303424",
@@ -468,7 +468,7 @@ def test_collect_pid_mappings_registers_discovered_task_tids() -> None:
         harness._collect_pid_mappings()
 
         assert harness.registered_tids() == {"1775630560739303424"}
-        assert harness.registered_worker_tids() == {
+        assert harness.registered_manager_tids() == {
             "1775630560447778816",
             "1775630560999999999",
         }
@@ -614,11 +614,11 @@ def test_cleanup_preserving_database_stops_workers_without_task_fanout(
     repo_cwd = os.getcwd()
     try:
         harness.__enter__()
-        harness.register_worker_tid("1775630560447778816")
+        harness.register_manager_tid("1775630560447778816")
         monkeypatch.setattr(harness, "_collect_pid_mappings", lambda: None)
         monkeypatch.setattr(
             harness,
-            "_cleanup_worker_records",
+            "_cleanup_manager_records",
             lambda: {"1775630560447778816": {"tid": "1775630560447778816"}},
         )
         monkeypatch.setattr(
@@ -628,11 +628,11 @@ def test_cleanup_preserving_database_stops_workers_without_task_fanout(
         )
         monkeypatch.setattr(harness, "_live_registered_pids", lambda: [])
 
-        worker_calls: list[str] = []
+        manager_calls: list[str] = []
         monkeypatch.setattr(
             harness,
-            "_send_worker_stop",
-            lambda tid, *, record: worker_calls.append(tid),
+            "_send_manager_stop",
+            lambda tid, *, record: manager_calls.append(tid),
         )
         monkeypatch.setattr(
             harness,
@@ -642,7 +642,7 @@ def test_cleanup_preserving_database_stops_workers_without_task_fanout(
 
         harness._cleanup_preserving_database()
 
-        assert worker_calls == ["1775630560447778816"]
+        assert manager_calls == ["1775630560447778816"]
     finally:
         os.chdir(repo_cwd)
         harness._closed = True

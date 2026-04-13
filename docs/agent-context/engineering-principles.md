@@ -50,7 +50,7 @@ For core lifecycle behavior, use the real system:
 Avoid mock-only tests for:
 
 - queue reservations
-- manager/worker lifecycle
+- manager/task lifecycle
 - timeout/resource behavior
 - task state transitions
 - final result delivery

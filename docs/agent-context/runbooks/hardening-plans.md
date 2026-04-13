@@ -38,7 +38,7 @@ For Weft, boundary mistakes usually hide in:
 
 - queue contracts and state transitions
 - template vs resolved `TaskSpec` rules
-- manager or worker bootstrap sequencing
+- manager or task bootstrap sequencing
 - append-only history reads
 - cleanup and retry behavior around deferred work
 
@@ -91,7 +91,7 @@ Trace the end-to-end flow and ask what assumes the current shape or timing.
 Common Weft hidden couplings:
 
 - CLI startup to manager registry state
-- manager lifecycle to `weft.state.workers` and PID liveness
+- manager lifecycle to `weft.state.managers` and PID liveness
 - task completion to outbox visibility and completion-event timing
 - append-only queue histories to generator-based readers
 - template TaskSpecs to resolved TaskSpecs and downstream consumers
@@ -141,7 +141,7 @@ A hardened plan should say when to keep these real:
 
 - `WeftTestHarness`
 - broker-backed queues
-- manager and worker lifecycle
+- manager and task lifecycle
 - reservation semantics
 - outbox and task-log behavior
 

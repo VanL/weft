@@ -163,8 +163,8 @@ Likely `shared` after light refactoring:
 - [`tests/cli/test_status.py`](../../tests/cli/test_status.py)
 - [`tests/cli/test_cli_system.py`](../../tests/cli/test_cli_system.py)
 - [`tests/cli/test_cli_result.py`](../../tests/cli/test_cli_result.py)
-- [`tests/specs/worker_architecture/test_agent_spawn.py`](../../tests/specs/worker_architecture/test_agent_spawn.py)
-- [`tests/specs/worker_architecture/test_tid_correlation.py`](../../tests/specs/worker_architecture/test_tid_correlation.py)
+- [`tests/specs/manager_architecture/test_agent_spawn.py`](../../tests/specs/manager_architecture/test_agent_spawn.py)
+- [`tests/specs/manager_architecture/test_tid_correlation.py`](../../tests/specs/manager_architecture/test_tid_correlation.py)
 
 Mixed modules that should be split into `*_shared.py` and
 `*_sqlite_only.py` rather than left ambiguous:
@@ -603,8 +603,8 @@ Read first:
 - [`tests/cli/test_status.py`](../../tests/cli/test_status.py)
 - [`tests/cli/test_cli_system.py`](../../tests/cli/test_cli_system.py)
 - [`tests/cli/test_cli_result.py`](../../tests/cli/test_cli_result.py)
-- [`tests/specs/worker_architecture/test_agent_spawn.py`](../../tests/specs/worker_architecture/test_agent_spawn.py)
-- [`tests/specs/worker_architecture/test_tid_correlation.py`](../../tests/specs/worker_architecture/test_tid_correlation.py)
+- [`tests/specs/manager_architecture/test_agent_spawn.py`](../../tests/specs/manager_architecture/test_agent_spawn.py)
+- [`tests/specs/manager_architecture/test_tid_correlation.py`](../../tests/specs/manager_architecture/test_tid_correlation.py)
 
 Files to modify:
 
