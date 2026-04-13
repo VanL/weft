@@ -452,6 +452,49 @@ class Manager(BaseTask):
         return min(active, key=int)
 
     def _maybe_yield_leadership(self, *, force: bool = False) -> bool:
+        """Check whether this manager should yield leadership and act on it.
+
+        Leadership algorithm
+        --------------------
+        Multiple manager processes can coexist when a new ``weft serve`` or
+        ``weft run`` starts while a previous manager is still alive.  The
+        system resolves the conflict by electing the manager with the
+        *lowest* TID as the leader.  TIDs are hybrid timestamps (microseconds
+        + counter), so the lowest TID is always the earliest-started manager.
+        This lets the system prefer stability: the long-running incumbent wins
+        rather than the newcomer.
+
+        This method is called periodically by the manager's main loop (rate-
+        limited by ``_leader_check_interval_ns`` unless ``force=True``).  On
+        each check it reads the live manager registry, finds the current
+        leader TID, and compares it to its own TID.
+
+        Yielding conditions and behaviour
+        ----------------------------------
+        * **Not leader** (another live manager has a lower TID):
+          - If this manager has **persistent** child tasks it cannot yield:
+            persistent tasks are long-lived workers (e.g. agents) that must
+            not be abandoned mid-run.  The manager stays active and continues
+            checking until the persistent children finish.
+          - If all remaining children are **non-persistent** (or there are no
+            children), leadership drain begins:
+            ``_begin_leadership_drain`` unregisters this manager from the
+            active registry so new submissions are routed to the leader, but
+            keeps the process alive until the in-flight non-persistent
+            children complete naturally.
+          - If there are **no children at all**, the yield is immediate:
+            the manager marks itself cancelled, reports the event, unregisters,
+            and sets ``should_stop``.
+        * **Is leader** (own TID is lowest, or registry is empty):
+          Returns ``False`` — nothing to do.
+
+        Returns
+        -------
+        bool
+            ``True`` if leadership is being yielded (caller should treat this
+            as a signal to wind down), ``False`` if this manager is the leader
+            or the check interval has not elapsed.
+        """
         now_ns = time.time_ns()
         if (
             not force

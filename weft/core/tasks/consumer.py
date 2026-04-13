@@ -47,6 +47,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         self._init_interactive()
         self._active_raw_message: str | None = None
         self._active_message_timestamp: int | None = None
+        self._active_live_command_streaming = False
         self._agent_session: AgentSession | None = None
         self._deferred_active_control_command: str | None = None
         self._deferred_active_control_timestamp: int | None = None
@@ -139,16 +140,23 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         initial_transition: bool,
     ) -> Any:
         outcome = self._run_task(work_item)
+        live_command_streaming = self._active_live_command_streaming
         metrics_payload = self._extract_metrics(outcome)
-        self._ensure_outcome_ok(outcome, timestamp, metrics_payload)
-        result_bytes = self._emit_result(outcome.value)
-        self._finalize_message(
-            timestamp,
-            result_bytes,
-            metrics_payload,
-            initial_transition=initial_transition,
-        )
-        return outcome.value
+        try:
+            self._ensure_outcome_ok(outcome, timestamp, metrics_payload)
+            if live_command_streaming:
+                result_bytes = self._serialized_result_bytes(outcome.value)
+            else:
+                result_bytes = self._emit_result(outcome.value)
+            self._finalize_message(
+                timestamp,
+                result_bytes,
+                metrics_payload,
+                initial_transition=initial_transition,
+            )
+            return outcome.value
+        finally:
+            self._active_live_command_streaming = False
 
     def run_work_item(self, work_item: Any) -> Any:
         """Execute *work_item* without relying on queue plumbing."""
@@ -161,6 +169,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
 
     def _run_task(self, work_item: Any) -> RunnerOutcome:
         if self._uses_agent_session():
+            self._active_live_command_streaming = False
             session = self._ensure_agent_session()
             start_time = time.monotonic()
             result = session.execute(
@@ -181,12 +190,88 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             )
 
         runner = self._make_task_runner()
+        live_command_streaming = (
+            self._uses_live_command_streaming() and runner.supports_stream_callbacks()
+        )
+        self._active_live_command_streaming = live_command_streaming
+        if live_command_streaming:
+            state = {
+                "started": False,
+                "stdout_index": 0,
+                "stderr_index": 0,
+            }
+
+            def _ensure_streaming_session() -> None:
+                if state["started"]:
+                    return
+                state["started"] = True
+                self._begin_streaming_session(
+                    mode="stream",
+                    metadata={
+                        "queue": self._queue_names["outbox"],
+                        "ctrl_queue": self._queue_names["ctrl_out"],
+                    },
+                )
+
+            def _on_stdout_chunk(chunk: str, final: bool) -> None:
+                _ensure_streaming_session()
+                envelope = {
+                    "type": "stream",
+                    "stream": "stdout",
+                    "chunk": state["stdout_index"],
+                    "final": final,
+                    "encoding": "text",
+                    "data": chunk,
+                }
+                if final:
+                    envelope["result_transform"] = "strip"
+                self._queue(self._queue_names["outbox"]).write(json.dumps(envelope))
+                state["stdout_index"] += 1
+
+            def _on_stderr_chunk(chunk: str, final: bool) -> None:
+                _ensure_streaming_session()
+                envelope = {
+                    "type": "stream",
+                    "stream": "stderr",
+                    "chunk": state["stderr_index"],
+                    "final": final,
+                    "encoding": "text",
+                    "data": chunk,
+                }
+                self._ctrl_out_queue.write(json.dumps(envelope))
+                state["stderr_index"] += 1
+
+            return runner.run_with_hooks(
+                work_item,
+                cancel_requested=self._cancel_requested,
+                on_worker_started=self._register_running_worker,
+                on_runtime_handle_started=self.register_runtime_handle,
+                on_stdout_chunk=_on_stdout_chunk,
+                on_stderr_chunk=_on_stderr_chunk,
+            )
+
         return runner.run_with_hooks(
             work_item,
             cancel_requested=self._cancel_requested,
             on_worker_started=self._register_running_worker,
             on_runtime_handle_started=self.register_runtime_handle,
         )
+
+    def _uses_live_command_streaming(self) -> bool:
+        return bool(
+            self.taskspec.spec.type == "command"
+            and getattr(self.taskspec.spec, "stream_output", False)
+            and not getattr(self.taskspec.spec, "interactive", False)
+        )
+
+    @staticmethod
+    def _serialized_result_bytes(result: Any) -> int:
+        serialized = serialize_result(result)
+        try:
+            encoded_result = serialized.encode("utf-8")
+        except UnicodeEncodeError:
+            encoded_result = serialized.encode("utf-8", errors="replace")
+        return len(encoded_result)
 
     def _poll_active_control_once(self) -> None:
         """Poll one active control message on the main task thread.
@@ -234,9 +319,39 @@ class Consumer(BaseTask, InteractiveTaskMixin):
     def _defer_active_control(self, command: str, timestamp: int) -> None:
         """Defer active STOP/KILL finalization back to the main task thread.
 
-        The background control poller may request cancellation promptly, but it
-        must not publish terminal state or apply reserved-queue policy while the
-        main task thread is still running the active work item.
+        Thread-safety pattern
+        ---------------------
+        Control messages (STOP/KILL) can arrive on the control-poller thread
+        at any time, including while the main task thread is blocked inside the
+        work runner executing user code.  Applying the full terminal transition
+        from the poller thread would be unsafe because:
+
+        1. ``taskspec`` state mutations and reserved-queue operations are not
+           thread-safe.
+        2. The reserved-queue policy (keep/requeue/clear) must be applied
+           against ``_active_message_timestamp``, which is owned by the main
+           thread.
+        3. Sending the control acknowledgement response before the runner has
+           unwound would create a false ordering: the caller would see an ack
+           before the task is actually done.
+
+        Instead, the poller thread does only the minimal work that is safe:
+        it stores the command and its queue timestamp in
+        ``_deferred_active_control_command`` /
+        ``_deferred_active_control_timestamp``, then sets ``should_stop``
+        (and ``_kill_requested`` for KILL) so the runner's cancellation
+        callback returns ``True`` on its next poll.  It also deletes the raw
+        control message from the queue so that the BaseTask control handler
+        does not double-process it.
+
+        Handoff to main thread
+        ----------------------
+        After the runner unwinds (whether due to cancellation, an error, or
+        normal completion), the main execution loop calls
+        ``_finalize_deferred_active_control``.  That method re-reads the
+        stored command and applies the terminal state transition, reserved-
+        queue policy, and acknowledgement response in the correct order on the
+        main thread, where all shared state is accessible.
         """
 
         self._deferred_active_control_command = command
@@ -246,7 +361,15 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             self._kill_requested = True
 
     def _finalize_deferred_active_control(self) -> None:
-        """Apply deferred STOP/KILL state transitions on the main task thread."""
+        """Apply deferred STOP/KILL state transitions on the main task thread.
+
+        Called by the main execution loop after the work runner has fully
+        unwound.  Reads the command stashed by ``_defer_active_control``,
+        applies the appropriate terminal transition (``_handle_stop_request``
+        or ``_handle_kill_request``), enforces the reserved-queue policy, and
+        sends the control acknowledgement.  Clears the deferred state before
+        returning so a second call is a no-op.
+        """
 
         command = self._deferred_active_control_command
         timestamp = self._deferred_active_control_timestamp
@@ -656,7 +779,8 @@ class Consumer(BaseTask, InteractiveTaskMixin):
 
         if cleanup_enabled:
             self._purge_start_tokens()
-            self._purge_stream_markers()
+            if not self._uses_live_command_streaming():
+                self._purge_stream_markers()
             self._cleanup_spilled_outputs_if_needed()
 
         super().cleanup()

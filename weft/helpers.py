@@ -271,10 +271,39 @@ def terminate_process_tree(
     timeout: float = 0.5,
     kill_after: bool = True,
 ) -> set[int]:
-    """Terminate ``root_pid`` and any descendant processes.
+    """Terminate ``root_pid`` and every descendant process.
 
-    Descendants receive the signal before the root process to reduce the chance
-    of orphaning subprocesses when the parent exits first.
+    Algorithm overview
+    ------------------
+    1. **Snapshot the tree.** ``_list_process_descendants`` walks the process
+       tree recursively via ``psutil`` and deduplicates PIDs.  The snapshot is
+       taken once; processes that spawn children after this point are not
+       included, but that is an acceptable race — they will typically inherit
+       the parent's fate anyway.
+
+    2. **Signal leaves before root.** The target list is ordered
+       ``[descendants..., root]``.  Sending SIGTERM to descendants first means
+       the root process cannot exit and orphan its children before they have
+       had a chance to receive their own signals.
+
+    3. **Graceful wait.** ``psutil.wait_procs`` waits up to ``timeout``
+       seconds for each signalled process to exit.  Processes that exit
+       cleanly during this window are collected in ``_gone``; the remainder
+       stay in ``alive``.
+
+    4. **Escalate to SIGKILL** (when ``kill_after=True``).  Any process still
+       alive after the grace period is force-killed with SIGKILL, followed by
+       a second ``wait_procs`` to reap zombies.
+
+    5. **Return the terminated set.**  The function returns the PIDs of every
+       process that is no longer running after the sequence, regardless of
+       whether it exited gracefully or was killed.
+
+    Returns
+    -------
+    set[int]
+        PIDs confirmed terminated.  An empty set means nothing was signalled
+        (e.g. the root PID was already gone or invalid).
     """
 
     if root_pid <= 0:
