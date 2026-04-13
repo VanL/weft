@@ -1,21 +1,12 @@
 # Agent Runtime
 
-This document specifies Weft's current first-class agent runtime layer. The
-goal is to let Weft dispatch model-backed agent work without abandoning the
-system's queue-first, process-first architecture.
+This document specifies Weft's current agent runtime layer. Deferred agent
+runtime surfaces live in
+[13A-Agent_Runtime_Planned.md](13A-Agent_Runtime_Planned.md).
 
 The core decision is unchanged: **agents remain Tasks**. Weft owns queues,
 durability, process isolation, resource limits, and lifecycle. Agent libraries
 remain adapters that run inside those task processes.
-
-## Related Plans
-
-- [Agent Runtime Implementation Plan](../plans/agent-runtime-implementation-plan.md)
-  -- original prototype plan covering Tasks 1-7, one-shot agent MVP
-- [Persistent Agent Runtime Implementation Plan](../plans/persistent-agent-runtime-implementation-plan.md)
-  -- superseding plan for persistent agent tasks with continuation
-- [Agent Runtime Boundary Cleanup Plan](../plans/agent-runtime-boundary-cleanup-plan.md)
-  -- schema pruning, structured message preservation, public/private boundary cleanup
 
 ## Design Context [AR-0]
 
@@ -33,7 +24,7 @@ agent runtime follows that layering:
   internal protocol between the parent task process and a dedicated runtime
   subprocess.
 
-## Current Status [AR-0.1]
+## Current Support [AR-0.1]
 
 The current implementation supports:
 
@@ -44,13 +35,6 @@ The current implementation supports:
 - conversation scopes: `per_message`, `per_task`
 - persistent agent tasks through ordinary `spec.persistent=true` task
   semantics
-
-The current implementation does **not** support:
-
-- approval policies **[NOT YET IMPLEMENTED]**
-- transcript persistence **[NOT YET IMPLEMENTED]**
-- semantic event streaming on the public outbox **[NOT YET IMPLEMENTED]**
-- public result wrappers such as `agent_result` (intentionally omitted by design)
 
 ## Conceptual Model [AR-1]
 
@@ -258,6 +242,9 @@ boundaries.
   inbox message while the task itself remains `running`.
 - `weft result TID` uses those existing task log events to determine when a
   batch of outbox messages for one work item is complete.
+- `weft result TID --stream` may render unread outbox stream chunks live, but
+  it still stops at those same existing boundary events rather than inventing a
+  new public protocol.
 
 This preserves a protocol-light public queue surface while still allowing one
 work item to emit multiple public outputs.
@@ -361,20 +348,29 @@ This slice does not attempt to:
 
 ## Implementation Mapping [AR-9]
 
-- TaskSpec models (`AgentSection`, `AgentToolSection`, `AgentTemplateSection`): `weft/core/taskspec.py`
-- Runtime normalization, registry, and dispatch: `weft/core/agent_runtime.py`
+- TaskSpec models (`AgentSection`, `AgentToolSection`, `AgentTemplateSection`):
+  `weft/core/taskspec.py`
+- Runtime normalization, registry, and dispatch:
+  `weft/core/agent_runtime.py`
 - Templates (`render_agent_template`): `weft/core/agent_templates.py`
-- Tool resolution (`resolve_agent_tools`, `ResolvedAgentTool`): `weft/core/agent_tools.py`
-- Built-in `llm` backend (`LLMBackend`, `LLMBackendSession`): `weft/core/agents/backends/llm_backend.py`
-- Backend package init and registration: `weft/core/agents/__init__.py`, `weft/core/agents/backends/__init__.py`
+- Tool resolution (`resolve_agent_tools`, `ResolvedAgentTool`):
+  `weft/core/agent_tools.py`
+- Built-in `llm` backend (`LLMBackend`, `LLMBackendSession`):
+  `weft/core/agents/backends/llm_backend.py`
+- Backend package init and registration: `weft/core/agents/__init__.py`,
+  `weft/core/agents/backends/__init__.py`
 - Task execution and outbox emission: `weft/core/tasks/consumer.py`
 - Persistent session management (`AgentSession`): `weft/core/tasks/sessions.py`
 - Persistent runtime subprocess orchestration: `weft/core/tasks/runner.py`
 - Private session protocol: `weft/core/tasks/agent_session_protocol.py`
 - CLI result aggregation: `weft/commands/run.py`, `weft/commands/result.py`
 
-### Test coverage
+## Related Plans
 
-- `tests/core/test_agent_runtime.py` -- normalization, registry, work envelope
-- `tests/core/test_llm_backend.py` -- llm backend execution
-- `tests/fixtures/llm_test_models.py` -- real llm.Model test subclass
+- [`docs/plans/result-stream-implementation-plan.md`](../plans/result-stream-implementation-plan.md)
+
+## Related Documents
+
+- [13A-Agent_Runtime_Planned.md](13A-Agent_Runtime_Planned.md)
+- [10-CLI_Interface.md](10-CLI_Interface.md)
+- [02-TaskSpec.md](02-TaskSpec.md)

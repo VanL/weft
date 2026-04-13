@@ -68,7 +68,6 @@ def run_monitored_subprocess(
 ) -> RunnerOutcome:
     """Run a managed subprocess with timeout, cancellation, and limit checks."""
 
-    monitor = None
     last_metrics: ResourceMetrics | None = None
     actual_worker_pid = worker_pid if worker_pid is not None else process.pid
     if on_worker_started is not None:

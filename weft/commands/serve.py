@@ -1,9 +1,9 @@
 """Foreground manager command for supervisor-managed deployments.
 
 Spec references:
-- docs/specifications/03-Worker_Architecture.md [WA-3]
+- docs/specifications/03-Manager_Architecture.md [MA-3]
 - docs/specifications/05-Message_Flow_and_State.md [MF-7]
-- docs/specifications/10-CLI_Interface.md [CLI-1]
+- docs/specifications/10-CLI_Interface.md [CLI-1.1.2]
 """
 
 from __future__ import annotations

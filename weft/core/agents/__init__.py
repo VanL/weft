@@ -1,4 +1,8 @@
-"""Built-in agent runtime registration."""
+"""Built-in agent runtime registration.
+
+Spec references:
+- docs/specifications/13-Agent_Runtime.md [AR-7], [AR-9]
+"""
 
 from __future__ import annotations
 

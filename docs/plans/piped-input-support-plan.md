@@ -314,7 +314,7 @@ Protect these from [`docs/specifications/07-System_Invariants.md`](../specificat
 - **QUEUE.1 / QUEUE.2 / QUEUE.3**: required queue layout and `T{tid}.` naming
 - **QUEUE.4 / QUEUE.5 / QUEUE.6**: preserve exactly-once move semantics and
   reserved queue policy
-- **WORKER.4**: spawn-request message ID remains the child task TID
+- **MANAGER.4**: spawn-request message ID remains the child task TID
 - **IMPL.5 / IMPL.6**: keep spawn-based process boundaries and recreate broker
   connections in child processes
 

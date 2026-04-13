@@ -1,4 +1,9 @@
-"""Helpers for managing stored task and pipeline specs."""
+"""Helpers for managing stored task and pipeline specs.
+
+Spec references:
+- docs/specifications/10-CLI_Interface.md [CLI-1.4], [CLI-1.4.1]
+- docs/specifications/12-Pipeline_Composition_and_UX.md
+"""
 
 from __future__ import annotations
 
@@ -7,6 +12,10 @@ from pathlib import Path
 from typing import Any
 
 from weft.context import WeftContext, build_context
+from weft.core.pipelines import (
+    generate_pipeline_example,
+    validate_pipeline_spec_payload,
+)
 from weft.core.taskspec import validate_taskspec
 
 SPEC_TYPE_TASK = "task"
@@ -102,8 +111,9 @@ def create_spec(
         if not valid:
             raise ValueError(f"Invalid TaskSpec: {errors}")
     elif spec_type == SPEC_TYPE_PIPELINE:
-        if "stages" not in payload:
-            raise ValueError("Pipeline spec must include 'stages'")
+        valid, errors = validate_pipeline_spec_payload(payload)
+        if not valid:
+            raise ValueError(f"Invalid pipeline spec: {errors}")
     else:
         raise ValueError(f"Unknown spec type: {spec_type}")
 
@@ -132,16 +142,13 @@ def generate_spec(spec_type: str) -> dict[str, Any]:
             "metadata": {},
         }
     if spec_type == SPEC_TYPE_PIPELINE:
-        return {
-            "name": "example-pipeline",
-            "stages": [
-                {
-                    "name": "stage-1",
-                    "task": "task-name",
-                }
-            ],
-        }
+        return generate_pipeline_example()
     raise ValueError(f"Unknown spec type: {spec_type}")
+
+
+def infer_spec_type(path: Path) -> str:
+    payload = _read_json(path)
+    return SPEC_TYPE_PIPELINE if "stages" in payload else SPEC_TYPE_TASK
 
 
 def validate_spec(
@@ -154,9 +161,7 @@ def validate_spec(
     if spec_type == SPEC_TYPE_TASK:
         return validate_taskspec(json.dumps(payload))
     if spec_type == SPEC_TYPE_PIPELINE:
-        if "stages" not in payload:
-            return False, {"stages": "pipeline spec must include 'stages'"}
-        return True, {}
+        return validate_pipeline_spec_payload(payload)
     return False, {"type": f"Unknown spec type: {spec_type}"}
 
 

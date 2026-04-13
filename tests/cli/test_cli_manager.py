@@ -1,32 +1,56 @@
-"""CLI coverage for `weft worker` subcommands."""
+"""CLI coverage for `weft manager` subcommands."""
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
+import time
+from typing import Any
 
 import pytest
 
 from tests.conftest import run_cli
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import (
+    WEFT_GLOBAL_LOG_QUEUE,
+    WEFT_MANAGERS_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
-    WEFT_WORKERS_REGISTRY_QUEUE,
 )
 from weft.context import build_context
+from weft.helpers import iter_queue_json_entries
 
 pytestmark = [pytest.mark.shared]
 
 
-def test_worker_start_and_status(workdir):
-    context_root = prepare_project_root(workdir / "worker-project")
+def _parse_started_manager(output: str) -> tuple[str, int]:
+    match = re.search(r"Started manager (\d+) \(pid (\d+)\)", output)
+    if match is None:
+        raise AssertionError(f"Unable to parse manager start output: {output!r}")
+    return match.group(1), int(match.group(2))
+
+
+def _task_log_payloads(context, tid: str) -> list[dict[str, Any]]:
+    queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
+    try:
+        payloads: list[dict[str, Any]] = []
+        for payload, _timestamp in iter_queue_json_entries(queue):
+            if payload.get("tid") == tid:
+                payloads.append(payload)
+        return payloads
+    finally:
+        queue.close()
+
+
+def test_manager_start_and_status(workdir):
+    context_root = prepare_project_root(workdir / "manager-project")
     build_context(spec_context=context_root)
 
     rc, out, err = run_cli(
-        "worker",
+        "manager",
         "start",
         "--context",
         context_root,
@@ -37,7 +61,7 @@ def test_worker_start_and_status(workdir):
     assert err == ""
 
     rc, out, err = run_cli(
-        "worker",
+        "manager",
         "list",
         "--json",
         "--context",
@@ -52,7 +76,7 @@ def test_worker_start_and_status(workdir):
     tid = active[0]["tid"]
 
     rc, out, err = run_cli(
-        "worker",
+        "manager",
         "start",
         "--context",
         context_root,
@@ -63,7 +87,7 @@ def test_worker_start_and_status(workdir):
     assert err == ""
 
     rc, out, err = run_cli(
-        "worker",
+        "manager",
         "status",
         tid,
         "--context",
@@ -78,7 +102,7 @@ def test_worker_start_and_status(workdir):
     assert detail.get("status") == "active"
 
     rc, out, err = run_cli(
-        "worker",
+        "manager",
         "stop",
         tid,
         "--context",
@@ -89,7 +113,7 @@ def test_worker_start_and_status(workdir):
     assert err == ""
 
     rc, out, err = run_cli(
-        "worker",
+        "manager",
         "status",
         tid,
         "--context",
@@ -103,12 +127,72 @@ def test_worker_start_and_status(workdir):
     assert detail.get("status") == "stopped"
 
 
-def test_worker_stop_missing_tid(workdir):
-    context_root = prepare_project_root(workdir / "missing-worker")
+@pytest.mark.skipif(os.name == "nt", reason="POSIX only")
+def test_manager_start_detaches_manager_process_group_from_cli_caller(workdir):
+    context_root = prepare_project_root(workdir / "detached-manager")
+    context = build_context(spec_context=context_root)
+    tid: str | None = None
+
+    try:
+        rc, out, err = run_cli(
+            "manager",
+            "start",
+            "--context",
+            context_root,
+            cwd=workdir,
+        )
+        assert rc == 0
+        assert err == ""
+        tid, pid = _parse_started_manager(out)
+
+        deadline = time.time() + 10.0
+        caller_pid: int | None = None
+        while time.time() < deadline and caller_pid is None:
+            for payload in _task_log_payloads(context, tid):
+                value = payload.get("caller_pid")
+                if isinstance(value, int) and value > 0:
+                    caller_pid = value
+                    break
+            if caller_pid is None:
+                time.sleep(0.05)
+
+        assert isinstance(caller_pid, int)
+        assert pid != caller_pid
+        assert os.getpgid(pid) == pid
+        assert os.getpgid(pid) != caller_pid
+
+        rc, out, err = run_cli(
+            "manager",
+            "status",
+            tid,
+            "--json",
+            "--context",
+            context_root,
+            cwd=workdir,
+        )
+        assert rc == 0
+        assert err == ""
+        detail = json.loads(out)
+        assert detail.get("status") == "active"
+        assert detail.get("pid") == pid
+    finally:
+        if tid is not None:
+            run_cli(
+                "manager",
+                "stop",
+                tid,
+                "--context",
+                context_root,
+                cwd=workdir,
+            )
+
+
+def test_manager_stop_missing_tid(workdir):
+    context_root = prepare_project_root(workdir / "missing-manager")
     build_context(spec_context=context_root)
 
     rc, out, err = run_cli(
-        "worker",
+        "manager",
         "stop",
         "999",
         "--timeout",
@@ -122,32 +206,32 @@ def test_worker_stop_missing_tid(workdir):
     assert "did not stop" in combined or "not found" in combined
 
 
-def test_worker_list_empty(workdir):
-    context_root = prepare_project_root(workdir / "empty-worker")
+def test_manager_list_empty(workdir):
+    context_root = prepare_project_root(workdir / "empty-manager")
     build_context(spec_context=context_root)
 
     rc, out, err = run_cli(
-        "worker",
+        "manager",
         "list",
         "--context",
         context_root,
         cwd=workdir,
     )
     assert rc == 0
-    assert "No registered workers" in out
+    assert "No registered managers" in out
     assert err == ""
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX only")
-def test_worker_list_and_status_agree_on_stale_active_manager(workdir):
-    context_root = prepare_project_root(workdir / "stale-worker")
+def test_manager_list_and_status_agree_on_stale_active_manager(workdir):
+    context_root = prepare_project_root(workdir / "stale-manager")
     context = build_context(spec_context=context_root)
     tid = "1761000000000000007"
 
     process = subprocess.Popen([sys.executable, "-c", "import os; os._exit(0)"])
     try:
         process.wait(timeout=2.0)
-        registry_queue = context.queue(WEFT_WORKERS_REGISTRY_QUEUE, persistent=False)
+        registry_queue = context.queue(WEFT_MANAGERS_REGISTRY_QUEUE, persistent=False)
         registry_queue.write(
             json.dumps(
                 {
@@ -164,7 +248,7 @@ def test_worker_list_and_status_agree_on_stale_active_manager(workdir):
         process.wait()
 
     rc, out, err = run_cli(
-        "worker",
+        "manager",
         "list",
         "--json",
         "--context",
@@ -173,8 +257,8 @@ def test_worker_list_and_status_agree_on_stale_active_manager(workdir):
     )
     assert rc == 0
     assert err == ""
-    worker_records = json.loads(out or "[]")
-    assert tid not in {record["tid"] for record in worker_records}
+    manager_records = json.loads(out or "[]")
+    assert tid not in {record["tid"] for record in manager_records}
 
     rc, out, err = run_cli(
         "status",
@@ -189,12 +273,12 @@ def test_worker_list_and_status_agree_on_stale_active_manager(workdir):
     assert tid not in {record["tid"] for record in status_payload["managers"]}
 
 
-def test_worker_status_missing(workdir):
-    context_root = prepare_project_root(workdir / "status-worker")
+def test_manager_status_missing(workdir):
+    context_root = prepare_project_root(workdir / "status-manager")
     build_context(spec_context=context_root)
 
     rc, out, err = run_cli(
-        "worker",
+        "manager",
         "status",
         "999",
         "--context",
@@ -206,8 +290,8 @@ def test_worker_status_missing(workdir):
     assert "not found" in combined.lower()
 
 
-def test_worker_force_stop_missing_pid_record(workdir):
-    context_root = prepare_project_root(workdir / "force-worker")
+def test_manager_force_stop_missing_pid_record(workdir):
+    context_root = prepare_project_root(workdir / "force-manager")
     context = build_context(spec_context=context_root)
     tid = "1761000000000000001"
 
@@ -215,7 +299,7 @@ def test_worker_force_stop_missing_pid_record(workdir):
     mapping_queue.write(json.dumps({"full": tid, "pid": 999_999}))
 
     rc, out, err = run_cli(
-        "worker",
+        "manager",
         "stop",
         tid,
         "--timeout",

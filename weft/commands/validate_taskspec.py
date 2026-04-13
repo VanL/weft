@@ -9,7 +9,6 @@ Spec references:
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +27,7 @@ def cmd_validate_taskspec(
     *,
     load_runner: bool = False,
     preflight: bool = False,
-) -> None:
+) -> int:
     """Validate a TaskSpec JSON file.
 
     Spec: docs/specifications/10-CLI_Interface.md [CLI-1.4.1]
@@ -44,14 +43,14 @@ def cmd_validate_taskspec(
     # Check if file exists
     if not file_path.exists():
         console.print(f"[red]Error:[/red] File not found: {file_path}")
-        sys.exit(1)
+        return 1
 
     # Read the file
     try:
         json_content = file_path.read_text()
     except Exception as e:
         console.print(f"[red]Error reading file:[/red] {e}")
-        sys.exit(1)
+        return 1
 
     # Validate the TaskSpec
     is_valid, errors = validate_taskspec(json_content)
@@ -77,11 +76,12 @@ def cmd_validate_taskspec(
             if load_runner:
                 console.print("[red]✗[/red] Runner validation failed\n")
                 _display_validation_errors({"runner": str(exc)})
-                sys.exit(1)
+                return 1
     else:
         console.print("[red]✗[/red] TaskSpec validation failed\n")
         _display_validation_errors(errors)
-        sys.exit(1)
+        return 1
+    return 0
 
 
 def _display_taskspec_summary(data: dict[str, Any]) -> None:

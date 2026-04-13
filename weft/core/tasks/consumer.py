@@ -50,6 +50,20 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         self._agent_session: AgentSession | None = None
         self._deferred_active_control_command: str | None = None
         self._deferred_active_control_timestamp: int | None = None
+        self._activate_pipeline_waiter_if_needed()
+        self._set_activity("waiting", waiting_on=self._queue_names["inbox"])
+        self._emit_pipeline_started_event()
+
+    def _activate_pipeline_waiter_if_needed(self) -> None:
+        owner = self._pipeline_owner_config()
+        if owner is None or owner.get("role") != "pipeline_stage":
+            return
+        if self.taskspec.state.status != "created":
+            return
+        self.taskspec.mark_started(pid=os.getpid())
+        self._report_state_change(event="task_spawning")
+        self.taskspec.mark_running(pid=os.getpid())
+        self._report_state_change(event="task_started")
 
     def process_once(self) -> None:
         super().process_once()
@@ -307,12 +321,17 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         )
 
     def _begin_work_item(self, timestamp: int | None) -> bool:
-        if self._task_is_persistent() and self.taskspec.state.status == "running":
-            self._report_state_change(event="work_item_started", message_id=timestamp)
+        if self.taskspec.state.status == "running":
+            self._set_activity("working")
+            event = (
+                "work_item_started" if self._task_is_persistent() else "work_started"
+            )
+            self._report_state_change(event=event, message_id=timestamp)
             self._update_process_title("running")
             return False
 
         self.taskspec.mark_started(pid=os.getpid())
+        self._set_activity("working")
         self._update_process_title("spawning")
         self._report_state_change(event="work_spawning", message_id=timestamp)
         self.taskspec.mark_running(pid=os.getpid())
@@ -354,6 +373,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
 
         self._monitor_resource_usage()
         if self._task_is_persistent():
+            self._set_activity("waiting", waiting_on=self._queue_names["inbox"])
             self._report_state_change(
                 event="work_item_completed",
                 message_id=timestamp,
@@ -365,12 +385,14 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             return
 
         self.taskspec.mark_completed(return_code=0)
+        self._clear_activity()
         self._report_state_change(
             event="work_completed",
             message_id=timestamp,
             result_bytes=result_bytes,
             metrics=metrics_payload,
         )
+        self._emit_pipeline_terminal_event(status="completed")
         self._update_process_title("completed")
         self._cleanup_spilled_outputs_if_needed()
         self._end_streaming_session()
@@ -444,12 +466,17 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         if outcome.status == "timeout":
             timeout_exc = TimeoutError(outcome.error or "Target timeout")
             self.taskspec.mark_timeout(error=str(timeout_exc))
+            self._clear_activity()
             self._update_process_title("timeout")
             self._report_state_change(
                 event="work_timeout",
                 message_id=timestamp,
                 error=str(timeout_exc),
                 metrics=metrics_payload,
+            )
+            self._emit_pipeline_terminal_event(
+                status="timeout",
+                error=self.taskspec.state.error,
             )
             self._apply_reserved_policy_on_error(timestamp)
             self._end_streaming_session()
@@ -462,12 +489,17 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             limit_exc = RuntimeError(outcome.error or "Resource limits exceeded")
             # Spec: docs/specifications/06-Resource_Management.md#error-categories
             self.taskspec.mark_killed(reason=str(limit_exc))
+            self._clear_activity()
             self._update_process_title("killed", "limit")
             self._report_state_change(
                 event="work_limit_violation",
                 message_id=timestamp,
                 error=str(limit_exc),
                 metrics=metrics_payload,
+            )
+            self._emit_pipeline_terminal_event(
+                status="killed",
+                error=self.taskspec.state.error,
             )
             self._apply_reserved_policy_on_error(timestamp)
             self._end_streaming_session()
@@ -496,12 +528,17 @@ class Consumer(BaseTask, InteractiveTaskMixin):
                 )
             error_exc = RuntimeError(outcome.error or "Target execution failed")
             self.taskspec.mark_failed(error=str(error_exc))
+            self._clear_activity()
             self._update_process_title("failed")
             self._report_state_change(
                 event="work_failed",
                 message_id=timestamp,
                 error=str(error_exc),
                 metrics=metrics_payload,
+            )
+            self._emit_pipeline_terminal_event(
+                status="failed",
+                error=self.taskspec.state.error,
             )
             self._apply_reserved_policy_on_error(timestamp)
             self._end_streaming_session()

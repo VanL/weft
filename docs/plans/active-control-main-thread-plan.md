@@ -47,7 +47,7 @@ Source specs:
 
 - [`docs/specifications/01-Core_Components.md`](../specifications/01-Core_Components.md) [CC-2.3], [CC-2.4], [CC-2.5], [CC-3]
 - [`docs/specifications/05-Message_Flow_and_State.md`](../specifications/05-Message_Flow_and_State.md) [MF-2], [MF-3], [MF-5]
-- [`docs/specifications/07-System_Invariants.md`](../specifications/07-System_Invariants.md) [STATE.1], [STATE.2], [QUEUE.4], [QUEUE.6], [EXEC.1], [OBS.1], [WORKER.7]
+- [`docs/specifications/07-System_Invariants.md`](../specifications/07-System_Invariants.md) [STATE.1], [STATE.2], [QUEUE.4], [QUEUE.6], [EXEC.1], [OBS.1], [MANAGER.7]
 - [`docs/specifications/08-Testing_Strategy.md`](../specifications/08-Testing_Strategy.md)
 - [`docs/specifications/10-CLI_Interface.md`](../specifications/10-CLI_Interface.md) [CLI-1.2], [CLI-1.3]
 

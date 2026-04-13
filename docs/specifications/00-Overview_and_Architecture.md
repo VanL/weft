@@ -1,179 +1,178 @@
 # Weft System Overview and Architecture
 
+Weft is a durable task runner built on SimpleBroker. The design target is not
+massive distributed orchestration. The target is a small, reliable, observable
+process system that feels as direct as Unix tools while surviving beyond a
+single shell session.
+
+_Implementation mapping_: CLI entrypoints in `weft/cli.py` and
+`weft/commands/`; context resolution in `weft/context.py`; manager runtime in
+`weft/core/manager.py` and `weft/manager_process.py`; task runtime in
+`weft/core/tasks/`; runner plugins in `weft/core/runners/`.
+
+See also:
+
+- planned companion:
+  [`00A-Overview_and_Architecture_Planned.md`](00A-Overview_and_Architecture_Planned.md)
+- pipeline-specific current contract:
+  [`12-Pipeline_Composition_and_UX.md`](12-Pipeline_Composition_and_UX.md)
+
 ## Executive Summary
 
-The Weft Task System is a lightweight task execution framework built on SimpleBroker's SQLite-backed message queue system. It provides reliable, monitored execution of both Python functions and system commands with comprehensive resource tracking, state management, and queue-based communication.
+The current system is organized around four ideas:
 
-_Implementation mapping_: Entry point `weft/cli.py`, core logic in `weft/core/`, task runtime in `weft/core/tasks/`, command handlers in `weft/commands/`.
+- queues are the only durable coordination surface
+- the manager is a task-shaped dispatcher, not a separate control plane
+- all externally visible work stays inspectable through stable CLI verbs
+- operator trust comes from visibility, not hidden automation
 
-### Core Mission
-The system enables **structured interaction between Unix tools and AI agents** with variable latencies (milliseconds to minutes). It acts as "durable Unix pipes" - providing persistent, observable, and resource-controlled process coordination through message queues. The design prioritizes **correctness and concurrency handling** over massive scale, focusing on multiplexing and coordinating a relatively small (usually <200) number of independent, mostly ephemeral processes.
+That shape is deliberate. It keeps the system easy to inspect with normal queue
+and process tools, and it avoids a second hidden state store that would drift
+from runtime truth.
 
-Weft is optimized for **asynchronous multi-agent workflows**: background agents
-can subscribe to queues or file events, report back via queues/logs, and shut
-down cleanly when the manager exits. Operators enable these services by placing
-autostart manifests in `.weft/autostart/` that reference stored task specs or
-pipelines—no extra commands required.
+## Core Mission
 
-_Implementation mapping_: Autostart manifests are scanned and launched by `weft/core/manager.py` (`_tick_autostart`, `_load_autostart_manifest`, `_build_autostart_spawn_payload`). Context/directory setup in `weft/context.py`. Pipeline references in autostart manifests are parsed but **[NOT YET IMPLEMENTED]** as a first-class orchestration primitive (only simple task-spec references are fully supported).
+Weft exists to coordinate commands, Python callables, and agent-backed work
+that may take milliseconds or minutes, while preserving:
 
-### SimpleBroker Foundation
-SimpleBroker provides features that align with the ephemeral task model:
-- **No queue pre-registration**: Queues are created on first use
-- **Self-cleaning**: Empty queues automatically disappear  
-- **SQLite-backed**: Simple, reliable, single-node persistence
-- **Exactly-once delivery**: Queue read/move operations are exactly-once; task
-  processing is at-least-once depending on reserved queue policy
-- **Auto-initialization**: Database created automatically on first message write
-- **Timestamp IDs**: Every message gets a unique 64-bit hybrid timestamp ID
-  (microseconds + logical counter; treat as opaque)
+- durable submission
+- observable lifecycle
+- explicit control
+- backend-neutral broker targeting
 
-### Key Design Principles
-- **Queue-First Architecture**: All communication via persistent message queues
-- **Recursive Task Model**: Workers are Tasks with long-running targets - everything is a Task
-- **Partial Immutability**: Task configuration (spec) is immutable after creation; state and metadata are mutable for runtime updates
-- **Forward-Only State Transitions**: No rollback, only progression through states
-- **Unified Reservation Pattern**: Single `.reserved` queue serves as both work-in-progress and dead-letter queue
-- **Observable State**: All state changes flow through `weft.log.tasks` for global visibility
-- **TID Correlation**: Spawn-request message IDs become Task IDs, providing end-to-end correlation
-- **Resource Monitoring**: Continuous tracking with configurable limits
-- **Fail-Safe Defaults**: Conservative resource limits and timeout behaviors
-- **Progressive Disclosure UX**: Default workflows stay as simple as SimpleBroker (e.g., `weft run <command>`), while advanced orchestration is opt-in.
-- **Operator-Intent Autostart**: Background agents are launched only when manifests exist in `.weft/autostart/`, and they stop cleanly when the manager exits.
+The goal is not "workflow engine first." The goal is "durable task/process
+coordination first." Higher-order composition is allowed, but it should still
+look and behave like tasks rather than like a separate platform.
+
+## Why SimpleBroker
+
+SimpleBroker fits Weft because it already provides the persistence and queue
+primitives Weft needs:
+
+- queues appear on first use
+- empty queues disappear again
+- message IDs are durable, ordered, and unique
+- the same broker abstraction works across file-backed and non-file-backed
+  backends
+
+That matters because Weft should spend its complexity budget on process
+lifecycle, task semantics, and observability, not on rebuilding a broker.
+
+## Design Principles
+
+- **Queue-first**: caller-facing coordination goes through durable queues.
+- **Task-shaped runtime**: managers and user work share the same outer task
+  model.
+- **Stable verbs**: `run`, `status`, `result`, `list`, `stop`, and `kill`
+  remain the center of gravity even as the system grows.
+- **Partial immutability**: execution config is frozen after TaskSpec creation;
+  runtime state stays mutable.
+- **Forward-only state**: lifecycle state is append-only and terminal states do
+  not roll back.
+- **Visible failure**: failures stay inspectable through state logs and reserved
+  queues.
+- **Backend-neutral targeting**: normal runtime paths operate on broker targets,
+  not on SQLite-only path assumptions.
+- **Operator intent over magic**: background behavior such as autostart exists
+  only when the project explicitly configures it.
+
+## Current Product Shape
+
+The current public surface is:
+
+- single-task execution through `weft run`
+- stored task specs and stored pipeline specs
+- pipeline execution through `weft run --pipeline`
+- manager lifecycle commands
+- queue passthrough commands
+- result, status, and task-control commands
+- first-class agent tasks through `spec.type="agent"`
+
+The reason pipelines live under `weft run --pipeline` rather than under a
+separate top-level verb is architectural: composition is part of task
+execution, not a second workflow language.
 
 ## System Architecture
 
-### Layered Architecture
+### Runtime Layers
 
-```
-┌─────────────────────────────────────────────────┐
-│                 User Interface                  │
-│            (CLI, API, Programmatic)             │
-├─────────────────────────────────────────────────┤
-│                Task Orchestration               │
-│         (Client, Scheduler, Pool)          │
-├─────────────────────────────────────────────────┤
-│                  Task Execution                 │
-│        (Task - Universal Primitive)             │
-│    Workers are Tasks with run_forever targets   │
-├─────────────────────────────────────────────────┤
-│               State & Monitoring                │
-│     (TaskSpec, StateSection, ResourceMonitor)   │
-├─────────────────────────────────────────────────┤
-│                 Queue System                    │
-│        (SimpleBroker, Queue, Watcher)           │
-├─────────────────────────────────────────────────┤
-│              Persistent Storage                 │
-│              (SQLite Database)                  │
-└─────────────────────────────────────────────────┘
+```text
+CLI and operator surfaces
+        |
+        v
+Command handlers and context resolution
+        |
+        v
+Manager dispatcher and task launch
+        |
+        v
+Task runtime and runner plugins
+        |
+        v
+SimpleBroker queues and broker target
 ```
 
 _Implementation mapping per layer_:
 
-- **User Interface**: `weft/cli.py` (CLI via Typer), `weft/commands/` (command handlers). API and Programmatic interfaces are **[NOT YET IMPLEMENTED]** beyond internal Python imports.
-- **Task Orchestration**: `weft/core/manager.py` (Manager as dispatcher). **Client** exists only as `InteractiveStreamClient` in `weft/commands/interactive.py` for streaming. **Scheduler** and **Pool** are **[NOT YET IMPLEMENTED]** as distinct components; the Manager handles dispatch directly.
-- **Task Execution**: `weft/core/tasks/base.py` (`BaseTask`), `weft/core/tasks/consumer.py` (`Consumer`), `weft/core/tasks/runner.py`, `weft/core/tasks/interactive.py`. Runners in `weft/core/runners/` (`host.py`, `subprocess_runner.py`).
-- **State & Monitoring**: `weft/core/taskspec.py` (`TaskSpec`, `StateSection`), `weft/core/resource_monitor.py` (`ResourceMonitor`, `PsutilResourceMonitor`).
-- **Queue System**: SimpleBroker (external dependency). `weft/core/tasks/multiqueue_watcher.py` (`MultiQueueWatcher`), `weft/core/tasks/base.py` (queue wiring).
-- **Persistent Storage**: SQLite via SimpleBroker.
+- **CLI and operator surfaces**: `weft/cli.py`, `weft/commands/`
+- **Context resolution**: `weft/context.py`
+- **Manager dispatcher**: `weft/core/manager.py`,
+  `weft/commands/_manager_bootstrap.py`, `weft/manager_process.py`
+- **Task runtime**: `weft/core/tasks/base.py`,
+  `weft/core/tasks/consumer.py`, `weft/core/tasks/runner.py`,
+  `weft/core/tasks/sessions.py`
+- **Runner plugins**: `weft/core/runners/`, `weft/_runner_plugins.py`,
+  `weft/ext.py`
+- **Queues and persistence**: SimpleBroker broker target and queue API
 
-### Component Interactions (Recursive Architecture)
+### Manager Model
 
-```
-Bootstrap ──creates──> Primordial Worker (Task)
-                            │
-                            └──spawns──> Worker Tasks
-                                              │
-                                              └──spawn──> Regular Tasks
-                                                             │
-                                                             └──> Ephemeral execution
+The manager is the dispatcher for spawn requests. It watches
+`weft.spawn.requests`, expands a runtime TaskSpec, and launches child work.
 
-Manager (Dispatcher Task) ──monitors──> weft.spawn.requests
-     │                           │
-     └──validates──> Registry    └──> Uses spawn-request message ID as Task TID
-                        │                    │
-                        └──creates──> TaskSpec with TID correlation
-                                          │
-                                          └──spawns──> Child Task
-```
+The important part is the shape, not a class taxonomy:
 
-_Implementation mapping_: The Manager (`weft/core/manager.py`) implements the dispatcher role, monitoring `weft.spawn.requests` and spawning child tasks. Bootstrap and Manager startup handled by `weft/core/launcher.py` and `weft/manager_process.py`. The "Primordial Worker" concept is not a named class; the Manager itself acts as the primordial task. **Registry** (pre-defined task validation) is **[NOT YET IMPLEMENTED]** as a standalone component; the Manager validates inline. TID correlation (spawn-request message ID becomes Task TID) is implemented in `weft/core/manager.py`.
+- there is one canonical manager runtime per context
+- the manager uses the same queue and control conventions as task work
+- the spawn-request message ID becomes the child task TID
+- startup, foreground serve, and lifecycle observation share one manager
+  bootstrap path
 
-## Performance Targets
+This is why the architecture talks about "managers are tasks" rather than about
+separate scheduler or pool objects. The outer lifecycle is intentionally
+uniform.
 
-**[NOT YET IMPLEMENTED]** No formal benchmarking suite exists to validate these targets. They remain design aspirations.
+## Observability and Security
 
-### Throughput Metrics (for <200 ephemeral tasks)
-- Task creation: 100 tasks/second (design target)
-- Queue messages: 1000 messages/second (SimpleBroker capability)
-- Concurrent tasks: 200 (design target)
-- Pipeline stages: 10 stages typical, 20 maximum **[NOT YET IMPLEMENTED]** — pipelines are not a first-class primitive
-- Process title updates: <1ms per update
+Weft assumes user-level trust, not hostile multi-tenancy. The security model is
+therefore mostly about explicitness and containment:
 
-_Implementation mapping_: Process titles set via `setproctitle` in `weft/core/manager.py`, `weft/core/tasks/consumer.py`, `weft/core/tasks/base.py`, and others.
+- all significant lifecycle changes are written to `weft.log.tasks`
+- process titles expose enough identity for normal OS tooling
+- reserved queues keep failed in-flight work visible
+- broker/project context remains explicit so operators know which runtime they
+  are touching
 
-### Latency Metrics
-- Task startup: <100ms
-- Queue read/write: <10ms
-- State update to log: <5ms
-- Control response: <50ms
-- Process title update: <1ms
-- TID lookup: <10ms
-- Variable tolerance: ms to minutes for AI agents
+The reason this matters is operational clarity. When something fails, the
+system should leave behind enough durable evidence that the operator can answer
+what happened without guessing.
 
-_Implementation mapping_: TID mappings stored in `weft.state.tid_mappings` queue, managed by `weft/core/tasks/base.py`, read by `weft/commands/status.py` and `weft/commands/tasks.py`.
+## Scope Boundaries
 
-### Resource Metrics
-- Memory per task: <10MB overhead (ephemeral)
-- CPU monitoring: <2% overhead (low-frequency sampling)
-- Database size: <100KB per 100 tasks
-- Queue auto-cleanup: Empty queues disappear
-- Process title overhead: <100KB per task
-- TID mapping storage: <1KB per task
+The canonical architecture spec covers what Weft does now. Planned extensions,
+aspirational performance targets, and future orchestration layers live in the
+adjacent companion doc:
 
-_Implementation mapping_: Resource monitoring in `weft/core/resource_monitor.py` (`ResourceMonitor`, `PsutilResourceMonitor`). Queue auto-cleanup is a SimpleBroker feature.
+- [`00A-Overview_and_Architecture_Planned.md`](00A-Overview_and_Architecture_Planned.md)
 
-## Security Model
-
-### Trust Model
-- **User-level permissions**: Tasks run as user (not adversarial)
-- **No privilege escalation**: Standard Unix permissions apply
-- **AI agent restrictions**: Pre-defined task registry only — **[NOT YET IMPLEMENTED]** as a standalone registry; no formal allow-list enforcement exists
-- **Audit trail**: All actions logged to weft.log.tasks
-
-_Implementation mapping_: State events written to `weft.log.tasks` by `weft/core/tasks/base.py` and `weft/core/manager.py`. Process titles set in task lifecycle code across `weft/core/tasks/`.
-
-### Observable Security
-- All state changes in weft.log.tasks
-- Failed tasks visible in reserved queues
-- Resource violations tracked in state
-- Complete audit trail for debugging
-- Process titles expose task identity for management
-- TID mappings enable emergency intervention
-- Standard Unix tools can monitor/control tasks
-- No hidden or untrackable processes
-
-## Related Plans
-
-- [`docs/plans/task-lifecycle-stop-drain-audit-plan.md`](../plans/task-lifecycle-stop-drain-audit-plan.md) — Audit task lifecycle stop/drain failures, preserve-cleanup, and liveness truth boundaries before planning fixes.
-- [`docs/plans/agent-runtime-boundary-cleanup-plan.md`](../plans/agent-runtime-boundary-cleanup-plan.md) — Agent runtime boundary cleanup
-- [`docs/plans/agent-runtime-implementation-plan.md`](../plans/agent-runtime-implementation-plan.md) — Agent runtime implementation
-- [`docs/plans/persistent-agent-runtime-implementation-plan.md`](../plans/persistent-agent-runtime-implementation-plan.md) — Persistent agent runtime
-- [`docs/plans/simplebroker-backend-generalization-plan.md`](../plans/simplebroker-backend-generalization-plan.md) — SimpleBroker backend generalization
-- [`docs/plans/runner-extension-point-plan.md`](../plans/runner-extension-point-plan.md) — Runner extension point
-- [`docs/plans/taskspec-clean-design-plan.md`](../plans/taskspec-clean-design-plan.md) — TaskSpec clean design
-- [`docs/plans/piped-input-support-plan.md`](../plans/piped-input-support-plan.md) — Piped input support
+That split is deliberate. The canonical file answers "what exists and why."
+The companion file answers "what may exist later."
 
 ## Related Documents
 
-_Implementation mapping_: `weft/cli.py` (CLI entry points), `weft/core/manager.py` (manager/worker), `weft/core/tasks/base.py` (task runtime), `weft/core/tasks/runner.py` (execution), `weft/context.py` (context discovery).
-
-- **[01-Core_Components.md](01-Core_Components.md)** - Detailed component architecture
-- **[02-TaskSpec.md](02-TaskSpec.md)** - Task configuration specification
-- **[03-Worker_Architecture.md](03-Worker_Architecture.md)** - Recursive worker model
-- **[04-SimpleBroker_Integration.md](04-SimpleBroker_Integration.md)** - Queue system integration
-- **[05-Message_Flow_and_State.md](05-Message_Flow_and_State.md)** - Communication patterns
-- **[06-Resource_Management.md](06-Resource_Management.md)** - Resource controls and error handling
-- **[07-System_Invariants.md](07-System_Invariants.md)** - System guarantees and constraints
-- **[08-Testing_Strategy.md](08-Testing_Strategy.md)** - Testing approach and standards
-- **[09-Implementation_Plan.md](09-Implementation_Plan.md)** - Development roadmap
+- [`01-Core_Components.md`](01-Core_Components.md)
+- [`03-Manager_Architecture.md`](03-Manager_Architecture.md)
+- [`04-SimpleBroker_Integration.md`](04-SimpleBroker_Integration.md)
+- [`10-CLI_Interface.md`](10-CLI_Interface.md)
+- [`12-Pipeline_Composition_and_UX.md`](12-Pipeline_Composition_and_UX.md)
+- [`13-Agent_Runtime.md`](13-Agent_Runtime.md)

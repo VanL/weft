@@ -1,4 +1,4 @@
-"""Black-box CLI tests for `weft validate-taskspec`."""
+"""Black-box CLI tests for `weft spec validate --type task`."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ def test_validate_taskspec_success(workdir):
     spec_path = workdir / "taskspec.json"
     write_taskspec(spec_path, taskspec)
 
-    rc, out, err = run_cli("validate-taskspec", spec_path, cwd=workdir)
+    rc, out, err = run_cli("spec", "validate", "--type", "task", spec_path, cwd=workdir)
 
     assert rc == 0
     assert "TaskSpec is valid" in out
@@ -47,7 +47,7 @@ def test_validate_taskspec_failure(workdir):
     spec_path = workdir / "invalid_taskspec.json"
     write_taskspec(spec_path, payload)
 
-    rc, out, err = run_cli("validate-taskspec", spec_path, cwd=workdir)
+    rc, out, err = run_cli("spec", "validate", "--type", "task", spec_path, cwd=workdir)
 
     assert rc != 0
     assert "TaskSpec validation failed" in out
@@ -59,7 +59,7 @@ def test_validate_taskspec_agent_summary(workdir):
     spec_path = workdir / "agent_taskspec.json"
     write_taskspec(spec_path, taskspec)
 
-    rc, out, err = run_cli("validate-taskspec", spec_path, cwd=workdir)
+    rc, out, err = run_cli("spec", "validate", "--type", "task", spec_path, cwd=workdir)
 
     assert rc == 0
     assert "TaskSpec is valid" in out
@@ -75,7 +75,10 @@ def test_validate_taskspec_preflight_host_runner(workdir):
     write_taskspec(spec_path, taskspec)
 
     rc, out, err = run_cli(
-        "validate-taskspec",
+        "spec",
+        "validate",
+        "--type",
+        "task",
         spec_path,
         "--preflight",
         cwd=workdir,
@@ -98,7 +101,10 @@ def test_validate_taskspec_load_runner_missing_plugin(workdir):
     write_taskspec(spec_path, payload)
 
     rc, out, err = run_cli(
-        "validate-taskspec",
+        "spec",
+        "validate",
+        "--type",
+        "task",
         spec_path,
         "--load-runner",
         cwd=workdir,

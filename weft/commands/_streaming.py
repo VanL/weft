@@ -9,12 +9,21 @@ from __future__ import annotations
 
 import base64
 import json
+from dataclasses import dataclass
 from typing import Any
 
 import typer
 
 from simplebroker import Queue
 from weft.helpers import iter_queue_json_entries
+
+
+@dataclass(frozen=True, slots=True)
+class DecodedOutboxValue:
+    """One caller-facing outbox value plus whether it was emitted live already."""
+
+    value: Any
+    emitted: bool = False
 
 
 def handle_ctrl_stream(raw: str) -> None:
@@ -52,12 +61,12 @@ def process_outbox_message(
     stream_buffer: list[str],
     *,
     emit_stream: bool = True,
-) -> tuple[bool, Any]:
+) -> tuple[bool, DecodedOutboxValue | None]:
     """Decode one outbox payload, accumulating stream fragments when needed."""
     try:
         envelope = json.loads(raw)
     except json.JSONDecodeError:
-        return True, decode_result_payload(raw)
+        return True, DecodedOutboxValue(decode_result_payload(raw))
 
     if isinstance(envelope, dict) and envelope.get("type") == "stream":
         encoding = envelope.get("encoding", "text")
@@ -79,10 +88,10 @@ def process_outbox_message(
                 typer.echo()
             value = "".join(stream_buffer)
             stream_buffer.clear()
-            return True, value
+            return True, DecodedOutboxValue(value, emitted=emit_stream)
         return False, None
 
-    return True, envelope
+    return True, DecodedOutboxValue(envelope)
 
 
 def drain_available_outbox_values(
@@ -90,10 +99,10 @@ def drain_available_outbox_values(
     stream_buffer: list[str],
     *,
     emit_stream: bool = True,
-) -> tuple[list[Any], bool]:
+) -> tuple[list[DecodedOutboxValue], bool]:
     """Drain all currently available outbox messages without blocking."""
 
-    values: list[Any] = []
+    values: list[DecodedOutboxValue] = []
     consumed_any = False
     while True:
         outbox_raw = outbox_queue.read_one()
@@ -107,7 +116,7 @@ def drain_available_outbox_values(
             stream_buffer,
             emit_stream=emit_stream,
         )
-        if final:
+        if final and value is not None:
             values.append(value)
 
 

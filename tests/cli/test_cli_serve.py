@@ -1,4 +1,4 @@
-"""CLI coverage for `weft serve`."""
+"""CLI coverage for `weft manager serve`."""
 
 from __future__ import annotations
 
@@ -18,8 +18,8 @@ from tests.helpers.test_backend import active_test_backend, prepare_cli_root
 from tests.helpers.weft_harness import WeftTestHarness
 from weft._constants import (
     WEFT_GLOBAL_LOG_QUEUE,
+    WEFT_MANAGERS_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
-    WEFT_WORKERS_REGISTRY_QUEUE,
 )
 from weft.context import build_context
 from weft.helpers import (
@@ -68,7 +68,7 @@ def _popen_cli(
 
 
 def _manager_records(context) -> list[dict[str, Any]]:
-    queue = context.queue(WEFT_WORKERS_REGISTRY_QUEUE, persistent=False)
+    queue = context.queue(WEFT_MANAGERS_REGISTRY_QUEUE, persistent=False)
     try:
         snapshot: dict[str, dict[str, Any]] = {}
         for data, ts in iter_queue_json_entries(queue):
@@ -178,13 +178,13 @@ def test_serve_runs_in_foreground_and_reuses_single_manager(
     context_root = workdir
     context = build_context(spec_context=context_root)
 
-    process = _popen_cli("serve", "--context", context_root, cwd=workdir)
+    process = _popen_cli("manager", "serve", "--context", context_root, cwd=workdir)
     weft_harness.register_pid(process.pid, kind="owner")
 
     try:
         record = _wait_for_active_canonical_manager(context, process=process)
         manager_tid = record["tid"]
-        weft_harness.register_worker_tid(manager_tid)
+        weft_harness.register_manager_tid(manager_tid)
         assert process.poll() is None
 
         rc, out, err = run_cli(
@@ -208,7 +208,7 @@ def test_serve_runs_in_foreground_and_reuses_single_manager(
         assert [entry["tid"] for entry in active_records] == [manager_tid]
 
         rc, out, err = run_cli(
-            "worker",
+            "manager",
             "stop",
             manager_tid,
             "--context",
@@ -237,15 +237,16 @@ def test_serve_rejects_duplicate_canonical_manager(
     context = build_context(spec_context=context_root)
     record: dict[str, Any] | None = None
 
-    process = _popen_cli("serve", "--context", context_root, cwd=workdir)
+    process = _popen_cli("manager", "serve", "--context", context_root, cwd=workdir)
     weft_harness.register_pid(process.pid, kind="owner")
 
     try:
         record = _wait_for_active_canonical_manager(context, process=process)
         manager_tid = record["tid"]
-        weft_harness.register_worker_tid(manager_tid)
+        weft_harness.register_manager_tid(manager_tid)
 
         rc, out, err = run_cli(
+            "manager",
             "serve",
             "--context",
             context_root,
@@ -257,7 +258,7 @@ def test_serve_rejects_duplicate_canonical_manager(
     finally:
         if process.poll() is None and record is not None:
             run_cli(
-                "worker",
+                "manager",
                 "stop",
                 record["tid"],
                 "--context",
@@ -273,6 +274,7 @@ def test_serve_forces_no_idle_timeout(workdir, weft_harness: WeftTestHarness) ->
     context = build_context(spec_context=context_root)
 
     process = _popen_cli(
+        "manager",
         "serve",
         "--context",
         context_root,
@@ -283,13 +285,13 @@ def test_serve_forces_no_idle_timeout(workdir, weft_harness: WeftTestHarness) ->
 
     try:
         record = _wait_for_active_canonical_manager(context, process=process)
-        weft_harness.register_worker_tid(record["tid"])
+        weft_harness.register_manager_tid(record["tid"])
 
         time.sleep(0.2)
         assert process.poll() is None
 
         rc, out, err = run_cli(
-            "worker",
+            "manager",
             "stop",
             record["tid"],
             "--context",
@@ -318,13 +320,13 @@ def test_serve_sigterm_drains_children_cleanly(
     context_root = workdir
     context = build_context(spec_context=context_root)
 
-    process = _popen_cli("serve", "--context", context_root, cwd=workdir)
+    process = _popen_cli("manager", "serve", "--context", context_root, cwd=workdir)
     weft_harness.register_pid(process.pid, kind="owner")
 
     try:
         record = _wait_for_active_canonical_manager(context, process=process)
         manager_tid = record["tid"]
-        weft_harness.register_worker_tid(manager_tid)
+        weft_harness.register_manager_tid(manager_tid)
 
         rc, out, err = run_cli(
             "run",

@@ -226,7 +226,7 @@ def iter_queue_json_entries(
 def pid_is_live(pid: int | None) -> bool:
     """Return whether *pid* refers to a currently live, non-zombie process.
 
-    Spec: docs/specifications/03-Worker_Architecture.md [WA-3]
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-3]
     """
 
     if pid is None or pid <= 0:
@@ -257,7 +257,7 @@ def pid_is_live(pid: int | None) -> bool:
 def is_canonical_manager_record(record: Mapping[str, Any]) -> bool:
     """Return whether a registry record represents the canonical spawn-queue manager.
 
-    Spec: docs/specifications/03-Worker_Architecture.md [WA-3]
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-3]
     """
 
     role = record.get("role", "manager")

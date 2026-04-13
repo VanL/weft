@@ -70,7 +70,7 @@ Many important Weft queues are append-only histories:
 
 - `weft.log.tasks`
 - `weft.state.tid_mappings`
-- `weft.state.workers`
+- `weft.state.managers`
 - task outboxes in some CLI/result flows
 
 Rules:
@@ -112,7 +112,7 @@ Why:
 
 These queues are runtime aids, not durable application state:
 
-- `weft.state.workers`
+- `weft.state.managers`
 - `weft.state.tid_mappings`
 - `weft.state.streaming`
 
@@ -130,7 +130,7 @@ Why:
 
 ## 7. Manager Registry State Is a Snapshot Derived from an Append-Only Log
 
-Worker registry entries are written over time; callers reconstruct the current
+Manager registry entries are written over time; callers reconstruct the current
 view.
 
 Rules:

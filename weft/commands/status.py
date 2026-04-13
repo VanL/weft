@@ -117,6 +117,8 @@ class TaskSnapshot:
     name: str
     status: str
     event: str
+    activity: str | None
+    waiting_on: str | None
     started_at: int | None
     completed_at: int | None
     last_timestamp: int
@@ -125,14 +127,17 @@ class TaskSnapshot:
     runtime_handle: dict[str, Any] | None
     runtime: dict[str, Any] | None
     metadata: dict[str, Any]
+    pipeline_status: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "tid": self.tid,
             "tid_short": self.tid_short,
             "name": self.name,
             "status": self.status,
             "event": self.event,
+            "activity": self.activity,
+            "waiting_on": self.waiting_on,
             "started_at": self.started_at,
             "completed_at": self.completed_at,
             "last_timestamp": self.last_timestamp,
@@ -142,6 +147,9 @@ class TaskSnapshot:
             "runtime": self.runtime,
             "metadata": self.metadata,
         }
+        if self.pipeline_status is not None:
+            payload["pipeline_status"] = self.pipeline_status
+        return payload
 
 
 def _resolve_context(
@@ -337,7 +345,7 @@ def _runtime_handle_from_mapping(entry: Mapping[str, Any]) -> RunnerHandle | Non
 
 def _merge_runtime_entry(
     mapping_entry: Mapping[str, Any] | None,
-    event_payload: Mapping[str, Any],
+    event_payload: Mapping[str, Any] | None,
 ) -> Mapping[str, Any] | None:
     """Combine runtime metadata from the mapping queue and the log payload."""
 
@@ -358,6 +366,13 @@ def _task_process_alive(mapping_entry: Mapping[str, Any] | None) -> bool:
         return False
     pid = mapping_entry.get("task_pid") or mapping_entry.get("pid")
     return _pid_alive(pid if isinstance(pid, int) else None)
+
+
+def _task_process_id(mapping_entry: Mapping[str, Any] | None) -> int | None:
+    if mapping_entry is None:
+        return None
+    pid = mapping_entry.get("task_pid") or mapping_entry.get("pid")
+    return pid if isinstance(pid, int) else None
 
 
 def _runtime_description_is_live(
@@ -383,20 +398,30 @@ def _effective_public_status(
 ) -> str:
     """Keep public terminal states aligned with live runtime liveness."""
 
-    if status not in TERMINAL_STATUSES:
-        return status
-
     normalized_runner = (
         runner_name.strip().lower() if isinstance(runner_name, str) else ""
     )
+    runtime_live = _runtime_description_is_live(runtime_description)
+    host_task_pid = _task_process_id(mapping_entry)
+
+    if status not in TERMINAL_STATUSES:
+        if (
+            status in {"spawning", "running"}
+            and (not normalized_runner or normalized_runner == "host")
+            and host_task_pid is not None
+            and not _pid_alive(host_task_pid)
+        ):
+            return "failed"
+        return status
+
     if normalized_runner and normalized_runner != "host":
-        if _runtime_description_is_live(runtime_description):
+        if runtime_live:
             return "running"
         return status
 
     if _task_process_alive(mapping_entry):
         return "running"
-    if _runtime_description_is_live(runtime_description):
+    if runtime_live:
         return "running"
     return status
 
@@ -455,7 +480,7 @@ def _collect_task_snapshots(
     Spec: [MF-5]
     """
     now_ns = time.time_ns()
-    snapshots: dict[str, TaskSnapshot] = {}
+    records: dict[str, dict[str, Any]] = {}
     tid_mapping_entries = _latest_tid_mapping_entries(ctx)
 
     for payload, timestamp in _iter_log_events(ctx):
@@ -470,6 +495,51 @@ def _collect_task_snapshots(
         ):
             continue
 
+        record = records.setdefault(
+            tid,
+            {
+                "tid": tid,
+                "tid_short": tid[-TASKSPEC_TID_SHORT_LENGTH:],
+                "name": tid,
+                "status": "created",
+                "event": "unknown",
+                "activity": None,
+                "waiting_on": None,
+                "started_at": None,
+                "completed_at": None,
+                "last_timestamp": timestamp,
+                "taskspec": None,
+                "metadata": {},
+                "event_payload": None,
+            },
+        )
+        record["last_timestamp"] = timestamp
+        event = payload.get("event", "unknown")
+        if isinstance(event, str):
+            record["event"] = event
+
+        if event == "task_activity":
+            status = payload.get("status")
+            if isinstance(status, str) and status:
+                record["status"] = status
+            if record["status"] in TERMINAL_STATUSES:
+                record["activity"] = None
+                record["waiting_on"] = None
+            else:
+                activity = payload.get("activity")
+                waiting_on = payload.get("waiting_on")
+                record["activity"] = (
+                    activity.strip()
+                    if isinstance(activity, str) and activity.strip()
+                    else None
+                )
+                record["waiting_on"] = (
+                    waiting_on.strip()
+                    if isinstance(waiting_on, str) and waiting_on.strip()
+                    else None
+                )
+            continue
+
         taskspec = payload.get("taskspec")
         if not isinstance(taskspec, dict):
             continue
@@ -477,12 +547,39 @@ def _collect_task_snapshots(
         name = taskspec.get("name") or payload.get("name") or tid
         state = taskspec.get("state") or {}
         status = payload.get("status") or state.get("status") or "created"
-        event = payload.get("event", "unknown")
         started_at = state.get("started_at")
         completed_at = state.get("completed_at")
         metadata = taskspec.get("metadata") or {}
+        record["name"] = str(name)
+        record["status"] = str(status)
+        record["started_at"] = started_at if isinstance(started_at, int) else None
+        record["completed_at"] = completed_at if isinstance(completed_at, int) else None
+        record["taskspec"] = taskspec
+        record["metadata"] = metadata if isinstance(metadata, dict) else {}
+        record["event_payload"] = dict(payload)
+        if record["status"] in TERMINAL_STATUSES:
+            record["activity"] = None
+            record["waiting_on"] = None
+        else:
+            activity = payload.get("activity")
+            waiting_on = payload.get("waiting_on")
+            if isinstance(activity, str) and activity.strip():
+                record["activity"] = activity.strip()
+            if isinstance(waiting_on, str) and waiting_on.strip():
+                record["waiting_on"] = waiting_on.strip()
+
+    snapshots: list[TaskSnapshot] = []
+    for tid, record in records.items():
+        taskspec = record.get("taskspec")
+        if not isinstance(taskspec, dict):
+            continue
         mapping_entry = tid_mapping_entries.get(tid)
-        runtime_entry = _merge_runtime_entry(mapping_entry, payload)
+        runtime_entry = _merge_runtime_entry(
+            mapping_entry,
+            record.get("event_payload")
+            if isinstance(record.get("event_payload"), Mapping)
+            else None,
+        )
         runtime_handle = _runtime_handle_from_mapping(runtime_entry or {})
         runner = _runner_name_for_snapshot(
             taskspec=taskspec,
@@ -490,12 +587,14 @@ def _collect_task_snapshots(
         )
         runtime_description = _describe_runtime_handle(runtime_handle)
         public_status = _effective_public_status(
-            str(status),
+            str(record.get("status") or "created"),
             runner_name=runner,
             mapping_entry=runtime_entry,
             runtime_description=runtime_description,
         )
 
+        started_at = record.get("started_at")
+        completed_at = record.get("completed_at")
         if isinstance(started_at, int) and not isinstance(completed_at, int):
             duration = max(0.0, (now_ns - started_at) / 1_000_000_000)
         elif isinstance(started_at, int) and isinstance(completed_at, int):
@@ -503,26 +602,37 @@ def _collect_task_snapshots(
         else:
             duration = None
 
-        snapshot = TaskSnapshot(
-            tid=tid,
-            tid_short=tid[-TASKSPEC_TID_SHORT_LENGTH:],
-            name=str(name),
-            status=public_status,
-            event=str(event),
-            started_at=started_at if isinstance(started_at, int) else None,
-            completed_at=completed_at if isinstance(completed_at, int) else None,
-            last_timestamp=timestamp,
-            duration_seconds=duration,
-            runner=runner,
-            runtime_handle=runtime_handle.to_dict()
-            if runtime_handle is not None
-            else None,
-            runtime=runtime_description,
-            metadata=metadata if isinstance(metadata, dict) else {},
-        )
-        snapshots[tid] = snapshot
+        activity = record.get("activity")
+        waiting_on = record.get("waiting_on")
+        if public_status in TERMINAL_STATUSES:
+            activity = None
+            waiting_on = None
 
-    result = list(snapshots.values())
+        snapshots.append(
+            TaskSnapshot(
+                tid=tid,
+                tid_short=record["tid_short"],
+                name=str(record.get("name") or tid),
+                status=public_status,
+                event=str(record.get("event") or "unknown"),
+                activity=activity if isinstance(activity, str) else None,
+                waiting_on=waiting_on if isinstance(waiting_on, str) else None,
+                started_at=started_at if isinstance(started_at, int) else None,
+                completed_at=completed_at if isinstance(completed_at, int) else None,
+                last_timestamp=int(record.get("last_timestamp") or 0),
+                duration_seconds=duration,
+                runner=runner,
+                runtime_handle=runtime_handle.to_dict()
+                if runtime_handle is not None
+                else None,
+                runtime=runtime_description,
+                metadata=record["metadata"]
+                if isinstance(record.get("metadata"), dict)
+                else {},
+            )
+        )
+
+    result = snapshots
     if not include_terminal:
         result = [snap for snap in result if snap.status not in TERMINAL_STATUSES]
     result.sort(key=lambda snap: (snap.status not in {"running", "spawning"}, snap.tid))
@@ -533,14 +643,23 @@ def _format_task_summary(snapshots: Sequence[TaskSnapshot]) -> str:
     if not snapshots:
         return "Tasks: none"
 
-    headers = ("TID", "STATUS", "RUNNER", "NAME", "STARTED", "DURATION", "EVENT")
+    headers = (
+        "TID",
+        "STATUS",
+        "ACTIVITY",
+        "RUNNER",
+        "NAME",
+        "STARTED",
+        "DURATION",
+        "EVENT",
+    )
     lines = [
         "Tasks:",
-        "  {:<19} {:<10} {:<14} {:<20} {:<20} {:<10} {}".format(*headers),
+        "  {:<19} {:<10} {:<12} {:<14} {:<20} {:<20} {:<10} {}".format(*headers),
     ]
     for snap in snapshots:
         lines.append(
-            f"  {snap.tid:<19} {snap.status:<10} {(snap.runner or '-'):<14} {snap.name[:20]:<20} {_format_timestamp(snap.started_at):<20} {_format_duration(snap.duration_seconds):<10} {snap.event}"
+            f"  {snap.tid:<19} {snap.status:<10} {(snap.activity or '-'): <12} {(snap.runner or '-'):<14} {snap.name[:20]:<20} {_format_timestamp(snap.started_at):<20} {_format_duration(snap.duration_seconds):<10} {snap.event}"
         )
     return "\n".join(lines)
 

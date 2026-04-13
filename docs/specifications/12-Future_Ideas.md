@@ -19,7 +19,7 @@ core-only with no user-facing surface. (Audited 2026-04-07.)
 ## Task TUI (`weft task top`)
 
 A curses-style live dashboard for task state, resource metrics, and tailing
-logs. This would be a distinct UX from `weft list` and should be implemented as
+logs. This would be a distinct UX from `weft task list` and should be implemented as
 an opt-in TUI, not a default code path.
 
 _Implementation status: Not implemented._ `weft status --watch` and `weft task

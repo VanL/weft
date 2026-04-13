@@ -2,7 +2,7 @@
 
 ## Goal
 
-Remove the separate `weft worker start` manager-launch path and make operator
+Remove the separate `weft manager start` manager-launch path and make operator
 startup use the same canonical bootstrap flow as `weft run`. The result should
 be one manager startup path per context, one manager-selection rule, and no
 remaining CLI support for arbitrary manager TaskSpec startup.
@@ -11,9 +11,9 @@ remaining CLI support for arbitrary manager TaskSpec startup.
 
 Source specs:
 
-- [`docs/specifications/03-Worker_Architecture.md`](../specifications/03-Worker_Architecture.md) [WA-0], [WA-1], [WA-3]
+- [`docs/specifications/03-Manager_Architecture.md`](../specifications/03-Manager_Architecture.md) [MA-0], [MA-1], [MA-3]
 - [`docs/specifications/05-Message_Flow_and_State.md`](../specifications/05-Message_Flow_and_State.md) [MF-6], [MF-7]
-- [`docs/specifications/07-System_Invariants.md`](../specifications/07-System_Invariants.md) [WORKER.1], [WORKER.3], [WORKER.6], [WORKER.7]
+- [`docs/specifications/07-System_Invariants.md`](../specifications/07-System_Invariants.md) [MANAGER.1], [MANAGER.3], [MANAGER.6], [MANAGER.7]
 - [`docs/specifications/10-CLI_Interface.md`](../specifications/10-CLI_Interface.md)
 
 Repo guidance:
@@ -35,13 +35,13 @@ Relevant existing context:
 Files to modify:
 
 - `weft/commands/run.py`
-- `weft/commands/worker.py`
+- `weft/commands/manager.py`
 - `weft/cli.py`
 - `weft/core/manager.py`
 - `tests/commands/test_run.py`
-- `tests/commands/test_worker_commands.py`
-- `tests/cli/test_cli_worker.py`
-- `docs/specifications/03-Worker_Architecture.md`
+- `tests/commands/test_manager_commands.py`
+- `tests/cli/test_cli_manager.py`
+- `docs/specifications/03-Manager_Architecture.md`
 - `docs/specifications/05-Message_Flow_and_State.md`
 - `docs/specifications/10-CLI_Interface.md`
 - `docs/lessons.md`
@@ -53,7 +53,7 @@ Likely new shared helper file:
 Read first:
 
 - `weft/commands/run.py` — owns the canonical manager bootstrap path today
-- `weft/commands/worker.py` — currently launches `Manager` through a separate path
+- `weft/commands/manager.py` — currently launches `Manager` through a separate path
 - `weft/core/manager.py` — manager registry, leader election, drain, idle shutdown
 - `tests/core/test_manager.py` — existing lifetime guarantees and election/drain tests
 - `tests/commands/test_run.py` — startup and stale-manager pruning coverage
@@ -67,7 +67,7 @@ Shared paths to reuse:
 Current structure:
 
 - `weft run` starts managers through a hardened registry-aware helper.
-- `weft worker start` separately loads a manager TaskSpec and starts `Manager`
+- `weft manager start` separately loads a manager TaskSpec and starts `Manager`
   directly, either foreground or background.
 - manager leader election currently considers all live `role="manager"` records,
   regardless of whether they are the canonical `weft.spawn.requests` manager.
@@ -81,7 +81,7 @@ Comprehension checks before editing:
 
 - Keep one durable startup spine: CLI wrapper -> canonical bootstrap helper ->
   `weft.manager_process` -> `Manager`.
-- Do not create a second startup path for explicit worker startup.
+- Do not create a second startup path for explicit manager startup.
 - Preserve manager control semantics after startup: STOP drain, leadership yield,
   and idle shutdown stay in `weft/core/manager.py`.
 - Preserve registry shape for canonical managers. Existing `tid`, `pid`,
@@ -97,7 +97,7 @@ Comprehension checks before editing:
 
 Out of scope:
 
-- worker stop/list/status stale-registry cleanup redesign
+- manager stop/list/status stale-registry cleanup redesign
 - autostart manifest behavior
 - manager idle-timeout policy changes
 - specialization or multiple manager pool design
@@ -105,7 +105,7 @@ Out of scope:
 ## Tasks
 
 1. Extract the canonical bootstrap helper into one shared command-support module.
-   - Outcome: `run` and `worker start` can call the same startup code.
+   - Outcome: `run` and `manager start` can call the same startup code.
    - Files to touch:
      - `weft/commands/run.py`
      - `weft/commands/_manager_bootstrap.py`
@@ -115,11 +115,11 @@ Out of scope:
    - Stop if the extraction starts changing result-wait or task-submission logic.
    - Done when `run.py` no longer owns a private bootstrap-only implementation.
 
-2. Replace `worker start` with a thin operator wrapper over the shared bootstrap helper.
-   - Outcome: `weft worker start` starts or adopts the canonical manager for the
+2. Replace `manager start` with a thin operator wrapper over the shared bootstrap helper.
+   - Outcome: `weft manager start` starts or adopts the canonical manager for the
      current context and no longer accepts a TaskSpec file or foreground mode.
    - Files to touch:
-     - `weft/commands/worker.py`
+     - `weft/commands/manager.py`
      - `weft/cli.py`
    - Use `build_context()` plus the shared bootstrap helper.
    - Return operator-facing text that distinguishes “started here” from
@@ -130,7 +130,7 @@ Out of scope:
 
 3. Narrow canonical manager election and leadership to canonical request-queue managers.
    - Outcome: old or stray live manager records using non-default request queues
-     cannot be adopted by `run` / `worker start` and cannot force the canonical
+     cannot be adopted by `run` / `manager start` and cannot force the canonical
      manager to yield.
    - Files to touch:
      - `weft/commands/_manager_bootstrap.py`
@@ -143,32 +143,32 @@ Out of scope:
      is sufficient.
 
 4. Update tests to prove the single-path contract.
-   - Outcome: tests cover the new `worker start` wrapper and reject the removed
+   - Outcome: tests cover the new `manager start` wrapper and reject the removed
      path.
    - Files to touch:
-     - `tests/commands/test_worker_commands.py`
-     - `tests/cli/test_cli_worker.py`
+     - `tests/commands/test_manager_commands.py`
+     - `tests/cli/test_cli_manager.py`
      - nearby startup/election tests as needed
    - Prefer command/helper tests plus one CLI proof.
    - Keep broker-backed lifetime tests real. Do not replace startup behavior
      with mock-only end-to-end claims.
 
 5. Update specs and lessons to match the new contract.
-   - Outcome: docs no longer describe TaskSpec-driven `worker start`, and the
+   - Outcome: docs no longer describe TaskSpec-driven `manager start`, and the
      spec back-links this plan.
    - Files to touch:
-     - `docs/specifications/03-Worker_Architecture.md`
+     - `docs/specifications/03-Manager_Architecture.md`
      - `docs/specifications/05-Message_Flow_and_State.md`
      - `docs/specifications/10-CLI_Interface.md`
      - `docs/lessons.md`
-   - State plainly that `worker start` is now an operator wrapper over the same
+   - State plainly that `manager start` is now an operator wrapper over the same
      bootstrap helper as `weft run`.
 
 ## Testing Plan
 
 Run in sequence:
 
-1. `uv run pytest tests/commands/test_run.py tests/commands/test_worker_commands.py tests/cli/test_cli_worker.py -q`
+1. `uv run pytest tests/commands/test_run.py tests/commands/test_manager_commands.py tests/cli/test_cli_manager.py -q`
 2. `uv run pytest tests/core/test_manager.py -q`
 3. `uv run pytest tests/context/test_context.py -q`
 4. `uv run mypy weft`
@@ -178,7 +178,7 @@ Keep real:
 
 - real manager registry snapshot logic
 - real `Manager` leader-election and drain tests
-- real CLI command surface for at least one `worker start` flow
+- real CLI command surface for at least one `manager start` flow
 
 ## Rollout and Rollback
 
@@ -190,7 +190,7 @@ Rollout concern:
 
 Rollback:
 
-- revert the shared bootstrap helper and `worker start` wrapper together; do
+- revert the shared bootstrap helper and `manager start` wrapper together; do
   not partially roll back one side while leaving the canonical-manager filter in
   only one caller.
 

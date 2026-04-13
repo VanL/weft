@@ -1,4 +1,9 @@
-"""Entry point that runs a Manager in a standalone interpreter."""
+"""Entry point that runs a Manager in a standalone interpreter.
+
+Spec references:
+- docs/specifications/03-Manager_Architecture.md [MA-3]
+- docs/specifications/05-Message_Flow_and_State.md [MF-7]
+"""
 
 from __future__ import annotations
 

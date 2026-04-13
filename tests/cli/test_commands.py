@@ -94,14 +94,14 @@ VALID_COMMAND_TASKSPEC = {
 
 
 class TestValidateTaskspecCommand:
-    """Test the validate-taskspec CLI command."""
+    """Test the spec validate task CLI command."""
 
     def test_validate_valid_taskspec(self, workdir):
         """Test validating a valid TaskSpec file."""
         path = workdir / "valid_taskspec.json"
         path.write_text(json.dumps(MINIMAL_VALID_TASKSPEC), encoding="utf-8")
 
-        rc, out, err = run_cli("validate-taskspec", path, cwd=workdir)
+        rc, out, err = run_cli("spec", "validate", "--type", "task", path, cwd=workdir)
         assert rc == 0
         assert "TaskSpec is valid" in out
         assert "✓" in out
@@ -112,7 +112,7 @@ class TestValidateTaskspecCommand:
         path = workdir / "invalid_taskspec.json"
         path.write_text(json.dumps(INVALID_SHORT_TID), encoding="utf-8")
 
-        rc, out, err = run_cli("validate-taskspec", path, cwd=workdir)
+        rc, out, err = run_cli("spec", "validate", "--type", "task", path, cwd=workdir)
         assert rc == 1
         assert "validation failed" in out
         assert "✗" in out
@@ -123,7 +123,14 @@ class TestValidateTaskspecCommand:
         """Test validating a non-existent file."""
         missing = workdir / "missing.json"
 
-        rc, out, err = run_cli("validate-taskspec", missing, cwd=workdir)
+        rc, out, err = run_cli(
+            "spec",
+            "validate",
+            "--type",
+            "task",
+            missing,
+            cwd=workdir,
+        )
         assert rc != 0
         combined = f"{out}\n{err}"
         assert "Invalid value" in combined or "File not found" in combined
@@ -133,7 +140,7 @@ class TestValidateTaskspecCommand:
         path = workdir / "malformed.json"
         path.write_text("{ invalid json", encoding="utf-8")
 
-        rc, out, err = run_cli("validate-taskspec", path, cwd=workdir)
+        rc, out, err = run_cli("spec", "validate", "--type", "task", path, cwd=workdir)
         assert rc == 1
         assert "validation failed" in out
         assert "_json" in out
@@ -144,7 +151,7 @@ class TestValidateTaskspecCommand:
         path = workdir / "command_taskspec.json"
         path.write_text(json.dumps(VALID_COMMAND_TASKSPEC), encoding="utf-8")
 
-        rc, out, err = run_cli("validate-taskspec", path, cwd=workdir)
+        rc, out, err = run_cli("spec", "validate", "--type", "task", path, cwd=workdir)
         assert rc == 0
         assert "TaskSpec Summary" in out
         assert "1755033993077017000" in out
@@ -180,7 +187,7 @@ class TestValidateTaskspecCommand:
         path = workdir / "multiple_errors.json"
         path.write_text(json.dumps(invalid_taskspec), encoding="utf-8")
 
-        rc, out, err = run_cli("validate-taskspec", path, cwd=workdir)
+        rc, out, err = run_cli("spec", "validate", "--type", "task", path, cwd=workdir)
         assert rc == 1
         assert "Validation Errors" in out
         assert "tid" in out

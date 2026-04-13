@@ -24,9 +24,9 @@ Source specs:
 
 - [`docs/specifications/00-Overview_and_Architecture.md`](../specifications/00-Overview_and_Architecture.md)
 - [`docs/specifications/01-Core_Components.md`](../specifications/01-Core_Components.md) [CC-2], [CC-3], [CC-3.2], [CC-3.4]
-- [`docs/specifications/03-Worker_Architecture.md`](../specifications/03-Worker_Architecture.md) [WA-1], [WA-3], [WA-4]
+- [`docs/specifications/03-Manager_Architecture.md`](../specifications/03-Manager_Architecture.md) [MA-1], [MA-3], [MA-4]
 - [`docs/specifications/05-Message_Flow_and_State.md`](../specifications/05-Message_Flow_and_State.md) [MF-2], [MF-3], [MF-5], [MF-7]
-- [`docs/specifications/07-System_Invariants.md`](../specifications/07-System_Invariants.md) [STATE.1], [STATE.2], [QUEUE.4], [QUEUE.6], [WORKER.3], [WORKER.7]
+- [`docs/specifications/07-System_Invariants.md`](../specifications/07-System_Invariants.md) [STATE.1], [STATE.2], [QUEUE.4], [QUEUE.6], [MANAGER.3], [MANAGER.7]
 - [`docs/specifications/08-Testing_Strategy.md`](../specifications/08-Testing_Strategy.md)
 - [`docs/specifications/10-CLI_Interface.md`](../specifications/10-CLI_Interface.md) [CLI-1.1], [CLI-1.2], [CLI-1.3]
 
@@ -228,7 +228,7 @@ Rules for temporary instrumentation:
 - [`tests/cli/test_cli_list_task.py`](../../tests/cli/test_cli_list_task.py)
   submits a normal function task, then relies on
   [`WeftTestHarness.wait_for_completion()`](../../tests/helpers/weft_harness.py#L176)
-  before asserting on `weft list` / `weft task status`.
+  before asserting on `weft task list` / `weft task status`.
 - [`WeftTestHarness.wait_for_completion()`](../../tests/helpers/weft_harness.py#L176)
   currently treats `weft.log.tasks` as the primary completion truth and only
   falls back to peeking `T{tid}.outbox`.
@@ -247,7 +247,7 @@ Rules for temporary instrumentation:
   [`InteractiveStreamClient`](../../weft/commands/interactive.py).
 - The interactive task’s control behavior and terminal event emission live in
   [`weft/core/tasks/interactive.py`](../../weft/core/tasks/interactive.py).
-- `weft list` / `weft task status` projections are built in
+- `weft task list` / `weft task status` projections are built in
   [`weft/commands/status.py`](../../weft/commands/status.py), primarily from
   task-log history plus the latest `tid_mappings` payloads.
 
@@ -259,7 +259,7 @@ The implementer is not ready to audit until they can answer these correctly:
 2. Which function currently owns prompt-mode `:quit` shutdown?
 3. Does `test_task_tid_reverse` fail in reverse formatting logic, or does it
    fail earlier?
-4. Which module shapes `weft list` / `weft task status` output?
+4. Which module shapes `weft task list` / `weft task status` output?
 
 ## Invariants and Constraints
 
@@ -349,7 +349,7 @@ This section exists to stop repeated dead ends.
    - The CLI may be leaking internal stop/kill machinery into a user-visible
      exit code or hang.
 
-7. `weft list` / `weft task status` are reading stale projection state.
+7. `weft task list` / `weft task status` are reading stale projection state.
    - This is less likely than the waiter/finalization theories, but it must be
      tested explicitly.
 

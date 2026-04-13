@@ -825,11 +825,11 @@ Read first:
 Write these failing tests first:
 
 1. `validate_taskspec()` remains schema-only and unchanged for existing callers.
-2. `weft validate-taskspec FILE --load-runner` fails with an install hint for
+2. `weft spec validate --type task FILE --load-runner` fails with an install hint for
    a missing plugin.
-3. `weft validate-taskspec FILE --preflight` fails with a runtime availability
+3. `weft spec validate --type task FILE --preflight` fails with a runtime availability
    error when the plugin is installed but unavailable.
-4. `weft validate-taskspec FILE --preflight` still succeeds for `host`.
+4. `weft spec validate --type task FILE --preflight` still succeeds for `host`.
 5. Preflight errors are clear and user-facing; they do not dump tracebacks for
    expected runtime-unavailable cases.
 
@@ -1020,8 +1020,8 @@ Implementation notes:
   - `uv add 'weft[macos-sandbox]'`
 - Add TaskSpec examples showing `spec.runner`.
 - Add CLI examples for:
-  - `weft validate-taskspec --load-runner`
-  - `weft validate-taskspec --preflight`
+  - `weft spec validate --type task --load-runner`
+  - `weft spec validate --type task --preflight`
 - Document that `host` remains the default runner.
 - Document non-host capability limits in this slice.
 - Document user-facing failure modes for:
@@ -1116,7 +1116,7 @@ Use:
   - external runner execution surface
 - `WeftTestHarness` or real CLI subprocess tests for:
   - `weft run`
-  - `weft validate-taskspec`
+  - `weft spec validate --type task`
   - end-to-end task control flows
 
 ### 9.4 Test Design Rules For This Plan

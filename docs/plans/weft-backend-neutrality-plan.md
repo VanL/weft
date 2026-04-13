@@ -121,7 +121,7 @@ Runtime and config:
 5. [`weft/commands/run.py`](../../weft/commands/run.py)
 6. [`weft/commands/result.py`](../../weft/commands/result.py)
 7. [`weft/commands/queue.py`](../../weft/commands/queue.py)
-8. [`weft/commands/worker.py`](../../weft/commands/worker.py)
+8. [`weft/commands/manager.py`](../../weft/commands/manager.py)
 9. [`weft/helpers.py`](../../weft/helpers.py)
 10. [`weft/manager_process.py`](../../weft/manager_process.py)
 
@@ -379,7 +379,7 @@ Files to audit and possibly modify:
 - [`weft/commands/result.py`](../../weft/commands/result.py)
 - [`weft/commands/queue.py`](../../weft/commands/queue.py)
 - [`weft/commands/status.py`](../../weft/commands/status.py)
-- [`weft/commands/worker.py`](../../weft/commands/worker.py)
+- [`weft/commands/manager.py`](../../weft/commands/manager.py)
 - [`weft/manager_process.py`](../../weft/manager_process.py)
 
 Read first:
@@ -407,7 +407,7 @@ rg -n "sqlite|database_path|is_file_backed|backend_name|BrokerDB|\\.db\\b|-wal|-
 Required tests:
 
 - Re-run the nearest targeted suite for each touched command/module.
-- For queue history or worker registry code, verify reads still use generator-
+- For queue history or manager registry code, verify reads still use generator-
   based helpers where queue history length matters.
 
 ### 5. Normalize test setup so shared tests actually exercise the active backend
@@ -450,7 +450,7 @@ Approach:
 
 Required tests:
 
-- Worker lifecycle CLI tests on PG and SQLite.
+- Manager lifecycle CLI tests on PG and SQLite.
 - Status command tests on PG and SQLite.
 - Any test touched because it previously mixed root preparation between process
   boundaries.
@@ -545,10 +545,10 @@ Classification rules:
 Suggested first allowlist modules to burn down:
 
 - [`tests/cli/test_cli.py`](../../tests/cli/test_cli.py)
-- [`tests/cli/test_cli_worker.py`](../../tests/cli/test_cli_worker.py)
+- [`tests/cli/test_cli_manager.py`](../../tests/cli/test_cli_manager.py)
 - [`tests/commands/test_status.py`](../../tests/commands/test_status.py)
-- [`tests/commands/test_worker_commands.py`](../../tests/commands/test_worker_commands.py)
-- [`tests/specs/worker_architecture/test_spawn_retry.py`](../../tests/specs/worker_architecture/test_spawn_retry.py)
+- [`tests/commands/test_manager_commands.py`](../../tests/commands/test_manager_commands.py)
+- [`tests/specs/manager_architecture/test_spawn_retry.py`](../../tests/specs/manager_architecture/test_spawn_retry.py)
 
 Then audit the remaining allowlist modules:
 
@@ -565,7 +565,7 @@ Then audit the remaining allowlist modules:
 - [`tests/commands/test_interactive_client.py`](../../tests/commands/test_interactive_client.py)
 - [`tests/commands/test_queue.py`](../../tests/commands/test_queue.py)
 - [`tests/specs/quick_reference/test_queue_names.py`](../../tests/specs/quick_reference/test_queue_names.py)
-- [`tests/specs/worker_architecture/test_manager_state_events.py`](../../tests/specs/worker_architecture/test_manager_state_events.py)
+- [`tests/specs/manager_architecture/test_manager_state_events.py`](../../tests/specs/manager_architecture/test_manager_state_events.py)
 - [`tests/system/test_helpers.py`](../../tests/system/test_helpers.py)
 - [`tests/system/test_release_script.py`](../../tests/system/test_release_script.py)
 - plus the directory-prefix exemptions under:
@@ -646,7 +646,7 @@ Shared test shapes:
 - queue roundtrip using `context.queue(...)`
 - CLI `init`, `status`, `run`, `result`, `queue`, `worker` behavior through
   `run_cli(...)`
-- worker registry and status reads via real runtime queues
+- manager registry and status reads via real runtime queues
 - dump/load preview and normal import behavior that should be backend-neutral
 
 SQLite-only test shapes:
@@ -676,7 +676,7 @@ Targeted checks for changed areas:
 uv run --extra dev pytest tests/cli/test_cli_init.py -q
 uv run --extra dev pytest tests/context/test_context.py -q
 uv run --extra dev pytest tests/commands/test_dump_load.py -q
-uv run --extra dev pytest tests/cli/test_cli_worker.py tests/commands/test_worker_commands.py tests/commands/test_status.py -q
+uv run --extra dev pytest tests/cli/test_cli_manager.py tests/commands/test_manager_commands.py tests/commands/test_status.py -q
 ```
 
 SQLite-only checks:

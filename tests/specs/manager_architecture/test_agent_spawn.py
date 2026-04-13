@@ -1,4 +1,4 @@
-"""Spec checks for agent spawn-request TID correlation (WA-2)."""
+"""Spec checks for agent spawn-request TID correlation (MA-2)."""
 
 from __future__ import annotations
 

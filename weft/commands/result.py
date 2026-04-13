@@ -23,12 +23,23 @@ from weft._constants import (
 from weft.context import WeftContext, build_context
 from weft.helpers import iter_queue_json_entries
 
+from ._result_wait import (
+    append_public_value,
+    await_one_shot_result,
+    terminal_error_message,
+    terminal_status_from_event,
+)
 from ._streaming import (
+    DecodedOutboxValue,
     aggregate_public_outputs,
     drain_available_outbox_values,
     handle_ctrl_stream,
     poll_log_events,
     process_outbox_message,
+)
+from ._task_history import (
+    is_pipeline_taskspec_payload,
+    load_latest_taskspec_payload,
 )
 
 
@@ -63,20 +74,7 @@ def _queue_names_for_tid(
 
 
 def _load_taskspec_payload(context: WeftContext, tid: str) -> dict[str, Any] | None:
-    log_queue = Queue(
-        WEFT_GLOBAL_LOG_QUEUE,
-        db_path=context.broker_target,
-        persistent=False,
-        config=context.broker_config,
-    )
-    latest_taskspec: dict[str, Any] | None = None
-    for payload, _timestamp in iter_queue_json_entries(log_queue):
-        if payload.get("tid") != tid:
-            continue
-        taskspec = payload.get("taskspec")
-        if isinstance(taskspec, dict):
-            latest_taskspec = taskspec
-    return latest_taskspec
+    return load_latest_taskspec_payload(context, tid)
 
 
 def _queue_exists(context: WeftContext, queue_name: str) -> bool:
@@ -170,19 +168,6 @@ def _iter_queue_messages(queue: Queue, *, peek: bool) -> Iterator[str]:
                 yield str(next_item)
 
 
-def _append_public_value(
-    values: list[Any],
-    value: Any,
-    *,
-    show_stderr: bool,
-) -> None:
-    """Append a caller-facing value after optional stderr selection."""
-    if show_stderr and isinstance(value, dict) and "stderr" in value:
-        values.append(value.get("stderr") or "")
-        return
-    values.append(value)
-
-
 def _is_persistent_task(taskspec_payload: dict[str, Any] | None) -> bool:
     """Return ``True`` when the loaded TaskSpec payload is persistent."""
     if not isinstance(taskspec_payload, dict):
@@ -198,10 +183,10 @@ def _drain_outbox_until_timestamp(
     *,
     boundary_timestamp: int,
     stream_buffer: list[str],
-    show_stderr: bool,
-) -> list[Any]:
+    emit_stream: bool,
+) -> list[DecodedOutboxValue]:
     """Consume final outbox payloads whose timestamps fall at or before a boundary."""
-    values: list[Any] = []
+    values: list[DecodedOutboxValue] = []
     while True:
         next_item = queue.peek_one(with_timestamps=True)
         if next_item is None:
@@ -217,10 +202,10 @@ def _drain_outbox_until_timestamp(
         final, value = process_outbox_message(
             str(consumed),
             stream_buffer,
-            emit_stream=False,
+            emit_stream=emit_stream,
         )
-        if final:
-            _append_public_value(values, value, show_stderr=show_stderr)
+        if final and value is not None:
+            values.append(value)
     return values
 
 
@@ -266,9 +251,9 @@ def _collect_all_results(
                     stream_buffer,
                     emit_stream=False,
                 )
-                if not final:
+                if not final or value is None:
                     continue
-                _append_public_value(result_values, value, show_stderr=show_stderr)
+                append_public_value(result_values, value, show_stderr=show_stderr)
             rendered = aggregate_public_outputs(result_values)
             if rendered is not None:
                 aggregated.append({"tid": tid, "result": rendered})
@@ -291,10 +276,25 @@ def _await_single_result(
     *,
     timeout: float | None,
     show_stderr: bool,
+    emit_stream: bool = False,
 ) -> tuple[str, Any | None, str | None]:
     taskspec_payload = _load_taskspec_payload(context, tid)
     is_persistent = _is_persistent_task(taskspec_payload)
     outbox_name, ctrl_out_name = _queue_names_for_tid(tid, taskspec_payload)
+    ctrl_out_for_wait = (
+        None if is_pipeline_taskspec_payload(taskspec_payload) else ctrl_out_name
+    )
+
+    if not is_persistent:
+        return await_one_shot_result(
+            context,
+            tid,
+            outbox_name=outbox_name,
+            ctrl_out_name=ctrl_out_for_wait,
+            timeout=timeout,
+            show_stderr=show_stderr,
+            emit_stream=emit_stream,
+        )
 
     outbox_queue = Queue(
         outbox_name,
@@ -353,20 +353,6 @@ def _await_single_result(
                             boundary_timestamp = completion_timestamp
                             boundary_seen_at = time.monotonic()
                             break
-            else:
-                ready_values, drained_outbox = drain_available_outbox_values(
-                    outbox_queue,
-                    stream_buffer,
-                    emit_stream=False,
-                )
-                for value in ready_values:
-                    _append_public_value(
-                        result_values,
-                        value,
-                        show_stderr=show_stderr,
-                    )
-                if drained_outbox:
-                    continue
 
             events: list[tuple[dict[str, Any], int]]
             events, log_last_timestamp = poll_log_events(
@@ -389,7 +375,7 @@ def _await_single_result(
                         boundary_seen_at = time.monotonic()
                     if event_payload.get("event") == "work_item_completed":
                         continue
-                event_status = _terminal_status_from_event(event_payload)
+                event_status = terminal_status_from_event(event_payload)
                 if event_status is None:
                     continue
                 if (
@@ -405,23 +391,31 @@ def _await_single_result(
                         completed_at = time.monotonic()
                     continue
                 status = event_status
-                error_message = _terminal_error_message(event_payload, event_status)
+                error_message = terminal_error_message(event_payload, event_status)
             if status != "running":
                 break
 
             if is_persistent and boundary_timestamp is not None:
-                result_values.extend(
-                    _drain_outbox_until_timestamp(
-                        outbox_queue,
-                        boundary_timestamp=boundary_timestamp,
-                        stream_buffer=stream_buffer,
+                drained_outputs = _drain_outbox_until_timestamp(
+                    outbox_queue,
+                    boundary_timestamp=boundary_timestamp,
+                    stream_buffer=stream_buffer,
+                    emit_stream=emit_stream,
+                )
+                for output in drained_outputs:
+                    append_public_value(
+                        result_values,
+                        output,
                         show_stderr=show_stderr,
                     )
-                )
-                if result_values or (
-                    boundary_seen_at is not None
-                    and time.monotonic() - boundary_seen_at
-                    >= WEFT_COMPLETED_RESULT_GRACE_SECONDS
+                if (
+                    drained_outputs
+                    or result_values
+                    or (
+                        boundary_seen_at is not None
+                        and time.monotonic() - boundary_seen_at
+                        >= WEFT_COMPLETED_RESULT_GRACE_SECONDS
+                    )
                 ):
                     result_value = aggregate_public_outputs(result_values)
                     status = "completed"
@@ -433,12 +427,12 @@ def _await_single_result(
                 late_values, _ = drain_available_outbox_values(
                     outbox_queue,
                     stream_buffer,
-                    emit_stream=False,
+                    emit_stream=emit_stream,
                 )
-                for value in late_values:
-                    _append_public_value(
+                for output in late_values:
+                    append_public_value(
                         result_values,
-                        value,
+                        output,
                         show_stderr=show_stderr,
                     )
                 result_value = aggregate_public_outputs(result_values)
@@ -498,6 +492,9 @@ def cmd_result(
     if tid is None:
         return 2, "weft result: task id required"
 
+    if stream and json_output:
+        return 2, "weft result: --stream cannot be used with --json"
+
     try:
         full_tid = _normalize_tid(tid)
     except ValueError as exc:
@@ -524,6 +521,7 @@ def cmd_result(
         full_tid,
         timeout=remaining_timeout,
         show_stderr=show_stderr,
+        emit_stream=stream,
     )
 
     if status == "completed":
@@ -546,39 +544,6 @@ def cmd_result(
         return 1, message
 
     return 2, f"weft result: task {full_tid} not found"
-
-
-def _terminal_status_from_event(payload: dict[str, Any]) -> str | None:
-    status = payload.get("status")
-    if not isinstance(status, str):
-        taskspec = payload.get("taskspec")
-        if isinstance(taskspec, dict):
-            state = taskspec.get("state")
-            if isinstance(state, dict):
-                state_status = state.get("status")
-                if isinstance(state_status, str):
-                    status = state_status
-    if status in {"completed", "failed", "timeout", "cancelled", "killed"}:
-        return status
-    return None
-
-
-def _terminal_error_message(payload: dict[str, Any], status: str) -> str | None:
-    error = payload.get("error")
-    if isinstance(error, str) and error:
-        return error
-    taskspec = payload.get("taskspec")
-    if isinstance(taskspec, dict):
-        state = taskspec.get("state")
-        if isinstance(state, dict):
-            state_error = state.get("error")
-            if isinstance(state_error, str) and state_error:
-                return state_error
-    if status == "cancelled":
-        return "task cancelled"
-    if status == "killed":
-        return "task killed"
-    return None
 
 
 __all__ = ["cmd_result"]

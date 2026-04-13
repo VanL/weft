@@ -12,8 +12,8 @@ import pytest
 from tests.conftest import run_cli
 from weft._constants import (
     WEFT_GLOBAL_LOG_QUEUE,
+    WEFT_MANAGERS_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
-    WEFT_WORKERS_REGISTRY_QUEUE,
 )
 from weft.context import build_context
 
@@ -36,7 +36,7 @@ def test_status_reports_no_managers(workdir) -> None:
 
 def test_status_json_includes_manager_records(workdir) -> None:
     context = build_context(spec_context=workdir)
-    registry = context.queue(WEFT_WORKERS_REGISTRY_QUEUE, persistent=False)
+    registry = context.queue(WEFT_MANAGERS_REGISTRY_QUEUE, persistent=False)
 
     record = {
         "tid": "1762000000000000999",
@@ -69,7 +69,7 @@ def test_status_json_includes_manager_records(workdir) -> None:
 
 def test_status_json_includes_noncanonical_manager_records(workdir) -> None:
     context = build_context(spec_context=workdir)
-    registry = context.queue(WEFT_WORKERS_REGISTRY_QUEUE, persistent=False)
+    registry = context.queue(WEFT_MANAGERS_REGISTRY_QUEUE, persistent=False)
 
     record = {
         "tid": "1762000000000000888",
@@ -101,7 +101,7 @@ def test_status_json_includes_noncanonical_manager_records(workdir) -> None:
 
 def test_status_filters_stopped_managers_by_default(workdir) -> None:
     context = build_context(spec_context=workdir)
-    registry = context.queue(WEFT_WORKERS_REGISTRY_QUEUE, persistent=False)
+    registry = context.queue(WEFT_MANAGERS_REGISTRY_QUEUE, persistent=False)
 
     stopped_record = {
         "tid": "1762000000000000123",
@@ -174,9 +174,126 @@ def test_status_reports_running_task_json(workdir) -> None:
     assert entry["metadata"]["owner"] == "tests"
 
 
-def test_status_tid_filter_not_found(workdir) -> None:
-    rc, out, err = run_cli("status", "nonexistent", cwd=workdir)
+def test_status_json_hides_dead_host_running_task_by_default(workdir) -> None:
+    context = build_context(spec_context=workdir)
+    tid = "1844674407370955169"
+    started = time.time_ns()
+    taskspec = {
+        "name": "dead-host-task",
+        "state": {
+            "status": "running",
+            "started_at": started,
+            "completed_at": None,
+        },
+        "io": {
+            "inputs": {"inbox": f"T{tid}.inbox"},
+            "outputs": {"outbox": f"T{tid}.outbox"},
+            "control": {
+                "ctrl_in": f"T{tid}.ctrl_in",
+                "ctrl_out": f"T{tid}.ctrl_out",
+            },
+        },
+        "metadata": {"owner": "tests"},
+    }
+    _write_log_event(
+        context,
+        {
+            "event": "task_started",
+            "status": "running",
+            "tid": tid,
+            "tid_short": tid[-10:],
+            "timestamp": started,
+            "task_pid": 999_999_996,
+            "pid": 999_999_996,
+            "taskspec": taskspec,
+        },
+    )
+    mapping_queue = context.queue("weft.state.tid_mappings", persistent=False)
+    mapping_queue.write(
+        json.dumps(
+            {
+                "short": tid[-10:],
+                "full": tid,
+                "pid": 999_999_996,
+                "task_pid": 999_999_996,
+                "managed_pids": [],
+                "runner": "host",
+            }
+        )
+    )
+
+    rc, out, err = run_cli("status", "--json", cwd=workdir)
+
+    assert rc == 0
+    assert err == ""
+    data = json.loads(out)
+    assert data["tasks"] == []
+
+
+def test_task_status_process_json_reports_dead_pid_liveness(workdir) -> None:
+    context = build_context(spec_context=workdir)
+    tid = "1844674407370955170"
+    started = time.time_ns()
+    taskspec = {
+        "name": "dead-host-task",
+        "state": {
+            "status": "running",
+            "started_at": started,
+            "completed_at": None,
+        },
+        "io": {
+            "inputs": {"inbox": f"T{tid}.inbox"},
+            "outputs": {"outbox": f"T{tid}.outbox"},
+            "control": {
+                "ctrl_in": f"T{tid}.ctrl_in",
+                "ctrl_out": f"T{tid}.ctrl_out",
+            },
+        },
+        "metadata": {"owner": "tests"},
+    }
+    _write_log_event(
+        context,
+        {
+            "event": "task_started",
+            "status": "running",
+            "tid": tid,
+            "tid_short": tid[-10:],
+            "timestamp": started,
+            "task_pid": 999_999_995,
+            "pid": 999_999_995,
+            "taskspec": taskspec,
+        },
+    )
+    mapping_queue = context.queue("weft.state.tid_mappings", persistent=False)
+    mapping_queue.write(
+        json.dumps(
+            {
+                "short": tid[-10:],
+                "full": tid,
+                "pid": 999_999_995,
+                "task_pid": 999_999_995,
+                "managed_pids": [999_999_994],
+                "runner": "host",
+            }
+        )
+    )
+
+    rc, out, err = run_cli("task", "status", tid, "--process", "--json", cwd=workdir)
+
+    assert rc == 0
+    assert err == ""
+    payload = json.loads(out)
+    assert payload["tid"] == tid
+    assert payload["status"] == "failed"
+    assert payload["pid"] == 999_999_995
+    assert payload["pid_alive"] is False
+    assert payload["managed_pids"] == [999_999_994]
+    assert payload["live_managed_pids"] == []
+
+
+def test_task_status_not_found(workdir) -> None:
+    rc, out, err = run_cli("task", "status", "nonexistent", cwd=workdir)
 
     assert rc == 2
     assert out == ""
-    assert err.strip().startswith("weft: task nonexistent not found")
+    assert "Task nonexistent not found" in err

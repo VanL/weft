@@ -4,7 +4,7 @@ Use this runbook when a plan or completed change is large enough that author
 blindness is a real risk.
 
 Here, "bootstrap" means discovering which reviewers are available in the
-current environment, not Weft manager or worker startup.
+current environment, not Weft manager or task startup.
 
 ## When To Use It
 

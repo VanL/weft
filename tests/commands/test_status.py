@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,7 @@ from weft.commands import status as status_cmd
 from weft.commands import tasks as task_cmd
 from weft.commands.status import cmd_status, collect_status
 from weft.context import build_context
+from weft.core.runners import host as host_runner
 from weft.ext import RunnerRuntimeDescription
 
 pytestmark = [pytest.mark.shared]
@@ -46,6 +48,54 @@ def _write_task_log_entry(
                         "completed_at": completed_at,
                     },
                     "metadata": {},
+                },
+            }
+        )
+    )
+
+
+def _write_pipeline_log_entry(
+    *,
+    ctx: Any,
+    tid: str,
+    status: str = "running",
+    event: str = "task_started",
+    started_at: int | None = None,
+    completed_at: int | None = None,
+) -> None:
+    log_queue = ctx.queue("weft.log.tasks", persistent=False)
+    log_queue.write(
+        json.dumps(
+            {
+                "event": event,
+                "status": status,
+                "tid": tid,
+                "taskspec": {
+                    "tid": tid,
+                    "name": "demo-pipeline",
+                    "spec": {
+                        "type": "function",
+                        "function_target": "weft.core.tasks.pipeline:runtime",
+                        "runner": {"name": "host", "options": {}},
+                    },
+                    "io": {
+                        "outputs": {"outbox": f"P{tid}.outbox"},
+                        "control": {
+                            "ctrl_in": f"P{tid}.ctrl_in",
+                            "ctrl_out": f"P{tid}.ctrl_out",
+                        },
+                    },
+                    "state": {
+                        "status": status,
+                        "started_at": started_at,
+                        "completed_at": completed_at,
+                    },
+                    "metadata": {
+                        "role": "pipeline",
+                        "_weft_pipeline_runtime": {
+                            "queues": {"status": f"P{tid}.status"},
+                        },
+                    },
                 },
             }
         )
@@ -372,6 +422,289 @@ def test_task_status_surfaces_terminal_log_state_once_task_pid_is_gone(
     assert snapshot.status == "cancelled"
 
 
+def test_task_status_marks_dead_host_running_snapshot_failed(
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = "1844674407370955167"
+    started = 1_762_000_000_000_000_000
+    mapping_queue = ctx.queue("weft.state.tid_mappings", persistent=False)
+
+    _write_task_log_entry(
+        ctx=ctx,
+        tid=tid,
+        event="task_started",
+        status="running",
+        started_at=started,
+        completed_at=None,
+        name="dead-running-host-task",
+    )
+    mapping_queue.write(
+        json.dumps(
+            {
+                "short": tid[-10:],
+                "full": tid,
+                "pid": 999_999_998,
+                "task_pid": 999_999_998,
+                "managed_pids": [],
+                "runner": "host",
+            }
+        )
+    )
+
+    snapshot = task_cmd.task_status(tid, context_path=root)
+
+    assert snapshot is not None
+    assert snapshot.event == "task_started"
+    assert snapshot.status == "failed"
+
+
+def test_cmd_status_surfaces_dead_host_running_snapshot_as_failed_with_all(
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = "1844674407370955168"
+    started = 1_762_000_000_000_000_000
+    mapping_queue = ctx.queue("weft.state.tid_mappings", persistent=False)
+
+    _write_task_log_entry(
+        ctx=ctx,
+        tid=tid,
+        event="task_started",
+        status="running",
+        started_at=started,
+        completed_at=None,
+        name="dead-running-host-task",
+    )
+    mapping_queue.write(
+        json.dumps(
+            {
+                "short": tid[-10:],
+                "full": tid,
+                "pid": 999_999_997,
+                "task_pid": 999_999_997,
+                "managed_pids": [],
+                "runner": "host",
+            }
+        )
+    )
+
+    exit_code, payload = cmd_status(
+        json_output=True,
+        include_terminal=True,
+        spec_context=root,
+    )
+
+    assert exit_code == 0
+    assert payload is not None
+    data = json.loads(payload)
+    tasks = data["tasks"]
+    assert len(tasks) == 1
+    assert tasks[0]["tid"] == tid
+    assert tasks[0]["status"] == "failed"
+
+
+def test_status_snapshot_preserves_activity_from_latest_log_event(
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = "1844674407370955170"
+    started = 1_762_000_000_000_000_000
+
+    _write_task_log_entry(
+        ctx=ctx,
+        tid=tid,
+        event="task_started",
+        status="running",
+        started_at=started,
+        completed_at=None,
+        name="waiting-stage",
+    )
+    ctx.queue("weft.log.tasks", persistent=False).write(
+        json.dumps(
+            {
+                "event": "task_activity",
+                "tid": tid,
+                "status": "running",
+                "activity": "waiting",
+                "waiting_on": "P123.first-to-second",
+            }
+        )
+    )
+
+    snapshot = task_cmd.task_status(tid, context_path=root)
+
+    assert snapshot is not None
+    assert snapshot.status == "running"
+    assert snapshot.activity == "waiting"
+    assert snapshot.waiting_on == "P123.first-to-second"
+
+
+def test_terminal_snapshot_omits_activity_when_status_is_terminal(
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = "1844674407370955171"
+    started = 1_762_000_000_000_000_000
+    completed = started + 2_000_000
+
+    _write_task_log_entry(
+        ctx=ctx,
+        tid=tid,
+        event="task_started",
+        status="running",
+        started_at=started,
+        completed_at=None,
+        name="terminal-stage",
+    )
+    log_queue = ctx.queue("weft.log.tasks", persistent=False)
+    log_queue.write(
+        json.dumps(
+            {
+                "event": "task_activity",
+                "tid": tid,
+                "status": "running",
+                "activity": "waiting",
+                "waiting_on": "P123.first-to-second",
+            }
+        )
+    )
+    log_queue.write(
+        json.dumps(
+            {
+                "event": "work_completed",
+                "tid": tid,
+                "status": "completed",
+                "taskspec": {
+                    "name": "terminal-stage",
+                    "spec": {"runner": {"name": "host", "options": {}}},
+                    "state": {
+                        "status": "completed",
+                        "started_at": started,
+                        "completed_at": completed,
+                    },
+                    "metadata": {},
+                },
+            }
+        )
+    )
+
+    snapshot = task_cmd.task_status(tid, context_path=root)
+
+    assert snapshot is not None
+    assert snapshot.status == "completed"
+    assert snapshot.activity is None
+    assert snapshot.waiting_on is None
+
+
+def test_task_status_reads_pipeline_snapshot_when_available(
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = "1844674407370955172"
+    started = 1_762_000_000_000_000_000
+
+    _write_pipeline_log_entry(
+        ctx=ctx,
+        tid=tid,
+        started_at=started,
+        completed_at=None,
+    )
+    ctx.queue(f"P{tid}.status", persistent=True).write(
+        json.dumps(
+            {
+                "type": "pipeline_status",
+                "pipeline_tid": tid,
+                "pipeline_name": "demo-pipeline",
+                "status": "running",
+                "activity": "waiting",
+                "waiting_on": f"P{tid}.events",
+                "timestamp": time.time_ns(),
+                "stages": [{"name": "first", "status": "running"}],
+                "edges": [{"name": "pipeline-to-first", "status": "running"}],
+            }
+        )
+    )
+
+    snapshot = task_cmd.task_status(tid, context_path=root)
+
+    assert snapshot is not None
+    assert snapshot.event == "pipeline_status"
+    assert snapshot.status == "running"
+    assert snapshot.activity == "waiting"
+    assert snapshot.waiting_on == f"P{tid}.events"
+    assert snapshot.pipeline_status is not None
+    assert snapshot.pipeline_status["stages"][0]["name"] == "first"
+
+
+def test_task_status_prefers_newer_terminal_log_snapshot_over_stale_pipeline_status(
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = "1844674407370955174"
+    started = 1_762_000_000_000_000_000
+    completed = started + 1_000
+
+    _write_pipeline_log_entry(
+        ctx=ctx,
+        tid=tid,
+        status="completed",
+        event="work_completed",
+        started_at=started,
+        completed_at=completed,
+    )
+    ctx.queue(f"P{tid}.status", persistent=True).write(
+        json.dumps(
+            {
+                "type": "pipeline_status",
+                "pipeline_tid": tid,
+                "pipeline_name": "demo-pipeline",
+                "status": "running",
+                "activity": "waiting",
+                "timestamp": started,
+                "stages": [{"name": "first", "status": "running"}],
+                "edges": [{"name": "pipeline-to-first", "status": "running"}],
+            }
+        )
+    )
+
+    snapshot = task_cmd.task_status(tid, context_path=root)
+
+    assert snapshot is not None
+    assert snapshot.event == "work_completed"
+    assert snapshot.status == "completed"
+    assert snapshot.pipeline_status is not None
+    assert snapshot.pipeline_status["status"] == "running"
+
+
+def test_task_status_falls_back_to_log_snapshot_when_pipeline_snapshot_missing(
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = "1844674407370955173"
+    started = 1_762_000_000_000_000_000
+
+    _write_pipeline_log_entry(
+        ctx=ctx,
+        tid=tid,
+        started_at=started,
+        completed_at=None,
+    )
+
+    snapshot = task_cmd.task_status(tid, context_path=root)
+
+    assert snapshot is not None
+    assert snapshot.event == "task_started"
+    assert snapshot.pipeline_status is None
+
+
 def test_task_status_keeps_external_runner_terminal_when_runtime_is_missing(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -431,6 +764,69 @@ def test_task_status_keeps_external_runner_terminal_when_runtime_is_missing(
 
     assert snapshot is not None
     assert snapshot.status == "cancelled"
+
+
+def test_cmd_status_host_runtime_uses_zombie_safe_pid_liveness(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = "1844674407370955166"
+    started = 1_762_000_000_000_000_000
+    log_queue = ctx.queue("weft.log.tasks", persistent=False)
+    mapping_queue = ctx.queue("weft.state.tid_mappings", persistent=False)
+    log_queue.write(
+        json.dumps(
+            {
+                "event": "work_started",
+                "status": "running",
+                "tid": tid,
+                "taskspec": {
+                    "name": "host-task",
+                    "spec": {"runner": {"name": "host", "options": {}}},
+                    "state": {
+                        "status": "running",
+                        "started_at": started,
+                        "completed_at": None,
+                    },
+                    "metadata": {},
+                },
+            }
+        )
+    )
+    mapping_queue.write(
+        json.dumps(
+            {
+                "short": tid[-10:],
+                "full": tid,
+                "pid": 43210,
+                "task_pid": 43210,
+                "managed_pids": [43210],
+                "runner": "host",
+                "runtime_handle": {
+                    "runner_name": "host",
+                    "runtime_id": "43210",
+                    "host_pids": [43210],
+                    "metadata": {},
+                },
+            }
+        )
+    )
+
+    monkeypatch.setattr(host_runner, "pid_is_live", lambda pid: False)
+
+    exit_code, payload = cmd_status(
+        json_output=True, include_terminal=True, spec_context=root
+    )
+
+    assert exit_code == 0
+    assert payload is not None
+    data = json.loads(payload)
+    assert len(data["tasks"]) == 1
+    entry = data["tasks"][0]
+    assert entry["runtime_handle"]["runner_name"] == "host"
+    assert entry["runtime"]["runner_name"] == "host"
+    assert entry["runtime"]["state"] == "missing"
 
 
 def test_cmd_status_discovers_parent_context_from_subdirectory(

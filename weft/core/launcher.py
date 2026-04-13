@@ -1,7 +1,7 @@
 """Utilities for launching task processes.
 
 Spec references:
-- docs/specifications/03-Worker_Architecture.md [WA-1.2], [WA-3]
+- docs/specifications/03-Manager_Architecture.md [MA-1.2], [MA-3]
 """
 
 from __future__ import annotations
@@ -70,7 +70,7 @@ def launch_task_process(
 ) -> BaseProcess:
     """Launch *task_cls* in a new spawn-process and return the Process object.
 
-    Spec: [WA-1.2], [WA-3]
+    Spec: [MA-1.2], [MA-3]
     """
 
     ctx = multiprocessing.get_context("spawn")

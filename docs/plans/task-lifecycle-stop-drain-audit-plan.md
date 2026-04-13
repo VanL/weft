@@ -29,9 +29,9 @@ Source specs:
 - [`docs/specifications/00-Overview_and_Architecture.md`](../specifications/00-Overview_and_Architecture.md)
 - [`docs/specifications/01-Core_Components.md`](../specifications/01-Core_Components.md) [CC-2], [CC-3]
 - [`docs/specifications/02-TaskSpec.md`](../specifications/02-TaskSpec.md) [TS-1.1], [TS-1.2], [TS-1.3]
-- [`docs/specifications/03-Worker_Architecture.md`](../specifications/03-Worker_Architecture.md) [WA-1], [WA-3], [WA-4]
+- [`docs/specifications/03-Manager_Architecture.md`](../specifications/03-Manager_Architecture.md) [MA-1], [MA-3], [MA-4]
 - [`docs/specifications/05-Message_Flow_and_State.md`](../specifications/05-Message_Flow_and_State.md) [MF-2], [MF-3], [MF-5], [MF-7]
-- [`docs/specifications/07-System_Invariants.md`](../specifications/07-System_Invariants.md) [STATE.1], [STATE.2], [QUEUE.4], [QUEUE.6], [WORKER.3], [WORKER.7]
+- [`docs/specifications/07-System_Invariants.md`](../specifications/07-System_Invariants.md) [STATE.1], [STATE.2], [QUEUE.4], [QUEUE.6], [MANAGER.3], [MANAGER.7]
 - [`docs/specifications/08-Testing_Strategy.md`](../specifications/08-Testing_Strategy.md)
 - [`docs/specifications/10-CLI_Interface.md`](../specifications/10-CLI_Interface.md) [CLI-1.1], [CLI-1.2], [CLI-1.3]
 
@@ -318,7 +318,7 @@ repeat dead ends.
 - [`weft/core/tasks/interactive.py`](../../weft/core/tasks/interactive.py)
 - [`weft/core/manager.py`](../../weft/core/manager.py)
 - [`weft/commands/tasks.py`](../../weft/commands/tasks.py)
-- [`weft/commands/worker.py`](../../weft/commands/worker.py)
+- [`weft/commands/manager.py`](../../weft/commands/manager.py)
 - [`weft/commands/run.py`](../../weft/commands/run.py)
 - [`weft/commands/status.py`](../../weft/commands/status.py)
 - [`tests/helpers/weft_harness.py`](../../tests/helpers/weft_harness.py)
@@ -366,7 +366,7 @@ implementation plan.
 - `weft/core/manager.py` owns manager lifecycle, child drain, and registry
   publication.
 - `weft/commands/tasks.py` owns CLI stop/kill fallback behavior.
-- `weft/commands/worker.py` owns worker registry lookup and stop behavior.
+- `weft/commands/manager.py` owns manager registry lookup and stop behavior.
 
 ### Current Structure Summary
 
@@ -433,7 +433,7 @@ These are self-check gates, not optional trivia.
 3. Preserve-cleanup is coupled to:
    - harness-registered tids/pids,
    - append-only `tid_mappings`,
-   - worker registry reads,
+   - manager registry reads,
    - and task-log terminal events.
 
 4. Full-suite and release-gate behavior are coupled to:
@@ -545,11 +545,11 @@ Optional follow-up tasks, if needed, are listed later under
 ### 4. Audit Manager Drain, Leadership Yield, and Registry Semantics
 
 - Outcome:
-  The audit states exactly what the worker registry means, what it does not
+  The audit states exactly what the manager registry means, what it does not
   mean, and how manager drain updates it.
 - Files to read:
   - `weft/core/manager.py`
-  - `weft/commands/worker.py`
+  - `weft/commands/manager.py`
   - `tests/core/test_manager.py`
 - Required work:
   - Trace:
@@ -641,7 +641,7 @@ Optional follow-up tasks, if needed, are listed later under
 - Files to read:
   - `weft/helpers.py`
   - `weft/commands/tasks.py`
-  - `weft/commands/worker.py`
+  - `weft/commands/manager.py`
   - any psutil-backed helper used by stop/kill waits
 - Required work:
   - Check Linux, macOS, and Windows assumptions separately.

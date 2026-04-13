@@ -11,6 +11,16 @@ TaskSpec serves dual purposes:
 
 The specification uses **partial immutability**: configuration sections (spec, io) become frozen after task creation to prevent accidental changes, while state and metadata remain mutable for runtime updates.
 
+`TaskSpec` is intentionally a leaf execution contract. Pipeline topology,
+bindings, generated edges, and pipeline-level retry or checkpoint semantics
+belong in `PipelineSpec` rather than in child TaskSpecs.
+
+User-authored TaskSpecs remain the public leaf types described here:
+`function`, `command`, and `agent`. Pipeline orchestrators and generated edge
+workers are runtime-owned internal tasks. The pipeline runtime may realize them
+with reserved internal task classes or reserved internal targets without
+expanding the normal user-authored `spec.type` vocabulary.
+
 _Implementation mapping_: `weft/core/taskspec.py` (`TaskSpec`, `SpecSection`, `IOSection`, `StateSection`, `_freeze_spec`, `FrozenList`, `FrozenDict`). Partial immutability is enforced via `_freeze_spec()` on `model_post_init`, which recursively freezes `spec` and `io` sections using `_freeze()` methods on each sub-model. `state` and `metadata` remain mutable via `__setattr__` guards checking `_frozen_fields`.
 
 ## JSON Schema v1.0 [TS-1]
@@ -271,7 +281,12 @@ default inputs/arguments. They do **not** include `tid`, queue names, or runtime
 
 **Targets**
 - `task`: references a stored task spec in `.weft/tasks/`
-- `pipeline`: references a pipeline stored in `.weft/pipelines/` **[NOT YET IMPLEMENTED]** Pipeline targets are not yet supported; only `task` targets are implemented.
+- `pipeline`: references a pipeline stored in `.weft/pipelines/`. This is part
+  of the intended public surface, but manager-launched pipeline targets remain
+  phased work. Current implementation still supports only `task` targets at
+  runtime; the manager logs a warning and skips the manifest. See
+  [`12-Pipeline_Composition_and_UX.md`](12-Pipeline_Composition_and_UX.md)
+  for the pipeline phase order and constraints.
 
 **Defaults**
 - `args`/`keyword_args` are merged into the target’s `spec.args`/`spec.keyword_args`.
@@ -283,8 +298,10 @@ default inputs/arguments. They do **not** include `tid`, queue names, or runtime
 - `mode=ensure` restarts on unexpected exit with optional backoff while the
   manager is running. Manager shutdown stops autostarted tasks regardless of
   policy.
-- `max_restarts` **[NOT YET IMPLEMENTED]** — the `ensure` mode restarts unconditionally; `max_restarts` cap is not enforced.
-- `backoff_seconds` **[NOT YET IMPLEMENTED]** — exponential backoff between restarts is not yet implemented; restarts happen on the next scan tick.
+- `max_restarts` is accepted in manifest policy but is not currently enforced;
+  `ensure` mode restarts unconditionally while the manager is running.
+- `backoff_seconds` is accepted in manifest policy but restart delay currently
+  remains one scan tick rather than an exponential backoff contract.
 
 Managers record metadata linking the running task back to the manifest source
 (`metadata.autostart_source`) and set `metadata.autostart=true` for
@@ -304,7 +321,9 @@ _Implementation mapping_: `weft/core/tasks/base.py` (`BaseTask._apply_reserved_p
 ## Related Plans
 
 - [`docs/plans/piped-input-support-plan.md`](../plans/piped-input-support-plan.md)
+- [`docs/plans/pipeline-spec-expansion-plan.md`](../plans/pipeline-spec-expansion-plan.md)
 - [`docs/plans/runner-extension-point-plan.md`](../plans/runner-extension-point-plan.md)
+- [`docs/plans/runner-monitor-result-waiter-and-liveness-fixes-plan.md`](../plans/runner-monitor-result-waiter-and-liveness-fixes-plan.md)
 - [`docs/plans/taskspec-clean-design-plan.md`](../plans/taskspec-clean-design-plan.md)
 - [`docs/plans/agent-runtime-implementation-plan.md`](../plans/agent-runtime-implementation-plan.md)
 - [`docs/plans/persistent-agent-runtime-implementation-plan.md`](../plans/persistent-agent-runtime-implementation-plan.md)

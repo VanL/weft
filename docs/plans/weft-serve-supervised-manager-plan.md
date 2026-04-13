@@ -1,11 +1,11 @@
-# `weft serve` Supervised Manager Plan
+# `weft manager serve` Supervised Manager Plan
 
 ## Goal
 
-Add a minimal top-level `weft serve` command for operators who want a
+Add a minimal top-level `weft manager serve` command for operators who want a
 supervisor-managed persistent manager process. This command should solve the
 `systemd` / `launchd` / `supervisord` use case without changing the normal
-`weft run` or `weft worker start` experience: it must run the canonical
+`weft run` or `weft manager start` experience: it must run the canonical
 manager in the foreground, disable idle timeout in this mode, and shut down
 cleanly on supervisor stop signals. Keep the design small. Do not add daemon
 features, adoption logic, PID files, or supervisor-specific protocols.
@@ -14,9 +14,9 @@ features, adoption logic, PID files, or supervisor-specific protocols.
 
 Source specs:
 
-- [`docs/specifications/03-Worker_Architecture.md`](../specifications/03-Worker_Architecture.md) [WA-1.5], [WA-1.7], [WA-3]
+- [`docs/specifications/03-Manager_Architecture.md`](../specifications/03-Manager_Architecture.md) [MA-1.5], [MA-1.7], [MA-3]
 - [`docs/specifications/05-Message_Flow_and_State.md`](../specifications/05-Message_Flow_and_State.md) [MF-6], [MF-7]
-- [`docs/specifications/07-System_Invariants.md`](../specifications/07-System_Invariants.md) [WORKER.1], [WORKER.6], [WORKER.7]
+- [`docs/specifications/07-System_Invariants.md`](../specifications/07-System_Invariants.md) [MANAGER.1], [MANAGER.6], [MANAGER.7]
 - [`docs/specifications/10-CLI_Interface.md`](../specifications/10-CLI_Interface.md) [CLI-0.2], [CLI-1.1] and the `worker` command section
 
 Repo guidance:
@@ -38,14 +38,14 @@ Relevant current implementation and docs:
 - [`weft/core/launcher.py`](../../weft/core/launcher.py)
 - [`weft/core/manager.py`](../../weft/core/manager.py)
 - [`weft/cli.py`](../../weft/cli.py)
-- [`weft/commands/worker.py`](../../weft/commands/worker.py)
+- [`weft/commands/manager.py`](../../weft/commands/manager.py)
 - [`tests/helpers/weft_harness.py`](../../tests/helpers/weft_harness.py)
 - [`tests/conftest.py`](../../tests/conftest.py)
 - [`README.md`](../../README.md)
 
 Source spec gap:
 
-- There is no current `weft serve` spec section. The implementation must add
+- There is no current `weft manager serve` spec section. The implementation must add
   it before or alongside the code change. Do not treat this as an
   implementation-only refactor.
 
@@ -53,31 +53,31 @@ Source spec gap:
 
 This section is the contract to implement. Do not improvise beyond it.
 
-1. `weft serve` is a new top-level CLI command.
-   - Shape: `weft serve [--context PATH]`
+1. `weft manager serve` is a new top-level CLI command.
+   - Shape: `weft manager serve [--context PATH]`
    - No other flags in the first slice.
 
-2. `weft serve` runs the canonical manager in the foreground.
+2. `weft manager serve` runs the canonical manager in the foreground.
    - The command blocks until the manager exits.
    - It is the correct target for `systemd`, `launchd`, and `supervisord`.
-   - `weft worker start` remains the detached bootstrap command and is not the
+   - `weft manager start` remains the detached bootstrap command and is not the
      right target for supervisor `ExecStart` / `ProgramArguments` / `command`.
-   - The supervisor-owned process is the actual manager runtime. `weft serve`
+   - The supervisor-owned process is the actual manager runtime. `weft manager serve`
      must not spawn a child manager process and merely wait on it.
 
-3. `weft serve` uses the same canonical manager spec builder as detached
+3. `weft manager serve` uses the same canonical manager spec builder as detached
    bootstrap.
    - No user-supplied manager TaskSpec input.
    - No direct `Manager(...)` construction in CLI code.
    - No second durable manager execution path.
 
-4. `weft serve` forces persistent-manager lifetime in this mode.
-   - The manager TaskSpec used by `weft serve` must set `metadata.idle_timeout`
+4. `weft manager serve` forces persistent-manager lifetime in this mode.
+   - The manager TaskSpec used by `weft manager serve` must set `metadata.idle_timeout`
      to `0.0`.
-   - This override is local to `weft serve`.
-   - `weft run` and `weft worker start` keep their current timeout behavior.
+   - This override is local to `weft manager serve`.
+   - `weft run` and `weft manager start` keep their current timeout behavior.
 
-5. `weft serve` refuses to start if another live canonical manager already
+5. `weft manager serve` refuses to start if another live canonical manager already
    exists for the same context.
    - Exit code is `1` with a clear operator-facing message.
    - Do not silently succeed by “attaching” to an existing manager.
@@ -95,7 +95,7 @@ This section is the contract to implement. Do not improvise beyond it.
      same graceful-drain signal. No second-signal escalation behavior is added
      in this change.
 
-7. `weft serve` is intentionally minimal.
+7. `weft manager serve` is intentionally minimal.
    - No `sd_notify`.
    - No PID file.
    - No daemon / background mode.
@@ -107,7 +107,7 @@ This section is the contract to implement. Do not improvise beyond it.
    - Do not add a long-running log stream.
    - Do not add a fake “ready” banner unless readiness is actually proven.
    - Prefer no success-path stdout in the first slice. Rely on
-     `weft worker list|status` and `weft status` for observation.
+     `weft manager list|status` and `weft status` for observation.
 
 ## Context and Key Files
 
@@ -123,7 +123,7 @@ Files to modify:
 - `tests/commands/test_serve.py` (new)
 - `tests/cli/test_cli_serve.py` (new)
 - `tests/core/test_manager.py`
-- `docs/specifications/03-Worker_Architecture.md`
+- `docs/specifications/03-Manager_Architecture.md`
 - `docs/specifications/05-Message_Flow_and_State.md`
 - `docs/specifications/07-System_Invariants.md`
 - `docs/specifications/10-CLI_Interface.md`
@@ -142,7 +142,7 @@ Read first:
     race is still owned by manager-side leadership yield.
   - If this module is absent on the implementer's branch, stop and reconcile
     with the manager bootstrap/lifecycle consolidation work before continuing.
-    Do not recreate pre-consolidation split paths just to land `weft serve`.
+    Do not recreate pre-consolidation split paths just to land `weft manager serve`.
 - `weft/_constants.py`
   - Confirms the current `WEFT_MANAGER_LIFETIME_TIMEOUT` config/env surface.
 - `weft/manager_process.py`
@@ -175,7 +175,7 @@ Read first:
 - `tests/core/test_manager.py`
   - Already contains the closest real proofs for manager STOP drain and
     leadership behavior.
-- `tests/cli/test_cli_worker.py`
+- `tests/cli/test_cli_manager.py`
   - Shows the current style for real CLI manager lifecycle tests.
 - `tests/conftest.py`
   - `run_cli()` env setup and timeout diagnostics. Reuse its environment shape
@@ -217,7 +217,7 @@ Shared paths to reuse. Do not duplicate these:
 
 Comprehension checks before editing:
 
-1. Why is `weft worker start` not sufficient for `systemd` / `launchd` /
+1. Why is `weft manager start` not sufficient for `systemd` / `launchd` /
    `supervisord`?
 2. Which function currently builds the canonical manager TaskSpec, and where is
    the detached manager process started?
@@ -225,7 +225,7 @@ Comprehension checks before editing:
    `SIGTERM`?
 4. Which registry field marks the canonical default manager queue, and why must
    the `requests == weft.spawn.requests` record shape remain the canonical
-   default-manager marker for `weft serve` too?
+   default-manager marker for `weft manager serve` too?
 
 If the implementer cannot answer those four questions from the code and spec,
 they are not ready to edit.
@@ -235,15 +235,15 @@ they are not ready to edit.
 - Keep one durable manager runtime spine:
   CLI wrapper -> shared manager lifecycle helper -> shared manager process
   runner -> `Manager`.
-- The `weft serve` process itself must become the manager runtime. Do not turn
+- The `weft manager serve` process itself must become the manager runtime. Do not turn
   it into a wrapper that supervises a second child manager process.
-- Do not construct `Manager(db_path, spec)` directly in `weft serve`.
+- Do not construct `Manager(db_path, spec)` directly in `weft manager serve`.
   Reuse the same task-process entry path that detached bootstrap uses.
-- `weft serve` is additive. Do not change the public behavior of:
+- `weft manager serve` is additive. Do not change the public behavior of:
   - `weft run`
-  - `weft worker start`
-  - `weft worker stop`
-  - `weft worker list|status`
+  - `weft manager start`
+  - `weft manager stop`
+  - `weft manager list|status`
 - Preserve canonical-manager identity rules:
   canonical default managers are the live manager records whose `requests`
   field equals `weft.spawn.requests`.
@@ -306,16 +306,16 @@ Risk concentration:
 
 - The new command itself is low risk if it reuses the shared runtime path.
 - The signal-handling correction is the real risky slice because it affects all
-  managers, not only `weft serve`.
+  managers, not only `weft manager serve`.
 - The supervisor-facing edge is leadership yield after a start race. The plan
   must define that outcome clearly enough to avoid restart loops.
 
 Rollback plan:
 
 - If the new command is wrong but the signal fix is sound, revert only the
-  `weft serve` CLI surface and docs.
+  `weft manager serve` CLI surface and docs.
 - If the signal fix causes regressions, revert the `Manager` signal change and
-  the `weft serve` command together. Do not leave `weft serve` shipping with
+  the `weft manager serve` command together. Do not leave `weft manager serve` shipping with
   abrupt supervisor-stop behavior.
 
 One-way-door note:
@@ -326,22 +326,22 @@ One-way-door note:
 
 ## Tasks
 
-1. Lock the `weft serve` contract in the specs before writing production code.
+1. Lock the `weft manager serve` contract in the specs before writing production code.
    - Outcome:
      - The exact command shape and shutdown semantics are written down before
        the implementation starts.
    - Files to touch:
-     - `docs/specifications/03-Worker_Architecture.md`
+     - `docs/specifications/03-Manager_Architecture.md`
      - `docs/specifications/05-Message_Flow_and_State.md`
      - `docs/specifications/07-System_Invariants.md`
      - `docs/specifications/10-CLI_Interface.md`
    - Read first:
-     - `docs/specifications/03-Worker_Architecture.md` [WA-1.5], [WA-1.7], [WA-3]
+     - `docs/specifications/03-Manager_Architecture.md` [MA-1.5], [MA-1.7], [MA-3]
      - `docs/specifications/05-Message_Flow_and_State.md` [MF-7]
-     - `docs/specifications/10-CLI_Interface.md` command structure and worker section
+     - `docs/specifications/10-CLI_Interface.md` command structure and manager section
    - Required changes:
-     - Add a `weft serve` section to the CLI spec.
-     - Extend the worker/bootstrap architecture spec to describe detached
+     - Add a `weft manager serve` section to the CLI spec.
+     - Extend the manager/bootstrap architecture spec to describe detached
        bootstrap versus foreground supervised serve.
      - Extend the message-flow spec so `MF-7` covers both detached bootstrap
        and foreground serve, without inventing a separate manager role.
@@ -350,16 +350,16 @@ One-way-door note:
      - Update nearby implementation-mapping notes and related-plan backlinks in
        the touched spec files so code, spec, and plan stay bidirectional.
    - Be explicit:
-     - `weft worker start` remains detached and idempotent.
-     - `weft serve` is foreground and non-idempotent.
-     - `weft serve` refuses an already-active canonical manager.
-     - `weft serve` forces `idle_timeout=0`.
+     - `weft manager start` remains detached and idempotent.
+     - `weft manager serve` is foreground and non-idempotent.
+     - `weft manager serve` refuses an already-active canonical manager.
+     - `weft manager serve` forces `idle_timeout=0`.
    - Stop if:
      - the spec text starts promising PID files, readiness notifications, or
        replacement/adoption behavior
    - Done when:
      - a zero-context implementer can read the specs and tell the difference
-       between `weft worker start` and `weft serve` without looking at code
+       between `weft manager start` and `weft manager serve` without looking at code
 
 2. Add red tests for the two load-bearing behaviors: foreground serve and
    supervisor-signal drain.
@@ -372,7 +372,7 @@ One-way-door note:
      - `tests/cli/test_cli_serve.py` (new)
    - Read first:
      - `tests/core/test_manager.py`
-     - `tests/cli/test_cli_worker.py`
+     - `tests/cli/test_cli_manager.py`
      - `tests/conftest.py`
      - `tests/helpers/weft_harness.py`
    - Required tests:
@@ -391,27 +391,27 @@ One-way-door note:
        - This can monkeypatch the shared helper because the wrapper itself is
          the unit under test.
        - Keep it narrow: context construction, delegation, exit code / message.
-     - A real CLI test showing `weft serve` stays alive until explicitly
+     - A real CLI test showing `weft manager serve` stays alive until explicitly
        stopped.
        - Start `python -m weft.cli serve ...` with `subprocess.Popen`.
        - Poll the real registry until the manager appears.
        - Assert the process is still running before stop.
-       - Submit real work through `weft run` while `weft serve` is active and
+       - Submit real work through `weft run` while `weft manager serve` is active and
          prove the system still has exactly one active canonical manager.
        - Stop it explicitly, then assert the foreground process exits.
-     - A real CLI test showing the foreground `weft serve` process handles
+     - A real CLI test showing the foreground `weft manager serve` process handles
        `SIGTERM` cleanly.
        - Start `python -m weft.cli serve ...`.
        - Wait for the manager registry record.
        - Send `process.terminate()`.
        - Assert the process exits and the manager ends through the graceful
          drain path rather than abrupt child termination.
-     - A real CLI test showing a second `weft serve` refuses to start while the
+     - A real CLI test showing a second `weft manager serve` refuses to start while the
        first canonical manager is active.
-     - A real CLI or helper-level test proving `weft serve` forces the
+     - A real CLI or helper-level test proving `weft manager serve` forces the
        no-timeout manager lifetime contract.
        - Recommended real-path proof: set
-         `WEFT_MANAGER_LIFETIME_TIMEOUT=0.05`, start `weft serve`, wait longer
+         `WEFT_MANAGER_LIFETIME_TIMEOUT=0.05`, start `weft manager serve`, wait longer
          than that while idle, and assert the foreground manager is still
          alive.
    - Test-seam guidance:
@@ -489,7 +489,7 @@ One-way-door note:
    - Done when:
      - both detached and foreground manager execution use the same runtime
        function
-     - `weft run` / `weft worker start` behavior stays unchanged in code shape
+     - `weft run` / `weft manager start` behavior stays unchanged in code shape
      - signal-related tests may still be red until Task 4 lands; that does not
        mean the Task 3 extraction itself drifted
 
@@ -531,7 +531,7 @@ One-way-door note:
        leader election remains the final convergence rule. The losing manager
        should exit through the existing leadership-yield path rather than a new
        ad hoc serve-only exit path.
-     - Explicit supervisor-facing rule: if a foreground `weft serve` process
+     - Explicit supervisor-facing rule: if a foreground `weft manager serve` process
        loses leadership after startup, it should exit cleanly with exit code
        `0` after leadership drain completes. Treat that path as successful
        convergence, not as a failure restart signal.
@@ -548,7 +548,7 @@ One-way-door note:
      - external TERM/INT enters the same no-new-spawn + child-STOP + drain path
        as manager STOP
 
-5. Add the top-level `weft serve` command as a thin wrapper.
+5. Add the top-level `weft manager serve` command as a thin wrapper.
    - Outcome:
      - The CLI exposes the new command without duplicating lifecycle logic.
    - Files to touch:
@@ -558,7 +558,7 @@ One-way-door note:
      - `tests/commands/test_serve.py`
      - `tests/cli/test_cli_serve.py`
    - Read first:
-     - `weft/commands/worker.py`
+     - `weft/commands/manager.py`
      - `weft/cli.py`
    - Required action:
      - Add `serve_command(*, context_path: Path | None = None)` in
@@ -568,7 +568,7 @@ One-way-door note:
        - delegate to the shared foreground serve helper
        - return exit code plus optional message in the same style as other
          command modules
-     - Register `weft serve` as a top-level Typer command in `weft/cli.py`.
+     - Register `weft manager serve` as a top-level Typer command in `weft/cli.py`.
      - If `weft/commands/__init__.py` re-exports command modules for package
        consumers, add the minimal `serve` export needed to match the existing
        package pattern. Do not add broader package reshaping.
@@ -587,24 +587,24 @@ One-way-door note:
        or signal logic
    - Done when:
      - the wrapper tests pass
-     - the real CLI test shows `weft serve` blocks until stop
+     - the real CLI test shows `weft manager serve` blocks until stop
 
 6. Update operator-facing docs so the right command is obvious.
    - Outcome:
-     - Operators can tell when to use `weft serve` versus `weft worker start`.
+     - Operators can tell when to use `weft manager serve` versus `weft manager start`.
    - Files to touch:
      - `README.md`
    - Required doc content:
      - A short “supervised manager” section in `README.md`
-     - Explicit warning that `weft worker start` daemonizes and exits, so it is
+     - Explicit warning that `weft manager start` daemonizes and exits, so it is
        not the right service-manager entrypoint
-     - Explicit note that `weft serve` is foreground and should be used by
+     - Explicit note that `weft manager serve` is foreground and should be used by
        `systemd`, `launchd`, and `supervisord`
      - Explicit note that restart policy belongs to the supervisor, not Weft
      - Explicit note that this minimal slice does not add a Weft-side drain
        timeout or second-signal escalation; operators should configure the
        supervisor's stop timeout accordingly
-     - Explicit note that `weft worker stop <tid>` still sends a graceful STOP,
+     - Explicit note that `weft manager stop <tid>` still sends a graceful STOP,
        but an auto-restarting supervisor may bring the service back unless the
        supervisor itself is stopped
    - Keep docs minimal:
@@ -627,18 +627,18 @@ One-way-door note:
         - `uv run pytest tests/commands/test_serve.py -q`
         - `uv run pytest tests/cli/test_cli_serve.py -q`
      2. Neighboring manager lifecycle suites:
-        - `uv run pytest tests/commands/test_run.py tests/commands/test_worker_commands.py tests/cli/test_cli_worker.py tests/core/test_manager.py -q`
+        - `uv run pytest tests/commands/test_run.py tests/commands/test_manager_commands.py tests/cli/test_cli_manager.py tests/core/test_manager.py -q`
      3. Broader CLI confidence pass:
         - `uv run pytest tests/cli/test_cli_run.py -q`
      4. Static checks:
         - `uv run mypy weft`
         - `uv run ruff check weft tests`
    - Manual smoke test before calling it done:
-     - Terminal 1: `weft serve --context /path/to/project`
+     - Terminal 1: `weft manager serve --context /path/to/project`
      - Terminal 2: `weft run --function tests.tasks.sample_targets:simulate_work --kw duration=5 --no-wait --context /path/to/project`
-     - Confirm `weft worker list --context /path/to/project` shows exactly one
+     - Confirm `weft manager list --context /path/to/project` shows exactly one
        active canonical manager.
-     - Send `SIGTERM` to the `weft serve` process or stop it through the
+     - Send `SIGTERM` to the `weft manager serve` process or stop it through the
        supervisor.
      - Confirm the manager drains and the child task stops through the STOP
        path rather than a hard-kill path.
@@ -686,12 +686,12 @@ If the test needs timing:
 
 Before implementation is called done, verify all of these are true:
 
-- `weft serve` is foreground only
-- `weft serve` forces `idle_timeout=0`
-- `weft serve` refuses an already-active canonical manager
-- `weft serve` reuses the canonical manager TaskSpec builder
+- `weft manager serve` is foreground only
+- `weft manager serve` forces `idle_timeout=0`
+- `weft manager serve` refuses an already-active canonical manager
+- `weft manager serve` reuses the canonical manager TaskSpec builder
 - detached bootstrap still uses the same manager runtime code path
 - manager `SIGTERM` / `SIGINT` drains like STOP
 - manager `SIGUSR1` kill behavior still works if supported on the platform
 - no new daemon / PID / readiness features slipped in
-- README and specs both explain why service managers must use `weft serve`
+- README and specs both explain why service managers must use `weft manager serve`

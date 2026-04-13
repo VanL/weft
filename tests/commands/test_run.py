@@ -13,13 +13,14 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import typer
 
 import weft.commands._manager_bootstrap as manager_lifecycle
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import (
     WEFT_GLOBAL_LOG_QUEUE,
+    WEFT_MANAGERS_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
-    WEFT_WORKERS_REGISTRY_QUEUE,
 )
 from weft.commands.run import (
     _build_manager_spec,
@@ -155,6 +156,38 @@ def test_wait_for_task_completion_aggregates_multiple_outbox_messages(
     assert error is None
 
 
+def test_wait_for_task_completion_classifies_timeout_event_as_timeout(
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    taskspec = _make_taskspec(tid)
+
+    log_queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
+    log_queue.write(
+        json.dumps(
+            {
+                "tid": tid,
+                "status": "timeout",
+                "event": "work_timeout",
+                "error": "Target execution timed out",
+            }
+        )
+    )
+
+    status, result, error = _wait_for_task_completion(
+        ctx,
+        taskspec,
+        json_output=False,
+        verbose=False,
+    )
+
+    assert status == "timeout"
+    assert result is None
+    assert error == "Target execution timed out"
+
+
 class _FakePeekQueue:
     def __init__(self, records: Sequence[object]) -> None:
         self._records = records
@@ -195,13 +228,34 @@ class _FakeManagerSpec:
 
 
 class _FakePopen:
-    def __init__(self) -> None:
-        self.pid = 4242
+    def __init__(
+        self,
+        *,
+        pid: int = 4242,
+        poll_results: Sequence[int | None] | None = None,
+        communicate_result: tuple[str, str] = ("", ""),
+    ) -> None:
+        self.pid = pid
+        self.returncode: int | None = None
         self._poll_calls = 0
+        self._poll_results = list(poll_results or [None, 0])
+        self._communicate_result = communicate_result
+        self.stdin = None
 
     def poll(self) -> int | None:
+        if self._poll_calls < len(self._poll_results):
+            result = self._poll_results[self._poll_calls]
+        else:
+            result = self._poll_results[-1]
         self._poll_calls += 1
-        return 0 if self._poll_calls >= 2 else None
+        self.returncode = result
+        return result
+
+    def communicate(self, timeout: float | None = None) -> tuple[str, str]:
+        del timeout
+        if self.returncode is None:
+            self.returncode = 0
+        return self._communicate_result
 
 
 def test_start_manager_does_not_terminate_competing_startup_manager(
@@ -210,24 +264,25 @@ def test_start_manager_does_not_terminate_competing_startup_manager(
 ) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
-    fake_process = _FakePopen()
+    fake_process = _FakePopen(poll_results=[1])
     competing_record = {"tid": "1775619800000000000", "pid": 31337}
+    launch = manager_lifecycle._DetachedManagerLaunch(
+        pid=4242,
+        stderr_path=root / ".weft" / "logs" / "manager-startup" / "manager.stderr",
+        launcher_process=fake_process,
+    )
 
     monkeypatch.setattr(
-        "weft.commands._manager_bootstrap._generate_tid",
-        lambda context: "9" * 19,
+        "weft.commands._manager_bootstrap._build_manager_runtime_invocation",
+        lambda context: manager_lifecycle._ManagerRuntimeInvocation(
+            task_cls_path="weft.core.manager.Manager",
+            tid="9" * 19,
+            spec=_FakeManagerSpec(),
+        ),
     )
     monkeypatch.setattr(
-        "weft.commands._manager_bootstrap._build_manager_spec",
-        lambda context, tid: _FakeManagerSpec(),
-    )
-    monkeypatch.setattr(
-        "weft.commands._manager_bootstrap.serialize_broker_target",
-        lambda target: "{}",
-    )
-    monkeypatch.setattr(
-        "weft.commands._manager_bootstrap.subprocess.Popen",
-        lambda *args, **kwargs: fake_process,
+        "weft.commands._manager_bootstrap._launch_detached_manager",
+        lambda context, invocation: launch,
     )
 
     records = iter([competing_record, competing_record])
@@ -253,6 +308,142 @@ def test_start_manager_does_not_terminate_competing_startup_manager(
     assert started_here is False
     assert handle is None
     assert terminated is False
+
+
+def test_start_manager_builds_detached_launch_from_shared_runtime_invocation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    fake_process = _FakePopen(poll_results=[None, None])
+    invocation = manager_lifecycle._ManagerRuntimeInvocation(
+        task_cls_path="weft.core.manager.Manager",
+        tid="9" * 19,
+        spec=_FakeManagerSpec(),
+    )
+    helper_calls: list[tuple[object, object]] = []
+    launch_calls: list[tuple[object, object]] = []
+    acked: list[object] = []
+    launch = manager_lifecycle._DetachedManagerLaunch(
+        pid=fake_process.pid,
+        stderr_path=root / ".weft" / "logs" / "manager-startup" / "manager.stderr",
+        launcher_process=fake_process,
+    )
+
+    def _fake_build_invocation(context_arg, *, idle_timeout_override=None):
+        helper_calls.append((context_arg, idle_timeout_override))
+        return invocation
+
+    def _fake_launch(context_arg, invocation_arg):
+        launch_calls.append((context_arg, invocation_arg))
+        return launch
+
+    monkeypatch.setattr(
+        "weft.commands._manager_bootstrap._build_manager_runtime_invocation",
+        _fake_build_invocation,
+    )
+    monkeypatch.setattr(
+        "weft.commands._manager_bootstrap._launch_detached_manager",
+        _fake_launch,
+    )
+    monkeypatch.setattr(
+        "weft.commands._manager_bootstrap._acknowledge_manager_launch_success",
+        lambda launch_arg: acked.append(launch_arg),
+    )
+    monkeypatch.setattr(
+        "weft.commands._manager_bootstrap._select_active_manager",
+        lambda context: {"tid": invocation.tid, "pid": fake_process.pid},
+    )
+    monkeypatch.setattr(
+        "weft.commands._manager_bootstrap._manager_record",
+        lambda context, tid, prune_stale=True: {
+            "tid": invocation.tid,
+            "pid": fake_process.pid,
+            "status": "active",
+            "requests": WEFT_SPAWN_REQUESTS_QUEUE,
+            "role": "manager",
+        },
+    )
+    monkeypatch.setattr(
+        "weft.commands._manager_bootstrap._is_pid_alive",
+        lambda pid: True,
+    )
+    monkeypatch.setattr(
+        "weft.commands._manager_bootstrap._cleanup_startup_stderr",
+        lambda path: None,
+    )
+    monkeypatch.setattr(
+        "weft.commands._manager_bootstrap.time.sleep",
+        lambda seconds: None,
+    )
+    monkeypatch.setattr(
+        "weft.commands._manager_bootstrap._MANAGER_STARTUP_STABILITY_WINDOW",
+        0.0,
+    )
+
+    record, started_here, handle = _start_manager(ctx, verbose=False)
+
+    assert record["tid"] == invocation.tid
+    assert record["pid"] == fake_process.pid
+    assert started_here is True
+    assert handle is None
+    assert helper_calls == [(ctx, None)]
+    assert launch_calls == [(ctx, invocation)]
+    assert acked == [launch]
+
+
+def test_start_manager_surfaces_detached_launch_stderr_when_manager_exits_early(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    stderr_path = root / ".weft" / "logs" / "manager-startup" / "manager.stderr"
+    stderr_path.parent.mkdir(parents=True, exist_ok=True)
+    stderr_path.write_text("boom on startup\ntraceback details\n", encoding="utf-8")
+    fake_process = _FakePopen(
+        poll_results=[10],
+        communicate_result=(
+            json.dumps({"event": "child_exit", "returncode": 23}) + "\n",
+            "",
+        ),
+    )
+    launch = manager_lifecycle._DetachedManagerLaunch(
+        pid=4242,
+        stderr_path=stderr_path,
+        launcher_process=fake_process,
+    )
+    errors: list[str] = []
+
+    monkeypatch.setattr(
+        "weft.commands._manager_bootstrap._build_manager_runtime_invocation",
+        lambda context: manager_lifecycle._ManagerRuntimeInvocation(
+            task_cls_path="weft.core.manager.Manager",
+            tid="9" * 19,
+            spec=_FakeManagerSpec(),
+        ),
+    )
+    monkeypatch.setattr(
+        "weft.commands._manager_bootstrap._launch_detached_manager",
+        lambda context, invocation: launch,
+    )
+    monkeypatch.setattr(
+        "weft.commands._manager_bootstrap._select_active_manager",
+        lambda context: None,
+    )
+    monkeypatch.setattr(
+        "weft.commands._manager_bootstrap.typer.echo",
+        lambda message, err=False: errors.append(message) if err else None,
+    )
+
+    with pytest.raises(typer.Exit) as exc_info:
+        _start_manager(ctx, verbose=False)
+
+    assert exc_info.value.exit_code == 1
+    assert errors
+    assert "return code 23" in errors[0]
+    assert "traceback details" in errors[0]
 
 
 def test_run_inline_enqueues_task_before_ensuring_manager(
@@ -347,7 +538,7 @@ def test_delete_spawn_request_swallows_delete_errors(
             nonlocal closed
             closed = True
 
-    monkeypatch.setattr("weft.commands.run.Queue", _FakeQueue)
+    monkeypatch.setattr("weft.core.spawn_requests.Queue", _FakeQueue)
 
     _delete_spawn_request(context, 1775679597297004544)
 
@@ -471,7 +662,7 @@ def test_run_pipeline_deletes_spawn_request_when_ensure_manager_fails(
         pipeline_path,
         {
             "name": "demo-pipeline",
-            "stages": [{"task": "stage-task"}],
+            "stages": [{"name": "stage-one", "task": "stage-task"}],
         },
     )
 
@@ -503,6 +694,67 @@ def test_run_pipeline_deletes_spawn_request_when_ensure_manager_fails(
         queue.close()
 
 
+def test_run_pipeline_without_input_does_not_inject_work_envelope_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+    task_spec_path = context.weft_dir / "tasks" / "stage-task.json"
+    pipeline_path = root / "pipeline.json"
+    _write_json(
+        task_spec_path,
+        {
+            "name": "stage-task",
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:provide_payload",
+            },
+            "metadata": {},
+        },
+    )
+    _write_json(
+        pipeline_path,
+        {
+            "name": "demo-pipeline",
+            "stages": [{"name": "stage-one", "task": "stage-task"}],
+        },
+    )
+
+    monkeypatch.setattr(
+        "weft.commands.run.build_context",
+        lambda spec_context=None, autostart=True: context,
+    )
+    monkeypatch.setattr("weft.commands.run._read_piped_stdin", lambda context: None)
+    monkeypatch.setattr(
+        "weft.commands.run._ensure_manager",
+        lambda context_arg, *, verbose: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    monkeypatch.setattr(
+        "weft.commands.run._delete_spawn_request", lambda *args, **kwargs: None
+    )
+
+    with pytest.raises(RuntimeError, match="boom"):
+        _run_pipeline(
+            pipeline_path,
+            pipeline_input=None,
+            context_dir=root,
+            wait=False,
+            json_output=False,
+            verbose=False,
+            autostart_enabled=True,
+        )
+
+    queue = context.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=False)
+    try:
+        queued = queue.read_one()
+    finally:
+        queue.close()
+    assert queued is not None
+    payload = json.loads(queued)
+    assert payload["inbox_message"] is None
+
+
 def test_build_manager_spec_uses_tid_scoped_control_queues(tmp_path: Path) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
@@ -524,7 +776,7 @@ def test_select_active_manager_ignores_zombie_registry_pid(
     process = subprocess.Popen([sys.executable, "-c", "import os; os._exit(0)"])
     try:
         process.wait(timeout=2.0)
-        registry = ctx.queue(WEFT_WORKERS_REGISTRY_QUEUE, persistent=False)
+        registry = ctx.queue(WEFT_MANAGERS_REGISTRY_QUEUE, persistent=False)
         try:
             registry.write(
                 json.dumps(
@@ -556,7 +808,7 @@ def test_select_active_manager_ignores_noncanonical_request_queue(
 ) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
-    registry = ctx.queue(WEFT_WORKERS_REGISTRY_QUEUE, persistent=False)
+    registry = ctx.queue(WEFT_MANAGERS_REGISTRY_QUEUE, persistent=False)
     try:
         registry.write(
             json.dumps(
@@ -587,7 +839,7 @@ def test_list_manager_records_prunes_dead_active_and_preserves_stopped_history(
 ) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
-    registry = ctx.queue(WEFT_WORKERS_REGISTRY_QUEUE, persistent=False)
+    registry = ctx.queue(WEFT_MANAGERS_REGISTRY_QUEUE, persistent=False)
     dead_tid = "1775622400000000003"
     stopped_tid = "1775622400000000004"
 
@@ -643,7 +895,7 @@ def test_list_manager_records_prunes_dead_active_and_preserves_stopped_history(
     assert {record["tid"] for record in first} == {stopped_tid}
     assert {record["tid"] for record in second} == {stopped_tid}
 
-    registry_reader = ctx.queue(WEFT_WORKERS_REGISTRY_QUEUE, persistent=False)
+    registry_reader = ctx.queue(WEFT_MANAGERS_REGISTRY_QUEUE, persistent=False)
     try:
         entries = [
             payload

@@ -1,4 +1,4 @@
-"""Spec checks for spawn request durability (WA-2)."""
+"""Spec checks for spawn request durability (MA-2)."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ import pytest
 from tests.helpers.test_backend import prepare_project_root
 from weft.commands import run as run_module
 from weft.context import build_context
+from weft.core import spawn_requests
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 
 pytestmark = [pytest.mark.shared]
@@ -41,27 +42,34 @@ def test_spawn_request_uses_retry(monkeypatch, tmp_path) -> None:
     tid = str(time.time_ns())
     taskspec = _build_spec(tid)
     called = {"count": 0}
-    original_broker = type(context).broker
+    original_get_connection = spawn_requests.Queue.get_connection
 
-    @contextmanager
-    def _broker_with_retry_probe(self) -> Iterator[Any]:
-        with original_broker(self) as broker:
-            original = broker._run_with_retry
+    def _get_connection_with_retry_probe(self):
+        connection_cm = original_get_connection(self)
 
-            class BrokerProxy:
-                def __init__(self, wrapped: Any) -> None:
-                    self._wrapped = wrapped
+        @contextmanager
+        def _wrapped() -> Iterator[Any]:
+            with connection_cm as db:
+                original = db._run_with_retry
 
-                def _run_with_retry(self, fn, *args, **kwargs):
-                    called["count"] += 1
-                    return original(fn, *args, **kwargs)
+                class BrokerProxy:
+                    def __init__(self, wrapped: Any) -> None:
+                        self._wrapped = wrapped
 
-                def __getattr__(self, name: str) -> Any:
-                    return getattr(self._wrapped, name)
+                    def _run_with_retry(self, fn, *args, **kwargs):
+                        called["count"] += 1
+                        return original(fn, *args, **kwargs)
 
-            yield BrokerProxy(broker)
+                    def __getattr__(self, name: str) -> Any:
+                        return getattr(self._wrapped, name)
 
-    monkeypatch.setattr(type(context), "broker", _broker_with_retry_probe)
+                yield BrokerProxy(db)
+
+        return _wrapped()
+
+    monkeypatch.setattr(
+        spawn_requests.Queue, "get_connection", _get_connection_with_retry_probe
+    )
 
     run_module._enqueue_taskspec(context, taskspec, None)
 

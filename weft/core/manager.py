@@ -1,8 +1,8 @@
-"""Worker task implementation for spawning child tasks.
+"""Manager task implementation for spawning child tasks.
 
 Spec references:
 - docs/specifications/01-Core_Components.md [CC-2.2], [CC-2.3], [CC-2.5]
-- docs/specifications/03-Worker_Architecture.md [WA-0], [WA-1], [WA-2], [WA-3]
+- docs/specifications/03-Manager_Architecture.md [MA-0], [MA-1], [MA-2], [MA-3]
 """
 
 from __future__ import annotations
@@ -24,11 +24,14 @@ from typing import Any, cast
 from simplebroker import Queue
 from weft._constants import (
     CONTROL_STOP,
+    INTERNAL_RUNTIME_TASK_CLASS_KEY,
+    INTERNAL_RUNTIME_TASK_CLASS_PIPELINE,
+    INTERNAL_RUNTIME_TASK_CLASS_PIPELINE_EDGE,
     QUEUE_CTRL_IN_SUFFIX,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MANAGER_LIFETIME_TIMEOUT,
+    WEFT_MANAGERS_REGISTRY_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
-    WEFT_WORKERS_REGISTRY_QUEUE,
     WORK_ENVELOPE_START,
 )
 from weft.helpers import (
@@ -61,7 +64,7 @@ class ManagedChild:
 class Manager(BaseTask):
     """Task that listens for spawn requests and runs child tasks.
 
-    Spec: [WA-0], [WA-1], [MF-6], [MF-7]
+    Spec: [MA-0], [MA-1], [MF-6], [MF-7]
     """
 
     def __init__(
@@ -109,7 +112,7 @@ class Manager(BaseTask):
         except Exception:
             logger.debug("Failed to prime broker activity queue", exc_info=True)
         self._last_broker_timestamp = self._read_broker_timestamp(force=True)
-        self._register_worker()
+        self._register_manager()
         if self._maybe_yield_leadership(force=True):
             return
         self.taskspec.mark_started(pid=multiprocessing.current_process().pid)
@@ -128,7 +131,7 @@ class Manager(BaseTask):
     def _build_queue_configs(self) -> dict[str, dict[str, Any]]:
         """Configure inbox reserve mode and control peek mode for the manager.
 
-        Spec: [CC-2.2], [CC-2.5], [WA-1]
+        Spec: [CC-2.2], [CC-2.5], [MA-1]
         """
         return {
             self._queue_names["inbox"]: self._reserve_queue_config(
@@ -208,8 +211,19 @@ class Manager(BaseTask):
             child_spec.metadata.setdefault("autostart_source", autostart_source)
             child_spec.metadata.setdefault("autostart", True)
 
+        try:
+            task_cls = self._resolve_child_task_class(child_spec)
+        except ValueError as exc:
+            logger.warning("Rejecting child launch for %s: %s", child_spec.tid, exc)
+            self._report_state_change(
+                event="task_spawn_rejected",
+                child_tid=child_spec.tid,
+                error=str(exc),
+            )
+            return False
+
         process = launch_task_process(
-            Consumer,
+            task_cls,
             self._db_path,
             child_spec,
             config=self._config,
@@ -235,12 +249,27 @@ class Manager(BaseTask):
         self._report_state_change(event="task_spawned", **event_payload)
         return True
 
+    @staticmethod
+    def _resolve_child_task_class(child_spec: TaskSpec) -> type[BaseTask]:
+        runtime_class = child_spec.metadata.get(INTERNAL_RUNTIME_TASK_CLASS_KEY)
+        if runtime_class is None:
+            return Consumer
+        if runtime_class == INTERNAL_RUNTIME_TASK_CLASS_PIPELINE:
+            from .tasks.pipeline import PipelineTask
+
+            return PipelineTask
+        if runtime_class == INTERNAL_RUNTIME_TASK_CLASS_PIPELINE_EDGE:
+            from .tasks.pipeline import PipelineEdgeTask
+
+            return PipelineEdgeTask
+        raise ValueError(f"unknown internal runtime task class '{runtime_class}'")
+
     # ------------------------------------------------------------------
-    # Worker bookkeeping
+    # Manager bookkeeping
     # ------------------------------------------------------------------
-    def _register_worker(self) -> None:
-        """Publish an active record to the worker registry (Spec: [WA-1.4], [MF-7])."""
-        registry_queue = self._queue(WEFT_WORKERS_REGISTRY_QUEUE)
+    def _register_manager(self) -> None:
+        """Publish an active record to the manager registry (Spec: [MA-1.4], [MF-7])."""
+        registry_queue = self._queue(WEFT_MANAGERS_REGISTRY_QUEUE)
         timestamp = registry_queue.generate_timestamp()
 
         payload = {
@@ -260,7 +289,7 @@ class Manager(BaseTask):
         try:
             message_id = cast(int | None, registry_queue.write(json.dumps(payload)))
         except Exception:
-            logger.debug("Failed to register worker", exc_info=True)
+            logger.debug("Failed to register manager", exc_info=True)
         else:
             if message_id is None:
                 latest = self._latest_registry_entry(registry_queue, self.tid)
@@ -268,11 +297,11 @@ class Manager(BaseTask):
             else:
                 self._registry_message_id = message_id
 
-    def _unregister_worker(self) -> None:
-        """Replace active record with stopped record on shutdown (Spec: [WA-1.4])."""
+    def _unregister_manager(self) -> None:
+        """Replace active record with stopped record on shutdown (Spec: [MA-1.4])."""
         if self._unregistered:
             return
-        registry_queue = self._queue(WEFT_WORKERS_REGISTRY_QUEUE)
+        registry_queue = self._queue(WEFT_MANAGERS_REGISTRY_QUEUE)
         stopped_timestamp = registry_queue.generate_timestamp()
 
         deletion_performed = False
@@ -380,7 +409,7 @@ class Manager(BaseTask):
         return pid_is_live(pid)
 
     def _active_manager_records(self) -> dict[str, dict[str, Any]]:
-        queue = self._queue(WEFT_WORKERS_REGISTRY_QUEUE)
+        queue = self._queue(WEFT_MANAGERS_REGISTRY_QUEUE)
         snapshot: dict[str, dict[str, Any]] = {}
         stale_timestamps: list[int] = []
 
@@ -449,7 +478,7 @@ class Manager(BaseTask):
                 event="manager_leadership_yielded",
                 leader_tid=leader_tid,
             )
-            self._unregister_worker()
+            self._unregister_manager()
             self.should_stop = True
         return True
 
@@ -620,7 +649,7 @@ class Manager(BaseTask):
             draining=True,
         )
         self._update_process_title("draining")
-        self._unregister_worker()
+        self._unregister_manager()
 
     def _finish_graceful_shutdown(self) -> None:
         if self.taskspec.state.status not in {"completed", "cancelled"}:
@@ -772,7 +801,7 @@ class Manager(BaseTask):
     def _handle_work_message(
         self, message: str, timestamp: int, context: QueueMessageContext
     ) -> None:
-        """Consume a spawn request, build child spec, and launch (Spec: [WA-1.1], [WA-2], [MF-6])."""
+        """Consume a spawn request, build child spec, and launch (Spec: [MA-1.1], [MA-2], [MF-6])."""
         self._cleanup_children()
         if not self._control_allows_child_launch():
             return
@@ -780,7 +809,7 @@ class Manager(BaseTask):
         try:
             payload = json.loads(message) if message else {}
         except json.JSONDecodeError:
-            logger.warning("Worker received non-JSON spawn request: %s", message)
+            logger.warning("Manager received non-JSON spawn request: %s", message)
             policy = self.taskspec.spec.reserved_policy_on_error
             self._apply_reserved_policy(policy, message_timestamp=timestamp)
             if policy is not ReservedPolicy.KEEP:
@@ -813,13 +842,13 @@ class Manager(BaseTask):
             self._get_reserved_queue().delete(message_id=timestamp)
         except Exception:
             logger.debug(
-                "Failed to acknowledge worker message %s", timestamp, exc_info=True
+                "Failed to acknowledge manager message %s", timestamp, exc_info=True
             )
 
     def _build_child_spec(
         self, payload: dict[str, Any], timestamp: int
     ) -> TaskSpec | None:
-        """Parse spawn payload and validate a child TaskSpec (Spec: [WA-1.1], [WA-2])."""
+        """Parse spawn payload and validate a child TaskSpec (Spec: [MA-1.1], [MA-2])."""
         provided_spec = payload.get("taskspec")
         if provided_spec is not None:
             candidate = copy.deepcopy(provided_spec)
@@ -1019,7 +1048,7 @@ class Manager(BaseTask):
             logger.warning("Failed to enqueue autostart spawn request", exc_info=True)
 
     def _tick_autostart(self, *, force: bool = False) -> None:
-        """Scan autostart manifests and enqueue spawn requests (Spec: [WA-1.6])."""
+        """Scan autostart manifests and enqueue spawn requests (Spec: [MA-1.6])."""
         if not self._autostart_enabled:
             return
         now_ns = time.time_ns()
@@ -1106,7 +1135,7 @@ class Manager(BaseTask):
     # ------------------------------------------------------------------
     def cleanup(self) -> None:
         self._terminate_children()
-        self._unregister_worker()
+        self._unregister_manager()
         super().cleanup()
 
     def process_once(self) -> None:
@@ -1168,7 +1197,7 @@ class Manager(BaseTask):
 
     def _atexit_unregister(self) -> None:
         try:
-            self._unregister_worker()
+            self._unregister_manager()
         except Exception:  # pragma: no cover - best effort cleanup
             pass
 

@@ -43,6 +43,41 @@ def test_cli_init_creates_project(workdir: Path, weft_harness) -> None:
     assert (weft_dir / "config.json").is_file()
 
 
+def test_cli_init_defaults_to_current_directory(workdir: Path, weft_harness) -> None:
+    project_root = workdir / "cwd-project"
+    project_root.mkdir()
+
+    rc, out, err = run_cli(
+        "init",
+        cwd=project_root,
+        harness=weft_harness,
+        prepare_root=False,
+    )
+
+    assert rc == 0
+    assert str(project_root.resolve()) in out
+    assert err == ""
+    assert (project_root / ".weft").is_dir()
+
+
+def test_cli_init_help_describes_positional_directory(
+    workdir: Path, weft_harness
+) -> None:
+    rc, out, err = run_cli(
+        "init",
+        "--help",
+        cwd=workdir,
+        harness=weft_harness,
+    )
+
+    assert rc == 0
+    assert err == ""
+    assert "[DIRECTORY]" in out
+    assert "Directory where the project should be initialized" in out
+    assert "[default:" in out
+    assert "--context" not in out
+
+
 def test_cli_init_quiet_suppresses_output(workdir: Path, weft_harness) -> None:
     project_root = workdir / "quiet-project"
 
