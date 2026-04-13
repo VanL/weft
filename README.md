@@ -91,6 +91,8 @@ $ weft result 1234567890
 {"status": "completed", "return_code": 0, "output": "..."}
 ```
 
+For a guided walkthrough, see [Your First Weft Task](docs/tutorials/first-task.md).
+
 ## Core Concepts
 
 ### Project Context
