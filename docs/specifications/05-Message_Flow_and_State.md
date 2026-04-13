@@ -214,6 +214,55 @@ Current behavior:
 - `weft result` reads the outbox payload as written
 - `weft result` does not currently auto-dereference large-output references
 
+### Large-Output Reference Format [MF-2.1]
+
+When output exceeds the configured threshold, the consumer writes a JSON
+reference envelope to `T{tid}.outbox` instead of the raw output. The threshold
+defaults to `DEFAULT_OUTPUT_SIZE_LIMIT_MB` (10 MB) and can be overridden per
+task via `spec.output_size_limit_mb`.
+
+Reference envelope (all fields present):
+
+```json
+{
+  "type": "large_output",
+  "path": "/tmp/weft/outputs/{tid}/output.dat",
+  "size": 12345678,
+  "size_mb": 11.77,
+  "truncated_preview": "<first 1024 bytes decoded as UTF-8 with replacement>",
+  "sha256": "<hex-encoded SHA-256 of the raw encoded bytes>",
+  "message": "Output too large (12345678 bytes); saved to /tmp/weft/outputs/{tid}/output.dat"
+}
+```
+
+Field definitions:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `type` | `"large_output"` | Discriminator; always this literal string |
+| `path` | string (absolute path) | Path to the spill file on the local filesystem |
+| `size` | integer | Raw byte count of the encoded output |
+| `size_mb` | float | `size / (1024 * 1024)`, rounded to 2 decimal places |
+| `truncated_preview` | string | First 1024 bytes decoded as UTF-8 with error replacement |
+| `sha256` | string | Hex-encoded SHA-256 digest of the full encoded output |
+| `message` | string | Human-readable summary for display in CLI output |
+
+Path locality rules:
+
+- If `spec.weft_context` is set, the spill directory is
+  `{weft_context}/.weft/outputs/{tid}/output.dat`.
+- Otherwise it falls back to `{tempdir}/weft/outputs/{tid}/output.dat`
+  (where `{tempdir}` is the platform temporary directory).
+- The file is written atomically relative to the task's lifetime; the
+  reference `path` is always absolute.
+
+Consumers reading the outbox must inspect `type` to detect a reference before
+treating the payload as inline output. The `sha256` field can be used to verify
+file integrity after dereferencing.
+
+_Implementation mapping_: `weft/core/tasks/base.py` `_spill_large_output`,
+`_outputs_base_dir`; `weft/core/tasks/consumer.py` `_emit_single_output`.
+
 ### Cleanup Boundary
 
 Current cleanup is task-owned:
