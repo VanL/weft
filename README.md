@@ -1,12 +1,12 @@
 # Weft
 
-*A durable task execution system. Persistent managers, multiprocess isolation, comprehensive observability.*
+*The durable task substrate for agent systems. Persistent managers, multiprocess isolation, comprehensive observability.*
 
 ```bash
 $ weft run echo "hello world"
 hello world
 
-$ weft run --spec task.json
+$ weft run --spec NAME|PATH
 # streams task output and returns when complete
 
 $ weft run --spec review-agent.json
@@ -16,7 +16,19 @@ $ weft status
 System: OK
 ```
 
-Weft is a queue-based task execution system focused on enabling interaction between AI agents, user-provided functions, and existing CLI tools. It combines the simplicity of direct command execution with the power of durable task queues, multiprocess isolation, and comprehensive state tracking.
+Weft is a durable task runner for commands, functions, pipelines, and agents.
+The unifying idea is simple: everything is a Task. If work matters, Weft
+should be able to submit it durably, run it in a chosen runtime, observe it,
+control it, and compose it with other work.
+
+Agent support is part of that core model, not a separate product layered on
+top. A dangerous agent running in a restricted container is still just a task
+with a different target and runner.
+
+Weft is the substrate for higher-level intelligence and orchestration, not the
+agent-management layer itself. It may know enough about important runtimes to
+make common execution paths work and to fail clearly, but it does not aim to
+own provider setup, login management, or hidden execution-time magic.
 
 ## Installation
 
@@ -46,7 +58,10 @@ plus the Docker SDK dependency, and `weft[macos-sandbox]` adds the macOS
 sandbox runner plugin. The first-party Docker runner is currently supported on
 Linux and macOS only. `weft[all]` installs the current first-party optional
 backends and runners together. Runner selection still happens per TaskSpec
-through `spec.runner`.
+through `spec.runner`. The current Docker runner owns normal command tasks and
+the Docker-backed one-shot `provider_cli` agent lane for providers with
+explicit image recipes. The current shipped image-recipe set is
+`claude_code`, `codex`, `gemini`, `opencode`, and `qwen`.
 
 ## Quick Start
 
@@ -67,6 +82,9 @@ $ weft run --wait --timeout 30 ./long-task.sh
 
 # Run a task spec JSON file
 $ weft run --spec .weft/tasks/data-cleanup.json
+
+# Run a builtin helper TaskSpec
+$ weft run --spec probe-agents
 
 # Run a pipeline spec (from .weft/pipelines/)
 $ weft run --pipeline etl-job
@@ -92,6 +110,204 @@ $ weft result 1234567890
 ```
 
 For a guided walkthrough, see [Your First Weft Task](docs/tutorials/first-task.md).
+
+## Builtin Task Helpers
+
+Weft ships a small set of read-only builtin TaskSpecs as explicit helpers.
+They are not a second command system and they do not change bare command
+execution.
+
+Builtins are bundled examples of using Weft as a task runner. A builtin is an
+example task or pipeline that is useful enough that Weft ships it directly. In
+current Weft, the shipped builtins are task helpers.
+
+They also offer an explicit happy path for common setup or
+runtime-preparation tasks.
+They may help discover available runtimes or warm a slow runner path, but they
+are never required for correctness and are never run implicitly.
+
+A builtin should teach the Weft shape rather than replace it. If a helper
+starts to feel like a setup wizard or a second control plane, it belongs in a
+higher layer or an extension.
+
+`weft run --spec NAME|PATH` resolves in this order:
+
+1. existing file path
+2. existing spec-bundle directory path containing `taskspec.json`
+3. local stored task spec in `.weft/tasks/<name>.json`
+4. local stored task bundle in `.weft/tasks/<name>/taskspec.json`
+5. builtin task helper bundled with Weft, either as
+   `weft/builtins/tasks/<name>.json` or
+   `weft/builtins/tasks/<name>/taskspec.json`
+
+Local `.weft/tasks` specs shadow builtin helpers of the same name. Builtins are
+available only through explicit spec surfaces such as `weft run --spec` and
+`weft spec show`. Bare `weft run foo` still means "run command `foo`".
+
+When a spec declares submission-time options through `spec.parameterization`
+or `spec.run_input`, those are still ordinary explicit long options owned by
+that spec, not new global Weft flags. They use `--name value` or
+`--name=value`, and declared `path` values are resolved to absolute host paths
+before the adapter sees them.
+
+When a task spec comes from a bundle directory, ordinary Python callable refs
+such as `module:function` stay unchanged, but Weft resolves `module` against
+that bundle root first before falling back to normal Python imports. That
+bundle-local rule applies to `function_target`, runner environment profiles,
+delegated agent resolver/tool-profile refs, and Python agent tool refs.
+Inside bundle-local helper code, sibling Python modules should use
+package-relative imports. Weft does not turn the bundle root into a
+process-global `sys.path` entry.
+
+Projects can use `.weft/tasks/` and `.weft/pipelines/` the same way. The same
+explicit spec surfaces let a project build up its own reusable task and
+pipeline library over time, with builtins acting as bundled examples alongside
+that project-local library.
+
+`weft spec list` shows the effective project-visible spec namespace. If you
+want the shipped builtin inventory instead, use `weft system builtins`.
+
+One builtin helper currently shipped is `probe-agents`, which probes the known
+delegated provider CLIs and can fill missing executable defaults while
+preserving existing explicit project settings. It is a convenience helper, not
+a required setup step.
+
+Another builtin helper currently shipped is `prepare-agent-images`, which
+warms the local Docker image cache for supported Docker-backed delegated agent
+runtimes. It is an explicit optional cache warmer, not hidden setup. The
+current shipped image-recipe set is `claude_code`, `codex`, `gemini`,
+`opencode`, and `qwen`. The name stays plural because one run may warm
+multiple provider images. Ordinary Docker-backed agent runs use the same
+deterministic image tags and reuse those warmed images when they already
+exist; they only build on cache miss.
+
+Weft also ships `dockerized-agent`, a parameterized builtin TaskSpec
+for the Docker-backed one-shot delegated-agent lane. It uses
+`spec.parameterization` to let `weft run --spec` accept an explicit
+`--provider` and optional `--model`, materializes a concrete provider-specific
+TaskSpec locally before queueing, then uses `spec.run_input` to accept a
+required `--prompt` plus either piped stdin text or an explicit `--document`
+path. It mounts a caller-supplied host document read-only into the container
+at a helper-owned target path and asks the agent to explain that document in
+one sentence. The current default provider is `codex`. To point it at this
+repo's architecture overview, run either:
+
+```bash
+cat /Users/van/Developer/weft/docs/specifications/00-Overview_and_Architecture.md | weft run --spec dockerized-agent --provider codex --prompt "Explain this document in one sentence."
+```
+
+or:
+
+```bash
+weft run --spec dockerized-agent --provider gemini --prompt "Explain this document in one sentence." --document /Users/van/Developer/weft/docs/specifications/00-Overview_and_Architecture.md
+```
+
+This is the one public builtin for that lane. Provider choice stays an
+explicit argument on the same TaskSpec instead of being split across multiple
+near-duplicate fixed-provider builtins. The main caveats are:
+
+- piped stdin is the tightest path when you want the shipped examples to obey
+  a strict output-shape prompt such as "one sentence"; `--document` still
+  proves late-bound Docker file mounts, but some providers may narrate their
+  file-read step before the final answer
+- the builtin currently defaults `opencode` to
+  `spec.agent.model="openai/gpt-5"` when `--provider opencode` is selected
+  without an explicit `--model`
+- the builtin defaults to `authority_class="general"` so it stays
+  representative; if you want a narrower read-only provider mode, copy it and set
+  `authority_class="bounded"` explicitly where the provider supports it
+- when `claude_code` is selected, Weft first
+  preserves explicit portable auth such as `CLAUDE_CODE_OAUTH_TOKEN`,
+  `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, or a Linux
+  `~/.claude/.credentials.json`
+- that explicit Claude example path also sets `IS_SANDBOX=1` so Claude treats
+  the Docker container as a sandboxed runtime instead of rejecting workspace-
+  write mode under root
+- on macOS, if those Claude auth paths are absent, that explicit Claude example
+  startup path attempts a runtime-only Keychain lookup and injects
+  `CLAUDE_CODE_OAUTH_TOKEN` for that run only; it does not persist a Linux
+  credential file, and it aborts startup if lookup fails
+
+## Docker-Backed One-Shot `provider_cli`
+
+The current Docker-backed agent lane is intentionally narrow. It is for
+one-shot delegated `provider_cli` tasks only:
+
+- `spec.type="agent"`
+- `spec.agent.runtime="provider_cli"`
+- `spec.agent.conversation_scope="per_message"`
+- `spec.persistent=false`
+- `spec.runner.name="docker"`
+- selected provider has both a shipped Docker image recipe and an internal
+  container runtime descriptor (`claude_code`, `codex`, `gemini`, `opencode`,
+  and `qwen` today)
+
+Use this when you want the agent CLI and its runtime inside a restricted
+container, while still passing per-run mounts, environment variables, working
+directory, and network policy through the normal task path. The current
+Docker-backed `provider_cli` lane may also apply internal provider runtime
+descriptors for provider-specific runtime mounts and other explicit defaults.
+Current shipped defaults include:
+
+- `codex`: optional writable `~/.codex`
+- `gemini`: optional `GEMINI_API_KEY` forwarding plus a small generated
+  runtime home seeded from a subset of `~/.gemini`
+- `opencode`: allowlisted provider env forwarding
+- `qwen`: optional writable `~/.qwen`
+- `claude_code`: optional writable `~/.claude` and `~/.claude.json` plus
+  portable auth env forwarding
+
+If you want env-based auth in a Docker agent task, set it explicitly in
+`spec.env` or through a runner environment profile. On macOS specifically,
+Docker-backed `claude_code` needs portable auth because a host `claude.ai`
+login lives in macOS Keychain and is not portable into the Linux container by
+mount alone.
+
+For agent tasks only, the Docker runner also supports
+`spec.runner.options.work_item_mounts`, which resolves absolute host paths from
+the raw work item at execution time and bind-mounts them into fixed container
+targets. This is intentionally Docker-specific; it is not a generic core Weft
+input-mount abstraction.
+
+```jsonc
+{
+  "name": "docker-codex-review",
+  "version": "1.0",
+  "spec": {
+    "type": "agent",
+    "persistent": false,
+    "agent": {
+      "runtime": "provider_cli",
+      "authority_class": "general",
+      "conversation_scope": "per_message",
+      "runtime_config": {
+        "provider": "codex"
+      }
+    },
+    "working_dir": "/Users/me/project",
+    "runner": {
+      "name": "docker",
+      "options": {
+        "container_workdir": "/workspace",
+        "mounts": [
+          {
+            "source": "/Users/me/project",
+            "target": "/workspace",
+            "read_only": false
+          }
+        ]
+      }
+    }
+  }
+}
+```
+
+`prepare-agent-images` is optional. It can warm the local image cache ahead of
+time, but ordinary `weft run` still takes the normal path and builds on cache
+miss when needed.
+
+For the current builtin catalog and contract, see
+[Builtin TaskSpecs](docs/specifications/10B-Builtin_TaskSpecs.md).
 
 ## Core Concepts
 
@@ -129,7 +345,7 @@ SQLite remains the default. To use Postgres, install `weft[pg]` and then
 declare the backend through SimpleBroker project config or Weft environment
 variables.
 
-Project-local `.simplebroker.toml`:
+Project-local `.broker.toml`:
 
 ```toml
 version = 1
@@ -147,6 +363,12 @@ export WEFT_BACKEND=postgres
 export WEFT_BACKEND_TARGET='postgresql://user:pass@host:5432/dbname'
 export WEFT_BACKEND_SCHEMA='weft'
 ```
+
+When Weft auto-discovers a project from a child directory, an existing local
+broker target still wins over ambient env backend selection. That means
+`.broker.toml` is authoritative, and legacy sqlite project discovery beats
+`WEFT_BACKEND=...` during upward discovery. Env-based backend selection is the
+fallback when no project-local broker target has already claimed the directory.
 
 If Postgres is selected without the plugin installed, Weft will fail with an
 install hint for `uv add 'weft[pg]'`.
@@ -263,20 +485,30 @@ weft task list [--stats] [--status STATUS] [--json]
 weft manager list [--json]
 
 # System maintenance
+weft system builtins        # shipped builtin inventory
 weft system tidy            # backend-native broker compaction
 weft system dump -o FILE
 weft system load -i FILE    # preflight import; exits 3 on alias conflicts
 
-# Validate a TaskSpec and optionally verify its runner
+# Validate a TaskSpec and optionally preflight runner/runtime availability
 weft spec validate --type task FILE [--load-runner] [--preflight]
 ```
+
+Use `weft spec validate --preflight` when you want an ahead-of-time
+availability check on the current machine. `weft run` does not do hidden
+runtime preflight first; it submits the task, then the real execution path
+either starts or fails with the concrete runner or agent error.
+For Docker-backed one-shot `provider_cli` agent specs, preflight validates the
+Docker lane and static descriptor requirements. It does not require the host
+provider executable to exist, because the real provider CLI runs inside the
+container.
 
 ### Task Execution
 
 ```bash
 # Run command
 weft run COMMAND [args...]
-weft run --spec FILE
+weft run --spec NAME|PATH
 weft run --pipeline NAME|PATH
 weft run --function module:func [--arg VALUE] [--kw KEY=VALUE]
 
@@ -284,7 +516,6 @@ weft run --function module:func [--arg VALUE] [--kw KEY=VALUE]
 printf "hello\n" | weft run -- python worker.py
 printf "hello\n" | weft run --spec summarize.json
 printf "hello\n" | weft run --pipeline etl-job
-# Stored pipeline names are supported here; task specs use explicit JSON paths.
 # --input is still available for structured pipeline input and cannot be mixed
 # with piped stdin.
 
@@ -627,7 +858,7 @@ uv sync --all-extras
 # Static checks
 ./.venv/bin/ruff check weft tests
 ./.venv/bin/ruff format weft tests
-./.venv/bin/mypy weft
+./.venv/bin/mypy weft extensions/weft_docker extensions/weft_macos_sandbox
 
 # Build
 uv build

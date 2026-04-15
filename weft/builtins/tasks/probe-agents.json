@@ -1,0 +1,12 @@
+{
+  "name": "probe-agents",
+  "description": "Probe known delegated provider CLIs and write missing executable defaults to .weft/agents.json.",
+  "spec": {
+    "type": "function",
+    "function_target": "weft.builtins.agent_probe:probe_agents_task"
+  },
+  "metadata": {
+    "builtin": true,
+    "category": "agent-runtime"
+  }
+}

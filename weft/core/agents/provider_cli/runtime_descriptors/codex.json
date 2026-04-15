@@ -1,0 +1,15 @@
+{
+  "version": "v2",
+  "provider": "codex",
+  "env": [],
+  "runtime_mounts": [
+    {
+      "name": "codex_home",
+      "source_kind": "home_dir",
+      "source_path": ".codex",
+      "target": "/root/.codex",
+      "required": false,
+      "read_only": false
+    }
+  ]
+}

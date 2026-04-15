@@ -278,10 +278,14 @@ Pipeline specs live under `.weft/pipelines/` and are run through:
 ```bash
 weft run --pipeline NAME
 weft run --pipeline ./pipeline.json
+weft run --pipeline ./my-pipeline/
 ```
 
 The CLI may resolve a pipeline by saved name or explicit path, using the same
-general `NAME|PATH` rules as other saved specs.
+general `NAME|PATH` rules as other saved specs. Current pipeline lookup accepts
+either a flat file such as `.weft/pipelines/<name>.json` or a directory bundle
+such as `.weft/pipelines/<name>/pipeline.json`. Exact directory paths resolve
+through the canonical `pipeline.json` entry file.
 
 ### Minimal shape [PL-2.2]
 

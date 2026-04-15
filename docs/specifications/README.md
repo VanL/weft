@@ -2,6 +2,10 @@
 
 This directory is the authoritative Weft spec set.
 
+Specs are normative. Plans in `docs/plans/` are not. Plans may reflect
+exploration, partial implementation, or superseded approaches. Keep the specs
+up to date when reality changes.
+
 The split is intentional:
 
 - Canonical numbered specs (`00`, `01`, `04`, `06`, `07`, `08`, `09`, `10`,
@@ -9,6 +13,11 @@ The split is intentional:
   boundaries, and the reasons behind them.
 - Adjacent `A` docs describe intended but unshipped behavior. They are
   planning companions, not current contract.
+- Most adjacent `B` docs describe exploratory integration patterns for using
+  Weft inside larger systems. They are neither current contract nor promised
+  core product surface.
+- `10B-Builtin_TaskSpecs.md` is the current builtin-task contract and remains
+  canonical despite the `B` suffix.
 - [`12-Future_Ideas.md`](12-Future_Ideas.md) remains the holding area for
   deferred ideas that are intentionally out of scope.
 
@@ -41,6 +50,8 @@ directly. It should not appear as "not yet implemented."
 - [`09-Implementation_Plan.md`](09-Implementation_Plan.md): current
   implementation status and active-plan map
 - [`10-CLI_Interface.md`](10-CLI_Interface.md): current CLI contract
+- [`10B-Builtin_TaskSpecs.md`](10B-Builtin_TaskSpecs.md): current builtin
+  TaskSpec contract and shipped builtin inventory
 - [`11-CLI_Architecture_Crosswalk.md`](11-CLI_Architecture_Crosswalk.md):
   current CLI-to-code ownership map
 - [`12-Future_Ideas.md`](12-Future_Ideas.md): explicitly deferred ideas
@@ -61,6 +72,10 @@ directly. It should not appear as "not yet implemented."
 - [`10A-CLI_Interface_Planned.md`](10A-CLI_Interface_Planned.md)
 - [`11A-CLI_Architecture_Crosswalk_Planned.md`](11A-CLI_Architecture_Crosswalk_Planned.md)
 - [`13A-Agent_Runtime_Planned.md`](13A-Agent_Runtime_Planned.md)
+
+### Exploratory integration docs
+
+- [`13B-Using_Weft_In_Higher_Level_Systems.md`](13B-Using_Weft_In_Higher_Level_Systems.md)
 
 These companion docs stay adjacent to the owning spec so the mapping is easy to
 follow, but they do not override the canonical files.
@@ -97,6 +112,8 @@ sync with plans and code using these rules:
   point back to the governing spec section.
 - Companion `A` docs should link back to the owning canonical spec and state
   plainly that they are planned material.
+- Companion `B` docs should state plainly that they are exploratory usage
+  guidance, not product contract.
 
 ## Mental Model
 

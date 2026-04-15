@@ -131,6 +131,119 @@ def test_docker_runner_is_skipped_on_windows(
         _skip_unavailable_runner("docker", sandbox_profile=sandbox_profile)
 
 
+def test_docker_runner_preflight_rejects_missing_build_context(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plugin_module = pytest.importorskip("weft_docker.plugin")
+    plugin = plugin_module.get_runner_plugin()
+
+    monkeypatch.setattr(plugin_module, "_resolve_docker_binary", lambda _: "docker")
+
+    class FakeClient:
+        def ping(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def fake_docker_client(*, timeout: int = 10):  # noqa: ANN202
+        del timeout
+        yield FakeClient()
+
+    monkeypatch.setattr(plugin_module, "_docker_client", fake_docker_client)
+
+    missing_root = tmp_path / "missing"
+    with pytest.raises(ValueError, match="Docker build context does not exist"):
+        plugin.validate_taskspec(
+            {
+                "spec": {
+                    "type": "command",
+                    "process_target": "python3",
+                    "runner": {
+                        "name": "docker",
+                        "options": {
+                            "build": {
+                                "context": str(missing_root),
+                                "dockerfile": str(missing_root / "Dockerfile"),
+                            }
+                        },
+                    },
+                }
+            },
+            preflight=True,
+        )
+
+
+def test_docker_command_runner_build_profile_materializes_mounts(
+    tmp_path: Path,
+) -> None:
+    plugin_module = pytest.importorskip("weft_docker.plugin")
+    dockerfile = tmp_path / "Dockerfile"
+    dockerfile.write_text("FROM busybox\n", encoding="utf-8")
+
+    runner = plugin_module.DockerCommandRunner(
+        tid="1844674407370955161",
+        process_target="python3",
+        args=["-c", "print('ok')"],
+        env={},
+        working_dir=str(tmp_path),
+        timeout=5.0,
+        limits=None,
+        monitor_class=None,
+        monitor_interval=0.05,
+        runner_options={
+            "build": {
+                "context": str(tmp_path),
+                "dockerfile": str(dockerfile),
+            },
+            "mounts": [
+                {
+                    "source": str(tmp_path),
+                    "target": "/workspace",
+                    "read_only": True,
+                }
+            ],
+            "container_workdir": "/workspace",
+        },
+    )
+
+    build_calls: list[tuple[str, dict[str, Any], str]] = []
+
+    def fake_build(
+        executable: str,
+        *,
+        build: dict[str, Any],
+        tag: str,
+    ) -> None:
+        build_calls.append((executable, build, tag))
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(plugin_module, "_build_docker_image", fake_build)
+    try:
+        image = runner._ensure_image("docker")
+        command, stdin_data = runner._build_docker_command(
+            {},
+            "container-123",
+            executable="docker",
+            image=image,
+        )
+    finally:
+        monkeypatch.undo()
+
+    assert build_calls
+    assert build_calls[0][0] == "docker"
+    assert build_calls[0][1]["context"] == str(tmp_path)
+    assert "--volume" in command
+    assert f"{tmp_path.resolve()}:/workspace:ro" in command
+    assert "--workdir" in command
+    assert "/workspace" in command
+    assert stdin_data is None
+
+
 def _runner_command(
     runner_name: str,
     *,

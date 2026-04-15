@@ -1,0 +1,71 @@
+{
+  "provider_cli": {
+    "providers": {
+      "qwen": {
+        "last_success": {
+          "at": "2026-04-15T17:27:47.614465+00:00",
+          "executable": "/private/var/folders/m_/2tncpj593tj8s_jdbdhj8g5m0000gn/T/pytest-of-van/pytest-340/test_structured_tool_profile_m4/qwen",
+          "command_class": "execute"
+        },
+        "last_failure": {
+          "at": "2026-04-15T17:27:37.134166+00:00",
+          "executable": "/private/var/folders/m_/2tncpj593tj8s_jdbdhj8g5m0000gn/T/pytest-of-van/pytest-340/test_provider_cli_runtime_surf4/qwen",
+          "command_class": "execute",
+          "detail": "qwen execution failed: stderr=fixture exec failed"
+        }
+      },
+      "claude_code": {
+        "last_success": {
+          "at": "2026-04-15T17:27:48.134410+00:00",
+          "executable": "/private/var/folders/m_/2tncpj593tj8s_jdbdhj8g5m0000gn/T/pytest-of-van/pytest-340/test_claude_mcp_tool_profile_w0/claude",
+          "command_class": "execute"
+        },
+        "last_failure": {
+          "at": "2026-04-15T17:27:35.027513+00:00",
+          "executable": "/private/var/folders/m_/2tncpj593tj8s_jdbdhj8g5m0000gn/T/pytest-of-van/pytest-340/test_provider_cli_runtime_surf0/claude",
+          "command_class": "execute",
+          "detail": "claude_code execution failed: stderr=fixture exec failed"
+        }
+      },
+      "gemini": {
+        "last_failure": {
+          "at": "2026-04-15T17:27:36.101998+00:00",
+          "executable": "/private/var/folders/m_/2tncpj593tj8s_jdbdhj8g5m0000gn/T/pytest-of-van/pytest-340/test_provider_cli_runtime_surf2/gemini",
+          "command_class": "execute",
+          "detail": "gemini execution failed: stderr=fixture exec failed"
+        },
+        "last_success": {
+          "at": "2026-04-15T17:27:46.571319+00:00",
+          "executable": "/private/var/folders/m_/2tncpj593tj8s_jdbdhj8g5m0000gn/T/pytest-of-van/pytest-340/test_structured_tool_profile_m2/gemini",
+          "command_class": "execute"
+        }
+      },
+      "codex": {
+        "last_success": {
+          "at": "2026-04-15T17:27:46.038664+00:00",
+          "executable": "/private/var/folders/m_/2tncpj593tj8s_jdbdhj8g5m0000gn/T/pytest-of-van/pytest-340/test_structured_tool_profile_m1/codex",
+          "command_class": "execute"
+        },
+        "last_failure": {
+          "at": "2026-04-15T17:27:35.554381+00:00",
+          "executable": "/private/var/folders/m_/2tncpj593tj8s_jdbdhj8g5m0000gn/T/pytest-of-van/pytest-340/test_provider_cli_runtime_surf1/codex",
+          "command_class": "execute",
+          "detail": "codex exec failed: stderr=fixture exec failed"
+        }
+      },
+      "opencode": {
+        "last_failure": {
+          "at": "2026-04-15T17:27:40.888754+00:00",
+          "executable": "/private/var/folders/m_/2tncpj593tj8s_jdbdhj8g5m0000gn/T/pytest-of-van/pytest-340/test_provider_cli_runtime_reje2/opencode",
+          "command_class": "execute",
+          "detail": "opencode CLI does not support 'run'; install a version with non-interactive run support"
+        },
+        "last_success": {
+          "at": "2026-04-15T17:27:47.093763+00:00",
+          "executable": "/private/var/folders/m_/2tncpj593tj8s_jdbdhj8g5m0000gn/T/pytest-of-van/pytest-340/test_structured_tool_profile_m3/opencode",
+          "command_class": "execute"
+        }
+      }
+    }
+  }
+}

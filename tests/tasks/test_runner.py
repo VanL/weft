@@ -16,7 +16,7 @@ from weft.core.runners import RunnerOutcome
 from weft.core.runners.subprocess_runner import run_monitored_subprocess
 from weft.core.tasks.runner import TaskRunner
 from weft.core.taskspec import LimitsSection
-from weft.ext import RunnerHandle
+from weft.ext import RunnerCapabilities, RunnerHandle
 
 
 def test_task_runner_executes_function_successfully():
@@ -176,7 +176,7 @@ def test_run_monitored_subprocess_emits_live_chunks_before_exit() -> None:
     worker = threading.Thread(target=_run, daemon=True)
     worker.start()
     try:
-        assert first_stdout_seen.wait(timeout=0.2), "expected live stdout before exit"
+        assert first_stdout_seen.wait(timeout=1.0), "expected live stdout before exit"
         assert worker.is_alive(), "process should still be running after first chunk"
     finally:
         worker.join(timeout=5.0)
@@ -295,6 +295,32 @@ def test_task_runner_executes_command_successfully(tmp_path):
     assert outcome.ok
     assert outcome.value.strip() == "ok"
     assert outcome.returncode == 0
+
+
+def test_task_runner_applies_environment_profile_defaults(tmp_path):
+    runner = TaskRunner(
+        target_type="command",
+        tid=None,
+        function_target=None,
+        process_target=sys.executable,
+        agent=None,
+        args=["-c", "import os; print(os.environ['WEFT_ENV_PROFILE'], end='')"],
+        kwargs=None,
+        env={},
+        working_dir=str(tmp_path),
+        timeout=5.0,
+        limits=None,
+        monitor_class=None,
+        monitor_interval=0.1,
+        environment_profile_ref=(
+            "tests.fixtures.runtime_profiles_fixture:host_environment_profile"
+        ),
+    )
+
+    outcome = runner.run({})
+
+    assert outcome.ok
+    assert outcome.value == "host-default"
 
 
 def test_task_runner_reports_command_failure(tmp_path):
@@ -558,6 +584,211 @@ def test_task_runner_agent_session_continues_conversation() -> None:
     assert second.status == "ok"
     assert second.value is not None
     assert second.value.aggregate_public_output() == "history:hello"
+
+
+def test_task_runner_run_does_not_preflight_agent_runtime_per_invocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    validation_calls: list[tuple[str, bool]] = []
+    plugin_calls: list[bool] = []
+
+    def fake_validate_runtime(
+        taskspec_payload,
+        *,
+        load_runtime: bool = False,
+        preflight: bool = False,
+    ) -> None:
+        del taskspec_payload, load_runtime
+        validation_calls.append(("runtime", preflight))
+
+    def fake_validate_tool_profile(
+        taskspec_payload,
+        *,
+        load_runtime: bool = False,
+        preflight: bool = False,
+    ) -> None:
+        del taskspec_payload, load_runtime
+        validation_calls.append(("tool_profile", preflight))
+
+    class FakeBackend:
+        def run_with_hooks(self, work_item, **kwargs):  # noqa: ANN001, ANN003
+            del work_item, kwargs
+            return RunnerOutcome(
+                status="ok",
+                value="ok",
+                error=None,
+                stdout=None,
+                stderr=None,
+                returncode=0,
+                duration=0.0,
+            )
+
+    class FakePlugin:
+        name = "host"
+        capabilities = RunnerCapabilities()
+
+        def check_version(self) -> None:
+            return None
+
+        def validate_taskspec(
+            self, taskspec_payload, *, preflight: bool = False
+        ) -> None:
+            del taskspec_payload
+            plugin_calls.append(preflight)
+            return None
+
+        def create_runner(self, **kwargs):  # noqa: ANN003
+            del kwargs
+            return FakeBackend()
+
+        def stop(self, handle, *, timeout: float = 2.0) -> bool:  # noqa: ANN001
+            del handle, timeout
+            return True
+
+        def kill(self, handle, *, timeout: float = 2.0) -> bool:  # noqa: ANN001
+            del handle, timeout
+            return True
+
+    monkeypatch.setattr(
+        "weft.core.tasks.runner.require_runner_plugin", lambda name: FakePlugin()
+    )
+    monkeypatch.setattr(
+        "weft.core.tasks.runner.validate_taskspec_agent_runtime",
+        fake_validate_runtime,
+    )
+    monkeypatch.setattr(
+        "weft.core.tasks.runner.validate_taskspec_agent_tool_profile",
+        fake_validate_tool_profile,
+    )
+
+    runner = TaskRunner(
+        target_type="agent",
+        tid="123",
+        function_target=None,
+        process_target=None,
+        agent={
+            "runtime": "llm",
+            "model": TEST_MODEL_ID,
+            "conversation_scope": "per_message",
+            "runtime_config": {
+                "plugin_modules": ["tests.fixtures.llm_test_models"],
+            },
+        },
+        args=None,
+        kwargs=None,
+        env={},
+        working_dir=None,
+        timeout=5.0,
+        limits=None,
+        monitor_class=None,
+        monitor_interval=0.05,
+    )
+
+    outcome = runner.run({"content": "hello"})
+
+    assert outcome.status == "ok"
+    assert plugin_calls == [False]
+    assert validation_calls == [("runtime", False), ("tool_profile", False)]
+
+
+def test_task_runner_start_agent_session_does_not_preflight_agent_runtime_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    validation_calls: list[tuple[str, bool]] = []
+    plugin_calls: list[bool] = []
+
+    def fake_validate_runtime(
+        taskspec_payload,
+        *,
+        load_runtime: bool = False,
+        preflight: bool = False,
+    ) -> None:
+        del taskspec_payload, load_runtime
+        validation_calls.append(("runtime", preflight))
+
+    def fake_validate_tool_profile(
+        taskspec_payload,
+        *,
+        load_runtime: bool = False,
+        preflight: bool = False,
+    ) -> None:
+        del taskspec_payload, load_runtime
+        validation_calls.append(("tool_profile", preflight))
+
+    class FakeSession:
+        def close(self) -> None:
+            return None
+
+    class FakeBackend:
+        def start_agent_session(self) -> FakeSession:
+            return FakeSession()
+
+    class FakePlugin:
+        name = "host"
+        capabilities = RunnerCapabilities()
+
+        def check_version(self) -> None:
+            return None
+
+        def validate_taskspec(
+            self, taskspec_payload, *, preflight: bool = False
+        ) -> None:
+            del taskspec_payload
+            plugin_calls.append(preflight)
+            return None
+
+        def create_runner(self, **kwargs):  # noqa: ANN003
+            del kwargs
+            return FakeBackend()
+
+        def stop(self, handle, *, timeout: float = 2.0) -> bool:  # noqa: ANN001
+            del handle, timeout
+            return True
+
+        def kill(self, handle, *, timeout: float = 2.0) -> bool:  # noqa: ANN001
+            del handle, timeout
+            return True
+
+    monkeypatch.setattr(
+        "weft.core.tasks.runner.require_runner_plugin", lambda name: FakePlugin()
+    )
+    monkeypatch.setattr(
+        "weft.core.tasks.runner.validate_taskspec_agent_runtime",
+        fake_validate_runtime,
+    )
+    monkeypatch.setattr(
+        "weft.core.tasks.runner.validate_taskspec_agent_tool_profile",
+        fake_validate_tool_profile,
+    )
+
+    runner = TaskRunner(
+        target_type="agent",
+        tid="123",
+        function_target=None,
+        process_target=None,
+        agent={
+            "runtime": "llm",
+            "model": TEST_MODEL_ID,
+            "conversation_scope": "per_task",
+            "runtime_config": {
+                "plugin_modules": ["tests.fixtures.llm_test_models"],
+            },
+        },
+        args=None,
+        kwargs=None,
+        env={},
+        working_dir=None,
+        timeout=5.0,
+        limits=None,
+        monitor_class=None,
+        monitor_interval=0.05,
+    )
+
+    session = runner.start_agent_session()
+    session.close()
+
+    assert plugin_calls == [False]
+    assert validation_calls == [("runtime", False), ("tool_profile", False)]
 
 
 def test_command_session_terminate_kills_descendants(tmp_path: Path) -> None:

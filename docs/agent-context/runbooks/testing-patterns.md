@@ -30,7 +30,7 @@ or `ruff` are installed globally.
 ./.venv/bin/python -m pytest tests/core/test_manager.py -k manager_reuse -q
 
 # Static checks
-./.venv/bin/mypy weft
+./.venv/bin/mypy weft extensions/weft_docker extensions/weft_macos_sandbox
 ./.venv/bin/ruff check weft
 ```
 

@@ -7,6 +7,7 @@ Spec references:
 from __future__ import annotations
 
 import importlib
+import json
 import multiprocessing
 import signal
 import sys
@@ -16,7 +17,7 @@ from typing import Any, cast
 
 from simplebroker import BrokerTarget
 
-from .taskspec import TaskSpec
+from .taskspec import TaskSpec, apply_bundle_root_to_taskspec_payload
 
 TERMINAL_STATES = {
     "completed",
@@ -78,7 +79,18 @@ def launch_task_process(
     task_cls_path = f"{task_cls.__module__}.{task_cls.__qualname__}"
     process = ctx.Process(
         target=_task_process_entry,
-        args=(task_cls_path, db_path, spec.model_dump_json(), config, poll_interval),
+        args=(
+            task_cls_path,
+            db_path,
+            json.dumps(
+                apply_bundle_root_to_taskspec_payload(
+                    spec.model_dump(mode="json"),
+                    spec.get_bundle_root(),
+                )
+            ),
+            config,
+            poll_interval,
+        ),
         daemon=False,
     )
     process.start()

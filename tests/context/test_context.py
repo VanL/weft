@@ -20,6 +20,32 @@ from weft.context import build_context  # noqa: E402
 pytestmark = [pytest.mark.shared]
 
 
+def _write_broker_project_config(
+    root: Path,
+    *,
+    backend: str,
+    target: str,
+    schema: str | None = None,
+) -> Path:
+    lines = [
+        "version = 1",
+        f'backend = "{backend}"',
+        f'target = "{target}"',
+        "",
+    ]
+    if schema is not None:
+        lines.extend(
+            [
+                "[backend_options]",
+                f'schema = "{schema}"',
+                "",
+            ]
+        )
+    config_path = root / ".broker.toml"
+    config_path.write_text("\n".join(lines), encoding="utf-8")
+    return config_path
+
+
 def test_build_context_creates_structure(tmp_path: Path) -> None:
     """Building a context for a fresh directory materializes all assets."""
     root = prepare_project_root(tmp_path)
@@ -65,6 +91,35 @@ def test_build_context_discovers_existing_project(tmp_path: Path) -> None:
         os.chdir(original_cwd)
 
     assert discovered_ctx.root == root_ctx.root
+    assert discovered_ctx.database_path == root_ctx.database_path
+    assert discovered_ctx.broker_target.target == root_ctx.broker_target.target
+    assert discovered_ctx.discovered is True
+
+
+def test_build_context_discovery_prefers_existing_sqlite_project_over_env_backend(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Nested discovery should keep using the local sqlite project before env backends."""
+
+    root = (tmp_path / "existing-project").resolve()
+    root.mkdir(parents=True)
+    root_ctx = build_context(spec_context=root)
+    nested_dir = root / "nested" / "child"
+    nested_dir.mkdir(parents=True)
+    monkeypatch.setenv("WEFT_BACKEND", "postgres")
+    monkeypatch.setenv("WEFT_BACKEND_TARGET", "postgresql://env-user@env-host/env-db")
+    monkeypatch.setenv("WEFT_BACKEND_SCHEMA", "env_schema")
+
+    original_cwd = Path.cwd()
+    try:
+        os.chdir(nested_dir)
+        discovered_ctx = build_context(create_database=False)
+    finally:
+        os.chdir(original_cwd)
+
+    assert discovered_ctx.root == root.resolve()
+    assert discovered_ctx.backend_name == "sqlite"
     assert discovered_ctx.database_path == root_ctx.database_path
     assert discovered_ctx.broker_target.target == root_ctx.broker_target.target
     assert discovered_ctx.discovered is True
@@ -128,3 +183,83 @@ def test_build_context_reports_weft_pg_install_hint_for_missing_plugin(
 
     with pytest.raises(RuntimeError, match=r"uv add 'weft\[pg\]'"):
         build_context(spec_context=tmp_path)
+
+
+def test_build_context_uses_project_sqlite_target_when_broker_file_exists(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path / "sqlite-project")
+    _write_broker_project_config(
+        root,
+        backend="sqlite",
+        target=".custom/from-project.db",
+    )
+    monkeypatch.setenv("WEFT_DEFAULT_DB_NAME", ".env/from-env.db")
+
+    ctx = build_context(spec_context=root, create_database=False)
+
+    assert ctx.backend_name == "sqlite"
+    assert ctx.database_path == (root / ".custom" / "from-project.db").resolve()
+
+
+def test_build_context_uses_project_postgres_target_when_broker_file_exists(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path / "postgres-project")
+    _write_broker_project_config(
+        root,
+        backend="postgres",
+        target="postgresql://toml-user@toml-host/toml-db",
+        schema="toml_schema",
+    )
+    monkeypatch.setenv("WEFT_BACKEND", "postgres")
+    monkeypatch.setenv("WEFT_BACKEND_TARGET", "postgresql://env-user@env-host/env-db")
+    monkeypatch.setenv("WEFT_BACKEND_SCHEMA", "env_schema")
+    monkeypatch.setenv(
+        "BROKER_BACKEND_TARGET",
+        "postgresql://raw-user@raw-host/raw-db",
+    )
+    monkeypatch.setenv("BROKER_BACKEND_SCHEMA", "raw_schema")
+
+    ctx = build_context(spec_context=root, create_database=False)
+
+    assert ctx.backend_name == "postgres"
+    assert ctx.broker_target.target == "postgresql://toml-user@toml-host/toml-db"
+    assert ctx.broker_target.backend_options == {"schema": "toml_schema"}
+
+
+def test_build_context_discovery_uses_project_postgres_target_when_broker_file_exists(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path / "discovered-postgres")
+    _write_broker_project_config(
+        root,
+        backend="postgres",
+        target="postgresql://toml-user@toml-host/toml-db",
+        schema="toml_schema",
+    )
+    nested_dir = root / "a" / "b"
+    nested_dir.mkdir(parents=True)
+    monkeypatch.setenv("WEFT_BACKEND", "postgres")
+    monkeypatch.setenv("WEFT_BACKEND_TARGET", "postgresql://env-user@env-host/env-db")
+    monkeypatch.setenv("WEFT_BACKEND_SCHEMA", "env_schema")
+    monkeypatch.setenv(
+        "BROKER_BACKEND_TARGET",
+        "postgresql://raw-user@raw-host/raw-db",
+    )
+    monkeypatch.setenv("BROKER_BACKEND_SCHEMA", "raw_schema")
+
+    original_cwd = Path.cwd()
+    try:
+        os.chdir(nested_dir)
+        ctx = build_context(create_database=False)
+    finally:
+        os.chdir(original_cwd)
+
+    assert ctx.root == root.resolve()
+    assert ctx.backend_name == "postgres"
+    assert ctx.broker_target.target == "postgresql://toml-user@toml-host/toml-db"
+    assert ctx.broker_target.backend_options == {"schema": "toml_schema"}

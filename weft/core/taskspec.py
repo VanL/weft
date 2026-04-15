@@ -12,12 +12,14 @@ import json as json_module
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import ExitStack, contextmanager
 from enum import StrEnum
-from typing import Any, Literal, NoReturn, Self, SupportsIndex
+from pathlib import Path
+from typing import Any, Final, Literal, NoReturn, Self, SupportsIndex
 
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    PrivateAttr,
     ValidationError,
     ValidationInfo,
     field_validator,
@@ -50,6 +52,14 @@ from weft._constants import (
     TASKSPEC_TID_LENGTH,
     TASKSPEC_VERSION,
 )
+from weft.core.spec_parameterization import validate_parameterization_adapter_ref
+from weft.core.spec_run_input import (
+    RUN_COMMAND_RESERVED_OPTION_NAMES,
+    normalize_declared_option_name,
+    validate_run_input_adapter_ref,
+)
+
+TASKSPEC_BUNDLE_ROOT_FIELD: Final[str] = "_weft_bundle_root"
 
 
 class FrozenList(list):
@@ -276,6 +286,38 @@ def resolve_taskspec_payload(
     return candidate
 
 
+def normalize_taskspec_bundle_root(value: object) -> str | None:
+    """Normalize an internal bundle-root value when present."""
+    if value is None:
+        return None
+    if isinstance(value, Path):
+        return str(value.resolve())
+    if not isinstance(value, str):
+        raise TypeError(
+            f"{TASKSPEC_BUNDLE_ROOT_FIELD} must be a string path when present"
+        )
+    cleaned = value.strip()
+    if not cleaned:
+        raise ValueError(f"{TASKSPEC_BUNDLE_ROOT_FIELD} must not be empty")
+    return str(Path(cleaned).expanduser().resolve())
+
+
+def bundle_root_from_taskspec_payload(payload: Mapping[str, Any]) -> str | None:
+    """Return the internal bundle root recorded on a TaskSpec payload."""
+    return normalize_taskspec_bundle_root(payload.get(TASKSPEC_BUNDLE_ROOT_FIELD))
+
+
+def apply_bundle_root_to_taskspec_payload(
+    payload: dict[str, Any],
+    bundle_root: str | Path | None,
+) -> dict[str, Any]:
+    """Attach an internal bundle root to a TaskSpec payload when present."""
+    normalized = normalize_taskspec_bundle_root(bundle_root)
+    if normalized is not None:
+        payload[TASKSPEC_BUNDLE_ROOT_FIELD] = normalized
+    return payload
+
+
 class ReservedPolicy(StrEnum):
     """Reserved queue policy options (Spec: [TS-1.1])."""
 
@@ -333,6 +375,7 @@ class RunnerSection(BaseModel):
 
     name: str = Field("host", min_length=1)
     options: dict[str, Any] = Field(default_factory=dict)
+    environment_profile_ref: str | None = None
 
     @field_validator("name")
     @classmethod
@@ -350,6 +393,18 @@ class RunnerSection(BaseModel):
         except (TypeError, ValueError) as exc:
             raise ValueError("runner.options must be JSON-serializable") from exc
         return value
+
+    @field_validator("environment_profile_ref")
+    @classmethod
+    def validate_environment_profile_ref(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError(
+                "runner.environment_profile_ref must be a non-empty string"
+            )
+        return normalized
 
     def model_post_init(self, __context: Any) -> None:
         super().model_post_init(__context)
@@ -380,6 +435,303 @@ class RunnerSection(BaseModel):
     def _freeze(self) -> None:
         """Mark this instance as frozen."""
         object.__setattr__(self, "options", _freeze_container_value(self.options))
+        object.__setattr__(self, "_frozen", True)
+        object.__setattr__(self, "_allow_mutation", False)
+
+
+class RunInputArgumentSection(BaseModel):
+    """Declared CLI argument accepted by ``weft run --spec``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["string", "path"] = "string"
+    required: bool = False
+    help: str | None = None
+
+    @field_validator("help")
+    @classmethod
+    def validate_help(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            return None
+        return normalized
+
+    def model_post_init(self, __context: Any) -> None:
+        super().model_post_init(__context)
+        object.__setattr__(self, "_allow_mutation", False)
+
+    @contextmanager
+    def _mutations_allowed(self) -> Iterator[None]:
+        object.__setattr__(self, "_allow_mutation", True)
+        try:
+            yield
+        finally:
+            object.__setattr__(self, "_allow_mutation", False)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name.startswith("_"):
+            super().__setattr__(name, value)
+            return
+        if getattr(self, "_frozen", False) and not getattr(
+            self, "_allow_mutation", False
+        ):
+            raise AttributeError(
+                f"Cannot modify field '{name}' on frozen RunInputArgumentSection. "
+                "RunInputArgumentSection is immutable after TaskSpec creation."
+            )
+        super().__setattr__(name, value)
+
+    def _freeze(self) -> None:
+        object.__setattr__(self, "_frozen", True)
+        object.__setattr__(self, "_allow_mutation", False)
+
+
+class ParameterizationArgumentSection(RunInputArgumentSection):
+    """Declared CLI argument accepted by ``spec.parameterization``."""
+
+    default: str | None = None
+    choices: tuple[str, ...] = Field(default_factory=tuple)
+
+    @field_validator("default")
+    @classmethod
+    def validate_default(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("default must be a non-empty string when provided")
+        return normalized
+
+    @field_validator("choices")
+    @classmethod
+    def validate_choices(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for item in value:
+            candidate = item.strip()
+            if not candidate:
+                raise ValueError("choices entries must be non-empty strings")
+            if candidate in seen:
+                raise ValueError("choices entries must not contain duplicates")
+            seen.add(candidate)
+            normalized.append(candidate)
+        return tuple(normalized)
+
+    @model_validator(mode="after")
+    def validate_default_with_choices(self) -> ParameterizationArgumentSection:
+        if (
+            self.default is not None
+            and self.choices
+            and self.default not in self.choices
+        ):
+            raise ValueError("default must be one of the declared choices")
+        return self
+
+
+class RunInputStdinSection(BaseModel):
+    """Declared stdin contract for ``weft run --spec``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["text"] = "text"
+    required: bool = False
+    help: str | None = None
+
+    @field_validator("help")
+    @classmethod
+    def validate_help(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            return None
+        return normalized
+
+    def model_post_init(self, __context: Any) -> None:
+        super().model_post_init(__context)
+        object.__setattr__(self, "_allow_mutation", False)
+
+    @contextmanager
+    def _mutations_allowed(self) -> Iterator[None]:
+        object.__setattr__(self, "_allow_mutation", True)
+        try:
+            yield
+        finally:
+            object.__setattr__(self, "_allow_mutation", False)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name.startswith("_"):
+            super().__setattr__(name, value)
+            return
+        if getattr(self, "_frozen", False) and not getattr(
+            self, "_allow_mutation", False
+        ):
+            raise AttributeError(
+                f"Cannot modify field '{name}' on frozen RunInputStdinSection. "
+                "RunInputStdinSection is immutable after TaskSpec creation."
+            )
+        super().__setattr__(name, value)
+
+    def _freeze(self) -> None:
+        object.__setattr__(self, "_frozen", True)
+        object.__setattr__(self, "_allow_mutation", False)
+
+
+def _validate_declared_argument_names(
+    arguments: Mapping[str, Any],
+    *,
+    section_name: str,
+) -> dict[str, str]:
+    seen_options: dict[str, str] = {}
+    for name in arguments:
+        if not name.isidentifier():
+            raise ValueError(f"{section_name}.arguments keys must be valid identifiers")
+        option_name = normalize_declared_option_name(name)
+        if (
+            option_name.startswith("-")
+            or option_name.endswith("-")
+            or "--" in option_name
+        ):
+            raise ValueError(
+                f"{section_name} argument names must normalize cleanly to "
+                "long option names"
+            )
+        if option_name in RUN_COMMAND_RESERVED_OPTION_NAMES:
+            raise ValueError(
+                f"{section_name} argument '{name}' collides with reserved "
+                f"`weft run` option '--{option_name}'"
+            )
+        previous = seen_options.get(option_name)
+        if previous is not None:
+            raise ValueError(
+                f"{section_name} argument names collide after '_' to '-' "
+                f"normalization: '{previous}' and '{name}'"
+            )
+        seen_options[option_name] = name
+    return seen_options
+
+
+class RunInputSection(BaseModel):
+    """Submission-time input shaping for ``weft run --spec``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    adapter_ref: str
+    arguments: dict[str, RunInputArgumentSection] = Field(default_factory=dict)
+    stdin: RunInputStdinSection | None = None
+
+    @field_validator("adapter_ref")
+    @classmethod
+    def validate_adapter_ref(cls, value: str) -> str:
+        return validate_run_input_adapter_ref(value)
+
+    @model_validator(mode="after")
+    def validate_argument_names(self) -> RunInputSection:
+        _validate_declared_argument_names(
+            self.arguments,
+            section_name="spec.run_input",
+        )
+        return self
+
+    def model_post_init(self, __context: Any) -> None:
+        super().model_post_init(__context)
+        object.__setattr__(self, "_allow_mutation", False)
+
+    @contextmanager
+    def _mutations_allowed(self) -> Iterator[None]:
+        object.__setattr__(self, "_allow_mutation", True)
+        try:
+            with ExitStack() as stack:
+                for argument in self.arguments.values():
+                    if hasattr(argument, "_mutations_allowed"):
+                        stack.enter_context(argument._mutations_allowed())
+                if self.stdin is not None and hasattr(self.stdin, "_mutations_allowed"):
+                    stack.enter_context(self.stdin._mutations_allowed())
+                yield
+        finally:
+            object.__setattr__(self, "_allow_mutation", False)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name.startswith("_"):
+            super().__setattr__(name, value)
+            return
+        if getattr(self, "_frozen", False) and not getattr(
+            self, "_allow_mutation", False
+        ):
+            raise AttributeError(
+                f"Cannot modify field '{name}' on frozen RunInputSection. "
+                "RunInputSection is immutable after TaskSpec creation."
+            )
+        super().__setattr__(name, value)
+
+    def _freeze(self) -> None:
+        for argument in self.arguments.values():
+            if hasattr(argument, "_freeze"):
+                argument._freeze()
+        if self.stdin is not None and hasattr(self.stdin, "_freeze"):
+            self.stdin._freeze()
+        object.__setattr__(self, "arguments", _freeze_container_value(self.arguments))
+        object.__setattr__(self, "_frozen", True)
+        object.__setattr__(self, "_allow_mutation", False)
+
+
+class ParameterizationSection(BaseModel):
+    """Submission-time TaskSpec materialization for ``weft run --spec``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    adapter_ref: str
+    arguments: dict[str, ParameterizationArgumentSection] = Field(default_factory=dict)
+
+    @field_validator("adapter_ref")
+    @classmethod
+    def validate_adapter_ref(cls, value: str) -> str:
+        return validate_parameterization_adapter_ref(value)
+
+    @model_validator(mode="after")
+    def validate_argument_names(self) -> ParameterizationSection:
+        _validate_declared_argument_names(
+            self.arguments,
+            section_name="spec.parameterization",
+        )
+        return self
+
+    def model_post_init(self, __context: Any) -> None:
+        super().model_post_init(__context)
+        object.__setattr__(self, "_allow_mutation", False)
+
+    @contextmanager
+    def _mutations_allowed(self) -> Iterator[None]:
+        object.__setattr__(self, "_allow_mutation", True)
+        try:
+            with ExitStack() as stack:
+                for argument in self.arguments.values():
+                    if hasattr(argument, "_mutations_allowed"):
+                        stack.enter_context(argument._mutations_allowed())
+                yield
+        finally:
+            object.__setattr__(self, "_allow_mutation", False)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name.startswith("_"):
+            super().__setattr__(name, value)
+            return
+        if getattr(self, "_frozen", False) and not getattr(
+            self, "_allow_mutation", False
+        ):
+            raise AttributeError(
+                f"Cannot modify field '{name}' on frozen ParameterizationSection. "
+                "ParameterizationSection is immutable after TaskSpec creation."
+            )
+        super().__setattr__(name, value)
+
+    def _freeze(self) -> None:
+        for argument in self.arguments.values():
+            if hasattr(argument, "_freeze"):
+                argument._freeze()
+        object.__setattr__(self, "arguments", _freeze_container_value(self.arguments))
         object.__setattr__(self, "_frozen", True)
         object.__setattr__(self, "_allow_mutation", False)
 
@@ -481,6 +833,7 @@ class AgentSection(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     runtime: str = Field(..., min_length=1)
+    authority_class: Literal["bounded", "general"] | None = None
     model: str | None = None
     instructions: str | None = None
     templates: dict[str, AgentTemplateSection] = Field(default_factory=dict)
@@ -493,11 +846,49 @@ class AgentSection(BaseModel):
     runtime_config: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
-    def validate_output_schema(self) -> AgentSection:
-        """Ensure output schema is only set for JSON output (Spec: [AR-2.2])."""
+    def validate_runtime_constraints(self) -> AgentSection:
+        """Validate runtime-specific schema constraints (Spec: [AR-2.2])."""
         if self.output_schema is not None and self.output_mode != "json":
             raise ValueError("output_schema is only allowed when output_mode is 'json'")
+        if self.runtime == "llm" and self.authority_class == "general":
+            raise ValueError("llm only supports authority_class='bounded'")
+        if self.runtime == "provider_cli":
+            provider = self.runtime_config.get("provider")
+            if not isinstance(provider, str) or not provider.strip():
+                raise ValueError(
+                    "provider_cli requires spec.agent.runtime_config.provider"
+                )
+            for key in ("executable", "resolver_ref", "tool_profile_ref"):
+                value = self.runtime_config.get(key)
+                if value is not None and (
+                    not isinstance(value, str) or not value.strip()
+                ):
+                    raise ValueError(
+                        f"spec.agent.runtime_config.{key} must be a non-empty string"
+                    )
+            if self.output_mode != "text":
+                raise ValueError("provider_cli only supports output_mode='text'")
+            if self.output_schema is not None:
+                raise ValueError("provider_cli does not support output_schema")
+            if self.conversation_scope not in {"per_message", "per_task"}:
+                raise ValueError(
+                    "provider_cli only supports conversation_scope values "
+                    "'per_message' and 'per_task'"
+                )
+            if self.tools:
+                raise ValueError(
+                    "provider_cli does not support spec.agent.tools in Phase 2"
+                )
         return self
+
+    @property
+    def resolved_authority_class(self) -> Literal["bounded", "general"]:
+        """Return the effective authority class for this agent runtime."""
+        if self.authority_class is not None:
+            return self.authority_class
+        if self.runtime == "provider_cli":
+            return "general"
+        return "bounded"
 
     def model_post_init(self, __context: Any) -> None:
         super().model_post_init(__context)
@@ -562,6 +953,8 @@ class SpecSection(BaseModel):
     # Spec: process_target is a single executable path; args are appended. [TS-1]
     process_target: str | None = Field(default=None, min_length=1)
     agent: AgentSection | None = None
+    parameterization: ParameterizationSection | None = None
+    run_input: RunInputSection | None = None
     args: list[Any] = Field(default_factory=list)
     keyword_args: dict[str, Any] = Field(default_factory=dict)
     timeout: float | None = None
@@ -626,6 +1019,38 @@ class SpecSection(BaseModel):
             raise ValueError(
                 "conversation_scope='per_task' requires spec.persistent=true"
             )
+        if (
+            self.type == "agent"
+            and self.agent is not None
+            and self.agent.runtime == "provider_cli"
+            and self.persistent
+            and self.agent.conversation_scope != "per_task"
+        ):
+            raise ValueError(
+                "provider_cli persistent tasks require conversation_scope='per_task'"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def validate_declared_option_collisions(self) -> SpecSection:
+        if self.parameterization is None or self.run_input is None:
+            return self
+        parameterization_names = _validate_declared_argument_names(
+            self.parameterization.arguments,
+            section_name="spec.parameterization",
+        )
+        run_input_names = _validate_declared_argument_names(
+            self.run_input.arguments,
+            section_name="spec.run_input",
+        )
+        for option_name, parameter_name in parameterization_names.items():
+            run_input_name = run_input_names.get(option_name)
+            if run_input_name is not None:
+                raise ValueError(
+                    "spec.parameterization and spec.run_input argument names "
+                    "collide after '_' to '-' normalization: "
+                    f"'{parameter_name}' and '{run_input_name}'"
+                )
         return self
 
     @field_validator("process_target")
@@ -658,6 +1083,14 @@ class SpecSection(BaseModel):
                     stack.enter_context(self.runner._mutations_allowed())
                 if self.agent is not None and hasattr(self.agent, "_mutations_allowed"):
                     stack.enter_context(self.agent._mutations_allowed())
+                if self.parameterization is not None and hasattr(
+                    self.parameterization, "_mutations_allowed"
+                ):
+                    stack.enter_context(self.parameterization._mutations_allowed())
+                if self.run_input is not None and hasattr(
+                    self.run_input, "_mutations_allowed"
+                ):
+                    stack.enter_context(self.run_input._mutations_allowed())
                 yield
         finally:
             object.__setattr__(self, "_allow_mutation", False)
@@ -684,6 +1117,12 @@ class SpecSection(BaseModel):
             self.runner._freeze()
         if self.agent is not None and hasattr(self.agent, "_freeze"):
             self.agent._freeze()
+        if self.parameterization is not None and hasattr(
+            self.parameterization, "_freeze"
+        ):
+            self.parameterization._freeze()
+        if self.run_input is not None and hasattr(self.run_input, "_freeze"):
+            self.run_input._freeze()
         object.__setattr__(self, "args", _freeze_container_value(self.args))
         object.__setattr__(
             self,
@@ -878,6 +1317,7 @@ class TaskSpec(BaseModel):
     metadata: dict[str, Any] = Field(
         default_factory=dict
     )  # REQUIRED per spec, but can be empty
+    _bundle_root: str | None = PrivateAttr(default=None)
 
     @field_validator("tid")
     @classmethod
@@ -965,8 +1405,27 @@ class TaskSpec(BaseModel):
 
         Enforces partial immutability after initialization.
         """
+        self._consume_bundle_root()
         # Enforce partial immutability after initialization
         self._freeze_spec()
+
+    def _consume_bundle_root(self) -> None:
+        extra = getattr(self, "__pydantic_extra__", None)
+        if not isinstance(extra, dict):
+            return
+        if TASKSPEC_BUNDLE_ROOT_FIELD not in extra:
+            return
+        self._bundle_root = normalize_taskspec_bundle_root(
+            extra.pop(TASKSPEC_BUNDLE_ROOT_FIELD)
+        )
+
+    def set_bundle_root(self, bundle_root: str | Path | None) -> None:
+        """Record the bundle root that owns this TaskSpec, if any."""
+        self._bundle_root = normalize_taskspec_bundle_root(bundle_root)
+
+    def get_bundle_root(self) -> str | None:
+        """Return the bundle root that owns this TaskSpec, if any."""
+        return self._bundle_root
 
     def is_template(self) -> bool:
         """Return True if this TaskSpec is a template (tid is unset)."""

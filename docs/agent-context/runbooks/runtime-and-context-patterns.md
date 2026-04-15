@@ -164,3 +164,51 @@ Why:
 - Completion and final outbox persistence can be separated by a small timing
   window.
 - Existing helpers already encode the correct behavior.
+
+## 9. Queue-First Submission Means Post-Enqueue Recovery Is Reconciliation
+
+`weft run` writes the spawn request before it proves manager readiness.
+
+Rules:
+
+- Do not "fix" submission races by moving manager bootstrap ahead of the
+  enqueue step unless the spec changes.
+- Once the spawn request write returns, treat that submitted TID as durable
+  user intent.
+- Post-enqueue failures must reconcile by submitted TID using durable surfaces:
+  task logs, TID mappings, `weft.spawn.requests`, and manager reserved queues.
+- Only requests still provably present in `weft.spawn.requests` are safe to
+  delete as rollback.
+- If the request is already in a manager reserved queue, do not claim cleanup
+  succeeded. That is an operator recovery case.
+
+Why:
+
+- Queue-first ordering is the contract that avoids a different startup race.
+- The public spawn queue is not the sole owner of the message after a manager
+  reserves it.
+
+## 10. Recovering a Stuck Reserved Spawn Request
+
+When submission reconciliation reports that a spawn request is stuck in a
+manager reserved queue, use the existing queue commands and operate on the
+exact message ID only.
+
+Rules:
+
+- Identify the submitted child TID first. That message ID is the spawn-request
+  timestamp and the child task TID.
+- Identify the candidate reserved queue, usually `T{manager_tid}.reserved`.
+- Inspect before mutating:
+  `weft queue peek T{manager_tid}.reserved --timestamps`
+- Delete only the exact message when you have proved it is stale:
+  `weft queue delete T{manager_tid}.reserved --message <tid>`
+- Requeue only after you have first proved the child did not already spawn:
+  `weft queue move T{manager_tid}.reserved weft.spawn.requests --message <tid>`
+- Never bulk-delete or bulk-move a manager reserved queue as a shortcut.
+
+Why:
+
+- The reserved queue may hold a real in-flight submission, not dead garbage.
+- Exact-message recovery preserves the queue-first contract and avoids
+  duplicating or losing unrelated work.

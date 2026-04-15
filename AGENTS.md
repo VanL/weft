@@ -18,6 +18,14 @@
 - Specs live in `docs/specifications/`.
 - Plans live in `docs/plans/` (nowhere else). Filename format:
   `YYYY-MM-DD-<descriptive-name>.md`.
+- Plans are non-normative for product behavior. The current approved plan may
+  still be authoritative for the active slice's scope, sequencing, rollback,
+  and review expectations. Plans may also be exploratory, partially
+  implemented, or superseded. Specs in `docs/specifications/` are the
+  authoritative source of truth for behavior.
+- If a current approved plan includes pending spec updates for the active
+  slice, treat that as temporary in-flight state only. The change is not done
+  until the spec is updated.
 - Durable lessons learned live in `docs/lessons.md`.
 - Documentation maintenance is part of the definition of done for spec-driven
   and risky changes.
@@ -77,7 +85,9 @@ and tested. Avoid "clever" abstractions.
 7. Check `docs/specifications/07-System_Invariants.md` before touching core logic.
 8. Use `README.md` for usage examples and CLI behavior.
 
-**Key principle**: The specs are the source of truth. Code must align to them.
+**Key principle**: The specs are the source of truth for behavior. The current
+plan may define how an approved slice should be executed, but it does not
+override the specs. Code must align to the specs.
 
 ## 2. Architecture
 
@@ -577,7 +587,7 @@ uv sync --all-extras             # Install dev tools into the repo env
 ./.venv/bin/python -m pytest     # Fast tests only
 ./.venv/bin/python -m pytest -m ""  # All tests including slow
 ./.venv/bin/python -m pytest tests/cli/ -v  # Specific directory
-./.venv/bin/mypy weft            # Type check
+./.venv/bin/mypy weft extensions/weft_docker extensions/weft_macos_sandbox  # Type check
 ./.venv/bin/ruff check weft      # Lint
 ```
 
@@ -681,7 +691,7 @@ weft task list --json | jq '.[] | select(.status=="completed")'
 
 **Before claiming "done"**:
 - [ ] Tests pass (`uv run pytest`)
-- [ ] Type check passes (`uv run mypy weft`)
+- [ ] Type check passes (`uv run mypy weft extensions/weft_docker extensions/weft_macos_sandbox`)
 - [ ] Lint passes (`uv run ruff check weft`)
 - [ ] Changes are minimal (no drive-by refactoring)
 

@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PYTHON_BIN="$ROOT/.venv/bin/python"
+CONFIG_FILE="$ROOT/pyproject.toml"
+
+if [[ ! -x "$PYTHON_BIN" ]]; then
+  echo "expected repo virtualenv at $PYTHON_BIN; run 'uv sync --all-extras' first" >&2
+  exit 1
+fi
+
+exec "$PYTHON_BIN" -m mypy \
+  --config-file="$CONFIG_FILE" \
+  "$ROOT/weft" \
+  "$ROOT/extensions/weft_docker" \
+  "$ROOT/extensions/weft_macos_sandbox"

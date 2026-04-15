@@ -17,8 +17,10 @@ Key behaviours
   the context and reused when constructing `simplebroker.Queue` instances.
 * **Broker resolution** – When a task or CLI command does not specify
   `weft_context`, we consult SimpleBroker's public project-scoping API to
-  locate an existing broker target. If nothing is found we fall back to the
-  current working directory and initialize a fresh default target there.
+  locate an existing broker target. Auto-discovery inherits SimpleBroker's
+  ordering: upward `.broker.toml`, then upward legacy sqlite discovery, then
+  env-selected non-sqlite backend synthesis. If nothing is found we fall back
+  to the current working directory and initialize a fresh default target there.
 * **Explicit overrides** – If `weft_context` *is* provided we treat it as the
   authoritative project root, expand the path, and ask SimpleBroker for the
   default target rooted at that directory.
@@ -49,7 +51,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -75,13 +77,14 @@ POSTGRES_BACKEND_INSTALL_HINT = (
     "Requested backend 'postgres' is not available. "
     "Install with `uv add 'weft[pg]'` or install `simplebroker-pg` directly."
 )
-
 __all__ = [
     "POSTGRES_BACKEND_INSTALL_HINT",
     "WeftContext",
     "build_context",
+    "find_existing_weft_dir",
     "get_context",
     "normalize_backend_resolution_error",
+    "resolve_context_broker_target",
 ]
 
 
@@ -245,6 +248,48 @@ def get_context(spec_context: str | os.PathLike[str] | None = None) -> WeftConte
     return build_context(spec_context=spec_context)
 
 
+def resolve_context_broker_target(
+    root: str | os.PathLike[str],
+    *,
+    config: Mapping[str, Any],
+) -> BrokerTarget:
+    """Resolve the broker target for an explicit project root.
+
+    This delegates directly to SimpleBroker's explicit-root helper, which
+    applies the authoritative project-config resolution contract for
+    `.broker.toml`, env-selected backends, and SQLite fallback.
+    """
+
+    resolved_root = Path(root).expanduser().resolve()
+    return target_for_directory(resolved_root, config=dict(config))
+
+
+def find_existing_weft_dir(
+    spec_context: str | os.PathLike[str] | None = None,
+) -> Path | None:
+    """Return the nearest existing `.weft` directory without materializing state.
+
+    Args:
+        spec_context: Optional directory override to search from. When omitted,
+            the current working directory is used.
+
+    Returns:
+        Path to the nearest existing `.weft` directory, or ``None`` when the
+        search root is not inside an initialized Weft project.
+
+    Spec: [SB-0]
+    """
+    start = Path(spec_context) if spec_context is not None else Path.cwd()
+    current = start.expanduser().resolve(strict=False)
+    if current.is_file():
+        current = current.parent
+    for candidate in (current, *current.parents):
+        weft_dir = candidate / ".weft"
+        if weft_dir.is_dir():
+            return weft_dir
+    return None
+
+
 def normalize_backend_resolution_error(exc: Exception) -> Exception:
     """Rewrite backend-plugin resolution failures into user-facing Weft guidance."""
 
@@ -270,7 +315,7 @@ def _resolve_root_and_target(
     if spec_context is not None:
         root = Path(spec_context).expanduser().resolve()
         try:
-            return root, target_for_directory(root, config=config), False
+            return root, resolve_context_broker_target(root, config=config), False
         except RuntimeError as exc:
             raise normalize_backend_resolution_error(exc) from exc
 
@@ -285,7 +330,7 @@ def _resolve_root_and_target(
 
     root = start_dir
     try:
-        return root, target_for_directory(root, config=config), False
+        return root, resolve_context_broker_target(root, config=config), False
     except RuntimeError as exc:
         raise normalize_backend_resolution_error(exc) from exc
 

@@ -14,7 +14,12 @@ from typing import Any
 
 from simplebroker import BrokerTarget, Queue
 from weft._constants import WEFT_SPAWN_REQUESTS_QUEUE, WORK_ENVELOPE_START
-from weft.core.taskspec import TaskSpec, resolve_taskspec_payload
+from weft.core.taskspec import (
+    TaskSpec,
+    apply_bundle_root_to_taskspec_payload,
+    bundle_root_from_taskspec_payload,
+    resolve_taskspec_payload,
+)
 
 
 def _normalize_broker_target(target: BrokerTarget | str | Path) -> BrokerTarget | str:
@@ -34,6 +39,12 @@ def _taskspec_payload_for_spawn(
         if isinstance(taskspec, TaskSpec)
         else dict(taskspec)
     )
+    bundle_root = (
+        taskspec.get_bundle_root()
+        if isinstance(taskspec, TaskSpec)
+        else bundle_root_from_taskspec_payload(payload)
+    )
+    apply_bundle_root_to_taskspec_payload(payload, bundle_root)
     return resolve_taskspec_payload(
         payload,
         tid=tid,
@@ -131,7 +142,7 @@ def delete_spawn_request(
     *,
     message_timestamp: int,
     config: Mapping[str, Any] | None = None,
-) -> None:
+) -> bool:
     """Best-effort removal of a queued spawn request after setup failure."""
 
     queue_config = dict(config) if config is not None else None
@@ -142,8 +153,8 @@ def delete_spawn_request(
         config=queue_config,
     )
     try:
-        queue.delete(message_id=message_timestamp)
+        return bool(queue.delete(message_id=message_timestamp))
     except Exception:
-        pass
+        return False
     finally:
         queue.close()

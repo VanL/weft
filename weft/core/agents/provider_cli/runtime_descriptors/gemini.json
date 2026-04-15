@@ -1,0 +1,46 @@
+{
+  "version": "v2",
+  "provider": "gemini",
+  "env": [
+    {
+      "name": "GEMINI_API_KEY",
+      "source_kind": "host_env",
+      "required": false
+    }
+  ],
+  "runtime_mounts": [],
+  "runtime_home": {
+    "target": "/tmp/weft-provider-home",
+    "env_names": [
+      "HOME",
+      "USERPROFILE"
+    ]
+  },
+  "copied_files": [
+    {
+      "name": "google_accounts",
+      "source_kind": "home_file",
+      "source_path": ".gemini/google_accounts.json",
+      "target_path": ".gemini/google_accounts.json",
+      "required": false
+    },
+    {
+      "name": "installation_id",
+      "source_kind": "home_file",
+      "source_path": ".gemini/installation_id",
+      "target_path": ".gemini/installation_id",
+      "required": false
+    },
+    {
+      "name": "state",
+      "source_kind": "home_file",
+      "source_path": ".gemini/state.json",
+      "target_path": ".gemini/state.json",
+      "required": false
+    }
+  ],
+  "runtime_dirs": [
+    ".gemini/history",
+    ".gemini/tmp"
+  ]
+}

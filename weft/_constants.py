@@ -24,6 +24,7 @@ Usage:
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from typing import Any, Final, Literal
 
 from simplebroker import resolve_config as resolve_broker_config
@@ -32,7 +33,7 @@ from simplebroker import resolve_config as resolve_broker_config
 # VERSION INFORMATION
 # ==============================================================================
 
-__version__: Final[str] = "0.8.0"
+__version__: Final[str] = "0.9.0"
 """Current version of Weft."""
 
 # ==============================================================================
@@ -104,6 +105,12 @@ DEFAULT_OUTPUT_SIZE_LIMIT_MB: Final[int] = 10
 
 DEFAULT_WEFT_CONTEXT: Final[str | None] = None
 """Default weft context directory. None means auto-discovery."""
+
+PROVIDER_CLI_VERSION_PROBE_TIMEOUT_SECONDS: Final[float] = 5.0
+"""Timeout for basic provider CLI version probes."""
+
+PROVIDER_CLI_OPENCODE_RUN_PROBE_TIMEOUT_SECONDS: Final[float] = 2.0
+"""Timeout for probing OpenCode non-interactive `run` support."""
 
 # Limits Section Defaults (moved from individual fields)
 # -------------------------------------------------------
@@ -282,6 +289,15 @@ WEFT_AUTOSTART_DIRECTORY_NAME: Final[str] = "autostart"
 WEFT_AUTOSTART_TASKS_DEFAULT: Final[bool] = True
 """Default for enabling auto-start TaskSpec templates when a Manager boots."""
 
+WEFT_AGENT_SETTINGS_FILENAME: Final[str] = "agents.json"
+"""Project-local delegated-agent launch settings stored under `.weft/`."""
+
+WEFT_AGENT_HEALTH_FILENAME: Final[str] = "agent-health.json"
+"""Best-effort delegated-agent health observations stored under `.weft/`."""
+
+BROKER_PROJECT_CONFIG_FILENAME: Final[str] = ".broker.toml"
+"""Project-scoped broker configuration filename."""
+
 
 # ==============================================================================
 # SIMPLEBROKER INTEGRATION MAPPINGS
@@ -360,7 +376,9 @@ def _resolve_weft_broker_config(config: dict[str, Any]) -> dict[str, Any]:
     _apply_weft_simplebroker_defaults(broker_overrides)
     broker_overrides["BROKER_DEBUG"] = config["WEFT_DEBUG"]
     broker_overrides["BROKER_LOGGING_ENABLED"] = config["WEFT_LOGGING_ENABLED"]
-    return resolve_broker_config(broker_overrides)
+    resolved = resolve_broker_config(broker_overrides)
+    _validate_postgres_backend_env_shape(resolved)
+    return resolved
 
 
 def _parse_bool(value: str | None) -> bool:
@@ -381,46 +399,122 @@ def _parse_bool(value: str | None) -> bool:
     return value.upper() not in false_values
 
 
+def _parse_logging_enabled(value: str) -> bool:
+    """Parse logging enablement with the existing strict compatibility rule."""
+
+    return value == "1"
+
+
+def _parse_non_negative_float(value: str, *, name: str) -> float:
+    """Parse a non-negative float environment value."""
+
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a non-negative float, got {value!r}") from exc
+
+    if parsed < 0:
+        raise ValueError(f"{name} must be a non-negative float, got {value!r}")
+
+    return parsed
+
+
+def _parse_manager_lifetime_timeout(value: str) -> float:
+    """Parse the manager idle timeout environment variable."""
+
+    return _parse_non_negative_float(value, name="WEFT_MANAGER_LIFETIME_TIMEOUT")
+
+
+def _load_weft_env_value(
+    name: str,
+    *,
+    default: Any,
+    parser: Callable[[str], Any],
+) -> Any:
+    """Load and normalize one Weft-owned environment value."""
+
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return default
+    return parser(raw_value)
+
+
+def _env_has_non_empty_value(*keys: str) -> bool:
+    """Return whether any named environment variable is set to a non-empty value."""
+
+    for key in keys:
+        value = os.environ.get(key)
+        if value is not None and value.strip():
+            return True
+    return False
+
+
+def _validate_postgres_backend_env_shape(config: dict[str, Any]) -> None:
+    """Reject ambiguous Postgres env configuration shapes."""
+
+    backend_name = str(config.get("BROKER_BACKEND", "sqlite")).strip().lower()
+    if backend_name != "postgres":
+        return
+
+    if not _env_has_non_empty_value("WEFT_BACKEND_TARGET", "BROKER_BACKEND_TARGET"):
+        return
+
+    conflicting_parts: list[str] = []
+    if _env_has_non_empty_value("WEFT_BACKEND_HOST", "BROKER_BACKEND_HOST"):
+        conflicting_parts.append("host")
+    if _env_has_non_empty_value("WEFT_BACKEND_PORT", "BROKER_BACKEND_PORT"):
+        conflicting_parts.append("port")
+    if _env_has_non_empty_value("WEFT_BACKEND_USER", "BROKER_BACKEND_USER"):
+        conflicting_parts.append("user")
+    if _env_has_non_empty_value("WEFT_BACKEND_DATABASE", "BROKER_BACKEND_DATABASE"):
+        conflicting_parts.append("database")
+
+    if conflicting_parts:
+        parts = ", ".join(conflicting_parts)
+        raise ValueError(
+            "Postgres backend configuration is ambiguous: set "
+            "WEFT/BROKER_BACKEND_TARGET or WEFT/BROKER_BACKEND_HOST/PORT/USER/"
+            f"DATABASE, not both (conflicting parts: {parts})"
+        )
+
+
 def _load_weft_env_vars() -> dict[str, Any]:
     """Load weft-specific configuration from environment variables.
 
     Returns:
         Dict with WEFT_* configuration values
     """
-    timeout_value = WEFT_MANAGER_LIFETIME_TIMEOUT
-    raw_timeout = os.environ.get("WEFT_MANAGER_LIFETIME_TIMEOUT")
-    if raw_timeout is not None:
-        try:
-            parsed = float(raw_timeout)
-            if parsed >= 0:
-                timeout_value = parsed
-        except ValueError:
-            timeout_value = WEFT_MANAGER_LIFETIME_TIMEOUT
-
-    reuse_value = os.environ.get("WEFT_MANAGER_REUSE_ENABLED")
-    if reuse_value is None:
-        reuse_enabled = WEFT_MANAGER_REUSE_ENABLED
-    else:
-        reuse_enabled = _parse_bool(reuse_value)
-
-    autostart_value = os.environ.get("WEFT_AUTOSTART_TASKS")
-    if autostart_value is None:
-        autostart_enabled = WEFT_AUTOSTART_TASKS_DEFAULT
-    else:
-        autostart_enabled = _parse_bool(autostart_value)
-
     return {
-        # Debug - uses flexible boolean parsing
-        "WEFT_DEBUG": _parse_bool(os.environ.get("WEFT_DEBUG")),
-        # Logging - strict "1" check for backward compatibility
-        "WEFT_LOGGING_ENABLED": os.environ.get("WEFT_LOGGING_ENABLED", "0") == "1",
-        # Comma-separated redaction paths for TaskSpec logging
-        "WEFT_REDACT_TASKSPEC_FIELDS": os.environ.get(
-            "WEFT_REDACT_TASKSPEC_FIELDS", ""
+        "WEFT_DEBUG": _load_weft_env_value(
+            "WEFT_DEBUG",
+            default=False,
+            parser=_parse_bool,
         ),
-        "WEFT_MANAGER_LIFETIME_TIMEOUT": timeout_value,
-        "WEFT_MANAGER_REUSE_ENABLED": reuse_enabled,
-        "WEFT_AUTOSTART_TASKS": autostart_enabled,
+        "WEFT_LOGGING_ENABLED": _load_weft_env_value(
+            "WEFT_LOGGING_ENABLED",
+            default=False,
+            parser=_parse_logging_enabled,
+        ),
+        "WEFT_REDACT_TASKSPEC_FIELDS": _load_weft_env_value(
+            "WEFT_REDACT_TASKSPEC_FIELDS",
+            default="",
+            parser=str,
+        ),
+        "WEFT_MANAGER_LIFETIME_TIMEOUT": _load_weft_env_value(
+            "WEFT_MANAGER_LIFETIME_TIMEOUT",
+            default=WEFT_MANAGER_LIFETIME_TIMEOUT,
+            parser=_parse_manager_lifetime_timeout,
+        ),
+        "WEFT_MANAGER_REUSE_ENABLED": _load_weft_env_value(
+            "WEFT_MANAGER_REUSE_ENABLED",
+            default=WEFT_MANAGER_REUSE_ENABLED,
+            parser=_parse_bool,
+        ),
+        "WEFT_AUTOSTART_TASKS": _load_weft_env_value(
+            "WEFT_AUTOSTART_TASKS",
+            default=WEFT_AUTOSTART_TASKS_DEFAULT,
+            parser=_parse_bool,
+        ),
     }
 
 

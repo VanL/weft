@@ -3,6 +3,14 @@
 ## Core Standards
 
 - Specs are the source of truth for system behavior.
+- Plans are non-normative implementation documents for product behavior. The
+  current approved plan may still be authoritative for execution details of the
+  active slice, such as scope, ordering, rollout, rollback, and review loops.
+  Plans may also be exploratory, partially implemented, or stale, so do not
+  use them to override the specs.
+- If the active slice includes an intended spec change that has not landed yet,
+  the plan may temporarily define that delta. The work is not done until the
+  spec is updated and the normative boundary is restored.
 - Keep changes minimal, local, and aligned to the request.
 - Verify behavior with concrete evidence before declaring completion.
 - Do not silently assume missing context; read the relevant spec, plan, test,
@@ -61,6 +69,8 @@ Specs, plans, and code should form a navigable chain:
 
 Rules:
 
+- Specs stay authoritative for behavior; plans must align to specs, not the
+  other way around.
 - Plans link to the exact spec file(s) and section code(s) they implement, or
   say plainly why no spec exists.
 - When a plan is derived from a spec, add or update a `## Plans` or

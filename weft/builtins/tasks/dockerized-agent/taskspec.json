@@ -1,0 +1,80 @@
+{
+  "name": "dockerized-agent",
+  "description": "Parameterized Docker-backed delegated agent TaskSpec that reads a caller-supplied document and explains it in one sentence.",
+  "spec": {
+    "type": "agent",
+    "persistent": false,
+    "parameterization": {
+      "adapter_ref": "dockerized_agent:dockerized_agent_parameterization",
+      "arguments": {
+        "provider": {
+          "type": "string",
+          "required": false,
+          "default": "codex",
+          "choices": [
+            "claude_code",
+            "codex",
+            "gemini",
+            "opencode",
+            "qwen"
+          ],
+          "help": "Delegated provider CLI to run inside Docker"
+        },
+        "model": {
+          "type": "string",
+          "required": false,
+          "help": "Optional provider-specific model override"
+        }
+      }
+    },
+    "run_input": {
+      "adapter_ref": "dockerized_agent:dockerized_agent_run_input",
+      "arguments": {
+        "prompt": {
+          "type": "string",
+          "required": true,
+          "help": "Instruction to apply to the supplied document"
+        },
+        "document": {
+          "type": "path",
+          "required": false,
+          "help": "Host path to a document file to mount read-only into the container"
+        }
+      },
+      "stdin": {
+        "type": "text",
+        "required": false,
+        "help": "Document text supplied through stdin"
+      }
+    },
+    "agent": {
+      "runtime": "provider_cli",
+      "authority_class": "general",
+      "conversation_scope": "per_message",
+      "output_mode": "text",
+      "templates": {
+        "explain_mounted": {
+          "instructions": "Read the mounted document path provided in the prompt and reply with one sentence explaining what Weft is.",
+          "prompt": "{{ prompt }}\n\nMounted document path: {{ document_target_path }}\nReturn only the answer sentence."
+        },
+        "explain_inline": {
+          "instructions": "Read the provided document text and reply with exactly one sentence explaining what Weft is. Output exactly one sentence and nothing else.",
+          "prompt": "{{ prompt }}\n\nReturn only the answer sentence.\n\nDocument:\n{{ document_text }}"
+        }
+      },
+      "runtime_config": {
+        "provider": "codex",
+        "tool_profile_ref": "dockerized_agent:dockerized_agent_tool_profile"
+      }
+    },
+    "runner": {
+      "name": "docker",
+      "environment_profile_ref": "dockerized_agent:dockerized_agent_environment_profile",
+      "options": {}
+    }
+  },
+  "metadata": {
+    "builtin": true,
+    "category": "agent-runtime"
+  }
+}

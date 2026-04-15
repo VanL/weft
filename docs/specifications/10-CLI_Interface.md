@@ -36,7 +36,10 @@ See also:
 3. **Pipe-friendly IO**: commands should compose with normal shell tools.
 4. **Backend-neutral targeting**: CLI surfaces should speak in terms of project
    context and broker targets, not SQLite-only file assumptions.
-5. **Thin command handlers**: commands should stay close to the runtime and
+5. **Substrate, not orchestration**: the CLI should help operators submit,
+   inspect, control, and explicitly validate tasks without turning `weft run`
+   into a higher-level agent-management surface.
+6. **Thin command handlers**: commands should stay close to the runtime and
    broker semantics they expose.
 
 ## Command Structure [CLI-0.2]
@@ -84,21 +87,24 @@ manager bootstrap in `weft/commands/_manager_bootstrap.py`.
 Current behavior:
 
 1. build a TaskSpec template from the CLI input
-2. validate locally so obvious user errors fail fast
+2. validate the TaskSpec template and CLI-level invariants locally so obvious
+   user errors fail fast
 3. enqueue the request on `weft.spawn.requests`
 4. use the spawn-request message ID as the task TID
-5. optionally wait for completion using task-local queues and task-log events
+5. reconcile post-enqueue startup failures by submitted TID instead of assuming
+   the enqueue can always be rolled back
+6. optionally wait for completion using task-local queues and task-log events
 
 Current execution targets:
 
 - inline command
 - `--function MODULE:FUNC`
-- `--spec FILE`
+- `--spec NAME|PATH`
 - `--pipeline NAME|PATH`
 
 Current options:
 
-- `--spec FILE`
+- `--spec NAME|PATH`
 - `--pipeline NAME|PATH`
 - `--input VALUE`
 - `--function MODULE:FUNC`
@@ -112,21 +118,74 @@ Current options:
 - `--interactive`
 - `--autostart` / `--no-autostart`
 
+Current spec-declared option support:
+
+- when the selected TaskSpec declares `spec.parameterization`, `weft run --spec`
+  also accepts that spec's declared long options such as `--provider VALUE`
+- these declared parameterization options run locally first and materialize a
+  concrete TaskSpec template before queueing
+- when the selected TaskSpec declares `spec.run_input`, `weft run --spec` also
+  accepts the spec's declared long options such as `--prompt VALUE`
+- these declared options are submission-time CLI sugar only; they are resolved
+  locally into the ordinary initial work payload after materialization and
+  before the spawn request is queued
+- declared options are long-option only: `--name value` or `--name=value`
+- declared option names come from identifier keys in the TaskSpec and
+  normalize `_` to `-`
+- declared option names cannot collide with built-in `weft run` option names
+- `spec.parameterization` and `spec.run_input` cannot reuse the same public
+  long option after normalization
+- declared `path` arguments are resolved to absolute paths before the adapter
+  receives them
+- `weft run --spec NAME|PATH --help` loads the selected TaskSpec locally and
+  appends spec-aware help for its declared submission-time options
+- specs without `spec.parameterization` or `spec.run_input` do not accept
+  extra spec-declared options
+
 Current rules:
 
 - `--spec`, `--pipeline`, and `--function` are mutually exclusive
-- `--spec FILE` always means an explicit TaskSpec JSON path
+- `--spec NAME|PATH` is the explicit task-spec resolution surface
 - stored pipeline names are resolved only under `--pipeline`
+- stored task names and builtin task helpers are resolved only under `--spec`
+- when a selected TaskSpec declares `spec.parameterization`, `weft run --spec`
+  materializes a concrete TaskSpec locally before queueing
+- parameterization parsing may apply TaskSpec-declared defaults and preserve
+  later undeclared tokens for the run-input stage
+- when a selected TaskSpec declares `spec.run_input`, `weft run --spec`
+  resolves declared long options and optional stdin through that adapter after
+  materialization and before queueing work
+- when `--help` is requested together with `--spec`, no task is queued; Weft
+  loads the TaskSpec locally and renders its declared submission-time option
+  surface
+- run-input parsing rejects undeclared or repeated spec-owned options
 - inline command and function runs synthesize a TaskSpec using the default
   `host` runner unless the spec itself says otherwise
-- agent execution is currently available through `--spec FILE` with
+- agent execution is currently available through `--spec NAME|PATH` with
   `spec.type="agent"`
+- `weft run` does not do runner/plugin/provider preflight before queueing work
+- queue-first submission is the durable contract; once step 3 succeeds, later
+  errors must be reconciled against task logs, TID mappings, and exact queue
+  location for that submitted TID
+- only spawn requests still provably present in `weft.spawn.requests` are
+  rollback-safe; requests already claimed into a manager reserved queue require
+  manual operator recovery
+- ahead-of-time runtime checks live under
+  `weft spec validate --load-runner` and `--preflight`
+- if runtime startup fails, the task fails on the normal execution path with
+  the concrete runner or agent error
 
 Current stdin behavior:
 
 - non-TTY stdin is read once as initial task input
 - inline command targets receive piped stdin as command stdin
 - inline function targets receive piped stdin as the initial work item
+- spec runs without `spec.run_input` receive piped stdin as the initial work
+  item using the existing target-specific rules
+- spec runs with `spec.parameterization` materialize the concrete TaskSpec
+  before stdin is routed to any later run-input adapter
+- spec runs with `spec.run_input` route declared args and piped stdin through
+  the adapter before queueing the initial work payload
 - pipeline runs use piped stdin as first-stage input when `--input` is absent
 
 Current interactive behavior:
@@ -154,9 +213,9 @@ This exists so operators can supervise Weft under tools like `systemd`,
 
 Detached manager bootstrap for `weft run` and `weft manager start` remains a
 separate contract from `manager serve`: it starts the canonical manager through
-the shared bootstrap helper, reports success only after matching pid-plus-registry
-readiness is observed and the detached launcher can still acknowledge success,
-and surfaces early detached-start diagnostics on failure.
+the shared bootstrap helper, reports success once matching pid-plus-registry
+readiness is observed, treats detached-launcher acknowledgement as best-effort
+post-proof cleanup, and surfaces early detached-start diagnostics on failure.
 
 ### `init` - Initialize a project
 
@@ -244,8 +303,8 @@ Current manager-control surfaces:
 `weft manager start` is the detached operator wrapper over the same canonical
 bootstrap helper used by `weft run`. It returns success only after the launched
 manager PID is live and the canonical registry record for the same manager
-TID/PID is present while the detached launcher is still healthy enough to
-acknowledge success. `weft manager serve`
+TID/PID is present. Detached-launcher acknowledgement after that proof is a
+warning path, not the startup truth boundary. `weft manager serve`
 remains the foreground supervisor path and is not interchangeable with
 `manager start`.
 
@@ -272,23 +331,61 @@ Current subcommands:
 
 Current rules:
 
-- task specs run through `weft run --spec FILE`
+- task specs run through `weft run --spec NAME|PATH`
 - stored pipeline specs run through `weft run --pipeline NAME|PATH`
-- `weft spec list` can show both tasks and pipelines
+- explicit task-spec lookup follows the same `NAME|PATH` model as pipelines:
+  existing file path first, then existing spec-bundle directory path, then
+  local stored flat spec, then local stored bundle, then builtin task spec
+- when a task spec is loaded from a bundle directory, Python callable refs in
+  that spec keep the normal `module:function` syntax but resolve `module`
+  against the bundle root first before falling back to normal Python imports
+- local stored task specs shadow builtin task specs of the same name
+- bare `weft run foo` still means "run command `foo`"; builtin lookup only
+  happens under explicit spec-management or `--spec` surfaces
+- `weft spec list` can show stored pipelines plus stored and builtin task specs
+- `weft spec list --json` includes a `source` field for each listed spec;
+  builtin entries report `source: "builtin"`
+- plain `weft spec list` labels builtin task specs with `(builtin)`
+- `weft spec list` is the effective project-visible spec namespace; local
+  `.weft/tasks/` shadows affect this view
+- builtin task specs are packaged read-only with Weft; `weft spec delete`
+  rejects builtin-only task specs
 - `--type` filters or disambiguates task vs pipeline names
 
 ### `spec validate` - Validate a task or pipeline spec [CLI-1.4.1]
 
 _Implementation mapping_: `weft/commands/specs.py` `validate_spec()`;
 task-spec runner validation reuses `weft/commands/validate_taskspec.py`
-`cmd_validate_taskspec()` and `weft/core/runner_validation.py`.
+`cmd_validate_taskspec()`, `weft/core/runner_validation.py`, and
+`weft/core/agents/validation.py`.
 
 Current validation layers:
 
 - default validation checks the schema only
-- `--load-runner` requires that the named runner plugin can be resolved
-- `--preflight` runs runner-specific availability checks and implies
+- `--load-runner` requires that the named runner plugin can be resolved; it
+  also loads and materializes the configured runner environment profile. For
+  agent tasks it resolves the configured agent runtime and, for delegated
+  runtimes, the configured tool profile
+- `--preflight` runs runner-specific availability checks and, for agent tasks,
+  environment-profile, agent-runtime, and delegated tool-profile preflight
+  checks that remain static at validation time, such as provider CLI path
+  resolution, project-local delegated executable defaults from
+  `.weft/agents.json`, and MCP server command resolution; it implies
   `--load-runner`
+- for Docker-backed one-shot `provider_cli` agent specs, that preflight stays
+  container-oriented: it validates the Docker runner path and static descriptor
+  requirements, but it does not require the host provider executable to exist
+  because the real provider CLI runs inside the container
+- `weft spec validate` is the explicit ahead-of-time validation surface.
+  `weft run` does not silently perform the same preflight work before
+  submission
+- `--preflight` does not prove delegated provider health, login state, or
+  runtime capability. Those are checked only when Weft actually opens a
+  delegated session or executes a delegated call
+- provider-backed persistent agent specs are validated through the same path;
+  for example `provider_cli` `conversation_scope="per_task"` requires
+  `spec.persistent=true` and a provider runtime that supports its configured
+  continuation surface
 
 ## Queue Operations [CLI-4]
 
@@ -317,11 +414,29 @@ project resolution, aliases, and task/runtime conventions on top.
 _Implementation mapping_: `weft/_constants.py` `load_config()`,
 `weft/context.py` `build_context()`.
 
-Current configuration sources:
+Current configuration domains:
 
-- environment variables
-- `.simplebroker.toml`
-- Weft project metadata under `.weft/`
+- environment variables for Weft defaults and broker alias translation
+- `.broker.toml` for project-scoped broker target selection
+- Weft project metadata and delegated-agent settings under `.weft/`
+
+Current broker resolution precedence:
+
+1. determine the project root from explicit `--context` or auto-discovery
+2. explicit-root resolution uses `simplebroker.target_for_directory()`:
+   `.broker.toml` at that root, else env-selected non-sqlite backend, else
+   sqlite fallback rooted at that directory
+3. auto-discovery uses `simplebroker.resolve_broker_target()`:
+   upward `.broker.toml`, then upward legacy sqlite discovery using the
+   configured default DB name, then env-selected non-sqlite backend
+4. if auto-discovery finds nothing, Weft falls back to explicit-root resolution
+   at the current working directory
+
+Current exclusions:
+
+- `.weft/config.json` does not participate in broker target resolution
+- `.weft/agents.json` does not participate in broker target resolution
+- TaskSpec `metadata` does not participate in broker target resolution
 
 The CLI should not imply that runtime broker configuration lives in a
 SQLite-only `.weft/broker.db` flag model. That is why the current contract uses
@@ -335,12 +450,15 @@ registered in `weft/cli.py` under the `system` sub-app.
 
 Current subcommands:
 
+- `weft system builtins`
 - `weft system tidy`
 - `weft system dump`
 - `weft system load`
 
 Current behavior:
 
+- `system builtins` reports the builtin inventory Weft ships, independent of
+  local stored-spec shadows in `.weft/tasks/`
 - `system tidy` delegates maintenance/compaction to the active backend
 - `system dump` exports broker state while excluding runtime-only
   `weft.state.*` queues
@@ -359,11 +477,22 @@ flags, and future queue or control ergonomics live in the companion doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-04-14-config-precedence-and-parsing-alignment-plan.md`](../plans/2026-04-14-config-precedence-and-parsing-alignment-plan.md)
+- [`docs/plans/2026-04-14-spawn-request-reconciliation-plan.md`](../plans/2026-04-14-spawn-request-reconciliation-plan.md)
 - [`docs/plans/2026-04-13-result-stream-implementation-plan.md`](../plans/2026-04-13-result-stream-implementation-plan.md)
+- [`docs/plans/2026-04-13-delegated-agent-authority-boundary-cleanup-plan.md`](../plans/2026-04-13-delegated-agent-authority-boundary-cleanup-plan.md)
+- [`docs/plans/2026-04-14-provider-cli-validation-boundary-and-agent-settings-alignment-plan.md`](../plans/2026-04-14-provider-cli-validation-boundary-and-agent-settings-alignment-plan.md)
+- [`docs/plans/2026-04-14-builtin-taskspecs-and-spec-resolution-plan.md`](../plans/2026-04-14-builtin-taskspecs-and-spec-resolution-plan.md)
+- [`docs/plans/2026-04-14-builtin-contract-and-doc-drift-reduction-plan.md`](../plans/2026-04-14-builtin-contract-and-doc-drift-reduction-plan.md)
+- [`docs/plans/2026-04-14-system-builtins-command-plan.md`](../plans/2026-04-14-system-builtins-command-plan.md)
+- [`docs/plans/2026-04-14-docker-agent-images-and-one-shot-provider-cli-plan.md`](../plans/2026-04-14-docker-agent-images-and-one-shot-provider-cli-plan.md)
+- [`docs/plans/2026-04-15-spec-run-input-adapter-and-declared-args-plan.md`](../plans/2026-04-15-spec-run-input-adapter-and-declared-args-plan.md)
+- [`docs/plans/2026-04-15-spec-aware-run-help-plan.md`](../plans/2026-04-15-spec-aware-run-help-plan.md)
 
 ## Related Documents
 
 - [`04-SimpleBroker_Integration.md`](04-SimpleBroker_Integration.md)
+- [`10B-Builtin_TaskSpecs.md`](10B-Builtin_TaskSpecs.md)
 - [`11-CLI_Architecture_Crosswalk.md`](11-CLI_Architecture_Crosswalk.md)
 - [`12-Pipeline_Composition_and_UX.md`](12-Pipeline_Composition_and_UX.md)
 - [`13-Agent_Runtime.md`](13-Agent_Runtime.md)

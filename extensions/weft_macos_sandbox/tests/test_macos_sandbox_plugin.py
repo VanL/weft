@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from weft_macos_sandbox import get_runner_plugin
 
@@ -22,7 +24,7 @@ def test_macos_sandbox_runner_requires_profile() -> None:
 
 def test_macos_sandbox_runner_preflight_checks_binary(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     plugin = get_runner_plugin()
     profile = tmp_path / "sandbox.sb"

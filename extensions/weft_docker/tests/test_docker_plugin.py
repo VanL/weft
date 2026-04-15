@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
+from types import SimpleNamespace
 
 import pytest
 from weft_docker import get_runner_plugin, plugin
@@ -70,6 +73,191 @@ def test_docker_runner_preflight_requires_binary(
                 }
             },
             preflight=True,
+        )
+
+
+def test_docker_runner_accepts_one_shot_provider_cli_agent_with_recipe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if os.name == "nt":
+        pytest.skip("Docker runner is currently unsupported on Windows")
+    runner_plugin = get_runner_plugin()
+    monkeypatch.setattr(
+        plugin,
+        "get_agent_image_recipe",
+        lambda provider_name: SimpleNamespace(
+            provider=provider_name,
+            default_executable="codex",
+        ),
+    )
+
+    class FakeClient:
+        def ping(self) -> None:
+            return None
+
+    @contextmanager
+    def fake_docker_client(*, timeout: int = 10) -> Iterator[FakeClient]:
+        del timeout
+        yield FakeClient()
+
+    monkeypatch.setattr(plugin, "_docker_client", fake_docker_client)
+
+    runner_plugin.validate_taskspec(
+        {
+            "spec": {
+                "type": "agent",
+                "runner": {
+                    "name": "docker",
+                    "options": {
+                        "mounts": [
+                            {
+                                "source": "/tmp",
+                                "target": "/workspace",
+                                "read_only": False,
+                            }
+                        ],
+                        "work_item_mounts": [
+                            {
+                                "source_path_ref": "metadata.document_path",
+                                "target": "/tmp/runtime-document.md",
+                                "read_only": True,
+                                "kind": "file",
+                            }
+                        ],
+                        "network": "none",
+                    },
+                },
+                "agent": {
+                    "runtime": "provider_cli",
+                    "authority_class": "general",
+                    "conversation_scope": "per_message",
+                    "runtime_config": {"provider": "codex"},
+                },
+            }
+        },
+        preflight=True,
+    )
+
+
+def test_docker_runner_rejects_command_work_item_mounts() -> None:
+    if os.name == "nt":
+        pytest.skip("Docker runner is currently unsupported on Windows")
+    runner_plugin = get_runner_plugin()
+
+    with pytest.raises(ValueError, match="work_item_mounts"):
+        runner_plugin.validate_taskspec(
+            {
+                "spec": {
+                    "type": "command",
+                    "runner": {
+                        "name": "docker",
+                        "options": {
+                            "image": "busybox:latest",
+                            "work_item_mounts": [
+                                {
+                                    "source_path_ref": "metadata.document_path",
+                                    "target": "/tmp/runtime-document.md",
+                                }
+                            ],
+                        },
+                    },
+                }
+            }
+        )
+
+
+def test_docker_runner_rejects_conflicting_agent_mount_targets() -> None:
+    if os.name == "nt":
+        pytest.skip("Docker runner is currently unsupported on Windows")
+    runner_plugin = get_runner_plugin()
+
+    with pytest.raises(ValueError, match="/tmp/runtime-document.md"):
+        runner_plugin.validate_taskspec(
+            {
+                "spec": {
+                    "type": "agent",
+                    "runner": {
+                        "name": "docker",
+                        "options": {
+                            "mounts": [
+                                {
+                                    "source": "/tmp",
+                                    "target": "/tmp/runtime-document.md",
+                                }
+                            ],
+                            "work_item_mounts": [
+                                {
+                                    "source_path_ref": "metadata.document_path",
+                                    "target": "/tmp/runtime-document.md",
+                                }
+                            ],
+                        },
+                    },
+                    "agent": {
+                        "runtime": "provider_cli",
+                        "authority_class": "general",
+                        "conversation_scope": "per_message",
+                        "runtime_config": {"provider": "codex"},
+                    },
+                }
+            }
+        )
+
+
+def test_docker_runner_rejects_agent_provider_without_recipe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if os.name == "nt":
+        pytest.skip("Docker runner is currently unsupported on Windows")
+    runner_plugin = get_runner_plugin()
+    monkeypatch.setattr(plugin, "get_agent_image_recipe", lambda provider_name: None)
+
+    with pytest.raises(ValueError, match="No Docker-backed agent image recipe"):
+        runner_plugin.validate_taskspec(
+            {
+                "spec": {
+                    "type": "agent",
+                    "runner": {"name": "docker", "options": {}},
+                    "agent": {
+                        "runtime": "provider_cli",
+                        "authority_class": "general",
+                        "conversation_scope": "per_message",
+                        "runtime_config": {"provider": "claude_code"},
+                    },
+                }
+            }
+        )
+
+
+def test_docker_runner_rejects_agent_provider_without_runtime_descriptor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if os.name == "nt":
+        pytest.skip("Docker runner is currently unsupported on Windows")
+    runner_plugin = get_runner_plugin()
+    monkeypatch.setattr(
+        plugin,
+        "get_provider_container_runtime_descriptor",
+        lambda provider_name: None,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="No Docker-backed provider container runtime descriptor",
+    ):
+        runner_plugin.validate_taskspec(
+            {
+                "spec": {
+                    "type": "agent",
+                    "runner": {"name": "docker", "options": {}},
+                    "agent": {
+                        "runtime": "provider_cli",
+                        "authority_class": "general",
+                        "conversation_scope": "per_message",
+                        "runtime_config": {"provider": "codex"},
+                    },
+                }
+            }
         )
 
 

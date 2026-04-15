@@ -1,0 +1,15 @@
+{
+  "version": "v2",
+  "provider": "qwen",
+  "env": [],
+  "runtime_mounts": [
+    {
+      "name": "qwen_home",
+      "source_kind": "home_dir",
+      "source_path": ".qwen",
+      "target": "/root/.qwen",
+      "required": false,
+      "read_only": false
+    }
+  ]
+}

@@ -6,8 +6,8 @@ import llm
 import pytest
 
 from tests.fixtures.llm_test_models import TEST_MODEL_ID, register_test_model_plugin
-from weft.core.agent_runtime import clear_agent_runtime_registry, execute_agent_target
 from weft.core.agents import register_builtin_agent_runtimes
+from weft.core.agents.runtime import clear_agent_runtime_registry, execute_agent_target
 from weft.core.taskspec import AgentSection
 
 
@@ -46,7 +46,7 @@ def test_llm_model_prompt_surface_is_available() -> None:
     assert response.text() == "text:hello"
 
 
-def test_llm_backend_text_output() -> None:
+def test_llm_runtime_text_output() -> None:
     result = execute_agent_target(make_agent_section(), "hello")
 
     assert result.output_mode == "text"
@@ -54,7 +54,7 @@ def test_llm_backend_text_output() -> None:
     assert result.aggregate_public_output() == "text:hello"
 
 
-def test_llm_backend_json_output_with_schema() -> None:
+def test_llm_runtime_json_output_with_schema() -> None:
     result = execute_agent_target(
         make_agent_section(
             output_mode="json",
@@ -73,7 +73,7 @@ def test_llm_backend_json_output_with_schema() -> None:
     assert result.aggregate_public_output() == {"summary": "review me", "status": "ok"}
 
 
-def test_llm_backend_json_output_without_schema() -> None:
+def test_llm_runtime_json_output_without_schema() -> None:
     result = execute_agent_target(
         make_agent_section(output_mode="json"),
         "json:review me",
@@ -82,7 +82,7 @@ def test_llm_backend_json_output_without_schema() -> None:
     assert result.aggregate_public_output() == {"task": "review me"}
 
 
-def test_llm_backend_messages_output() -> None:
+def test_llm_runtime_messages_output() -> None:
     result = execute_agent_target(
         make_agent_section(output_mode="messages"),
         "hello",
@@ -95,7 +95,7 @@ def test_llm_backend_messages_output() -> None:
     }
 
 
-def test_llm_backend_accepts_structured_messages_input() -> None:
+def test_llm_runtime_accepts_structured_messages_input() -> None:
     result = execute_agent_target(
         make_agent_section(),
         {
@@ -109,7 +109,7 @@ def test_llm_backend_accepts_structured_messages_input() -> None:
     assert result.aggregate_public_output() == "text:system: be brief\n\nuser: hello"
 
 
-def test_llm_backend_executes_python_tool() -> None:
+def test_llm_runtime_executes_python_tool() -> None:
     result = execute_agent_target(
         make_agent_section(
             tools=(
@@ -127,7 +127,7 @@ def test_llm_backend_executes_python_tool() -> None:
     assert result.tool_trace == ({"name": "echo_payload", "status": "completed"},)
 
 
-def test_llm_backend_passes_instructions_options_and_tools() -> None:
+def test_llm_runtime_passes_instructions_options_and_tools() -> None:
     result = execute_agent_target(
         make_agent_section(
             output_mode="json",
@@ -156,7 +156,7 @@ def test_llm_backend_passes_instructions_options_and_tools() -> None:
     }
 
 
-def test_llm_backend_template_overrides_instructions() -> None:
+def test_llm_runtime_template_overrides_instructions() -> None:
     result = execute_agent_target(
         make_agent_section(
             output_mode="json",
@@ -183,7 +183,7 @@ def test_llm_backend_template_overrides_instructions() -> None:
     }
 
 
-def test_llm_backend_enforces_max_turns() -> None:
+def test_llm_runtime_enforces_max_turns() -> None:
     with pytest.raises(ValueError, match="Chain limit"):
         execute_agent_target(
             make_agent_section(
@@ -200,7 +200,7 @@ def test_llm_backend_enforces_max_turns() -> None:
         )
 
 
-def test_llm_backend_tool_overrides_narrow_visible_tools() -> None:
+def test_llm_runtime_tool_overrides_narrow_visible_tools() -> None:
     agent = make_agent_section(
         tools=(
             {

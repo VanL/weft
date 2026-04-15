@@ -15,6 +15,22 @@ delivery, or observability, start by extending that path. Do not introduce a
 second execution path or side channel unless the relevant spec explicitly
 requires it.
 
+## 1.5 Keep Weft as the Substrate
+
+Weft is the durable task-runner substrate, not the higher-level agent
+management or orchestration layer.
+
+When a feature starts trying to predict agent readiness, hide orchestration
+policy in `weft run`, or add proactive health-management behavior before real
+execution, stop and re-check the boundary. In Weft, the right default is to
+make task submission and execution reliable, observable, and easy to validate
+explicitly. Higher-level intelligence belongs above this layer.
+
+Agent support and limited runners still belong here. An agent is a task. A
+dangerous task in a restricted container is still a task. Runtime-specific
+knowledge is acceptable when it directly serves execution, isolation,
+observability, or clear failure on the normal durable spine.
+
 ## 2. Queues Are the Canonical State
 
 Weft is evented through queues, not through an auxiliary database layer.
@@ -117,7 +133,43 @@ If a risky plan cannot say these clearly, it is not ready for implementation.
 - Prefer explicit spec-section references such as `[MF-2]` or `[CLI-1.1.1]`
   over broad document-only references when tying a change to docs.
 - Prefer explicit rejection over silently ignoring unsupported fields or modes.
+- Keep runtime executability checks opt-in. Do not turn `weft run`,
+  manager submission, or ordinary task startup into a speculative "can this
+  binary run here" gate; explicit validation or diagnostic surfaces own that,
+  and the normal execution path should attempt the real run and report the
+  concrete startup failure. Hidden probes pull Weft upward into agent
+  management, which is outside this layer's job.
 - Keep future-proofing out unless the current spec requires it.
+
+## 8. Fit Test For Agent And Runner Features
+
+When adding agent or runner features, ask:
+
+1. Is this about running, constraining, observing, controlling, or composing a
+   task?
+2. Does it stay on the canonical durable spine?
+3. Is any runtime-specific knowledge required for execution, or is it really
+   ecosystem management?
+4. If it is convenience-only, can it remain explicit, optional, and
+   non-authoritative?
+5. Does it silently write policy, cache truth, or create a second control
+   plane?
+
+Good fits:
+
+- agent runtimes that preserve queue and task semantics
+- restricted runners for dangerous work
+- explicit runtime preparation for a real slow path
+- explicit discovery helpers that report what is available
+
+Bad fits:
+
+- hidden preflight in `weft run`
+- background provider probing or image prep
+- health caches treated as startup truth
+- automatic mutation of project config without an explicit documented contract
+- provider-specific management features that grow faster than the core task
+  model
 
 ## Warning Signs
 

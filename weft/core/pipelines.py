@@ -25,7 +25,11 @@ from weft._constants import (
 )
 from weft.context import WeftContext
 from weft.core.spawn_requests import generate_spawn_request_timestamp
-from weft.core.taskspec import TaskSpec, resolve_taskspec_payload
+from weft.core.taskspec import (
+    TaskSpec,
+    apply_bundle_root_to_taskspec_payload,
+    resolve_taskspec_payload,
+)
 
 SUPPORTED_STAGE_DEFAULT_KEYS = frozenset({"input", "args", "keyword_args", "env"})
 PIPELINE_PLACEHOLDER_TARGET = "weft.core.tasks.pipeline:runtime"
@@ -451,7 +455,10 @@ def compile_linear_pipeline(
             outbox_queue=stage_taskspec.io.outputs["outbox"],
             ctrl_in_queue=stage_taskspec.io.control["ctrl_in"],
             ctrl_out_queue=stage_taskspec.io.control["ctrl_out"],
-            taskspec=stage_taskspec.model_dump(mode="json"),
+            taskspec=apply_bundle_root_to_taskspec_payload(
+                stage_taskspec.model_dump(mode="json"),
+                stage_taskspec.get_bundle_root(),
+            ),
         )
         stage_records.append(stage_record)
         stage_specs_for_runtime.append(stage_record.taskspec)

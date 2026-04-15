@@ -11,13 +11,16 @@ Spec references:
 
 from __future__ import annotations
 
+import inspect
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol, cast
 
-from weft.core.agent_templates import render_agent_template
-from weft.core.agent_tools import ResolvedAgentTool, resolve_agent_tools
 from weft.core.taskspec import AgentSection
+
+from .templates import render_agent_template
+from .tools import ResolvedAgentTool, resolve_agent_tools
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +157,7 @@ class AgentRuntimeAdapter(Protocol):
         work_item: NormalizedAgentWorkItem,
         tools: Sequence[ResolvedAgentTool],
         tid: str | None,
+        bundle_root: str | None = None,
     ) -> AgentExecutionResult:
         """Execute a normalized agent work item."""
 
@@ -242,6 +246,7 @@ def execute_agent_target(
     work_item: Any,
     *,
     tid: str | None = None,
+    bundle_root: str | None = None,
 ) -> AgentExecutionResult:
     """Execute agent work against the registered runtime backend.
 
@@ -252,8 +257,17 @@ def execute_agent_target(
         agent.tools,
         allow=normalized.tool_allow,
         deny=normalized.tool_deny,
+        bundle_root=bundle_root,
     )
     runtime = get_agent_runtime(agent.runtime)
+    if _callable_supports_bundle_root(runtime.execute):
+        return runtime.execute(
+            agent=agent,
+            work_item=normalized,
+            tools=tools,
+            tid=tid,
+            bundle_root=bundle_root,
+        )
     return runtime.execute(
         agent=agent,
         work_item=normalized,
@@ -266,6 +280,7 @@ def start_agent_runtime_session(
     agent: AgentSection,
     *,
     tid: str | None = None,
+    bundle_root: str | None = None,
 ) -> AgentRuntimeSession:
     """Start a long-lived runtime session for a persistent agent task.
 
@@ -277,7 +292,42 @@ def start_agent_runtime_session(
         raise ValueError(
             f"Runtime does not support persistent sessions: {agent.runtime}"
         )
-    return cast(AgentRuntimeSession, start_session(agent=agent, tid=tid))
+    if _callable_supports_bundle_root(start_session):
+        return cast(
+            AgentRuntimeSession,
+            start_session(agent=agent, tid=tid, bundle_root=bundle_root),
+        )
+    return cast(
+        AgentRuntimeSession,
+        start_session(agent=agent, tid=tid),
+    )
+
+
+def _callable_supports_bundle_root(callback: object) -> bool:
+    if not callable(callback):
+        return False
+    parameters = inspect.signature(callback).parameters
+    return "bundle_root" in parameters
+
+
+def content_to_prompt_text(
+    content: str | tuple[str | NormalizedAgentMessage, ...],
+) -> str:
+    """Render normalized agent content to deterministic plain text."""
+    if isinstance(content, str):
+        return content
+
+    parts: list[str] = []
+    for item in content:
+        if isinstance(item, str):
+            parts.append(item)
+            continue
+        if isinstance(item.content, str):
+            content_text = item.content
+        else:
+            content_text = _json_dumps_compact(item.content)
+        parts.append(f"{item.role}: {content_text}")
+    return "\n\n".join(parts)
 
 
 def _normalize_metadata(value: Any) -> dict[str, Any]:
@@ -400,6 +450,10 @@ def _normalize_messages(messages: Any) -> tuple[str | NormalizedAgentMessage, ..
     return tuple(normalized)
 
 
+def _json_dumps_compact(value: Any) -> str:
+    return json.dumps(value, separators=(",", ":"))
+
+
 __all__ = [
     "AgentExecutionResult",
     "AgentRuntimeAdapter",
@@ -407,6 +461,7 @@ __all__ = [
     "NormalizedAgentMessage",
     "NormalizedAgentWorkItem",
     "clear_agent_runtime_registry",
+    "content_to_prompt_text",
     "execute_agent_target",
     "get_agent_runtime",
     "normalize_agent_work_item",

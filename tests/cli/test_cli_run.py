@@ -4,15 +4,21 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sqlite3
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from tests.conftest import run_cli
+from tests.fixtures.provider_cli_fixture import (
+    PROVIDER_FIXTURE_NAMES,
+    write_provider_cli_wrapper,
+)
 from tests.helpers.weft_harness import WeftTestHarness
 from tests.taskspec import fixtures as taskspec_fixtures
 from weft._constants import (
@@ -20,6 +26,7 @@ from weft._constants import (
     WEFT_MANAGERS_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
 )
+from weft.commands import manager as manager_cmd
 from weft.commands import tasks as task_cmd
 from weft.context import build_context
 from weft.helpers import pid_is_live
@@ -28,6 +35,36 @@ PROCESS_SCRIPT = Path(__file__).resolve().parents[1] / "tasks" / "process_target
 INTERACTIVE_SCRIPT = (
     Path(__file__).resolve().parents[1] / "tasks" / "interactive_echo.py"
 )
+
+
+def _write_json(path: Path, payload: dict[str, object]) -> None:
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _create_stored_task_spec(
+    workdir: Path,
+    *,
+    name: str,
+    payload: dict[str, object],
+    harness: WeftTestHarness,
+) -> None:
+    spec_path = workdir / f"{name}.json"
+    _write_json(spec_path, payload)
+    rc, out, err = run_cli(
+        "spec",
+        "create",
+        name,
+        "--type",
+        "task",
+        "--file",
+        spec_path,
+        "--context",
+        workdir,
+        cwd=workdir,
+        harness=harness,
+    )
+    assert rc == 0, (out, err)
+    assert err == ""
 
 
 def _latest_completed_record(harness, limit: int = 512) -> tuple[str, dict] | None:
@@ -57,6 +94,61 @@ def _assert_sqlite_integrity(path: Path) -> None:
     finally:
         connection.close()
     assert result == ("ok",)
+
+
+def _parallel_manager_list_snapshot(root: Path) -> Any:
+    exit_code, payload = manager_cmd.list_command(
+        json_output=True,
+        include_stopped=True,
+        context_path=root,
+    )
+    if payload is None:
+        return {"exit_code": exit_code, "payload": None}
+    try:
+        return {
+            "exit_code": exit_code,
+            "payload": json.loads(payload),
+        }
+    except json.JSONDecodeError:
+        return {
+            "exit_code": exit_code,
+            "payload": payload,
+        }
+
+
+def _raise_parallel_manager_reuse_failure(
+    *,
+    phase: str,
+    root: Path,
+    env: dict[str, str],
+    harness: WeftTestHarness,
+    max_workers: int,
+    submit_timeout: float,
+    status_timeout: float,
+    submit_results: list[tuple[int, str, str]] | None = None,
+    status_observations: list[dict[str, Any]] | None = None,
+    status_payload: dict[str, object] | None = None,
+    detail: str | None = None,
+) -> None:
+    payload: dict[str, Any] = {
+        "phase": phase,
+        "root": str(root),
+        "max_workers": max_workers,
+        "submit_timeout": submit_timeout,
+        "status_timeout": status_timeout,
+        "reuse_enabled": env.get("WEFT_MANAGER_REUSE_ENABLED"),
+        "broker_test_backend": env.get(
+            "BROKER_TEST_BACKEND", os.environ.get("BROKER_TEST_BACKEND", "sqlite")
+        ),
+        "submit_results": submit_results,
+        "status_observations": status_observations,
+        "status_payload": status_payload,
+        "manager_list_snapshot": _parallel_manager_list_snapshot(root),
+        "harness": harness.dump_debug_state(),
+    }
+    if detail is not None:
+        payload["detail"] = detail
+    raise AssertionError(json.dumps(payload, indent=2, ensure_ascii=False))
 
 
 def _run_parallel_manager_reuse_cycle(
@@ -92,12 +184,43 @@ def _run_parallel_manager_reuse_cycle(
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         results = list(executor.map(lambda _index: _submit(), range(4)))
 
-    assert all(rc == 0 for rc, _out, _err in results), results
-    assert all(err == "" for _rc, _out, err in results), results
-    assert all(len(out) == 19 and out.isdigit() for _rc, out, _err in results), results
+    if not all(rc == 0 for rc, _out, _err in results):
+        _raise_parallel_manager_reuse_failure(
+            phase="submit_nonzero",
+            root=root,
+            env=env,
+            harness=harness,
+            max_workers=max_workers,
+            submit_timeout=submit_timeout,
+            status_timeout=status_timeout,
+            submit_results=results,
+        )
+    if not all(err == "" for _rc, _out, err in results):
+        _raise_parallel_manager_reuse_failure(
+            phase="submit_stderr",
+            root=root,
+            env=env,
+            harness=harness,
+            max_workers=max_workers,
+            submit_timeout=submit_timeout,
+            status_timeout=status_timeout,
+            submit_results=results,
+        )
+    if not all(len(out) == 19 and out.isdigit() for _rc, out, _err in results):
+        _raise_parallel_manager_reuse_failure(
+            phase="submit_bad_tid",
+            root=root,
+            env=env,
+            harness=harness,
+            max_workers=max_workers,
+            submit_timeout=submit_timeout,
+            status_timeout=status_timeout,
+            submit_results=results,
+        )
 
     deadline = time.time() + status_timeout
     payload: dict[str, object] | None = None
+    status_observations: list[dict[str, Any]] = []
     while time.time() < deadline:
         rc, out, err = run_cli(
             "status",
@@ -106,17 +229,105 @@ def _run_parallel_manager_reuse_cycle(
             env=env,
             harness=harness,
         )
-        assert rc == 0, err
-        payload = json.loads(out)
+        if rc != 0:
+            status_observations.append(
+                {
+                    "attempt": len(status_observations) + 1,
+                    "rc": rc,
+                    "stderr": err,
+                }
+            )
+            _raise_parallel_manager_reuse_failure(
+                phase="status_nonzero",
+                root=root,
+                env=env,
+                harness=harness,
+                max_workers=max_workers,
+                submit_timeout=submit_timeout,
+                status_timeout=status_timeout,
+                submit_results=results,
+                status_observations=status_observations,
+                detail=err,
+            )
+        try:
+            payload = json.loads(out)
+        except json.JSONDecodeError:
+            status_observations.append(
+                {
+                    "attempt": len(status_observations) + 1,
+                    "rc": rc,
+                    "stderr": err,
+                    "stdout": out,
+                }
+            )
+            _raise_parallel_manager_reuse_failure(
+                phase="status_invalid_json",
+                root=root,
+                env=env,
+                harness=harness,
+                max_workers=max_workers,
+                submit_timeout=submit_timeout,
+                status_timeout=status_timeout,
+                submit_results=results,
+                status_observations=status_observations,
+            )
         managers = payload.get("managers")
+        observation: dict[str, Any] = {
+            "attempt": len(status_observations) + 1,
+            "rc": rc,
+            "stderr": err,
+            "manager_count": len(managers) if isinstance(managers, list) else None,
+        }
+        if isinstance(managers, list):
+            observation["manager_tids"] = [
+                record.get("tid") for record in managers if isinstance(record, dict)
+            ]
+        else:
+            observation["payload"] = payload
+        status_observations.append(observation)
         if isinstance(managers, list) and len(managers) == 1:
             break
         time.sleep(0.1)
 
-    assert payload is not None
+    if payload is None:
+        _raise_parallel_manager_reuse_failure(
+            phase="status_no_payload",
+            root=root,
+            env=env,
+            harness=harness,
+            max_workers=max_workers,
+            submit_timeout=submit_timeout,
+            status_timeout=status_timeout,
+            submit_results=results,
+            status_observations=status_observations,
+        )
     managers = payload.get("managers")
-    assert isinstance(managers, list)
-    assert len(managers) == 1, payload
+    if not isinstance(managers, list):
+        _raise_parallel_manager_reuse_failure(
+            phase="manager_payload_not_list",
+            root=root,
+            env=env,
+            harness=harness,
+            max_workers=max_workers,
+            submit_timeout=submit_timeout,
+            status_timeout=status_timeout,
+            submit_results=results,
+            status_observations=status_observations,
+            status_payload=payload,
+        )
+    if len(managers) != 1:
+        _raise_parallel_manager_reuse_failure(
+            phase="manager_convergence_timeout",
+            root=root,
+            env=env,
+            harness=harness,
+            max_workers=max_workers,
+            submit_timeout=submit_timeout,
+            status_timeout=status_timeout,
+            submit_results=results,
+            status_observations=status_observations,
+            status_payload=payload,
+        )
     return payload
 
 
@@ -217,7 +428,7 @@ def test_cli_run_command_inline(workdir, weft_harness) -> None:
     assert err == ""
 
 
-def test_cli_run_help_hides_monitor_and_documents_spec_file(
+def test_cli_run_help_hides_monitor_and_documents_named_or_path_spec(
     workdir, weft_harness
 ) -> None:
     rc, out, err = run_cli(
@@ -229,9 +440,158 @@ def test_cli_run_help_hides_monitor_and_documents_spec_file(
 
     assert rc == 0
     assert err == ""
-    assert "--spec FILE" in out
-    assert "Execute an existing TaskSpec JSON file" in out
+    assert "--spec NAME|PATH" in out
+    assert "--pipeline NAME|PATH" in out
+    assert "Execute a task spec by stored name or JSON" in out
+    assert "Execute a pipeline by stored name or JSON" in out
     assert "--monitor" not in out
+
+
+def test_cli_run_spec_help_is_spec_aware_for_builtin_dockerized_agent(
+    workdir, weft_harness
+) -> None:
+    rc, out, err = run_cli(
+        "run",
+        "--spec",
+        "dockerized-agent",
+        "--help",
+        cwd=workdir,
+        harness=weft_harness,
+    )
+
+    assert rc == 0
+    assert err == ""
+    assert "--spec NAME|PATH" in out
+    assert "Spec Help: dockerized-agent" in out
+    assert "Parameterization Options:" in out
+    assert "--provider TEXT" in out
+    assert "choices: claude_code, codex, gemini, opencode, qwen" in out
+    assert "--model TEXT" in out
+    assert "Run Input Options:" in out
+    assert "--prompt TEXT" in out
+    assert "--document PATH" in out
+    assert "Stdin: Document text supplied through stdin [optional]" in out
+
+
+def test_cli_run_rejects_unknown_long_option_without_spec(
+    workdir, weft_harness
+) -> None:
+    rc, out, err = run_cli(
+        "run",
+        "--bogus",
+        cwd=workdir,
+        harness=weft_harness,
+    )
+
+    assert rc != 0
+    assert out == ""
+    assert "Unknown option '--bogus'" in err
+
+
+def test_cli_run_spec_name_resolves_stored_task_spec(workdir, weft_harness) -> None:
+    _create_stored_task_spec(
+        workdir,
+        name="stored-echo",
+        payload={
+            "name": "stored-echo",
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:simulate_work",
+                "keyword_args": {"result": "stored-spec-result"},
+            },
+            "metadata": {},
+        },
+        harness=weft_harness,
+    )
+
+    rc, out, err = run_cli(
+        "run",
+        "--spec",
+        "stored-echo",
+        "--context",
+        workdir,
+        cwd=workdir,
+        harness=weft_harness,
+    )
+
+    assert rc == 0
+    assert out == "stored-spec-result"
+    assert err == ""
+
+
+def test_cli_run_spec_name_resolves_builtin_probe_helper_and_writes_agent_settings(
+    workdir: Path,
+    weft_harness: WeftTestHarness,
+) -> None:
+    wrappers = [
+        write_provider_cli_wrapper(workdir, provider_name)
+        for provider_name in PROVIDER_FIXTURE_NAMES
+    ]
+    env = os.environ.copy()
+    env["PATH"] = os.pathsep.join([str(workdir), env.get("PATH", "")])
+
+    for wrapper in wrappers:
+        assert shutil.which(wrapper.name, path=env["PATH"]) == str(wrapper)
+
+    rc, out, err = run_cli(
+        "run",
+        "--spec",
+        "probe-agents",
+        "--context",
+        workdir,
+        cwd=workdir,
+        env=env,
+        harness=weft_harness,
+    )
+
+    assert rc == 0
+    payload = json.loads(out)
+    assert payload["summary"]["available"] == len(PROVIDER_FIXTURE_NAMES)
+    assert payload["summary"]["not_found"] == 0
+    assert payload["summary"]["probe_failed"] == 0
+    assert payload["summary"]["settings_created"] == len(PROVIDER_FIXTURE_NAMES)
+    assert err == ""
+
+    settings_path = workdir / ".weft" / "agents.json"
+    settings_payload = json.loads(settings_path.read_text(encoding="utf-8"))
+    providers = settings_payload["provider_cli"]["providers"]
+    for wrapper in wrappers:
+        provider_name = "claude_code" if wrapper.name == "claude" else wrapper.name
+        assert providers[provider_name]["executable"] == str(wrapper)
+
+
+def test_cli_run_spec_name_prefers_local_shadow_over_builtin(
+    workdir: Path,
+    weft_harness: WeftTestHarness,
+) -> None:
+    _create_stored_task_spec(
+        workdir,
+        name="probe-agents",
+        payload={
+            "name": "shadow-probe-agents",
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:simulate_work",
+                "keyword_args": {"result": "local-shadow-result"},
+            },
+            "metadata": {"shadow": True},
+        },
+        harness=weft_harness,
+    )
+
+    rc, out, err = run_cli(
+        "run",
+        "--spec",
+        "probe-agents",
+        "--context",
+        workdir,
+        cwd=workdir,
+        harness=weft_harness,
+    )
+
+    assert rc == 0
+    assert out == "local-shadow-result"
+    assert err == ""
 
 
 def test_cli_run_reads_stdin(workdir, weft_harness) -> None:
@@ -323,6 +683,41 @@ def test_cli_run_spec_path(workdir, weft_harness) -> None:
     assert err == ""
 
 
+def test_cli_run_spec_without_run_input_rejects_extra_declared_args(
+    workdir,
+    weft_harness,
+) -> None:
+    spec_path = workdir / "task_without_run_input.json"
+    _write_json(
+        spec_path,
+        {
+            "name": "plain-spec",
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:echo_payload",
+                "weft_context": str(workdir),
+                "reserved_policy_on_stop": "keep",
+                "reserved_policy_on_error": "keep",
+            },
+            "metadata": {},
+        },
+    )
+
+    rc, out, err = run_cli(
+        "run",
+        "--spec",
+        spec_path,
+        "--prompt",
+        "Summarize",
+        cwd=workdir,
+        harness=weft_harness,
+    )
+
+    assert rc == 2
+    assert out == ""
+    assert "does not declare spec.run_input" in err
+
+
 def test_cli_run_spec_path_reads_piped_stdin_into_function(
     workdir, weft_harness
 ) -> None:
@@ -363,6 +758,509 @@ def test_cli_run_spec_path_reads_piped_stdin_into_function(
     assert rc == 0
     assert out == "from-stdin"
     assert err == ""
+
+
+def test_cli_run_spec_bundle_resolves_bundle_local_function_target(
+    workdir, weft_harness
+) -> None:
+    bundle_dir = workdir / "bundle-task"
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    (bundle_dir / "helper_module.py").write_text(
+        "\n".join(
+            [
+                "def bundle_echo(payload: str) -> str:",
+                "    return f'bundle:{payload}'",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    spec_payload = {
+        "tid": "1760000000000000105",
+        "name": "bundle-task",
+        "version": "1.0",
+        "spec": {
+            "type": "function",
+            "function_target": "helper_module:bundle_echo",
+            "weft_context": str(workdir),
+            "reserved_policy_on_stop": "keep",
+            "reserved_policy_on_error": "keep",
+        },
+        "io": {
+            "inputs": {"inbox": "bundle_task.inbox"},
+            "outputs": {"outbox": "bundle_task.outbox"},
+            "control": {
+                "ctrl_in": "bundle_task.ctrl_in",
+                "ctrl_out": "bundle_task.ctrl_out",
+            },
+        },
+        "state": {"status": "created"},
+        "metadata": {},
+    }
+    _write_json(bundle_dir / "taskspec.json", spec_payload)
+
+    rc, out, err = run_cli(
+        "run",
+        "--spec",
+        bundle_dir,
+        cwd=workdir,
+        harness=weft_harness,
+        stdin="from-bundle",
+    )
+
+    assert rc == 0
+    assert out == "bundle:from-bundle"
+    assert err == ""
+
+
+def test_cli_run_spec_bundle_passes_plain_json_object_stdin_to_function_target(
+    workdir, weft_harness
+) -> None:
+    bundle_dir = workdir / "bundle-json-task"
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    (bundle_dir / "helper_module.py").write_text(
+        "\n".join(
+            [
+                "import json",
+                "",
+                "def echo_mapping(payload: dict[str, object]) -> str:",
+                "    return json.dumps(payload, sort_keys=True)",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    spec_payload = {
+        "tid": "1760000000000000106",
+        "name": "bundle-json-task",
+        "version": "1.0",
+        "spec": {
+            "type": "function",
+            "function_target": "helper_module:echo_mapping",
+            "weft_context": str(workdir),
+            "reserved_policy_on_stop": "keep",
+            "reserved_policy_on_error": "keep",
+        },
+        "io": {
+            "inputs": {"inbox": "bundle_json_task.inbox"},
+            "outputs": {"outbox": "bundle_json_task.outbox"},
+            "control": {
+                "ctrl_in": "bundle_json_task.ctrl_in",
+                "ctrl_out": "bundle_json_task.ctrl_out",
+            },
+        },
+        "state": {"status": "created"},
+        "metadata": {},
+    }
+    _write_json(bundle_dir / "taskspec.json", spec_payload)
+
+    rc, out, err = run_cli(
+        "run",
+        "--spec",
+        bundle_dir,
+        cwd=workdir,
+        harness=weft_harness,
+        stdin='{"providers":["bogus-provider"],"refresh":true}',
+    )
+
+    assert rc == 0
+    assert out == '{"providers": ["bogus-provider"], "refresh": true}'
+    assert err == ""
+
+
+def test_cli_run_spec_bundle_declared_args_shape_work_item(
+    workdir,
+    weft_harness,
+) -> None:
+    bundle_dir = workdir / "run-input-bundle"
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    (bundle_dir / "helper_module.py").write_text(
+        "\n".join(
+            [
+                "from __future__ import annotations",
+                "",
+                "def build_work_item(request):",
+                "    document = request.arguments.get('document')",
+                "    if document and request.stdin_text is not None:",
+                "        raise ValueError('Provide either --document or stdin, not both.')",
+                "    if document:",
+                "        return f\"{request.arguments['prompt']}|PATH={document}\"",
+                "    if request.stdin_text is not None:",
+                "        return f\"{request.arguments['prompt']}|STDIN={request.stdin_text}\"",
+                "    raise ValueError('Provide --document or stdin.')",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    _write_json(
+        bundle_dir / "taskspec.json",
+        {
+            "name": "run-input-bundle",
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:echo_payload",
+                "run_input": {
+                    "adapter_ref": "helper_module:build_work_item",
+                    "arguments": {
+                        "prompt": {
+                            "type": "string",
+                            "required": True,
+                        },
+                        "document": {
+                            "type": "path",
+                        },
+                    },
+                    "stdin": {
+                        "type": "text",
+                    },
+                },
+                "weft_context": str(workdir),
+                "reserved_policy_on_stop": "keep",
+                "reserved_policy_on_error": "keep",
+            },
+            "metadata": {},
+        },
+    )
+
+    rc, out, err = run_cli(
+        "run",
+        "--spec",
+        bundle_dir,
+        "--prompt",
+        "Summarize this document",
+        cwd=workdir,
+        harness=weft_harness,
+        stdin="from-stdin",
+    )
+
+    assert rc == 0
+    assert out == "Summarize this document|STDIN=from-stdin"
+    assert err == ""
+
+
+def test_cli_run_spec_bundle_declared_path_arg_normalizes_to_absolute_path(
+    workdir,
+    weft_harness,
+) -> None:
+    bundle_dir = workdir / "run-input-path-bundle"
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    (bundle_dir / "helper_module.py").write_text(
+        "\n".join(
+            [
+                "from __future__ import annotations",
+                "",
+                "def build_work_item(request):",
+                "    return request.arguments['document']",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    _write_json(
+        bundle_dir / "taskspec.json",
+        {
+            "name": "run-input-path-bundle",
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:echo_payload",
+                "run_input": {
+                    "adapter_ref": "helper_module:build_work_item",
+                    "arguments": {
+                        "document": {
+                            "type": "path",
+                            "required": True,
+                        }
+                    },
+                },
+                "weft_context": str(workdir),
+                "reserved_policy_on_stop": "keep",
+                "reserved_policy_on_error": "keep",
+            },
+            "metadata": {},
+        },
+    )
+    document_path = workdir / "doc.txt"
+    document_path.write_text("hello", encoding="utf-8")
+
+    rc, out, err = run_cli(
+        "run",
+        "--spec",
+        bundle_dir,
+        "--document",
+        "doc.txt",
+        cwd=workdir,
+        harness=weft_harness,
+    )
+
+    assert rc == 0
+    assert out == str(document_path.resolve())
+    assert err == ""
+
+
+def test_cli_run_spec_bundle_declared_args_require_declared_option(
+    workdir,
+    weft_harness,
+) -> None:
+    bundle_dir = workdir / "run-input-required-bundle"
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    (bundle_dir / "helper_module.py").write_text(
+        "\n".join(
+            [
+                "from __future__ import annotations",
+                "",
+                "def build_work_item(request):",
+                "    return request.arguments['prompt']",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    _write_json(
+        bundle_dir / "taskspec.json",
+        {
+            "name": "run-input-required-bundle",
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:echo_payload",
+                "run_input": {
+                    "adapter_ref": "helper_module:build_work_item",
+                    "arguments": {
+                        "prompt": {
+                            "type": "string",
+                            "required": True,
+                        }
+                    },
+                },
+                "weft_context": str(workdir),
+                "reserved_policy_on_stop": "keep",
+                "reserved_policy_on_error": "keep",
+            },
+            "metadata": {},
+        },
+    )
+
+    rc, out, err = run_cli(
+        "run",
+        "--spec",
+        bundle_dir,
+        cwd=workdir,
+        harness=weft_harness,
+    )
+
+    assert rc == 2
+    assert out == ""
+    assert "Missing required declared option(s): --prompt" in err
+
+
+def test_cli_run_spec_bundle_declared_args_reject_undeclared_option(
+    workdir,
+    weft_harness,
+) -> None:
+    bundle_dir = workdir / "run-input-undeclared-bundle"
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    (bundle_dir / "helper_module.py").write_text(
+        "\n".join(
+            [
+                "from __future__ import annotations",
+                "",
+                "def build_work_item(request):",
+                "    return request.arguments.get('prompt', '')",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    _write_json(
+        bundle_dir / "taskspec.json",
+        {
+            "name": "run-input-undeclared-bundle",
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:echo_payload",
+                "run_input": {
+                    "adapter_ref": "helper_module:build_work_item",
+                    "arguments": {
+                        "prompt": {
+                            "type": "string",
+                            "required": True,
+                        }
+                    },
+                },
+                "weft_context": str(workdir),
+                "reserved_policy_on_stop": "keep",
+                "reserved_policy_on_error": "keep",
+            },
+            "metadata": {},
+        },
+    )
+
+    rc, out, err = run_cli(
+        "run",
+        "--spec",
+        bundle_dir,
+        "--prompt",
+        "Summarize",
+        "--unknown",
+        "value",
+        cwd=workdir,
+        harness=weft_harness,
+    )
+
+    assert rc == 2
+    assert out == ""
+    assert "Option '--unknown' is not declared by this TaskSpec" in err
+
+
+def test_cli_run_spec_bundle_parameterization_materializes_before_run_input(
+    workdir,
+    weft_harness,
+) -> None:
+    bundle_dir = workdir / "parameterized-bundle"
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    (bundle_dir / "helper_module.py").write_text(
+        "\n".join(
+            [
+                "from __future__ import annotations",
+                "",
+                "import copy",
+                "",
+                "def materialize(request):",
+                "    payload = copy.deepcopy(dict(request.taskspec_payload))",
+                "    provider = request.arguments['provider']",
+                "    payload['name'] = f'example-{provider}'",
+                "    payload['spec']['run_input']['adapter_ref'] = f'helper_module:build_{provider}'",
+                "    return payload",
+                "",
+                "def build_codex(request):",
+                "    return f\"codex|{request.arguments['prompt']}\"",
+                "",
+                "def build_gemini(request):",
+                "    return f\"gemini|{request.arguments['prompt']}\"",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    _write_json(
+        bundle_dir / "taskspec.json",
+        {
+            "name": "parameterized-bundle",
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:echo_payload",
+                "parameterization": {
+                    "adapter_ref": "helper_module:materialize",
+                    "arguments": {
+                        "provider": {
+                            "type": "string",
+                            "required": False,
+                            "default": "codex",
+                            "choices": ["codex", "gemini"],
+                        }
+                    },
+                },
+                "run_input": {
+                    "adapter_ref": "helper_module:build_codex",
+                    "arguments": {
+                        "prompt": {
+                            "type": "string",
+                            "required": True,
+                        }
+                    },
+                },
+                "weft_context": str(workdir),
+                "reserved_policy_on_stop": "keep",
+                "reserved_policy_on_error": "keep",
+            },
+            "metadata": {},
+        },
+    )
+
+    rc, out, err = run_cli(
+        "run",
+        "--spec",
+        bundle_dir,
+        "--prompt",
+        "Summarize",
+        "--provider",
+        "gemini",
+        cwd=workdir,
+        harness=weft_harness,
+    )
+
+    assert rc == 0
+    assert out == "gemini|Summarize"
+    assert err == ""
+
+
+def test_cli_run_spec_bundle_parameterization_requires_declared_parameter(
+    workdir,
+    weft_harness,
+) -> None:
+    bundle_dir = workdir / "parameterized-required-bundle"
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    (bundle_dir / "helper_module.py").write_text(
+        "\n".join(
+            [
+                "from __future__ import annotations",
+                "",
+                "def materialize(request):",
+                "    return dict(request.taskspec_payload)",
+                "",
+                "def build_work_item(request):",
+                "    return request.arguments['prompt']",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    _write_json(
+        bundle_dir / "taskspec.json",
+        {
+            "name": "parameterized-required-bundle",
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:echo_payload",
+                "parameterization": {
+                    "adapter_ref": "helper_module:materialize",
+                    "arguments": {
+                        "provider": {
+                            "type": "string",
+                            "required": True,
+                        }
+                    },
+                },
+                "run_input": {
+                    "adapter_ref": "helper_module:build_work_item",
+                    "arguments": {
+                        "prompt": {
+                            "type": "string",
+                            "required": True,
+                        }
+                    },
+                },
+                "weft_context": str(workdir),
+                "reserved_policy_on_stop": "keep",
+                "reserved_policy_on_error": "keep",
+            },
+            "metadata": {},
+        },
+    )
+
+    rc, out, err = run_cli(
+        "run",
+        "--spec",
+        bundle_dir,
+        "--prompt",
+        "Summarize",
+        cwd=workdir,
+        harness=weft_harness,
+    )
+
+    assert rc == 2
+    assert out == ""
+    assert "Missing required declared option(s): --provider" in err
 
 
 def test_cli_run_spec_path_reads_piped_stdin_into_command(

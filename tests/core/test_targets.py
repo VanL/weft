@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 from weft.core.targets import (
     decode_work_message,
@@ -33,6 +34,28 @@ def test_execute_function_target_invokes_callable():
     module_path = f"{__name__}:dummy_function"
     result = execute_function_target(module_path, {"args": [2], "kwargs": {"b": 5}})
     assert result == 7
+
+
+def test_execute_function_target_prefers_bundle_module(tmp_path: Path) -> None:
+    helper = tmp_path / "helper_module.py"
+    helper.write_text(
+        "\n".join(
+            [
+                "def bundle_sum(a: int, b: int = 0) -> int:",
+                "    return a + b + 10",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = execute_function_target(
+        "helper_module:bundle_sum",
+        {"args": [2], "kwargs": {"b": 5}},
+        bundle_root=str(tmp_path),
+    )
+
+    assert result == 17
 
 
 def test_execute_command_target_runs_subprocess(tmp_path):

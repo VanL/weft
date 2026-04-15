@@ -22,13 +22,14 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, cast
 
-from simplebroker import BrokerTarget, Queue, target_for_directory
+from simplebroker import BrokerTarget, Queue
 from simplebroker.watcher import (
     BaseWatcher,
     PollingStrategy,
     default_error_handler,
 )
 from weft._constants import load_config
+from weft.context import resolve_context_broker_target
 
 logger = logging.getLogger(__name__)
 
@@ -133,7 +134,7 @@ class MultiQueueWatcher(BaseWatcher):
         first_queue_name = next(iter(queue_configs.keys()))
         shared_target = _resolve_db_target(
             db,
-            target_for_directory(Path.cwd(), config=self._config),
+            resolve_context_broker_target(Path.cwd(), config=self._config),
         )
         initial_queue = Queue(
             first_queue_name,

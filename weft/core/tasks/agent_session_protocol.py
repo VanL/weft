@@ -13,7 +13,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from weft.core.agent_runtime import AgentExecutionResult
+from weft.core.agents.runtime import AgentExecutionResult
 
 AGENT_SESSION_PROTOCOL_VERSION = 1
 
