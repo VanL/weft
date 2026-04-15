@@ -2,14 +2,22 @@
 
 from __future__ import annotations
 
+import subprocess
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 from weft_docker.agent_runner import (
     DockerProviderCLIRunner,
     _resolve_work_item_mounts,
+)
+
+from weft.core.agents.provider_cli.registry import (
+    ProviderCLIInvocation,
+    ProviderCLIResult,
 )
 
 pytestmark = [pytest.mark.shared]
@@ -145,7 +153,7 @@ def test_agent_runner_uses_cached_image_tag_returned_by_ensure_agent_image(
             self.containers = FakeContainers()
 
     @contextmanager
-    def fake_docker_client():
+    def fake_docker_client() -> Iterator[FakeClient]:
         yield FakeClient()
 
     class FakeMount:
@@ -186,9 +194,14 @@ def test_agent_runner_uses_cached_image_tag_returned_by_ensure_agent_image(
     )
 
     class FakeProvider:
-        def parse_result(self, *, completed, invocation):
+        def parse_result(
+            self,
+            *,
+            completed: subprocess.CompletedProcess[str],
+            invocation: ProviderCLIInvocation,
+        ) -> ProviderCLIResult:
             del completed, invocation
-            return "parsed"
+            return ProviderCLIResult(output_text="parsed")
 
     monkeypatch.setattr(
         "weft_docker.agent_runner.prepare_provider_cli_execution",
@@ -235,5 +248,6 @@ def test_agent_runner_uses_cached_image_tag_returned_by_ensure_agent_image(
     assert outcome.status == "ok"
     assert outcome.value == "provider-output"
     assert created["image"] == "weft-agent-codex:cached123"
-    kwargs = created["kwargs"]
-    assert kwargs["labels"]["weft.agent.image.cache_key"] == "cached-key"
+    kwargs = cast(dict[str, object], created["kwargs"])
+    labels = cast(dict[str, str], kwargs["labels"])
+    assert labels["weft.agent.image.cache_key"] == "cached-key"
