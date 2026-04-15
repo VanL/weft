@@ -104,9 +104,9 @@ $ weft run --spec review-agent.json
 $ weft status
 System: OK
 
-# Get task result
-$ weft result 1234567890
-{"status": "completed", "return_code": 0, "output": "..."}
+# Get task result as structured JSON
+$ weft result 1234567890 --json
+{"tid": "1234567890", "status": "completed", "result": "..."}
 ```
 
 For a guided walkthrough, see [Your First Weft Task](docs/tutorials/first-task.md).
@@ -490,9 +490,18 @@ weft system tidy            # backend-native broker compaction
 weft system dump -o FILE
 weft system load -i FILE    # preflight import; exits 3 on alias conflicts
 
+# Generate and store a reusable spec
+weft spec generate --type task > my-task.json
+weft spec create my-task --file my-task.json
+
 # Validate a TaskSpec and optionally preflight runner/runtime availability
 weft spec validate --type task FILE [--load-runner] [--preflight]
 ```
+
+Stored specs are ordinary JSON files. If you want `weft run --spec ...` to
+accept extra spec-owned CLI options, declare `spec.parameterization` or
+`spec.run_input` in that TaskSpec. `--arg` and `--kw` are only for
+`weft run --function`.
 
 Use `weft spec validate --preflight` when you want an ahead-of-time
 availability check on the current machine. `weft run` does not do hidden
@@ -707,11 +716,11 @@ Violations trigger `work_limit_violation` events and task termination.
 
 ```bash
 # Launch task without waiting
-$ weft run ./background-job.sh
+$ weft run --no-wait ./background-job.sh
 
 # Check status later
 $ weft status
-Tasks: 1 running
+# Shows running tasks in the current context
 
 # Get result when ready
 $ weft result <tid>

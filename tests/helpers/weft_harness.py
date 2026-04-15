@@ -502,6 +502,29 @@ class WeftTestHarness:
 
         return sorted(set(live_tids))
 
+    def _cleanup_candidate_task_tids(self) -> list[str]:
+        """Return non-terminal task tids that still merit cleanup fan-out.
+
+        ``_registered_tids`` is historical. Teardown should not send STOP/KILL
+        to every task the test ever observed, only to tasks whose latest
+        mapping still looks active and whose latest task-log event is not
+        terminal.
+        """
+
+        candidate_tids: list[str] = []
+        terminal_events = self._latest_task_events()
+        for full_tid, data in self._latest_tid_mapping_payloads().items():
+            if (
+                full_tid in self._registered_manager_tids
+                or self._mapping_role(data) == "manager"
+                or self._mapping_has_safe_owner(data)
+                or terminal_events.get(full_tid) in TERMINAL_TASK_EVENTS
+            ):
+                continue
+            candidate_tids.append(full_tid)
+
+        return sorted(set(candidate_tids))
+
     def _list_active_manager_records(self) -> list[dict[str, object]]:
         context_path = self.context.root
         exit_code, payload = manager_cmd.list_command(
@@ -576,7 +599,11 @@ class WeftTestHarness:
         for _ in range(3):
             self._collect_pid_mappings()
             if stop_tasks:
-                task_tids = sorted(set(self._registered_tids) - issued_task_stops)
+                task_tids = [
+                    tid
+                    for tid in self._cleanup_candidate_task_tids()
+                    if tid not in issued_task_stops
+                ]
                 if task_tids:
                     for tid in task_tids:
                         self._send_task_stop(tid)

@@ -121,7 +121,6 @@ def test_harness_stop_active_managers_stops_registered_task_and_manager_tids(
     harness = WeftTestHarness()
     try:
         harness.__enter__()
-        harness.register_tid("1775630560739303424")
         harness.register_manager_tid("1775630560447778816")
         monkeypatch.setattr(
             harness,
@@ -129,6 +128,11 @@ def test_harness_stop_active_managers_stops_registered_task_and_manager_tids(
             lambda: [{"tid": "1775630560999999999", "status": "active"}],
         )
         monkeypatch.setattr(harness, "_collect_pid_mappings", lambda: None)
+        monkeypatch.setattr(
+            harness,
+            "_cleanup_candidate_task_tids",
+            lambda: ["1775630560739303424"],
+        )
         monkeypatch.setattr(
             harness,
             "_wait_for_registered_pids_to_exit",
@@ -164,6 +168,64 @@ def test_harness_stop_active_managers_stops_registered_task_and_manager_tids(
         assert task_calls == ["1775630560739303424"]
     finally:
         harness.cleanup()
+
+
+@pytest.mark.sqlite_only
+def test_harness_stop_active_managers_skips_terminal_task_tids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = WeftTestHarness()
+    repo_cwd = os.getcwd()
+    try:
+        harness.__enter__()
+        monkeypatch.setattr(harness, "_list_active_manager_records", lambda: [])
+        harness._load_tid_mapping_payloads = lambda: [  # type: ignore[method-assign]
+            {
+                "full": "1775630560739303424",
+                "pid": 424242,
+                "task_pid": 424242,
+                "managed_pids": [],
+            }
+        ]
+        monkeypatch.setattr(
+            harness,
+            "_latest_task_events",
+            lambda: {"1775630560739303424": "work_completed"},
+        )
+        monkeypatch.setattr(
+            harness,
+            "_wait_for_registered_pids_to_exit",
+            lambda **kwargs: [],
+        )
+        monkeypatch.setattr(harness, "_drain_registry_queue", lambda: None)
+
+        task_calls: list[str] = []
+        kill_calls: list[tuple[str, ...]] = []
+
+        monkeypatch.setattr(
+            harness,
+            "_send_task_stop",
+            lambda tid: task_calls.append(tid),
+        )
+        monkeypatch.setattr(
+            task_cmd,
+            "kill_tasks",
+            lambda tids, **kwargs: kill_calls.append(tuple(tids)),
+        )
+        monkeypatch.setattr(
+            manager_cmd,
+            "stop_command",
+            lambda **kwargs: (0, None),
+        )
+
+        harness._stop_active_managers()
+
+        assert task_calls == []
+        assert kill_calls == []
+    finally:
+        os.chdir(repo_cwd)
+        harness._closed = True
+        harness._tempdir.cleanup()
 
 
 @pytest.mark.sqlite_only

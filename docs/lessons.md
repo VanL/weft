@@ -227,6 +227,15 @@ runbook needs to become stricter.
   present in the registry (`requests == weft.spawn.requests`) instead of
   treating every live `role="manager"` record as equivalent.
 
+## 2026-04-15 Structural Start Payloads
+
+- The synthetic start envelope for non-persistent tasks must stay structural all
+  the way through function-target argument preparation. If the decoded
+  no-payload marker becomes a positional `{}` argument, kwargs-only callables
+  fail immediately even though the task was launched without stdin. Keep empty
+  work items from being promoted into callable payloads unless the caller
+  explicitly supplied envelope keys or a non-empty plain object.
+
 ## 2026-04-09 Manager Lifecycle Command Consolidation
 
 - Manager control-plane commands must share one registry replay and liveness
