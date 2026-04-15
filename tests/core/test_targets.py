@@ -18,6 +18,10 @@ def dummy_function(a: int, b: int = 0) -> int:
     return a + b
 
 
+def keyword_only_function(*, value: str = "default") -> str:
+    return value
+
+
 def test_decode_work_message_handles_json_and_plain_text():
     assert decode_work_message('"string"') == "string"
     assert decode_work_message("{'invalid': 'json'}") == "{'invalid': 'json'}"
@@ -30,10 +34,22 @@ def test_prepare_call_arguments_merges_spec_and_work_item():
     assert kwargs == {"b": 2, "c": 3}
 
 
+def test_prepare_call_arguments_treats_empty_mapping_as_no_payload():
+    args, kwargs = prepare_call_arguments([], {"value": "ok"}, {})
+    assert args == []
+    assert kwargs == {"value": "ok"}
+
+
 def test_execute_function_target_invokes_callable():
     module_path = f"{__name__}:dummy_function"
     result = execute_function_target(module_path, {"args": [2], "kwargs": {"b": 5}})
     assert result == 7
+
+
+def test_execute_function_target_kwargs_only_ignores_empty_work_item():
+    module_path = f"{__name__}:keyword_only_function"
+    result = execute_function_target(module_path, {}, kwargs={"value": "ok"})
+    assert result == "ok"
 
 
 def test_execute_function_target_prefers_bundle_module(tmp_path: Path) -> None:

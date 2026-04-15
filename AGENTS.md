@@ -682,8 +682,8 @@ weft task list --json | jq '.[] | select(.status=="completed")'
 | `weft task kill TID` | Force terminate |
 | `weft queue read/write/peek/move/list/watch` | Direct queue ops |
 | `weft manager list/start/stop/serve` | Manager lifecycle |
-| `weft spec create/list/show/delete/validate` | Manage stored specs |
-| `weft system tidy/dump/load` | Maintenance |
+| `weft spec create/list/show/delete/validate/generate` | Manage stored specs |
+| `weft system tidy/dump/load/builtins` | Maintenance |
 
 **Exit codes**: 0=success, 1=error, 2=not found, 124=timeout
 

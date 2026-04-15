@@ -43,19 +43,16 @@ reports a `timeout` or `killed` status.
 ## 4. Fire and forget
 
 ```bash
-$ weft run --no-wait sleep 5
-1837025672140161024
+$ weft run --no-wait sleep 1
+<TID>
 
-$ weft status
-System: OK
-Tasks: 1 running
-
-$ weft result 1837025672140161024
+$ weft result <TID>
 # (empty output -- sleep produces nothing)
 ```
 
 `--no-wait` returns the task ID (TID) immediately. Use `weft result <TID>`
-to collect output later.
+to collect output later. While the task is still running, use `weft status` or
+`weft task status <TID>` to inspect progress.
 
 ## 5. Run a Python function
 
@@ -73,29 +70,50 @@ Hello, world!
 ## 6. Create a reusable task spec
 
 ```bash
-$ weft spec create my-greeter \
-    --type function \
-    --target processor:greet
+$ weft spec generate --type task > my-greeter.json
+```
 
-$ weft run --spec my-greeter --arg "weft"
+Edit `my-greeter.json` so it looks like this:
+
+```json
+{
+  "name": "my-greeter",
+  "spec": {
+    "type": "function",
+    "function_target": "processor:greet",
+    "args": ["weft"]
+  },
+  "metadata": {}
+}
+```
+
+Then store and run it:
+
+```bash
+$ weft spec create my-greeter --file my-greeter.json
+/path/to/project/.weft/tasks/my-greeter.json
+
+$ weft run --spec my-greeter
 Hello, weft!
 
 $ weft spec show my-greeter
-# Shows the full TaskSpec JSON
+# Shows the stored TaskSpec JSON
 ```
 
 Task specs are stored in `.weft/tasks/` and can be version-controlled.
+This example bakes `"weft"` into `spec.args`, so the stored spec runs as-is.
+If you want `weft run --spec my-greeter --name value` style inputs, declare
+`spec.parameterization` or `spec.run_input` in the TaskSpec. `--arg` is only
+for `weft run --function`.
 
 ## 7. Check task history
 
 ```bash
 $ weft task list
-TID                  NAME        STATUS     TIME
-1837025672140161024  sleep       completed  5.0s
-1837025672140161025  greet       completed  0.1s
+# Shows current tasks, including their TIDs, status, runner, and target summary
 
-$ weft task status 1837025672140161025
-# Shows full task details including resource usage
+$ weft task status <TID>
+# Shows the current status line for that task
 ```
 
 ## Next steps

@@ -8,9 +8,9 @@ up to date when reality changes.
 
 The split is intentional:
 
-- Canonical numbered specs (`00`, `01`, `04`, `06`, `07`, `08`, `09`, `10`,
-  `11`, `13`, and the other core docs) describe current behavior, current
-  boundaries, and the reasons behind them.
+- Canonical specs without an `A` suffix describe current behavior, current
+  boundaries, and the reasons behind them unless this README explicitly marks
+  them as deferred or exploratory.
 - Adjacent `A` docs describe intended but unshipped behavior. They are
   planning companions, not current contract.
 - Most adjacent `B` docs describe exploratory integration patterns for using
@@ -18,6 +18,8 @@ The split is intentional:
   core product surface.
 - `10B-Builtin_TaskSpecs.md` is the current builtin-task contract and remains
   canonical despite the `B` suffix.
+- `12-Pipeline_Composition_and_UX.md` is the current pipeline contract even
+  though `12-Future_Ideas.md` shares the `12` prefix for deferred ideas.
 - [`12-Future_Ideas.md`](12-Future_Ideas.md) remains the holding area for
   deferred ideas that are intentionally out of scope.
 
@@ -54,9 +56,15 @@ directly. It should not appear as "not yet implemented."
   TaskSpec contract and shipped builtin inventory
 - [`11-CLI_Architecture_Crosswalk.md`](11-CLI_Architecture_Crosswalk.md):
   current CLI-to-code ownership map
-- [`12-Future_Ideas.md`](12-Future_Ideas.md): explicitly deferred ideas
+- [`12-Pipeline_Composition_and_UX.md`](12-Pipeline_Composition_and_UX.md):
+  current pipeline composition contract
 - [`13-Agent_Runtime.md`](13-Agent_Runtime.md): current first-class agent
   runtime contract
+
+### Deferred idea ledger
+
+- [`12-Future_Ideas.md`](12-Future_Ideas.md): explicitly deferred ideas that
+  are not part of the current contract
 
 ### Planned companion docs
 
@@ -90,6 +98,7 @@ For current system orientation:
 4. [`02-TaskSpec.md`](02-TaskSpec.md)
 5. [`03-Manager_Architecture.md`](03-Manager_Architecture.md)
 6. [`10-CLI_Interface.md`](10-CLI_Interface.md)
+7. [`12-Pipeline_Composition_and_UX.md`](12-Pipeline_Composition_and_UX.md)
 
 Then read the matching `A` docs only if you need the intended future surface
 for planning work.
@@ -124,3 +133,7 @@ Weft is "SimpleBroker for processes":
 - CLI verbs stay small and stable
 - rationale belongs in the canonical spec because design intent still matters
 - history does not belong in the canonical tier because it weakens authority
+
+## Related Plans
+
+- [`docs/plans/2026-04-15-docs-audit-and-alignment-plan.md`](../plans/2026-04-15-docs-audit-and-alignment-plan.md)

@@ -45,6 +45,8 @@ def prepare_call_arguments(
 
     Plain JSON objects are treated as the callable payload unless they use the
     explicit function-work envelope keys ``args``, ``kwargs``, or ``payload``.
+    The empty mapping is structural and means "no payload" so kwargs-only
+    function targets do not receive a synthetic positional ``{}``.
 
     Spec: [CC-3], [TS-1]
     """
@@ -65,7 +67,7 @@ def prepare_call_arguments(
 
         if "payload" in work_item and "input" not in kwargs and not args:
             args = [work_item["payload"]]
-        elif not has_envelope_keys and not args:
+        elif not has_envelope_keys and not args and work_item:
             args = [work_item]
     elif work_item is not None and not args:
         args = [work_item]
