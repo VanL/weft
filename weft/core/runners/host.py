@@ -8,6 +8,7 @@ Spec references:
 
 from __future__ import annotations
 
+import contextlib
 import multiprocessing
 import os
 import queue
@@ -16,7 +17,7 @@ import sys
 import threading
 import time
 import traceback
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from multiprocessing.process import BaseProcess
 from multiprocessing.queues import Queue as MPQueue
@@ -25,7 +26,7 @@ from typing import Any, TextIO, cast
 import weft.core.agents  # noqa: F401 - register built-in agent runtimes
 from simplebroker import BrokerTarget
 from weft._constants import ACTIVE_CONTROL_POLL_INTERVAL
-from weft.core.agent_runtime import (
+from weft.core.agents.runtime import (
     execute_agent_target,
     normalize_agent_work_item,
     start_agent_runtime_session,
@@ -98,43 +99,46 @@ def _worker_entry(
     returncode: int | None = 0
 
     try:
-        if spec_data["type"] == "function":
-            value = execute_function_target(
-                spec_data["function_target"],
-                work_item,
-                args=spec_data.get("args"),
-                kwargs=spec_data.get("kwargs"),
-            )
-        elif spec_data["type"] == "agent":
-            agent = AgentSection.model_validate(spec_data["agent"])
-            value = execute_agent_target(
-                agent,
-                work_item,
-                tid=spec_data.get("tid"),
-            )
-        else:
-            completed = execute_command_target(
-                spec_data["process_target"],
-                work_item,
-                args=spec_data.get("args"),
-                env=spec_data.get("env") or {},
-                working_dir=spec_data.get("working_dir"),
-                # HostTaskRunner owns timeout enforcement for one-shot command
-                # tasks. Passing the same timeout into subprocess.run() races the
-                # outer worker timeout and can orphan grandchildren when the
-                # direct child exits first.
-                timeout=None,
-            )
-            value = completed.stdout.strip() if completed.stdout is not None else ""
-            stdout = completed.stdout
-            stderr = completed.stderr
-            returncode = completed.returncode
-            if completed.returncode != 0:
-                status = "error"
-                error = (
-                    f"Command exited with {completed.returncode}: "
-                    f"{(completed.stderr or '').strip()}"
+        with _worker_runtime_context(spec_data):
+            if spec_data["type"] == "function":
+                value = execute_function_target(
+                    spec_data["function_target"],
+                    work_item,
+                    args=spec_data.get("args"),
+                    kwargs=spec_data.get("kwargs"),
+                    bundle_root=cast(str | None, spec_data.get("bundle_root")),
                 )
+            elif spec_data["type"] == "agent":
+                agent = AgentSection.model_validate(spec_data["agent"])
+                value = execute_agent_target(
+                    agent,
+                    work_item,
+                    tid=spec_data.get("tid"),
+                    bundle_root=cast(str | None, spec_data.get("bundle_root")),
+                )
+            else:
+                completed = execute_command_target(
+                    spec_data["process_target"],
+                    work_item,
+                    args=spec_data.get("args"),
+                    env=spec_data.get("env") or {},
+                    working_dir=spec_data.get("working_dir"),
+                    # HostTaskRunner owns timeout enforcement for one-shot command
+                    # tasks. Passing the same timeout into subprocess.run() races the
+                    # outer worker timeout and can orphan grandchildren when the
+                    # direct child exits first.
+                    timeout=None,
+                )
+                value = completed.stdout.strip() if completed.stdout is not None else ""
+                stdout = completed.stdout
+                stderr = completed.stderr
+                returncode = completed.returncode
+                if completed.returncode != 0:
+                    status = "error"
+                    error = (
+                        f"Command exited with {completed.returncode}: "
+                        f"{(completed.stderr or '').strip()}"
+                    )
     except Exception:  # pragma: no cover - propagated via parent
         status = "error"
         error = traceback.format_exc()
@@ -154,6 +158,36 @@ def _worker_entry(
     )
 
 
+@contextlib.contextmanager
+def _worker_runtime_context(
+    spec_data: Mapping[str, Any],
+) -> Iterator[None]:
+    """Apply task-scoped env and cwd overrides inside a spawned worker."""
+    original_cwd = os.getcwd()
+    env_override = spec_data.get("env") or {}
+    previous_env: dict[str, str | None] = {}
+    try:
+        if isinstance(env_override, Mapping):
+            for key, value in env_override.items():
+                key_text = str(key)
+                previous_env[key_text] = os.environ.get(key_text)
+                os.environ[key_text] = str(value)
+        working_dir_obj = spec_data.get("working_dir")
+        if working_dir_obj:
+            os.chdir(str(working_dir_obj))
+        yield
+    finally:
+        os.chdir(original_cwd)
+        if isinstance(env_override, Mapping):
+            for key in env_override:
+                key_text = str(key)
+                previous_value = previous_env.get(key_text)
+                if previous_value is None:
+                    os.environ.pop(key_text, None)
+                else:
+                    os.environ[key_text] = previous_value
+
+
 def _agent_session_worker_entry(
     spec_data: Mapping[str, Any],
     request_queue: MPQueue[dict[str, Any]],
@@ -162,34 +196,38 @@ def _agent_session_worker_entry(
     """Run a long-lived agent session in a spawned subprocess."""
     session = None
     try:
-        agent = AgentSection.model_validate(spec_data["agent"])
-        session = start_agent_runtime_session(
-            agent,
-            tid=spec_data.get("tid"),
-        )
-        response_queue.put(make_ready_response())
+        with _worker_runtime_context(spec_data):
+            agent = AgentSection.model_validate(spec_data["agent"])
+            session = start_agent_runtime_session(
+                agent,
+                tid=spec_data.get("tid"),
+                bundle_root=cast(str | None, spec_data.get("bundle_root")),
+            )
+            response_queue.put(make_ready_response())
 
-        while True:
-            request = request_queue.get()
-            request_type = parse_request_type(request)
-            if request_type == "stop":
-                break
-            if request_type != "execute":
-                continue
+            while True:
+                request = request_queue.get()
+                request_type = parse_request_type(request)
+                if request_type == "stop":
+                    break
+                if request_type != "execute":
+                    continue
 
-            try:
-                normalized = normalize_agent_work_item(
-                    agent,
-                    request.get("work_item"),
-                )
-                result = session.execute(normalized)
-            except Exception:  # pragma: no cover - propagated via parent
-                response_queue.put(
-                    make_result_response(status="error", error=traceback.format_exc())
-                )
-                break
+                try:
+                    normalized = normalize_agent_work_item(
+                        agent,
+                        request.get("work_item"),
+                    )
+                    result = session.execute(normalized)
+                except Exception:  # pragma: no cover - propagated via parent
+                    response_queue.put(
+                        make_result_response(
+                            status="error", error=traceback.format_exc()
+                        )
+                    )
+                    break
 
-            response_queue.put(make_result_response(status="ok", result=result))
+                response_queue.put(make_result_response(status="ok", result=result))
     except Exception:  # pragma: no cover - propagated via parent
         response_queue.put(make_startup_error_response(traceback.format_exc()))
     finally:
@@ -219,6 +257,7 @@ class HostTaskRunner:
         limits: Any | None,
         monitor_class: str | None,
         monitor_interval: float | None,
+        bundle_root: str | None = None,
         db_path: BrokerTarget | str | None = None,
         config: dict[str, Any] | None = None,
     ) -> None:
@@ -233,6 +272,7 @@ class HostTaskRunner:
             "env": dict(env or {}),
             "working_dir": working_dir,
             "command_timeout": timeout,
+            "bundle_root": bundle_root,
         }
         self._timeout = timeout
         self._ctx = multiprocessing.get_context("spawn")
@@ -727,6 +767,7 @@ class HostRunnerPlugin:
         monitor_class: str | None,
         monitor_interval: float | None,
         runner_options: Mapping[str, Any] | None,
+        bundle_root: str | None,
         persistent: bool,
         interactive: bool,
         db_path: BrokerTarget | str | None = None,
@@ -747,6 +788,7 @@ class HostRunnerPlugin:
             limits=limits,
             monitor_class=monitor_class,
             monitor_interval=monitor_interval,
+            bundle_root=bundle_root,
             db_path=db_path,
             config=config,
         )

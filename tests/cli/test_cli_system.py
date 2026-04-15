@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from tests.conftest import run_cli
@@ -15,6 +18,90 @@ def _write_message(context, queue_name: str, body: str) -> None:
     queue = context.queue(queue_name, persistent=True)
     queue.write(body)
     queue.close()
+
+
+def _write_json(path: Path, payload: dict[str, object]) -> None:
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def test_system_builtins_lists_shipped_inventory(workdir) -> None:
+    rc, out, err = run_cli(
+        "system",
+        "builtins",
+        cwd=workdir,
+    )
+
+    assert rc == 0
+    assert err == ""
+    assert "task: probe-agents" in out
+    assert "Category: agent-runtime" in out
+    assert "Description: Probe known delegated provider CLIs" in out
+    assert "Target: weft.builtins.agent_probe:probe_agents_task" in out
+
+
+def test_system_builtins_json_reports_builtin_metadata(workdir) -> None:
+    rc, out, err = run_cli(
+        "system",
+        "builtins",
+        "--json",
+        cwd=workdir,
+    )
+
+    assert rc == 0
+    payload = json.loads(out)
+    builtin = next(item for item in payload if item["name"] == "probe-agents")
+    assert builtin["type"] == "task"
+    assert builtin["source"] == "builtin"
+    assert builtin["category"] == "agent-runtime"
+    assert builtin["function_target"] == "weft.builtins.agent_probe:probe_agents_task"
+    assert builtin["path"].endswith("weft/builtins/tasks/probe-agents.json")
+    assert err == ""
+
+
+def test_system_builtins_ignores_local_project_shadow(workdir) -> None:
+    source_path = workdir / "local_probe_agents.json"
+    _write_json(
+        source_path,
+        {
+            "name": "local-probe-agents",
+            "description": "Local shadow for testing",
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:simulate_work",
+            },
+            "metadata": {"shadow": True},
+        },
+    )
+
+    rc, out, err = run_cli(
+        "spec",
+        "create",
+        "probe-agents",
+        "--type",
+        "task",
+        "--file",
+        source_path,
+        "--context",
+        workdir,
+        cwd=workdir,
+    )
+    assert rc == 0
+    assert err == ""
+
+    rc, out, err = run_cli(
+        "system",
+        "builtins",
+        "--json",
+        cwd=workdir,
+    )
+
+    assert rc == 0
+    payload = json.loads(out)
+    builtin = next(item for item in payload if item["name"] == "probe-agents")
+    assert builtin["source"] == "builtin"
+    assert builtin["path"].endswith("weft/builtins/tasks/probe-agents.json")
+    assert builtin["description"].startswith("Probe known delegated provider CLIs")
+    assert err == ""
 
 
 def test_system_dump_exports_messages(workdir) -> None:

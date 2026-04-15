@@ -5,6 +5,14 @@ adjacent to [`06-Resource_Management.md`](06-Resource_Management.md).
 
 Nothing here overrides the canonical runtime contract.
 
+Implementation note:
+
+- Phase 3 delegated-runtime work now adds runner-scoped environment profiles and
+  richer Docker runner inputs for build-backed images, mounts, and network
+  policy. Those shipped surfaces live in the canonical runtime and runner specs.
+  This companion still tracks broader isolation and policy work that has not
+  landed yet.
+
 ## Planned Areas
 
 ### Softer Enforcement Modes
@@ -43,3 +51,4 @@ Possible future work:
 
 - [`docs/plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md`](../plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md)
 - [`docs/plans/2026-04-06-runner-extension-point-plan.md`](../plans/2026-04-06-runner-extension-point-plan.md)
+- [`docs/plans/2026-04-13-delegated-agent-runtime-phase-3-implementation-plan.md`](../plans/2026-04-13-delegated-agent-runtime-phase-3-implementation-plan.md)

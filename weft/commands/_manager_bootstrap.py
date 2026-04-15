@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import subprocess
 import sys
 import time
@@ -45,6 +46,8 @@ _MANAGER_STARTUP_TIMEOUT = 10.0
 _MANAGER_STARTUP_LOG_DIRNAME = "manager-startup"
 _LAUNCHER_SIGNAL_SUCCESS = "SUCCESS"
 _LAUNCHER_SIGNAL_ABORT = "ABORT"
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -608,8 +611,13 @@ def _start_manager(
                     try:
                         _acknowledge_manager_launch_success(launch)
                     except RuntimeError as exc:
-                        typer.echo(str(exc), err=True)
-                        raise typer.Exit(code=1) from exc
+                        logger.warning(
+                            "Detached manager launch for %s succeeded before "
+                            "post-proof acknowledgement failed: %s",
+                            manager_tid,
+                            exc,
+                            exc_info=True,
+                        )
                     _cleanup_startup_stderr(launch.stderr_path)
                     if verbose:
                         _emit_manager_registry_snapshot(selected_record)

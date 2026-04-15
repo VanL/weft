@@ -6,12 +6,27 @@ Use this order whenever instructions or context seem inconsistent:
 2. Safety and repository constraints:
    dirty-tree discipline, no destructive commands, do-not-revert-others.
 3. Task source-of-truth documents:
-   relevant spec files, invariants, current plan, and user-facing README
-   behavior when applicable.
+   relevant spec files, invariants, and user-facing README behavior when
+   applicable.
 4. Canonical repo context in `docs/agent-context/`.
-5. Root agent files such as `AGENTS.md` and `CLAUDE.md`.
-6. Existing code patterns.
-7. Agent inference.
+5. Relevant plans in `docs/plans/` as execution guidance. Plans are
+   non-normative for product behavior, but the current approved plan may be
+   authoritative for scope, sequencing, rollback, and review expectations for
+   the active slice. Plans may also reflect exploration, partial
+   implementation, or superseded thinking.
+6. Root agent files such as `AGENTS.md` and `CLAUDE.md`.
+7. Existing code patterns.
+8. Agent inference.
+
+Normative rule:
+
+- Specs are the source of truth for Weft behavior.
+- Plans are execution aids. They should cite specs, and the current approved
+  plan may control how the active slice is carried out, but plans do not
+  override specs on product behavior and may be stale.
+- For in-flight spec changes, the current approved plan may describe the
+  intended delta before the spec edit lands. The slice is not complete until
+  the spec is updated and becomes the steady-state source of truth again.
 
 ## Required Preflight Before Edits
 

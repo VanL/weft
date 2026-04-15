@@ -32,7 +32,24 @@ implementation-ready until it also satisfies:
 
 ## Planning Standard
 
-Plans are executable documents, not rough notes.
+Plans are executable documents, not rough notes. They are still non-normative.
+They may be written during exploration, and later work may implement only part
+of them or supersede them.
+
+The rule is:
+
+- specs define behavior
+- plans explain one proposed path to implement or change that behavior
+- the current approved plan may define the execution shape for the active
+  change, but it does not overrule the specs on behavior
+
+For spec-driven in-flight work, the plan may describe the intended spec delta
+before the spec text is updated. That is temporary. Before the work is done,
+the spec must be updated so the normative truth returns to
+`docs/specifications/`.
+
+If a plan and a spec disagree, fix the plan or the spec. Do not quietly treat
+the plan as authoritative.
 
 - Document everything the implementer needs to know to succeed on the first
   pass: source specs, files to touch, files to read first, local style rules,
@@ -89,6 +106,10 @@ One short paragraph on what is changing and why.
 
 Link the source spec(s) and any existing plan or README behavior that defines
 the desired outcome.
+
+When citing an older plan, say whether it is still fully intended, partially
+landed, or exploratory if that status is not obvious from context. Do not make
+the implementer infer normative behavior from a historical plan.
 
 Also link the local guidance the implementer needs in order to match repo
 standards, such as `AGENTS.md`, `docs/agent-context/principles.md`, or a
@@ -306,7 +327,7 @@ Example:
 ```bash
 uv run pytest tests/core/test_manager.py -q
 uv run pytest tests/commands/test_run.py -q
-uv run mypy weft
+uv run mypy weft extensions/weft_docker extensions/weft_macos_sandbox
 uv run ruff check weft
 ```
 

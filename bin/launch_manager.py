@@ -19,7 +19,7 @@ from weft._constants import (
     QUEUE_CTRL_OUT_SUFFIX,
     QUEUE_INBOX_SUFFIX,
     QUEUE_OUTBOX_SUFFIX,
-    WEFT_WORKERS_REGISTRY_QUEUE,
+    WEFT_MANAGERS_REGISTRY_QUEUE,
 )
 from weft.context import WeftContext, build_context
 from weft.core.taskspec import TaskSpec
@@ -62,7 +62,7 @@ def _wait_for_registry(
     context: WeftContext, tid: str, timeout: float = 5.0
 ) -> dict[str, Any] | None:
     queue = Queue(
-        WEFT_WORKERS_REGISTRY_QUEUE,
+        WEFT_MANAGERS_REGISTRY_QUEUE,
         db_path=context.broker_target,
         persistent=False,
         config=context.broker_config,

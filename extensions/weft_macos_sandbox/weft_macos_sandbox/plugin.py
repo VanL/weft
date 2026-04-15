@@ -209,12 +209,22 @@ class MacOSSandboxRunnerPlugin:
         monitor_class: str | None,
         monitor_interval: float | None,
         runner_options: Mapping[str, Any] | None,
+        bundle_root: str | None,
         persistent: bool,
         interactive: bool,
         db_path: BrokerTarget | str | None = None,
         config: dict[str, Any] | None = None,
     ) -> MacOSSandboxRunner:
-        del target_type, tid, function_target, agent, kwargs, persistent, interactive
+        del (
+            target_type,
+            tid,
+            function_target,
+            agent,
+            kwargs,
+            bundle_root,
+            persistent,
+            interactive,
+        )
         return MacOSSandboxRunner(
             process_target=process_target,
             args=args,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from weft.core.agent_tools import resolve_agent_tools
+from weft.core.agents.tools import resolve_agent_tools
 from weft.core.taskspec import AgentToolSection
 
 

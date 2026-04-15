@@ -130,6 +130,61 @@ def test_pipeline_run_reads_piped_stdin_when_input_omitted(
     assert err == ""
 
 
+def test_pipeline_run_stage_can_be_bundle_backed_task_spec(
+    workdir, weft_harness
+) -> None:
+    ctx = build_context(spec_context=workdir)
+    tasks_dir = ctx.weft_dir / "tasks"
+    tasks_dir.mkdir(parents=True, exist_ok=True)
+
+    bundle_dir = tasks_dir / "stage1"
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    (bundle_dir / "helper_module.py").write_text(
+        "\n".join(
+            [
+                "def bundle_stage(payload: str) -> str:",
+                "    return f'{payload}-bundle'",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    _write_json(
+        bundle_dir / "taskspec.json",
+        {
+            "name": "stage1",
+            "spec": {
+                "type": "function",
+                "function_target": "helper_module:bundle_stage",
+            },
+            "metadata": {},
+        },
+    )
+
+    pipeline_path = workdir / "pipeline_bundle.json"
+    _write_json(
+        pipeline_path,
+        {
+            "name": "pipe-bundle",
+            "stages": [{"name": "one", "task": "stage1"}],
+        },
+    )
+
+    rc, out, err = run_cli(
+        "run",
+        "--pipeline",
+        pipeline_path,
+        "--input",
+        "hello",
+        cwd=workdir,
+        harness=weft_harness,
+    )
+
+    assert rc == 0
+    assert "hello-bundle" in out
+    assert err == ""
+
+
 def test_pipeline_run_no_wait_returns_pipeline_tid(workdir, weft_harness) -> None:
     ctx = build_context(spec_context=workdir)
     tasks_dir = ctx.weft_dir / "tasks"

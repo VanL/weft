@@ -13,6 +13,10 @@ from collections.abc import Mapping
 from typing import Any
 
 from weft._runner_plugins import require_runner_plugin
+from weft.core.environment_profiles import (
+    MaterializedRunnerEnvironment,
+    materialize_runner_environment_from_taskspec,
+)
 from weft.ext import RunnerPlugin
 
 
@@ -21,6 +25,7 @@ def validate_taskspec_runner(
     *,
     load_runner: bool = False,
     preflight: bool = False,
+    materialized_environment: MaterializedRunnerEnvironment | None = None,
 ) -> None:
     """Validate the configured runner for a TaskSpec payload.
 
@@ -35,12 +40,26 @@ def validate_taskspec_runner(
     if not load_runner:
         return
 
-    plugin = require_runner_plugin(runner_name_from_taskspec(taskspec_payload))
+    materialized = materialized_environment or validate_taskspec_runner_environment(
+        taskspec_payload
+    )
+    runner_payload = apply_materialized_environment_to_taskspec(
+        taskspec_payload,
+        materialized,
+    )
+    plugin = require_runner_plugin(runner_name_from_taskspec(runner_payload))
     plugin.check_version()
-    validate_runner_capabilities(plugin, taskspec_payload)
-    plugin.validate_taskspec(taskspec_payload, preflight=False)
+    validate_runner_capabilities(plugin, runner_payload)
+    plugin.validate_taskspec(runner_payload, preflight=False)
     if preflight:
-        plugin.validate_taskspec(taskspec_payload, preflight=True)
+        plugin.validate_taskspec(runner_payload, preflight=True)
+
+
+def validate_taskspec_runner_environment(
+    taskspec_payload: Mapping[str, Any],
+) -> MaterializedRunnerEnvironment:
+    """Load and materialize the configured runner environment profile."""
+    return materialize_runner_environment_from_taskspec(taskspec_payload)
 
 
 def validate_runner_capabilities(
@@ -85,6 +104,27 @@ def runner_name_from_taskspec(taskspec_payload: Mapping[str, Any]) -> str:
     runner_mapping = _require_mapping(runner, name="spec.runner")
     name = runner_mapping.get("name", "host")
     return _require_text(name, name="spec.runner.name")
+
+
+def apply_materialized_environment_to_taskspec(
+    taskspec_payload: Mapping[str, Any],
+    materialized_environment: MaterializedRunnerEnvironment,
+) -> dict[str, Any]:
+    """Return a copy of *taskspec_payload* with materialized runner inputs."""
+    payload = dict(taskspec_payload)
+    spec = dict(_require_mapping(taskspec_payload.get("spec"), name="spec"))
+    runner = dict(_require_mapping(spec.get("runner") or {}, name="spec.runner"))
+    runner["name"] = materialized_environment.runner_name
+    runner["options"] = dict(materialized_environment.runner_options)
+    if materialized_environment.environment_profile_ref is not None:
+        runner["environment_profile_ref"] = (
+            materialized_environment.environment_profile_ref
+        )
+    spec["runner"] = runner
+    spec["env"] = dict(materialized_environment.env)
+    spec["working_dir"] = materialized_environment.working_dir
+    payload["spec"] = spec
+    return payload
 
 
 def _require_mapping(value: object, *, name: str) -> Mapping[str, Any]:

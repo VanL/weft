@@ -6,6 +6,9 @@ repository (Codex, Claude, Cursor-style agents, and automation agents).
 ## Goals
 
 - Keep one source of truth for durable execution standards.
+- Keep the normative boundary clear: specs are authoritative for behavior;
+  plans are non-normative working documents, though the current approved plan
+  may guide the active slice.
 - Reduce drift across agent-specific prompt files.
 - Make planning, testing, review, and verification expectations explicit.
 - Make risky-work boundaries, rollback assumptions, and agent-usable guidance
@@ -51,6 +54,9 @@ repository (Codex, Claude, Cursor-style agents, and automation agents).
 
 - Keep files short, operational, and repo-specific.
 - Prefer checklists over long prose.
+- Keep the hierarchy explicit:
+  `docs/specifications/` is normative; `docs/plans/` may be exploratory,
+  partially implemented, or stale.
 - Keep `context.index.yaml` synchronized with the real read order and runbook
   inventory.
 - When a repeated mistake shows up, add a short lesson in `docs/lessons.md`

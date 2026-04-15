@@ -11,7 +11,6 @@ and docs/specifications/02-TaskSpec.md [TS-1].
 
 from __future__ import annotations
 
-import importlib
 import json
 import os
 import subprocess
@@ -19,6 +18,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 from weft._constants import WORK_ENVELOPE_START
+from weft.core.imports import import_callable_ref
 
 
 def decode_work_message(message: str) -> Any:
@@ -41,11 +41,20 @@ def prepare_call_arguments(
     spec_kwargs: Mapping[str, Any] | None,
     work_item: Any,
 ) -> tuple[list[Any], dict[str, Any]]:
-    """Merge TaskSpec arguments with overrides supplied in the work item (Spec: [CC-3], [TS-1])."""
+    """Merge TaskSpec arguments with overrides supplied in the work item.
+
+    Plain JSON objects are treated as the callable payload unless they use the
+    explicit function-work envelope keys ``args``, ``kwargs``, or ``payload``.
+
+    Spec: [CC-3], [TS-1]
+    """
     args = list(spec_args or [])
     kwargs = dict(spec_kwargs or {})
 
     if isinstance(work_item, dict):
+        has_envelope_keys = any(
+            key in work_item for key in ("args", "kwargs", "payload")
+        )
         if "args" in work_item:
             args = list(work_item["args"])
         elif "payload" in work_item and not args:
@@ -56,6 +65,8 @@ def prepare_call_arguments(
 
         if "payload" in work_item and "input" not in kwargs and not args:
             args = [work_item["payload"]]
+        elif not has_envelope_keys and not args:
+            args = [work_item]
     elif work_item is not None and not args:
         args = [work_item]
 
@@ -68,11 +79,10 @@ def execute_function_target(
     *,
     args: Sequence[Any] | None = None,
     kwargs: Mapping[str, Any] | None = None,
+    bundle_root: str | None = None,
 ) -> Any:
     """Import and execute the function referenced by ``module:function`` (Spec: [CC-3], [TS-1])."""
-    module_name, func_name = function_target.rsplit(":", 1)
-    module = importlib.import_module(module_name)
-    func = getattr(module, func_name)
+    func = import_callable_ref(function_target, bundle_root=bundle_root)
 
     call_args, call_kwargs = prepare_call_arguments(args, kwargs, work_item)
     return func(*call_args, **call_kwargs)

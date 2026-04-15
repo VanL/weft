@@ -18,6 +18,11 @@ from pathlib import Path
 from typing import Any
 
 from simplebroker import BrokerTarget
+from weft.core.agents.provider_cli.container_runtime import (
+    format_provider_container_runtime_diagnostics,
+    get_provider_container_runtime_descriptor,
+    resolve_provider_container_runtime,
+)
 from weft.core.resource_monitor import ResourceMetrics
 from weft.core.runners import RunnerOutcome
 from weft.core.runners.subprocess_runner import (
@@ -25,11 +30,22 @@ from weft.core.runners.subprocess_runner import (
     run_monitored_subprocess,
 )
 from weft.core.tasks.runner import AgentSession, CommandSession
+from weft.core.taskspec import AgentSection
 from weft.ext import (
     RunnerCapabilities,
     RunnerHandle,
     RunnerPlugin,
     RunnerRuntimeDescription,
+)
+
+from ._sdk import docker_client as shared_docker_client
+from ._sdk import docker_client_from_env as shared_docker_client_from_env
+from ._sdk import load_docker_sdk as shared_load_docker_sdk
+from .agent_images import get_agent_image_recipe
+from .agent_runner import (
+    DockerProviderCLIRunner,
+    _normalize_work_item_mounts,
+    _validate_mount_target_conflicts,
 )
 
 _CONTAINER_LOOKUP_TIMEOUT = 2.0
@@ -113,8 +129,30 @@ class DockerCommandRunner:
 
         options = dict(runner_options or {})
         image = options.get("image")
-        if not isinstance(image, str) or not image.strip():
-            raise ValueError("Docker runner requires spec.runner.options.image")
+        build = options.get("build")
+        normalized_build = (
+            _normalize_build_options(build, name="spec.runner.options.build")
+            if build is not None
+            else None
+        )
+        normalized_image = (
+            image.strip() if isinstance(image, str) and image.strip() else None
+        )
+        if normalized_image is None and normalized_build is None:
+            raise ValueError(
+                "Docker runner requires exactly one of spec.runner.options.image "
+                "or spec.runner.options.build"
+            )
+        if normalized_image is not None and normalized_build is not None:
+            raise ValueError(
+                "Docker runner requires exactly one of spec.runner.options.image "
+                "or spec.runner.options.build"
+            )
+        if options.get("work_item_mounts") is not None:
+            raise ValueError(
+                "Docker command tasks do not accept "
+                "spec.runner.options.work_item_mounts"
+            )
 
         self._tid = tid
         self._process_target = process_target.strip()
@@ -124,7 +162,8 @@ class DockerCommandRunner:
         self._timeout = timeout
         self._limits = limits
         self._monitor_interval = monitor_interval or 1.0
-        self._image = image.strip()
+        self._image = normalized_image
+        self._build = normalized_build
         self._docker_binary = str(options.get("docker_binary") or "docker")
         self._docker_args = _string_list(
             options.get("docker_args"),
@@ -136,6 +175,14 @@ class DockerCommandRunner:
             else None
         )
         self._mount_workdir = bool(options.get("mount_workdir", True))
+        self._network = _normalize_optional_text(
+            options.get("network"),
+            name="spec.runner.options.network",
+        )
+        self._mounts = _normalize_mounts(
+            options.get("mounts"),
+            name="spec.runner.options.mounts",
+        )
 
     def run(self, work_item: Any) -> RunnerOutcome:
         return self.run_with_hooks(work_item)
@@ -151,11 +198,13 @@ class DockerCommandRunner:
         on_stderr_chunk: Callable[[str, bool], None] | None = None,
     ) -> RunnerOutcome:
         executable = _resolve_docker_binary(self._docker_binary)
+        image = self._ensure_image(executable)
         container_name = _container_name(self._tid)
         command, stdin_data = self._build_docker_command(
             work_item,
             container_name,
             executable=executable,
+            image=image,
         )
         process = subprocess.Popen(
             command,
@@ -176,14 +225,14 @@ class DockerCommandRunner:
             )
             runtime_handle = _runtime_handle_for_container(
                 container_name=container_name,
-                image=self._image,
+                image=image,
                 docker_binary=self._docker_binary,
                 container=container,
             )
             monitor = DockerContainerMonitor(
                 runtime_id=container_name,
                 limits=self._limits,
-                image=self._image,
+                image=image,
             )
 
             def _stop_runtime() -> None:
@@ -245,6 +294,7 @@ class DockerCommandRunner:
         container_name: str,
         *,
         executable: str,
+        image: str,
     ) -> tuple[list[str], str | None]:
         inner_command, stdin_data = prepare_command_invocation(
             self._process_target,
@@ -275,7 +325,9 @@ class DockerCommandRunner:
             docker_command.extend(["--ulimit", f"nofile={max_fds}:{max_fds}"])
 
         max_connections = _limit_value(self._limits, "max_connections")
-        if max_connections == 0:
+        if self._network is not None:
+            docker_command.extend(["--network", self._network])
+        elif max_connections == 0:
             docker_command.extend(["--network", "none"])
 
         if self._mount_workdir and self._working_dir:
@@ -290,19 +342,35 @@ class DockerCommandRunner:
                 ]
             )
 
+        for mount in self._mounts:
+            docker_command.extend(["--volume", _docker_volume_arg(mount)])
+
         for key, value in sorted(self._env.items()):
             docker_command.extend(["--env", f"{key}={value}"])
 
-        docker_command.extend([self._image, *inner_command])
+        docker_command.extend([image, *inner_command])
         return docker_command, stdin_data
+
+    def _ensure_image(self, executable: str) -> str:
+        if self._image is not None:
+            return self._image
+        if self._build is None:  # pragma: no cover - constructor guard
+            raise RuntimeError("Docker runner is missing image/build configuration")
+        tag = f"weft-build-{uuid.uuid4().hex[:12]}"
+        _build_docker_image(
+            executable,
+            build=self._build,
+            tag=tag,
+        )
+        return tag
 
 
 class DockerRunnerPlugin:
-    """Runner plugin for Docker-backed one-shot command tasks."""
+    """Runner plugin for Docker-backed one-shot command and agent tasks."""
 
     name = "docker"
     capabilities = RunnerCapabilities(
-        supported_types=("command",),
+        supported_types=("command", "agent"),
         supports_interactive=False,
         supports_persistent=False,
         supports_agent_sessions=False,
@@ -322,23 +390,59 @@ class DockerRunnerPlugin:
                 "Docker runner is currently supported only on Linux and macOS"
             )
         spec = _require_mapping(taskspec_payload.get("spec"), name="spec")
-        if spec.get("type") != "command":
-            raise ValueError("Docker runner supports only spec.type='command'")
         if bool(spec.get("interactive", False)):
             raise ValueError("Docker runner does not support interactive tasks")
+
+        spec_type = spec.get("type")
+        if spec_type == "agent":
+            self._validate_agent_taskspec(spec, preflight=preflight)
+            return
+        if spec_type != "command":
+            raise ValueError(
+                "Docker runner supports only spec.type='command' and the "
+                "one-shot provider_cli agent lane"
+            )
         if bool(spec.get("persistent", False)):
             raise ValueError("Docker runner does not support persistent tasks")
-
         runner = _require_mapping(spec.get("runner"), name="spec.runner")
         options = _require_mapping(runner.get("options"), name="spec.runner.options")
         image = options.get("image")
-        if not isinstance(image, str) or not image.strip():
-            raise ValueError("Docker runner requires spec.runner.options.image")
+        build = options.get("build")
+        normalized_image = (
+            image.strip() if isinstance(image, str) and image.strip() else None
+        )
+        normalized_build = (
+            _normalize_build_options(build, name="spec.runner.options.build")
+            if build is not None
+            else None
+        )
+        if normalized_image is None and normalized_build is None:
+            raise ValueError(
+                "Docker runner requires exactly one of spec.runner.options.image "
+                "or spec.runner.options.build"
+            )
+        if normalized_image is not None and normalized_build is not None:
+            raise ValueError(
+                "Docker runner requires exactly one of spec.runner.options.image "
+                "or spec.runner.options.build"
+            )
+        if options.get("work_item_mounts") is not None:
+            raise ValueError(
+                "Docker command tasks do not accept "
+                "spec.runner.options.work_item_mounts"
+            )
         docker_args = _string_list(
             options.get("docker_args"),
             name="spec.runner.options.docker_args",
         )
         _validate_extra_docker_args(docker_args)
+        _normalize_mounts(
+            options.get("mounts"),
+            name="spec.runner.options.mounts",
+        )
+        network = options.get("network")
+        if network is not None:
+            _normalize_optional_text(network, name="spec.runner.options.network")
 
         limits = spec.get("limits")
         if isinstance(limits, Mapping):
@@ -352,6 +456,8 @@ class DockerRunnerPlugin:
         if preflight:
             docker_binary = str(options.get("docker_binary") or "docker")
             _resolve_docker_binary(docker_binary)
+            if normalized_build is not None:
+                _validate_build_paths(normalized_build)
             with _docker_client(timeout=5) as client:
                 client.ping()
 
@@ -372,15 +478,30 @@ class DockerRunnerPlugin:
         monitor_class: str | None,
         monitor_interval: float | None,
         runner_options: Mapping[str, Any] | None,
+        bundle_root: str | None,
         persistent: bool,
         interactive: bool,
         db_path: BrokerTarget | str | None = None,
         config: dict[str, Any] | None = None,
-    ) -> DockerCommandRunner:
-        del target_type, function_target, agent, kwargs, persistent, interactive
+    ) -> DockerCommandRunner | DockerProviderCLIRunner:
+        del function_target, kwargs, persistent, interactive
         if os.name == "nt":
             raise ValueError(
                 "Docker runner is currently supported only on Linux and macOS"
+            )
+        if target_type == "agent":
+            return DockerProviderCLIRunner(
+                tid=tid,
+                agent=agent,
+                env=env,
+                working_dir=working_dir,
+                timeout=timeout,
+                limits=limits,
+                monitor_interval=monitor_interval,
+                runner_options=runner_options,
+                bundle_root=bundle_root,
+                db_path=db_path,
+                config=config,
             )
         return DockerCommandRunner(
             tid=tid,
@@ -396,6 +517,103 @@ class DockerRunnerPlugin:
             db_path=db_path,
             config=config,
         )
+
+    def _validate_agent_taskspec(
+        self,
+        spec: Mapping[str, Any],
+        *,
+        preflight: bool,
+    ) -> None:
+        if bool(spec.get("persistent", False)):
+            raise ValueError("Docker runner does not support persistent agent tasks")
+        agent = AgentSection.model_validate(
+            _require_mapping(spec.get("agent"), name="spec.agent")
+        )
+        if agent.runtime != "provider_cli":
+            raise ValueError(
+                "Docker runner currently supports agent tasks only for "
+                "spec.agent.runtime='provider_cli'"
+            )
+        if agent.conversation_scope != "per_message":
+            raise ValueError(
+                "Docker runner supports provider_cli agent tasks only when "
+                "spec.agent.conversation_scope='per_message'"
+            )
+
+        runner = _require_mapping(spec.get("runner"), name="spec.runner")
+        options = _require_mapping(runner.get("options"), name="spec.runner.options")
+        disallowed_keys = sorted(
+            set(options) & {"build", "docker_args", "docker_binary", "image"}
+        )
+        if disallowed_keys:
+            raise ValueError(
+                "Docker-backed provider_cli agent tasks do not accept "
+                f"spec.runner.options.{', spec.runner.options.'.join(disallowed_keys)}"
+            )
+        explicit_mounts = _normalize_mounts(
+            options.get("mounts"),
+            name="spec.runner.options.mounts",
+        )
+        work_item_mounts = _normalize_work_item_mounts(
+            options.get("work_item_mounts"),
+            name="spec.runner.options.work_item_mounts",
+        )
+        _validate_mount_target_conflicts(explicit_mounts, work_item_mounts)
+        network = options.get("network")
+        if network is not None:
+            _normalize_optional_text(network, name="spec.runner.options.network")
+
+        limits = spec.get("limits")
+        if isinstance(limits, Mapping):
+            max_connections = limits.get("max_connections")
+            if max_connections not in (None, 0, 0.0):
+                raise ValueError(
+                    "Docker runner supports spec.limits.max_connections only when "
+                    "it is 0 (mapped to Docker network isolation)"
+                )
+
+        provider_name = str(agent.runtime_config.get("provider") or "").strip()
+        if not provider_name:
+            raise ValueError("provider_cli requires spec.agent.runtime_config.provider")
+        recipe = get_agent_image_recipe(provider_name)
+        if recipe is None:
+            raise ValueError(
+                "No Docker-backed agent image recipe is available for provider "
+                f"'{provider_name}'"
+            )
+        descriptor = get_provider_container_runtime_descriptor(provider_name)
+        if descriptor is None:
+            raise ValueError(
+                "No Docker-backed provider container runtime descriptor is "
+                f"available for provider '{provider_name}'"
+            )
+        configured_executable = agent.runtime_config.get("executable")
+        if recipe.default_executable is None and not (
+            isinstance(configured_executable, str) and configured_executable.strip()
+        ):
+            raise ValueError(
+                "Docker-backed provider_cli agent tasks require either a recipe "
+                "default executable or spec.agent.runtime_config.executable"
+            )
+
+        if preflight:
+            env_mapping = _mapping_of_strings(spec.get("env") or {}, name="spec.env")
+            resolution = resolve_provider_container_runtime(
+                provider_name,
+                task_env=env_mapping,
+                working_dir=_optional_string(spec.get("working_dir")),
+                explicit_mounts=explicit_mounts,
+            )
+            if resolution.has_missing_required:
+                detail = format_provider_container_runtime_diagnostics(
+                    resolution.diagnostics
+                )
+                raise ValueError(
+                    "Docker-backed provider_cli agent runtime requirements are not "
+                    f"satisfied for provider '{descriptor.provider}': {detail}"
+                )
+            with _docker_client(timeout=5) as client:
+                client.ping()
 
     def stop(self, handle: RunnerHandle, *, timeout: float = 2.0) -> bool:
         with _docker_client() as client:
@@ -846,26 +1064,16 @@ def _remove_container(client: Any, runtime_id: str) -> None:
 
 @contextmanager
 def _docker_client(*, timeout: int = 10) -> Iterator[Any]:
-    client = _docker_client_from_env(timeout=timeout)
-    try:
+    with shared_docker_client(timeout=timeout) as client:
         yield client
-    finally:
-        client.close()
 
 
 def _docker_client_from_env(*, timeout: int = 10) -> Any:
-    docker = _load_docker_sdk()
-    return docker.from_env(version="auto", timeout=timeout)
+    return shared_docker_client_from_env(timeout=timeout)
 
 
 def _load_docker_sdk() -> Any:
-    try:
-        import docker
-    except Exception as exc:  # pragma: no cover - dependency guard
-        raise RuntimeError(
-            "Docker runner requires the Docker SDK for Python. Install weft[docker]."
-        ) from exc
-    return docker
+    return shared_load_docker_sdk()
 
 
 def _resolve_docker_binary(docker_binary: str) -> str:
@@ -900,10 +1108,174 @@ def _validate_extra_docker_args(args: Sequence[str]) -> None:
             )
 
 
+def _build_docker_image(
+    executable: str,
+    *,
+    build: Mapping[str, Any],
+    tag: str,
+) -> None:
+    context = str(build["context"])
+    dockerfile = build.get("dockerfile")
+    command = [executable, "build", "--tag", tag]
+    if isinstance(dockerfile, str) and dockerfile:
+        command.extend(["--file", dockerfile])
+    target = build.get("target")
+    if isinstance(target, str) and target:
+        command.extend(["--target", target])
+    build_args = build.get("args")
+    if isinstance(build_args, Mapping):
+        for key, value in sorted(build_args.items()):
+            command.extend(["--build-arg", f"{key}={value}"])
+    command.append(context)
+    completed = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    if completed.returncode != 0:
+        detail = _compact_completed_process_detail(completed)
+        raise RuntimeError(
+            "Docker image build failed" + (f": {detail}" if detail else "")
+        )
+
+
+def _compact_completed_process_detail(
+    completed: subprocess.CompletedProcess[str],
+) -> str:
+    parts: list[str] = []
+    stdout = (completed.stdout or "").strip()
+    stderr = (completed.stderr or "").strip()
+    if stdout:
+        parts.append(f"stdout={stdout[:200]}")
+    if stderr:
+        parts.append(f"stderr={stderr[:200]}")
+    return "; ".join(parts)
+
+
+def _normalize_build_options(
+    value: object,
+    *,
+    name: str,
+) -> dict[str, Any]:
+    build = dict(_require_mapping(value, name=name))
+    context = _normalize_required_text(build.get("context"), name=f"{name}.context")
+    normalized: dict[str, Any] = {"context": context}
+    dockerfile = build.get("dockerfile")
+    if dockerfile is not None:
+        normalized["dockerfile"] = _normalize_required_text(
+            dockerfile,
+            name=f"{name}.dockerfile",
+        )
+    target = build.get("target")
+    if target is not None:
+        normalized["target"] = _normalize_required_text(
+            target,
+            name=f"{name}.target",
+        )
+    build_args = build.get("args")
+    if build_args is not None:
+        args_mapping = _require_mapping(build_args, name=f"{name}.args")
+        normalized["args"] = {
+            _normalize_required_text(key, name=f"{name}.args key"): str(item)
+            for key, item in args_mapping.items()
+        }
+    return normalized
+
+
+def _validate_build_paths(build: Mapping[str, Any]) -> None:
+    context = Path(str(build["context"])).expanduser()
+    if not context.exists() or not context.is_dir():
+        raise ValueError(f"Docker build context does not exist: {context}")
+    dockerfile = build.get("dockerfile")
+    if dockerfile is None:
+        return
+    dockerfile_path = Path(str(dockerfile)).expanduser()
+    if not dockerfile_path.exists() or not dockerfile_path.is_file():
+        raise ValueError(f"Docker build Dockerfile does not exist: {dockerfile_path}")
+
+
+def _normalize_mounts(
+    value: object,
+    *,
+    name: str,
+) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        raise ValueError(f"{name} must be a list of mount objects")
+    mounts: list[dict[str, Any]] = []
+    for index, raw_mount in enumerate(value):
+        mount_name = f"{name}[{index}]"
+        mount = dict(_require_mapping(raw_mount, name=mount_name))
+        source = _normalize_required_text(
+            mount.get("source"),
+            name=f"{mount_name}.source",
+        )
+        target = _normalize_required_text(
+            mount.get("target"),
+            name=f"{mount_name}.target",
+        )
+        read_only = mount.get("read_only", True)
+        if not isinstance(read_only, bool):
+            raise ValueError(f"{mount_name}.read_only must be a boolean")
+        mounts.append(
+            {
+                "source": source,
+                "target": target,
+                "read_only": read_only,
+            }
+        )
+    return mounts
+
+
+def _docker_volume_arg(mount: Mapping[str, Any]) -> str:
+    source = str(Path(str(mount["source"])).expanduser().resolve())
+    target = str(mount["target"])
+    suffix = ":ro" if bool(mount.get("read_only", True)) else ""
+    return f"{source}:{target}{suffix}"
+
+
+def _normalize_optional_text(value: object, *, name: str) -> str | None:
+    if value is None:
+        return None
+    return _normalize_required_text(value, name=name)
+
+
+def _normalize_required_text(value: object, *, name: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{name} must be a string")
+    cleaned = value.strip()
+    if not cleaned:
+        raise ValueError(f"{name} must be a non-empty string")
+    return cleaned
+
+
 def _require_mapping(value: object, *, name: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise ValueError(f"{name} must be an object")
     return value
+
+
+def _mapping_of_strings(value: object, *, name: str) -> dict[str, str]:
+    mapping = _require_mapping(value, name=name)
+    normalized: dict[str, str] = {}
+    for key, item in mapping.items():
+        if not isinstance(key, str) or not isinstance(item, str):
+            raise ValueError(f"{name} must be a mapping of strings to strings")
+        normalized[key] = item
+    return normalized
+
+
+def _optional_string(value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("spec.working_dir must be a string")
+    cleaned = value.strip()
+    return cleaned or None
 
 
 def _string_list(value: object, *, name: str) -> list[str]:

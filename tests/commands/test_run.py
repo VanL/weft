@@ -22,6 +22,11 @@ from weft._constants import (
     WEFT_MANAGERS_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
 )
+from weft.commands import tasks as task_cmd
+from weft.commands._spawn_submission import (
+    SpawnSubmissionReconciliation,
+    reconcile_submitted_spawn,
+)
 from weft.commands.run import (
     _build_manager_spec,
     _collect_interactive_queue_output,
@@ -64,6 +69,61 @@ def _make_taskspec(tid: str) -> TaskSpec:
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _wait_for_task_snapshot(
+    root: Path,
+    tid: str,
+    *,
+    timeout: float = 10.0,
+) -> task_cmd.status_cmd.TaskSnapshot:
+    deadline = time.time() + timeout
+    last_snapshot: task_cmd.status_cmd.TaskSnapshot | None = None
+    while time.time() < deadline:
+        snapshot = task_cmd.task_status(tid, context_path=root)
+        if snapshot is not None:
+            last_snapshot = snapshot
+            return snapshot
+        time.sleep(0.05)
+    raise AssertionError(
+        f"Timed out waiting for task snapshot for {tid}: "
+        f"{last_snapshot.to_dict() if last_snapshot is not None else None}"
+    )
+
+
+def _wait_for_task_status(
+    root: Path,
+    tid: str,
+    *,
+    expected_status: str,
+    timeout: float = 10.0,
+) -> task_cmd.status_cmd.TaskSnapshot:
+    deadline = time.time() + timeout
+    last_snapshot: task_cmd.status_cmd.TaskSnapshot | None = None
+    while time.time() < deadline:
+        snapshot = task_cmd.task_status(tid, context_path=root)
+        if snapshot is not None:
+            last_snapshot = snapshot
+            if snapshot.status == expected_status:
+                return snapshot
+        time.sleep(0.05)
+    raise AssertionError(
+        f"Timed out waiting for {expected_status} snapshot for {tid}: "
+        f"{last_snapshot.to_dict() if last_snapshot is not None else None}"
+    )
+
+
+def _stop_active_manager(context) -> None:
+    record = manager_lifecycle._select_active_manager(context)
+    if record is None:
+        return
+    stopped, error = manager_lifecycle._stop_manager(
+        context,
+        record,
+        timeout=5.0,
+        stop_if_absent=True,
+    )
+    assert stopped, error
 
 
 def test_wait_for_task_completion_reads_outbox_after_completion_event(
@@ -385,6 +445,71 @@ def test_start_manager_builds_detached_launch_from_shared_runtime_invocation(
     assert acked == [launch]
 
 
+def test_start_manager_treats_post_proof_ack_failure_as_nonfatal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    fake_process = _FakePopen(poll_results=[None, None, 0])
+    invocation = manager_lifecycle._ManagerRuntimeInvocation(
+        task_cls_path="weft.core.manager.Manager",
+        tid="9" * 19,
+        spec=_FakeManagerSpec(),
+    )
+    launch = manager_lifecycle._DetachedManagerLaunch(
+        pid=fake_process.pid,
+        stderr_path=root / ".weft" / "logs" / "manager-startup" / "manager.stderr",
+        launcher_process=fake_process,
+    )
+    warnings: list[str] = []
+
+    monkeypatch.setattr(
+        "weft.commands._manager_bootstrap._build_manager_runtime_invocation",
+        lambda context: invocation,
+    )
+    monkeypatch.setattr(
+        "weft.commands._manager_bootstrap._launch_detached_manager",
+        lambda context, invocation_arg: launch,
+    )
+    monkeypatch.setattr(
+        "weft.commands._manager_bootstrap._acknowledge_manager_launch_success",
+        lambda launch_arg: (_ for _ in ()).throw(
+            RuntimeError("post-proof acknowledgement failed")
+        ),
+    )
+    monkeypatch.setattr(
+        "weft.commands._manager_bootstrap._select_active_manager",
+        lambda context: {
+            "tid": invocation.tid,
+            "pid": fake_process.pid,
+            "status": "active",
+            "requests": WEFT_SPAWN_REQUESTS_QUEUE,
+            "role": "manager",
+        },
+    )
+    monkeypatch.setattr(
+        "weft.commands._manager_bootstrap._is_pid_alive",
+        lambda pid: True,
+    )
+    monkeypatch.setattr(
+        "weft.commands._manager_bootstrap.logger.warning",
+        lambda message, *args, **kwargs: warnings.append(str(message)),
+    )
+    monkeypatch.setattr(
+        "weft.commands._manager_bootstrap.time.sleep",
+        lambda seconds: None,
+    )
+
+    record, started_here, handle = _start_manager(ctx, verbose=False)
+
+    assert record["tid"] == invocation.tid
+    assert record["pid"] == fake_process.pid
+    assert started_here is True
+    assert handle is None
+    assert warnings
+
+
 def test_start_manager_surfaces_detached_launch_stderr_when_manager_exits_early(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -493,6 +618,138 @@ def test_run_inline_enqueues_task_before_ensuring_manager(
     assert calls == ["enqueue", "ensure"]
 
 
+def test_run_inline_no_wait_succeeds_when_post_proof_acknowledgement_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+    submitted_tid: dict[str, str] = {}
+    original_enqueue = _enqueue_taskspec
+
+    def _recording_enqueue(*args: Any, **kwargs: Any) -> int:
+        tid = original_enqueue(*args, **kwargs)
+        submitted_tid["value"] = str(tid)
+        return tid
+
+    def _fail_ack_after_spawn(*args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        deadline = time.time() + 8.0
+        while time.time() < deadline:
+            tid = submitted_tid.get("value")
+            if tid and task_cmd.task_status(tid, context_path=root) is not None:
+                raise RuntimeError("synthetic late acknowledgement failure")
+            time.sleep(0.05)
+        raise RuntimeError("timed out waiting for spawned task visibility")
+
+    monkeypatch.setattr(
+        "weft.commands.run.build_context",
+        lambda spec_context=None, autostart=True: context,
+    )
+    monkeypatch.setattr("weft.commands.run._read_piped_stdin", lambda context: None)
+    monkeypatch.setattr("weft.commands.run.stdin_is_tty", lambda: False)
+    monkeypatch.setattr("weft.commands.run._enqueue_taskspec", _recording_enqueue)
+    monkeypatch.setattr(
+        "weft.commands._manager_bootstrap._acknowledge_manager_launch_success",
+        _fail_ack_after_spawn,
+    )
+    monkeypatch.setattr("weft.commands.run.typer.echo", lambda *args, **kwargs: None)
+
+    try:
+        exit_code = _run_inline(
+            command=(),
+            function_target="tests.tasks.sample_targets:provide_payload",
+            args=(),
+            kwargs=(),
+            env=(),
+            name="provide-payload",
+            interactive=False,
+            stream_output=None,
+            timeout=None,
+            memory=None,
+            cpu=None,
+            tags=(),
+            context_dir=root,
+            wait=False,
+            json_output=False,
+            verbose=False,
+            autostart_enabled=True,
+        )
+
+        assert exit_code == 0
+        tid = submitted_tid["value"]
+        snapshot = _wait_for_task_status(root, tid, expected_status="completed")
+        assert snapshot.tid == tid
+    finally:
+        _stop_active_manager(context)
+
+
+def test_run_inline_wait_succeeds_when_post_proof_acknowledgement_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+    submitted_tid: dict[str, str] = {}
+    original_enqueue = _enqueue_taskspec
+
+    def _recording_enqueue(*args: Any, **kwargs: Any) -> int:
+        tid = original_enqueue(*args, **kwargs)
+        submitted_tid["value"] = str(tid)
+        return tid
+
+    def _fail_ack_after_spawn(*args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        deadline = time.time() + 8.0
+        while time.time() < deadline:
+            tid = submitted_tid.get("value")
+            if tid and task_cmd.task_status(tid, context_path=root) is not None:
+                raise RuntimeError("synthetic late acknowledgement failure")
+            time.sleep(0.05)
+        raise RuntimeError("timed out waiting for spawned task visibility")
+
+    monkeypatch.setattr(
+        "weft.commands.run.build_context",
+        lambda spec_context=None, autostart=True: context,
+    )
+    monkeypatch.setattr("weft.commands.run._read_piped_stdin", lambda context: None)
+    monkeypatch.setattr("weft.commands.run.stdin_is_tty", lambda: False)
+    monkeypatch.setattr("weft.commands.run._enqueue_taskspec", _recording_enqueue)
+    monkeypatch.setattr(
+        "weft.commands._manager_bootstrap._acknowledge_manager_launch_success",
+        _fail_ack_after_spawn,
+    )
+    monkeypatch.setattr("weft.commands.run.typer.echo", lambda *args, **kwargs: None)
+
+    try:
+        exit_code = _run_inline(
+            command=(),
+            function_target="tests.tasks.sample_targets:provide_payload",
+            args=(),
+            kwargs=(),
+            env=(),
+            name="provide-payload",
+            interactive=False,
+            stream_output=None,
+            timeout=None,
+            memory=None,
+            cpu=None,
+            tags=(),
+            context_dir=root,
+            wait=True,
+            json_output=False,
+            verbose=False,
+            autostart_enabled=True,
+        )
+
+        assert exit_code == 0
+        tid = submitted_tid["value"]
+        snapshot = _wait_for_task_status(root, tid, expected_status="completed")
+        assert snapshot.tid == tid
+    finally:
+        _stop_active_manager(context)
+
+
 def test_delete_spawn_request_removes_queued_message(tmp_path: Path) -> None:
     root = prepare_project_root(tmp_path)
     context = build_context(spec_context=root)
@@ -501,13 +758,14 @@ def test_delete_spawn_request_removes_queued_message(tmp_path: Path) -> None:
 
     message_timestamp = _enqueue_taskspec(context, taskspec, None)
 
-    _delete_spawn_request(context, message_timestamp)
+    deleted = _delete_spawn_request(context, message_timestamp)
 
     queue = context.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=False)
     try:
         assert queue.read_one() is None
     finally:
         queue.close()
+    assert deleted is True
 
 
 def test_delete_spawn_request_swallows_delete_errors(
@@ -532,9 +790,103 @@ def test_delete_spawn_request_swallows_delete_errors(
 
     monkeypatch.setattr("weft.core.spawn_requests.Queue", _FakeQueue)
 
-    _delete_spawn_request(context, 1775679597297004544)
+    deleted = _delete_spawn_request(context, 1775679597297004544)
 
     assert closed is True
+    assert deleted is False
+
+
+def test_reconcile_submitted_spawn_reports_queued_for_unclaimed_request(
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    taskspec = _make_taskspec(tid)
+    submitted_tid = str(_enqueue_taskspec(context, taskspec, None))
+
+    result = reconcile_submitted_spawn(context, submitted_tid, timeout=0.0)
+
+    assert result == SpawnSubmissionReconciliation(
+        outcome="queued",
+        tid=submitted_tid,
+    )
+
+
+def test_reconcile_submitted_spawn_reports_reserved_for_claimed_request(
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+    manager_tid = "1776000000000000001"
+    registry = context.queue(WEFT_MANAGERS_REGISTRY_QUEUE, persistent=False)
+    try:
+        registry.write(
+            json.dumps(
+                {
+                    "tid": manager_tid,
+                    "status": "active",
+                    "pid": 424242,
+                    "requests": WEFT_SPAWN_REQUESTS_QUEUE,
+                    "role": "manager",
+                }
+            )
+        )
+    finally:
+        registry.close()
+
+    tid = str(time.time_ns())
+    taskspec = _make_taskspec(tid)
+    submitted_tid = str(_enqueue_taskspec(context, taskspec, None))
+    spawn_queue = context.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=False)
+    try:
+        moved = spawn_queue.move_one(
+            f"T{manager_tid}.reserved",
+            exact_timestamp=int(submitted_tid),
+            with_timestamps=False,
+        )
+    finally:
+        spawn_queue.close()
+    assert moved is not None
+
+    result = reconcile_submitted_spawn(context, submitted_tid, timeout=0.0)
+
+    assert result == SpawnSubmissionReconciliation(
+        outcome="reserved",
+        tid=submitted_tid,
+        reserved_queue=f"T{manager_tid}.reserved",
+    )
+
+
+def test_reconcile_submitted_spawn_reports_rejected_from_manager_log(
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+    submitted_tid = str(time.time_ns())
+    log_queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
+    try:
+        log_queue.write(
+            json.dumps(
+                {
+                    "event": "task_spawn_rejected",
+                    "tid": "1776000000000000002",
+                    "status": "running",
+                    "child_tid": submitted_tid,
+                    "error": "manager rejected child task",
+                }
+            )
+        )
+    finally:
+        log_queue.close()
+
+    result = reconcile_submitted_spawn(context, submitted_tid, timeout=0.0)
+
+    assert result == SpawnSubmissionReconciliation(
+        outcome="rejected",
+        tid=submitted_tid,
+        error="manager rejected child task",
+    )
 
 
 def test_run_inline_deletes_spawn_request_when_ensure_manager_fails(
@@ -726,7 +1078,7 @@ def test_run_pipeline_without_input_does_not_inject_work_envelope_start(
         "weft.commands.run._delete_spawn_request", lambda *args, **kwargs: None
     )
 
-    with pytest.raises(RuntimeError, match="boom"):
+    with pytest.raises(RuntimeError, match="rollback could not be confirmed"):
         _run_pipeline(
             pipeline_path,
             pipeline_input=None,

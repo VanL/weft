@@ -21,10 +21,11 @@ from .commands import serve as serve_cmd
 from .commands import specs as spec_cmd
 from .commands import status as status_cmd
 from .commands import tasks as task_cmd
+from .commands.builtins import cmd_system_builtins
 from .commands.dump import cmd_dump
 from .commands.load import cmd_load
 from .commands.result import cmd_result
-from .commands.run import cmd_run
+from .commands.run import cmd_run, render_spec_aware_run_help
 from .commands.validate_taskspec import cmd_validate_taskspec
 
 app = typer.Typer(
@@ -421,9 +422,13 @@ def spec_list(
         typer.echo(json.dumps(specs, ensure_ascii=False))
         return
     if not specs:
-        typer.echo("No stored specs found")
+        typer.echo("No specs found")
         return
     for item in specs:
+        source = item.get("source")
+        if source == spec_cmd.SPEC_SOURCE_BUILTIN:
+            typer.echo(f"{item['type']}: {item['name']} (builtin)")
+            continue
         typer.echo(f"{item['type']}: {item['name']}")
 
 
@@ -928,8 +933,16 @@ def result_command(
     raise typer.Exit(code=exit_code)
 
 
-@app.command("run")
+@app.command(
+    "run",
+    context_settings={
+        "allow_extra_args": True,
+        "ignore_unknown_options": True,
+        "help_option_names": [],
+    },
+)
 def run_command(
+    ctx: typer.Context,
     command: Annotated[
         list[str] | None,
         typer.Argument(
@@ -938,14 +951,11 @@ def run_command(
         ),
     ] = None,
     spec: Annotated[
-        Path | None,
+        str | None,
         typer.Option(
             "--spec",
-            help="Execute an existing TaskSpec JSON file",
-            exists=True,
-            file_okay=True,
-            dir_okay=False,
-            readable=True,
+            help="Execute a task spec by stored name or JSON path",
+            metavar="NAME|PATH",
         ),
     ] = None,
     pipeline: Annotated[
@@ -953,7 +963,8 @@ def run_command(
         typer.Option(
             "--pipeline",
             "-p",
-            help="Execute a stored pipeline name or JSON file",
+            help="Execute a pipeline by stored name or JSON path",
+            metavar="NAME|PATH",
         ),
     ] = None,
     pipeline_input: Annotated[
@@ -1057,15 +1068,38 @@ def run_command(
             help="Enable or disable auto-start tasks for this invocation",
         ),
     ] = True,
+    help_flag: Annotated[
+        bool,
+        typer.Option(
+            "--help",
+            is_eager=True,
+            help="Show this message and exit.",
+        ),
+    ] = False,
 ) -> None:
     """Execute a command, function, or TaskSpec via the TaskSpec runner surface.
 
     Spec: docs/specifications/10-CLI_Interface.md [CLI-1.1.1],
     docs/specifications/02-TaskSpec.md [TS-1.3]
     """
+    if help_flag:
+        if spec is not None:
+            typer.echo(
+                render_spec_aware_run_help(
+                    ctx,
+                    spec=spec,
+                    context_dir=context_dir,
+                )
+            )
+        else:
+            typer.echo(ctx.get_help())
+        raise typer.Exit(code=0)
 
+    raw_command_tokens = list(command or ())
+    command_tokens = [] if spec is not None else raw_command_tokens
     exit_code = cmd_run(
-        command or [],
+        command_tokens,
+        spec_run_args=raw_command_tokens if spec is not None else [],
         spec=spec,
         pipeline=pipeline,
         pipeline_input=pipeline_input,
@@ -1208,6 +1242,21 @@ def dump_command(
     exit_code, payload = cmd_dump(
         output=output, context_path=str(context_dir) if context_dir else None
     )
+    if payload:
+        typer.echo(payload, err=exit_code != 0)
+    raise typer.Exit(code=exit_code)
+
+
+@system_app.command("builtins")
+def system_builtins_command(
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Output builtin inventory as JSON"),
+    ] = False,
+) -> None:
+    """List the builtin TaskSpecs shipped with Weft."""
+
+    exit_code, payload = cmd_system_builtins(json_output=json_output)
     if payload:
         typer.echo(payload, err=exit_code != 0)
     raise typer.Exit(code=exit_code)

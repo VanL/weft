@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "weft"
-version = "0.8.0"
-description = "A lightweight workflow execution framework"
+version = "0.9.0"
+description = "The durable task substrate for agent systems"
 readme = "README.md"
 requires-python = ">=3.12"
 license = {text = "MIT"}
@@ -79,6 +79,7 @@ weft-macos-sandbox = { path = "./extensions/weft_macos_sandbox", editable = true
 [tool.hatch.build]
 include = [
     "weft/**/*.py",
+    "weft/**/*.json",
     "README.md",
     "LICENSE",
 ]
@@ -123,7 +124,7 @@ module = "psutil"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-module = "docker"
+module = "weft_docker.*"
 ignore_missing_imports = true
 
 [tool.ruff]

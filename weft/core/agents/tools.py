@@ -11,14 +11,14 @@ Spec references:
 
 from __future__ import annotations
 
-import importlib
 import inspect
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import Any
 
 from pydantic import BaseModel, create_model
 
+from weft.core.imports import import_callable_ref
 from weft.core.taskspec import AgentToolSection
 
 
@@ -40,6 +40,7 @@ def resolve_agent_tools(
     *,
     allow: Sequence[str] | None = None,
     deny: Sequence[str] | None = None,
+    bundle_root: str | None = None,
 ) -> list[ResolvedAgentTool]:
     """Resolve configured tools and apply per-work-item allow/deny overrides.
 
@@ -58,16 +59,20 @@ def resolve_agent_tools(
             continue
         if tool.name in denied_names:
             continue
-        resolved.append(resolve_agent_tool(tool))
+        resolved.append(resolve_agent_tool(tool, bundle_root=bundle_root))
     return resolved
 
 
-def resolve_agent_tool(tool: AgentToolSection) -> ResolvedAgentTool:
+def resolve_agent_tool(
+    tool: AgentToolSection,
+    *,
+    bundle_root: str | None = None,
+) -> ResolvedAgentTool:
     """Resolve a single tool descriptor to a callable tool object."""
     if tool.kind != "python":
         raise ValueError(f"Unsupported agent tool kind: {tool.kind}")
 
-    implementation = _import_tool_callable(tool.ref)
+    implementation = _import_tool_callable(tool.ref, bundle_root=bundle_root)
     description = tool.description or inspect.getdoc(implementation)
     input_schema = tool.args_schema or _build_input_schema(implementation)
     return ResolvedAgentTool(
@@ -94,19 +99,17 @@ def _validate_override_names(
         raise ValueError(f"Unknown tool name(s) in {label}: {joined}")
 
 
-def _import_tool_callable(ref: str) -> Callable[..., Any]:
+def _import_tool_callable(
+    ref: str,
+    *,
+    bundle_root: str | None = None,
+) -> Callable[..., Any]:
     try:
-        module_name, func_name = ref.rsplit(":", 1)
+        return import_callable_ref(ref, bundle_root=bundle_root)
     except ValueError as exc:  # pragma: no cover - input validation
         raise ValueError(
             f"Invalid python tool reference {ref!r}; expected 'module:function'"
         ) from exc
-
-    module = importlib.import_module(module_name)
-    implementation = cast(Callable[..., Any], getattr(module, func_name))
-    if not callable(implementation):
-        raise TypeError(f"Resolved tool reference is not callable: {ref}")
-    return implementation
 
 
 def _build_input_schema(implementation: Callable[..., Any]) -> dict[str, Any]:
@@ -132,7 +135,7 @@ def _build_input_schema(implementation: Callable[..., Any]) -> dict[str, Any]:
         __base__=BaseModel,
         **fields,
     )
-    return cast(dict[str, Any], model.model_json_schema())
+    return model.model_json_schema()
 
 
 __all__ = ["ResolvedAgentTool", "resolve_agent_tool", "resolve_agent_tools"]

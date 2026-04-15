@@ -44,6 +44,52 @@ The goal is not "workflow engine first." The goal is "durable task/process
 coordination first." Higher-order composition is allowed, but it should still
 look and behave like tasks rather than like a separate platform.
 
+That boundary also applies to agent work. Weft is the execution substrate for
+higher-level intelligence and orchestration, not the agent-management layer
+itself. The system should make execution easy, observable, and explicitly
+validatable without quietly taking ownership of higher-level orchestration
+policy.
+
+## Product Identity
+
+Weft owns the runtime substrate:
+
+- task lifecycle
+- queue-visible state
+- manager dispatch
+- runner selection and isolation
+- resource limits
+- task-shaped composition
+- agent execution as one more task target
+
+This means agent support and limited runners are not foreign to Weft. They are
+core expressions of the same design. An agent is a task. A dangerous task in a
+restricted container is still a task. Runner plugins and agent adapters extend
+the same execution model rather than creating a second product.
+
+## Product Boundary
+
+What fits in Weft:
+
+- agents as tasks
+- limited runners such as Docker or sandboxed runtimes
+- explicit composition over tasks
+- enough runtime-specific knowledge to make common runs work or fail clearly
+- explicit optional helpers that smooth a real execution path without becoming
+  required for correctness
+
+What does not fit in Weft:
+
+- hidden setup or probing on ordinary execution paths
+- turning Weft into the source of truth for provider ecosystem state
+- broad agent-specific management logic that is not needed to execute a task
+- convenience features that silently author project policy
+- a second control plane for agent setup, health, or lifecycle outside the task
+  model
+
+The rule is simple: Weft may help you run work. It should not try to manage the
+whole world around that work.
+
 ## Why SimpleBroker
 
 SimpleBroker fits Weft because it already provides the persistence and queue
@@ -82,11 +128,15 @@ The current public surface is:
 
 - single-task execution through `weft run`
 - stored task specs and stored pipeline specs
+- shipped builtin task helpers resolved only through explicit spec surfaces
+  such as `weft run --spec`, `weft spec ...`, and `weft system builtins`
 - pipeline execution through `weft run --pipeline`
 - manager lifecycle commands
 - queue passthrough commands
 - result, status, and task-control commands
 - first-class agent tasks through `spec.type="agent"`
+- first-party restricted runners, including the Docker runner's current
+  command lane and its narrow one-shot Docker-backed `provider_cli` agent lane
 
 The reason pipelines live under `weft run --pipeline` rather than under a
 separate top-level verb is architectural: composition is part of task

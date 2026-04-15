@@ -35,6 +35,8 @@ Current contract:
 - `state` and metadata remain mutable
 - stored templates omit runtime-expanded fields such as `tid`, `io`, and
   `state`
+- stored templates may also declare explicit submission-time shaping through
+  `spec.parameterization` and `spec.run_input`
 - the manager resolves runtime TaskSpecs from templates at spawn time
 - runner selection lives in `spec.runner`
 - resource limits live in `spec.limits`
@@ -157,9 +159,10 @@ Why this stays shared:
 **Purpose**: dispatch task execution to the configured runner plugin while
 keeping queue semantics and task lifecycle in core Weft code.
 
-_Implementation mapping_: `weft/core/tasks/runner.py` — `TaskRunner`; plugin
-loading in `weft/_runner_plugins.py`; runner plugin interface in `weft/ext.py`;
-built-in host runner in `weft/core/runners/`.
+_Implementation mapping_: `weft/core/tasks/runner.py` — `TaskRunner`; runner
+environment-profile materialization in `weft/core/environment_profiles.py`;
+plugin loading in `weft/_runner_plugins.py`; runner plugin interface in
+`weft/ext.py`; built-in host runner in `weft/core/runners/`.
 
 Why this boundary exists:
 
@@ -198,9 +201,15 @@ Why this matters:
 Current validation is layered:
 
 - TaskSpec schema validation checks the shape of `spec.runner`
+- runner environment-profile validation and materialization happen before
+  runner capability or plugin preflight checks
 - capability validation checks whether the runner supports the declared task
   shape
-- optional preflight checks runtime availability on the current machine
+- optional preflight checks runtime availability on the current machine when an
+  operator explicitly asks for validation
+- ordinary `weft run` submission does not add a hidden "can this binary run"
+  gate; the task attempts startup on the canonical execution path and reports
+  concrete startup failures there
 
 _Implementation mapping_: `weft/core/runner_validation.py`,
 `weft/commands/validate_taskspec.py`.

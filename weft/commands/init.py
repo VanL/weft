@@ -10,10 +10,18 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from simplebroker import target_for_directory
 from simplebroker.commands import cmd_init as sb_cmd_init
-from weft._constants import EXIT_ERROR, EXIT_SUCCESS, load_config
-from weft.context import build_context, normalize_backend_resolution_error
+from weft._constants import (
+    BROKER_PROJECT_CONFIG_FILENAME,
+    EXIT_ERROR,
+    EXIT_SUCCESS,
+    load_config,
+)
+from weft.context import (
+    build_context,
+    normalize_backend_resolution_error,
+    resolve_context_broker_target,
+)
 
 
 def cmd_init(
@@ -32,7 +40,7 @@ def cmd_init(
     if (
         backend_name == "sqlite"
         and not config.get("BROKER_DEFAULT_DB_NAME")
-        and not (root / ".simplebroker.toml").is_file()
+        and not (root / BROKER_PROJECT_CONFIG_FILENAME).is_file()
     ):
         if not quiet:
             print(
@@ -41,7 +49,7 @@ def cmd_init(
             )
         return EXIT_ERROR
     try:
-        broker_target = target_for_directory(root, config=config)
+        broker_target = resolve_context_broker_target(root, config=config)
         result = int(sb_cmd_init(broker_target, quiet=quiet))
     except Exception as exc:  # pragma: no cover - defensive
         friendly_exc = normalize_backend_resolution_error(exc)

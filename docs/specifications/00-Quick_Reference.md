@@ -81,11 +81,11 @@ Format rules and sanitization live in `01-Core_Components.md`.
 
 | Variable | Purpose |
 |----------|---------|
-| `WEFT_DIR` | Default project directory |
-| `WEFT_DB` | Database filename |
-| `WEFT_TIMEOUT` | Default task timeout |
-| `WEFT_MANAGER_LIFETIME_TIMEOUT` | Default manager idle timeout |
-| `WEFT_LOG_LEVEL` | Logging level |
+| `WEFT_MANAGER_LIFETIME_TIMEOUT` | Default manager idle timeout. Must parse as a non-negative float. |
+| `WEFT_MANAGER_REUSE_ENABLED` | Whether CLI-started managers stay alive after task completion. |
+| `WEFT_AUTOSTART_TASKS` | Whether manager boot should consider `.weft/autostart/` manifests. |
+| `WEFT_DEFAULT_DB_NAME` | Default sqlite broker path for explicit-root resolution and for legacy sqlite project auto-discovery when no `.broker.toml` owns the target. |
+| `WEFT_BACKEND`, `WEFT_BACKEND_TARGET`, `WEFT_BACKEND_HOST`, `WEFT_BACKEND_PORT`, `WEFT_BACKEND_USER`, `WEFT_BACKEND_PASSWORD`, `WEFT_BACKEND_DATABASE`, `WEFT_BACKEND_SCHEMA` | Env-selected broker backend and connection details. They win for explicit-root resolution when no `.broker.toml` exists, but auto-discovery still prefers a project `.broker.toml` or an existing legacy sqlite project first. |
 
 ## Spec Breaking Notes
 

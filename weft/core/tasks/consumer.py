@@ -18,7 +18,7 @@ from weft._constants import (
     DEFAULT_OUTPUT_SIZE_LIMIT_MB,
     WORK_ENVELOPE_START,
 )
-from weft.core.agent_runtime import AgentExecutionResult
+from weft.core.agents.runtime import AgentExecutionResult
 from weft.core.targets import decode_work_message, serialize_result
 from weft.core.taskspec import ReservedPolicy, TaskSpec
 from weft.helpers import kill_process_tree, terminate_process_tree
@@ -142,6 +142,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         outcome = self._run_task(work_item)
         live_command_streaming = self._active_live_command_streaming
         metrics_payload = self._extract_metrics(outcome)
+        agent_execution = self._build_agent_execution_payload(outcome.value)
         try:
             self._ensure_outcome_ok(outcome, timestamp, metrics_payload)
             if live_command_streaming:
@@ -152,6 +153,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
                 timestamp,
                 result_bytes,
                 metrics_payload,
+                agent_execution=agent_execution,
                 initial_transition=initial_transition,
             )
             return outcome.value
@@ -437,6 +439,8 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             monitor_interval=self.taskspec.spec.polling_interval,
             runner_name=self.taskspec.spec.runner.name,
             runner_options=self.taskspec.spec.runner.options,
+            environment_profile_ref=self.taskspec.spec.runner.environment_profile_ref,
+            bundle_root=self.taskspec.get_bundle_root(),
             persistent=self._task_is_persistent(),
             interactive=interactive,
             db_path=self._db_path,
@@ -479,6 +483,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         timestamp: int | None,
         result_bytes: int,
         metrics_payload: dict[str, Any] | None,
+        agent_execution: dict[str, Any] | None,
         *,
         initial_transition: bool,
     ) -> None:
@@ -502,6 +507,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
                 message_id=timestamp,
                 result_bytes=result_bytes,
                 metrics=metrics_payload,
+                agent_execution=agent_execution,
                 initial_transition=initial_transition,
             )
             self._update_process_title("running")
@@ -514,6 +520,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             message_id=timestamp,
             result_bytes=result_bytes,
             metrics=metrics_payload,
+            agent_execution=agent_execution,
         )
         self._emit_pipeline_terminal_event(status="completed")
         self._update_process_title("completed")
@@ -572,6 +579,33 @@ class Consumer(BaseTask, InteractiveTaskMixin):
                 net_connections=metrics.connections,
             )
         return metrics_payload
+
+    @staticmethod
+    def _build_agent_execution_payload(result: Any) -> dict[str, Any] | None:
+        if not isinstance(result, AgentExecutionResult):
+            return None
+        payload = {
+            "runtime": result.runtime,
+            "model": result.model,
+            "output_mode": result.output_mode,
+            "status": result.status,
+            "metadata": result.metadata,
+            "usage": result.usage,
+            "tool_trace": list(result.tool_trace),
+            "artifacts": list(result.artifacts),
+        }
+        try:
+            serialized = json.loads(json.dumps(payload, default=str))
+            if isinstance(serialized, dict):
+                return serialized
+        except Exception:  # pragma: no cover - defensive
+            logger.debug("Failed to serialize agent execution payload", exc_info=True)
+        return {
+            "runtime": result.runtime,
+            "model": result.model,
+            "output_mode": result.output_mode,
+            "status": result.status,
+        }
 
     def _ensure_outcome_ok(
         self,

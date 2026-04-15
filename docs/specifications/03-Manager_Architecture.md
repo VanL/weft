@@ -18,18 +18,24 @@ enqueues them on `weft.spawn.requests`, and optionally waits for completion by
 tailing task logs/outboxes. The spawn-request message ID becomes the task TID.
 Managers consume those requests, expand the TaskSpec, launch child Consumers via
 `launch_task_process`, and emit `weft.log.tasks` events just like any other task.
+Once that spawn request is written, submission is durable user intent; later
+CLI failure handling must reconcile by TID instead of assuming the enqueue can
+always be rolled back from the public request queue.
 
 ## Related Plans
 
-- [Task Lifecycle Stop/Drain Audit Plan](../plans/task-lifecycle-stop-drain-audit-plan.md) – Audit manager drain, registry semantics, and lifecycle ownership before changing worker behavior.
-- [Manager Bootstrap Unification Plan](../plans/manager-bootstrap-unification-plan.md) – Collapse `weft manager start` onto the canonical manager bootstrap path used by `weft run`.
-- [Manager Lifecycle Command Consolidation Plan](../plans/manager-lifecycle-command-consolidation-plan.md) – Collapse remaining `manager list|status|stop` and `weft status` manager lifecycle reads onto the same shared control-plane helper as bootstrap.
-- [Weft Serve Supervised Manager Plan](../plans/weft-serve-supervised-manager-plan.md) – Add a minimal foreground `weft manager serve` command for supervisor-managed persistent managers and align manager TERM/INT with graceful drain.
-- [Detached Manager Bootstrap Hardening Plan](../plans/detached-manager-bootstrap-hardening-plan.md) – Replace parent-dependent detached bootstrap with a real detached-launch wrapper, stronger startup proof, and actionable early-failure diagnostics.
-- [Manager Bootstrap Readiness And Cleanup Test Plan](../plans/manager-bootstrap-readiness-and-cleanup-test-plan.md) – Replace the fixed startup delay with event-based readiness proof and split cleanup-vs-startup stress coverage.
-- [Agent Runtime Implementation Plan](../plans/agent-runtime-implementation-plan.md) – references `MA-2` TID correlation.
-- [Persistent Agent Runtime Implementation Plan](../plans/persistent-agent-runtime-implementation-plan.md) – references Manager Architecture for long-lived agent sessions.
-- [TaskSpec Clean Design Plan](../plans/taskspec-clean-design-plan.md) – references Manager Architecture for TaskSpec schema alignment.
+- [Config Precedence and Parsing Alignment Plan](../plans/2026-04-14-config-precedence-and-parsing-alignment-plan.md) – align broker target precedence, Weft env parsing, and manager-timeout config semantics with the documented contract.
+- [Spawn Request Reconciliation Plan](../plans/2026-04-14-spawn-request-reconciliation-plan.md) – tighten queue-first submission error handling so post-enqueue failures reconcile by TID instead of assuming rollback, and keep late bootstrap acknowledgement failures from downgrading successful startup.
+- [Task Lifecycle Stop/Drain Audit Plan](../plans/2026-04-08-task-lifecycle-stop-drain-audit-plan.md) – Audit manager drain, registry semantics, and lifecycle ownership before changing worker behavior.
+- [Manager Bootstrap Unification Plan](../plans/2026-04-09-manager-bootstrap-unification-plan.md) – Collapse `weft manager start` onto the canonical manager bootstrap path used by `weft run`.
+- [Manager Lifecycle Command Consolidation Plan](../plans/2026-04-09-manager-lifecycle-command-consolidation-plan.md) – Collapse remaining `manager list|status|stop` and `weft status` manager lifecycle reads onto the same shared control-plane helper as bootstrap.
+- [Weft Serve Supervised Manager Plan](../plans/2026-04-09-weft-serve-supervised-manager-plan.md) – Add a minimal foreground `weft manager serve` command for supervisor-managed persistent managers and align manager TERM/INT with graceful drain.
+- [Detached Manager Bootstrap Hardening Plan](../plans/2026-04-13-detached-manager-bootstrap-hardening-plan.md) – Replace parent-dependent detached bootstrap with a real detached-launch wrapper, stronger startup proof, and actionable early-failure diagnostics.
+- [Manager Bootstrap Readiness And Cleanup Test Plan](../plans/2026-04-13-manager-bootstrap-readiness-and-cleanup-test-plan.md) – Replace the fixed startup delay with event-based readiness proof and split cleanup-vs-startup stress coverage.
+- [Weft Road To Excellent Plan](../plans/2026-04-14-weft-road-to-excellent-plan.md) – Top-level roadmap for making manager bootstrap boring under contention and aligning the rest of the system to the same reliability bar.
+- [Agent Runtime Implementation Plan](../plans/2026-04-06-agent-runtime-implementation-plan.md) – references `MA-2` TID correlation.
+- [Persistent Agent Runtime Implementation Plan](../plans/2026-04-06-persistent-agent-runtime-implementation-plan.md) – references Manager Architecture for long-lived agent sessions.
+- [TaskSpec Clean Design Plan](../plans/2026-04-06-taskspec-clean-design-plan.md) – references Manager Architecture for TaskSpec schema alignment.
 
 ## Conceptual Model: Everything is a Task [MA-0]
 
@@ -64,9 +70,11 @@ Key responsibilities implemented in `weft/core/manager.py`:
    `weft.state.managers` on startup (including queue names, PID, role, and
    capabilities) and replace it with a `stopped` record during shutdown. The
    active record is pruned when the manager exits cleanly.
-5. **Idle timeout** – Managers honour the `idle_timeout` metadata field (default
-   `WEFT_MANAGER_LIFETIME_TIMEOUT`) and will self-terminate after prolonged
-   inactivity while ensuring all child processes are reaped.
+5. **Idle timeout** – Managers honour the `idle_timeout` metadata field first.
+   When that metadata is absent they fall back to
+   `WEFT_MANAGER_LIFETIME_TIMEOUT`, which must parse as a non-negative float at
+   config-load time. Managers then self-terminate after prolonged inactivity
+   while ensuring all child processes are reaped.
 6. **Autostart manifests** – When `WEFT_AUTOSTART_TASKS` is enabled the manager
    scans `.weft/autostart/` for manifests that reference stored task specs or
    pipelines and launches each target using the same spawn pipeline as queue
@@ -103,27 +111,29 @@ _Implementation mapping_:
 and launching a short-lived detached bootstrap helper when required. That
 helper starts `weft.manager_process`, then the shared lifecycle code waits for a
 stronger startup proof than "registry entry appeared once": the launched manager
-PID must still be live, the canonical registry record for the requested manager
-TID must exist with that same PID, and the detached launcher must still be able
-to acknowledge success before the caller returns. This keeps startup proof tied
-to current manager readiness rather than a fixed sleep window. Early bootstrap
-failures surface the detached child exit status and startup stderr context
-instead of discarding them. Operators can also manage managers explicitly via
-`weft manager start|stop|list|status` and `weft manager serve`. `weft manager start`
-is a thin operator wrapper over the same bootstrap helper as `weft run`; it
-does not accept an arbitrary manager TaskSpec. `weft manager serve` uses that
-same canonical manager TaskSpec but runs it in the foreground for `systemd`,
-`launchd`, or `supervisord` style supervision, forcing `idle_timeout=0.0` for
-that invocation only. The canonical manager for bootstrap and leadership is the
-live manager registered for `weft.spawn.requests`. Manager records bound to
-another request queue do not participate in default-manager selection. External
-`SIGTERM` and `SIGINT` against a Manager enter the same drain path as STOP;
-`SIGUSR1` retains immediate kill semantics.
+PID must still be live and the canonical registry record for the requested
+manager TID must exist with that same PID. Detached-launcher success
+acknowledgement and startup-log cleanup happen after that proof and are
+best-effort diagnostics cleanup, not the startup truth boundary. This keeps
+startup proof tied to current manager readiness rather than a fixed sleep
+window. Early bootstrap failures surface the detached child exit status and
+startup stderr context instead of discarding them. Operators can also manage
+managers explicitly via `weft manager start|stop|list|status` and
+`weft manager serve`. `weft manager start` is a thin operator wrapper over the
+same bootstrap helper as `weft run`; it does not accept an arbitrary manager
+TaskSpec. `weft manager serve` uses that same canonical manager TaskSpec but
+runs it in the foreground for `systemd`, `launchd`, or `supervisord` style
+supervision, forcing `idle_timeout=0.0` for that invocation only. The canonical
+manager for bootstrap and leadership is the live manager registered for
+`weft.spawn.requests`. Manager records bound to another request queue do not
+participate in default-manager selection. External `SIGTERM` and `SIGINT`
+against a Manager enter the same drain path as STOP; `SIGUSR1` retains
+immediate kill semantics.
 
 _Implementation mapping_:
 - Shared manager lifecycle helper — `weft/commands/_manager_bootstrap.py` :: `_ensure_manager`, `_serve_manager_foreground`, `_list_manager_records`, `_manager_record`, `_stop_manager` (owns canonical manager bootstrap, foreground serve, normalized registry replay, and graceful/forced stop observation for CLI callers).
 - Detached bootstrap launcher — `weft/manager_detached_launcher.py` :: `main` (short-lived wrapper that starts the real manager runtime in a detached session/process-group boundary and reports early launch status back to `_start_manager`).
-- Manager process launch — `weft/commands/_manager_bootstrap.py` :: `_start_manager` (builds manager TaskSpec, launches the detached wrapper, requires matching pid-plus-registry readiness plus launcher acknowledgement before success, and reports early bootstrap diagnostics on failure).
+- Manager process launch — `weft/commands/_manager_bootstrap.py` :: `_start_manager` (builds manager TaskSpec, launches the detached wrapper, requires matching pid-plus-registry readiness before success, treats post-proof acknowledgement cleanup as best effort, and reports early bootstrap diagnostics on failure).
 - Manager process entry point — `weft/manager_process.py` :: `run_manager_process`, `main` (shared runtime helper plus standalone module invoked via `python -m weft.manager_process`).
 - Leadership election — `weft/core/manager.py` :: `Manager._maybe_yield_leadership`, `Manager._leader_tid`, `Manager._active_manager_records` (lowest-TID canonical manager wins; duplicates self-cancel).
 - External signal handling — `weft/core/manager.py` :: `Manager.handle_termination_signal` (TERM/INT drain, SIGUSR1 kill).

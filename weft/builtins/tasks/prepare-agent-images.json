@@ -1,0 +1,12 @@
+{
+  "name": "prepare-agent-images",
+  "description": "Build or reuse supported Docker-backed agent runtime images.",
+  "spec": {
+    "type": "function",
+    "function_target": "weft.builtins.agent_images:prepare_agent_images_task"
+  },
+  "metadata": {
+    "builtin": true,
+    "category": "agent-runtime"
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "version": "v2",
+  "provider": "claude_code",
+  "env": [
+    {
+      "name": "ANTHROPIC_API_KEY",
+      "source_kind": "host_env",
+      "required": false
+    },
+    {
+      "name": "ANTHROPIC_AUTH_TOKEN",
+      "source_kind": "host_env",
+      "required": false
+    },
+    {
+      "name": "CLAUDE_CODE_OAUTH_TOKEN",
+      "source_kind": "host_env",
+      "required": false
+    }
+  ],
+  "runtime_mounts": [
+    {
+      "name": "claude_home",
+      "source_kind": "home_dir",
+      "source_path": ".claude",
+      "target": "/root/.claude",
+      "required": false,
+      "read_only": false
+    },
+    {
+      "name": "claude_auth_file",
+      "source_kind": "home_file",
+      "source_path": ".claude.json",
+      "target": "/root/.claude.json",
+      "required": false,
+      "read_only": false
+    }
+  ]
+}

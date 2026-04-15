@@ -1,0 +1,37 @@
+{
+  "version": "v2",
+  "provider": "opencode",
+  "env": [
+    {
+      "name": "OPENAI_API_KEY",
+      "source_kind": "host_env",
+      "required": false
+    },
+    {
+      "name": "OPENAI_BASE_URL",
+      "source_kind": "host_env",
+      "required": false
+    },
+    {
+      "name": "OPENROUTER_API_KEY",
+      "source_kind": "host_env",
+      "required": false
+    },
+    {
+      "name": "GEMINI_API_KEY",
+      "source_kind": "host_env",
+      "required": false
+    },
+    {
+      "name": "GITHUB_TOKEN",
+      "source_kind": "host_env",
+      "required": false
+    },
+    {
+      "name": "XAI_API_KEY",
+      "source_kind": "host_env",
+      "required": false
+    }
+  ],
+  "runtime_mounts": []
+}

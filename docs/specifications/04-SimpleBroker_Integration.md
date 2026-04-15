@@ -90,9 +90,10 @@ This backend-neutral path is why older CLI surfaces like global `--dir` and
 
 ## Project Context and Directory Scoping
 
-Weft uses git-like project scoping. A `.weft/` directory marks the project
-root, and commands run from nested directories discover that root
-automatically.
+Weft uses broker-scoped project discovery. The project root comes from an
+explicit context override or from SimpleBroker's upward project search.
+`.weft/` is materialized at that resolved root for Weft-owned artifacts, but
+it is not the broker-target source of truth.
 
 _Implementation mapping_: `weft/context.py` (`build_context`,
 `_resolve_root_and_target`, `WeftContext`), `weft/commands/init.py`
@@ -105,11 +106,36 @@ Current discovery rules:
 3. materialize Weft-owned directories under `.weft/` when needed
 4. resolve the active broker target for that project
 
+Current broker target precedence:
+
+1. choose the project root from explicit `--context` / `spec_context` or from
+   SimpleBroker auto-discovery
+2. for an explicit root, delegate to `simplebroker.target_for_directory()`:
+   `root/.broker.toml` first, then env-selected non-sqlite backend synthesis,
+   then sqlite fallback rooted at that directory
+3. for auto-discovery, delegate to `simplebroker.resolve_broker_target()`:
+   upward `.broker.toml` first, then upward legacy sqlite discovery using the
+   configured default DB name, then env-selected non-sqlite backend synthesis
+4. if auto-discovery finds nothing, Weft falls back to explicit-root resolution
+   at the current working directory
+
+Current boundary notes:
+
+- `WEFT_*` broker aliases are translated through `load_config()` once and then
+  reused by Weft-owned context resolution
+- `.weft/config.json` is project metadata, not a broker target source
+- `.weft/agents.json` is delegated-agent launch config, not a broker target
+  source
+- TaskSpec `metadata` is caller-owned runtime metadata, not a broker target
+  source
+
 Current project structure:
 
 ```text
 project-root/
 ├── .weft/
+│   ├── agents.json        # optional explicit delegated-agent launch config
+│   ├── agent-health.json  # optional advisory delegated-provider observations
 │   ├── outputs/
 │   ├── logs/
 │   └── broker metadata and runtime artifacts
@@ -119,6 +145,20 @@ project-root/
 The reason for this shape is operator clarity. Even when the broker backend is
 not file-backed, `.weft/` remains the visible project home for Weft-owned
 artifacts.
+
+Builtin task helpers are different. They are shipped read-only with the Weft
+package rather than copied into `.weft/` during project init. Local stored task
+specs under `.weft/tasks/` may shadow builtin task helpers with the same name.
+
+Current delegated-agent boundary:
+
+- `.weft/agents.json` is explicit user-authored project config. It may select
+  delegated executable paths or other launch defaults when the TaskSpec does
+  not pin them directly
+- `.weft/agent-health.json` is observed metadata written by Weft after real
+  delegated calls. It is advisory only and never treated as startup truth
+- neither file changes the core queue/state model. They are project-scoped
+  runtime artifacts alongside other `.weft/` metadata
 
 ## Current Context API
 
@@ -184,6 +224,12 @@ Future context-management commands, cross-context bridges, and explicit
 connection-pooling designs are tracked in the companion doc:
 
 - [`04A-SimpleBroker_Integration_Planned.md`](04A-SimpleBroker_Integration_Planned.md)
+
+## Related Plans
+
+- [`docs/plans/2026-04-14-config-precedence-and-parsing-alignment-plan.md`](../plans/2026-04-14-config-precedence-and-parsing-alignment-plan.md)
+- [`docs/plans/2026-04-14-provider-cli-validation-boundary-and-agent-settings-alignment-plan.md`](../plans/2026-04-14-provider-cli-validation-boundary-and-agent-settings-alignment-plan.md)
+- [`docs/plans/2026-04-14-builtin-taskspecs-and-spec-resolution-plan.md`](../plans/2026-04-14-builtin-taskspecs-and-spec-resolution-plan.md)
 
 ## Related Documents
 

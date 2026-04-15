@@ -30,12 +30,33 @@ models in `weft/core/taskspec.py`. Runtime behaviour honours `stream_output`
 (chunked, base64-encoded messages), `output_size_limit_mb` (disk spillover),
 and `interactive` (long-lived, line-oriented command sessions with streaming
 stdin/stdout over task-local queues rather than terminal emulation).
-`spec.type="agent"` is implemented with `spec.agent.runtime="llm"`, Python
-tools, `output_mode` values `text`/`json`/`messages`, and persistent
-continuations when `spec.persistent=true` and
-`spec.agent.conversation_scope="per_task"`. The schema below treats one-off vs
-persistent execution as a **task lifecycle concern**, not an agent-specific
-field.
+`spec.type="agent"` is implemented with `spec.agent.runtime="llm"` and
+`spec.agent.runtime="provider_cli"`. `llm` supports Python tools,
+`output_mode` values `text`/`json`/`messages`, and persistent continuations
+when `spec.persistent=true` and `spec.agent.conversation_scope="per_task"`.
+`provider_cli` supports `output_mode="text"` only, rejects `spec.agent.tools`,
+and allows persistent continuation only for
+`spec.persistent=true` plus `spec.agent.conversation_scope="per_task"`.
+The current Docker-backed delegated lane is narrower:
+`spec.runner.name="docker"` currently supports one-shot `provider_cli` only,
+with `spec.agent.conversation_scope="per_message"`, `spec.persistent=false`,
+and a provider that has both an explicit shipped Docker image recipe and an
+internal provider container runtime descriptor.
+Weft also exposes a coarse delegated-agent authority declaration through
+`spec.agent.authority_class`. `llm` is bounded only. `provider_cli` accepts
+`"bounded"` and `"general"`, with missing values resolving to `"general"` for
+compatibility with older stored specs.
+Delegated runtimes may also use
+`spec.agent.runtime_config.tool_profile_ref` to load explicit structured tool
+policy such as `workspace_access` and stdio MCP server descriptors. The schema
+below treats one-off vs persistent execution as a **task lifecycle concern**,
+not an agent-specific field.
+
+Project-local delegated launch settings live outside TaskSpec. When a delegated
+TaskSpec does not pin an executable path directly, Weft may consult
+`.weft/agents.json` for explicit project defaults. Observed delegated-provider
+health may be recorded in `.weft/agent-health.json`, but that advisory cache is
+not part of the TaskSpec contract and does not affect schema validity.
 
 ```jsonc
 {
@@ -47,10 +68,11 @@ field.
   "spec": {                                  // REQUIRED. Defines the work to be done.
     "type": "function" | "command" | "agent", // REQUIRED. The type of execution.
     "persistent": false,                     // OPTIONAL. Generic task lifecycle flag. false = one-shot, true = keep draining inbox until stopped.
-    "function_target": "weft.specs:analyze", // REQUIRED if type is "function". Format: "pkg.module:function_name". Any Python Callable.
+    "function_target": "weft.specs:analyze", // REQUIRED if type is "function". Format: "pkg.module:function_name". Any Python Callable. If the TaskSpec was loaded from a bundle directory, Weft resolves the module against that bundle root first.
     "process_target": "grep",               // REQUIRED if type is "command". Executable path or PATH binary.
     "agent": {                              // REQUIRED if type is "agent". Static agent runtime config.
       "runtime": "llm",
+      "authority_class": "bounded" | "general" | null,
       "model": "openai/gpt-4o-mini" | null,
       "instructions": "You are a careful reviewer." | null, // Static system/developer prompt.
       "templates": {
@@ -67,6 +89,33 @@ field.
       "conversation_scope": "per_message" | "per_task",
       "runtime_config": {}
     },
+    "parameterization": {                   // OPTIONAL. Submission-time TaskSpec materialization for `weft run --spec`. Declares named long options and an adapter that converts those inputs into a concrete TaskSpec template before queueing.
+      "adapter_ref": "pkg.module:function_name",
+      "arguments": {
+        "provider": {
+          "type": "string" | "path",
+          "required": true | false,
+          "default": "codex" | null,
+          "choices": ["codex", "gemini"] | [],
+          "help": "Shown in docs and examples only"
+        }
+      }
+    } | null,
+    "run_input": {                          // OPTIONAL. Submission-time shaping for `weft run --spec`. Declares named long options plus optional stdin and an adapter that converts those inputs into the ordinary initial work payload before queueing.
+      "adapter_ref": "pkg.module:function_name",
+      "arguments": {
+        "prompt": {
+          "type": "string" | "path",
+          "required": true | false,
+          "help": "Shown in docs and examples only"
+        }
+      },
+      "stdin": {
+        "type": "text",
+        "required": true | false,
+        "help": "Shown in docs and examples only"
+      } | null
+    } | null,
     "args": [],                              // OPTIONAL. For commands, args are appended to build argv. For functions, args become *args.
     "keyword_args": {},                      // OPTIONAL. Keyword arguments for a function (named differently from Python kwargs due to technical constraints).
     "runner": {                              // OPTIONAL. Execution backend selection. Defaults to the built-in host runner.
@@ -141,10 +190,12 @@ field.
   runtime adapter. Task lifecycle still lives at the task layer: one-off agent
   tasks are ordinary one-shot tasks, and persistent agent tasks are ordinary
   long-lived tasks that continue draining inbox messages. In the current
-  implementation the supported backend is `llm`, tools are Python callables
-  only, and agent outputs are written to `outbox` as plain strings or JSON
-  objects. If a single work item yields multiple public outputs, the task
-  writes multiple outbox messages in order.
+  implementation `llm` is the bounded lane and `provider_cli` is the delegated
+  lane. Weft only owns the coarse authority declaration. Tool profiles and
+  runner isolation may narrow authority further, but Weft does not subsume the
+  full inner policy of external agent CLIs. Agent outputs are written to
+  `outbox` as plain strings or JSON objects. If a single work item yields
+  multiple public outputs, the task writes multiple outbox messages in order.
 
 **TID format**
 - TIDs are SimpleBroker 64-bit hybrid timestamps (microseconds + logical counter). Treat them as opaque, monotonic identifiers that may appear as 19-digit integers in decimal form.
@@ -154,6 +205,7 @@ constraint in the model layer.
 
 **Spec field groupings (for readability)**
 - **Target**: `type`, `function_target`/`process_target`/`agent`, `args`, `keyword_args`
+- **Submission UX**: `parameterization`, `run_input`
 - **Runner**: `runner.name`, `runner.options`
 - **Lifecycle**: `persistent`
 - **Limits**: `limits.*`
@@ -178,6 +230,8 @@ _Implementation mapping_:
 - **Schema & validation**: `weft/core/taskspec.py` — `TaskSpec`, `SpecSection`, `IOSection`, `StateSection`, `LimitsSection`, `RunnerSection`, `AgentSection`, `AgentToolSection`, `AgentTemplateSection`, `ReservedPolicy`.
 - **Payload resolution & defaults**: `weft/core/taskspec.py` — `resolve_taskspec_payload()`, `rewrite_tid_in_io()`, `TaskSpec.prepare_payload()` (model_validator mode="before").
 - **Target semantics**: `weft/core/targets.py` — `decode_work_message()`, `build_argv()` (command argv construction), `resolve_function_target()`.
+- **Submission-time TaskSpec materialization**: `weft/core/spec_parameterization.py` — declared long-option parsing for `spec.parameterization`, adapter invocation, JSON-serializable payload checks, and local concrete-TaskSpec materialization; `weft/commands/run.py` — local materialization before run-input shaping and spawn submission; `weft/commands/validate_taskspec.py` — explicit adapter-ref validation.
+- **Submission-time run-input shaping**: `weft/core/spec_run_input.py` — declared long-option parsing, adapter invocation, JSON-serializable payload checks; `weft/commands/run.py` — `weft run --spec` local adapter execution after materialization and before spawn submission; `weft/commands/validate_taskspec.py` — explicit adapter-ref validation.
 - **Runtime execution**: `weft/core/tasks/consumer.py` (`Consumer` — streaming, output handling, reserved policy application), `weft/core/tasks/base.py` (`BaseTask` — queue wiring, state tracking, process titles, reserved policy), `weft/core/tasks/interactive.py` (`InteractiveTaskMixin` — line-oriented interactive command sessions over task-local queues).
 - **Resource monitoring**: `weft/core/resource_monitor.py` (`ResourceMonitor` — psutil-based metrics collection), `weft/core/runners/host.py` (`HostTaskRunner` — monitor_class loading).
 - **Runner dispatch**: `weft/core/runners/host.py` (`HostTaskRunner`, `HostRunnerPlugin`), `weft/core/tasks/runner.py` (`TaskRunner`), `weft/core/taskspec.py` (`RunnerSection`).
@@ -190,7 +244,9 @@ _Per-field implementation status_:
 - `spec.type`: Implemented. `SpecSection.type` — Literal["function", "command", "agent"].
 - `spec.persistent`: Implemented. `SpecSection.persistent` — used by agent/interactive task paths.
 - `spec.function_target`, `spec.process_target`: Implemented. Cross-validated in `SpecSection.validate_target()`.
-- `spec.agent`: Implemented. `AgentSection` with full sub-schema (`runtime`, `model`, `instructions`, `templates`, `tools`, `output_mode`, `output_schema`, `max_turns`, `options`, `conversation_scope`, `runtime_config`).
+- `spec.agent`: Implemented. `AgentSection` with full sub-schema (`runtime`, `authority_class`, `model`, `instructions`, `templates`, `tools`, `output_mode`, `output_schema`, `max_turns`, `options`, `conversation_scope`, `runtime_config`).
+- `spec.parameterization`: Implemented. `ParameterizationSection` and `ParameterizationArgumentSection` in `weft/core/taskspec.py`; adapter parsing and materialization in `weft/core/spec_parameterization.py`; local `weft run --spec` integration in `weft/commands/run.py`.
+- `spec.run_input`: Implemented. `RunInputSection`, `RunInputArgumentSection`, and `RunInputStdinSection` in `weft/core/taskspec.py`; adapter parsing and invocation in `weft/core/spec_run_input.py`; local `weft run --spec` integration in `weft/commands/run.py`.
 - `spec.args`, `spec.keyword_args`: Implemented. Frozen after creation.
 - `spec.timeout`: Implemented. `SpecSection.timeout`.
 - `spec.limits.*`: Implemented. `LimitsSection` — `memory_mb`, `cpu_percent`, `max_fds`, `max_connections`. Runtime enforcement in `ResourceMonitor` and `TaskSpec.check_limits()`.
@@ -228,6 +284,66 @@ ownership:
 Rule of thumb: if Weft writes it automatically, it belongs in `state`. If the
 user or application writes it, it belongs in `metadata`.
 
+`spec.parameterization` and `spec.run_input` are not metadata.
+
+- `spec.parameterization` is static spec-owned submission behavior for
+  `weft run --spec`: a spec can declare named long options and point them at a
+  Python adapter that returns a concrete TaskSpec template before the spawn
+  request is queued.
+- `spec.run_input` is the next local step after materialization: a spec can
+  declare named long options plus optional stdin and point them at a Python
+  adapter that returns the ordinary initial work payload before the spawn
+  request is queued.
+
+Once the task is queued, the normal target-specific inbox contract applies.
+`metadata` remains caller-owned input inside that payload; Weft does not
+reinterpret metadata keys as submission configuration.
+
+### Submission-Time And Runtime Shaping Hooks [TS-1.4A]
+
+Weft now has several explicit shaping hooks. They are related, but they have
+different owners and run at different points:
+
+- `spec.parameterization`: local `weft run --spec` materialization from
+  declared long options into a concrete TaskSpec template before queueing
+- `spec.run_input`: local `weft run --spec` shaping from declared long options
+  plus optional stdin into the ordinary initial work payload before queueing
+- `spec.runner.environment_profile_ref`: runner-owned default materialization
+  into ordinary `runner.options`, `env`, and `working_dir`
+- `spec.agent.runtime_config.tool_profile_ref`: delegated-runtime-owned
+  materialization into ordinary structured tool-profile fields and provider
+  options
+- internal provider container runtime descriptors: provider-owned Docker-lane
+  defaults such as allowlisted env forwarding or optional config mounts; these
+  are internal support metadata, not user-authored TaskSpec schema
+- runner-specific features such as Docker
+  `spec.runner.options.work_item_mounts`: runner-owned late binding from the
+  raw work item into ordinary runner inputs
+
+Boundary rule:
+
+- these hooks are additive shaping surfaces; they must not branch Weft onto a
+  different durable execution path
+- after local submission shaping is done, the task still goes through the
+  ordinary `TaskSpec -> Manager -> Consumer -> TaskRunner -> runner` spine
+- local submission hooks may materialize a concrete TaskSpec or work payload,
+  but they do not get to reinterpret runtime state after the task is queued
+
+Current declared-option rules:
+
+- declared submission-time arguments use identifier keys in the TaskSpec and
+  normalize `_` to `-` for the public long option name
+- declared options are long-option only at the CLI boundary:
+  `--name value` or `--name=value`
+- declared option names must not collide with reserved `weft run` option names
+- `spec.parameterization` and `spec.run_input` argument names must not collide
+  with each other after `_` to `-` normalization
+- `spec.run_input` argument type `path` is expanded to an absolute path before
+  the adapter receives it
+- `spec.parameterization` may declare defaults and choices; `spec.run_input`
+  currently declares only argument type, requiredness, help text, and optional
+  stdin acceptance
+
 _Implementation mapping_: `StateSection` fields are written by
 `BaseTask._report_state_change()` (lifecycle events, resource metrics) and
 `Consumer._finalize_result()` (return_code, completed_at, final metrics).
@@ -258,6 +374,15 @@ inside Docker, or in another supported backend.
 - `spec.runner.name`
   - non-empty string
   - defaults to `"host"`
+- `spec.runner.environment_profile_ref`
+  - optional callable reference
+  - selects a Weft-owned runner environment profile that may supply default
+    `runner.options`, `env`, and `working_dir`
+  - those are defaults only; explicit TaskSpec `runner.options`, `env`, and
+    `working_dir` win when both the profile and the spec provide values
+  - if the TaskSpec was loaded from a bundle directory, the referenced module
+    is resolved against that bundle root first
+  - does not select or override `spec.runner.name`
 - `spec.runner.options`
   - runner-specific mapping
   - must remain JSON-serializable so stored TaskSpecs and queue payloads can
@@ -266,15 +391,37 @@ inside Docker, or in another supported backend.
 Validation is layered:
 
 - schema validation checks the shape of `spec.runner`
+- environment-profile validation loads and materializes the configured profile
 - capability validation checks whether the selected runner supports the task
   shape (`spec.type`, `interactive`, `persistent`, agent-session needs)
 - plugin validation checks runner-specific required options
-- preflight checks runtime availability on the current machine
+- preflight checks runtime availability on the current machine when explicitly
+  requested
 
 Stored TaskSpecs should remain portable; runtime availability is therefore a
-separate validation phase rather than part of baseline schema validation.
+separate validation phase rather than part of baseline schema validation or the
+ordinary `weft run` submission path. Ahead-of-time "does this binary resolve
+here" checks belong to explicit validation surfaces; execution still attempts
+the real run and reports startup failure from the normal runner or agent path.
 
-_Implementation mapping_: `weft/core/taskspec.py` (`RunnerSection`, `resolve_taskspec_payload()`), `weft/core/runner_validation.py` (`validate_taskspec_runner()`, `validate_runner_capabilities()`, `runner_name_from_taskspec()`), `weft/ext.py` (`RunnerPlugin`, `RunnerHandle`), `weft/_runner_plugins.py` (`get_runner_plugin()`, `require_runner_plugin()`), `weft/core/tasks/runner.py` (`TaskRunner`, `_build_runner_validation_payload()`).
+One current example is the Docker-backed one-shot `provider_cli` lane. The
+TaskSpec stays portable and declarative, while provider image availability,
+Docker daemon reachability, internal provider container runtime descriptors,
+and cache warming remain explicit runtime concerns rather than hidden
+submission gates. The current shipped Docker provider set is
+`claude_code`, `codex`, `gemini`, `opencode`, and `qwen`, but their runtime
+defaults differ. Examples include writable mounted config dirs such as
+`~/.codex` or `~/.qwen`, allowlisted auth env forwarding such as
+`GEMINI_API_KEY` or OpenCode provider keys, and generated runtime homes for
+Gemini. On macOS specifically, Docker-backed `claude_code` also needs
+portable auth because a host `claude.ai` login lives in macOS Keychain rather
+than a mounted Linux credential file. Ahead-of-time validation for that
+one-shot Docker lane therefore stays static and container-oriented: it checks
+runner, descriptor, and Docker availability, but it does not require the host
+provider executable to exist because the real provider runtime lives inside the
+container.
+
+_Implementation mapping_: `weft/core/taskspec.py` (`RunnerSection`, `resolve_taskspec_payload()`), `weft/core/environment_profiles.py` (`RunnerEnvironmentProfileResult`, `materialize_runner_environment()`, `materialize_runner_environment_from_taskspec()`), `weft/core/runner_validation.py` (`validate_taskspec_runner()`, `validate_taskspec_runner_environment()`, `validate_runner_capabilities()`, `runner_name_from_taskspec()`), `weft/ext.py` (`RunnerPlugin`, `RunnerHandle`, `RunnerEnvironmentProfile`), `weft/_runner_plugins.py` (`get_runner_plugin()`, `require_runner_plugin()`), `weft/core/tasks/runner.py` (`TaskRunner`, `_build_runner_validation_payload()`).
 
 ### Autostart Manifests [TS-1.2]
 
@@ -358,3 +505,9 @@ _Implementation mapping_: `weft/core/tasks/base.py` (`BaseTask._apply_reserved_p
 - [`docs/plans/2026-04-06-agent-runtime-implementation-plan.md`](../plans/2026-04-06-agent-runtime-implementation-plan.md)
 - [`docs/plans/2026-04-06-persistent-agent-runtime-implementation-plan.md`](../plans/2026-04-06-persistent-agent-runtime-implementation-plan.md)
 - [`docs/plans/2026-04-06-agent-runtime-boundary-cleanup-plan.md`](../plans/2026-04-06-agent-runtime-boundary-cleanup-plan.md)
+- [`docs/plans/2026-04-13-delegated-agent-authority-boundary-cleanup-plan.md`](../plans/2026-04-13-delegated-agent-authority-boundary-cleanup-plan.md)
+- [`docs/plans/2026-04-14-provider-cli-validation-boundary-and-agent-settings-alignment-plan.md`](../plans/2026-04-14-provider-cli-validation-boundary-and-agent-settings-alignment-plan.md)
+- [`docs/plans/2026-04-15-multi-provider-docker-provider-cli-expansion-plan.md`](../plans/2026-04-15-multi-provider-docker-provider-cli-expansion-plan.md)
+- [`docs/plans/2026-04-14-docker-agent-images-and-one-shot-provider-cli-plan.md`](../plans/2026-04-14-docker-agent-images-and-one-shot-provider-cli-plan.md)
+- [`docs/plans/2026-04-14-provider-cli-container-runtime-descriptor-plan.md`](../plans/2026-04-14-provider-cli-container-runtime-descriptor-plan.md)
+- [`docs/plans/2026-04-15-spec-run-input-adapter-and-declared-args-plan.md`](../plans/2026-04-15-spec-run-input-adapter-and-declared-args-plan.md)

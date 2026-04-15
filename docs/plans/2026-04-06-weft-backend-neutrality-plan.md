@@ -291,7 +291,7 @@ Shared path — do not duplicate:
 Approach:
 
 - Remove or narrow the preflight in `cmd_init()` that assumes
-  `BROKER_DEFAULT_DB_NAME` must be set unless `.simplebroker.toml` exists.
+  `BROKER_DEFAULT_DB_NAME` must be set unless `.broker.toml` exists.
 - Let target resolution and SimpleBroker initialization determine whether the
   configured backend is valid.
 - Preserve the friendly error path, but make the message describe target

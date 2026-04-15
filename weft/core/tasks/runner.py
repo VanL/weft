@@ -14,8 +14,14 @@ from typing import Any
 
 from simplebroker import BrokerTarget
 from weft._runner_plugins import require_runner_plugin
+from weft.core.agents.validation import (
+    validate_taskspec_agent_runtime,
+    validate_taskspec_agent_tool_profile,
+)
+from weft.core.environment_profiles import materialize_runner_environment
 from weft.core.runner_validation import validate_runner_capabilities
 from weft.core.runners import RunnerOutcome
+from weft.core.taskspec import apply_bundle_root_to_taskspec_payload
 from weft.ext import RunnerHandle
 
 from .sessions import AgentSession, CommandSession
@@ -45,6 +51,8 @@ class TaskRunner:
         monitor_interval: float | None,
         runner_name: str = "host",
         runner_options: Mapping[str, Any] | None = None,
+        environment_profile_ref: str | None = None,
+        bundle_root: str | None = None,
         persistent: bool = False,
         interactive: bool = False,
         db_path: BrokerTarget | str | None = None,
@@ -53,8 +61,22 @@ class TaskRunner:
         self._target_type = target_type
         self._persistent = persistent
         self._interactive = interactive
-        self._runner_name = runner_name.strip() or "host"
-        self._runner_options = dict(runner_options or {})
+        materialized_environment = materialize_runner_environment(
+            target_type=target_type,
+            runner_name=runner_name.strip() or "host",
+            runner_options=runner_options,
+            env=env,
+            working_dir=working_dir,
+            environment_profile_ref=environment_profile_ref,
+            bundle_root=bundle_root,
+            tid=tid,
+        )
+        self._runner_name = materialized_environment.runner_name
+        self._runner_options = dict(materialized_environment.runner_options)
+        self._env = dict(materialized_environment.env)
+        self._working_dir = materialized_environment.working_dir
+        self._environment_profile_ref = materialized_environment.environment_profile_ref
+        self._bundle_root = bundle_root
         self._taskspec_payload = _build_runner_validation_payload(
             target_type=target_type,
             tid=tid,
@@ -63,14 +85,16 @@ class TaskRunner:
             agent=agent,
             args=args,
             kwargs=kwargs,
-            env=env,
-            working_dir=working_dir,
+            env=self._env,
+            working_dir=self._working_dir,
             timeout=timeout,
             limits=limits,
             monitor_class=monitor_class,
             monitor_interval=monitor_interval,
             runner_name=self._runner_name,
             runner_options=self._runner_options,
+            environment_profile_ref=self._environment_profile_ref,
+            bundle_root=bundle_root,
             persistent=persistent,
             interactive=interactive,
         )
@@ -79,6 +103,16 @@ class TaskRunner:
         plugin.check_version()
         validate_runner_capabilities(plugin, self._taskspec_payload)
         plugin.validate_taskspec(self._taskspec_payload, preflight=False)
+        validate_taskspec_agent_runtime(
+            self._taskspec_payload,
+            load_runtime=target_type == "agent",
+            preflight=False,
+        )
+        validate_taskspec_agent_tool_profile(
+            self._taskspec_payload,
+            load_runtime=target_type == "agent",
+            preflight=False,
+        )
 
         self._plugin = plugin
         self._backend = plugin.create_runner(
@@ -89,13 +123,14 @@ class TaskRunner:
             agent=agent,
             args=args,
             kwargs=kwargs,
-            env=env,
-            working_dir=working_dir,
+            env=self._env,
+            working_dir=self._working_dir,
             timeout=timeout,
             limits=limits,
             monitor_class=monitor_class,
             monitor_interval=monitor_interval,
             runner_options=self._runner_options,
+            bundle_root=bundle_root,
             persistent=persistent,
             interactive=interactive,
             db_path=db_path,
@@ -123,7 +158,6 @@ class TaskRunner:
 
         Spec: [CC-3], [RM-5.1]
         """
-        self._plugin.validate_taskspec(self._taskspec_payload, preflight=True)
         kwargs: dict[str, Any] = {
             "cancel_requested": cancel_requested,
             "on_worker_started": on_worker_started,
@@ -144,12 +178,10 @@ class TaskRunner:
 
     def start_session(self) -> CommandSession:
         """Start an interactive command session for the configured runner."""
-        self._plugin.validate_taskspec(self._taskspec_payload, preflight=True)
         return self._backend.start_session()
 
     def start_agent_session(self) -> AgentSession:
         """Start a long-lived agent session for the configured runner."""
-        self._plugin.validate_taskspec(self._taskspec_payload, preflight=True)
         return self._backend.start_agent_session()
 
 
@@ -170,6 +202,8 @@ def _build_runner_validation_payload(
     monitor_interval: float | None,
     runner_name: str,
     runner_options: Mapping[str, Any] | None,
+    environment_profile_ref: str | None,
+    bundle_root: str | None,
     persistent: bool,
     interactive: bool,
 ) -> dict[str, Any]:
@@ -181,7 +215,7 @@ def _build_runner_validation_payload(
     agent_payload = dict(agent) if agent is not None else None
     env_payload = dict(env or {})
 
-    return {
+    payload = {
         "tid": tid,
         "spec": {
             "type": target_type,
@@ -201,9 +235,11 @@ def _build_runner_validation_payload(
             "runner": {
                 "name": runner_name,
                 "options": dict(runner_options or {}),
+                "environment_profile_ref": environment_profile_ref,
             },
         },
     }
+    return apply_bundle_root_to_taskspec_payload(payload, bundle_root)
 
 
 __all__ = ["AgentSession", "CommandSession", "RunnerOutcome", "TaskRunner"]

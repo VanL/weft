@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from weft.core.agent_runtime import (
+from weft.core.agents.runtime import (
     AgentExecutionResult,
     NormalizedAgentMessage,
     clear_agent_runtime_registry,

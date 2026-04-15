@@ -110,6 +110,7 @@ def create_valid_agent_taskspec(
     name: str = "test-agent",
     runtime: str = "llm",
     model: str = "weft-test-agent-model",
+    authority_class: str | None = None,
 ) -> TaskSpec:
     """Create a valid agent TaskSpec with common fields."""
     return TaskSpec(
@@ -121,9 +122,54 @@ def create_valid_agent_taskspec(
             limits=LimitsSection(memory_mb=256),
             agent=AgentSection(
                 runtime=runtime,
+                authority_class=authority_class,
                 model=model,
                 runtime_config={
                     "plugin_modules": ["tests.fixtures.llm_test_models"],
+                },
+            ),
+        ),
+        io=IOSection(
+            inputs={"inbox": f"T{tid}.inbox"},
+            outputs={"outbox": f"T{tid}.outbox"},
+            control={
+                "ctrl_in": f"T{tid}.ctrl_in",
+                "ctrl_out": f"T{tid}.ctrl_out",
+            },
+        ),
+        state=StateSection(),
+        metadata={"owner": "test", "type": "agent"},
+    )
+
+
+def create_valid_provider_cli_agent_taskspec(
+    *,
+    tid: str = VALID_TEST_TID,
+    name: str = "test-provider-cli-agent",
+    provider: str = "codex",
+    executable: str,
+    model: str | None = None,
+    persistent: bool = False,
+    conversation_scope: str = "per_message",
+    authority_class: str | None = None,
+) -> TaskSpec:
+    """Create a valid provider_cli agent TaskSpec for fixture-backed tests."""
+    return TaskSpec(
+        tid=tid,
+        name=name,
+        spec=SpecSection(
+            type="agent",
+            persistent=persistent,
+            timeout=30.0,
+            limits=LimitsSection(memory_mb=256),
+            agent=AgentSection(
+                runtime="provider_cli",
+                authority_class=authority_class,
+                model=model,
+                conversation_scope=conversation_scope,
+                runtime_config={
+                    "provider": provider,
+                    "executable": executable,
                 },
             ),
         ),

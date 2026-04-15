@@ -3,6 +3,8 @@
 import os
 from unittest.mock import patch
 
+import pytest
+
 from weft._constants import (
     CONTROL_PAUSE,
     CONTROL_RESUME,
@@ -263,14 +265,19 @@ class TestLoadConfig:
             config = load_config()
             assert config["WEFT_MANAGER_LIFETIME_TIMEOUT"] == 42.5
 
-        with patch.dict(os.environ, {"WEFT_MANAGER_LIFETIME_TIMEOUT": "-1"}):
-            config = load_config()
-            assert (
-                config["WEFT_MANAGER_LIFETIME_TIMEOUT"] == WEFT_MANAGER_LIFETIME_TIMEOUT
-            )
+    @pytest.mark.parametrize(
+        "value",
+        ["-1", "true", "junk"],
+    )
+    def test_manager_timeout_env_rejects_invalid_values(self, value: str) -> None:
+        with (
+            patch.dict(os.environ, {"WEFT_MANAGER_LIFETIME_TIMEOUT": value}),
+            pytest.raises(ValueError, match="WEFT_MANAGER_LIFETIME_TIMEOUT"),
+        ):
+            load_config()
 
-    def test_backend_env_translation(self) -> None:
-        """Backend-selection env vars are translated to SimpleBroker keys."""
+    def test_backend_env_translation_from_parts(self) -> None:
+        """Backend-selection env vars are translated to typed SimpleBroker keys."""
         with patch.dict(
             os.environ,
             {
@@ -281,7 +288,6 @@ class TestLoadConfig:
                 "WEFT_BACKEND_PASSWORD": "secret",
                 "WEFT_BACKEND_DATABASE": "simplebroker_app",
                 "WEFT_BACKEND_SCHEMA": "broker_schema",
-                "WEFT_BACKEND_TARGET": "postgresql://broker@db.example.com/simplebroker",
             },
             clear=True,
         ):
@@ -294,12 +300,45 @@ class TestLoadConfig:
         assert config["BROKER_BACKEND_PASSWORD"] == "secret"
         assert config["BROKER_BACKEND_DATABASE"] == "simplebroker_app"
         assert config["BROKER_BACKEND_SCHEMA"] == "broker_schema"
+        assert config["BROKER_BACKEND_TARGET"] == ""
+        assert config["BROKER_AUTO_VACUUM_INTERVAL"] == 100
+        assert isinstance(config["BROKER_AUTO_VACUUM_INTERVAL"], int)
+
+    def test_backend_env_translation_from_target(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "WEFT_BACKEND": "postgres",
+                "WEFT_BACKEND_TARGET": "postgresql://broker@db.example.com/simplebroker",
+                "WEFT_BACKEND_SCHEMA": "broker_schema",
+            },
+            clear=True,
+        ):
+            config = load_config()
+
+        assert config["BROKER_BACKEND"] == "postgres"
         assert (
             config["BROKER_BACKEND_TARGET"]
             == "postgresql://broker@db.example.com/simplebroker"
         )
-        assert config["BROKER_AUTO_VACUUM_INTERVAL"] == 100
-        assert isinstance(config["BROKER_AUTO_VACUUM_INTERVAL"], int)
+        assert config["BROKER_BACKEND_SCHEMA"] == "broker_schema"
+
+    def test_backend_env_rejects_target_plus_parts(self) -> None:
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "WEFT_BACKEND": "postgres",
+                    "WEFT_BACKEND_TARGET": (
+                        "postgresql://broker@db.example.com/simplebroker"
+                    ),
+                    "WEFT_BACKEND_HOST": "db.example.com",
+                },
+                clear=True,
+            ),
+            pytest.raises(ValueError, match="ambiguous"),
+        ):
+            load_config()
 
     def test_all_config_keys_present(self) -> None:
         """Test that Weft returns its own keys plus a full broker config."""

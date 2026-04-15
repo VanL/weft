@@ -465,7 +465,7 @@ Implementation notes:
   is a concrete collision.
 - For PG, create one schema per Weft project root.
   - Derive the schema from the absolute project-root path via a stable hash.
-  - Write a `.simplebroker.toml` into that project root.
+  - Write a `.broker.toml` into that project root.
   - Use the plugin's public target initialization / cleanup hooks.
 - Do not copy SimpleBroker's "one schema per xdist worker" design directly.
   That design is wrong for Weft because one Weft test may need multiple project

@@ -35,6 +35,10 @@ User -> CLI -> weft.spawn.requests -> Manager -> T{tid}.inbox
 The CLI submits a spawn request. The manager expands it into a runtime TaskSpec,
 uses the spawn-request message ID as the task TID, seeds the initial inbox
 payload when provided, and records the lifecycle event in `weft.log.tasks`.
+Queue-first ordering is deliberate. Once the spawn request is written, later
+CLI error handling reconciles that submitted TID against durable task, log, and
+queue surfaces instead of assuming the public inbox delete path can always roll
+the request back.
 
 _Implementation mapping_: `weft/commands/run.py` `_enqueue_taskspec`;
 `weft/core/manager.py` `Manager._handle_work_message`,
@@ -124,6 +128,19 @@ _Implementation mapping_: `weft/core/tasks/base.py` `_report_state_change`;
 Managers consume `weft.spawn.requests`, validate and expand TaskSpecs, launch
 child tasks, and seed initial inbox payloads when present.
 
+Current submission-reconciliation rules:
+
+- if the submitted TID is already visible through task logs or TID mappings,
+  the submission is treated as spawned
+- if a manager has already emitted `task_spawn_rejected` for that child TID,
+  the submission is treated as rejected
+- if the exact message is still in `weft.spawn.requests`, the CLI may delete it
+  and report submission failure
+- if the exact message has moved into a manager reserved queue, the CLI must
+  not claim rollback succeeded; recovery is manual from that reserved queue
+- if none of those surfaces prove success or rollback, the CLI reports an
+  explicit unknown submission outcome keyed by TID
+
 Autostart manifests follow the same overall spawn path. Current autostart
 runtime support covers stored task specs; stored pipeline targets are logged as
 unsupported and skipped.
@@ -141,9 +158,11 @@ Current rules:
 - detached bootstrap launches the real manager runtime through a short-lived
   detached wrapper rather than keeping it as a plain CLI child
 - detached bootstrap returns success only after the launched manager PID is
-  live, the canonical registry record for that same manager TID/PID is visible,
-  and the detached launcher can still acknowledge success without reporting an
-  early child exit
+  live and the canonical registry record for that same manager TID/PID is
+  visible
+- detached-launcher acknowledgement and startup-stderr cleanup are best-effort
+  post-proof steps; they may warn, but they do not downgrade a successfully
+  proven manager start into submission failure
 - early detached-bootstrap failure surfaces child exit status and startup
   stderr context
 - foreground serve forces `idle_timeout=0.0` for that invocation
@@ -309,6 +328,7 @@ management live in the companion doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-04-14-spawn-request-reconciliation-plan.md`](../plans/2026-04-14-spawn-request-reconciliation-plan.md)
 - [`docs/plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md`](../plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md)
 - [`docs/plans/2026-04-09-manager-bootstrap-unification-plan.md`](../plans/2026-04-09-manager-bootstrap-unification-plan.md)
 - [`docs/plans/2026-04-13-pipeline-spec-expansion-plan.md`](../plans/2026-04-13-pipeline-spec-expansion-plan.md)

@@ -18,6 +18,32 @@ from weft.context import build_context
 pytestmark = [pytest.mark.shared]
 
 
+def _write_broker_project_config(
+    root: Path,
+    *,
+    backend: str,
+    target: str,
+    schema: str | None = None,
+) -> Path:
+    lines = [
+        "version = 1",
+        f'backend = "{backend}"',
+        f'target = "{target}"',
+        "",
+    ]
+    if schema is not None:
+        lines.extend(
+            [
+                "[backend_options]",
+                f'schema = "{schema}"',
+                "",
+            ]
+        )
+    config_path = root / ".broker.toml"
+    config_path.write_text("\n".join(lines), encoding="utf-8")
+    return config_path
+
+
 def test_cli_init_creates_project(workdir: Path, weft_harness) -> None:
     project_root = workdir / "project"
 
@@ -151,7 +177,7 @@ def test_cli_init_supports_env_only_postgres_configuration(
         assert rc == 0
         assert "Initialized Weft project" in out
         assert err == ""
-        assert not (project_root / ".simplebroker.toml").exists()
+        assert not (project_root / ".broker.toml").exists()
 
         project_context = build_context(spec_context=project_root)
         queue = project_context.queue("init.env_only_pg.queue", persistent=True)
@@ -174,7 +200,7 @@ def test_cmd_init_reports_weft_pg_install_hint_for_missing_plugin(
         )
 
     monkeypatch.setattr(
-        "weft.commands.init.target_for_directory", _raise_missing_plugin
+        "weft.commands.init.resolve_context_broker_target", _raise_missing_plugin
     )
     monkeypatch.setattr(
         "weft.commands.init.load_config", lambda: {"BROKER_BACKEND": "postgres"}
@@ -186,3 +212,42 @@ def test_cmd_init_reports_weft_pg_install_hint_for_missing_plugin(
     assert rc == 1
     assert "uv add 'weft[pg]'" in captured.err
     assert "simplebroker-pg" in captured.err
+
+
+def test_cmd_init_prefers_project_postgres_target_over_env_target(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    _write_broker_project_config(
+        project_root,
+        backend="postgres",
+        target="postgresql://toml-user@toml-host/toml-db",
+        schema="toml_schema",
+    )
+    monkeypatch.setenv("WEFT_BACKEND", "postgres")
+    monkeypatch.setenv("WEFT_BACKEND_TARGET", "postgresql://env-user@env-host/env-db")
+    monkeypatch.setenv("WEFT_BACKEND_SCHEMA", "env_schema")
+    monkeypatch.setenv(
+        "BROKER_BACKEND_TARGET",
+        "postgresql://raw-user@raw-host/raw-db",
+    )
+    monkeypatch.setenv("BROKER_BACKEND_SCHEMA", "raw_schema")
+
+    captured: dict[str, object] = {}
+
+    def _fake_init(target, quiet=False):  # type: ignore[no-untyped-def]
+        captured["target"] = target
+        captured["quiet"] = quiet
+        return 0
+
+    monkeypatch.setattr("weft.commands.init.sb_cmd_init", _fake_init)
+
+    rc = cmd_init(project_root, quiet=True)
+
+    assert rc == 0
+    broker_target = captured["target"]
+    assert broker_target.backend_name == "postgres"
+    assert broker_target.target == "postgresql://toml-user@toml-host/toml-db"
+    assert broker_target.backend_options == {"schema": "toml_schema"}

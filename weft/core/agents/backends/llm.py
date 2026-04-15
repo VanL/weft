@@ -13,14 +13,16 @@ from typing import Any
 
 import llm
 
-from weft.core.agent_runtime import (
+from weft.core.taskspec import AgentSection
+
+from ..runtime import (
     AgentExecutionResult,
     AgentRuntimeSession,
     NormalizedAgentMessage,
     NormalizedAgentWorkItem,
+    content_to_prompt_text,
 )
-from weft.core.agent_tools import ResolvedAgentTool, resolve_agent_tools
-from weft.core.taskspec import AgentSection
+from ..tools import ResolvedAgentTool, resolve_agent_tools
 
 
 class LLMBackend:
@@ -33,7 +35,9 @@ class LLMBackend:
         work_item: NormalizedAgentWorkItem,
         tools: Sequence[ResolvedAgentTool],
         tid: str | None,
+        bundle_root: str | None = None,
     ) -> AgentExecutionResult:
+        del bundle_root
         model = self._resolve_model(agent)
         conversation = model.conversation(chain_limit=agent.max_turns)
         return self._execute_with_conversation(
@@ -49,7 +53,9 @@ class LLMBackend:
         *,
         agent: AgentSection,
         tid: str | None,
+        bundle_root: str | None = None,
     ) -> AgentRuntimeSession:
+        del bundle_root
         model = self._resolve_model(agent)
         conversation = model.conversation(chain_limit=agent.max_turns)
         return LLMBackendSession(
@@ -57,6 +63,16 @@ class LLMBackend:
             conversation=conversation,
             tid=tid,
         )
+
+    def validate(
+        self,
+        *,
+        agent: AgentSection,
+        preflight: bool = False,
+        bundle_root: str | None = None,
+    ) -> None:
+        del preflight, bundle_root
+        self._resolve_model(agent)
 
     def _resolve_model(self, agent: AgentSection) -> Any:
         self._validate_agent(agent)
@@ -163,20 +179,7 @@ class LLMBackend:
     def _content_to_prompt(
         content: str | tuple[str | NormalizedAgentMessage, ...],
     ) -> str:
-        if isinstance(content, str):
-            return content
-
-        parts: list[str] = []
-        for item in content:
-            if isinstance(item, str):
-                parts.append(item)
-                continue
-            if isinstance(item.content, str):
-                content_text = item.content
-            else:
-                content_text = json.dumps(item.content, separators=(",", ":"))
-            parts.append(f"{item.role}: {content_text}")
-        return "\n\n".join(parts)
+        return content_to_prompt_text(content)
 
     def _extract_outputs(
         self,

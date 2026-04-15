@@ -2,6 +2,7 @@
 
 Spec references:
 - docs/specifications/10-CLI_Interface.md [CLI-1.1.1]
+- docs/specifications/10B-Builtin_TaskSpecs.md
 - docs/specifications/01-Core_Components.md [CC-2.5]
 - docs/specifications/02-TaskSpec.md [TS-1], [TS-1.3]
 """
@@ -39,6 +40,7 @@ from weft.commands._manager_bootstrap import (
     _stop_manager,
 )
 from weft.commands._result_wait import await_one_shot_result
+from weft.commands._spawn_submission import reconcile_submitted_spawn
 from weft.commands._streaming import (
     collect_interactive_queue_output as _collect_interactive_queue_output,
 )
@@ -54,7 +56,21 @@ from weft.core.spawn_requests import (
     delete_spawn_request as delete_spawn_request_message,
 )
 from weft.core.spawn_requests import submit_spawn_request
-from weft.core.taskspec import TaskSpec, resolve_taskspec_payload
+from weft.core.spec_parameterization import (
+    materialize_taskspec_template,
+    parse_declared_parameterization_args,
+)
+from weft.core.spec_run_input import (
+    SpecRunInputRequest,
+    invoke_run_input_adapter,
+    normalize_declared_option_name,
+    parse_declared_run_input_args,
+)
+from weft.core.taskspec import (
+    TaskSpec,
+    apply_bundle_root_to_taskspec_payload,
+    resolve_taskspec_payload,
+)
 from weft.helpers import (
     read_limited_stdin,
     resolve_broker_max_message_size,
@@ -62,17 +78,28 @@ from weft.helpers import (
 )
 
 # -----------------------------------------------------------------------------
-# Legacy helpers for --spec execution
+# Explicit spec helpers
 # -----------------------------------------------------------------------------
 
 
-def _load_taskspec(path: Path) -> TaskSpec:
-    """Load and validate a TaskSpec JSON file (Spec: [TS-1], [CLI-1.1.1])."""
+def _load_taskspec_reference(
+    spec: str | Path,
+    *,
+    context_dir: Path | None,
+) -> TaskSpec:
+    """Load and validate a TaskSpec from an explicit path or named spec reference."""
     try:
-        return TaskSpec.model_validate_json(
-            path.read_text(encoding="utf-8"),
+        resolved = spec_cmd.resolve_spec_reference(
+            spec,
+            spec_type=spec_cmd.SPEC_TYPE_TASK,
+            context_path=context_dir,
+        )
+        taskspec = TaskSpec.model_validate(
+            resolved.payload,
             context={"template": True, "auto_expand": False},
         )
+        taskspec.set_bundle_root(resolved.bundle_root)
+        return taskspec
     except Exception as exc:  # pragma: no cover - validation tested elsewhere
         raise typer.Exit(code=2) from exc
 
@@ -82,25 +109,94 @@ def _load_pipeline_spec(
     *,
     context_dir: Path | None,
 ) -> tuple[PipelineSpec, str | None]:
-    path = Path(pipeline)
-    if path.exists():
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except Exception as exc:  # pragma: no cover - defensive
-            raise typer.BadParameter(f"Failed to read pipeline: {exc}") from exc
-        if not isinstance(payload, dict):
-            raise typer.BadParameter("Pipeline spec must be a JSON object")
-        return load_pipeline_spec_payload(payload), str(path.resolve())
-
-    kind, spec_path, payload = spec_cmd.load_spec(
-        str(pipeline),
+    resolved = spec_cmd.resolve_spec_reference(
+        pipeline,
         spec_type=spec_cmd.SPEC_TYPE_PIPELINE,
         context_path=context_dir,
     )
-    if kind != spec_cmd.SPEC_TYPE_PIPELINE:
-        raise typer.BadParameter("Pipeline name must reference a pipeline spec")
-    source_ref = str(spec_path) if spec_path is not None else str(pipeline)
-    return load_pipeline_spec_payload(payload), source_ref
+    return load_pipeline_spec_payload(resolved.payload), str(resolved.path)
+
+
+def _declared_option_metavar(kind: str) -> str:
+    """Return the user-facing metavar for a declared spec option."""
+    if kind == "path":
+        return "PATH"
+    return "TEXT"
+
+
+def _format_declared_option_help(name: str, declaration: Any) -> str:
+    """Render one declared spec option for spec-aware CLI help."""
+    option = (
+        f"--{normalize_declared_option_name(name)} "
+        f"{_declared_option_metavar(declaration.type)}"
+    )
+    detail_parts: list[str] = []
+    if declaration.required:
+        detail_parts.append("required")
+    default = getattr(declaration, "default", None)
+    if default is not None:
+        detail_parts.append(f"default: {default}")
+    choices = tuple(getattr(declaration, "choices", ()))
+    if choices:
+        detail_parts.append("choices: " + ", ".join(choices))
+
+    description = getattr(declaration, "help", None) or ""
+    if detail_parts:
+        suffix = "; ".join(detail_parts)
+        if description:
+            return f"  {option:<22} {description} [{suffix}]"
+        return f"  {option:<22} [{suffix}]"
+    if description:
+        return f"  {option:<22} {description}"
+    return f"  {option}"
+
+
+def render_spec_aware_run_help(
+    ctx: typer.Context,
+    *,
+    spec: str | Path,
+    context_dir: Path | None,
+) -> str:
+    """Return `weft run` help augmented with selected TaskSpec help."""
+    taskspec = _load_taskspec_reference(spec, context_dir=context_dir)
+
+    lines = [ctx.get_help(), "", f"Spec Help: {taskspec.name}"]
+    if taskspec.description:
+        lines.append(taskspec.description)
+
+    parameterization = taskspec.spec.parameterization
+    run_input = taskspec.spec.run_input
+    if parameterization is None and run_input is None:
+        lines.extend(
+            [
+                "",
+                "This TaskSpec does not declare spec-specific CLI options.",
+            ]
+        )
+        return "\n".join(lines)
+
+    if parameterization is not None:
+        lines.extend(["", "Parameterization Options:"])
+        if parameterization.arguments:
+            for name, parameter_declaration in parameterization.arguments.items():
+                lines.append(_format_declared_option_help(name, parameter_declaration))
+        else:
+            lines.append("  None")
+
+    if run_input is not None:
+        lines.extend(["", "Run Input Options:"])
+        if run_input.arguments:
+            for name, run_input_declaration in run_input.arguments.items():
+                lines.append(_format_declared_option_help(name, run_input_declaration))
+        else:
+            lines.append("  None")
+        if run_input.stdin is not None:
+            stdin_mode = "required" if run_input.stdin.required else "optional"
+            stdin_help = run_input.stdin.help or "Piped stdin text"
+            lines.append("")
+            lines.append(f"Stdin: {stdin_help} [{stdin_mode}]")
+
+    return "\n".join(lines)
 
 
 # -----------------------------------------------------------------------------
@@ -220,13 +316,79 @@ def _enqueue_taskspec(
     )
 
 
-def _delete_spawn_request(context: WeftContext, message_timestamp: int) -> None:
+def _delete_spawn_request(context: WeftContext, message_timestamp: int) -> bool:
     """Best-effort removal of a queued spawn request after submission failure."""
-    delete_spawn_request_message(
+    return delete_spawn_request_message(
         context.broker_target,
         message_timestamp=message_timestamp,
         config=context.broker_config,
     )
+
+
+def _recover_submitted_spawn(
+    context: WeftContext,
+    *,
+    submitted_tid: str,
+    startup_error: Exception,
+) -> tuple[dict[str, Any] | None, bool, subprocess.Popen[Any] | None]:
+    reconciliation = reconcile_submitted_spawn(context, submitted_tid)
+    if reconciliation.outcome == "spawned":
+        return None, False, None
+    if reconciliation.outcome == "rejected":
+        reason = (
+            reconciliation.error or f"Manager rejected submitted task {submitted_tid}"
+        )
+        raise RuntimeError(reason) from startup_error
+    if reconciliation.outcome == "queued":
+        deleted = _delete_spawn_request(context, int(submitted_tid))
+        if deleted:
+            raise startup_error
+        reconciliation = reconcile_submitted_spawn(
+            context,
+            submitted_tid,
+            timeout=0.2,
+        )
+        if reconciliation.outcome == "spawned":
+            return None, False, None
+        if reconciliation.outcome == "rejected":
+            reason = (
+                reconciliation.error
+                or f"Manager rejected submitted task {submitted_tid}"
+            )
+            raise RuntimeError(reason) from startup_error
+    if reconciliation.outcome == "reserved":
+        raise RuntimeError(
+            f"Submitted task {submitted_tid} was already claimed into "
+            f"{reconciliation.reserved_queue}; manual recovery is required."
+        ) from startup_error
+    if reconciliation.outcome == "queued":
+        raise RuntimeError(
+            f"Submitted task {submitted_tid} is still queued, but rollback could "
+            "not be confirmed."
+        ) from startup_error
+    raise RuntimeError(
+        f"Submitted task {submitted_tid} could not be reconciled; rollback "
+        "could not be proven."
+    ) from startup_error
+
+
+def _ensure_manager_after_submission(
+    context: WeftContext,
+    *,
+    submitted_tid: int,
+    verbose: bool,
+) -> tuple[dict[str, Any] | None, bool, subprocess.Popen[Any] | None]:
+    try:
+        return _ensure_manager(
+            context,
+            verbose=verbose,
+        )
+    except Exception as exc:
+        return _recover_submitted_spawn(
+            context,
+            submitted_tid=str(submitted_tid),
+            startup_error=exc,
+        )
 
 
 def _wait_for_task_completion(
@@ -577,6 +739,78 @@ def _initial_work_payload(
     return None
 
 
+def _build_spec_work_payload(
+    *,
+    taskspec: TaskSpec,
+    context: WeftContext,
+    stdin_data: str | None,
+    run_input_tokens: Sequence[str],
+) -> Any:
+    run_input = taskspec.spec.run_input
+    if run_input is None:
+        if run_input_tokens:
+            raise typer.BadParameter(
+                "This TaskSpec does not declare spec.run_input; extra "
+                "arguments are not supported with --spec."
+            )
+        return _initial_work_payload(
+            target_type=taskspec.spec.type,
+            stdin_data=stdin_data,
+            interactive=bool(taskspec.spec.interactive),
+        )
+
+    if stdin_data is not None and run_input.stdin is None:
+        raise typer.BadParameter(
+            "This TaskSpec does not declare stdin input for spec.run_input."
+        )
+    if run_input.stdin is not None and run_input.stdin.required and stdin_data is None:
+        raise typer.BadParameter(
+            "This TaskSpec requires piped stdin for spec.run_input."
+        )
+
+    try:
+        arguments = parse_declared_run_input_args(
+            list(run_input_tokens),
+            run_input.arguments,
+        )
+        return invoke_run_input_adapter(
+            run_input.adapter_ref,
+            request=SpecRunInputRequest(
+                arguments=arguments,
+                stdin_text=stdin_data,
+                context_root=str(context.root),
+                spec_name=taskspec.name,
+            ),
+            bundle_root=taskspec.get_bundle_root(),
+        )
+    except (TypeError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
+def _materialize_parameterized_spec(
+    *,
+    taskspec: TaskSpec,
+    context_root: str | None,
+    run_input_tokens: Sequence[str],
+) -> tuple[TaskSpec, list[str]]:
+    parameterization = taskspec.spec.parameterization
+    if parameterization is None:
+        return taskspec, list(run_input_tokens)
+    try:
+        arguments, remaining_tokens = parse_declared_parameterization_args(
+            list(run_input_tokens),
+            parameterization.arguments,
+        )
+        materialized = materialize_taskspec_template(
+            taskspec,
+            arguments=arguments,
+            context_root=context_root,
+        )
+    except (TypeError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    return materialized, remaining_tokens
+
+
 def _run_inline(
     *,
     command: Sequence[str],
@@ -675,14 +909,11 @@ def _run_inline(
             taskspec,
             work_payload,
         )
-        try:
-            manager_record, started_here, process_handle = _ensure_manager(
-                context,
-                verbose=verbose,
-            )
-        except Exception:
-            _delete_spawn_request(context, tid_int)
-            raise
+        manager_record, started_here, process_handle = _ensure_manager_after_submission(
+            context,
+            submitted_tid=tid_int,
+            verbose=verbose,
+        )
         tid = str(tid_int)
         if verbose:
             typer.echo(
@@ -704,6 +935,7 @@ def _run_inline(
         resolved_spec = TaskSpec.model_validate(
             resolved_payload, context={"auto_expand": False}
         )
+        resolved_spec.set_bundle_root(taskspec.get_bundle_root())
 
         if not wait:
             if json_output:
@@ -794,15 +1026,18 @@ def _run_inline(
 
 
 def _run_spec_via_manager(
-    spec_path: Path,
+    spec_ref: str | Path,
     *,
+    context_dir: Path | None = None,
+    run_input_tokens: Sequence[str] = (),
     verbose: bool,
     wait: bool,
     json_output: bool,
     autostart_enabled: bool,
     persistent_override: bool | None,
 ) -> int:
-    spec = _load_taskspec(spec_path)
+    spec = _load_taskspec_reference(spec_ref, context_dir=context_dir)
+    bundle_root = spec.get_bundle_root()
     spec_payload = spec.model_dump(mode="json")
     if persistent_override is not None:
         spec_payload.setdefault("spec", {})
@@ -811,16 +1046,25 @@ def _run_spec_via_manager(
         spec_payload,
         context={"template": True, "auto_expand": False},
     )
+    spec.set_bundle_root(bundle_root)
+    spec, remaining_tokens = _materialize_parameterized_spec(
+        taskspec=spec,
+        context_root=str(context_dir)
+        if context_dir is not None
+        else spec.spec.weft_context,
+        run_input_tokens=run_input_tokens,
+    )
     if spec.spec.persistent and wait:
         raise typer.BadParameter(
             "--wait is not supported for persistent TaskSpecs; use --no-wait."
         )
     context = build_context(spec.spec.weft_context, autostart=autostart_enabled)
     stdin_data = _read_piped_stdin(context)
-    work_payload = _initial_work_payload(
-        target_type=spec.spec.type,
+    work_payload = _build_spec_work_payload(
+        taskspec=spec,
+        context=context,
         stdin_data=stdin_data,
-        interactive=bool(spec.spec.interactive),
+        run_input_tokens=remaining_tokens,
     )
     manager_record: dict[str, Any] | None = None
     started_here = False
@@ -833,14 +1077,11 @@ def _run_spec_via_manager(
             spec,
             work_payload,
         )
-        try:
-            manager_record, started_here, process_handle = _ensure_manager(
-                context,
-                verbose=verbose,
-            )
-        except Exception:
-            _delete_spawn_request(context, tid_int)
-            raise
+        manager_record, started_here, process_handle = _ensure_manager_after_submission(
+            context,
+            submitted_tid=tid_int,
+            verbose=verbose,
+        )
         tid = str(tid_int)
         resolved_payload = resolve_taskspec_payload(
             spec.model_dump(mode="json"),
@@ -850,6 +1091,7 @@ def _run_spec_via_manager(
         resolved_spec = TaskSpec.model_validate(
             resolved_payload, context={"auto_expand": False}
         )
+        resolved_spec.set_bundle_root(spec.get_bundle_root())
         if not wait:
             if json_output:
                 typer.echo(
@@ -935,16 +1177,15 @@ def _run_pipeline(
         requested_input = stdin_data
 
     def _load_pipeline_stage(task_name: str) -> dict[str, Any]:
-        kind, _path, payload = spec_cmd.load_spec(
+        resolved = spec_cmd.resolve_named_spec(
             task_name,
             spec_type=spec_cmd.SPEC_TYPE_TASK,
             context_path=context_dir,
         )
-        if kind != spec_cmd.SPEC_TYPE_TASK:
-            raise typer.BadParameter(
-                f"Pipeline stage '{task_name}' must reference a task spec"
-            )
-        return payload
+        return apply_bundle_root_to_taskspec_payload(
+            dict(resolved.payload),
+            resolved.bundle_root,
+        )
 
     compiled = compile_linear_pipeline(
         pipeline_spec,
@@ -970,14 +1211,11 @@ def _run_pipeline(
             work_payload,
             seed_start_envelope=False,
         )
-        try:
-            manager_record, started_here, process_handle = _ensure_manager(
-                context,
-                verbose=verbose,
-            )
-        except Exception:
-            _delete_spawn_request(context, tid_int)
-            raise
+        manager_record, started_here, process_handle = _ensure_manager_after_submission(
+            context,
+            submitted_tid=tid_int,
+            verbose=verbose,
+        )
         tid = str(tid_int)
         if started_here:
             manager_started_here = True
@@ -1065,7 +1303,8 @@ def _run_pipeline(
 def cmd_run(
     command: Sequence[str],
     *,
-    spec: Path | None,
+    spec_run_args: Sequence[str],
+    spec: str | Path | None,
     pipeline: str | Path | None,
     pipeline_input: str | None,
     function: str | None,
@@ -1094,8 +1333,8 @@ def cmd_run(
     \b
       weft run COMMAND [ARGS...]        Run a shell command
       weft run --function mod:fn        Call a Python function
-      weft run --spec task.json         Run a TaskSpec file or stored spec
-      weft run --pipeline pipe.json     Run a pipeline spec
+      weft run --spec NAME|PATH         Run a task spec by stored name or path
+      weft run --pipeline NAME|PATH     Run a pipeline by stored name or path
 
     \b
     Common patterns:
@@ -1104,6 +1343,7 @@ def cmd_run(
       weft run --no-wait long-task.sh            Fire and forget
       printf "data" | weft run -- processor     Pipe stdin
       weft run --function mymod:fn --arg x      Function with args
+      weft run --spec probe-agents              Builtin helper TaskSpec
 
     By default, waits for the task to complete and prints output.
     Use --no-wait to submit and return immediately (prints TID).
@@ -1145,6 +1385,8 @@ def cmd_run(
             raise typer.BadParameter("--monitor is not yet supported with the Manager.")
         return _run_spec_via_manager(
             spec,
+            context_dir=context_dir,
+            run_input_tokens=spec_run_args,
             verbose=verbose,
             wait=wait,
             json_output=json_output,
@@ -1166,6 +1408,11 @@ def cmd_run(
     if command and function:
         raise typer.BadParameter(
             "Cannot execute a shell command and --function simultaneously."
+        )
+    if command and command[0].startswith("--"):
+        raise typer.BadParameter(
+            f"Unknown option '{command[0]}'. If this is intentional command "
+            "input, use a command that does not begin with '--'."
         )
 
     return _run_inline(
@@ -1196,4 +1443,5 @@ __all__ = [
     "_select_active_manager",
     "_start_manager",
     "cmd_run",
+    "render_spec_aware_run_help",
 ]

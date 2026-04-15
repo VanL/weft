@@ -16,6 +16,9 @@ The current codebase is intentionally narrower than the old roadmap:
   package families.
 - Task execution, persistence, and agent support are owned by the current
   `weft/core/` and `weft/commands/` modules.
+- Explicit builtin task helpers, submission-time spec materialization, and
+  submission-time run-input shaping are part of the shipped surface rather than
+  roadmap-only ideas.
 
 The reason for that shape is simplicity. Weft keeps the visible command surface
 small and routes everything through the current task, queue, and manager
@@ -23,15 +26,19 @@ machinery instead of splitting behavior across speculative helper packages.
 
 ## Current Ownership [IP-1]
 
-- `weft/commands/run.py` owns task submission and pipeline execution.
+- `weft/commands/run.py` owns task submission, queue-first spawn handling,
+  submission-time TaskSpec materialization, submission-time run-input shaping,
+  and pipeline execution.
 - `weft/commands/status.py` and `weft/commands/result.py` own status and
   result reporting.
 - `weft/commands/tasks.py` and `weft/commands/manager.py` own task lifecycle,
   TID handling, and manager control commands.
 - `weft/commands/queue.py` owns direct SimpleBroker queue operations.
-- `weft/commands/specs.py` owns spec management and validation.
-- `weft/commands/tidy.py`, `weft/commands/dump.py`, and `weft/commands/load.py`
-  own broker maintenance.
+- `weft/commands/specs.py` plus `weft/commands/validate_taskspec.py` own stored
+  spec management, builtin-spec discovery, and explicit TaskSpec validation.
+- `weft/commands/builtins.py`, `weft/commands/tidy.py`,
+  `weft/commands/dump.py`, and `weft/commands/load.py` own builtin inventory
+  and broker maintenance.
 
 ## Why This Shape Exists [IP-2]
 

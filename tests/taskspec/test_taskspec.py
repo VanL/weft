@@ -15,6 +15,7 @@ from weft.core.taskspec import (
     TaskSpec,
     validate_taskspec,
 )
+from weft.ext import AgentMCPServerDescriptor, AgentToolProfileResult
 
 from . import fixtures
 
@@ -58,6 +59,7 @@ class TestCreationDefaults:
         assert taskspec.spec.agent.output_mode == "text"
         assert taskspec.spec.agent.max_turns == 20
         assert taskspec.spec.agent.options == {}
+        assert taskspec.spec.agent.resolved_authority_class == "bounded"
 
 
 class TestValidation:
@@ -84,6 +86,156 @@ class TestValidation:
                 runner={
                     "name": "host",
                     "options": {"bad": object()},
+                },
+            )
+
+    def test_runner_environment_profile_ref_accepts_non_empty_string(self) -> None:
+        spec = SpecSection(
+            type="function",
+            function_target="pkg:fn",
+            runner={
+                "name": "host",
+                "environment_profile_ref": "tests.fixtures.runtime_profiles_fixture:host_environment_profile",
+            },
+        )
+
+        assert spec.runner.environment_profile_ref == (
+            "tests.fixtures.runtime_profiles_fixture:host_environment_profile"
+        )
+
+    def test_runner_environment_profile_ref_rejects_blank_string(self) -> None:
+        with pytest.raises(ValueError, match="environment_profile_ref"):
+            SpecSection(
+                type="function",
+                function_target="pkg:fn",
+                runner={
+                    "name": "host",
+                    "environment_profile_ref": "   ",
+                },
+            )
+
+    def test_run_input_accepts_valid_declared_arguments(self) -> None:
+        spec = SpecSection(
+            type="function",
+            function_target="pkg:fn",
+            run_input={
+                "adapter_ref": "tests.tasks.sample_targets:echo_payload",
+                "arguments": {
+                    "prompt": {
+                        "type": "string",
+                        "required": True,
+                    },
+                    "document": {
+                        "type": "path",
+                    },
+                },
+                "stdin": {
+                    "type": "text",
+                },
+            },
+        )
+
+        assert spec.run_input is not None
+        assert spec.run_input.adapter_ref == "tests.tasks.sample_targets:echo_payload"
+        assert sorted(spec.run_input.arguments) == ["document", "prompt"]
+        assert spec.run_input.stdin is not None
+
+    def test_run_input_rejects_reserved_option_name(self) -> None:
+        with pytest.raises(ValueError, match="collides with reserved"):
+            SpecSection(
+                type="function",
+                function_target="pkg:fn",
+                run_input={
+                    "adapter_ref": "tests.tasks.sample_targets:echo_payload",
+                    "arguments": {
+                        "spec": {
+                            "type": "string",
+                        }
+                    },
+                },
+            )
+
+    def test_run_input_rejects_unclean_long_option_name(self) -> None:
+        with pytest.raises(ValueError, match="normalize cleanly"):
+            SpecSection(
+                type="function",
+                function_target="pkg:fn",
+                run_input={
+                    "adapter_ref": "tests.tasks.sample_targets:echo_payload",
+                    "arguments": {
+                        "_prompt": {
+                            "type": "string",
+                        }
+                    },
+                },
+            )
+
+    def test_parameterization_accepts_valid_declared_arguments(self) -> None:
+        spec = SpecSection(
+            type="function",
+            function_target="pkg:fn",
+            parameterization={
+                "adapter_ref": "tests.tasks.sample_targets:echo_payload",
+                "arguments": {
+                    "provider": {
+                        "type": "string",
+                        "default": "codex",
+                        "choices": ["codex", "gemini"],
+                    },
+                    "model": {
+                        "type": "string",
+                    },
+                },
+            },
+        )
+
+        assert spec.parameterization is not None
+        assert (
+            spec.parameterization.adapter_ref
+            == "tests.tasks.sample_targets:echo_payload"
+        )
+        assert sorted(spec.parameterization.arguments) == ["model", "provider"]
+        assert spec.parameterization.arguments["provider"].default == "codex"
+
+    def test_parameterization_rejects_default_outside_choices(self) -> None:
+        with pytest.raises(
+            ValueError, match="default must be one of the declared choices"
+        ):
+            SpecSection(
+                type="function",
+                function_target="pkg:fn",
+                parameterization={
+                    "adapter_ref": "tests.tasks.sample_targets:echo_payload",
+                    "arguments": {
+                        "provider": {
+                            "type": "string",
+                            "default": "codex",
+                            "choices": ["gemini"],
+                        }
+                    },
+                },
+            )
+
+    def test_parameterization_and_run_input_reject_colliding_option_names(self) -> None:
+        with pytest.raises(ValueError, match="collide after '_' to '-' normalization"):
+            SpecSection(
+                type="function",
+                function_target="pkg:fn",
+                parameterization={
+                    "adapter_ref": "tests.tasks.sample_targets:echo_payload",
+                    "arguments": {
+                        "provider": {
+                            "type": "string",
+                        }
+                    },
+                },
+                run_input={
+                    "adapter_ref": "tests.tasks.sample_targets:echo_payload",
+                    "arguments": {
+                        "provider": {
+                            "type": "string",
+                        }
+                    },
                 },
             )
 
@@ -138,6 +290,27 @@ class TestTemplates:
         }
 
         is_valid, errors = validate_taskspec(json.dumps(agent_template))
+        assert is_valid is True
+        assert errors == {}
+
+    def test_provider_cli_template_requires_provider(self) -> None:
+        provider_cli_template = {
+            "name": "template-provider-cli-agent",
+            "spec": {
+                "type": "agent",
+                "agent": {
+                    "runtime": "provider_cli",
+                    "runtime_config": {
+                        "provider": "codex",
+                    },
+                },
+            },
+            "io": {},
+            "state": {},
+            "metadata": {},
+        }
+
+        is_valid, errors = validate_taskspec(json.dumps(provider_cli_template))
         assert is_valid is True
         assert errors == {}
 
@@ -216,6 +389,109 @@ class TestPartialImmutability:
             taskspec.spec.env.update({"NEW_VAR": "value"})
 
         assert dict(taskspec.spec.env) == original_env
+
+
+class TestProviderCLIValidation:
+    """Validation rules specific to the Phase 1 delegated runtime."""
+
+    def test_provider_cli_allows_persistent_per_task_sessions(self) -> None:
+        spec = SpecSection(
+            type="agent",
+            persistent=True,
+            agent=AgentSection(
+                runtime="provider_cli",
+                conversation_scope="per_task",
+                runtime_config={"provider": "codex"},
+            ),
+        )
+
+        assert spec.persistent is True
+        assert spec.agent is not None
+        assert spec.agent.conversation_scope == "per_task"
+
+    def test_provider_cli_defaults_authority_class_to_general_for_compatibility(
+        self,
+    ) -> None:
+        agent = AgentSection(
+            runtime="provider_cli",
+            runtime_config={"provider": "codex"},
+        )
+
+        assert agent.authority_class is None
+        assert agent.resolved_authority_class == "general"
+
+    def test_provider_cli_accepts_explicit_bounded_authority_class(self) -> None:
+        agent = AgentSection(
+            runtime="provider_cli",
+            authority_class="bounded",
+            runtime_config={"provider": "codex"},
+        )
+
+        assert agent.resolved_authority_class == "bounded"
+
+    def test_llm_rejects_general_authority_class(self) -> None:
+        with pytest.raises(
+            ValueError, match="llm only supports authority_class='bounded'"
+        ):
+            AgentSection(
+                runtime="llm",
+                authority_class="general",
+                model="test-model",
+            )
+
+    def test_provider_cli_rejects_persistent_per_message_tasks(self) -> None:
+        with pytest.raises(
+            ValueError,
+            match="provider_cli persistent tasks require conversation_scope='per_task'",
+        ):
+            SpecSection(
+                type="agent",
+                persistent=True,
+                agent=AgentSection(
+                    runtime="provider_cli",
+                    conversation_scope="per_message",
+                    runtime_config={"provider": "codex"},
+                ),
+            )
+
+    def test_provider_cli_rejects_non_text_output_mode(self) -> None:
+        with pytest.raises(ValueError, match="only supports output_mode='text'"):
+            AgentSection(
+                runtime="provider_cli",
+                output_mode="json",
+                runtime_config={"provider": "codex"},
+            )
+
+    def test_provider_cli_rejects_tools(self) -> None:
+        with pytest.raises(ValueError, match="does not support spec.agent.tools"):
+            AgentSection(
+                runtime="provider_cli",
+                tools=(
+                    {
+                        "name": "echo_payload",
+                        "kind": "python",
+                        "ref": "tests.tasks.sample_targets:echo_payload",
+                    },
+                ),
+                runtime_config={"provider": "codex"},
+            )
+
+    def test_agent_tool_profile_result_rejects_invalid_workspace_access(self) -> None:
+        with pytest.raises(ValueError, match="workspace_access"):
+            AgentToolProfileResult(workspace_access="danger-full-access")
+
+    def test_agent_tool_profile_result_rejects_invalid_mcp_server_descriptor(
+        self,
+    ) -> None:
+        with pytest.raises(ValueError, match="command must be non-empty"):
+            AgentToolProfileResult(
+                mcp_servers=(
+                    AgentMCPServerDescriptor(
+                        name="fixture",
+                        command="   ",
+                    ),
+                )
+            )
 
     def test_resolved_io_rejects_nested_mutation(self) -> None:
         taskspec = fixtures.create_minimal_taskspec()

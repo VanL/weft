@@ -298,6 +298,23 @@ runbook needs to become stricter.
   boundary and avoids cross-platform teardown flakes that only show up under
   CI load.
 
+## 2026-04-14 Explicit Preflight Boundaries
+
+- Do not move "can this binary run here" checks into `weft run`, manager
+  submission, or other ordinary execution paths. If operators want ahead-of-time
+  validation, give them an explicit validation or diagnostic surface such as
+  `weft spec validate --preflight`.
+- On the normal run path, attempt the real execution and report the concrete
+  startup failure from the real runner or agent path. Hidden preflight gates
+  drift from real execution and create a second policy surface to maintain.
+
+## 2026-04-15 Runner Environment Profile Boundaries
+
+- Runner environment profiles are materialized during validation as well as at
+  real task startup. Any side-effectful profile logic such as Keychain reads,
+  host probes, or filesystem mutation must explicitly defer until the real
+  execution path instead of assuming the profile hook is runtime-only.
+
 ## 2026-04-08 Manager Role Identity
 
 - Manager identity has to stay consistent across every observability surface,

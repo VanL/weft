@@ -11,7 +11,7 @@ from pathlib import Path
 
 from simplebroker.ext import get_backend_plugin
 
-PROJECT_CONFIG_FILENAME = ".simplebroker.toml"
+PROJECT_CONFIG_FILENAME = ".broker.toml"
 POSTGRES_TEST_BACKEND = "postgres"
 _PREPARED_POSTGRES_ROOTS: set[tuple[str, str, str]] = set()
 
