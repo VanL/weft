@@ -1,6 +1,10 @@
 # Docker Builtins Windows Guard Plan
 
-## Goal
+Status: proposed
+Source specs: see Source Documents below
+Superseded by: none
+
+## 1. Goal
 
 Make Docker-dependent builtins explicit about their platform boundary and fail
 cleanly on Windows before they reach Docker plugin startup. Keep builtin
@@ -8,7 +12,7 @@ inspection intact where practical, but stop Docker-backed builtin execution
 from looking like a generic runner failure. Update the builtin tests so
 Windows CI does not exercise positive-path Docker builtin behavior.
 
-## Source Documents
+## 2. Source Documents
 
 Source specs:
 - `docs/specifications/10B-Builtin_TaskSpecs.md`
@@ -21,7 +25,7 @@ Local guidance:
 - `docs/agent-context/engineering-principles.md`
 - `docs/agent-context/runbooks/writing-plans.md`
 
-## Context and Key Files
+## 3. Context and Key Files
 
 Files to modify:
 - `weft/builtins/__init__.py`
@@ -62,7 +66,7 @@ Comprehension questions:
 2. Which Docker builtins are function-backed versus parameterized TaskSpec
    bundles?
 
-## Invariants and Constraints
+## 4. Invariants and Constraints
 
 - Do not add a second spec-resolution or execution path.
 - Do not make builtin inspection depend on Docker availability.
@@ -73,7 +77,7 @@ Comprehension questions:
 - Keep builtin resolution order unchanged: local shadows still beat builtins.
 - No new dependency and no drive-by refactor.
 
-## Tasks
+## 5. Tasks
 
 1. Add explicit builtin platform metadata and shared parsing helpers.
    - Touch `weft/builtins/__init__.py`,
@@ -110,12 +114,12 @@ Comprehension questions:
    - Verification: targeted builtin/core/CLI tests pass and Windows-specific
      expectations are explicit in the test suite.
 
-## Verification
+## 6. Verification
 
 - `./.venv/bin/python -m pytest tests/core/test_builtin_agent_images.py tests/core/test_builtin_dockerized_agent.py tests/cli/test_cli_spec.py tests/cli/test_cli_system.py -q`
 - `./.venv/bin/python -m pytest tests/tasks/test_command_runner_parity.py::test_docker_runner_is_skipped_on_windows tests/system/test_release_script.py::test_docker_extension_tests_are_disabled_on_windows -q`
 
-## Rollback
+## 7. Rollback
 
 If the new guard causes unexpected breakage, remove the builtin-entry-point
 checks and the supported-platform metadata changes together. The underlying
