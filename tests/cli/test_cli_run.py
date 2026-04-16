@@ -525,14 +525,14 @@ def test_cli_run_spec_name_resolves_builtin_probe_helper_and_writes_agent_settin
     workdir: Path,
     weft_harness: WeftTestHarness,
 ) -> None:
-    wrappers = [
-        write_provider_cli_wrapper(workdir, provider_name)
+    provider_wrappers = [
+        (provider_name, write_provider_cli_wrapper(workdir, provider_name))
         for provider_name in PROVIDER_FIXTURE_NAMES
     ]
     env = os.environ.copy()
     env["PATH"] = os.pathsep.join([str(workdir), env.get("PATH", "")])
 
-    for wrapper in wrappers:
+    for _provider_name, wrapper in provider_wrappers:
         resolved = shutil.which(wrapper.name, path=env["PATH"])
         assert resolved is not None
         assert Path(resolved).resolve() == wrapper.resolve()
@@ -559,8 +559,7 @@ def test_cli_run_spec_name_resolves_builtin_probe_helper_and_writes_agent_settin
     settings_path = workdir / ".weft" / "agents.json"
     settings_payload = json.loads(settings_path.read_text(encoding="utf-8"))
     providers = settings_payload["provider_cli"]["providers"]
-    for wrapper in wrappers:
-        provider_name = "claude_code" if wrapper.name == "claude" else wrapper.name
+    for provider_name, wrapper in provider_wrappers:
         assert providers[provider_name]["executable"] == str(wrapper)
 
 

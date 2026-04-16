@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -189,6 +190,8 @@ def test_validate_taskspec_preflight_provider_cli_does_not_probe_subprocess(work
     )
     spec_path = workdir / "provider_cli_no_probe.json"
     write_taskspec(spec_path, taskspec)
+    env = os.environ.copy()
+    env["PROVIDER_CLI_FIXTURE_FAIL_PROBE"] = "1"
 
     rc, out, err = run_cli(
         "spec",
@@ -198,7 +201,7 @@ def test_validate_taskspec_preflight_provider_cli_does_not_probe_subprocess(work
         spec_path,
         "--preflight",
         cwd=workdir,
-        env={"PROVIDER_CLI_FIXTURE_FAIL_PROBE": "1"},
+        env=env,
     )
 
     assert rc == 0
