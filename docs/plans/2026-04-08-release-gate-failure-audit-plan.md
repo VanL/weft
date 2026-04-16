@@ -581,7 +581,7 @@ docker run --detach --rm \
   --env POSTGRES_PASSWORD=postgres \
   --env POSTGRES_USER=postgres \
   --env POSTGRES_DB=simplebroker_test \
-  --publish-all postgres:17 -c max_connections=300
+  --publish-all postgres:18 -c max_connections=300
 
 PORT=$(docker port weft-pg-audit 5432/tcp | awk -F: '{print $2}')
 export BROKER_TEST_BACKEND=postgres

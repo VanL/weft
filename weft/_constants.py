@@ -24,6 +24,7 @@ Usage:
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Callable
 from typing import Any, Final, Literal
 
@@ -90,6 +91,9 @@ ACTIVE_CONTROL_POLL_INTERVAL: Final[float] = 0.05
 
 TASK_PROCESS_POLL_INTERVAL: Final[float] = 0.05
 """Polling interval for spawned task-process main loops between `process_once` calls."""
+
+MANAGER_POLL_INTERVAL: Final[float] = TASK_PROCESS_POLL_INTERVAL
+"""Polling interval for foreground manager-service loops."""
 
 CONTROL_SURFACE_WAIT_TIMEOUT: Final[float] = 2.0
 """Maximum time to wait for durable terminal task state before CLI fallback."""
@@ -197,6 +201,14 @@ WEFT_MANAGERS_REGISTRY_QUEUE: Final[str] = "weft.state.managers"
 WEFT_STREAMING_SESSIONS_QUEUE: Final[str] = "weft.state.streaming"
 """Queue tracking active streaming sessions (interactive/streaming outputs)."""
 
+WEFT_ENDPOINTS_REGISTRY_QUEUE: Final[str] = "weft.state.endpoints"
+"""Queue tracking active named task endpoints."""
+
+ENDPOINT_NAME_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+)
+"""Allowed stable named-endpoint syntax for runtime endpoint claims."""
+
 WEFT_PIPELINES_STATE_QUEUE: Final[str] = "weft.state.pipelines"
 """Queue tracking active first-class pipeline runs."""
 
@@ -223,6 +235,9 @@ WORK_ENVELOPE_START: Final[dict[str, bool]] = {"__weft_start__": True}
 
 INTERNAL_RUNTIME_TASK_CLASS_KEY: Final[str] = "_weft_runtime_task_class"
 """Reserved metadata key selecting an internal runtime-owned task class."""
+
+INTERNAL_RUNTIME_ENDPOINT_NAME_KEY: Final[str] = "_weft_endpoint_name"
+"""Reserved metadata key selecting an explicit runtime endpoint claim."""
 
 INTERNAL_RUNTIME_TASK_CLASS_PIPELINE: Final[str] = "pipeline"
 """Reserved internal runtime-owned class selector for PipelineTask."""

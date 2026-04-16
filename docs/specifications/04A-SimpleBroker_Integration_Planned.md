@@ -32,6 +32,20 @@ class ContextMonitor:
 
 These helpers represent explicit cross-context and multi-context orchestration surfaces. Weft keeps the current contract narrower and project-local.
 
+## Runtime Endpoint Storage Follow-up [04A-2.1]
+
+The base queue-backed storage contract is now current; see
+[`04-SimpleBroker_Integration.md`](04-SimpleBroker_Integration.md) [SB-0.5].
+
+No additional endpoint storage surface is planned today. If future work is
+needed, it must preserve the same constraints:
+
+- endpoint state remains runtime-only, queue-backed, and excluded from
+  dump/load
+- no backend-specific SQL hooks or privileged table ownership for ordinary
+  tasks
+- no hidden alternate control plane outside queue-visible runtime state
+
 ## Planned Performance Surfaces [04A-3]
 
 Two performance-related additions remain planned rather than current:
@@ -44,4 +58,8 @@ The current contract relies on SimpleBroker's hard size limit and shared broker 
 ## Backlinks [04A-4]
 
 - Current contract: [04-SimpleBroker_Integration.md](04-SimpleBroker_Integration.md)
+- Runtime-flow semantics:
+  [05A-Message_Flow_and_State_Planned.md](05A-Message_Flow_and_State_Planned.md)
 - CLI surface: [10-CLI_Interface.md](10-CLI_Interface.md)
+- Implementation plan:
+  [docs/plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md](../plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md)

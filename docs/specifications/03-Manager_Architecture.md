@@ -35,6 +35,7 @@ always be rolled back from the public request queue.
 - [Weft Road To Excellent Plan](../plans/2026-04-14-weft-road-to-excellent-plan.md) – Top-level roadmap for making manager bootstrap boring under contention and aligning the rest of the system to the same reliability bar.
 - [Autostart Hardening And Contract Alignment Plan](../plans/2026-04-16-autostart-hardening-and-contract-alignment-plan.md) – Make project-level autostart intent durable, fix manager-side enqueue bookkeeping, and align manifest policy docs with enforced behavior.
 - [Pipeline Autostart Extension Plan](../plans/2026-04-16-pipeline-autostart-extension-plan.md) – Extend autostart manifests so stored pipeline targets compile and launch through the ordinary first-class pipeline runtime.
+- [Review Findings Remediation Plan](../plans/2026-04-16-review-findings-remediation-plan.md) – Fix forced broker-activity freshness, autostart-state pruning, and nearby contract ambiguity surfaced by the deep-read review.
 - [Agent Runtime Implementation Plan](../plans/2026-04-06-agent-runtime-implementation-plan.md) – references `MA-2` TID correlation.
 - [Persistent Agent Runtime Implementation Plan](../plans/2026-04-06-persistent-agent-runtime-implementation-plan.md) – references Manager Architecture for long-lived agent sessions.
 - [TaskSpec Clean Design Plan](../plans/2026-04-06-taskspec-clean-design-plan.md) – references Manager Architecture for TaskSpec schema alignment.
@@ -71,12 +72,17 @@ Key responsibilities implemented in `weft/core/manager.py`:
 4. **Registry heartbeat** – Managers publish an `active` record to
    `weft.state.managers` on startup (including queue names, PID, role, and
    capabilities) and replace it with a `stopped` record during shutdown. The
-   active record is pruned when the manager exits cleanly.
+   active record is pruned when the manager exits cleanly. The registry itself
+   remains append-only history; readers are responsible for reducing to the
+   latest relevant record for a manager TID and validating PID liveness instead
+   of treating raw queue contents as a mutable snapshot.
 5. **Idle timeout** – Managers honour the `idle_timeout` metadata field first.
    When that metadata is absent they fall back to
    `WEFT_MANAGER_LIFETIME_TIMEOUT`, which must parse as a non-negative float at
    config-load time. Managers then self-terminate after prolonged inactivity
-   while ensuring all child processes are reaped.
+   while ensuring all child processes are reaped. The final idle-timeout
+   decision performs a forced broker-activity refresh instead of trusting a
+   cached `Queue.last_ts` read.
 6. **Autostart manifests** – When autostart is enabled for the effective
    context, the manager scans `.weft/autostart/` for manifests that reference
    stored task specs or pipelines and launches each target using the same spawn
@@ -84,6 +90,8 @@ Key responsibilities implemented in `weft/core/manager.py`:
    governs restarts while the manager is running. Launch and restart accounting
    advances only after a spawn request is successfully written. Ensure-mode
    manifests are reconsidered immediately after a tracked autostart child exits.
+   Scan bookkeeping for deleted manifest paths is pruned during refresh so
+   long-lived managers do not accumulate stale manifest state indefinitely.
    Pipeline targets are compiled into the same first-class pipeline task used by
    `weft run --pipeline` before the manager enqueues the compiled top-level
    pipeline task on its own inbox.
@@ -95,8 +103,8 @@ _Implementation mapping_:
 - [MA-1.2] Child process launch — `Manager._launch_child_task`, `launch_task_process` (`weft/core/launcher.py`).
 - [MA-1.3] Initial payload delivery — `Manager._launch_child_task` (inbox seeding block).
 - [MA-1.4] Registry heartbeat — `Manager._register_manager`, `Manager._unregister_manager`, `Manager._atexit_unregister`.
-- [MA-1.5] Idle timeout — `Manager.process_once` (idle-timeout check), `Manager._update_idle_activity_from_broker`.
-- [MA-1.6] Autostart manifests — `Manager._tick_autostart`, `Manager._build_autostart_spawn_payload`, `Manager._load_autostart_manifest`, `Manager._load_autostart_taskspec`, `Manager._load_autostart_pipeline`, `Manager._active_autostart_sources`, `Manager._enqueue_autostart_request`, `Manager._cleanup_children`, plus `weft/core/pipelines.py::compile_linear_pipeline` for stored pipeline targets.
+- [MA-1.5] Idle timeout — `Manager.process_once` (idle-timeout check), `Manager._read_broker_timestamp`, `Manager._update_idle_activity_from_broker`.
+- [MA-1.6] Autostart manifests — `Manager._tick_autostart`, `Manager._prune_autostart_state`, `Manager._build_autostart_spawn_payload`, `Manager._load_autostart_manifest`, `Manager._load_autostart_taskspec`, `Manager._load_autostart_pipeline`, `Manager._active_autostart_sources`, `Manager._enqueue_autostart_request`, `Manager._cleanup_children`, plus `weft/core/pipelines.py::compile_linear_pipeline` for stored pipeline targets.
 - [MA-1.7] Control channel — inherited from `BaseTask._handle_control_command` (`weft/core/tasks/base.py`); PING/PONG, STOP, STATUS, KILL handling.
 
 ## TID Correlation [MA-2]

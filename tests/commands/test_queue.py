@@ -3,15 +3,22 @@
 from __future__ import annotations
 
 import io
+import json
 import sys
+import time
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from tests.helpers.test_backend import prepare_project_root
+from tests.tasks.test_task_execution import make_function_taskspec
+from weft._constants import WEFT_ENDPOINTS_REGISTRY_QUEUE
 from weft.commands import queue as queue_cmd
 from weft.context import build_context
+from weft.core.endpoints import build_endpoint_record_payload
+from weft.core.tasks import Consumer
+from weft.helpers import iter_queue_json_entries
 
 pytestmark = [pytest.mark.shared]
 
@@ -220,3 +227,120 @@ def test_broadcast_command_reads_omitted_message_from_stdin(
     assert captured["fn"] is queue_cmd.sb_commands.cmd_broadcast
     assert captured["args"] == ("db", "broadcast-body")
     assert captured["kwargs"] == {"pattern": "jobs.*"}
+
+
+def test_resolve_command_returns_registered_endpoint_details(tmp_path) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    spec = make_function_taskspec(
+        tid,
+        "tests.tasks.sample_targets:echo_payload",
+        weft_context=str(root),
+    )
+    task = Consumer(ctx.broker_target, spec, config=ctx.config)
+
+    try:
+        task.register_endpoint_name("mayor", metadata={"role": "operator-facing"})
+
+        exit_code, stdout, stderr = queue_cmd.resolve_command(
+            "mayor",
+            json_output=True,
+            spec_context=str(root),
+        )
+
+        assert exit_code == 0
+        assert stderr == ""
+        payload = json.loads(stdout)
+        assert payload["name"] == "mayor"
+        assert payload["tid"] == tid
+        assert payload["inbox"] == spec.io.inputs["inbox"]
+        assert payload["live_candidates"] == 1
+    finally:
+        task.cleanup()
+
+
+def test_list_command_endpoints_uses_lowest_live_tid_as_canonical(tmp_path) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    low_tid = str(time.time_ns())
+    high_tid = str(int(low_tid) + 1)
+    low_task = Consumer(
+        ctx.broker_target,
+        make_function_taskspec(
+            low_tid,
+            "tests.tasks.sample_targets:echo_payload",
+            weft_context=str(root),
+        ),
+        config=ctx.config,
+    )
+    high_task = Consumer(
+        ctx.broker_target,
+        make_function_taskspec(
+            high_tid,
+            "tests.tasks.sample_targets:echo_payload",
+            weft_context=str(root),
+        ),
+        config=ctx.config,
+    )
+
+    try:
+        low_task.register_endpoint_name("mayor")
+        high_task.register_endpoint_name("mayor")
+
+        exit_code, stdout, stderr = queue_cmd.list_command(
+            json_output=True,
+            endpoints=True,
+            spec_context=str(root),
+        )
+
+        assert exit_code == 0
+        assert stderr == ""
+        payload = json.loads(stdout)
+        assert len(payload) == 1
+        entry = payload[0]
+        assert entry["name"] == "mayor"
+        assert entry["tid"] == low_tid
+        assert entry["status"] == "active"
+        assert entry["inbox"] == f"T{low_tid}.inbox"
+        assert entry["outbox"] == f"T{low_tid}.outbox"
+        assert entry["ctrl_in"] == f"T{low_tid}.ctrl_in"
+        assert entry["ctrl_out"] == f"T{low_tid}.ctrl_out"
+        assert isinstance(entry["registered_at"], int)
+        assert isinstance(entry["last_seen"], int)
+        assert entry["metadata"] == {}
+        assert entry["live_candidates"] == 2
+    finally:
+        high_task.cleanup()
+        low_task.cleanup()
+
+
+def test_resolve_command_prunes_stale_endpoint_records(tmp_path) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    registry = ctx.queue(WEFT_ENDPOINTS_REGISTRY_QUEUE, persistent=False)
+    try:
+        registry.write(
+            json.dumps(
+                build_endpoint_record_payload(
+                    name="ghost",
+                    tid="1775630560447778816",
+                    inbox="T1775630560447778816.inbox",
+                    outbox="T1775630560447778816.outbox",
+                    ctrl_in="T1775630560447778816.ctrl_in",
+                    ctrl_out="T1775630560447778816.ctrl_out",
+                )
+            )
+        )
+
+        exit_code, stdout, stderr = queue_cmd.resolve_command(
+            "ghost",
+            spec_context=str(root),
+        )
+
+        assert exit_code == 2
+        assert stdout == ""
+        assert "No active endpoint named 'ghost'" in stderr
+        assert list(iter_queue_json_entries(registry)) == []
+    finally:
+        registry.close()

@@ -841,7 +841,17 @@ class Manager(BaseTask):
             else:
                 self._broker_activity_queue = queue
 
-        candidate = queue.last_ts
+        try:
+            if force and hasattr(queue, "refresh_last_ts"):
+                candidate = queue.refresh_last_ts()
+            else:
+                candidate = queue.last_ts
+        except (BrokerError, OSError, RuntimeError):
+            logger.debug(
+                "Failed to refresh broker activity timestamp",
+                exc_info=True,
+            )
+            return last_known
         if candidate is None:
             return last_known
 
@@ -1189,6 +1199,22 @@ class Manager(BaseTask):
             return False
         return True
 
+    def _prune_autostart_state(self, manifest_sources: set[str]) -> None:
+        stale_sources = [
+            source for source in self._autostart_state if source not in manifest_sources
+        ]
+        for source in stale_sources:
+            self._autostart_state.pop(source, None)
+            self._autostart_launched.discard(source)
+
+        stale_launched = {
+            source
+            for source in self._autostart_launched
+            if source not in manifest_sources
+        }
+        for source in stale_launched:
+            self._autostart_launched.discard(source)
+
     def _tick_autostart(self, *, force: bool = False) -> None:
         """Scan autostart manifests and enqueue spawn requests (Spec: [MA-1.6])."""
         if not self._autostart_enabled:
@@ -1202,7 +1228,10 @@ class Manager(BaseTask):
         self._autostart_last_scan_ns = now_ns
 
         directory = self._autostart_dir
-        if not directory or not directory.exists():
+        if not directory:
+            return
+        if not directory.exists():
+            self._prune_autostart_state(set())
             return
 
         active_sources = self._active_autostart_sources()
@@ -1218,6 +1247,9 @@ class Manager(BaseTask):
                 exc_info=True,
             )
             return
+
+        manifest_sources = {str(path.resolve()) for path in manifests}
+        self._prune_autostart_state(manifest_sources)
 
         for manifest_path in manifests:
             source = str(manifest_path.resolve())

@@ -25,14 +25,14 @@ from weft.context import WeftContext, build_context
 
 @dataclass(frozen=True, slots=True)
 class ResolvedSpecReference:
-    """Resolved named spec from project storage or builtins."""
+    """Resolved spec from an explicit file path, project storage, or builtins."""
 
     spec_type: str
     name: str
     path: Path
     bundle_root: Path | None
     payload: dict[str, Any]
-    source: Literal["stored", "builtin"]
+    source: Literal["file", "stored", "builtin"]
 
 
 def _spec_root(context: WeftContext) -> Path:

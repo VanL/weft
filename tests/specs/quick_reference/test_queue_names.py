@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from weft._constants import (
+    WEFT_ENDPOINTS_REGISTRY_QUEUE,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MANAGER_CTRL_IN_QUEUE,
     WEFT_MANAGER_CTRL_OUT_QUEUE,
@@ -23,3 +24,4 @@ def test_global_queue_names_match_spec() -> None:
     assert WEFT_MANAGERS_REGISTRY_QUEUE == "weft.state.managers"
     assert WEFT_TID_MAPPINGS_QUEUE == "weft.state.tid_mappings"
     assert WEFT_STREAMING_SESSIONS_QUEUE == "weft.state.streaming"
+    assert WEFT_ENDPOINTS_REGISTRY_QUEUE == "weft.state.endpoints"

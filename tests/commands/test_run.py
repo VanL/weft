@@ -19,6 +19,7 @@ import weft.commands._manager_bootstrap as manager_lifecycle
 import weft.commands._spawn_submission as spawn_submission_cmd
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import (
+    INTERNAL_RUNTIME_ENDPOINT_NAME_KEY,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MANAGERS_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
@@ -1238,6 +1239,7 @@ def test_run_spec_via_manager_deletes_spawn_request_when_ensure_manager_fails(
 
     exit_code = _run_spec_via_manager(
         spec_path,
+        name=None,
         verbose=False,
         wait=False,
         json_output=False,
@@ -1251,6 +1253,181 @@ def test_run_spec_via_manager_deletes_spawn_request_when_ensure_manager_fails(
     finally:
         queue.close()
     assert exit_code == 1
+
+
+def test_run_spec_via_manager_returns_timeout_exit_code(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    spec_path = root / "task.json"
+    _write_json(
+        spec_path,
+        {
+            "name": "demo-task",
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:echo_payload",
+            },
+            "metadata": {},
+        },
+    )
+
+    monkeypatch.setattr("weft.commands.run._read_piped_stdin", lambda context: None)
+    monkeypatch.setattr(
+        "weft.commands.run._ensure_manager_after_submission",
+        lambda context, *, submitted_tid, verbose: (None, False, None),
+    )
+    monkeypatch.setattr(
+        "weft.commands.run._enqueue_taskspec",
+        lambda context, taskspec, work_payload, seed_start_envelope=True: (
+            1777000000000000000
+        ),
+    )
+    monkeypatch.setattr(
+        "weft.commands.run._wait_for_task_completion",
+        lambda context, resolved_spec, *, json_output, verbose: (
+            "timeout",
+            None,
+            "Timed out waiting for task",
+        ),
+    )
+    monkeypatch.setattr("weft.commands.run.typer.echo", lambda *args, **kwargs: None)
+
+    exit_code = _run_spec_via_manager(
+        spec_path,
+        name=None,
+        verbose=False,
+        wait=True,
+        json_output=False,
+        autostart_enabled=True,
+        persistent_override=None,
+    )
+
+    assert exit_code == 124
+
+
+def test_run_spec_via_manager_explicit_name_overrides_name_and_claims_endpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+    spec_path = root / "persistent_named_task.json"
+    _write_json(
+        spec_path,
+        {
+            "name": "demo-task",
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:echo_payload",
+                "persistent": True,
+                "weft_context": str(root),
+            },
+            "metadata": {},
+        },
+    )
+
+    captured: dict[str, Any] = {}
+
+    def _capture_enqueue(
+        context_arg: Any,
+        taskspec: TaskSpec,
+        work_payload: Any,
+        *,
+        seed_start_envelope: bool = True,
+    ) -> int:
+        del context_arg, work_payload, seed_start_envelope
+        captured["name"] = taskspec.name
+        captured["metadata"] = dict(taskspec.metadata)
+        return 1777000000000000001
+
+    monkeypatch.setattr(
+        "weft.commands.run.build_context",
+        lambda spec_context=None, autostart=True: context,
+    )
+    monkeypatch.setattr("weft.commands.run._read_piped_stdin", lambda context: None)
+    monkeypatch.setattr(
+        "weft.commands.run._ensure_manager_after_submission",
+        lambda context, *, submitted_tid, verbose: (None, False, None),
+    )
+    monkeypatch.setattr("weft.commands.run._enqueue_taskspec", _capture_enqueue)
+    monkeypatch.setattr("weft.commands.run.typer.echo", lambda *args, **kwargs: None)
+
+    exit_code = _run_spec_via_manager(
+        spec_path,
+        name="mayor",
+        verbose=False,
+        wait=False,
+        json_output=False,
+        autostart_enabled=True,
+        persistent_override=None,
+    )
+
+    assert exit_code == 0
+    assert captured["name"] == "mayor"
+    assert captured["metadata"][INTERNAL_RUNTIME_ENDPOINT_NAME_KEY] == "mayor"
+
+
+def test_run_spec_via_manager_explicit_name_keeps_nonpersistent_tasks_label_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+    spec_path = root / "named_task.json"
+    _write_json(
+        spec_path,
+        {
+            "name": "demo-task",
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:echo_payload",
+                "weft_context": str(root),
+            },
+            "metadata": {},
+        },
+    )
+
+    captured: dict[str, Any] = {}
+
+    def _capture_enqueue(
+        context_arg: Any,
+        taskspec: TaskSpec,
+        work_payload: Any,
+        *,
+        seed_start_envelope: bool = True,
+    ) -> int:
+        del context_arg, work_payload, seed_start_envelope
+        captured["name"] = taskspec.name
+        captured["metadata"] = dict(taskspec.metadata)
+        return 1777000000000000002
+
+    monkeypatch.setattr(
+        "weft.commands.run.build_context",
+        lambda spec_context=None, autostart=True: context,
+    )
+    monkeypatch.setattr("weft.commands.run._read_piped_stdin", lambda context: None)
+    monkeypatch.setattr(
+        "weft.commands.run._ensure_manager_after_submission",
+        lambda context, *, submitted_tid, verbose: (None, False, None),
+    )
+    monkeypatch.setattr("weft.commands.run._enqueue_taskspec", _capture_enqueue)
+    monkeypatch.setattr("weft.commands.run.typer.echo", lambda *args, **kwargs: None)
+
+    exit_code = _run_spec_via_manager(
+        spec_path,
+        name="mayor",
+        verbose=False,
+        wait=False,
+        json_output=False,
+        autostart_enabled=True,
+        persistent_override=None,
+    )
+
+    assert exit_code == 0
+    assert captured["name"] == "mayor"
+    assert INTERNAL_RUNTIME_ENDPOINT_NAME_KEY not in captured["metadata"]
 
 
 def test_run_pipeline_deletes_spawn_request_when_ensure_manager_fails(
@@ -1293,6 +1470,7 @@ def test_run_pipeline_deletes_spawn_request_when_ensure_manager_fails(
     with pytest.raises(RuntimeError, match="boom"):
         _run_pipeline(
             pipeline_path,
+            name=None,
             pipeline_input=None,
             context_dir=root,
             wait=True,
@@ -1306,6 +1484,71 @@ def test_run_pipeline_deletes_spawn_request_when_ensure_manager_fails(
         assert queue.read_one() is None
     finally:
         queue.close()
+
+
+def test_run_pipeline_explicit_name_overrides_pipeline_task_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+    task_spec_path = context.weft_dir / "tasks" / "stage-task.json"
+    pipeline_path = root / "pipeline.json"
+    _write_json(
+        task_spec_path,
+        {
+            "name": "stage-task",
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:echo_payload",
+            },
+            "metadata": {},
+        },
+    )
+    _write_json(
+        pipeline_path,
+        {
+            "name": "demo-pipeline",
+            "stages": [{"name": "stage-one", "task": "stage-task"}],
+        },
+    )
+
+    captured: dict[str, Any] = {}
+
+    def _capture_enqueue(
+        context_arg: Any,
+        taskspec: TaskSpec,
+        work_payload: Any,
+        *,
+        seed_start_envelope: bool = True,
+    ) -> int:
+        del context_arg, work_payload, seed_start_envelope
+        captured["name"] = taskspec.name
+        captured["metadata"] = dict(taskspec.metadata)
+        return 1777000000000000003
+
+    monkeypatch.setattr("weft.commands.run._read_piped_stdin", lambda context: None)
+    monkeypatch.setattr(
+        "weft.commands.run._ensure_manager_after_submission",
+        lambda context, *, submitted_tid, verbose: (None, False, None),
+    )
+    monkeypatch.setattr("weft.commands.run._enqueue_taskspec", _capture_enqueue)
+    monkeypatch.setattr("weft.commands.run.typer.echo", lambda *args, **kwargs: None)
+
+    exit_code = _run_pipeline(
+        pipeline_path,
+        name="nightly",
+        pipeline_input=None,
+        context_dir=root,
+        wait=False,
+        json_output=False,
+        verbose=False,
+        autostart_enabled=True,
+    )
+
+    assert exit_code == 0
+    assert captured["name"] == "nightly"
+    assert INTERNAL_RUNTIME_ENDPOINT_NAME_KEY not in captured["metadata"]
 
 
 def test_run_pipeline_without_input_does_not_inject_work_envelope_start(
@@ -1351,6 +1594,7 @@ def test_run_pipeline_without_input_does_not_inject_work_envelope_start(
     with pytest.raises(RuntimeError, match="rollback could not be confirmed"):
         _run_pipeline(
             pipeline_path,
+            name=None,
             pipeline_input=None,
             context_dir=root,
             wait=False,
@@ -1571,6 +1815,41 @@ def test_stop_manager_waits_for_pid_exit_after_stopped_status(
     assert stopped is True
     assert message is None
     assert seen_pids.count(4321) >= 2
+
+
+def test_stop_manager_stop_if_absent_short_circuits_after_stop_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = "17756224000000000055"
+    sent: list[str] = []
+
+    monkeypatch.setattr(
+        manager_lifecycle,
+        "_send_stop",
+        lambda _context, target_tid, *, record=None: sent.append(target_tid),
+    )
+    monkeypatch.setattr(
+        manager_lifecycle,
+        "_await_manager_stop_confirmation",
+        lambda *args, **kwargs: pytest.fail(
+            "absent stop_if_absent path should not wait on registry confirmation"
+        ),
+    )
+
+    stopped, message = manager_lifecycle._stop_manager(
+        ctx,
+        None,
+        tid=tid,
+        timeout=1.0,
+        stop_if_absent=True,
+    )
+
+    assert stopped is True
+    assert message is None
+    assert sent == [tid]
 
 
 def test_stop_manager_force_prefers_process_tree_kill_when_pid_known(

@@ -380,6 +380,8 @@ class Consumer(BaseTask, InteractiveTaskMixin):
 
         self._deferred_active_control_command = None
         self._deferred_active_control_timestamp = None
+        active_message_timestamp = self._active_message_timestamp
+        has_active_reserved_message = active_message_timestamp is not None
 
         if command == CONTROL_STOP:
             policy = self._resolve_policy(self.taskspec.spec.reserved_policy_on_stop)
@@ -389,10 +391,11 @@ class Consumer(BaseTask, InteractiveTaskMixin):
                 message_id=timestamp,
                 apply_reserved_policy=False,
             )
-            self._apply_reserved_policy(
-                policy, message_timestamp=self._active_message_timestamp
-            )
-            if policy is not ReservedPolicy.KEEP:
+            if has_active_reserved_message:
+                self._apply_reserved_policy(
+                    policy, message_timestamp=active_message_timestamp
+                )
+            if has_active_reserved_message and policy is not ReservedPolicy.KEEP:
                 self._ensure_reserved_empty()
                 self._cleanup_reserved_if_needed()
             self._send_control_response("STOP", "ack")
@@ -406,10 +409,11 @@ class Consumer(BaseTask, InteractiveTaskMixin):
                 message_id=timestamp,
                 apply_reserved_policy=False,
             )
-            self._apply_reserved_policy(
-                policy, message_timestamp=self._active_message_timestamp
-            )
-            if policy is not ReservedPolicy.KEEP:
+            if has_active_reserved_message:
+                self._apply_reserved_policy(
+                    policy, message_timestamp=active_message_timestamp
+                )
+            if has_active_reserved_message and policy is not ReservedPolicy.KEEP:
                 self._ensure_reserved_empty()
                 self._cleanup_reserved_if_needed()
             self._send_control_response("KILL", "ack")
@@ -510,6 +514,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
                 agent_execution=agent_execution,
                 initial_transition=initial_transition,
             )
+            self._end_streaming_session()
             self._update_process_title("running")
             return
 

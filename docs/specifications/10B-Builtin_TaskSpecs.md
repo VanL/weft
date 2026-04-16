@@ -66,6 +66,17 @@ See also:
 - builtins may report availability, prepare a slow runner path, or demonstrate
   a Weft workflow, but they must not become a second control plane for agent
   setup or lifecycle management
+- service-style builtins may demonstrate named persistent-task patterns only if
+  they remain ordinary tasks on the existing durable spine and treat any named
+  endpoint or request envelope as explicit optional helper behavior rather than
+  as hidden runtime magic
+- service-style builtins must not rely on direct backend-specific SQL tables
+  inside the broker store as their blessed persistence model; if they need
+  durable domain state beyond runtime-only Weft registries, that state belongs
+  in an explicit app/domain store outside Weft core truth surfaces
+- a service-style builtin may offer stricter inbox schemas, request envelopes,
+  or explicit claim and release helpers, but those semantics stay local to the
+  builtin contract rather than redefining Weft globally
 
 ## Adding A Builtin
 
@@ -86,10 +97,17 @@ should be added only when they meet all of these rules:
 - the builtin has a dedicated section in this document
 - the builtin has black-box coverage for resolution and any public behavior it
   introduces
+- if the builtin demonstrates a long-lived service/actor pattern, the builtin
+  must keep payload and request semantics explicit in its own contract instead
+  of implicitly redefining the global Weft task model
 
 _Implementation mapping_: builtin assets live under `weft/builtins/tasks/`.
 Explicit spec resolution lives in `weft/commands/specs.py` and
 `weft/commands/run.py`.
+
+## Related Plans
+
+- [`docs/plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md`](../plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md)
 
 ## Builtins
 

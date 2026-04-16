@@ -18,6 +18,8 @@ See also:
 - [`docs/plans/2026-04-06-runner-extension-point-plan.md`](../plans/2026-04-06-runner-extension-point-plan.md)
 - [`docs/plans/2026-04-06-persistent-agent-runtime-implementation-plan.md`](../plans/2026-04-06-persistent-agent-runtime-implementation-plan.md)
 - [`docs/plans/2026-04-07-active-control-main-thread-plan.md`](../plans/2026-04-07-active-control-main-thread-plan.md)
+- [`docs/plans/2026-04-16-review-findings-remediation-plan.md`](../plans/2026-04-16-review-findings-remediation-plan.md)
+- [`docs/plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md`](../plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md)
 
 ## 1. TaskSpec (`weft/core/taskspec.py`) [CC-1]
 
@@ -88,6 +90,7 @@ Current responsibilities:
 - report task lifecycle changes to `weft.log.tasks`
 - maintain TID mappings and process titles
 - own reserved-queue policy application
+- optionally claim and release one stable runtime endpoint name for the live task
 - expose `process_once()` and `run_until_stopped()`
 
 Why this exists:
@@ -127,12 +130,43 @@ Current required control behavior:
   live detail
 - streaming markers in `weft.state.streaming` reflect live stream ownership for
   result/status surfaces
+- streaming markers are runtime-only ownership hints and must clear before a
+  persistent task returns to `waiting`
 
 Why this boundary matters:
 
 - operators need one durable truth and one lightweight live explanation
 - control replies should stay off the data plane
 - task-local streaming state should remain explicit and inspectable
+
+### 2.4.1 Runtime Endpoint Registry [CC-2.4.1]
+
+**Purpose**: expose one thin discovery primitive for long-lived tasks that want
+a stable project-local name.
+
+_Implementation mapping_: `weft/core/endpoints.py` — `EndpointRecord`,
+`ResolvedEndpoint`, `list_resolved_endpoints()`, `resolve_endpoint()`;
+`weft/core/tasks/base.py` — `register_endpoint_name()`,
+`unregister_endpoint_name()`.
+
+Current rules:
+
+- registration is explicit and opt-in; unnamed tasks remain the default
+- one live task currently owns at most one active named-endpoint claim at a
+  time
+- endpoint records point at ordinary task-local queues (`inbox`, `outbox`,
+  `ctrl_in`, `ctrl_out`)
+- the registry is discovery only; it does not introduce a second transport,
+  task kind, or workflow router
+- endpoint records are runtime-only hints and must not become durable domain
+  state inside Weft core
+
+Why this boundary exists:
+
+- higher-level systems often need a stable way to find a long-lived task
+- queue ownership must stay visible and task-local
+- service semantics such as request schemas, fan-out, or replacement policy
+  belong above this primitive
 
 ### 2.5 Execution Flow [CC-2.5]
 

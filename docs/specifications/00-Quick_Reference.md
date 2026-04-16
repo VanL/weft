@@ -37,14 +37,22 @@ Global queues:
 | `weft.manager.outbox` | Manager informational output | Yes |
 | `weft.state.managers` | Active manager registry | No (runtime state) |
 | `weft.state.tid_mappings` | Short→full TID mappings | No (runtime state) |
+| `weft.state.endpoints` | Active named endpoint registry | No (runtime state) |
 | `weft.state.streaming` | Active streaming sessions | No (runtime state) |
 | `weft.state.pipelines` | Active pipeline registry | No (runtime state) |
 
 Notes:
 - `weft.state.*` queues are runtime state and are excluded from dumps by default.
+- named endpoint records resolve stable project-local names to ordinary
+  task-local queues.
 - Full queue behaviors are defined in `05-Message_Flow_and_State.md`.
 
-_Implementation mapping_: `weft/_constants.py` (global queue constants), `weft/core/tasks/base.py` (queue wiring), `weft/core/manager.py` (manager registry), `weft/core/pipelines.py` (pipeline queue compilation), `weft/core/tasks/pipeline.py` (pipeline runtime queues).
+_Implementation mapping_: `weft/_constants.py` (global queue constants),
+`weft/core/tasks/base.py` (queue wiring and runtime endpoint registration),
+`weft/core/endpoints.py` (named endpoint resolution),
+`weft/core/manager.py` (manager registry), `weft/core/pipelines.py`
+(pipeline queue compilation), `weft/core/tasks/pipeline.py`
+(pipeline runtime queues).
 
 ## Task States
 

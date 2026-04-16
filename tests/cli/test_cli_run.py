@@ -444,6 +444,8 @@ def test_cli_run_help_hides_monitor_and_documents_named_or_path_spec(
     assert "--pipeline NAME|PATH" in out
     assert "Execute a task spec by stored name or JSON" in out
     assert "Execute a pipeline by stored name or JSON" in out
+    assert "--name TEXT" in out
+    assert "claims the named runtime endpoint" in out
     assert "--monitor" not in out
 
 
@@ -1528,6 +1530,89 @@ def test_cli_run_persistent_agent_spec_continues_conversation(
     second_payload = json.loads(out)
     assert second_payload["result"] == "history:hello"
     assert err == ""
+
+
+def test_cli_run_persistent_spec_name_claims_and_releases_endpoint(
+    workdir: Path,
+    weft_harness: WeftTestHarness,
+) -> None:
+    spec_path = workdir / "persistent_named_endpoint.json"
+    spec_payload = {
+        "name": "persistent-worker",
+        "spec": {
+            "type": "function",
+            "function_target": "tests.tasks.sample_targets:echo_payload",
+            "persistent": True,
+            "weft_context": str(workdir),
+        },
+        "metadata": {},
+    }
+    spec_path.write_text(json.dumps(spec_payload, indent=2), encoding="utf-8")
+
+    rc, out, err = run_cli(
+        "run",
+        "--spec",
+        spec_path,
+        "--name",
+        "mayor",
+        "--no-wait",
+        cwd=workdir,
+        harness=weft_harness,
+    )
+
+    assert rc == 0
+    assert err == ""
+    tid = out.strip()
+
+    deadline = time.time() + 10.0
+    resolved_payload: dict[str, Any] | None = None
+    while time.time() < deadline:
+        rc, out, err = run_cli(
+            "queue",
+            "resolve",
+            "mayor",
+            "--json",
+            cwd=workdir,
+            harness=weft_harness,
+        )
+        if rc == 0:
+            resolved_payload = json.loads(out)
+            break
+        time.sleep(0.05)
+
+    assert resolved_payload is not None
+    assert resolved_payload["tid"] == tid
+
+    snapshot = task_cmd.task_status(tid, context_path=workdir)
+    assert snapshot is not None
+    assert snapshot.name == "mayor"
+
+    rc, out, err = run_cli(
+        "task",
+        "stop",
+        tid,
+        cwd=workdir,
+        harness=weft_harness,
+    )
+    assert rc == 0
+    assert err == ""
+
+    deadline = time.time() + 10.0
+    while time.time() < deadline:
+        rc, out, err = run_cli(
+            "queue",
+            "resolve",
+            "mayor",
+            cwd=workdir,
+            harness=weft_harness,
+        )
+        if rc == 2:
+            break
+        time.sleep(0.05)
+
+    assert rc == 2
+    assert out == ""
+    assert "No active endpoint named 'mayor'" in err
 
 
 def test_cli_run_persistent_spec_rejects_wait(workdir, weft_harness) -> None:

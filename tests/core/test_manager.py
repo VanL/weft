@@ -1035,10 +1035,11 @@ def test_build_child_spec_propagates_unexpected_resolution_error(
         manager._build_child_spec(make_child_spec(), int(time.time_ns()))
 
 
-def test_manager_idle_timeout_force_refreshes_broker_activity_before_shutdown(
-    broker_env, unique_tid, monkeypatch: pytest.MonkeyPatch
+def test_manager_idle_timeout_force_refreshes_cached_broker_activity_before_shutdown(
+    broker_env,
+    unique_tid,
 ) -> None:
-    db_path, _make_queue = broker_env
+    db_path, make_queue = broker_env
     inbox = f"manager.{unique_tid}.inbox"
     ctrl_in = f"manager.{unique_tid}.ctrl_in"
     ctrl_out = f"manager.{unique_tid}.ctrl_out"
@@ -1052,23 +1053,23 @@ def test_manager_idle_timeout_force_refreshes_broker_activity_before_shutdown(
     manager = Manager(db_path, spec)
     try:
         previous_activity = time.time_ns() - 1_000_000_000
+        broker_queue = manager._get_connected_queue()
+        cached_timestamp = broker_queue.last_ts or 0
         manager._last_activity_ns = previous_activity
-        manager._last_broker_timestamp = 100
-        observed_force_flags: list[bool] = []
+        manager._last_broker_timestamp = cached_timestamp
+        manager._last_broker_probe_ns = time.time_ns()
 
-        def fake_read_broker_timestamp(*, force: bool = False) -> int:
-            observed_force_flags.append(force)
-            return 200 if force else 100
-
-        monkeypatch.setattr(
-            manager, "_read_broker_timestamp", fake_read_broker_timestamp
-        )
+        activity_queue = make_queue("manager.activity")
+        activity_queue.write("ping")
+        activity_timestamp = activity_queue.last_ts
+        assert isinstance(activity_timestamp, int)
+        assert activity_timestamp > cached_timestamp
+        assert broker_queue.last_ts == cached_timestamp
 
         manager.process_once()
 
-        assert observed_force_flags[-1] is True
         assert manager.should_stop is False
-        assert manager._last_broker_timestamp == 200
+        assert manager._last_broker_timestamp >= activity_timestamp
         assert manager._last_activity_ns > previous_activity
     finally:
         manager.cleanup()
@@ -1277,6 +1278,38 @@ def test_manager_autostart_skips_active_templates(
         manager.process_once()
         assert not manager._child_processes
         assert not manager._autostart_launched
+    finally:
+        manager.cleanup()
+
+
+def test_manager_autostart_prunes_deleted_manifest_state(
+    tmp_path: Path,
+    broker_env,
+    unique_tid,
+) -> None:
+    db_path, _make_queue = broker_env
+    autostart_dir = tmp_path / "autostart"
+    autostart_dir.mkdir()
+
+    config = load_config()
+    config["WEFT_AUTOSTART_TASKS"] = True
+    config["WEFT_AUTOSTART_DIR"] = str(autostart_dir)
+
+    spec = make_manager_spec(unique_tid, idle_timeout=1.5)
+    manager = Manager(db_path, spec, config=config)
+    stale_source = str((autostart_dir / "deleted.json").resolve())
+    try:
+        manager._autostart_state[stale_source] = {
+            "restarts": 2,
+            "next_allowed_ns": time.time_ns(),
+            "launched_once": True,
+        }
+        manager._autostart_launched.add(stale_source)
+
+        manager._tick_autostart(force=True)
+
+        assert stale_source not in manager._autostart_state
+        assert stale_source not in manager._autostart_launched
     finally:
         manager.cleanup()
 

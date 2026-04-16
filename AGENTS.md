@@ -58,8 +58,6 @@
 **What**: Durable task execution built on SimpleBroker queues.
 **Tagline**: "SimpleBroker for processes" - same zero-config philosophy, adds process isolation and resource control.
 
-**Mental Model**: Everything is a Task. The Manager is a Task that spawns other Tasks. Queues are the only communication channel. State lives in queues, not databases.
-
 **When to use weft**:
 - Tasks that might outlive your session
 - Parallel work with result collection
@@ -69,21 +67,82 @@
 
 **Current state**: Core working. CLI working. Tests passing.
 
-## 1.1 If You're New Here (Read This First)
+## 1.1 Design Philosophy (Read Before You Judge)
 
-You are a skilled developer with limited context. This project is a durable
-task runner built on SimpleBroker. Keep changes small, grounded in the specs,
-and tested. Avoid "clever" abstractions.
+Weft is a task runner where **queues are the only source of truth**.
+Everything is a Task — the Manager is a Task that spawns other Tasks.
+State lives in queues, not databases. The system is observable with
+standard Unix tools (`ps`, queue peek). We inherit SimpleBroker's
+zero-config philosophy: safe defaults, no magic, no cleverness.
+
+**What this means for you:**
+
+- **Size is not a smell.** Files are large when responsibilities are
+  cohesive. BaseTask owns queue wiring, state lifecycle, control handling,
+  and process titles because those concerns share state and must coordinate.
+  Manager is large because coordination *is* its job. TaskSpec is large
+  because it's a complete domain schema. Don't suggest extraction unless you
+  can show the responsibilities are *actually separable* — meaning they
+  don't share state that would need to be passed between the new pieces.
+
+- **Absence is not a gap.** If an abstraction doesn't exist (no
+  QueueFactory, no state machine library, no plugin framework), it's
+  because the simpler approach works. `BrokerTarget` is the queue factory,
+  at the SimpleBroker layer where it belongs. Don't add indirection unless
+  duplication forces it.
+
+- **Patterns have reasons.** If you see a `time.sleep()`, a broad `except`,
+  or an unusual structure, read the surrounding context before forming an
+  opinion. Every sleep uses a named constant with a docstring explaining
+  why no event-driven alternative exists. Every broad catch at a process
+  boundary has a pragma comment. Every spec reference code (`[CC-1]`,
+  `[MF-2.1]`) traces to a governing specification. Read first, then
+  evaluate.
+
+- **Specs are truth, everything else is context.** Plans in `docs/plans/`
+  are non-normative historical records — they document why decisions were
+  made and how slices were sequenced. Don't treat them as backlog or
+  unfinished work. Lessons are governance, not complaints. The specs in
+  `docs/specifications/` are the only authoritative source for behavior.
+
+- **Respect the layer boundary with SimpleBroker.** Weft builds on
+  SimpleBroker; it doesn't reimplement it. Queue creation, backend
+  selection, timestamp ordering, and delivery guarantees are SimpleBroker's
+  job. Don't pull queue-level concerns up into Weft, and don't make
+  assumptions about performance or capability without reading how
+  SimpleBroker actually works (`../simplebroker/` or the installed package).
+  If something feels like it needs a queue-level fix, it probably does —
+  in SimpleBroker, not here. Key things that differ from typical message
+  brokers: queues are auto-created on first use (no provisioning step),
+  moves are zero-copy metadata updates (not dequeue-then-enqueue), and
+  queues are cheap — creating many short-lived queues is a normal pattern,
+  not a resource concern. These properties are why Weft uses per-task queue
+  sets freely.
+
+- **Don't infer — read.** The most common agent mistake in this codebase is
+  applying generic heuristics (line count = god class, sleep count = design
+  smell, exception count = sloppy code) without reading the specific code.
+  Generic best practices often point the wrong direction here. Evaluate
+  whether the code is consistent with *its own philosophy*, not whether it
+  matches industry-standard patterns.
+
+## 1.2 If You're New Here
+
+You are a skilled developer with limited context. Keep changes small,
+grounded in the specs, and tested. Avoid "clever" abstractions.
 
 **Where to start**
-1. Read `docs/agent-context/README.md`.
-2. Read `docs/agent-context/decision-hierarchy.md`.
-3. Read `docs/agent-context/principles.md`.
-4. Read `docs/specifications/00-Overview_and_Architecture.md` for the mental model.
-5. Read `docs/specifications/02-TaskSpec.md` for the TaskSpec schema.
-6. Read `docs/specifications/05-Message_Flow_and_State.md` for queue flows.
-7. Check `docs/specifications/07-System_Invariants.md` before touching core logic.
-8. Use `README.md` for usage examples and CLI behavior.
+1. Read §1.1 above (you just did).
+2. Read `docs/specifications/00-Overview_and_Architecture.md` for the full
+   mental model.
+3. Read `docs/specifications/07-System_Invariants.md` before touching core
+   logic.
+
+**For deeper work**, also read:
+4. `docs/specifications/02-TaskSpec.md` for the TaskSpec schema.
+5. `docs/specifications/05-Message_Flow_and_State.md` for queue flows.
+6. `docs/agent-context/engineering-principles.md` for development guidance.
+7. `README.md` for usage examples and CLI behavior.
 
 **Key principle**: The specs are the source of truth for behavior. The current
 plan may define how an approved slice should be executed, but it does not

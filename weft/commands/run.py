@@ -13,7 +13,8 @@ import base64
 import json
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,7 @@ from weft._constants import (
     CONTROL_STOP,
     DEFAULT_STREAM_OUTPUT,
     INTERACTIVE_STOP_COMPLETION_TIMEOUT,
+    INTERNAL_RUNTIME_ENDPOINT_NAME_KEY,
     QUEUE_CTRL_IN_SUFFIX,
     QUEUE_CTRL_OUT_SUFFIX,
     QUEUE_INBOX_SUFFIX,
@@ -47,6 +49,7 @@ from weft.commands._streaming import (
 from weft.commands._task_history import is_pipeline_taskspec_payload
 from weft.commands.interactive import InteractiveStreamClient
 from weft.context import WeftContext, build_context
+from weft.core.endpoints import normalize_endpoint_name
 from weft.core.pipelines import (
     PipelineSpec,
     compile_linear_pipeline,
@@ -80,6 +83,72 @@ from weft.helpers import (
 # -----------------------------------------------------------------------------
 # Explicit spec helpers
 # -----------------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class _ManagedExecutionResult:
+    """Shared manager-backed submission result for run-mode helpers."""
+
+    tid: str
+    status: str | None = None
+    result_value: Any | None = None
+    error_message: str | None = None
+
+
+def _run_with_managed_execution(
+    *,
+    context: WeftContext,
+    submit: Callable[[], int],
+    verbose: bool,
+    wait: bool,
+    reuse_enabled: bool,
+    wait_for_completion: Callable[[str], tuple[str, Any, str | None]] | None = None,
+    on_submitted: Callable[[str], None] | None = None,
+) -> _ManagedExecutionResult:
+    """Share the manager-backed bootstrap -> submit -> wait -> optional stop flow."""
+    manager_record: dict[str, Any] | None = None
+    started_here = False
+    process_handle: subprocess.Popen[bytes] | None = None
+    failed = False
+
+    try:
+        tid_int = submit()
+        manager_record, started_here, process_handle = _ensure_manager_after_submission(
+            context,
+            submitted_tid=tid_int,
+            verbose=verbose,
+        )
+        tid = str(tid_int)
+        if on_submitted is not None:
+            on_submitted(tid)
+
+        if not wait:
+            return _ManagedExecutionResult(tid=tid)
+
+        if wait_for_completion is None:  # pragma: no cover - caller contract guard
+            raise RuntimeError("wait_for_completion is required when wait=True")
+
+        status, result_value, error_message = wait_for_completion(tid)
+        return _ManagedExecutionResult(
+            tid=tid,
+            status=status,
+            result_value=result_value,
+            error_message=error_message,
+        )
+    except Exception:
+        failed = True
+        if started_here and manager_record is not None:
+            _stop_manager(context, manager_record, process_handle)
+        raise
+    finally:
+        if (
+            not failed
+            and started_here
+            and wait
+            and not reuse_enabled
+            and manager_record is not None
+        ):
+            _stop_manager(context, manager_record, process_handle)
 
 
 def _load_taskspec_reference(
@@ -777,6 +846,40 @@ def _build_spec_work_payload(
         raise typer.BadParameter(str(exc)) from exc
 
 
+def _apply_explicit_run_name(taskspec: TaskSpec, explicit_name: str | None) -> TaskSpec:
+    """Apply an explicit CLI name override to a runtime TaskSpec template.
+
+    For persistent tasks only, an explicit CLI name also becomes the runtime
+    endpoint claim name. This remains submission-time shaping; the task still
+    claims and releases the endpoint through its ordinary lifecycle.
+    """
+
+    if explicit_name is None:
+        return taskspec
+
+    payload = taskspec.model_dump(mode="json")
+    payload["name"] = explicit_name
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+        payload["metadata"] = metadata
+    metadata.pop(INTERNAL_RUNTIME_ENDPOINT_NAME_KEY, None)
+
+    if bool(getattr(taskspec.spec, "persistent", False)):
+        try:
+            endpoint_name = normalize_endpoint_name(explicit_name)
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc), param_hint="--name") from exc
+        metadata[INTERNAL_RUNTIME_ENDPOINT_NAME_KEY] = endpoint_name
+
+    renamed = TaskSpec.model_validate(
+        payload,
+        context={"auto_expand": False, "template": taskspec.tid is None},
+    )
+    renamed.set_bundle_root(taskspec.get_bundle_root())
+    return renamed
+
+
 def _materialize_parameterized_spec(
     *,
     taskspec: TaskSpec,
@@ -879,44 +982,23 @@ def _run_inline(
     taskspec = TaskSpec.model_validate(
         template_dict, context={"auto_expand": False, "template": True}
     )
-    manager_record: dict[str, Any] | None = None
-    started_here = False
-    process_handle: subprocess.Popen[bytes] | None = None
     reuse_enabled = bool(context.config.get("WEFT_MANAGER_REUSE_ENABLED", True))
 
-    try:
-        if interactive:
-            if target_type != "command":
-                raise typer.BadParameter(
-                    "--interactive is only supported for command targets"
-                )
-            if json_output:
-                raise typer.BadParameter(
-                    "--json is not supported together with --interactive"
-                )
-        tid_int = _enqueue_taskspec(
-            context,
-            taskspec,
-            work_payload,
-        )
-        manager_record, started_here, process_handle = _ensure_manager_after_submission(
-            context,
-            submitted_tid=tid_int,
-            verbose=verbose,
-        )
-        tid = str(tid_int)
-        if verbose:
-            typer.echo(
-                json.dumps(
-                    {
-                        "tid": tid,
-                        "task": task_name,
-                        "db": context.broker_display_target,
-                    },
-                    indent=2,
-                )
+    def _emit_verbose_submission(tid: str) -> None:
+        if not verbose:
+            return
+        typer.echo(
+            json.dumps(
+                {
+                    "tid": tid,
+                    "task": task_name,
+                    "db": context.broker_display_target,
+                },
+                indent=2,
             )
+        )
 
+    def _wait_for_inline_completion(tid: str) -> tuple[str, Any, str | None]:
         resolved_payload = resolve_taskspec_payload(
             taskspec.model_dump(mode="json"),
             tid=tid,
@@ -926,18 +1008,6 @@ def _run_inline(
             resolved_payload, context={"auto_expand": False}
         )
         resolved_spec.set_bundle_root(taskspec.get_bundle_root())
-
-        if not wait:
-            if json_output:
-                typer.echo(
-                    json.dumps(
-                        {"tid": tid, "status": "queued"},
-                        ensure_ascii=False,
-                    )
-                )
-            else:
-                typer.echo(tid)
-            return 0
 
         if interactive:
             use_prompt = stdin_data is None and stdin_is_terminal
@@ -958,21 +1028,58 @@ def _run_inline(
                 if not str(result_value).endswith("\n"):
                     typer.echo()
                 result_value = ""
-        else:
-            status, result_value, error_message = _wait_for_task_completion(
+            return status, result_value, error_message
+
+        return _wait_for_task_completion(
+            context,
+            resolved_spec,
+            json_output=json_output,
+            verbose=verbose,
+        )
+
+    try:
+        if interactive:
+            if target_type != "command":
+                raise typer.BadParameter(
+                    "--interactive is only supported for command targets"
+                )
+            if json_output:
+                raise typer.BadParameter(
+                    "--json is not supported together with --interactive"
+                )
+        execution = _run_with_managed_execution(
+            context=context,
+            submit=lambda: _enqueue_taskspec(
                 context,
-                resolved_spec,
-                json_output=json_output,
-                verbose=verbose,
-            )
+                taskspec,
+                work_payload,
+            ),
+            verbose=verbose,
+            wait=wait,
+            reuse_enabled=reuse_enabled,
+            wait_for_completion=_wait_for_inline_completion if wait else None,
+            on_submitted=_emit_verbose_submission,
+        )
     except Exception as exc:
-        if started_here and manager_record is not None:
-            _stop_manager(context, manager_record, process_handle)
         typer.echo(f"Error submitting task: {exc}", err=True)
         return 1
-    else:
-        if started_here and wait and not reuse_enabled and manager_record is not None:
-            _stop_manager(context, manager_record, process_handle)
+
+    tid = execution.tid
+    if not wait:
+        if json_output:
+            typer.echo(
+                json.dumps(
+                    {"tid": tid, "status": "queued"},
+                    ensure_ascii=False,
+                )
+            )
+        else:
+            typer.echo(tid)
+        return 0
+
+    status = execution.status
+    result_value = execution.result_value
+    error_message = execution.error_message
 
     if status == "completed":
         if json_output:
@@ -1018,6 +1125,7 @@ def _run_inline(
 def _run_spec_via_manager(
     spec_ref: str | Path,
     *,
+    name: str | None = None,
     context_dir: Path | None = None,
     run_input_tokens: Sequence[str] = (),
     verbose: bool,
@@ -1044,6 +1152,7 @@ def _run_spec_via_manager(
         else spec.spec.weft_context,
         run_input_tokens=run_input_tokens,
     )
+    spec = _apply_explicit_run_name(spec, name)
     if spec.spec.persistent and wait:
         raise typer.BadParameter(
             "--wait is not supported for persistent TaskSpecs; use --no-wait."
@@ -1056,23 +1165,9 @@ def _run_spec_via_manager(
         stdin_data=stdin_data,
         run_input_tokens=remaining_tokens,
     )
-    manager_record: dict[str, Any] | None = None
-    started_here = False
-    process_handle: subprocess.Popen[bytes] | None = None
     reuse_enabled = bool(context.config.get("WEFT_MANAGER_REUSE_ENABLED", True))
 
-    try:
-        tid_int = _enqueue_taskspec(
-            context,
-            spec,
-            work_payload,
-        )
-        manager_record, started_here, process_handle = _ensure_manager_after_submission(
-            context,
-            submitted_tid=tid_int,
-            verbose=verbose,
-        )
-        tid = str(tid_int)
+    def _wait_for_spec_completion(tid: str) -> tuple[str, Any, str | None]:
         resolved_payload = resolve_taskspec_payload(
             spec.model_dump(mode="json"),
             tid=tid,
@@ -1082,32 +1177,46 @@ def _run_spec_via_manager(
             resolved_payload, context={"auto_expand": False}
         )
         resolved_spec.set_bundle_root(spec.get_bundle_root())
-        if not wait:
-            if json_output:
-                typer.echo(
-                    json.dumps(
-                        {"tid": tid, "status": "queued"},
-                        ensure_ascii=False,
-                    )
-                )
-            else:
-                typer.echo(tid)
-            return 0
-
-        status, result_value, error_message = _wait_for_task_completion(
+        return _wait_for_task_completion(
             context,
             resolved_spec,
             json_output=json_output,
             verbose=verbose,
         )
+
+    try:
+        execution = _run_with_managed_execution(
+            context=context,
+            submit=lambda: _enqueue_taskspec(
+                context,
+                spec,
+                work_payload,
+            ),
+            verbose=verbose,
+            wait=wait,
+            reuse_enabled=reuse_enabled,
+            wait_for_completion=_wait_for_spec_completion if wait else None,
+        )
     except Exception as exc:
-        if started_here and manager_record is not None:
-            _stop_manager(context, manager_record, process_handle)
         typer.echo(f"Error submitting TaskSpec: {exc}", err=True)
         return 1
-    else:
-        if started_here and wait and not reuse_enabled and manager_record is not None:
-            _stop_manager(context, manager_record, process_handle)
+
+    tid = execution.tid
+    if not wait:
+        if json_output:
+            typer.echo(
+                json.dumps(
+                    {"tid": tid, "status": "queued"},
+                    ensure_ascii=False,
+                )
+            )
+        else:
+            typer.echo(tid)
+        return 0
+
+    status = execution.status
+    result_value = execution.result_value
+    error_message = execution.error_message
 
     if status == "completed":
         if json_output:
@@ -1141,12 +1250,13 @@ def _run_spec_via_manager(
         )
     else:
         typer.echo(f"Error executing task: {error_message}", err=True)
-    return 1
+    return 124 if status == "timeout" else 1
 
 
 def _run_pipeline(
     pipeline: str | Path,
     *,
+    name: str | None,
     pipeline_input: str | None,
     context_dir: Path | None,
     wait: bool,
@@ -1183,72 +1293,74 @@ def _run_pipeline(
         task_loader=_load_pipeline_stage,
         source_ref=source_ref,
     )
+    compiled = replace(
+        compiled,
+        pipeline_taskspec=_apply_explicit_run_name(compiled.pipeline_taskspec, name),
+    )
     work_payload = (
         requested_input
         if requested_input is not None
         else compiled.bootstrap_input_fallback
     )
 
-    manager_record: dict[str, Any] | None = None
-    process_handle: subprocess.Popen[bytes] | None = None
-    manager_started_here = False
     reuse_enabled = bool(context.config.get("WEFT_MANAGER_REUSE_ENABLED", True))
 
-    try:
-        tid_int = _enqueue_taskspec(
+    def _emit_pipeline_submission(tid: str) -> None:
+        if not verbose:
+            return
+        typer.echo(
+            json.dumps(
+                {
+                    "tid": tid,
+                    "pipeline": compiled.runtime.pipeline_name,
+                    "db": context.broker_display_target,
+                },
+                indent=2,
+            )
+        )
+
+    execution = _run_with_managed_execution(
+        context=context,
+        submit=lambda: _enqueue_taskspec(
             context,
             compiled.pipeline_taskspec,
             work_payload,
             seed_start_envelope=False,
-        )
-        manager_record, started_here, process_handle = _ensure_manager_after_submission(
-            context,
-            submitted_tid=tid_int,
-            verbose=verbose,
-        )
-        tid = str(tid_int)
-        if started_here:
-            manager_started_here = True
-
-        if verbose:
-            typer.echo(
-                json.dumps(
-                    {
-                        "tid": tid,
-                        "pipeline": compiled.runtime.pipeline_name,
-                        "db": context.broker_display_target,
-                    },
-                    indent=2,
+        ),
+        verbose=verbose,
+        wait=wait,
+        reuse_enabled=reuse_enabled,
+        wait_for_completion=(
+            (
+                lambda _tid: _wait_for_task_completion(
+                    context,
+                    compiled.pipeline_taskspec,
+                    json_output=json_output,
+                    verbose=verbose,
                 )
             )
+            if wait
+            else None
+        ),
+        on_submitted=_emit_pipeline_submission,
+    )
 
-        if not wait:
-            if json_output:
-                typer.echo(
-                    json.dumps(
-                        {"tid": tid, "status": "queued"},
-                        ensure_ascii=False,
-                    )
+    tid = execution.tid
+    if not wait:
+        if json_output:
+            typer.echo(
+                json.dumps(
+                    {"tid": tid, "status": "queued"},
+                    ensure_ascii=False,
                 )
-            else:
-                typer.echo(tid)
-            return 0
+            )
+        else:
+            typer.echo(tid)
+        return 0
 
-        status, result_value, error_message = _wait_for_task_completion(
-            context,
-            compiled.pipeline_taskspec,
-            json_output=json_output,
-            verbose=verbose,
-        )
-
-    finally:
-        if (
-            manager_started_here
-            and wait
-            and not reuse_enabled
-            and manager_record is not None
-        ):
-            _stop_manager(context, manager_record, process_handle)
+    status = execution.status
+    result_value = execution.result_value
+    error_message = execution.error_message
 
     if status == "completed":
         if json_output:
@@ -1355,6 +1467,7 @@ def cmd_run(
             )
         return _run_pipeline(
             pipeline,
+            name=name,
             pipeline_input=pipeline_input,
             context_dir=context_dir,
             wait=wait,
@@ -1375,6 +1488,7 @@ def cmd_run(
             raise typer.BadParameter("--monitor is not yet supported with the Manager.")
         return _run_spec_via_manager(
             spec,
+            name=name,
             context_dir=context_dir,
             run_input_tokens=spec_run_args,
             verbose=verbose,
