@@ -1116,11 +1116,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/0f/c0/81f3c028368e0a694df7b5ed0cf0f8ade6fa04ecb8874971d7a1352c300a/simplebroker-3.1.7-py3-none-any.whl", hash = "sha256:d60a7442035f9fd33825a455c990e03443dd7491a319424d6a933f70e67a22c7", size = 151447, upload-time = "2026-04-15T02:17:36.893Z" },
 ]
 
-[package.optional-dependencies]
-pg = [
-    { name = "simplebroker-pg" },
-]
-
 [[package]]
 name = "simplebroker-pg"
 version = "1.0.5"
@@ -1296,7 +1291,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "rich" },
     { name = "setproctitle" },
-    { name = "simplebroker", extra = ["pg"] },
+    { name = "simplebroker" },
     { name = "typer" },
     { name = "typing-extensions" },
 ]
@@ -1314,6 +1309,7 @@ dev = [
     { name = "pytest-timeout" },
     { name = "pytest-xdist" },
     { name = "ruff" },
+    { name = "simplebroker-pg" },
     { name = "types-psutil" },
 ]
 docker = [
@@ -1340,8 +1336,9 @@ requires-dist = [
     { name = "rich", specifier = ">=14.0.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.12" },
     { name = "setproctitle", specifier = ">=1.3.7" },
-    { name = "simplebroker", extras = ["pg"], specifier = ">=3.1.2" },
+    { name = "simplebroker", specifier = ">=3.1.2" },
     { name = "simplebroker-pg", marker = "extra == 'all'", specifier = ">=1.0.0" },
+    { name = "simplebroker-pg", marker = "extra == 'dev'", specifier = ">=1.0.0" },
     { name = "simplebroker-pg", marker = "extra == 'pg'", specifier = ">=1.0.0" },
     { name = "typer", specifier = ">=0.16.0" },
     { name = "types-psutil", marker = "extra == 'dev'", specifier = ">=5.9.5" },

@@ -1,5 +1,9 @@
 # Weft Road To Excellent Plan
 
+Status: roadmap
+Source specs: see Source Documents below
+Superseded by: none
+
 This plan turns the current high-level assessment into an implementation
 roadmap. The system already has a strong core idea and a strong core spine.
 What it lacks is not more scope. What it lacks is a tighter reliability floor,

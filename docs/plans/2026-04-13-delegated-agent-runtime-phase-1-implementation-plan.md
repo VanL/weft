@@ -1,5 +1,9 @@
 # Delegated Agent Runtime Phase 1 Implementation Plan
 
+Status: completed
+Source specs: see Source Documents below
+Superseded by: none
+
 This plan implements Phase 1 from
 [`docs/specifications/13A-Agent_Runtime_Planned.md`](../specifications/13A-Agent_Runtime_Planned.md):
 one-shot delegated agent execution through an external provider CLI while

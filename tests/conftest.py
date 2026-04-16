@@ -38,8 +38,10 @@ _SHARED_MODULES = frozenset(
     {
         "tests/system/test_constants.py",
         "tests/system/test_test_backend.py",
+        "tests/system/test_helpers.py",
         "tests/context/test_context.py",
         "tests/commands/test_dump_load.py",
+        "tests/commands/test_interactive_client.py",
         "tests/commands/test_result.py",
         "tests/commands/test_run.py",
         "tests/commands/test_task_commands.py",
@@ -49,8 +51,53 @@ _SHARED_MODULES = frozenset(
         "tests/cli/test_cli_system.py",
         "tests/cli/test_status.py",
         "tests/commands/test_queue.py",
+        "tests/shell/test_known_interpreters.py",
+        "tests/core/test_agent_resolution.py",
+        "tests/core/test_agent_runtime.py",
+        "tests/core/test_agent_tools.py",
+        "tests/core/test_agent_validation.py",
+        "tests/core/test_builtin_agent_images.py",
+        "tests/core/test_builtin_dockerized_agent.py",
+        "tests/core/test_callable.py",
+        "tests/core/test_debugger.py",
+        "tests/core/test_environment_profiles.py",
+        "tests/core/test_llm_backend.py",
+        "tests/core/test_manager.py",
+        "tests/core/test_pipelines.py",
+        "tests/core/test_provider_cli_backend.py",
+        "tests/core/test_provider_cli_container_runtime.py",
+        "tests/core/test_provider_cli_execution.py",
+        "tests/core/test_provider_cli_session_backend.py",
+        "tests/core/test_provider_cli_windows_shims.py",
+        "tests/core/test_runner_plugins.py",
+        "tests/core/test_spec_parameterization.py",
+        "tests/core/test_spec_run_input.py",
+        "tests/core/test_targets.py",
+        "tests/core/test_tool_profiles.py",
         "tests/specs/manager_architecture/test_agent_spawn.py",
+        "tests/specs/manager_architecture/test_manager_state_events.py",
         "tests/specs/manager_architecture/test_tid_correlation.py",
+        "tests/specs/quick_reference/test_queue_names.py",
+        "tests/taskspec/test_taskspec.py",
+        "tests/specs/message_flow/test_agent_spawning_transition.py",
+        "tests/specs/message_flow/test_spawning_transition.py",
+        "tests/specs/resource_management/test_monitor_compat.py",
+        "tests/specs/resource_management/test_resource_limit_killed.py",
+        "tests/specs/resource_management/test_resource_metrics.py",
+        "tests/specs/resource_management/test_timeout_return_code.py",
+        "tests/specs/taskspec/test_agent_taskspec.py",
+        "tests/specs/taskspec/test_peak_metrics.py",
+        "tests/specs/taskspec/test_process_target.py",
+        "tests/specs/taskspec/test_state_transitions.py",
+        "tests/tasks/test_agent_execution.py",
+        "tests/tasks/test_control_channel.py",
+        "tests/tasks/test_multiqueue_watcher.py",
+        "tests/tasks/test_pipeline_runtime.py",
+        "tests/tasks/test_runner.py",
+        "tests/tasks/test_task_execution.py",
+        "tests/tasks/test_task_interactive.py",
+        "tests/tasks/test_task_observability.py",
+        "tests/tasks/test_task_observer_behavior.py",
     }
 )
 _SQLITE_ONLY_MODULES = frozenset(
@@ -60,37 +107,39 @@ _SQLITE_ONLY_MODULES = frozenset(
         "tests/commands/test_dump_load_sqlite_only.py",
     }
 )
-_UNAUDITED_PATH_PREFIXES = frozenset(
-    {
-        "tests/core/",
-        "tests/tasks/",
-        "tests/taskspec/",
-        "tests/specs/message_flow/",
-        "tests/specs/resource_management/",
-        "tests/specs/taskspec/",
-    }
-)
-_UNAUDITED_MODULE_ALLOWLIST = frozenset(
-    {
-        "tests/cli/test_cli_list_task.py",
-        "tests/cli/test_cli_pipeline.py",
-        "tests/cli/test_cli_queue.py",
-        "tests/cli/test_cli_result_all.py",
-        "tests/cli/test_cli_run.py",
-        "tests/cli/test_cli_spec.py",
-        "tests/cli/test_cli_tidy.py",
-        "tests/cli/test_commands.py",
-        "tests/cli/test_manager_proctitle.py",
-        "tests/cli/test_rearrange_args.py",
-        "tests/commands/test_interactive_client.py",
-        "tests/commands/test_queue.py",
-        "tests/shell/test_known_interpreters.py",
-        "tests/specs/quick_reference/test_queue_names.py",
-        "tests/specs/manager_architecture/test_manager_state_events.py",
-        "tests/system/test_helpers.py",
-        "tests/system/test_release_script.py",
-    }
-)
+_UNAUDITED_PATH_PREFIX_REASONS: dict[str, str] = {}
+_UNAUDITED_MODULE_ALLOWLIST_REASONS = {
+    "tests/cli/test_cli_list_task.py": (
+        "legacy CLI list-task coverage still needs explicit backend-scope review"
+    ),
+    "tests/cli/test_cli_pipeline.py": (
+        "legacy CLI pipeline coverage still needs explicit backend-scope review"
+    ),
+    "tests/cli/test_cli_result_all.py": (
+        "legacy CLI result-all coverage still needs explicit backend-scope review"
+    ),
+    "tests/cli/test_cli_run.py": (
+        "large end-to-end CLI run surface still needs explicit backend-scope review"
+    ),
+    "tests/cli/test_cli_spec.py": (
+        "legacy CLI spec coverage still needs explicit backend-scope review"
+    ),
+    "tests/cli/test_cli_tidy.py": (
+        "legacy CLI tidy coverage still needs explicit backend-scope review"
+    ),
+    "tests/cli/test_commands.py": (
+        "legacy CLI command smoke coverage still needs explicit backend-scope review"
+    ),
+    "tests/cli/test_manager_proctitle.py": (
+        "platform-sensitive process-title coverage still needs explicit backend-scope review"
+    ),
+    "tests/cli/test_rearrange_args.py": (
+        "legacy CLI argv-shaping coverage still needs explicit backend-scope review"
+    ),
+    "tests/system/test_release_script.py": (
+        "release-helper tooling coverage still needs explicit backend-scope review"
+    ),
+}
 _EAGER_FAILURE_TRACEBACK_ENV = "WEFT_EAGER_FAILURE_TRACEBACK"
 
 
@@ -468,9 +517,12 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
         if relative_path in _SQLITE_ONLY_MODULES:
             item.add_marker(pytest.mark.sqlite_only)
             continue
-        if relative_path in _UNAUDITED_MODULE_ALLOWLIST:
+        if relative_path in _UNAUDITED_MODULE_ALLOWLIST_REASONS:
             continue
-        if any(relative_path.startswith(prefix) for prefix in _UNAUDITED_PATH_PREFIXES):
+        if any(
+            relative_path.startswith(prefix)
+            for prefix in _UNAUDITED_PATH_PREFIX_REASONS
+        ):
             continue
         raise pytest.UsageError(
             "Unaudited test module must be marked 'shared' or 'sqlite_only', or "

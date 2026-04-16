@@ -16,11 +16,13 @@ import pytest
 import typer
 
 import weft.commands._manager_bootstrap as manager_lifecycle
+import weft.commands._spawn_submission as spawn_submission_cmd
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import (
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MANAGERS_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
+    WEFT_TID_MAPPINGS_QUEUE,
 )
 from weft.commands import tasks as task_cmd
 from weft.commands._spawn_submission import (
@@ -124,6 +126,33 @@ def _stop_active_manager(context) -> None:
         stop_if_absent=True,
     )
     assert stopped, error
+
+
+def _registry_view(
+    *,
+    active: dict[str, Any] | None = None,
+    target: dict[str, Any] | None = None,
+    records: dict[str, dict[str, Any]] | None = None,
+) -> manager_lifecycle._ManagerRegistryView:
+    return manager_lifecycle._ManagerRegistryView(
+        records={} if records is None else records,
+        active_manager=active,
+        target_record=target,
+    )
+
+
+class _FakeQueueChangeMonitor:
+    def __init__(self, queues, *args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        self.queue_names = [queue.name for queue in queues]
+        self.wait_calls: list[float | None] = []
+
+    def wait(self, timeout: float | None) -> bool:
+        self.wait_calls.append(timeout)
+        return False
+
+    def close(self) -> None:
+        return
 
 
 def test_wait_for_task_completion_reads_outbox_after_completion_event(
@@ -344,11 +373,19 @@ def test_start_manager_does_not_terminate_competing_startup_manager(
         "weft.commands._manager_bootstrap._launch_detached_manager",
         lambda context, invocation: launch,
     )
+    monkeypatch.setattr(
+        "weft.commands._manager_bootstrap.QueueChangeMonitor",
+        _FakeQueueChangeMonitor,
+    )
 
     records = iter([competing_record, competing_record])
     monkeypatch.setattr(
-        "weft.commands._manager_bootstrap._select_active_manager",
-        lambda context: next(records),
+        "weft.commands._manager_bootstrap._registry_view",
+        lambda context, *, target_tid=None, prune_stale=True, queue=None: (
+            _registry_view(
+                active=next(records),
+            )
+        ),
     )
 
     terminated = False
@@ -368,6 +405,80 @@ def test_start_manager_does_not_terminate_competing_startup_manager(
     assert started_here is False
     assert handle is None
     assert terminated is False
+
+
+def test_start_manager_adopts_competing_manager_after_losing_pid_exits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    fake_process = _FakePopen(poll_results=[None, None, None])
+    competing_record = {
+        "tid": "1775619800000000000",
+        "pid": 31337,
+        "status": "active",
+        "requests": WEFT_SPAWN_REQUESTS_QUEUE,
+        "role": "manager",
+    }
+    launch = manager_lifecycle._DetachedManagerLaunch(
+        pid=4242,
+        stderr_path=root / ".weft" / "logs" / "manager-startup" / "manager.stderr",
+        launcher_process=fake_process,
+    )
+    cleaned_paths: list[Path] = []
+
+    monkeypatch.setattr(
+        "weft.commands._manager_bootstrap._build_manager_runtime_invocation",
+        lambda context: manager_lifecycle._ManagerRuntimeInvocation(
+            task_cls_path="weft.core.manager.Manager",
+            tid="9" * 19,
+            spec=_FakeManagerSpec(),
+        ),
+    )
+    monkeypatch.setattr(
+        "weft.commands._manager_bootstrap._launch_detached_manager",
+        lambda context, invocation: launch,
+    )
+    monkeypatch.setattr(
+        "weft.commands._manager_bootstrap.QueueChangeMonitor",
+        _FakeQueueChangeMonitor,
+    )
+
+    monkeypatch.setattr(
+        "weft.commands._manager_bootstrap._registry_view",
+        lambda context, *, target_tid=None, prune_stale=True, queue=None: (
+            _registry_view()
+        ),
+    )
+    monkeypatch.setattr(
+        "weft.commands._manager_bootstrap._await_manager_start_settlement",
+        lambda context, *, manager_tid, deadline: competing_record,
+    )
+    monkeypatch.setattr(
+        "weft.commands._manager_bootstrap._is_pid_alive",
+        lambda pid: False,
+    )
+    monotonic_values = iter([0.0, 0.0, 0.1, 0.2])
+    monkeypatch.setattr(
+        "weft.commands._manager_bootstrap.time.monotonic",
+        lambda: next(monotonic_values, 1.0),
+    )
+    monkeypatch.setattr(
+        "weft.commands._manager_bootstrap.time.sleep",
+        lambda seconds: None,
+    )
+    monkeypatch.setattr(
+        "weft.commands._manager_bootstrap._cleanup_startup_stderr",
+        lambda path: cleaned_paths.append(path),
+    )
+
+    record, started_here, handle = _start_manager(ctx, verbose=False)
+
+    assert record == competing_record
+    assert started_here is False
+    assert handle is None
+    assert cleaned_paths == [launch.stderr_path]
 
 
 def test_start_manager_builds_detached_launch_from_shared_runtime_invocation(
@@ -408,18 +519,26 @@ def test_start_manager_builds_detached_launch_from_shared_runtime_invocation(
         _fake_launch,
     )
     monkeypatch.setattr(
+        "weft.commands._manager_bootstrap.QueueChangeMonitor",
+        _FakeQueueChangeMonitor,
+    )
+    monkeypatch.setattr(
         "weft.commands._manager_bootstrap._acknowledge_manager_launch_success",
         lambda launch_arg: acked.append(launch_arg),
     )
     monkeypatch.setattr(
-        "weft.commands._manager_bootstrap._select_active_manager",
-        lambda context: {
-            "tid": invocation.tid,
-            "pid": fake_process.pid,
-            "status": "active",
-            "requests": WEFT_SPAWN_REQUESTS_QUEUE,
-            "role": "manager",
-        },
+        "weft.commands._manager_bootstrap._registry_view",
+        lambda context, *, target_tid=None, prune_stale=True, queue=None: (
+            _registry_view(
+                active={
+                    "tid": invocation.tid,
+                    "pid": fake_process.pid,
+                    "status": "active",
+                    "requests": WEFT_SPAWN_REQUESTS_QUEUE,
+                    "role": "manager",
+                }
+            )
+        ),
     )
     monkeypatch.setattr(
         "weft.commands._manager_bootstrap._is_pid_alive",
@@ -473,20 +592,28 @@ def test_start_manager_treats_post_proof_ack_failure_as_nonfatal(
         lambda context, invocation_arg: launch,
     )
     monkeypatch.setattr(
+        "weft.commands._manager_bootstrap.QueueChangeMonitor",
+        _FakeQueueChangeMonitor,
+    )
+    monkeypatch.setattr(
         "weft.commands._manager_bootstrap._acknowledge_manager_launch_success",
         lambda launch_arg: (_ for _ in ()).throw(
             RuntimeError("post-proof acknowledgement failed")
         ),
     )
     monkeypatch.setattr(
-        "weft.commands._manager_bootstrap._select_active_manager",
-        lambda context: {
-            "tid": invocation.tid,
-            "pid": fake_process.pid,
-            "status": "active",
-            "requests": WEFT_SPAWN_REQUESTS_QUEUE,
-            "role": "manager",
-        },
+        "weft.commands._manager_bootstrap._registry_view",
+        lambda context, *, target_tid=None, prune_stale=True, queue=None: (
+            _registry_view(
+                active={
+                    "tid": invocation.tid,
+                    "pid": fake_process.pid,
+                    "status": "active",
+                    "requests": WEFT_SPAWN_REQUESTS_QUEUE,
+                    "role": "manager",
+                }
+            )
+        ),
     )
     monkeypatch.setattr(
         "weft.commands._manager_bootstrap._is_pid_alive",
@@ -546,8 +673,14 @@ def test_start_manager_surfaces_detached_launch_stderr_when_manager_exits_early(
         lambda context, invocation: launch,
     )
     monkeypatch.setattr(
-        "weft.commands._manager_bootstrap._select_active_manager",
-        lambda context: None,
+        "weft.commands._manager_bootstrap.QueueChangeMonitor",
+        _FakeQueueChangeMonitor,
+    )
+    monkeypatch.setattr(
+        "weft.commands._manager_bootstrap._registry_view",
+        lambda context, *, target_tid=None, prune_stale=True, queue=None: (
+            _registry_view()
+        ),
     )
     monkeypatch.setattr(
         "weft.commands._manager_bootstrap.typer.echo",
@@ -887,6 +1020,143 @@ def test_reconcile_submitted_spawn_reports_rejected_from_manager_log(
         tid=submitted_tid,
         error="manager rejected child task",
     )
+
+
+def test_reconcile_submitted_spawn_uses_queue_monitor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+    submitted_tid = str(time.time_ns())
+    created_monitors: list[_FakeQueueChangeMonitor] = []
+    results = iter(
+        [
+            SpawnSubmissionReconciliation(outcome="unknown", tid=submitted_tid),
+            SpawnSubmissionReconciliation(outcome="queued", tid=submitted_tid),
+        ]
+    )
+
+    def _fake_monitor(queues, *, config=None):
+        monitor = _FakeQueueChangeMonitor(queues, config=config)
+        created_monitors.append(monitor)
+        return monitor
+
+    monkeypatch.setattr(spawn_submission_cmd, "QueueChangeMonitor", _fake_monitor)
+    monkeypatch.setattr(
+        spawn_submission_cmd,
+        "_reconcile_submitted_spawn_once",
+        lambda *_args, **_kwargs: next(results),
+    )
+    monkeypatch.setattr(
+        spawn_submission_cmd,
+        "_spawn_reconciliation_queue_specs",
+        lambda _context: (
+            (WEFT_TID_MAPPINGS_QUEUE, False),
+            (WEFT_GLOBAL_LOG_QUEUE, False),
+            (WEFT_SPAWN_REQUESTS_QUEUE, False),
+            (WEFT_MANAGERS_REGISTRY_QUEUE, False),
+        ),
+    )
+
+    result = reconcile_submitted_spawn(context, submitted_tid, timeout=0.1)
+
+    assert result == SpawnSubmissionReconciliation(
+        outcome="queued",
+        tid=submitted_tid,
+    )
+    assert len(created_monitors) == 1
+    assert created_monitors[0].queue_names == [
+        WEFT_TID_MAPPINGS_QUEUE,
+        WEFT_GLOBAL_LOG_QUEUE,
+        WEFT_SPAWN_REQUESTS_QUEUE,
+        WEFT_MANAGERS_REGISTRY_QUEUE,
+    ]
+    assert created_monitors[0].wait_calls
+
+
+def test_reconcile_submitted_spawn_rebuilds_monitor_when_reserved_queues_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+    submitted_tid = str(time.time_ns())
+    created_monitors: list[_FakeQueueChangeMonitor] = []
+    results = iter(
+        [
+            SpawnSubmissionReconciliation(outcome="unknown", tid=submitted_tid),
+            SpawnSubmissionReconciliation(outcome="unknown", tid=submitted_tid),
+            SpawnSubmissionReconciliation(
+                outcome="reserved",
+                tid=submitted_tid,
+                reserved_queue="T1776000000000000001.reserved",
+            ),
+        ]
+    )
+    queue_specs = iter(
+        [
+            (
+                (WEFT_TID_MAPPINGS_QUEUE, False),
+                (WEFT_GLOBAL_LOG_QUEUE, False),
+                (WEFT_SPAWN_REQUESTS_QUEUE, False),
+                (WEFT_MANAGERS_REGISTRY_QUEUE, False),
+            ),
+            (
+                (WEFT_TID_MAPPINGS_QUEUE, False),
+                (WEFT_GLOBAL_LOG_QUEUE, False),
+                (WEFT_SPAWN_REQUESTS_QUEUE, False),
+                (WEFT_MANAGERS_REGISTRY_QUEUE, False),
+                ("T1776000000000000001.reserved", False),
+            ),
+            (
+                (WEFT_TID_MAPPINGS_QUEUE, False),
+                (WEFT_GLOBAL_LOG_QUEUE, False),
+                (WEFT_SPAWN_REQUESTS_QUEUE, False),
+                (WEFT_MANAGERS_REGISTRY_QUEUE, False),
+                ("T1776000000000000001.reserved", False),
+            ),
+        ]
+    )
+
+    def _fake_monitor(queues, *, config=None):
+        monitor = _FakeQueueChangeMonitor(queues, config=config)
+        created_monitors.append(monitor)
+        return monitor
+
+    monkeypatch.setattr(spawn_submission_cmd, "QueueChangeMonitor", _fake_monitor)
+    monkeypatch.setattr(
+        spawn_submission_cmd,
+        "_reconcile_submitted_spawn_once",
+        lambda *_args, **_kwargs: next(results),
+    )
+    monkeypatch.setattr(
+        spawn_submission_cmd,
+        "_spawn_reconciliation_queue_specs",
+        lambda _context: next(queue_specs),
+    )
+
+    result = reconcile_submitted_spawn(context, submitted_tid, timeout=0.1)
+
+    assert result == SpawnSubmissionReconciliation(
+        outcome="reserved",
+        tid=submitted_tid,
+        reserved_queue="T1776000000000000001.reserved",
+    )
+    assert len(created_monitors) == 2
+    assert created_monitors[0].queue_names == [
+        WEFT_TID_MAPPINGS_QUEUE,
+        WEFT_GLOBAL_LOG_QUEUE,
+        WEFT_SPAWN_REQUESTS_QUEUE,
+        WEFT_MANAGERS_REGISTRY_QUEUE,
+    ]
+    assert created_monitors[1].queue_names == [
+        WEFT_TID_MAPPINGS_QUEUE,
+        WEFT_GLOBAL_LOG_QUEUE,
+        WEFT_SPAWN_REQUESTS_QUEUE,
+        WEFT_MANAGERS_REGISTRY_QUEUE,
+        "T1776000000000000001.reserved",
+    ]
 
 
 def test_run_inline_deletes_spawn_request_when_ensure_manager_fails(
@@ -1264,10 +1534,10 @@ def test_stop_manager_waits_for_pid_exit_after_stopped_status(
 
     responses = iter(
         [
-            {"tid": tid, "status": "active", "pid": 4321},
-            {"tid": tid, "status": "stopped", "pid": 4321},
-            {"tid": tid, "status": "stopped", "pid": 4321},
-            None,
+            _registry_view(target={"tid": tid, "status": "active", "pid": 4321}),
+            _registry_view(target={"tid": tid, "status": "stopped", "pid": 4321}),
+            _registry_view(target={"tid": tid, "status": "stopped", "pid": 4321}),
+            _registry_view(),
         ]
     )
     pid_states = iter([True, True, False, False])
@@ -1275,7 +1545,12 @@ def test_stop_manager_waits_for_pid_exit_after_stopped_status(
     monkeypatch.setattr(manager_lifecycle, "_send_stop", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         manager_lifecycle,
-        "_manager_record",
+        "QueueChangeMonitor",
+        _FakeQueueChangeMonitor,
+    )
+    monkeypatch.setattr(
+        manager_lifecycle,
+        "_registry_view",
         lambda *args, **kwargs: next(responses),
     )
 
@@ -1309,7 +1584,14 @@ def test_stop_manager_force_prefers_process_tree_kill_when_pid_known(
 
     monkeypatch.setattr(manager_lifecycle, "_send_stop", lambda *args, **kwargs: None)
     monkeypatch.setattr(
-        manager_lifecycle, "_manager_record", lambda *args, **kwargs: None
+        manager_lifecycle,
+        "QueueChangeMonitor",
+        _FakeQueueChangeMonitor,
+    )
+    monkeypatch.setattr(
+        manager_lifecycle,
+        "_registry_view",
+        lambda *args, **kwargs: _registry_view(),
     )
     monkeypatch.setattr(
         manager_lifecycle, "_lookup_manager_pid", lambda *args, **kwargs: 8765

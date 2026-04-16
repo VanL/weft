@@ -13,6 +13,7 @@ from weft._constants import WEFT_GLOBAL_LOG_QUEUE
 from weft.commands.result import (
     _await_single_result,
     _load_taskspec_payload,
+    await_one_shot_result,
     cmd_result,
 )
 from weft.context import build_context
@@ -135,6 +136,45 @@ def test_await_single_result_reads_outbox_after_completion_event(tmp_path) -> No
         status, result, error = _await_single_result(
             ctx,
             tid,
+            timeout=1.0,
+            show_stderr=False,
+        )
+    finally:
+        writer.join(timeout=1.0)
+
+    assert status == "completed"
+    assert result == "hello"
+    assert error is None
+
+
+def test_await_one_shot_result_reads_outbox_after_completion_event(tmp_path) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    log_queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
+    outbox_queue = ctx.queue(f"T{tid}.outbox", persistent=True)
+
+    log_queue.write(
+        json.dumps(
+            {
+                "tid": tid,
+                "status": "completed",
+                "event": "work_completed",
+            }
+        )
+    )
+
+    writer = threading.Thread(
+        target=lambda: (time.sleep(0.05), outbox_queue.write("hello")),
+        daemon=True,
+    )
+    writer.start()
+    try:
+        status, result, error = await_one_shot_result(
+            ctx,
+            tid,
+            outbox_name=f"T{tid}.outbox",
+            ctrl_out_name=None,
             timeout=1.0,
             show_stderr=False,
         )

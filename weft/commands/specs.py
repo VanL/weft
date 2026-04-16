@@ -9,39 +9,30 @@ Spec references:
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Final, Literal
+from typing import Any, Literal
 
+from weft._constants import (
+    SPEC_ENTRY_FILES,
+    SPEC_SOURCE_BUILTIN,
+    SPEC_SOURCE_FILE,
+    SPEC_SOURCE_STORED,
+    SPEC_TYPE_PIPELINE,
+    SPEC_TYPE_TASK,
+)
 from weft.builtins import builtin_task_specs, builtin_tasks_dir
 from weft.context import WeftContext, build_context
 from weft.core.pipelines import (
     generate_pipeline_example,
     validate_pipeline_spec_payload,
 )
+from weft.core.spec_store import (
+    ResolvedSpecReference,
+)
+from weft.core.spec_store import (
+    resolve_named_spec as core_resolve_named_spec,
+)
 from weft.core.taskspec import validate_taskspec
-
-SPEC_TYPE_TASK = "task"
-SPEC_TYPE_PIPELINE = "pipeline"
-SPEC_SOURCE_FILE: Final[Literal["file"]] = "file"
-SPEC_SOURCE_STORED: Final[Literal["stored"]] = "stored"
-SPEC_SOURCE_BUILTIN: Final[Literal["builtin"]] = "builtin"
-_SPEC_ENTRY_FILES: Final[dict[str, str]] = {
-    SPEC_TYPE_TASK: "taskspec.json",
-    SPEC_TYPE_PIPELINE: "pipeline.json",
-}
-
-
-@dataclass(frozen=True, slots=True)
-class ResolvedSpecReference:
-    """Resolved explicit spec reference from file, project store, or builtins."""
-
-    spec_type: str
-    name: str
-    path: Path
-    bundle_root: Path | None
-    payload: dict[str, Any]
-    source: Literal["file", "stored", "builtin"]
 
 
 def _spec_root(context: WeftContext) -> Path:
@@ -104,7 +95,7 @@ def _builtin_spec_bundle_path(spec_type: str, name: str) -> Path | None:
 
 def _spec_entry_file(spec_type: str) -> str:
     try:
-        return _SPEC_ENTRY_FILES[spec_type]
+        return SPEC_ENTRY_FILES[spec_type]
     except KeyError as exc:
         raise ValueError(f"Unknown spec type: {spec_type}") from exc
 
@@ -193,33 +184,11 @@ def resolve_named_spec(
     context_path: Path | None = None,
 ) -> ResolvedSpecReference:
     """Resolve a stored or builtin spec name."""
-    context = build_context(spec_context=context_path)
-    candidates: list[ResolvedSpecReference] = []
-    if spec_type:
-        candidate = _resolve_named_candidate(
-            context,
-            spec_type=spec_type,
-            name=name,
-        )
-        if candidate is not None:
-            candidates.append(candidate)
-    else:
-        for kind in (SPEC_TYPE_TASK, SPEC_TYPE_PIPELINE):
-            candidate = _resolve_named_candidate(
-                context,
-                spec_type=kind,
-                name=name,
-            )
-            if candidate is not None:
-                candidates.append(candidate)
-
-    if not candidates:
-        raise FileNotFoundError(f"Spec '{name}' not found")
-    if len(candidates) > 1:
-        raise ValueError(
-            f"Spec '{name}' exists as multiple types; pass --type to disambiguate"
-        )
-    return candidates[0]
+    return core_resolve_named_spec(
+        name,
+        spec_type=spec_type,
+        context_path=context_path,
+    )
 
 
 def resolve_spec_reference(

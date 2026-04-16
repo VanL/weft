@@ -93,7 +93,9 @@ Current behavior:
 4. use the spawn-request message ID as the task TID
 5. reconcile post-enqueue startup failures by submitted TID instead of assuming
    the enqueue can always be rolled back
-6. optionally wait for completion using task-local queues and task-log events
+6. optionally wait for completion using task-local queues and task-log events,
+   reusing broker-native queue waiting for those queue-backed boundaries when
+   available
 
 Current execution targets:
 
@@ -187,6 +189,11 @@ Current stdin behavior:
 - spec runs with `spec.run_input` route declared args and piped stdin through
   the adapter before queueing the initial work payload
 - pipeline runs use piped stdin as first-stage input when `--input` is absent
+- `--autostart` / `--no-autostart` are per-invocation context overrides:
+  explicit flag, then project-local `.weft/config.json` `autostart`, then the
+  env/global default
+- if `weft run` adopts an already-live canonical manager, these flags do not
+  reconfigure that live manager
 
 Current interactive behavior:
 
@@ -229,6 +236,8 @@ Current behavior:
 - `init` does not take `--context`
 - `init` materializes `.weft/` and broker-facing project state for the selected
   root
+- `init --autostart/--no-autostart` persists the selected project-local
+  autostart default into `.weft/config.json`
 
 This is intentionally git-like. `init` chooses or creates the project root;
 other commands operate within an existing root.
@@ -418,7 +427,8 @@ Current configuration domains:
 
 - environment variables for Weft defaults and broker alias translation
 - `.broker.toml` for project-scoped broker target selection
-- Weft project metadata and delegated-agent settings under `.weft/`
+- Weft project metadata and delegated-agent settings under `.weft/`, including
+  the optional project-local autostart default in `.weft/config.json`
 
 Current broker resolution precedence:
 
@@ -434,7 +444,8 @@ Current broker resolution precedence:
 
 Current exclusions:
 
-- `.weft/config.json` does not participate in broker target resolution
+- `.weft/config.json` does not participate in broker target resolution, even
+  when it carries the project-local autostart default
 - `.weft/agents.json` does not participate in broker target resolution
 - TaskSpec `metadata` does not participate in broker target resolution
 
@@ -488,6 +499,8 @@ flags, and future queue or control ergonomics live in the companion doc:
 - [`docs/plans/2026-04-14-docker-agent-images-and-one-shot-provider-cli-plan.md`](../plans/2026-04-14-docker-agent-images-and-one-shot-provider-cli-plan.md)
 - [`docs/plans/2026-04-15-spec-run-input-adapter-and-declared-args-plan.md`](../plans/2026-04-15-spec-run-input-adapter-and-declared-args-plan.md)
 - [`docs/plans/2026-04-15-spec-aware-run-help-plan.md`](../plans/2026-04-15-spec-aware-run-help-plan.md)
+- [`docs/plans/2026-04-16-autostart-hardening-and-contract-alignment-plan.md`](../plans/2026-04-16-autostart-hardening-and-contract-alignment-plan.md)
+- [`docs/plans/2026-04-16-pipeline-autostart-extension-plan.md`](../plans/2026-04-16-pipeline-autostart-extension-plan.md)
 
 ## Related Documents
 

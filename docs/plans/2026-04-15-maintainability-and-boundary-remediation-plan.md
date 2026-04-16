@@ -1,5 +1,9 @@
 # Maintainability And Boundary Remediation
 
+Status: active
+Source specs: see Source Documents below
+Superseded by: none
+
 ## 1. Goal
 
 Turn the validated architecture, testing, and documentation concerns into a

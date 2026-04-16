@@ -1,5 +1,9 @@
 # Spec Corpus Current-vs-Planned Split Plan
 
+Status: completed
+Source specs: see Source Documents below
+Superseded by: none
+
 ## 1. Goal
 
 Make `docs/specifications/` truthful at a glance.

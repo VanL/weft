@@ -14,6 +14,7 @@ from typing import Any, cast
 
 from simplebroker import Queue
 from weft._constants import (
+    FAILURE_LIKE_TASK_STATUSES,
     QUEUE_CTRL_OUT_SUFFIX,
     QUEUE_OUTBOX_SUFFIX,
     WEFT_COMPLETED_RESULT_GRACE_SECONDS,
@@ -23,6 +24,7 @@ from weft._constants import (
 from weft.context import WeftContext, build_context
 from weft.helpers import iter_queue_json_entries
 
+from ._queue_wait import QueueChangeMonitor
 from ._result_wait import (
     append_public_value,
     await_one_shot_result,
@@ -118,30 +120,32 @@ def _await_result_materialization(
     deadline = None
     if timeout is not None and timeout > 0:
         deadline = time.monotonic() + timeout
+    log_queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
+    monitor = QueueChangeMonitor([log_queue], config=context.config)
 
-    while True:
-        taskspec_payload = _load_taskspec_payload(context, tid)
-        outbox_name, ctrl_out_name = _queue_names_for_tid(tid, taskspec_payload)
-        if taskspec_payload is not None or _queue_names_exist(
-            context, outbox_name, ctrl_out_name
-        ):
-            return taskspec_payload, outbox_name, ctrl_out_name
+    try:
+        while True:
+            taskspec_payload = _load_taskspec_payload(context, tid)
+            outbox_name, ctrl_out_name = _queue_names_for_tid(tid, taskspec_payload)
+            if taskspec_payload is not None or _queue_names_exist(
+                context, outbox_name, ctrl_out_name
+            ):
+                return taskspec_payload, outbox_name, ctrl_out_name
 
-        if deadline is None:
-            return None
-        if time.monotonic() >= deadline:
-            return None
-        time.sleep(0.05)
+            if deadline is None:
+                return None
+            wait_timeout = max(0.0, deadline - time.monotonic())
+            if wait_timeout <= 0:
+                return None
+            monitor.wait(wait_timeout)
+    finally:
+        monitor.close()
+        log_queue.close()
 
 
 def _active_streaming_queues(context: WeftContext) -> set[str]:
     """Return outbox names currently marked as streaming (Spec: [CC-2.4])."""
-    queue = Queue(
-        WEFT_STREAMING_SESSIONS_QUEUE,
-        db_path=context.broker_target,
-        persistent=False,
-        config=context.broker_config,
-    )
+    queue = context.queue(WEFT_STREAMING_SESSIONS_QUEUE, persistent=False)
     active: set[str] = set()
     for payload, _timestamp in iter_queue_json_entries(queue):
         queue_name = payload.get("queue")
@@ -236,12 +240,7 @@ def _collect_all_results(
         if name in streaming:
             continue
         tid = name.split(".", 1)[0][1:]
-        queue = Queue(
-            name,
-            db_path=context.broker_target,
-            persistent=True,
-            config=context.broker_config,
-        )
+        queue = context.queue(name, persistent=True)
         try:
             stream_buffer: list[str] = []
             result_values: list[Any] = []
@@ -296,23 +295,12 @@ def _await_single_result(
             emit_stream=emit_stream,
         )
 
-    outbox_queue = Queue(
-        outbox_name,
-        db_path=context.broker_target,
-        persistent=True,
-        config=context.broker_config,
-    )
-    ctrl_queue = Queue(
-        ctrl_out_name,
-        db_path=context.broker_target,
-        persistent=False,
-        config=context.broker_config,
-    )
-    log_queue = Queue(
-        WEFT_GLOBAL_LOG_QUEUE,
-        db_path=context.broker_target,
-        persistent=False,
-        config=context.broker_config,
+    outbox_queue = context.queue(outbox_name, persistent=True)
+    ctrl_queue = context.queue(ctrl_out_name, persistent=False)
+    log_queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
+    monitor = QueueChangeMonitor(
+        [outbox_queue, ctrl_queue, log_queue],
+        config=context.config,
     )
 
     log_last_timestamp: int | None = None
@@ -446,8 +434,34 @@ def _await_single_result(
                 )
                 break
 
-            time.sleep(0.05)
+            wait_timeout: float | None = None
+            if deadline is not None:
+                wait_timeout = max(0.0, deadline - time.monotonic())
+            if boundary_timestamp is not None and boundary_seen_at is not None:
+                grace_remaining = max(
+                    0.0,
+                    WEFT_COMPLETED_RESULT_GRACE_SECONDS
+                    - (time.monotonic() - boundary_seen_at),
+                )
+                wait_timeout = (
+                    grace_remaining
+                    if wait_timeout is None
+                    else min(wait_timeout, grace_remaining)
+                )
+            if completed_at is not None:
+                completion_remaining = max(
+                    0.0,
+                    WEFT_COMPLETED_RESULT_GRACE_SECONDS
+                    - (time.monotonic() - completed_at),
+                )
+                wait_timeout = (
+                    completion_remaining
+                    if wait_timeout is None
+                    else min(wait_timeout, completion_remaining)
+                )
+            monitor.wait(wait_timeout)
     finally:
+        monitor.close()
         outbox_queue.close()
         ctrl_queue.close()
         log_queue.close()
@@ -539,7 +553,7 @@ def cmd_result(
             f"weft result: timed out waiting for task {full_tid}"
         )
 
-    if status in {"failed", "killed", "cancelled"}:
+    if status in FAILURE_LIKE_TASK_STATUSES:
         message = error_message or f"weft result: task {full_tid} failed"
         return 1, message
 

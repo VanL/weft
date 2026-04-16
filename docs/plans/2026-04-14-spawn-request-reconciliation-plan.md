@@ -1,5 +1,9 @@
 # Spawn Request Reconciliation Plan
 
+Status: proposed
+Source specs: see Source Documents below
+Superseded by: none
+
 ## Goal
 
 Fix the false-failure race in queue-first task submission without undoing the

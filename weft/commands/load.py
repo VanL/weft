@@ -14,11 +14,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TextIO
 
-from weft._constants import WEFT_STATE_QUEUE_PREFIX
+from weft._constants import (
+    SQLITE_SNAPSHOT_SUFFIXES,
+    SUPPORTED_IMPORT_SCHEMA_VERSIONS,
+    WEFT_STATE_QUEUE_PREFIX,
+)
 from weft.context import WeftContext, build_context
-
-_SQLITE_SNAPSHOT_SUFFIXES = ("", "-wal", "-shm")
-_SUPPORTED_IMPORT_SCHEMA_VERSIONS = frozenset({4, 5})
 
 
 @dataclass(frozen=True)
@@ -171,7 +172,7 @@ def _validate_compatibility(metadata: dict[str, Any]) -> list[str]:
     schema_version = metadata.get("schema_version")
     if not schema_version:
         warnings.append("No schema version found in export")
-    elif schema_version not in _SUPPORTED_IMPORT_SCHEMA_VERSIONS:
+    elif schema_version not in SUPPORTED_IMPORT_SCHEMA_VERSIONS:
         warnings.append(f"Schema version {schema_version} may not be fully compatible")
     return warnings
 
@@ -412,7 +413,7 @@ def _sqlite_artifact_paths(database_path: Path) -> tuple[Path, ...]:
         database_path
         if suffix == ""
         else database_path.with_name(f"{database_path.name}{suffix}")
-        for suffix in _SQLITE_SNAPSHOT_SUFFIXES
+        for suffix in SQLITE_SNAPSHOT_SUFFIXES
     )
 
 

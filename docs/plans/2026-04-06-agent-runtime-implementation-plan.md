@@ -1,5 +1,9 @@
 # Agent Runtime Implementation Plan
 
+Status: completed
+Source specs: see Source Documents below
+Superseded by: ./2026-04-06-persistent-agent-runtime-implementation-plan.md (persistent agent work)
+
 This document is the implementation plan for the draft spec in
 [`docs/specifications/13-Agent_Runtime.md`](../specifications/13-Agent_Runtime.md).
 It is written for an engineer who is strong in Python but has **almost no

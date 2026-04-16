@@ -31,6 +31,7 @@ from ..provider_cli.registry import (
     resolve_provider_cli_executable,
 )
 from ..provider_cli.settings import record_provider_cli_health
+from ..provider_cli.windows_shims import resolve_windows_cmd_shim_command
 from ..resolution import (
     load_agent_resolver,
     load_agent_tool_profile,
@@ -230,8 +231,11 @@ class ProviderCLIBackend:
             env.update(invocation.env)
         spec_context = invocation.cwd or str(Path.cwd())
         try:
+            command = tuple(invocation.command)
+            if os.name == "nt":
+                command = resolve_windows_cmd_shim_command(command)
             completed = subprocess.run(
-                list(invocation.command),
+                list(command),
                 input=invocation.stdin_text,
                 capture_output=True,
                 text=True,

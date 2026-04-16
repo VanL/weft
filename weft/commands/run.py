@@ -496,12 +496,7 @@ def _run_interactive_session(
             status_holder["error"] = event.get("error") or "Task killed"
 
     def _send_interactive_control(command: str) -> None:
-        ctrl_queue = Queue(
-            ctrl_in_name,
-            db_path=db_path,
-            persistent=False,
-            config=config,
-        )
+        ctrl_queue = context.queue(ctrl_in_name, persistent=False)
         try:
             ctrl_queue.write(command)
         finally:
@@ -628,12 +623,7 @@ def _run_interactive_session(
                     stdout_chunks.extend(history)
 
     if not use_prompt:
-        outbox_queue = Queue(
-            outbox_name,
-            db_path=db_path,
-            persistent=True,
-            config=config,
-        )
+        outbox_queue = context.queue(outbox_name, persistent=True)
         try:
             collected = _collect_interactive_queue_output(outbox_queue)
         finally:

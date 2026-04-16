@@ -20,6 +20,16 @@ The point is not to maximize suite count. The point is to keep the current
 contract exercised where it matters and to make backend-sensitive drift easy to
 see.
 
+Current classification rule:
+
+- test modules should declare backend scope explicitly through `shared` or
+  `sqlite_only`, either directly or through the central classification tables in
+  `tests/conftest.py`
+- broad directory-level audit exemptions should be treated as temporary migration
+  scaffolding and removed once a subtree has been reviewed
+- any remaining unaudited debt should stay module-scoped, explicit, and
+  reviewable rather than becoming the default home for new tests
+
 ## Current Coverage [TS-1]
 
 - `tests/taskspec/` covers TaskSpec validation, immutability, defaults, and

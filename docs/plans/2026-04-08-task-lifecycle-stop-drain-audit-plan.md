@@ -1,5 +1,9 @@
 # Task Lifecycle Stop/Drain Audit Plan
 
+Status: proposed
+Source specs: see Source Documents below
+Superseded by: none
+
 ## Goal
 
 Audit the load-bearing task lifecycle and shutdown paths that have been failing

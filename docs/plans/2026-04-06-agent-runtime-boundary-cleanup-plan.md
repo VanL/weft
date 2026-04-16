@@ -1,5 +1,9 @@
 # Agent Runtime Boundary Cleanup Plan
 
+Status: completed
+Source specs: see Source Documents below
+Superseded by: none
+
 This document is the implementation plan for the **next** agent-runtime slice:
 
 - prune speculative `spec.agent` fields that are not implemented,

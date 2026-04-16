@@ -13,7 +13,7 @@ from collections.abc import Iterable, Iterator, Mapping
 from contextlib import ExitStack, contextmanager
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Final, Literal, NoReturn, Self, SupportsIndex
+from typing import Any, Literal, NoReturn, Self, SupportsIndex
 
 from pydantic import (
     BaseModel,
@@ -49,6 +49,7 @@ from weft._constants import (
     QUEUE_CTRL_OUT_SUFFIX,
     QUEUE_INBOX_SUFFIX,
     QUEUE_OUTBOX_SUFFIX,
+    TASKSPEC_BUNDLE_ROOT_FIELD,
     TASKSPEC_TID_LENGTH,
     TASKSPEC_VERSION,
 )
@@ -58,8 +59,6 @@ from weft.core.spec_run_input import (
     normalize_declared_option_name,
     validate_run_input_adapter_ref,
 )
-
-TASKSPEC_BUNDLE_ROOT_FIELD: Final[str] = "_weft_bundle_root"
 
 
 class FrozenList(list):

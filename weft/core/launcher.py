@@ -16,16 +16,9 @@ from multiprocessing.process import BaseProcess
 from typing import Any, cast
 
 from simplebroker import BrokerTarget
+from weft._constants import TASK_PROCESS_POLL_INTERVAL, TERMINAL_TASK_STATUSES
 
 from .taskspec import TaskSpec, apply_bundle_root_to_taskspec_payload
-
-TERMINAL_STATES = {
-    "completed",
-    "failed",
-    "timeout",
-    "cancelled",
-    "killed",
-}
 
 
 def _load_task_class(path: str) -> type[Any]:
@@ -50,7 +43,7 @@ def _task_process_entry(
         while True:
             task.process_once()
             status = task.taskspec.state.status
-            if status in TERMINAL_STATES or task.should_stop:
+            if status in TERMINAL_TASK_STATUSES or task.should_stop:
                 break
             time.sleep(poll_interval)
     finally:
@@ -67,7 +60,7 @@ def launch_task_process(
     spec: TaskSpec,
     *,
     config: dict[str, Any] | None = None,
-    poll_interval: float = 0.05,
+    poll_interval: float = TASK_PROCESS_POLL_INTERVAL,
 ) -> BaseProcess:
     """Launch *task_cls* in a new spawn-process and return the Process object.
 

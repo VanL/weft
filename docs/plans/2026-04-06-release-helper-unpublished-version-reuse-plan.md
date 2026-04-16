@@ -1,5 +1,9 @@
 # Release Helper Unpublished Version Reuse Plan
 
+Status: proposed
+Source specs: see Source Documents below
+Superseded by: none
+
 ## Goal
 
 Allow the local release helper to reuse the current repo version when that

@@ -8,6 +8,7 @@ import types
 
 import pytest
 
+from simplebroker.ext import BrokerError
 from tests.tasks import sample_targets as targets  # noqa: F401
 from weft import helpers as weft_helpers
 from weft._constants import (
@@ -247,6 +248,32 @@ def test_state_logging_records_failure(broker_env, task_factory, unique_tid) -> 
     statuses = [record["status"] for record in records]
     assert "work_failed" in events
     assert statuses[-1] == "failed"
+
+
+def test_state_logging_propagates_unserializable_payload(
+    task_factory, unique_tid: str
+) -> None:
+    spec = build_function_spec(unique_tid)
+    task = task_factory(spec)
+
+    with pytest.raises(TypeError):
+        task._report_state_change("task_custom", marker=object())
+
+
+def test_control_response_broker_error_is_best_effort(
+    monkeypatch: pytest.MonkeyPatch,
+    task_factory,
+    unique_tid: str,
+) -> None:
+    spec = build_function_spec(unique_tid)
+    task = task_factory(spec)
+
+    def _fail_write(_payload: str) -> None:
+        raise BrokerError("ctrl-out unavailable")
+
+    monkeypatch.setattr(task._ctrl_out_queue, "write", _fail_write)
+
+    task._send_control_response("PING", "ok", message="PONG")
 
 
 def test_control_stop_logged_and_cancelled(

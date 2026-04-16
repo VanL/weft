@@ -1,5 +1,9 @@
 # Postgres Backend Audit and Shared Test Surface Plan
 
+Status: proposed
+Source specs: see Source Documents below
+Superseded by: none
+
 ## 1. Goal
 
 Make Postgres a real first-class Weft backend by auditing and removing hidden

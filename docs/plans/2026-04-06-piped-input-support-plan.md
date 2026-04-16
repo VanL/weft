@@ -1,5 +1,9 @@
 # Piped Input Support Plan
 
+Status: proposed
+Source specs: see Source Documents below
+Superseded by: none
+
 This document is the implementation plan for adding **consistent piped input
 support** to Weft without breaking the queue-first execution model.
 

@@ -1,5 +1,9 @@
 # Runner Monitor, Result Waiter, and Liveness Fixes Plan
 
+Status: proposed
+Source specs: see Source Documents below
+Superseded by: none
+
 ## Goal
 
 Fix four correctness issues without widening scope into a broader runner or CLI

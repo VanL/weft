@@ -10,6 +10,11 @@ from __future__ import annotations
 import copy
 from typing import Any
 
+from weft._constants import (
+    DOCKERIZED_AGENT_CLAUDE_ENVIRONMENT_PROFILE_REF,
+    DOCKERIZED_AGENT_DEFAULT_ENVIRONMENT_PROFILE_REF,
+    DOCKERIZED_AGENT_PROVIDER_CHOICES,
+)
 from weft.builtins.dockerized_agent_examples import (
     dockerized_agent_environment_profile,
     dockerized_agent_run_input,
@@ -17,22 +22,13 @@ from weft.builtins.dockerized_agent_examples import (
 from weft.core.spec_parameterization import SpecParameterizationRequest
 from weft.ext import AgentToolProfileResult
 
-_PROVIDER_CHOICES = frozenset({"claude_code", "codex", "gemini", "opencode", "qwen"})
-_DEFAULT_ENVIRONMENT_PROFILE_REF = (
-    "dockerized_agent:dockerized_agent_environment_profile"
-)
-_CLAUDE_ENVIRONMENT_PROFILE_REF = (
-    "weft.builtins.dockerized_agent_examples:"
-    "claude_code_dockerized_agent_environment_profile"
-)
-
 
 def dockerized_agent_parameterization(
     request: SpecParameterizationRequest,
 ) -> dict[str, Any]:
     """Materialize one concrete provider-specific builtin TaskSpec template."""
     provider = request.arguments["provider"]
-    if provider not in _PROVIDER_CHOICES:
+    if provider not in DOCKERIZED_AGENT_PROVIDER_CHOICES:
         raise ValueError(f"Unsupported provider for dockerized-agent: {provider}")
 
     payload = copy.deepcopy(dict(request.taskspec_payload))
@@ -62,9 +58,13 @@ def dockerized_agent_parameterization(
     agent["runtime_config"] = runtime_config
     runner = spec.setdefault("runner", {})
     if provider == "claude_code":
-        runner["environment_profile_ref"] = _CLAUDE_ENVIRONMENT_PROFILE_REF
+        runner["environment_profile_ref"] = (
+            DOCKERIZED_AGENT_CLAUDE_ENVIRONMENT_PROFILE_REF
+        )
     else:
-        runner["environment_profile_ref"] = _DEFAULT_ENVIRONMENT_PROFILE_REF
+        runner["environment_profile_ref"] = (
+            DOCKERIZED_AGENT_DEFAULT_ENVIRONMENT_PROFILE_REF
+        )
     return payload
 
 

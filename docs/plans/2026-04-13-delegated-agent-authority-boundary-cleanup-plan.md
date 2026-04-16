@@ -1,5 +1,9 @@
 # Delegated Agent Authority Boundary Cleanup Plan
 
+Status: proposed
+Source specs: see Source Documents below
+Superseded by: none
+
 This plan tightens the delegated-agent boundary around the new `provider_cli`
 work without widening Weft into a full agent-governance system. The goal is to
 make Weft's substrate-level authority contract explicit, deterministic, and

@@ -10,15 +10,12 @@ from __future__ import annotations
 from importlib import metadata
 from typing import Any, cast
 
+from weft._constants import (
+    DEFAULT_RUNNER_NAME,
+    RUNNER_ENTRY_POINT_GROUP,
+    RUNNER_PLUGIN_EXTRA_INSTALL_HINTS,
+)
 from weft.ext import RunnerPlugin
-
-RUNNER_ENTRY_POINT_GROUP = "weft.runners"
-DEFAULT_RUNNER_NAME = "host"
-
-_EXTRA_INSTALL_HINTS = {
-    "docker": "weft[docker]",
-    "macos-sandbox": "weft[macos-sandbox]",
-}
 
 
 def _load_entry_point_plugin(name: str) -> RunnerPlugin:
@@ -63,7 +60,7 @@ def require_runner_plugin(name: str) -> RunnerPlugin:
     except RuntimeError as exc:
         if str(exc) != f"Unknown runner plugin: {name.strip()}":
             raise
-        extra = _EXTRA_INSTALL_HINTS.get(name.strip())
+        extra = RUNNER_PLUGIN_EXTRA_INSTALL_HINTS.get(name.strip())
         if extra:
             raise RuntimeError(
                 f"Requested runner '{name.strip()}' is not available. Install {extra}."

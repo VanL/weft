@@ -18,11 +18,11 @@ import time
 from pathlib import Path
 from typing import Any
 
+from weft._constants import (
+    MANAGER_LAUNCHER_POLL_INTERVAL,
+    MANAGER_LAUNCHER_SIGNAL_SUCCESS,
+)
 from weft.helpers import terminate_process_tree
-
-_POLL_INTERVAL = 0.05
-_SIGNAL_SUCCESS = "SUCCESS"
-_SIGNAL_ABORT = "ABORT"
 
 
 def _emit_event(payload: dict[str, Any]) -> None:
@@ -159,9 +159,9 @@ def main(argv: list[str] | None = None) -> int:
 
         signal_name = _read_parent_signal(signal_queue)
         if signal_name is _NO_SIGNAL:
-            time.sleep(_POLL_INTERVAL)
+            time.sleep(MANAGER_LAUNCHER_POLL_INTERVAL)
             continue
-        if signal_name == _SIGNAL_SUCCESS:
+        if signal_name == MANAGER_LAUNCHER_SIGNAL_SUCCESS:
             return 0
 
         _terminate_runtime(runtime)

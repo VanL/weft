@@ -21,8 +21,17 @@ import typer
 
 from simplebroker import Queue, serialize_broker_target
 from weft._constants import (
+    MANAGER_COMPETING_STARTUP_GRACE_SECONDS,
+    MANAGER_LAUNCHER_SIGNAL_ABORT,
+    MANAGER_LAUNCHER_SIGNAL_SUCCESS,
+    MANAGER_PID_LIVENESS_RECHECK_INTERVAL,
+    MANAGER_REGISTRY_POLL_INTERVAL,
+    MANAGER_STARTUP_LOG_DIRNAME,
+    MANAGER_STARTUP_TIMEOUT_SECONDS,
+    MANAGER_TASK_CLASS_PATH,
     QUEUE_CTRL_IN_SUFFIX,
     QUEUE_CTRL_OUT_SUFFIX,
+    TASK_PROCESS_POLL_INTERVAL,
     WEFT_MANAGER_LIFETIME_TIMEOUT,
     WEFT_MANAGER_OUTBOX_QUEUE,
     WEFT_MANAGERS_REGISTRY_QUEUE,
@@ -40,12 +49,7 @@ from weft.helpers import (
 )
 from weft.manager_process import run_manager_process
 
-_MANAGER_POLL_INTERVAL = 0.05
-_MANAGER_TASK_CLASS_PATH = "weft.core.manager.Manager"
-_MANAGER_STARTUP_TIMEOUT = 10.0
-_MANAGER_STARTUP_LOG_DIRNAME = "manager-startup"
-_LAUNCHER_SIGNAL_SUCCESS = "SUCCESS"
-_LAUNCHER_SIGNAL_ABORT = "ABORT"
+from ._queue_wait import QueueChangeMonitor
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +75,15 @@ class _DetachedManagerLaunch:
     launcher_process: subprocess.Popen[str]
 
 
+@dataclass(frozen=True)
+class _ManagerRegistryView:
+    """One polled view of the manager registry for a specific lifecycle check."""
+
+    records: dict[str, dict[str, Any]]
+    active_manager: dict[str, Any] | None
+    target_record: dict[str, Any] | None
+
+
 def _generate_tid(context: WeftContext) -> str:
     """Generate a unique TID via broker timestamp (Spec: [MA-2])."""
     return str(
@@ -82,12 +95,7 @@ def _generate_tid(context: WeftContext) -> str:
 
 
 def _registry_queue(context: WeftContext) -> Queue:
-    return Queue(
-        WEFT_MANAGERS_REGISTRY_QUEUE,
-        db_path=context.broker_target,
-        persistent=False,
-        config=context.broker_config,
-    )
+    return context.queue(WEFT_MANAGERS_REGISTRY_QUEUE, persistent=False)
 
 
 def _normalize_manager_record(
@@ -104,33 +112,83 @@ def _normalize_manager_record(
 
 
 def _snapshot_registry(
-    context: WeftContext, *, prune_stale: bool = True
+    context: WeftContext,
+    *,
+    prune_stale: bool = True,
+    queue: Queue | None = None,
 ) -> dict[str, dict[str, Any]]:
-    queue = _registry_queue(context)
+    registry_queue = queue or _registry_queue(context)
+    owns_queue = queue is None
     snapshot: dict[str, dict[str, Any]] = {}
     stale_timestamps: list[int] = []
-    for data, timestamp in iter_queue_json_entries(queue):
-        tid = data.get("tid")
-        if not tid:
-            continue
-        record = _normalize_manager_record(data, timestamp=timestamp)
-        if prune_stale and record.get("status") == "active":
-            pid = record.get("pid")
-            if isinstance(pid, int) and not _is_pid_alive(pid):
-                stale_timestamps.append(timestamp)
+    try:
+        for data, timestamp in iter_queue_json_entries(registry_queue):
+            tid = data.get("tid")
+            if not tid:
                 continue
-        existing = snapshot.get(tid)
-        existing_ts = int(existing.get("timestamp", -1)) if existing else -1
-        if existing is None or existing_ts < timestamp:
-            snapshot[tid] = record
+            record = _normalize_manager_record(data, timestamp=timestamp)
+            if prune_stale and record.get("status") == "active":
+                pid = record.get("pid")
+                if isinstance(pid, int) and not _is_pid_alive(pid):
+                    stale_timestamps.append(timestamp)
+                    continue
+            existing = snapshot.get(tid)
+            existing_ts = int(existing.get("timestamp", -1)) if existing else -1
+            if existing is None or existing_ts < timestamp:
+                snapshot[tid] = record
 
-    for ts in stale_timestamps:
-        try:
-            queue.delete(message_id=ts)
-        except Exception:
-            pass
+        for ts in stale_timestamps:
+            try:
+                registry_queue.delete(message_id=ts)
+            except Exception:
+                pass
+    finally:
+        if owns_queue:
+            registry_queue.close()
 
     return snapshot
+
+
+def _select_active_manager_from_snapshot(
+    snapshot: dict[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    candidates = []
+    for record in snapshot.values():
+        if not is_canonical_manager_record(record):
+            continue
+        if record.get("status") != "active":
+            continue
+        pid = record.get("pid")
+        if isinstance(pid, int) and _is_pid_alive(pid):
+            candidates.append(record)
+    if not candidates:
+        return None
+    return min(
+        candidates,
+        key=lambda rec: (int(rec.get("tid", 0)), rec.get("timestamp", 0)),
+    )
+
+
+def _registry_view(
+    context: WeftContext,
+    *,
+    target_tid: str | None = None,
+    prune_stale: bool = True,
+    queue: Queue | None = None,
+) -> _ManagerRegistryView:
+    snapshot = _snapshot_registry(context, prune_stale=prune_stale, queue=queue)
+    return _ManagerRegistryView(
+        records=snapshot,
+        active_manager=_select_active_manager_from_snapshot(snapshot),
+        target_record=snapshot.get(target_tid) if target_tid is not None else None,
+    )
+
+
+def _record_pid(record: dict[str, Any] | None) -> int | None:
+    if not isinstance(record, dict):
+        return None
+    pid = record.get("pid")
+    return pid if isinstance(pid, int) else None
 
 
 def _manager_record(
@@ -139,7 +197,11 @@ def _manager_record(
     *,
     prune_stale: bool = True,
 ) -> dict[str, Any] | None:
-    return _snapshot_registry(context, prune_stale=prune_stale).get(tid)
+    return _registry_view(
+        context,
+        target_tid=tid,
+        prune_stale=prune_stale,
+    ).target_record
 
 
 def _list_manager_records(
@@ -159,24 +221,7 @@ def _list_manager_records(
 
 
 def _select_active_manager(context: WeftContext) -> dict[str, Any] | None:
-    candidates = []
-    for record in _list_manager_records(
-        context,
-        include_stopped=False,
-        canonical_only=True,
-        prune_stale=True,
-    ):
-        if record.get("status") != "active":
-            continue
-        pid = record.get("pid")
-        if isinstance(pid, int) and _is_pid_alive(pid):
-            candidates.append(record)
-    if not candidates:
-        return None
-    return min(
-        candidates,
-        key=lambda rec: (int(rec.get("tid", 0)), rec.get("timestamp", 0)),
-    )
+    return _registry_view(context).active_manager
 
 
 def _is_pid_alive(pid: int | None) -> bool:
@@ -184,12 +229,7 @@ def _is_pid_alive(pid: int | None) -> bool:
 
 
 def _lookup_manager_pid(context: WeftContext, tid: str) -> int | None:
-    queue = Queue(
-        WEFT_TID_MAPPINGS_QUEUE,
-        db_path=context.broker_target,
-        persistent=False,
-        config=context.broker_config,
-    )
+    queue = context.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
     latest_timestamp = -1
     resolved_pid: int | None = None
     for data, timestamp in iter_queue_json_entries(queue):
@@ -213,12 +253,7 @@ def _manager_ctrl_queue_name(tid: str, record: dict[str, Any] | None = None) -> 
 def _send_stop(
     context: WeftContext, tid: str, *, record: dict[str, Any] | None
 ) -> None:
-    queue = Queue(
-        _manager_ctrl_queue_name(tid, record),
-        db_path=context.broker_target,
-        persistent=False,
-        config=context.broker_config,
-    )
+    queue = context.queue(_manager_ctrl_queue_name(tid, record), persistent=False)
     queue.write("STOP")
 
 
@@ -283,7 +318,7 @@ def _build_manager_runtime_invocation(
         idle_timeout_override=idle_timeout_override,
     )
     return _ManagerRuntimeInvocation(
-        task_cls_path=_MANAGER_TASK_CLASS_PATH,
+        task_cls_path=MANAGER_TASK_CLASS_PATH,
         tid=manager_tid,
         spec=manager_spec,
     )
@@ -316,7 +351,7 @@ def _build_manager_process_command(
         broker_target_b64,
         spec_b64,
         config_b64,
-        str(_MANAGER_POLL_INTERVAL),
+        str(TASK_PROCESS_POLL_INTERVAL),
     ]
 
 
@@ -344,7 +379,7 @@ def _build_manager_detached_launcher_command(
 
 
 def _manager_startup_stderr_path(context: WeftContext, tid: str) -> Path:
-    startup_dir = context.logs_dir / _MANAGER_STARTUP_LOG_DIRNAME
+    startup_dir = context.logs_dir / MANAGER_STARTUP_LOG_DIRNAME
     startup_dir.mkdir(parents=True, exist_ok=True)
     return startup_dir / f"manager-{tid}.stderr.log"
 
@@ -523,6 +558,109 @@ def _format_manager_start_failure(
     return "\n".join(parts)
 
 
+def _await_manager_start_settlement(
+    context: WeftContext,
+    *,
+    manager_tid: str,
+    deadline: float,
+) -> dict[str, Any] | None:
+    grace_deadline = min(
+        deadline,
+        time.monotonic() + MANAGER_COMPETING_STARTUP_GRACE_SECONDS,
+    )
+    last_active: dict[str, Any] | None = None
+    registry_queue = _registry_queue(context)
+    monitor = QueueChangeMonitor([registry_queue], config=context.config)
+    try:
+        while True:
+            view = _registry_view(
+                context,
+                target_tid=manager_tid,
+                queue=registry_queue,
+            )
+            last_active = view.active_manager
+            if last_active is not None and last_active.get("tid") != manager_tid:
+                return last_active
+            remaining = grace_deadline - time.monotonic()
+            if remaining <= 0:
+                return last_active
+            monitor.wait(min(remaining, MANAGER_REGISTRY_POLL_INTERVAL))
+    finally:
+        monitor.close()
+        registry_queue.close()
+
+
+def _wait_for_process_exit(
+    process: subprocess.Popen[Any] | None,
+    *,
+    deadline: float,
+) -> bool:
+    if process is None or process.poll() is not None:
+        return True
+    remaining = max(0.0, deadline - time.monotonic())
+    if remaining <= 0:
+        return process.poll() is not None
+    try:
+        process.wait(timeout=remaining)
+    except subprocess.TimeoutExpired:
+        return process.poll() is not None
+    return True
+
+
+def _await_manager_stop_confirmation(
+    context: WeftContext,
+    *,
+    target_tid: str,
+    deadline: float,
+    initial_record: dict[str, Any] | None,
+    process: subprocess.Popen[Any] | None,
+    stop_if_absent: bool,
+) -> tuple[bool, dict[str, Any] | None]:
+    entry_observed = initial_record is not None
+    last_record = initial_record
+    pid_checked_at = 0.0
+    registry_queue = _registry_queue(context)
+    monitor = QueueChangeMonitor([registry_queue], config=context.config)
+    try:
+        while time.monotonic() < deadline:
+            view = _registry_view(
+                context,
+                target_tid=target_tid,
+                queue=registry_queue,
+            )
+            current = view.target_record
+            if current is None:
+                if stop_if_absent or entry_observed:
+                    if not _is_pid_alive(_record_pid(last_record)):
+                        if _wait_for_process_exit(process, deadline=deadline):
+                            return True, last_record
+            else:
+                entry_observed = True
+                last_record = current
+                current_pid = _record_pid(current)
+                if current.get("status") == "stopped" and not _is_pid_alive(
+                    current_pid
+                ):
+                    if _wait_for_process_exit(process, deadline=deadline):
+                        return True, current
+                if stop_if_absent:
+                    now = time.monotonic()
+                    if now - pid_checked_at >= MANAGER_PID_LIVENESS_RECHECK_INTERVAL:
+                        pid_checked_at = now
+                        if not _is_pid_alive(current_pid):
+                            if _wait_for_process_exit(process, deadline=deadline):
+                                return True, current
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            monitor.wait(min(remaining, MANAGER_REGISTRY_POLL_INTERVAL))
+        return False, last_record
+    finally:
+        monitor.close()
+        registry_queue.close()
+
+
 def _fail_manager_start(
     *,
     launch: _DetachedManagerLaunch,
@@ -532,7 +670,7 @@ def _fail_manager_start(
     launcher_events: list[dict[str, Any]] = []
     launcher_stderr = ""
     if abort_launcher:
-        _send_launcher_signal(launch.launcher_process, _LAUNCHER_SIGNAL_ABORT)
+        _send_launcher_signal(launch.launcher_process, MANAGER_LAUNCHER_SIGNAL_ABORT)
     if launch.launcher_process.poll() is not None or abort_launcher:
         launcher_events, launcher_stderr = _communicate_launcher(
             launch.launcher_process,
@@ -553,7 +691,7 @@ def _fail_manager_start(
 def _acknowledge_manager_launch_success(launch: _DetachedManagerLaunch) -> None:
     sent, error = _send_launcher_signal(
         launch.launcher_process,
-        _LAUNCHER_SIGNAL_SUCCESS,
+        MANAGER_LAUNCHER_SIGNAL_SUCCESS,
     )
     launcher_events, launcher_stderr = _communicate_launcher(
         launch.launcher_process,
@@ -594,62 +732,88 @@ def _start_manager(
             )
         )
 
-    deadline = time.time() + _MANAGER_STARTUP_TIMEOUT
+    deadline = time.monotonic() + MANAGER_STARTUP_TIMEOUT_SECONDS
     competing_record: dict[str, Any] | None = None
-    while time.time() < deadline:
-        selected_record = _select_active_manager(context)
-        if selected_record is not None:
-            if selected_record.get("tid") != manager_tid:
-                competing_record = selected_record
-            else:
-                if (
-                    selected_record.get("status") == "active"
-                    and is_canonical_manager_record(selected_record)
-                    and selected_record.get("pid") == launch.pid
-                    and _is_pid_alive(launch.pid)
-                ):
-                    try:
-                        _acknowledge_manager_launch_success(launch)
-                    except RuntimeError as exc:
-                        logger.warning(
-                            "Detached manager launch for %s succeeded before "
-                            "post-proof acknowledgement failed: %s",
-                            manager_tid,
-                            exc,
-                            exc_info=True,
-                        )
-                    _cleanup_startup_stderr(launch.stderr_path)
-                    if verbose:
-                        _emit_manager_registry_snapshot(selected_record)
-                    return selected_record, True, None
+    registry_queue = _registry_queue(context)
+    monitor = QueueChangeMonitor([registry_queue], config=context.config)
+    try:
+        while time.monotonic() < deadline:
+            view = _registry_view(
+                context,
+                target_tid=manager_tid,
+                queue=registry_queue,
+            )
+            selected_record = view.active_manager
+            if selected_record is not None:
+                if selected_record.get("tid") != manager_tid:
+                    competing_record = selected_record
+                else:
+                    if (
+                        selected_record.get("status") == "active"
+                        and is_canonical_manager_record(selected_record)
+                        and selected_record.get("pid") == launch.pid
+                        and _is_pid_alive(launch.pid)
+                    ):
+                        try:
+                            _acknowledge_manager_launch_success(launch)
+                        except RuntimeError as exc:
+                            logger.warning(
+                                "Detached manager launch for %s succeeded before "
+                                "post-proof acknowledgement failed: %s",
+                                manager_tid,
+                                exc,
+                                exc_info=True,
+                            )
+                        _cleanup_startup_stderr(launch.stderr_path)
+                        if verbose:
+                            _emit_manager_registry_snapshot(selected_record)
+                        return selected_record, True, None
 
-        if launch.launcher_process.poll() is not None:
-            if competing_record is not None:
-                _cleanup_startup_stderr(launch.stderr_path)
-                return competing_record, False, None
-            refreshed_record = _select_active_manager(context)
-            if refreshed_record is not None:
-                return refreshed_record, False, None
-            _fail_manager_start(
-                launch=launch,
-                message="Failed to start Manager process; detached launcher exited before startup stabilized.",
-                abort_launcher=False,
-            )
-        if not _is_pid_alive(launch.pid):
-            if competing_record is not None:
-                _send_launcher_signal(launch.launcher_process, _LAUNCHER_SIGNAL_ABORT)
-                _communicate_launcher(launch.launcher_process, timeout=1.0)
-                _cleanup_startup_stderr(launch.stderr_path)
-                return competing_record, False, None
-            _fail_manager_start(
-                launch=launch,
-                message="Failed to start Manager process; detached manager PID exited before startup stabilized.",
-                abort_launcher=True,
-            )
-        time.sleep(0.1)
+            if launch.launcher_process.poll() is not None:
+                if competing_record is None:
+                    competing_record = _await_manager_start_settlement(
+                        context,
+                        manager_tid=manager_tid,
+                        deadline=deadline,
+                    )
+                if competing_record is not None:
+                    _cleanup_startup_stderr(launch.stderr_path)
+                    return competing_record, False, None
+                _fail_manager_start(
+                    launch=launch,
+                    message="Failed to start Manager process; detached launcher exited before startup stabilized.",
+                    abort_launcher=False,
+                )
+            if not _is_pid_alive(launch.pid):
+                if competing_record is None:
+                    competing_record = _await_manager_start_settlement(
+                        context,
+                        manager_tid=manager_tid,
+                        deadline=deadline,
+                    )
+                if competing_record is not None:
+                    _send_launcher_signal(
+                        launch.launcher_process,
+                        MANAGER_LAUNCHER_SIGNAL_ABORT,
+                    )
+                    _communicate_launcher(launch.launcher_process, timeout=1.0)
+                    _cleanup_startup_stderr(launch.stderr_path)
+                    return competing_record, False, None
+                _fail_manager_start(
+                    launch=launch,
+                    message="Failed to start Manager process; detached manager PID exited before startup stabilized.",
+                    abort_launcher=True,
+                )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            monitor.wait(min(remaining, MANAGER_REGISTRY_POLL_INTERVAL))
+    finally:
+        monitor.close()
+        registry_queue.close()
 
     if competing_record is not None:
-        _send_launcher_signal(launch.launcher_process, _LAUNCHER_SIGNAL_ABORT)
+        _send_launcher_signal(launch.launcher_process, MANAGER_LAUNCHER_SIGNAL_ABORT)
         _communicate_launcher(launch.launcher_process, timeout=1.0)
         _cleanup_startup_stderr(launch.stderr_path)
         return competing_record, False, None
@@ -736,7 +900,7 @@ def _serve_manager_foreground(context: WeftContext) -> tuple[int, str | None]:
         context.broker_target,
         invocation.spec,
         context.config,
-        _MANAGER_POLL_INTERVAL,
+        TASK_PROCESS_POLL_INTERVAL,
     )
     return 0, None
 
@@ -769,53 +933,17 @@ def _stop_manager(
         typer.echo("Warning: failed to send STOP to manager.", err=True)
         return False, "failed to send STOP to manager"
 
-    deadline = time.time() + timeout
-    entry_observed = current is not None
-    last_record = current
-    pid_checked_at = 0.0
-
-    while time.time() < deadline:
-        current = _manager_record(context, target_tid)
-        if current is None:
-            if stop_if_absent or entry_observed:
-                last_pid = None
-                if isinstance(last_record, dict):
-                    pid = last_record.get("pid")
-                    if isinstance(pid, int):
-                        last_pid = pid
-                if not _is_pid_alive(last_pid):
-                    if process is not None and process.poll() is None:
-                        remaining = max(0.0, deadline - time.time())
-                        if remaining > 0:
-                            try:
-                                process.wait(timeout=remaining)
-                            except subprocess.TimeoutExpired:
-                                pass
-                    if process is None or process.poll() is not None:
-                        return True, None
-        else:
-            entry_observed = True
-            last_record = current
-            status = current.get("status")
-            pid = current.get("pid")
-            current_pid = pid if isinstance(pid, int) else None
-            if status == "stopped" and not _is_pid_alive(current_pid):
-                if process is not None and process.poll() is None:
-                    remaining = max(0.0, deadline - time.time())
-                    if remaining > 0:
-                        try:
-                            process.wait(timeout=remaining)
-                        except subprocess.TimeoutExpired:
-                            pass
-                if process is None or process.poll() is not None:
-                    return True, None
-            if stop_if_absent:
-                now = time.time()
-                if now - pid_checked_at >= 0.5:
-                    pid_checked_at = now
-                    if not _is_pid_alive(current_pid):
-                        return True, None
-        time.sleep(0.1)
+    deadline = time.monotonic() + timeout
+    stopped, _last_record = _await_manager_stop_confirmation(
+        context,
+        target_tid=target_tid,
+        deadline=deadline,
+        initial_record=current,
+        process=process,
+        stop_if_absent=stop_if_absent,
+    )
+    if stopped:
+        return True, None
 
     if force:
         kill_pid = _lookup_manager_pid(context, target_tid)

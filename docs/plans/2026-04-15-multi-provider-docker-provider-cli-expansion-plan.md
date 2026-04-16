@@ -1,5 +1,9 @@
 # Multi-Provider Docker `provider_cli` Expansion Plan
 
+Status: proposed
+Source specs: see Source Documents below
+Superseded by: none
+
 ## Goal
 
 Expand the current Docker-backed one-shot delegated `provider_cli` lane from

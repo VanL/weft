@@ -1,5 +1,9 @@
 # Parameterized TaskSpec Materialization Plan
 
+Status: proposed
+Source specs: see Source Documents below
+Superseded by: none
+
 ## Goal
 
 Add a narrow parameterized-TaskSpec feature so `weft run --spec` can take

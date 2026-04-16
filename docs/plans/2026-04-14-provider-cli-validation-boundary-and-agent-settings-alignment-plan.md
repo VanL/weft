@@ -1,5 +1,9 @@
 # Provider CLI Validation Boundary and Agent Settings Alignment Plan
 
+Status: proposed
+Source specs: see Source Documents below
+Superseded by: none
+
 This plan fixes the current `provider_cli` startup-boundary mistake and aligns
 the delegated-agent UX with Weft's actual role. Weft should know how to invoke
 common agent CLIs, validate the static parts it owns, and surface execution

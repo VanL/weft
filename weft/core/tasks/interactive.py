@@ -19,7 +19,11 @@ from simplebroker import Queue
 from weft._constants import (
     CONTROL_KILL,
     CONTROL_STOP,
+    INTERACTIVE_OUTPUT_DRAIN_POLL_INTERVAL,
+    INTERACTIVE_OUTPUT_DRAIN_TIMEOUT,
     INTERACTIVE_STOP_GRACE_SECONDS,
+    INTERACTIVE_STOP_POLL_INTERVAL,
+    TERMINAL_TASK_STATUSES,
 )
 from weft.core.targets import decode_work_message
 from weft.core.taskspec import ReservedPolicy, TaskSpec
@@ -28,10 +32,6 @@ from .multiqueue_watcher import QueueMessageContext
 from .runner import CommandSession, TaskRunner
 
 logger = logging.getLogger(__name__)
-
-_TERMINAL_TASK_STATUSES = frozenset(
-    {"completed", "failed", "timeout", "cancelled", "killed"}
-)
 
 
 class InteractiveTaskMixin(ABC):
@@ -168,7 +168,7 @@ class InteractiveTaskMixin(ABC):
         if not getattr(self, "_interactive_mode", False):
             return False
 
-        if self.should_stop or self.taskspec.state.status in _TERMINAL_TASK_STATUSES:
+        if self.should_stop or self.taskspec.state.status in TERMINAL_TASK_STATUSES:
             try:
                 self._get_reserved_queue().delete(message_id=timestamp)
             except Exception:
@@ -316,14 +316,14 @@ class InteractiveTaskMixin(ABC):
     def _interactive_drain_remaining(
         self, session: CommandSession, outbox_queue: Queue
     ) -> None:
-        deadline = time.time() + 0.25
-        while time.time() < deadline:
+        deadline = time.monotonic() + INTERACTIVE_OUTPUT_DRAIN_TIMEOUT
+        while time.monotonic() < deadline:
             self._interactive_emit_chunks(session, outbox_queue)
             if getattr(session, "_stdout_closed", False) and getattr(
                 session, "_stderr_closed", False
             ):
                 break
-            time.sleep(0.01)
+            time.sleep(INTERACTIVE_OUTPUT_DRAIN_POLL_INTERVAL)
 
     def _interactive_terminal_envelope(self) -> dict[str, Any]:
         """Build the task-local terminal event emitted on ctrl_out.
@@ -454,10 +454,10 @@ class InteractiveTaskMixin(ABC):
             session.close_stdin()
         except Exception:
             logger.debug("Failed to close interactive stdin", exc_info=True)
-        deadline = time.time() + INTERACTIVE_STOP_GRACE_SECONDS
-        while session.is_alive() and time.time() < deadline:
-            time.sleep(0.05)
+        deadline = time.monotonic() + INTERACTIVE_STOP_GRACE_SECONDS
+        while session.is_alive() and time.monotonic() < deadline:
             self._interactive_flush_outputs()
+            time.sleep(INTERACTIVE_STOP_POLL_INTERVAL)
         if session.is_alive():
             session.terminate()
         session.stop_monitor()

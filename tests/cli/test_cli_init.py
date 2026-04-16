@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -141,6 +142,32 @@ def test_cli_init_existing_project_returns_success(workdir: Path, weft_harness) 
     assert rc_second == 0
     assert "Initialized Weft project" in out_second
     assert err_second == ""
+
+
+def test_cli_init_no_autostart_persists_project_default(
+    workdir: Path,
+    weft_harness,
+) -> None:
+    project_root = workdir / "no-autostart-project"
+
+    rc, out, err = run_cli(
+        "init",
+        project_root,
+        "--no-autostart",
+        cwd=workdir,
+        harness=weft_harness,
+    )
+
+    assert rc == 0
+    assert "Initialized Weft project" in out
+    assert err == ""
+
+    project_context = build_context(spec_context=project_root)
+    assert project_context.autostart_enabled is False
+    assert not project_context.autostart_dir.exists()
+
+    config = json.loads(project_context.config_path.read_text(encoding="utf-8"))
+    assert config["autostart"] is False
 
 
 @pytest.mark.skipif(

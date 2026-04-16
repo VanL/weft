@@ -1,5 +1,9 @@
 # Manager Bootstrap Readiness And Cleanup Test Plan
 
+Status: proposed
+Source specs: see Source Documents below
+Superseded by: none
+
 ## Goal
 
 Replace the fixed detached-bootstrap startup stability delay with a cheaper

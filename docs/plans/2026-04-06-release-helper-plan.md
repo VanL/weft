@@ -1,5 +1,9 @@
 # Release Helper Plan
 
+Status: proposed
+Source specs: see Source Documents below
+Superseded by: none
+
 ## Goal
 
 Add a repo-local release helper at `bin/release.py` so maintainers can run a

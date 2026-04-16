@@ -1,5 +1,9 @@
 # System Builtins Command Plan
 
+Status: proposed
+Source specs: see Source Documents below
+Superseded by: none
+
 ## Goal
 
 Add `weft system builtins` as the explicit discovery surface for shipped

@@ -1,5 +1,9 @@
 # Detached Manager Bootstrap Hardening Plan
 
+Status: proposed
+Source specs: see Source Documents below
+Superseded by: none
+
 ## Goal
 
 Make detached manager bootstrap satisfy the existing `MA-3` contract in

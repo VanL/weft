@@ -1,5 +1,9 @@
 # Runner Extension Point Plan
 
+Status: proposed
+Source specs: see Source Documents below
+Superseded by: none
+
 This document is the implementation plan for adding a **well-designed runner
 extension point** to Weft so TaskSpecs can declare **how** they execute
 without changing **what** they execute.

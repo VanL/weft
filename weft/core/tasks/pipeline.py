@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict
 from weft._constants import (
     CONTROL_KILL,
     CONTROL_STOP,
+    FAILURE_LIKE_TASK_STATUSES,
     PIPELINE_EDGE_RUNTIME_METADATA_KEY,
     PIPELINE_RUNTIME_METADATA_KEY,
     WEFT_PIPELINES_STATE_QUEUE,
@@ -38,8 +39,6 @@ from .base import BaseTask
 from .multiqueue_watcher import QueueMessageContext
 
 logger = logging.getLogger(__name__)
-
-FAILURE_LIKE_STATUSES = frozenset({"failed", "timeout", "cancelled", "killed"})
 
 
 class PipelineEdgeRuntimeConfig(BaseModel):
@@ -420,7 +419,7 @@ class PipelineTask(BaseTask):
                 stage["error"] = error
             break
 
-        if status in FAILURE_LIKE_STATUSES:
+        if status in FAILURE_LIKE_TASK_STATUSES:
             self._fail_pipeline(
                 self._failure_message(payload, child_name=stage_name),
                 child_kind="stage",
@@ -498,7 +497,7 @@ class PipelineTask(BaseTask):
         status = payload.get("status")
         if not isinstance(edge_name, str) or not isinstance(status, str):
             return
-        if status in FAILURE_LIKE_STATUSES:
+        if status in FAILURE_LIKE_TASK_STATUSES:
             self._fail_pipeline(
                 self._failure_message(payload, child_name=edge_name),
                 child_kind="edge",
@@ -545,7 +544,7 @@ class PipelineTask(BaseTask):
         if (
             self._activity is not None
             and self.taskspec.state.status
-            not in FAILURE_LIKE_STATUSES.union({"completed"})
+            not in FAILURE_LIKE_TASK_STATUSES.union({"completed"})
         ):
             payload["activity"] = self._activity
             if self._waiting_on is not None:
@@ -642,7 +641,9 @@ class PipelineTask(BaseTask):
         child_name: str | None,
         child_tid: str | None,
     ) -> None:
-        if self.taskspec.state.status in FAILURE_LIKE_STATUSES.union({"completed"}):
+        if self.taskspec.state.status in FAILURE_LIKE_TASK_STATUSES.union(
+            {"completed"}
+        ):
             return
         self._broadcast_control(CONTROL_STOP)
         self.taskspec.mark_failed(error=error)
@@ -661,7 +662,9 @@ class PipelineTask(BaseTask):
             self._stop_event.set()
 
     def _complete_pipeline(self) -> None:
-        if self.taskspec.state.status in FAILURE_LIKE_STATUSES.union({"completed"}):
+        if self.taskspec.state.status in FAILURE_LIKE_TASK_STATUSES.union(
+            {"completed"}
+        ):
             return
         self.taskspec.mark_completed(return_code=0)
         self._clear_activity()

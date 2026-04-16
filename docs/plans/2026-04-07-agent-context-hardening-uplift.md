@@ -1,5 +1,9 @@
 # Agent Context Hardening Uplift
 
+Status: proposed
+Source specs: see Source Documents below
+Superseded by: none
+
 ## Goal
 
 Port the context-doc improvements that fit Weft's current documentation model:

@@ -17,6 +17,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+import weft._constants as weft_constants
 from simplebroker import BrokerTarget
 from weft.core.agents.provider_cli.container_runtime import (
     format_provider_container_runtime_diagnostics,
@@ -47,9 +48,6 @@ from .agent_runner import (
     _normalize_work_item_mounts,
     _validate_mount_target_conflicts,
 )
-
-_CONTAINER_LOOKUP_TIMEOUT = 2.0
-_CONTAINER_LOOKUP_INTERVAL = 0.05
 
 
 class DockerContainerMonitor:
@@ -385,10 +383,6 @@ class DockerRunnerPlugin:
         *,
         preflight: bool = False,
     ) -> None:
-        if os.name == "nt":
-            raise ValueError(
-                "Docker runner is currently supported only on Linux and macOS"
-            )
         spec = _require_mapping(taskspec_payload.get("spec"), name="spec")
         if bool(spec.get("interactive", False)):
             raise ValueError("Docker runner does not support interactive tasks")
@@ -458,8 +452,12 @@ class DockerRunnerPlugin:
             _resolve_docker_binary(docker_binary)
             if normalized_build is not None:
                 _validate_build_paths(normalized_build)
-            with _docker_client(timeout=5) as client:
-                client.ping()
+        if os.name == "nt":
+            raise ValueError(
+                "Docker runner is currently supported only on Linux and macOS"
+            )
+        with _docker_client(timeout=5) as client:
+            client.ping()
 
     def create_runner(
         self,
@@ -1018,14 +1016,14 @@ def _wait_for_container(
     runtime_id: str,
     process: subprocess.Popen[str],
 ) -> Any | None:
-    deadline = time.monotonic() + _CONTAINER_LOOKUP_TIMEOUT
+    deadline = time.monotonic() + weft_constants.DOCKER_CONTAINER_LOOKUP_TIMEOUT
     while time.monotonic() < deadline:
         container = _lookup_container(client, runtime_id)
         if container is not None:
             return container
         if process.poll() is not None:
             break
-        time.sleep(_CONTAINER_LOOKUP_INTERVAL)
+        time.sleep(weft_constants.DOCKER_CONTAINER_LOOKUP_INTERVAL)
     return _lookup_container(client, runtime_id)
 
 

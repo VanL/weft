@@ -1,5 +1,9 @@
 # Good-to-Excellent: Specification, UX, and Engineering Polish
 
+Status: roadmap
+Source specs: see Source Documents below
+Superseded by: none
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Address the gaps identified in a full-project review that prevent weft from being *excellent* — unclear spec boundaries, discovery friction for advanced features, and sparse inline documentation in complex code paths.

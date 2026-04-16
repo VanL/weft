@@ -16,17 +16,14 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
+from weft._constants import (
+    CLAUDE_DOCKER_SANDBOX_ENV,
+    CLAUDE_KEYCHAIN_SERVICE,
+    CLAUDE_PORTABLE_AUTH_ENV_NAMES,
+    DOCKERIZED_AGENT_CONTAINER_DOC_PATH,
+)
 from weft.core.spec_run_input import SpecRunInputRequest
 from weft.ext import RunnerEnvironmentProfileResult
-
-_CONTAINER_DOC_PATH = "/tmp/00-Overview_and_Architecture.md"
-_CLAUDE_DOCKER_SANDBOX_ENV = {"IS_SANDBOX": "1"}
-_CLAUDE_PORTABLE_AUTH_ENV_NAMES = (
-    "CLAUDE_CODE_OAUTH_TOKEN",
-    "ANTHROPIC_AUTH_TOKEN",
-    "ANTHROPIC_API_KEY",
-)
-_CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials"
 
 
 def dockerized_agent_environment_profile(
@@ -52,7 +49,7 @@ def dockerized_agent_environment_profile(
             "work_item_mounts": [
                 {
                     "source_path_ref": "metadata.document_path",
-                    "target": _CONTAINER_DOC_PATH,
+                    "target": DOCKERIZED_AGENT_CONTAINER_DOC_PATH,
                     "read_only": True,
                     "required": False,
                     "kind": "file",
@@ -62,7 +59,7 @@ def dockerized_agent_environment_profile(
         env=dict(env),
         metadata={
             "builtin": "dockerized-agent",
-            "container_doc_path": _CONTAINER_DOC_PATH,
+            "container_doc_path": DOCKERIZED_AGENT_CONTAINER_DOC_PATH,
             "tid": tid,
         },
     )
@@ -105,7 +102,7 @@ def claude_code_dockerized_agent_environment_profile(
         tid=tid,
     )
     merged_env = dict(base.env)
-    merged_env.update(_CLAUDE_DOCKER_SANDBOX_ENV)
+    merged_env.update(CLAUDE_DOCKER_SANDBOX_ENV)
     merged_env.update(injected_env)
     metadata = dict(base.metadata)
     metadata.update(
@@ -164,7 +161,7 @@ def _resolve_claude_code_example_auth_env(
 def _has_portable_claude_auth(env: Mapping[str, str]) -> bool:
     return any(
         isinstance(env.get(name), str) and str(env.get(name)).strip()
-        for name in _CLAUDE_PORTABLE_AUTH_ENV_NAMES
+        for name in CLAUDE_PORTABLE_AUTH_ENV_NAMES
     )
 
 
@@ -177,14 +174,14 @@ def _default_claude_code_oauth_token_reader() -> str:
                 "security",
                 "find-generic-password",
                 "-s",
-                _CLAUDE_KEYCHAIN_SERVICE,
+                CLAUDE_KEYCHAIN_SERVICE,
                 "-a",
                 account,
                 "-w",
             ]
         )
     commands.append(
-        ["security", "find-generic-password", "-s", _CLAUDE_KEYCHAIN_SERVICE, "-w"]
+        ["security", "find-generic-password", "-s", CLAUDE_KEYCHAIN_SERVICE, "-w"]
     )
     for command in commands:
         try:
@@ -274,7 +271,7 @@ def dockerized_agent_run_input(
             "template": "explain_mounted",
             "template_args": {
                 "prompt": prompt,
-                "document_target_path": _CONTAINER_DOC_PATH,
+                "document_target_path": DOCKERIZED_AGENT_CONTAINER_DOC_PATH,
             },
             "metadata": {"document_path": document_path},
         }

@@ -65,18 +65,13 @@ from simplebroker import (
     target_for_directory,
 )
 from weft._constants import (
+    POSTGRES_BACKEND_INSTALL_HINT,
+    POSTGRES_BACKEND_UNAVAILABLE,
     WEFT_AUTOSTART_DIRECTORY_NAME,
     WEFT_AUTOSTART_TASKS_DEFAULT,
     load_config,
 )
 
-POSTGRES_BACKEND_UNAVAILABLE = (
-    "Requested backend 'postgres' is not available. Install simplebroker-pg."
-)
-POSTGRES_BACKEND_INSTALL_HINT = (
-    "Requested backend 'postgres' is not available. "
-    "Install with `uv add 'weft[pg]'` or install `simplebroker-pg` directly."
-)
 __all__ = [
     "POSTGRES_BACKEND_INSTALL_HINT",
     "WeftContext",
@@ -85,6 +80,7 @@ __all__ = [
     "get_context",
     "normalize_backend_resolution_error",
     "resolve_context_broker_target",
+    "update_project_config",
 ]
 
 
@@ -199,11 +195,17 @@ def build_context(
     logs_dir = weft_dir / "logs"
     config_path = weft_dir / "config.json"
     autostart_dir = weft_dir / WEFT_AUTOSTART_DIRECTORY_NAME
+    project_config = _load_project_config(config_path)
+    project_autostart = _project_autostart_default(project_config)
 
     autostart_enabled = (
         autostart
         if autostart is not None
-        else bool(config.get("WEFT_AUTOSTART_TASKS", WEFT_AUTOSTART_TASKS_DEFAULT))
+        else (
+            project_autostart
+            if project_autostart is not None
+            else bool(config.get("WEFT_AUTOSTART_TASKS", WEFT_AUTOSTART_TASKS_DEFAULT))
+        )
     )
     config["WEFT_AUTOSTART_TASKS"] = autostart_enabled
     config["WEFT_AUTOSTART_DIR"] = str(autostart_dir)
@@ -223,8 +225,6 @@ def build_context(
 
     if create_database:
         _ensure_database(broker_target, broker_config, database_path=database_path)
-
-    project_config = _load_project_config(config_path)
 
     return WeftContext(
         root=root,
@@ -380,3 +380,25 @@ def _load_project_config(config_path: Path) -> dict[str, Any]:
     }
     config_path.write_text(json.dumps(fallback, indent=2), encoding="utf-8")
     return fallback
+
+
+def _project_autostart_default(project_config: Mapping[str, Any]) -> bool | None:
+    value = project_config.get("autostart")
+    return value if isinstance(value, bool) else None
+
+
+def update_project_config(
+    config_path: Path,
+    updates: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Persist Weft-owned project metadata updates in `.weft/config.json`.
+
+    Spec: [SB-0], [CLI-1.1]
+    """
+
+    payload = _load_project_config(config_path)
+    for key, value in updates.items():
+        payload[key] = value
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return payload

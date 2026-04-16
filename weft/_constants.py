@@ -88,11 +88,50 @@ DEFAULT_POLLING_INTERVAL: Final[float] = 1.0
 ACTIVE_CONTROL_POLL_INTERVAL: Final[float] = 0.05
 """Internal control-loop polling interval for active task execution."""
 
+TASK_PROCESS_POLL_INTERVAL: Final[float] = 0.05
+"""Polling interval for spawned task-process main loops between `process_once` calls."""
+
 CONTROL_SURFACE_WAIT_TIMEOUT: Final[float] = 2.0
 """Maximum time to wait for durable terminal task state before CLI fallback."""
 
 CONTROL_SURFACE_WAIT_INTERVAL: Final[float] = 0.05
 """Polling interval while waiting for task terminal state in CLI control flows."""
+
+SPAWN_SUBMISSION_RECONCILIATION_TIMEOUT: Final[float] = 1.0
+"""Default time budget for classifying a submitted spawn request via durable state."""
+
+STATUS_WATCH_MIN_INTERVAL: Final[float] = 0.1
+"""Minimum poll interval for CLI status-watch loops to avoid broker-hot spins."""
+
+MANAGER_STARTUP_TIMEOUT_SECONDS: Final[float] = 10.0
+"""Time budget for a detached manager to publish a stable active registry entry."""
+
+MANAGER_REGISTRY_POLL_INTERVAL: Final[float] = 0.1
+"""Polling interval while observing manager registry state during startup/shutdown."""
+
+MANAGER_PID_LIVENESS_RECHECK_INTERVAL: Final[float] = 0.5
+"""Throttle for repeated PID-liveness probes during stop-if-absent manager waits."""
+
+MANAGER_CHILD_EXIT_POLL_INTERVAL: Final[float] = 0.05
+"""Polling interval while the Manager waits for tracked child processes to exit."""
+
+MANAGER_COMPETING_STARTUP_GRACE_SECONDS: Final[float] = 0.5
+"""Grace window for concurrent manager starts to yield to an existing winner."""
+
+MANAGER_TASK_CLASS_PATH: Final[str] = "weft.core.manager.Manager"
+"""Import path for the runtime-owned Manager task class."""
+
+MANAGER_STARTUP_LOG_DIRNAME: Final[str] = "manager-startup"
+"""Subdirectory under `.weft/logs/` used for detached manager bootstrap stderr."""
+
+MANAGER_LAUNCHER_SIGNAL_SUCCESS: Final[str] = "SUCCESS"
+"""Parent-to-launcher signal indicating detached manager startup succeeded."""
+
+MANAGER_LAUNCHER_SIGNAL_ABORT: Final[str] = "ABORT"
+"""Parent-to-launcher signal requesting detached manager bootstrap abort."""
+
+MANAGER_LAUNCHER_POLL_INTERVAL: Final[float] = 0.05
+"""Polling interval for the detached manager bootstrap launcher wrapper."""
 
 DEFAULT_REPORTING_INTERVAL: Final[Literal["transition"]] = "transition"
 """Default reporting interval. Either 'poll' or 'transition'."""
@@ -220,6 +259,30 @@ STATUS_CANCELLED: Final[Literal["cancelled"]] = "cancelled"
 DEFAULT_STATUS: Final[Literal["created"]] = STATUS_CREATED
 """Default initial status for tasks."""
 
+TERMINAL_TASK_STATUSES: Final[frozenset[str]] = frozenset(
+    {"completed", "failed", "timeout", "cancelled", "killed"}
+)
+"""Statuses that represent terminal task lifecycle states."""
+
+FAILURE_LIKE_TASK_STATUSES: Final[frozenset[str]] = frozenset(
+    {"failed", "timeout", "cancelled", "killed"}
+)
+"""Terminal statuses that should be treated as unsuccessful outcomes."""
+
+NON_LIVE_RUNTIME_STATES: Final[frozenset[str]] = frozenset(
+    {
+        "missing",
+        "created",
+        "exited",
+        "dead",
+        "stopped",
+        "completed",
+        "failed",
+        "cancelled",
+    }
+)
+"""Runtime states that should not be treated as live work."""
+
 # Control Commands
 # ----------------
 CONTROL_STOP: Final[str] = "STOP"
@@ -263,8 +326,17 @@ WEFT_MANAGER_REUSE_ENABLED: Final[bool] = True
 WEFT_COMPLETED_RESULT_GRACE_SECONDS: Final[float] = 0.25
 """Time to keep polling an outbox after a completion event before assuming no result."""
 
+INTERACTIVE_OUTPUT_DRAIN_TIMEOUT: Final[float] = 0.25
+"""Best-effort drain window for late stdout/stderr after an interactive session exits."""
+
+INTERACTIVE_OUTPUT_DRAIN_POLL_INTERVAL: Final[float] = 0.01
+"""Polling interval while draining late interactive stdout/stderr chunks."""
+
 INTERACTIVE_STOP_GRACE_SECONDS: Final[float] = 2.0
 """Grace period for interactive tasks to exit cleanly after stdin closure."""
+
+INTERACTIVE_STOP_POLL_INTERVAL: Final[float] = 0.05
+"""Polling interval while waiting for an interactive session to exit cooperatively."""
 
 COMMAND_SESSION_TERMINATION_TIMEOUT: Final[float] = 2.0
 """Base timeout for command-session termination steps."""
@@ -278,7 +350,14 @@ INTERACTIVE_STOP_COMPLETION_TIMEOUT: Final[float] = (
     + COMMAND_SESSION_POST_TERMINATION_WAIT
     + 0.5
 )
-"""CLI wait budget for interactive STOP completion, matching session teardown."""
+"""CLI wait budget for interactive STOP completion.
+
+Composition:
+- stdin-close grace for cooperative exits
+- up to three command-session termination phases
+- one short post-termination wait for process-tree cleanup visibility
+- a small CLI-side slack budget for final queue drains and control acks
+"""
 
 
 # Autostart behaviour
@@ -297,6 +376,189 @@ WEFT_AGENT_HEALTH_FILENAME: Final[str] = "agent-health.json"
 
 BROKER_PROJECT_CONFIG_FILENAME: Final[str] = ".broker.toml"
 """Project-scoped broker configuration filename."""
+
+STREAM_CHUNK_SIZE_BYTES: Final[int] = 512 * 1024
+"""Chunk size used when splitting large task output into queue messages."""
+
+SUBPROCESS_STREAM_READ_SIZE: Final[int] = 64 * 1024
+"""Read size for subprocess stdout/stderr drain loops."""
+
+SUBPROCESS_TERMINATION_WAIT_TIMEOUT: Final[float] = 0.2
+"""Short grace timeout between subprocess stop/kill escalation phases."""
+
+SUBPROCESS_STREAM_DRAIN_TIMEOUT: Final[float] = 0.25
+"""Best-effort timeout for draining subprocess stdout/stderr after exit."""
+
+SUBPROCESS_POLL_INTERVAL_FLOOR: Final[float] = 0.01
+"""Minimum sleep interval for subprocess coordination loops."""
+
+RUNNER_ENTRY_POINT_GROUP: Final[str] = "weft.runners"
+"""Entry-point group name for external runner plugins."""
+
+DEFAULT_RUNNER_NAME: Final[str] = "host"
+"""Built-in default runner plugin name."""
+
+RUNNER_PLUGIN_EXTRA_INSTALL_HINTS: Final[dict[str, str]] = {
+    "docker": "weft[docker]",
+    "macos-sandbox": "weft[macos-sandbox]",
+}
+"""Optional install extras surfaced when a runner plugin is unavailable."""
+
+POSTGRES_BACKEND_UNAVAILABLE: Final[str] = (
+    "Requested backend 'postgres' is not available. Install simplebroker-pg."
+)
+"""Operator-facing error when the Postgres backend plugin is unavailable."""
+
+POSTGRES_BACKEND_INSTALL_HINT: Final[str] = (
+    "Requested backend 'postgres' is not available. "
+    "Install with `uv add 'weft[pg]'` or install `simplebroker-pg` directly."
+)
+"""Operator-facing install hint for the Postgres backend plugin."""
+
+SQLITE_SNAPSHOT_SUFFIXES: Final[tuple[str, ...]] = ("", "-wal", "-shm")
+"""SQLite database sidecar suffixes that travel with snapshot imports."""
+
+SUPPORTED_IMPORT_SCHEMA_VERSIONS: Final[frozenset[int]] = frozenset({4, 5})
+"""Dump schema versions accepted by the current import surface."""
+
+SPEC_TYPE_TASK: Final[str] = "task"
+"""Canonical spec kind name for stored TaskSpecs."""
+
+SPEC_TYPE_PIPELINE: Final[str] = "pipeline"
+"""Canonical spec kind name for stored PipelineSpecs."""
+
+SPEC_SOURCE_FILE: Final[Literal["file"]] = "file"
+"""Resolved spec reference source for explicit file paths."""
+
+SPEC_SOURCE_STORED: Final[Literal["stored"]] = "stored"
+"""Resolved spec reference source for project-local stored specs."""
+
+SPEC_SOURCE_BUILTIN: Final[Literal["builtin"]] = "builtin"
+"""Resolved spec reference source for shipped builtin specs."""
+
+SPEC_ENTRY_FILES: Final[dict[str, str]] = {
+    SPEC_TYPE_TASK: "taskspec.json",
+    SPEC_TYPE_PIPELINE: "pipeline.json",
+}
+"""Bundle entry filenames keyed by canonical spec kind."""
+
+PIPELINE_SUPPORTED_STAGE_DEFAULT_KEYS: Final[frozenset[str]] = frozenset(
+    {"input", "args", "keyword_args", "env"}
+)
+"""Supported stage-level default override keys in authored pipeline specs."""
+
+PIPELINE_PLACEHOLDER_TARGET: Final[str] = "weft.core.tasks.pipeline:runtime"
+"""Internal placeholder target used for first-class pipeline runtime tasks."""
+
+RUN_COMMAND_RESERVED_OPTION_NAMES: Final[frozenset[str]] = frozenset(
+    {
+        "spec",
+        "pipeline",
+        "input",
+        "function",
+        "arg",
+        "kw",
+        "env",
+        "name",
+        "interactive",
+        "non-interactive",
+        "stream-output",
+        "no-stream-output",
+        "timeout",
+        "memory",
+        "cpu",
+        "tag",
+        "context",
+        "wait",
+        "no-wait",
+        "json",
+        "verbose",
+        "monitor",
+        "continuous",
+        "once",
+        "autostart",
+        "no-autostart",
+        "help",
+    }
+)
+"""Long option names reserved by `weft run` and unavailable to spec adapters."""
+
+TASKSPEC_BUNDLE_ROOT_FIELD: Final[str] = "_weft_bundle_root"
+"""Private extra-field key storing a resolved TaskSpec bundle root path."""
+
+AGENT_SESSION_PROTOCOL_VERSION: Final[int] = 1
+"""Private multiprocessing protocol version for agent-session subprocesses."""
+
+WINDOWS_CMD_SHIM_SUFFIXES: Final[frozenset[str]] = frozenset({".bat", ".cmd"})
+"""Windows shim suffixes eligible for provider CLI command rewriting."""
+
+PROVIDER_CONTAINER_DESCRIPTOR_VERSION: Final[str] = "v2"
+"""Current internal descriptor schema version for provider container runtimes."""
+
+PROVIDER_CONTAINER_DESCRIPTOR_PACKAGE: Final[str] = "weft.core.agents.provider_cli"
+"""Package containing shipped provider container runtime descriptor files."""
+
+PROVIDER_CONTAINER_DESCRIPTOR_DIRECTORY: Final[str] = "runtime_descriptors"
+"""Resource subdirectory containing provider container runtime descriptors."""
+
+PROVIDER_CONTAINER_DEFAULT_RUNTIME_HOME_ENV: Final[tuple[str, ...]] = (
+    "HOME",
+    "USERPROFILE",
+)
+"""Environment variable names updated when a generated runtime home is mounted."""
+
+KNOWN_INTERPRETER_DEFINITIONS: Final[dict[str, tuple[str, tuple[str, ...]]]] = {
+    "python": ("python", ("-u", "-i")),
+    "python3": ("python", ("-u", "-i")),
+    "python3.10": ("python", ("-u", "-i")),
+    "python3.11": ("python", ("-u", "-i")),
+    "python3.12": ("python", ("-u", "-i")),
+    "python3.13": ("python", ("-u", "-i")),
+    "python3.14": ("python", ("-u", "-i")),
+    "pypy": ("python", ("-u", "-i")),
+    "pypy3": ("python", ("-u", "-i")),
+    "node": ("node", ("--interactive",)),
+    "bash": ("bash", ("-i",)),
+}
+"""Known interactive interpreter launch adjustments keyed by executable name."""
+
+DOCKER_CONTAINER_LOOKUP_TIMEOUT: Final[float] = 2.0
+"""Time budget for Docker runner state reconciliation against the daemon."""
+
+DOCKER_CONTAINER_LOOKUP_INTERVAL: Final[float] = 0.05
+"""Polling interval while waiting for Docker container state visibility."""
+
+DOCKERIZED_AGENT_CONTAINER_DOC_PATH: Final[str] = "/tmp/00-Overview_and_Architecture.md"
+"""In-container document path used by shipped Dockerized agent example tasks."""
+
+CLAUDE_DOCKER_SANDBOX_ENV: Final[dict[str, str]] = {"IS_SANDBOX": "1"}
+"""Environment overrides injected into the shipped Claude Docker example."""
+
+CLAUDE_PORTABLE_AUTH_ENV_NAMES: Final[tuple[str, ...]] = (
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_API_KEY",
+)
+"""Portable Claude auth environment variables honored by the Docker example."""
+
+CLAUDE_KEYCHAIN_SERVICE: Final[str] = "Claude Code-credentials"
+"""macOS Keychain service name used by the shipped Claude Docker example."""
+
+DOCKERIZED_AGENT_PROVIDER_CHOICES: Final[frozenset[str]] = frozenset(
+    {"claude_code", "codex", "gemini", "opencode", "qwen"}
+)
+"""Supported provider names for the shipped Dockerized agent builtin."""
+
+DOCKERIZED_AGENT_DEFAULT_ENVIRONMENT_PROFILE_REF: Final[str] = (
+    "dockerized_agent:dockerized_agent_environment_profile"
+)
+"""Default environment-profile hook for the Dockerized agent builtin."""
+
+DOCKERIZED_AGENT_CLAUDE_ENVIRONMENT_PROFILE_REF: Final[str] = (
+    "weft.builtins.dockerized_agent_examples:"
+    "claude_code_dockerized_agent_environment_profile"
+)
+"""Claude-specific environment-profile hook for the Dockerized agent builtin."""
 
 
 # ==============================================================================

@@ -1,5 +1,9 @@
 # SimpleBroker Backend Generalization Plan
 
+Status: proposed
+Source specs: see Source Documents below
+Superseded by: none
+
 This document is the implementation plan for the next backend-neutral cleanup
 slice in Weft.
 

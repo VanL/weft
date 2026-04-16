@@ -19,10 +19,11 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ValidationError, field_validator, model_validator
 
-_DESCRIPTOR_VERSION = "v2"
-_DESCRIPTOR_PACKAGE = "weft.core.agents.provider_cli"
-_DESCRIPTOR_DIRECTORY = "runtime_descriptors"
-_DEFAULT_RUNTIME_HOME_ENV = ("HOME", "USERPROFILE")
+from weft._constants import (
+    PROVIDER_CONTAINER_DEFAULT_RUNTIME_HOME_ENV,
+    PROVIDER_CONTAINER_DESCRIPTOR_DIRECTORY,
+    PROVIDER_CONTAINER_DESCRIPTOR_PACKAGE,
+)
 
 EnvSourceKind = Literal["host_env"]
 MountSourceKind = Literal[
@@ -79,7 +80,7 @@ class ProviderContainerRuntimeHome:
     """One generated provider runtime home mounted into the container."""
 
     target: str
-    env_names: tuple[str, ...] = _DEFAULT_RUNTIME_HOME_ENV
+    env_names: tuple[str, ...] = PROVIDER_CONTAINER_DEFAULT_RUNTIME_HOME_ENV
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,7 +256,7 @@ class _CopiedFileRequirementModel(BaseModel):
 
 class _RuntimeHomeModel(BaseModel):
     target: str
-    env_names: tuple[str, ...] = _DEFAULT_RUNTIME_HOME_ENV
+    env_names: tuple[str, ...] = PROVIDER_CONTAINER_DEFAULT_RUNTIME_HOME_ENV
 
     @field_validator("target")
     @classmethod
@@ -387,8 +388,8 @@ def get_provider_container_runtime_descriptor(
     if not normalized:
         raise ValueError("provider_name must be a non-empty string")
     resource = (
-        resources.files(_DESCRIPTOR_PACKAGE)
-        .joinpath(_DESCRIPTOR_DIRECTORY)
+        resources.files(PROVIDER_CONTAINER_DESCRIPTOR_PACKAGE)
+        .joinpath(PROVIDER_CONTAINER_DESCRIPTOR_DIRECTORY)
         .joinpath(f"{normalized}.json")
     )
     if not resource.is_file():

@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from functools import cache
 from pathlib import Path
+
+from weft._constants import KNOWN_INTERPRETER_DEFINITIONS
 
 
 @dataclass(frozen=True)
@@ -15,26 +18,12 @@ class InterpreterHit:
     extra_args: tuple[str, ...] = ()
 
 
-KNOWN_INTERPRETERS: Mapping[str, InterpreterHit] = {
-    # Python REPLs need -u (unbuffered) for prompt responsiveness and -i to
-    # stay interactive when stdin is streamed over Weft's line-oriented
-    # interactive channel.
-    "python": InterpreterHit("python", ("-u", "-i")),
-    "python3": InterpreterHit("python", ("-u", "-i")),
-    "python3.10": InterpreterHit("python", ("-u", "-i")),
-    "python3.11": InterpreterHit("python", ("-u", "-i")),
-    "python3.12": InterpreterHit("python", ("-u", "-i")),
-    "python3.13": InterpreterHit("python", ("-u", "-i")),
-    "python3.14": InterpreterHit("python", ("-u", "-i")),
-    "pypy": InterpreterHit("python", ("-u", "-i")),
-    "pypy3": InterpreterHit("python", ("-u", "-i")),
-    # Node already enters a REPL when no script is given, but --interactive
-    # makes the intent explicit for line-oriented stdin streaming.
-    "node": InterpreterHit("node", ("--interactive",)),
-    # Bash supports -i for interactive shells driven through Weft's stdin
-    # stream, even though Weft is not emulating a full terminal.
-    "bash": InterpreterHit("bash", ("-i",)),
-}
+@cache
+def _known_interpreters() -> Mapping[str, InterpreterHit]:
+    return {
+        key: InterpreterHit(name, extra_args)
+        for key, (name, extra_args) in KNOWN_INTERPRETER_DEFINITIONS.items()
+    }
 
 
 def _normalize(entry: str) -> str:
@@ -47,13 +36,14 @@ def recognise_interpreter(command: Sequence[str]) -> InterpreterHit | None:
 
     if not command:
         return None
+    known_interpreters = _known_interpreters()
     candidate = _normalize(command[0])
-    if candidate in KNOWN_INTERPRETERS:
-        return KNOWN_INTERPRETERS[candidate]
+    if candidate in known_interpreters:
+        return known_interpreters[candidate]
 
     # Allow dotted python versions without registering every minor release.
     if candidate.startswith("python"):
-        return KNOWN_INTERPRETERS["python"]
+        return known_interpreters["python"]
 
     return None
 

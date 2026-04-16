@@ -236,6 +236,14 @@ runbook needs to become stricter.
   work items from being promoted into callable payloads unless the caller
   explicitly supplied envelope keys or a non-empty plain object.
 
+## 2026-04-16 Command Queue Seam
+
+- In command and helper code that already has a `WeftContext`, construct broker
+  queues through `WeftContext.queue()` instead of retyping `Queue(...)` with
+  `broker_target` and `broker_config`. Repeated open-coded queue construction
+  in command paths turns backend changes into grep work and weakens the single
+  queue-construction seam Weft already has.
+
 ## 2026-04-09 Manager Lifecycle Command Consolidation
 
 - Manager control-plane commands must share one registry replay and liveness
@@ -323,6 +331,61 @@ runbook needs to become stricter.
   real task startup. Any side-effectful profile logic such as Keychain reads,
   host probes, or filesystem mutation must explicitly defer until the real
   execution path instead of assuming the profile hook is runtime-only.
+
+## 2026-04-16 Constants Boundary
+
+- If the repo says `_constants.py` is the single source of truth for constants,
+  enforce that structurally. A style note without a guard test degrades into a
+  suggestion, and cross-module drift comes back one local “just this one value”
+  at a time.
+- Keep only true runtime objects local: sentinels created with `object()`,
+  mutable registries, compiled regexes, and singleton plugin instances. Plain
+  immutable policy values, message names, timeouts, queue/status sets, import
+  refs, and backend hints should live in `weft/_constants.py`.
+
+## 2026-04-16 Poll Floors And Grace Windows
+
+- Short poll floors and grace windows are still behavior, not implementation
+  noise. Values like `0.05`, `0.1`, `0.2`, and `0.25` should not be repeated
+  inline across result waits, spawn reconciliation, status watch, and
+  subprocess cleanup paths.
+- Reuse one named constant when multiple surfaces are waiting on the same
+  durable control boundary. Add a new constant only when the semantic reason
+  for waiting is different.
+- When the boundary is already queue-backed, use SimpleBroker's queue-native
+  waiting path instead of adding more `sleep()` loops in Weft. The command-side
+  result waits, task control waits, spawn reconciliation, and manager lifecycle
+  waits now block on queue activity through SimpleBroker watchers, and the
+  command-owned `status watch` and limited `queue watch` paths do too. Keep
+  only bounded timeout/process checks in Weft.
+- Do not oversell this as a broader event system. SimpleBroker owns optimized
+  queue waiting; Weft still needs explicit semantic checks after wake-up and
+  still needs bounded polling or `process.wait(timeout=...)` for non-queue
+  boundaries like PID liveness and detached child exit.
+- The main remaining "wrong tool" cases are the ones that still alternate queue
+  reads with bespoke sleep logic outside the watcher-owned path, plus any
+  future lifecycle surfaces that try to invent a second event plane instead of
+  reusing the broker queues they already have.
+
+## 2026-04-16 Exception Boundaries In Manager And BaseTask
+
+- Narrow the catch to the boundary, not the function. Queue writes, deletes,
+  moves, `has_pending()`, and queue-close cleanup should catch broker-side
+  failures like `simplebroker.ext.BrokerError` plus local runtime wrappers such
+  as `OSError` or `RuntimeError` only when that operation is truly best effort.
+- Do not keep `json.dumps(...)` or spec/pipeline validation inside a broker
+  catch. Serialization and validation bugs are internal defects. They should
+  surface instead of disappearing behind a debug log that says a queue write
+  failed.
+- In `Manager`, malformed spawn/autostart payloads are ordinary local failures
+  and should be caught as `ValueError`, `TypeError`, `ValidationError`,
+  `FileNotFoundError`, or JSON/file read errors, depending on the real input
+  boundary. Unexpected internal exceptions in `_build_child_spec()` and
+  autostart resolution should propagate.
+- A small number of broad catches are still acceptable, but only at explicit
+  extension or interpreter-shutdown seams: optional resource-monitor callbacks,
+  runner-plugin stop/kill hooks, and `atexit`/destructor cleanup. If a broad
+  catch survives, the code should say why that boundary is best effort.
 
 ## 2026-04-08 Manager Role Identity
 

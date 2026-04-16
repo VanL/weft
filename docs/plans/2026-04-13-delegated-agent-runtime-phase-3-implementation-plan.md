@@ -1,5 +1,9 @@
 # Delegated Agent Runtime Phase 3 Implementation Plan
 
+Status: proposed
+Source specs: see Source Documents below
+Superseded by: none
+
 This plan implements Phase 3 from
 [`docs/specifications/13A-Agent_Runtime_Planned.md`](../specifications/13A-Agent_Runtime_Planned.md):
 runtime-agnostic environment profiles and explicit tool profiles for higher

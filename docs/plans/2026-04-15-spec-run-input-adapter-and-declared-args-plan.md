@@ -1,5 +1,9 @@
 # Spec Run-Input Adapter And Declared Args Plan
 
+Status: completed
+Source specs: see Source Documents below
+Superseded by: none
+
 ## Goal
 
 Add a small, explicit `weft run --spec` input-shaping feature so a TaskSpec can

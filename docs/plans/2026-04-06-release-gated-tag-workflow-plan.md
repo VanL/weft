@@ -1,5 +1,9 @@
 # Release-Gated Tag Workflow Plan
 
+Status: proposed
+Source specs: see Source Documents below
+Superseded by: none
+
 ## Goal
 
 Add a tag-driven GitHub Actions workflow that runs the full SQLite release

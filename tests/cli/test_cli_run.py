@@ -531,7 +531,9 @@ def test_cli_run_spec_name_resolves_builtin_probe_helper_and_writes_agent_settin
     env["PATH"] = os.pathsep.join([str(workdir), env.get("PATH", "")])
 
     for wrapper in wrappers:
-        assert shutil.which(wrapper.name, path=env["PATH"]) == str(wrapper)
+        resolved = shutil.which(wrapper.name, path=env["PATH"])
+        assert resolved is not None
+        assert Path(resolved).resolve() == wrapper.resolve()
 
     rc, out, err = run_cli(
         "run",

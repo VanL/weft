@@ -223,7 +223,11 @@ def test_spec_list_and_show_builtin_task_spec(workdir) -> None:
         if item["type"] == "task" and item["name"] == "probe-agents"
     )
     assert builtin["source"] == "builtin"
-    assert builtin["path"].endswith("weft/builtins/tasks/probe-agents.json")
+    assert (
+        Path(builtin["path"])
+        .as_posix()
+        .endswith("weft/builtins/tasks/probe-agents.json")
+    )
     assert err == ""
 
     rc, out, err = run_cli(
@@ -264,8 +268,10 @@ def test_spec_show_builtin_dockerized_agent(workdir) -> None:
         if item["type"] == "task" and item["name"] == "dockerized-agent"
     )
     assert builtin["source"] == "builtin"
-    assert builtin["path"].endswith(
-        "weft/builtins/tasks/dockerized-agent/taskspec.json"
+    assert (
+        Path(builtin["path"])
+        .as_posix()
+        .endswith("weft/builtins/tasks/dockerized-agent/taskspec.json")
     )
     assert err == ""
 

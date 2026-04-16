@@ -54,7 +54,11 @@ def test_system_builtins_json_reports_builtin_metadata(workdir) -> None:
     assert builtin["source"] == "builtin"
     assert builtin["category"] == "agent-runtime"
     assert builtin["function_target"] == "weft.builtins.agent_probe:probe_agents_task"
-    assert builtin["path"].endswith("weft/builtins/tasks/probe-agents.json")
+    assert (
+        Path(builtin["path"])
+        .as_posix()
+        .endswith("weft/builtins/tasks/probe-agents.json")
+    )
     assert err == ""
 
 
@@ -99,7 +103,11 @@ def test_system_builtins_ignores_local_project_shadow(workdir) -> None:
     payload = json.loads(out)
     builtin = next(item for item in payload if item["name"] == "probe-agents")
     assert builtin["source"] == "builtin"
-    assert builtin["path"].endswith("weft/builtins/tasks/probe-agents.json")
+    assert (
+        Path(builtin["path"])
+        .as_posix()
+        .endswith("weft/builtins/tasks/probe-agents.json")
+    )
     assert builtin["description"].startswith("Probe known delegated provider CLIs")
     assert err == ""
 

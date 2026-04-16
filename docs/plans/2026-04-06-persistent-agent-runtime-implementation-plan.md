@@ -1,5 +1,9 @@
 # Persistent Agent Runtime Implementation Plan
 
+Status: proposed
+Source specs: see Source Documents below
+Superseded by: none
+
 This document is the implementation plan for the **next** agent-runtime slice:
 correcting the TaskSpec shape, supporting explicit `llm` arguments cleanly, and
 adding **persistent agent tasks with continuation** without duplicating

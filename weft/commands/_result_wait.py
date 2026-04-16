@@ -10,13 +10,14 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from simplebroker import Queue
 from weft._constants import (
+    TERMINAL_TASK_STATUSES,
     WEFT_COMPLETED_RESULT_GRACE_SECONDS,
     WEFT_GLOBAL_LOG_QUEUE,
 )
 from weft.context import WeftContext
 
+from ._queue_wait import QueueChangeMonitor
 from ._streaming import (
     DecodedOutboxValue,
     aggregate_public_outputs,
@@ -55,7 +56,7 @@ def terminal_status_from_event(payload: dict[str, Any]) -> str | None:
                 state_status = state.get("status")
                 if isinstance(state_status, str):
                     status = state_status
-    if status in {"completed", "failed", "timeout", "cancelled", "killed"}:
+    if status in TERMINAL_TASK_STATUSES:
         return status
     return None
 
@@ -90,27 +91,14 @@ def await_one_shot_result(
     emit_stream: bool = False,
 ) -> tuple[str, Any | None, str | None]:
     """Wait for a one-shot task to publish a terminal result."""
-    outbox_queue = Queue(
-        outbox_name,
-        db_path=context.broker_target,
-        persistent=True,
-        config=context.broker_config,
-    )
+    outbox_queue = context.queue(outbox_name, persistent=True)
     ctrl_queue = (
-        Queue(
-            ctrl_out_name,
-            db_path=context.broker_target,
-            persistent=False,
-            config=context.broker_config,
-        )
-        if ctrl_out_name
-        else None
+        context.queue(ctrl_out_name, persistent=False) if ctrl_out_name else None
     )
-    log_queue = Queue(
-        WEFT_GLOBAL_LOG_QUEUE,
-        db_path=context.broker_target,
-        persistent=False,
-        config=context.broker_config,
+    log_queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
+    monitor = QueueChangeMonitor(
+        [queue for queue in (outbox_queue, ctrl_queue, log_queue) if queue is not None],
+        config=context.config,
     )
 
     log_last_timestamp: int | None = None
@@ -195,8 +183,23 @@ def await_one_shot_result(
                 )
                 break
 
-            time.sleep(0.05)
+            wait_timeout: float | None = None
+            if deadline is not None:
+                wait_timeout = max(0.0, deadline - time.monotonic())
+            if completed_at is not None:
+                grace_remaining = max(
+                    0.0,
+                    WEFT_COMPLETED_RESULT_GRACE_SECONDS
+                    - (time.monotonic() - completed_at),
+                )
+                wait_timeout = (
+                    grace_remaining
+                    if wait_timeout is None
+                    else min(wait_timeout, grace_remaining)
+                )
+            monitor.wait(wait_timeout)
     finally:
+        monitor.close()
         outbox_queue.close()
         if ctrl_queue is not None:
             ctrl_queue.close()

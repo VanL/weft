@@ -19,7 +19,10 @@ from typing import Any, cast
 
 from simplebroker import Queue
 from weft._constants import (
+    NON_LIVE_RUNTIME_STATES,
+    STATUS_WATCH_MIN_INTERVAL,
     TASKSPEC_TID_SHORT_LENGTH,
+    TERMINAL_TASK_STATUSES,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
@@ -35,22 +38,9 @@ from weft.helpers import (
     pid_is_live,
 )
 
+from ._queue_wait import QueueChangeMonitor
+
 StatusMapping = Mapping[str, int | float | str | None]
-TERMINAL_STATUSES: frozenset[str] = frozenset(
-    {"completed", "failed", "timeout", "cancelled", "killed"}
-)
-NON_LIVE_RUNTIME_STATES: frozenset[str] = frozenset(
-    {
-        "missing",
-        "created",
-        "exited",
-        "dead",
-        "stopped",
-        "completed",
-        "failed",
-        "cancelled",
-    }
-)
 
 
 def _to_int(value: object) -> int:
@@ -183,12 +173,7 @@ def _queue(
     *,
     persistent: bool = False,
 ) -> Queue:
-    return Queue(
-        name,
-        db_path=ctx.broker_target,
-        persistent=persistent,
-        config=ctx.broker_config,
-    )
+    return ctx.queue(name, persistent=persistent)
 
 
 def _collect_manager_records(
@@ -404,7 +389,7 @@ def _effective_public_status(
     runtime_live = _runtime_description_is_live(runtime_description)
     host_task_pid = _task_process_id(mapping_entry)
 
-    if status not in TERMINAL_STATUSES:
+    if status not in TERMINAL_TASK_STATUSES:
         if (
             status in {"spawning", "running"}
             and (not normalized_runner or normalized_runner == "host")
@@ -522,7 +507,7 @@ def _collect_task_snapshots(
             status = payload.get("status")
             if isinstance(status, str) and status:
                 record["status"] = status
-            if record["status"] in TERMINAL_STATUSES:
+            if record["status"] in TERMINAL_TASK_STATUSES:
                 record["activity"] = None
                 record["waiting_on"] = None
             else:
@@ -557,7 +542,7 @@ def _collect_task_snapshots(
         record["taskspec"] = taskspec
         record["metadata"] = metadata if isinstance(metadata, dict) else {}
         record["event_payload"] = dict(payload)
-        if record["status"] in TERMINAL_STATUSES:
+        if record["status"] in TERMINAL_TASK_STATUSES:
             record["activity"] = None
             record["waiting_on"] = None
         else:
@@ -604,7 +589,7 @@ def _collect_task_snapshots(
 
         activity = record.get("activity")
         waiting_on = record.get("waiting_on")
-        if public_status in TERMINAL_STATUSES:
+        if public_status in TERMINAL_TASK_STATUSES:
             activity = None
             waiting_on = None
 
@@ -634,7 +619,7 @@ def _collect_task_snapshots(
 
     result = snapshots
     if not include_terminal:
-        result = [snap for snap in result if snap.status not in TERMINAL_STATUSES]
+        result = [snap for snap in result if snap.status not in TERMINAL_TASK_STATUSES]
     result.sort(key=lambda snap: (snap.status not in {"running", "spawning"}, snap.tid))
     return result
 
@@ -690,7 +675,10 @@ def _watch_task_events(
     Spec: [MF-5]
     """
     last_timestamp = 0
+    queue = _queue(ctx, WEFT_GLOBAL_LOG_QUEUE)
+    monitor: QueueChangeMonitor | None = None
     try:
+        monitor = QueueChangeMonitor([queue], config=ctx.config)
         while True:
             emitted = False
             for payload, timestamp in _iter_log_events(ctx):
@@ -736,12 +724,16 @@ def _watch_task_events(
 
             if json_output and emitted:
                 sys.stdout.flush()
-            time.sleep(max(0.1, interval))
+            monitor.wait(max(STATUS_WATCH_MIN_INTERVAL, interval))
     except KeyboardInterrupt:
         return 0
     except Exception as exc:  # pragma: no cover - defensive
         print(f"weft: status watch failed: {exc}", file=sys.stderr)
         return 1
+    finally:
+        if monitor is not None:
+            monitor.close()
+        queue.close()
 
 
 def cmd_status(

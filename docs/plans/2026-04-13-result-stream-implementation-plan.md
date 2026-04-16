@@ -1,5 +1,9 @@
 # Result Stream Implementation Plan
 
+Status: proposed
+Source specs: see Source Documents below
+Superseded by: none
+
 ## Goal
 
 Implement `weft result TID --stream` as a true single-task follow mode that
