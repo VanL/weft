@@ -179,6 +179,8 @@ Purpose:
 What it does:
 
 - requires the Docker runner extension to be installed
+- current platform note: this builtin is supported on Linux and macOS, but not
+  Windows
 - accepts optional JSON input with `providers` and `refresh`
 - stays plural because one run may warm multiple provider images
 - when `providers` are supplied explicitly, it uses those names directly; no
@@ -252,6 +254,8 @@ What it does:
 - uses a bundle-local run-input adapter to turn those later CLI inputs into the
   ordinary public agent work envelope before queueing
 - selects the Docker runner through `spec.runner.name="docker"`
+- current platform note: this builtin is supported on Linux and macOS, but not
+  Windows
 - uses an explicit runner environment profile to:
   - set Docker runner defaults for one-shot delegated execution
   - declare `spec.runner.options.work_item_mounts` so the raw work item field
@@ -347,3 +351,4 @@ _Implementation mapping_: builtin TaskSpec asset:
 - [`docs/plans/2026-04-15-multi-provider-docker-provider-cli-expansion-plan.md`](../plans/2026-04-15-multi-provider-docker-provider-cli-expansion-plan.md)
 - [`docs/plans/2026-04-15-parameterized-taskspec-materialization-plan.md`](../plans/2026-04-15-parameterized-taskspec-materialization-plan.md)
 - [`docs/plans/2026-04-15-spec-aware-run-help-plan.md`](../plans/2026-04-15-spec-aware-run-help-plan.md)
+- [`docs/plans/2026-04-16-docker-builtins-windows-guard-plan.md`](../plans/2026-04-16-docker-builtins-windows-guard-plan.md)

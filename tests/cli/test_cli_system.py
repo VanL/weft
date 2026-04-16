@@ -59,6 +59,14 @@ def test_system_builtins_json_reports_builtin_metadata(workdir) -> None:
         .as_posix()
         .endswith("weft/builtins/tasks/probe-agents.json")
     )
+    dockerized_agent = next(
+        item for item in payload if item["name"] == "dockerized-agent"
+    )
+    assert dockerized_agent["supported_platforms"] == ["linux", "darwin"]
+    prepare_agent_images = next(
+        item for item in payload if item["name"] == "prepare-agent-images"
+    )
+    assert prepare_agent_images["supported_platforms"] == ["linux", "darwin"]
     assert err == ""
 
 

@@ -31,6 +31,11 @@ def cmd_system_builtins(*, json_output: bool = False) -> tuple[int, str | None]:
                 "description": item.description,
                 "category": item.category,
                 "function_target": item.function_target,
+                "supported_platforms": (
+                    list(item.supported_platforms)
+                    if item.supported_platforms is not None
+                    else None
+                ),
                 "path": str(item.path),
                 "source": item.source,
             }
@@ -52,6 +57,8 @@ def cmd_system_builtins(*, json_output: bool = False) -> tuple[int, str | None]:
             lines.append(f"  Description: {item.description}")
         if item.function_target:
             lines.append(f"  Target: {item.function_target}")
+        if item.supported_platforms is not None:
+            lines.append("  Platforms: " + ", ".join(item.supported_platforms))
     return 0, "\n".join(lines)
 
 

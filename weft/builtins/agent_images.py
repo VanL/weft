@@ -12,6 +12,11 @@ from collections.abc import Sequence
 from typing import Any
 
 from weft._runner_plugins import require_runner_plugin
+from weft.builtins import (
+    DOCKER_BUILTIN_SUPPORTED_PLATFORMS,
+    builtin_platform_supported,
+    unsupported_builtin_platform_message,
+)
 from weft.context import build_context
 from weft.core.agents.provider_cli.registry import list_provider_cli_providers
 
@@ -20,6 +25,13 @@ from .agent_probe import probe_agents
 
 def prepare_agent_images_task(work_item: Any = None) -> dict[str, Any]:
     """Build or reuse supported Docker-backed agent images."""
+    if not builtin_platform_supported(DOCKER_BUILTIN_SUPPORTED_PLATFORMS):
+        raise RuntimeError(
+            unsupported_builtin_platform_message(
+                "prepare-agent-images",
+                DOCKER_BUILTIN_SUPPORTED_PLATFORMS,
+            )
+        )
 
     try:
         require_runner_plugin("docker")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,13 @@ from weft.core.environment_profiles import materialize_runner_environment
 from weft.core.spec_parameterization import materialize_taskspec_template
 from weft.core.spec_run_input import SpecRunInputRequest, invoke_run_input_adapter
 from weft.core.taskspec import TaskSpec
+
+pytestmark = [
+    pytest.mark.skipif(
+        os.name == "nt",
+        reason="Docker builtins are currently supported only on Linux and macOS",
+    )
+]
 
 
 def _load_builtin_taskspec() -> TaskSpec:

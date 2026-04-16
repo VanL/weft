@@ -308,6 +308,7 @@ def test_spec_show_builtin_dockerized_agent(workdir) -> None:
         payload["spec"]["agent"]["runtime_config"]["tool_profile_ref"]
         == "dockerized_agent:dockerized_agent_tool_profile"
     )
+    assert payload["metadata"]["supported_platforms"] == ["linux", "darwin"]
     assert "explain_mounted" in payload["spec"]["agent"]["templates"]
     assert "explain_inline" in payload["spec"]["agent"]["templates"]
     assert err == ""
