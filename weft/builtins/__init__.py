@@ -15,12 +15,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-_PLATFORM_DISPLAY_NAMES = {
-    "linux": "Linux",
-    "darwin": "macOS",
-    "win32": "Windows",
-}
-DOCKER_BUILTIN_SUPPORTED_PLATFORMS: tuple[str, ...] = ("linux", "darwin")
+from weft._constants import (
+    BUILTIN_PLATFORM_DISPLAY_NAMES,
+    DOCKER_BUILTIN_SUPPORTED_PLATFORMS,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,7 +180,7 @@ def _normalize_supported_platforms(
                 f"Builtin TaskSpec {path} supported_platforms must be a list of strings"
             )
         cleaned = _normalize_platform_key(item.strip())
-        if cleaned not in _PLATFORM_DISPLAY_NAMES:
+        if cleaned not in BUILTIN_PLATFORM_DISPLAY_NAMES:
             raise ValueError(
                 f"Builtin TaskSpec {path} uses unsupported platform key {item!r}"
             )
@@ -205,7 +203,7 @@ def _normalize_platform_key(platform: str | None) -> str:
 
 
 def _platform_display_name(platform: str) -> str:
-    return _PLATFORM_DISPLAY_NAMES.get(platform, platform)
+    return BUILTIN_PLATFORM_DISPLAY_NAMES.get(platform, platform)
 
 
 def _human_platform_list(platforms: Sequence[str]) -> str:
