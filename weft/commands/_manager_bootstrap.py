@@ -38,6 +38,9 @@ from weft._constants import (
     WEFT_SPAWN_REQUESTS_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
 )
+from weft._constants import (
+    MANAGER_POLL_INTERVAL as _MANAGER_POLL_INTERVAL,
+)
 from weft.context import WeftContext
 from weft.core.spawn_requests import generate_spawn_request_timestamp
 from weft.core.taskspec import TaskSpec, resolve_taskspec_payload
@@ -900,7 +903,7 @@ def _serve_manager_foreground(context: WeftContext) -> tuple[int, str | None]:
         context.broker_target,
         invocation.spec,
         context.config,
-        TASK_PROCESS_POLL_INTERVAL,
+        _MANAGER_POLL_INTERVAL,
     )
     return 0, None
 
@@ -932,6 +935,9 @@ def _stop_manager(
     except Exception:
         typer.echo("Warning: failed to send STOP to manager.", err=True)
         return False, "failed to send STOP to manager"
+
+    if current is None and stop_if_absent and process is None:
+        return True, None
 
     deadline = time.monotonic() + timeout
     stopped, _last_record = _await_manager_stop_confirmation(

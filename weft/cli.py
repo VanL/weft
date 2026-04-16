@@ -91,12 +91,38 @@ def queue_read(
 
 @queue_app.command("write")
 def queue_write(
-    name: Annotated[str, typer.Argument(help="Queue name to write to")],
-    message: str | None = typer.Argument(
-        None, help="Message to write (omit or use '-' for stdin)"
-    ),
+    name_or_message: Annotated[
+        str | None,
+        typer.Argument(help="Queue name, or message when --endpoint is used"),
+    ] = None,
+    message: Annotated[
+        str | None, typer.Argument(help="Message to write (omit or use '-' for stdin)")
+    ] = None,
+    endpoint: Annotated[
+        str | None,
+        typer.Option("--endpoint", help="Named endpoint to resolve and write to"),
+    ] = None,
 ) -> None:
-    _emit_queue_result(queue_cmd.write_command(name, message))
+    if endpoint is None:
+        if name_or_message is None:
+            raise typer.BadParameter(
+                "Provide a queue name or use --endpoint",
+                param_hint="name_or_message",
+            )
+        queue_name = name_or_message
+        payload = message
+    else:
+        if message is not None:
+            raise typer.BadParameter(
+                "When using --endpoint, provide at most one positional message",
+                param_hint="message",
+            )
+        queue_name = None
+        payload = name_or_message
+
+    _emit_queue_result(
+        queue_cmd.write_command(queue_name, payload, endpoint_name=endpoint)
+    )
 
 
 @queue_app.command("peek")
@@ -188,6 +214,10 @@ def queue_list(
         bool,
         typer.Option("--stats", help="Include claimed message statistics"),
     ] = False,
+    endpoints: Annotated[
+        bool,
+        typer.Option("--endpoints", help="List canonical named task endpoints"),
+    ] = False,
     pattern: Annotated[
         str | None,
         typer.Option(
@@ -201,8 +231,22 @@ def queue_list(
         queue_cmd.list_command(
             json_output=json_output,
             stats=stats,
+            endpoints=endpoints,
             pattern=pattern,
         )
+    )
+
+
+@queue_app.command("resolve")
+def queue_resolve(
+    endpoint_name: Annotated[str, typer.Argument(help="Named endpoint to resolve")],
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Output endpoint details as JSON"),
+    ] = False,
+) -> None:
+    _emit_queue_result(
+        queue_cmd.resolve_command(endpoint_name, json_output=json_output)
     )
 
 
@@ -995,7 +1039,13 @@ def run_command(
     ] = None,
     name: Annotated[
         str | None,
-        typer.Option("--name", help="Explicit task name"),
+        typer.Option(
+            "--name",
+            help=(
+                "Explicit task name. For persistent runs, also claims the named "
+                "runtime endpoint"
+            ),
+        ),
     ] = None,
     interactive: Annotated[
         bool,

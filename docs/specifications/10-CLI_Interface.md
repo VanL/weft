@@ -26,6 +26,8 @@ See also:
   [`10A-CLI_Interface_Planned.md`](10A-CLI_Interface_Planned.md)
 - current CLI-to-code ownership map:
   [`11-CLI_Architecture_Crosswalk.md`](11-CLI_Architecture_Crosswalk.md)
+- implementation plan:
+  [`docs/plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md`](../plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md)
 
 ## Design Principles [CLI-0.1]
 
@@ -110,6 +112,7 @@ Current options:
 - `--pipeline NAME|PATH`
 - `--input VALUE`
 - `--function MODULE:FUNC`
+- `--name TEXT`
 - `--arg VALUE`
 - `--kw KEY=VALUE`
 - `--timeout SECONDS`
@@ -119,6 +122,19 @@ Current options:
 - `--wait` / `--no-wait`
 - `--interactive`
 - `--autostart` / `--no-autostart`
+
+Current `--name` behavior:
+
+- `--name` always sets the public task name used by task/status/process-title
+  surfaces
+- inline command, inline function, `--spec`, and `--pipeline` runs all honor
+  that explicit override
+- if the resolved top-level task is persistent, an explicit `--name` also
+  becomes the runtime endpoint claim name for that task
+- if the resolved top-level task is not persistent, `--name` is label-only and
+  does not claim a runtime endpoint
+- endpoint claim on persistent runs is opt-in through explicit `--name`; Weft
+  does not derive endpoint claims from stored TaskSpec names by default
 
 Current spec-declared option support:
 
@@ -408,6 +424,7 @@ Current queue subcommands:
 - `peek`
 - `move`
 - `list`
+- `resolve`
 - `watch`
 - `delete`
 - `broadcast`
@@ -417,6 +434,33 @@ Current queue subcommands:
 
 These commands intentionally stay close to SimpleBroker behavior. Weft adds
 project resolution, aliases, and task/runtime conventions on top.
+
+### Named Endpoint Queue Ergonomics [CLI-4.1]
+
+Current endpoint helpers are intentionally thin:
+
+- `weft queue resolve NAME` returns the canonical live endpoint record for one
+  stable project-local name
+- `weft queue list --endpoints` lists canonical named endpoints instead of raw
+  queue inventory
+- `weft queue write --endpoint NAME [MESSAGE]` resolves the current inbox for
+  that name and then performs an ordinary queue write using the existing queue
+  payload rules
+
+Current rules:
+
+- endpoint helpers remain under `weft queue`; Weft does not add a second
+  service command family
+- endpoint-targeted writes do not auto-register, auto-spawn, or wrap the
+  payload in a Weft-wide request envelope
+- payload schemas remain task-owned or builtin-owned contracts
+- `queue list --endpoints` is incompatible with `--stats`
+- failed resolution returns an explicit non-zero exit rather than silently
+  redirecting work
+
+_Implementation mapping_: `weft/commands/queue.py` `resolve_command()`,
+`list_command()`, `write_command()`; `weft/cli.py` `queue_resolve()`,
+`queue_list()`, `queue_write()`.
 
 ## Configuration [CLI-5]
 

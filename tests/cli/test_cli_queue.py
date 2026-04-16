@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 
 from tests.conftest import run_cli
+from tests.tasks.test_task_execution import make_function_taskspec
 from weft.context import build_context
+from weft.core.tasks import Consumer
 
 pytestmark = [pytest.mark.shared]
 
@@ -259,3 +262,105 @@ def test_queue_list_json_stats_includes_totals(workdir):
     stat_entry = next(entry for entry in data if entry["queue"] == "stat.queue")
     assert "total_messages" in stat_entry
     assert "claimed_messages" in stat_entry
+
+
+def test_queue_resolve_reports_named_endpoint(workdir):
+    context = build_context(spec_context=workdir)
+    tid = str(time.time_ns())
+    spec = make_function_taskspec(
+        tid,
+        "tests.tasks.sample_targets:echo_payload",
+        weft_context=str(workdir),
+    )
+    task = Consumer(context.broker_target, spec, config=context.config)
+
+    try:
+        task.register_endpoint_name("mayor", metadata={"role": "operator-facing"})
+
+        rc, out, err = run_cli("queue", "resolve", "mayor", cwd=workdir)
+        assert rc == 0
+        assert err == ""
+        assert "name: mayor" in out
+        assert f"tid: {tid}" in out
+        assert f"inbox: {spec.io.inputs['inbox']}" in out
+    finally:
+        task.cleanup()
+
+
+def test_queue_write_can_target_named_endpoint(workdir):
+    context = build_context(spec_context=workdir)
+    tid = str(time.time_ns())
+    spec = make_function_taskspec(
+        tid,
+        "tests.tasks.sample_targets:echo_payload",
+        weft_context=str(workdir),
+    )
+    task = Consumer(context.broker_target, spec, config=context.config)
+
+    try:
+        task.register_endpoint_name("mayor")
+
+        rc, out, err = run_cli(
+            "queue",
+            "write",
+            "--endpoint",
+            "mayor",
+            "hello",
+            cwd=workdir,
+        )
+        assert rc == 0
+        assert out == ""
+        assert err == ""
+
+        rc, out, err = run_cli("queue", "read", spec.io.inputs["inbox"], cwd=workdir)
+        assert rc == 0
+        assert out.strip() == "hello"
+        assert err == ""
+    finally:
+        task.cleanup()
+
+
+def test_queue_list_endpoints_json_reports_canonical_owner(workdir):
+    context = build_context(spec_context=workdir)
+    low_tid = str(time.time_ns())
+    high_tid = str(int(low_tid) + 1)
+    low_task = Consumer(
+        context.broker_target,
+        make_function_taskspec(
+            low_tid,
+            "tests.tasks.sample_targets:echo_payload",
+            weft_context=str(workdir),
+        ),
+        config=context.config,
+    )
+    high_task = Consumer(
+        context.broker_target,
+        make_function_taskspec(
+            high_tid,
+            "tests.tasks.sample_targets:echo_payload",
+            weft_context=str(workdir),
+        ),
+        config=context.config,
+    )
+
+    try:
+        low_task.register_endpoint_name("mayor")
+        high_task.register_endpoint_name("mayor")
+
+        rc, out, err = run_cli(
+            "queue",
+            "list",
+            "--endpoints",
+            "--json",
+            cwd=workdir,
+        )
+        assert rc == 0
+        assert err == ""
+        payload = json.loads(out or "[]")
+        assert len(payload) == 1
+        assert payload[0]["name"] == "mayor"
+        assert payload[0]["tid"] == low_tid
+        assert payload[0]["live_candidates"] == 2
+    finally:
+        high_task.cleanup()
+        low_task.cleanup()

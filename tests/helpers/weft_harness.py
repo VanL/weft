@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import gc
 import json
 import os
@@ -358,7 +359,7 @@ class WeftTestHarness:
             self._restore_cwd()
             self._restore_environment()
             if not preserve_database:
-                self._tempdir.cleanup()
+                self._cleanup_tempdir()
             self._closed = True
 
     # ------------------------------------------------------------------
@@ -897,6 +898,27 @@ class WeftTestHarness:
                     "Failed to restore database files after release probe: "
                     + "; ".join(restore_errors)
                 )
+
+    def _cleanup_tempdir(self) -> None:
+        last_error: OSError | None = None
+        for _ in range(5):
+            gc.collect()
+            try:
+                self._tempdir.cleanup()
+                return
+            except FileNotFoundError:
+                return
+            except OSError as exc:
+                if exc.errno not in {
+                    errno.ENOTEMPTY,
+                    errno.EBUSY,
+                    errno.EPERM,
+                }:
+                    raise
+                last_error = exc
+                time.sleep(0.05)
+        if last_error is not None:
+            raise last_error
 
 
 __all__ = ["WeftTestHarness"]

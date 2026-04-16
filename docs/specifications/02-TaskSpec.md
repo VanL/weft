@@ -308,6 +308,9 @@ different owners and run at different points:
   declared long options into a concrete TaskSpec template before queueing
 - `spec.run_input`: local `weft run --spec` shaping from declared long options
   plus optional stdin into the ordinary initial work payload before queueing
+- explicit `weft run --name TEXT`: local submission-time override of the
+  top-level task name and, for persistent resolved tasks only, injection of a
+  private runtime endpoint-claim metadata key before queueing
 - `spec.runner.environment_profile_ref`: runner-owned default materialization
   into ordinary `runner.options`, `env`, and `working_dir`
 - `spec.agent.runtime_config.tool_profile_ref`: delegated-runtime-owned
@@ -328,6 +331,8 @@ Boundary rule:
   ordinary `TaskSpec -> Manager -> Consumer -> TaskRunner -> runner` spine
 - local submission hooks may materialize a concrete TaskSpec or work payload,
   but they do not get to reinterpret runtime state after the task is queued
+- CLI-owned explicit name override is one of those local shaping hooks. It does
+  not add a public TaskSpec field
 
 Current declared-option rules:
 

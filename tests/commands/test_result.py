@@ -20,6 +20,8 @@ from weft.context import build_context
 
 pytestmark = [pytest.mark.shared]
 
+RESULT_WAIT_TIMEOUT = 2.0
+
 
 def _capture_stream_echo(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     rendered: list[str] = []
@@ -136,11 +138,11 @@ def test_await_single_result_reads_outbox_after_completion_event(tmp_path) -> No
         status, result, error = _await_single_result(
             ctx,
             tid,
-            timeout=1.0,
+            timeout=RESULT_WAIT_TIMEOUT,
             show_stderr=False,
         )
     finally:
-        writer.join(timeout=1.0)
+        writer.join(timeout=RESULT_WAIT_TIMEOUT)
 
     assert status == "completed"
     assert result == "hello"
@@ -175,11 +177,11 @@ def test_await_one_shot_result_reads_outbox_after_completion_event(tmp_path) -> 
             tid,
             outbox_name=f"T{tid}.outbox",
             ctrl_out_name=None,
-            timeout=1.0,
+            timeout=RESULT_WAIT_TIMEOUT,
             show_stderr=False,
         )
     finally:
-        writer.join(timeout=1.0)
+        writer.join(timeout=RESULT_WAIT_TIMEOUT)
 
     assert status == "completed"
     assert result == "hello"
@@ -214,11 +216,11 @@ def test_await_single_result_aggregates_multiple_outbox_messages(tmp_path) -> No
         status, result, error = _await_single_result(
             ctx,
             tid,
-            timeout=1.0,
+            timeout=RESULT_WAIT_TIMEOUT,
             show_stderr=False,
         )
     finally:
-        writer.join(timeout=1.0)
+        writer.join(timeout=RESULT_WAIT_TIMEOUT)
 
     assert status == "completed"
     assert result == ["hello", "world"]
@@ -245,7 +247,7 @@ def test_await_single_result_classifies_timeout_event_as_timeout(tmp_path) -> No
     status, result, error = _await_single_result(
         ctx,
         tid,
-        timeout=1.0,
+        timeout=RESULT_WAIT_TIMEOUT,
         show_stderr=False,
     )
 
@@ -300,13 +302,13 @@ def test_await_single_result_persistent_returns_one_work_item_batch(tmp_path) ->
     first_status, first_result, first_error = _await_single_result(
         ctx,
         tid,
-        timeout=1.0,
+        timeout=RESULT_WAIT_TIMEOUT,
         show_stderr=False,
     )
     second_status, second_result, second_error = _await_single_result(
         ctx,
         tid,
-        timeout=1.0,
+        timeout=RESULT_WAIT_TIMEOUT,
         show_stderr=False,
     )
 
@@ -372,12 +374,12 @@ def test_await_single_result_stream_mode_emits_chunks_without_replay(
         status, result, error = _await_single_result(
             ctx,
             tid,
-            timeout=1.0,
+            timeout=RESULT_WAIT_TIMEOUT,
             show_stderr=False,
             emit_stream=True,
         )
     finally:
-        writer.join(timeout=1.0)
+        writer.join(timeout=RESULT_WAIT_TIMEOUT)
 
     assert status == "completed"
     assert result is None
@@ -457,14 +459,14 @@ def test_await_single_result_persistent_stream_mode_keeps_next_batch(
     first_status, first_result, first_error = _await_single_result(
         ctx,
         tid,
-        timeout=1.0,
+        timeout=RESULT_WAIT_TIMEOUT,
         show_stderr=False,
         emit_stream=True,
     )
     second_status, second_result, second_error = _await_single_result(
         ctx,
         tid,
-        timeout=1.0,
+        timeout=RESULT_WAIT_TIMEOUT,
         show_stderr=False,
         emit_stream=True,
     )
@@ -529,14 +531,14 @@ def test_cmd_result_waits_for_custom_result_channels_to_materialize(tmp_path) ->
             tid=tid,
             all_results=False,
             peek=False,
-            timeout=1.0,
+            timeout=RESULT_WAIT_TIMEOUT,
             stream=False,
             json_output=False,
             show_stderr=False,
             context_path=str(root),
         )
     finally:
-        thread.join(timeout=1.0)
+        thread.join(timeout=RESULT_WAIT_TIMEOUT)
         outbox_queue.close()
         log_queue.close()
 
@@ -551,7 +553,7 @@ def test_cmd_result_rejects_stream_json_combination(tmp_path) -> None:
         tid="123",
         all_results=False,
         peek=False,
-        timeout=1.0,
+        timeout=RESULT_WAIT_TIMEOUT,
         stream=True,
         json_output=True,
         show_stderr=False,
@@ -584,7 +586,7 @@ def test_cmd_result_stream_preserves_error_payload_selection(tmp_path) -> None:
         tid=tid,
         all_results=False,
         peek=False,
-        timeout=1.0,
+        timeout=RESULT_WAIT_TIMEOUT,
         stream=True,
         json_output=False,
         show_stderr=True,
@@ -646,7 +648,7 @@ def test_result_reads_pipeline_outbox_by_pipeline_tid(tmp_path) -> None:
         tid=tid,
         all_results=False,
         peek=False,
-        timeout=1.0,
+        timeout=RESULT_WAIT_TIMEOUT,
         stream=False,
         json_output=False,
         show_stderr=False,

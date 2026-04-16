@@ -7,6 +7,27 @@ Nothing here overrides the canonical message-flow contract.
 
 ## Planned Areas
 
+### Named Endpoint Follow-up [05A-1]
+
+The base named-endpoint discovery flow is now current; see
+[`05-Message_Flow_and_State.md`](05-Message_Flow_and_State.md) [MF-3.1].
+
+Remaining future work, if it proves necessary, is narrower:
+
+- explicit lease or heartbeat refresh instead of today's opportunistic stale
+  pruning
+- additional control-target helpers that still resolve to ordinary `ctrl_in`
+  queues
+- richer operator diagnostics around duplicate live claims
+
+Boundary:
+
+- endpoint resolution remains discovery only
+- sending to a named endpoint remains an ordinary queue write
+- request and reply envelopes stay task-owned or builtin-owned contracts
+- missing-name resolution must remain explicit and must not auto-spawn or
+  auto-register a task
+
 ### Higher-Level State Helpers
 
 Possible future work:
@@ -35,3 +56,4 @@ Possible future work:
 
 - [`docs/plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md`](../plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md)
 - [`docs/plans/2026-04-13-pipeline-spec-expansion-plan.md`](../plans/2026-04-13-pipeline-spec-expansion-plan.md)
+- [`docs/plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md`](../plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md)

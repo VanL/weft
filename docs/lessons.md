@@ -387,6 +387,25 @@ runbook needs to become stricter.
   runner-plugin stop/kill hooks, and `atexit`/destructor cleanup. If a broad
   catch survives, the code should say why that boundary is best effort.
 
+## 2026-04-16 Review-Finding Boundary Fixes
+
+- Do not reuse reserved-queue cleanup helpers as if every execution path came
+  from a reserved inbox message. Direct `run_work_item()` execution has no
+  active reserved timestamp, so STOP/KILL finalization must not clear or
+  requeue unrelated reserved backlog.
+- On correctness-critical broker freshness checks, do not trust a cached
+  `Queue.last_ts` read. Force-refresh the broker timestamp at the boundary that
+  decides manager idle shutdown; ordinary throttled reads can stay cached.
+- Runtime-only streaming markers such as `weft.state.streaming` must clear on
+  the successful persistent path before the task returns to `waiting`. If a
+  runtime marker can outlive the live work it describes, operator surfaces will
+  start treating stale runtime hints as durable truth.
+- Append-only control and registry queues need their public truth boundary
+  stated explicitly. Raw `ctrl_in` deletion during active STOP/KILL is not the
+  public ACK, and raw registry history is not a mutable snapshot. Public truth
+  comes from post-unwind `ctrl_out` plus terminal task-log state, and from
+  reducing manager registry history to the latest relevant live record.
+
 ## 2026-04-08 Manager Role Identity
 
 - Manager identity has to stay consistent across every observability surface,

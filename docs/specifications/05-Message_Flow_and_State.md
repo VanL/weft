@@ -20,6 +20,8 @@ See also:
   [`05A-Message_Flow_and_State_Planned.md`](05A-Message_Flow_and_State_Planned.md)
 - invariants:
   [`07-System_Invariants.md`](07-System_Invariants.md)
+- implementation plan:
+  [`docs/plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md`](../plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md)
 
 ## Message Flow Patterns [MF-0]
 
@@ -61,6 +63,8 @@ Current rules:
 - success clears or finalizes reserved state
 - error, timeout, or external control applies the configured reserved policy
 - crash leaves the message in reserved state for explicit operator recovery
+- direct `run_work_item()` execution has no reserved message and must not
+  mutate unrelated reserved backlog as if it did
 
 Agent work follows the same outer reservation flow as command and function
 targets.
@@ -83,9 +87,42 @@ The control plane is explicit:
 - `ctrl_out` carries task-local replies and terminal notifications
 - `weft.log.tasks` remains the durable audit trail rather than the interactive
   reply channel
+- active STOP/KILL may delete the raw `ctrl_in` message as an internal
+  handoff detail, but public acknowledgement remains the post-unwind
+  `ctrl_out` reply plus the terminal task-log event on the main task thread
 
 _Implementation mapping_: `weft/core/tasks/base.py`,
 `weft/core/tasks/consumer.py`, `weft/commands/tasks.py`.
+
+### 3.1 Named Endpoint Discovery [MF-3.1]
+
+Current flow:
+
+```text
+Task -> weft.state.endpoints -> resolve/list -> ordinary queue write to inbox or ctrl_in
+```
+
+Current rules:
+
+- a long-lived task may explicitly publish one active named-endpoint claim by
+  writing a runtime record that points at its ordinary task-local queues
+- current claim paths are explicit task-side registration helpers and explicit
+  `weft run --name TEXT` on persistent top-level runs
+- clean shutdown deletes the task's active claim
+- resolve and list surfaces opportunistically prune stale claims whose owner is
+  terminal or no longer live
+- current liveness checks use `weft.log.tasks` plus `weft.state.tid_mappings`;
+  there is no separate endpoint lease or heartbeat contract
+- if multiple live tasks claim the same name, the canonical live owner is the
+  lowest eligible TID; duplicate live claims remain observable conflicts
+- sending to a named endpoint is still an ordinary queue write to the resolved
+  inbox or `ctrl_in`
+- missing-name resolution is an explicit failure. It does not auto-spawn,
+  auto-register, or redirect work elsewhere
+
+_Implementation mapping_: `weft/core/tasks/base.py`
+`register_endpoint_name()` and `unregister_endpoint_name()`;
+`weft/core/endpoints.py`; `weft/commands/queue.py`.
 
 ### 4. Pipeline Flow [MF-4]
 
@@ -339,3 +376,4 @@ management live in the companion doc:
 - [`docs/plans/2026-04-13-result-stream-implementation-plan.md`](../plans/2026-04-13-result-stream-implementation-plan.md)
 - [`docs/plans/2026-04-16-autostart-hardening-and-contract-alignment-plan.md`](../plans/2026-04-16-autostart-hardening-and-contract-alignment-plan.md)
 - [`docs/plans/2026-04-16-pipeline-autostart-extension-plan.md`](../plans/2026-04-16-pipeline-autostart-extension-plan.md)
+- [`docs/plans/2026-04-16-review-findings-remediation-plan.md`](../plans/2026-04-16-review-findings-remediation-plan.md)

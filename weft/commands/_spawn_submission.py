@@ -28,7 +28,7 @@ from weft.helpers import iter_queue_json_entries
 from ._manager_bootstrap import _list_manager_records
 from ._queue_wait import QueueChangeMonitor
 
-_SPAWN_RECONCILIATION_STATIC_QUEUE_SPECS: Final[tuple[tuple[str, bool], ...]] = (
+_spawn_reconciliation_static_queue_specs: Final[tuple[tuple[str, bool], ...]] = (
     (WEFT_TID_MAPPINGS_QUEUE, False),
     (WEFT_GLOBAL_LOG_QUEUE, False),
     (WEFT_SPAWN_REQUESTS_QUEUE, False),
@@ -165,7 +165,7 @@ def _reserved_spawn_request_queue_names(context: WeftContext) -> tuple[str, ...]
 def _spawn_reconciliation_queue_specs(
     context: WeftContext,
 ) -> tuple[tuple[str, bool], ...]:
-    return _SPAWN_RECONCILIATION_STATIC_QUEUE_SPECS + tuple(
+    return _spawn_reconciliation_static_queue_specs + tuple(
         (queue_name, False)
         for queue_name in _reserved_spawn_request_queue_names(context)
     )

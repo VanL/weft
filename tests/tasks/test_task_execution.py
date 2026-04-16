@@ -21,6 +21,7 @@ from weft._constants import (
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_STREAMING_SESSIONS_QUEUE,
 )
+from weft.core.runners import RunnerOutcome
 from weft.core.tasks import Consumer
 from weft.core.tasks.base import BaseTask
 from weft.core.taskspec import (
@@ -89,6 +90,8 @@ def make_command_taskspec(
     cleanup_on_exit: bool = False,
     reserved_stop: ReservedPolicy = ReservedPolicy.KEEP,
     reserved_error: ReservedPolicy = ReservedPolicy.KEEP,
+    persistent: bool = False,
+    stream_output: bool | None = None,
 ) -> TaskSpec:
     """Create a TaskSpec for command execution with explicit queue mappings."""
     return TaskSpec(
@@ -101,6 +104,8 @@ def make_command_taskspec(
             cleanup_on_exit=cleanup_on_exit,
             reserved_policy_on_stop=reserved_stop,
             reserved_policy_on_error=reserved_error,
+            persistent=persistent,
+            stream_output=stream_output if stream_output is not None else False,
         ),
         io=IOSection(
             inputs={"inbox": f"T{tid}.inbox"},
@@ -223,6 +228,45 @@ def test_run_work_item_spills_large_output(broker_env, unique_tid: str) -> None:
     outbox = make_queue(spec.io.outputs["outbox"])
     reference = json.loads(outbox.read_one())
     assert reference["type"] == "large_output"
+    task.cleanup()
+
+
+def test_run_work_item_deferred_stop_without_active_message_preserves_reserved_queue(
+    broker_env,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    spec = make_function_taskspec(
+        unique_tid,
+        "tests.tasks.sample_targets:echo_payload",
+        reserved_stop=ReservedPolicy.CLEAR,
+    )
+    task = Consumer(db_path, spec)
+
+    reserved = make_queue(f"T{unique_tid}.{QUEUE_RESERVED_SUFFIX}")
+    reserved.write("job")
+
+    def fake_run_task(_work_item: object) -> RunnerOutcome:
+        task._defer_active_control(CONTROL_STOP, int(unique_tid) + 1)
+        return RunnerOutcome(
+            status="cancelled",
+            value=None,
+            error="Target execution cancelled",
+            stdout=None,
+            stderr=None,
+            returncode=None,
+            duration=0.0,
+        )
+
+    monkeypatch.setattr(task, "_run_task", fake_run_task)
+
+    with pytest.raises(RuntimeError, match="STOP command received"):
+        task.run_work_item({"args": ["direct"]})
+
+    assert task.taskspec.state.status == "cancelled"
+    assert reserved.read_one() == "job"
+    assert make_queue(spec.io.control["ctrl_out"]).read_one() is not None
     task.cleanup()
 
 
@@ -510,6 +554,33 @@ def test_streaming_session_records_and_clears(
         f"{unique_tid}:{spec.io.outputs['outbox']}:"
     )
     assert deletes, "expected streaming session deletion"
+
+
+def test_persistent_live_command_streaming_clears_session_before_waiting(
+    monkeypatch,
+    broker_env,
+    unique_tid: str,
+) -> None:
+    writes, deletes = _instrument_streaming_queue(monkeypatch)
+
+    db_path, _make_queue = broker_env
+    spec = make_command_taskspec(
+        unique_tid,
+        sys.executable,
+        args=[PROCESS_SCRIPT, "--result", "streamed"],
+        persistent=True,
+        stream_output=True,
+    )
+    task = Consumer(db_path, spec)
+
+    try:
+        result = task.run_work_item({})
+        assert result == "streamed"
+        assert task.taskspec.state.status == "running"
+        assert writes, "expected streaming session entry"
+        assert deletes, "expected streaming session deletion before returning"
+    finally:
+        task.cleanup()
 
 
 def test_cleanup_on_exit_removes_output_queue(broker_env, unique_tid: str) -> None:

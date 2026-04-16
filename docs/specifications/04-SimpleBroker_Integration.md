@@ -16,6 +16,8 @@ See also:
   [`04A-SimpleBroker_Integration_Planned.md`](04A-SimpleBroker_Integration_Planned.md)
 - current CLI contract:
   [`10-CLI_Interface.md`](10-CLI_Interface.md)
+- implementation plan:
+  [`docs/plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md`](../plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md)
 
 ## SimpleBroker Features Leveraged by Weft [SB-0]
 
@@ -87,6 +89,29 @@ Current behavior:
 
 This backend-neutral path is why older CLI surfaces like global `--dir` and
 `--file` are no longer the right mental model.
+
+### Runtime Endpoint Registry State [SB-0.5]
+
+Named endpoint discovery is stored as Weft-owned runtime state on ordinary
+broker queues.
+
+_Implementation mapping_: `weft/_constants.py`
+`WEFT_ENDPOINTS_REGISTRY_QUEUE`; `weft/core/endpoints.py`;
+`weft/core/tasks/base.py` `register_endpoint_name()` and
+`unregister_endpoint_name()`.
+
+Current contract:
+
+- `weft.state.endpoints` stores task-owned JSON records keyed by ordinary task
+  TIDs
+- each record points at ordinary task-local queues rather than introducing a
+  second transport
+- endpoint state is runtime-only and is excluded from dump/load with the rest
+  of the `weft.state.*` soft-state queues
+- endpoint resolution and stale-owner pruning use ordinary broker APIs and
+  queue-visible runtime state; there is no backend-specific SQL coupling
+- names are project-local. Weft does not expose a cross-context or global
+  service namespace
 
 ## Project Context and Directory Scoping
 

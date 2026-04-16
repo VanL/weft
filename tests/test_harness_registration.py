@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import json
 import os
 from types import SimpleNamespace
@@ -112,6 +113,58 @@ def test_harness_cleanup_preserve_database_avoids_force_termination(
         os.chdir(repo_cwd)
         harness._closed = True
         harness._tempdir.cleanup()
+
+
+@pytest.mark.sqlite_only
+def test_harness_cleanup_retries_transient_tempdir_not_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = WeftTestHarness()
+    original_tempdir = harness._tempdir
+    repo_cwd = os.getcwd()
+
+    class _TempdirStub:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def cleanup(self) -> None:
+            self.calls += 1
+            if self.calls == 1:
+                raise OSError(errno.ENOTEMPTY, "Directory not empty")
+
+    stub = _TempdirStub()
+
+    try:
+        harness.__enter__()
+        monkeypatch.setattr(harness, "_stop_active_managers", lambda **kwargs: None)
+        monkeypatch.setattr(harness, "_collect_pid_mappings", lambda: None)
+        monkeypatch.setattr(
+            harness,
+            "_wait_for_registered_pids_to_exit",
+            lambda timeout=None: [],
+        )
+        monkeypatch.setattr(harness, "_terminate_registered_pids", lambda: None)
+        monkeypatch.setattr(harness, "_remove_database_files", lambda: None)
+        monkeypatch.setattr(
+            harness_mod,
+            "cleanup_prepared_roots",
+            lambda root: None,
+        )
+        sleep_calls: list[float] = []
+        monkeypatch.setattr(
+            harness_mod.time,
+            "sleep",
+            lambda seconds: sleep_calls.append(seconds),
+        )
+        harness._tempdir = cast(Any, stub)
+
+        harness.cleanup()
+
+        assert stub.calls == 2
+        assert sleep_calls == [0.05]
+    finally:
+        os.chdir(repo_cwd)
+        original_tempdir.cleanup()
 
 
 @pytest.mark.sqlite_only

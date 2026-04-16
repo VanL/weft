@@ -6,8 +6,8 @@ CLI in sync with SimpleBroker (minus ``init``, which already exists as
 ``weft init``) while still respecting Weft configuration and project discovery.
 
 Spec references:
-- docs/specifications/04-SimpleBroker_Integration.md [SB-0.1], [SB-0.3]
-- docs/specifications/10-CLI_Interface.md (queue operations)
+- docs/specifications/04-SimpleBroker_Integration.md [SB-0.1], [SB-0.3], [SB-0.5]
+- docs/specifications/10-CLI_Interface.md [CLI-4], [CLI-4.1]
 """
 
 from __future__ import annotations
@@ -25,6 +25,12 @@ from typing import Any, cast
 from simplebroker import commands as sb_commands
 from simplebroker._timestamp import TimestampGenerator
 from weft.context import WeftContext, build_context
+from weft.core.endpoints import (
+    ResolvedEndpoint,
+    list_resolved_endpoints,
+    normalize_endpoint_name,
+    resolve_endpoint,
+)
 from weft.helpers import resolve_broker_max_message_size, resolve_cli_message_content
 
 from ._queue_wait import QueueChangeMonitor
@@ -91,6 +97,36 @@ def _resolve_message_content(
 ) -> str:
     max_bytes = resolve_broker_max_message_size(ctx.config)
     return resolve_cli_message_content(message, max_bytes=max_bytes)
+
+
+def _format_resolved_endpoint(record: ResolvedEndpoint) -> str:
+    payload = record.to_dict()
+    lines = [
+        f"name: {payload['name']}",
+        f"tid: {payload['tid']}",
+        f"status: {payload['status']}",
+        f"inbox: {payload['inbox']}",
+        f"outbox: {payload['outbox']}",
+        f"ctrl_in: {payload['ctrl_in']}",
+        f"ctrl_out: {payload['ctrl_out']}",
+        f"registered_at: {payload['registered_at']}",
+        f"last_seen: {payload['last_seen']}",
+        f"live_candidates: {payload['live_candidates']}",
+    ]
+    metadata = payload.get("metadata")
+    if isinstance(metadata, dict) and metadata:
+        lines.append(f"metadata: {json.dumps(metadata, ensure_ascii=False)}")
+    return "\n".join(lines)
+
+
+def _format_endpoint_list(records: list[ResolvedEndpoint]) -> str:
+    lines: list[str] = []
+    for record in records:
+        line = f"{record.record.name}\t{record.record.tid}\t{record.record.inbox}"
+        if record.live_candidates > 1:
+            line += f"\t({record.live_candidates} live claims)"
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def read_messages(
@@ -308,14 +344,32 @@ def read_command(
     )
 
 
-def write_command(queue_name: str, message: str | None) -> tuple[int, str, str]:
-    ctx = _context()
+def write_command(
+    queue_name: str | None,
+    message: str | None,
+    *,
+    endpoint_name: str | None = None,
+    spec_context: str | None = None,
+) -> tuple[int, str, str]:
+    ctx = _context(spec_context)
+    target_queue = queue_name
+    if endpoint_name is not None:
+        try:
+            resolved = resolve_endpoint(ctx, endpoint_name)
+        except ValueError as exc:
+            return 1, "", str(exc)
+        if resolved is None:
+            normalized = normalize_endpoint_name(endpoint_name)
+            return 2, "", f"No active endpoint named '{normalized}'"
+        target_queue = resolved.record.inbox
+    if not isinstance(target_queue, str) or not target_queue:
+        return 1, "", "Queue name is required unless --endpoint is used"
     try:
         content = _resolve_message_content(ctx, message)
     except ValueError as exc:
         return 1, "", str(exc)
     return _run_simplebroker_command(
-        sb_commands.cmd_write, ctx.broker_target, queue_name, content
+        sb_commands.cmd_write, ctx.broker_target, target_queue, content
     )
 
 
@@ -408,10 +462,26 @@ def list_command(
     *,
     json_output: bool = False,
     stats: bool = False,
+    endpoints: bool = False,
     pattern: str | None = None,
     spec_context: str | None = None,
 ) -> tuple[int, str, str]:
     ctx = _context(spec_context)
+
+    if endpoints:
+        if stats:
+            return 1, "", "--stats is not supported with --endpoints"
+        records = list_resolved_endpoints(ctx, pattern=pattern)
+        if json_output:
+            return (
+                0,
+                json.dumps(
+                    [record.to_dict() for record in records],
+                    ensure_ascii=False,
+                ),
+                "",
+            )
+        return 0, _format_endpoint_list(records), ""
 
     if json_output:
         queues = list_queues(ctx, include_stats=stats, pattern=pattern)
@@ -527,6 +597,25 @@ def watch_command(
     return 0, "", ""
 
 
+def resolve_command(
+    endpoint_name: str,
+    *,
+    json_output: bool = False,
+    spec_context: str | None = None,
+) -> tuple[int, str, str]:
+    ctx = _context(spec_context)
+    try:
+        resolved = resolve_endpoint(ctx, endpoint_name)
+    except ValueError as exc:
+        return 1, "", str(exc)
+    if resolved is None:
+        normalized = normalize_endpoint_name(endpoint_name)
+        return 2, "", f"No active endpoint named '{normalized}'"
+    if json_output:
+        return 0, json.dumps(resolved.to_dict(), ensure_ascii=False), ""
+    return 0, _format_resolved_endpoint(resolved), ""
+
+
 def alias_add_command(
     alias: str,
     target: str,
@@ -584,6 +673,7 @@ __all__ = [
     "peek_command",
     "move_command",
     "list_command",
+    "resolve_command",
     "delete_command",
     "broadcast_command",
     "watch_command",

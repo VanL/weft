@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 import types
 
@@ -32,6 +33,7 @@ def build_function_spec(
     *,
     enable_title: bool = True,
     function_target: str = "tests.tasks.sample_targets:echo_payload",
+    name: str = "observability-task",
     context_path: str = "ctx-root",
     env: dict[str, str] | None = None,
     metadata: dict[str, object] | None = None,
@@ -40,7 +42,7 @@ def build_function_spec(
 ) -> TaskSpec:
     return TaskSpec(
         tid=tid,
-        name="observability-task",
+        name=name,
         spec=SpecSection(
             type="function",
             function_target=function_target,
@@ -204,6 +206,38 @@ def test_process_title_keeps_status_token_and_uses_activity_detail(
 
     assert calls
     assert any(title.endswith(":running:waiting") for title in calls)
+
+
+def test_process_title_sanitizes_dynamic_segments(
+    task_factory, unique_tid: str
+) -> None:
+    calls: list[str] = []
+    fake_module = types.SimpleNamespace(setproctitle=lambda title: calls.append(title))
+    spec = build_function_spec(
+        unique_tid,
+        enable_title=False,
+        name="; rm -rf /",
+        context_path="/tmp/ctx;rm -rf",
+    )
+    task = task_factory(spec)
+    task._setproctitle_module = fake_module
+    task.enable_process_title = True
+
+    task._update_process_title(
+        "running;cat /etc/passwd",
+        " waiting:\nqueue;rm ",
+    )
+
+    assert calls == [
+        (
+            f"weft-ctxrm-rf-{unique_tid[-TASKSPEC_TID_SHORT_LENGTH:]}"
+            ":rm-rf:runningcatetcpasswd:waitingqueuerm"
+        )
+    ]
+    assert re.fullmatch(
+        r"weft-[A-Za-z0-9_-]+-[0-9]+:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+(?::[A-Za-z0-9_-]+)?",
+        calls[0],
+    )
 
 
 def test_state_logging_records_events(broker_env, task_factory, unique_tid) -> None:

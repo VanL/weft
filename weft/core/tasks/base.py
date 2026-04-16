@@ -39,6 +39,7 @@ from weft._constants import (
     CONTROL_KILL,
     CONTROL_STOP,
     DEFAULT_OUTPUT_SIZE_LIMIT_MB,
+    INTERNAL_RUNTIME_ENDPOINT_NAME_KEY,
     PIPELINE_OWNER_METADATA_KEY,
     QUEUE_CTRL_IN_SUFFIX,
     QUEUE_CTRL_OUT_SUFFIX,
@@ -49,12 +50,18 @@ from weft._constants import (
     TASK_PROCESS_POLL_INTERVAL,
     TASKSPEC_TID_SHORT_LENGTH,
     TERMINAL_TASK_STATUSES,
+    WEFT_ENDPOINTS_REGISTRY_QUEUE,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_STREAMING_SESSIONS_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
     load_config,
 )
 from weft._runner_plugins import require_runner_plugin
+from weft.core.endpoints import (
+    build_endpoint_record_payload,
+    find_endpoint_registry_message,
+    normalize_endpoint_name,
+)
 from weft.core.taskspec import ReservedPolicy, TaskSpec
 from weft.ext import RunnerHandle
 from weft.helpers import (
@@ -172,6 +179,10 @@ class BaseTask(MultiQueueWatcher, ABC):
             self._queue(global_name)
 
         self._ctrl_out_queue = self._queue(self._queue_names["ctrl_out"])
+        self._endpoint_registration_name: str | None = None
+        self._endpoint_registration_metadata: dict[str, Any] | None = None
+        self._endpoint_registration_message_id: int | None = None
+        self._claim_configured_runtime_endpoint()
         self._streaming_session_info: dict[str, Any] | None = None
         self._streaming_session_message_id: int | None = None
 
@@ -319,6 +330,7 @@ class BaseTask(MultiQueueWatcher, ABC):
 
         Spec: [CC-2.5], [SB-0.1]
         """
+        self.unregister_endpoint_name()
         self._end_streaming_session()
         seen_queue_ids: set[int] = set()
         for queue in list(self._queue_cache.values()):
@@ -796,7 +808,7 @@ class BaseTask(MultiQueueWatcher, ABC):
     def _update_process_title(self, status: str, details: str | None = None) -> None:
         """Update the OS process title when supported by the environment.
 
-        Spec: [CC-2.4]
+        Spec: [CC-2.4], [OBS.4], [OBS.7], [OBS.8]
         """
         if not self.enable_process_title:
             return
@@ -831,10 +843,29 @@ class BaseTask(MultiQueueWatcher, ABC):
         except (AttributeError, OSError, RuntimeError):
             logger.debug("Failed to update process title", exc_info=True)
 
+    def _sanitize_process_title_segment(
+        self,
+        value: Any,
+        *,
+        fallback: str | None = None,
+        max_length: int | None = None,
+    ) -> str:
+        """Normalize one dynamic process-title segment to the allowed vocabulary.
+
+        Spec: [OBS.4], [OBS.7], [OBS.8]
+        """
+        raw_value = "" if value is None else str(value)
+        segment = re.sub(r"[^a-zA-Z0-9_-]", "", raw_value)
+        if not segment and fallback is not None:
+            segment = re.sub(r"[^a-zA-Z0-9_-]", "", fallback)
+        if max_length is not None:
+            segment = segment[:max_length]
+        return segment
+
     def _format_process_title(self, status: str, details: str | None = None) -> str:
         """Generate a compact, safe-to-display process title fragment.
 
-        Spec: [CC-2.4]
+        Spec: [CC-2.4], [OBS.4], [OBS.7], [OBS.8]
         """
         context_short = "proj"
         context_path: Path | None = None
@@ -846,22 +877,30 @@ class BaseTask(MultiQueueWatcher, ABC):
                 context_path = self._db_path.project_root
 
         if context_path:
-            context_label = context_path.name or context_path.stem
-            context_label = context_label[:8]
-            context_label = re.sub(r"[^a-zA-Z0-9_-]", "", context_label)
-            if context_label:
-                context_short = context_label
+            context_short = self._sanitize_process_title_segment(
+                context_path.name or context_path.stem,
+                fallback="proj",
+                max_length=8,
+            )
 
-        safe_name = re.sub(r"[^a-zA-Z0-9_-]", "", self.taskspec.name) or "task"
+        safe_name = self._sanitize_process_title_segment(
+            self.taskspec.name,
+            fallback="task",
+            max_length=20,
+        )
+        safe_status = self._sanitize_process_title_segment(status, fallback="unknown")
         parts = [
             f"weft-{context_short}-{self.tid_short}",
-            safe_name[:20],
-            status,
+            safe_name,
+            safe_status,
         ]
         if details:
-            safe_details = re.sub(r"[^a-zA-Z0-9_-]", "", str(details))
+            safe_details = self._sanitize_process_title_segment(
+                details,
+                max_length=15,
+            )
             if safe_details:
-                parts.append(safe_details[:15])
+                parts.append(safe_details)
         return ":".join(parts)
 
     def _register_tid_mapping(self) -> None:
@@ -1082,6 +1121,123 @@ class BaseTask(MultiQueueWatcher, ABC):
             if payload.get("session_id") == session_id:
                 return int(ts)
         return None
+
+    def _claim_configured_runtime_endpoint(self) -> None:
+        """Claim the runtime endpoint requested by submission-time shaping.
+
+        Spec: [CC-2.4.1], [MF-3.1]
+        """
+
+        if not bool(getattr(self.taskspec.spec, "persistent", False)):
+            return
+
+        configured_name = self.taskspec.metadata.get(INTERNAL_RUNTIME_ENDPOINT_NAME_KEY)
+        if not isinstance(configured_name, str) or not configured_name:
+            return
+
+        self.register_endpoint_name(configured_name)
+
+    def register_endpoint_name(
+        self,
+        name: str,
+        *,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Claim a stable runtime endpoint name for this live task.
+
+        Spec: [CC-2.2], [CC-2.4.1], [MF-3.1]
+        """
+
+        normalized_name = normalize_endpoint_name(name)
+        queue = self._queue(WEFT_ENDPOINTS_REGISTRY_QUEUE)
+        registered_at = time.time_ns()
+        payload = build_endpoint_record_payload(
+            name=normalized_name,
+            tid=self.tid,
+            inbox=self._queue_names["inbox"],
+            outbox=self._queue_names["outbox"],
+            ctrl_in=self._queue_names["ctrl_in"],
+            ctrl_out=self._queue_names["ctrl_out"],
+            metadata=metadata,
+            registered_at=registered_at,
+            last_seen=registered_at,
+        )
+
+        previous_message_id = self._endpoint_registration_message_id
+        if previous_message_id is None and self._endpoint_registration_name is not None:
+            previous_message_id = find_endpoint_registry_message(
+                queue,
+                name=self._endpoint_registration_name,
+                tid=self.tid,
+            )
+
+        try:
+            queue.write(json.dumps(payload, ensure_ascii=False))
+        except (BrokerError, OSError, RuntimeError):
+            logger.debug(
+                "Failed to register endpoint %s for task %s",
+                normalized_name,
+                self.tid,
+                exc_info=True,
+            )
+            return
+
+        current_message_id = find_endpoint_registry_message(
+            queue,
+            name=normalized_name,
+            tid=self.tid,
+        )
+        if (
+            previous_message_id is not None
+            and current_message_id is not None
+            and previous_message_id != current_message_id
+        ):
+            try:
+                queue.delete(message_id=previous_message_id)
+            except (BrokerError, OSError, RuntimeError):
+                logger.debug(
+                    "Failed to prune prior endpoint registration %s for task %s",
+                    previous_message_id,
+                    self.tid,
+                    exc_info=True,
+                )
+
+        self._endpoint_registration_name = normalized_name
+        self._endpoint_registration_metadata = dict(metadata or {})
+        self._endpoint_registration_message_id = current_message_id
+
+    def unregister_endpoint_name(self) -> None:
+        """Release any active runtime endpoint name claimed by this task.
+
+        Spec: [CC-2.2], [CC-2.4.1], [MF-3.1]
+        """
+
+        if self._endpoint_registration_name is None:
+            return
+
+        queue = self._queue(WEFT_ENDPOINTS_REGISTRY_QUEUE)
+        message_id = self._endpoint_registration_message_id
+        if message_id is None:
+            message_id = find_endpoint_registry_message(
+                queue,
+                name=self._endpoint_registration_name,
+                tid=self.tid,
+            )
+
+        if message_id is not None:
+            try:
+                queue.delete(message_id=message_id)
+            except (BrokerError, OSError, RuntimeError):
+                logger.debug(
+                    "Failed to clear endpoint registration %s for task %s",
+                    message_id,
+                    self.tid,
+                    exc_info=True,
+                )
+
+        self._endpoint_registration_name = None
+        self._endpoint_registration_metadata = None
+        self._endpoint_registration_message_id = None
 
     def _begin_streaming_session(
         self,
