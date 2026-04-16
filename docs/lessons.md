@@ -219,6 +219,14 @@ runbook needs to become stricter.
 
 ## 2026-04-09 Manager Bootstrap Unification
 
+## 2026-04-16 Docker Builtin Boundaries
+
+- Docker-dependent builtins must declare their supported platforms in builtin
+  metadata and reject unsupported platforms at the builtin-owned entry point.
+  Do not rely on the Docker runner plugin alone to make that boundary obvious;
+  otherwise Windows users get a generic runner failure instead of an explicit
+  builtin contract error.
+
 - Operator-facing manager startup must wrap the same canonical bootstrap helper
   as `weft run`. Allowing `weft manager start` to launch arbitrary manager
   TaskSpecs creates a second execution path and lets registry selection adopt a

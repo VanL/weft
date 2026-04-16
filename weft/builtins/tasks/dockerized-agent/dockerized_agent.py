@@ -15,6 +15,11 @@ from weft._constants import (
     DOCKERIZED_AGENT_DEFAULT_ENVIRONMENT_PROFILE_REF,
     DOCKERIZED_AGENT_PROVIDER_CHOICES,
 )
+from weft.builtins import (
+    DOCKER_BUILTIN_SUPPORTED_PLATFORMS,
+    builtin_platform_supported,
+    unsupported_builtin_platform_message,
+)
 from weft.builtins.dockerized_agent_examples import (
     dockerized_agent_environment_profile,
     dockerized_agent_run_input,
@@ -27,6 +32,14 @@ def dockerized_agent_parameterization(
     request: SpecParameterizationRequest,
 ) -> dict[str, Any]:
     """Materialize one concrete provider-specific builtin TaskSpec template."""
+    if not builtin_platform_supported(DOCKER_BUILTIN_SUPPORTED_PLATFORMS):
+        raise ValueError(
+            unsupported_builtin_platform_message(
+                "dockerized-agent",
+                DOCKER_BUILTIN_SUPPORTED_PLATFORMS,
+            )
+        )
+
     provider = request.arguments["provider"]
     if provider not in DOCKERIZED_AGENT_PROVIDER_CHOICES:
         raise ValueError(f"Unsupported provider for dockerized-agent: {provider}")

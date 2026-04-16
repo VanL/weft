@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import types
 from types import SimpleNamespace
@@ -9,6 +10,13 @@ from types import SimpleNamespace
 import pytest
 
 from weft.builtins.agent_images import prepare_agent_images_task
+
+pytestmark = [
+    pytest.mark.skipif(
+        os.name == "nt",
+        reason="Docker builtins are currently supported only on Linux and macOS",
+    )
+]
 
 
 def test_prepare_agent_images_task_requires_docker_extension(
