@@ -12,6 +12,10 @@ from tests.fixtures.provider_cli_fixture import (
     write_provider_cli_wrapper,
 )
 from weft.core.agents import register_builtin_agent_runtimes
+from weft.core.agents.provider_cli.registry import (
+    get_provider_cli_provider,
+    resolve_provider_cli_executable,
+)
 from weft.core.agents.runtime import clear_agent_runtime_registry, execute_agent_target
 from weft.core.taskspec import AgentSection
 
@@ -211,6 +215,46 @@ def test_provider_cli_runtime_uses_project_agent_settings_executable(
 
     payload = json.loads(result.aggregate_public_output())
     assert payload["provider"] == "codex"
+
+
+def test_resolve_provider_cli_executable_normalizes_relative_which_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wrapper = write_provider_cli_wrapper(tmp_path, "codex")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "weft.core.agents.provider_cli.registry.shutil.which",
+        lambda _: f"./{wrapper.name}",
+    )
+
+    resolved = resolve_provider_cli_executable(
+        get_provider_cli_provider("codex"),
+        configured_executable="codex",
+    )
+
+    assert Path(resolved).resolve() == wrapper.resolve()
+
+
+def test_resolve_provider_cli_executable_resolves_relative_project_setting_against_spec_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".weft").mkdir()
+    wrapper = write_provider_cli_wrapper(tmp_path, "codex")
+    _write_agent_settings(
+        tmp_path / ".weft" / "agents.json",
+        provider_name="codex",
+        executable=f"./{wrapper.name}",
+    )
+
+    resolved = resolve_provider_cli_executable(
+        get_provider_cli_provider("codex"),
+        spec_context=str(tmp_path),
+    )
+
+    assert Path(resolved).resolve() == wrapper.resolve()
 
 
 def test_provider_cli_runtime_records_advisory_health_without_gating_execution(

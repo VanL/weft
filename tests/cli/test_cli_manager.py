@@ -273,6 +273,90 @@ def test_manager_list_and_status_agree_on_stale_active_manager(workdir):
     assert tid not in {record["tid"] for record in status_payload["managers"]}
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX only")
+def test_manager_start_replaces_stale_active_manager(workdir):
+    context_root = prepare_project_root(workdir / "stale-manager-start")
+    context = build_context(spec_context=context_root)
+    stale_tid = "1761000000000000008"
+    started_tid: str | None = None
+
+    process = subprocess.Popen([sys.executable, "-c", "import os; os._exit(0)"])
+    try:
+        process.wait(timeout=2.0)
+        registry_queue = context.queue(WEFT_MANAGERS_REGISTRY_QUEUE, persistent=False)
+        registry_queue.write(
+            json.dumps(
+                {
+                    "tid": stale_tid,
+                    "status": "active",
+                    "name": "stale-manager",
+                    "pid": process.pid,
+                    "role": "manager",
+                    "requests": WEFT_SPAWN_REQUESTS_QUEUE,
+                    "ctrl_in": f"T{stale_tid}.ctrl_in",
+                    "ctrl_out": f"T{stale_tid}.ctrl_out",
+                    "outbox": "weft.manager.outbox",
+                }
+            )
+        )
+    finally:
+        process.wait()
+
+    try:
+        rc, out, err = run_cli(
+            "manager",
+            "start",
+            "--context",
+            context_root,
+            cwd=workdir,
+        )
+        assert rc == 0
+        assert err == ""
+
+        started_tid, started_pid = _parse_started_manager(out)
+        assert started_tid != stale_tid
+        assert started_pid != process.pid
+
+        rc, out, err = run_cli(
+            "manager",
+            "list",
+            "--json",
+            "--context",
+            context_root,
+            cwd=workdir,
+        )
+        assert rc == 0
+        assert err == ""
+        manager_records = json.loads(out or "[]")
+        active = [
+            record for record in manager_records if record.get("status") == "active"
+        ]
+        assert {record["tid"] for record in active} == {started_tid}
+
+        registry_reader = context.queue(WEFT_MANAGERS_REGISTRY_QUEUE, persistent=False)
+        try:
+            payloads = [
+                json.loads(item)
+                for item, _timestamp in registry_reader.peek_many(
+                    limit=100, with_timestamps=True
+                )
+            ]
+        finally:
+            registry_reader.close()
+
+        assert all(record.get("pid") != process.pid for record in payloads)
+    finally:
+        if started_tid is not None:
+            run_cli(
+                "manager",
+                "stop",
+                started_tid,
+                "--context",
+                context_root,
+                cwd=workdir,
+            )
+
+
 def test_manager_status_missing(workdir):
     context_root = prepare_project_root(workdir / "status-manager")
     build_context(spec_context=context_root)

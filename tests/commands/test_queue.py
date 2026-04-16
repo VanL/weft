@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import sys
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -13,6 +14,65 @@ from weft.commands import queue as queue_cmd
 from weft.context import build_context
 
 pytestmark = [pytest.mark.shared]
+
+
+class _FakeQueueChangeMonitor:
+    def __init__(self, queues, *, config=None) -> None:
+        del config
+        self.queue_names = [queue.name for queue in queues]
+        self.wait_calls: list[float | None] = []
+
+    def wait(self, timeout: float | None) -> bool:
+        self.wait_calls.append(timeout)
+        return False
+
+    def close(self) -> None:
+        return
+
+
+class _FakeWatchQueue:
+    def __init__(self, name: str, batches: list[list[tuple[str, int]]]) -> None:
+        self.name = name
+        self._batches = list(batches)
+        self.closed = False
+
+    def read_generator(
+        self,
+        *,
+        with_timestamps: bool,
+        since_timestamp: int | None = None,
+    ):
+        del since_timestamp
+        batch = self._batches.pop(0) if self._batches else []
+        if with_timestamps:
+            return iter(batch)
+        return iter([body for body, _timestamp in batch])
+
+    def peek_generator(
+        self,
+        *,
+        with_timestamps: bool,
+        since_timestamp: int | None = None,
+    ):
+        return self.read_generator(
+            with_timestamps=with_timestamps,
+            since_timestamp=since_timestamp,
+        )
+
+    def move_generator(
+        self,
+        _move_to: str,
+        *,
+        with_timestamps: bool,
+        since_timestamp: int | None = None,
+    ):
+        return self.read_generator(
+            with_timestamps=with_timestamps,
+            since_timestamp=since_timestamp,
+        )
+
+    def close(self) -> None:
+        self.closed = True
 
 
 def test_read_and_write_messages(tmp_path):
@@ -70,6 +130,48 @@ def test_watch_queue(tmp_path):
     messages = list(iterator)
     assert len(messages) == 1
     assert messages[0].body == "payload"
+
+
+def test_watch_queue_uses_queue_monitor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_queue = _FakeWatchQueue("watch.queue", [[], [("payload", 5)]])
+    monitor_queue = _FakeWatchQueue("watch.queue", [])
+    created_monitors: list[_FakeQueueChangeMonitor] = []
+
+    class _FakeContext:
+        config: dict[str, Any] = {}
+
+        def __init__(self) -> None:
+            self._queues = [data_queue, monitor_queue]
+
+        def queue(self, _name: str, *, persistent: bool = True):
+            del persistent
+            return self._queues.pop(0)
+
+    def _fake_monitor(queues, *, config=None):
+        monitor = _FakeQueueChangeMonitor(queues, config=config)
+        created_monitors.append(monitor)
+        return monitor
+
+    monkeypatch.setattr(queue_cmd, "QueueChangeMonitor", _fake_monitor)
+
+    messages = list(
+        queue_cmd.watch_queue(
+            _FakeContext(),
+            "watch.queue",
+            interval=0.25,
+            max_messages=1,
+            with_timestamps=True,
+        )
+    )
+
+    assert [message.body for message in messages] == ["payload"]
+    assert len(created_monitors) == 1
+    assert created_monitors[0].queue_names == ["watch.queue"]
+    assert created_monitors[0].wait_calls == [0.25]
+    assert data_queue.closed
+    assert monitor_queue.closed
 
 
 def test_write_command_reads_omitted_message_from_stdin(

@@ -1,5 +1,9 @@
 # Config Precedence and Parsing Alignment Plan
 
+Status: proposed
+Source specs: see Source Documents below
+Superseded by: none
+
 This plan fixes the real configuration defects verified in the current Weft
 codebase without widening scope into unrelated config surfaces. The goal is to
 make broker-target resolution deterministic and documented, keep Weft's

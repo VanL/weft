@@ -1,5 +1,9 @@
 # Task Lifecycle Stop/Drain Audit Log
 
+Status: audit-log
+Source specs: None - audit artifact
+Superseded by: none
+
 Date: 2026-04-08
 Plan: [task-lifecycle-stop-drain-audit-plan.md](./task-lifecycle-stop-drain-audit-plan.md)
 Platform: Darwin

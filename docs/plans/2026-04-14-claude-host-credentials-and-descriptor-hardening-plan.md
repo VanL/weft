@@ -1,5 +1,9 @@
 # Claude Host Credentials Helper and Claude Descriptor Hardening Plan
 
+Status: proposed
+Source specs: see Source Documents below
+Superseded by: none
+
 ## Goal
 
 Make the shipped `example-dockerized-agent-claude_code` builtin actually

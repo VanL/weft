@@ -1,3 +1,9 @@
+# Pipeline Spec Expansion Plan
+
+Status: proposed
+Source specs: see Source Documents below
+Superseded by: none
+
 ## Goal
 
 Define a prescriptive pipeline product contract for Weft that matches the

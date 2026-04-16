@@ -33,6 +33,8 @@ always be rolled back from the public request queue.
 - [Detached Manager Bootstrap Hardening Plan](../plans/2026-04-13-detached-manager-bootstrap-hardening-plan.md) – Replace parent-dependent detached bootstrap with a real detached-launch wrapper, stronger startup proof, and actionable early-failure diagnostics.
 - [Manager Bootstrap Readiness And Cleanup Test Plan](../plans/2026-04-13-manager-bootstrap-readiness-and-cleanup-test-plan.md) – Replace the fixed startup delay with event-based readiness proof and split cleanup-vs-startup stress coverage.
 - [Weft Road To Excellent Plan](../plans/2026-04-14-weft-road-to-excellent-plan.md) – Top-level roadmap for making manager bootstrap boring under contention and aligning the rest of the system to the same reliability bar.
+- [Autostart Hardening And Contract Alignment Plan](../plans/2026-04-16-autostart-hardening-and-contract-alignment-plan.md) – Make project-level autostart intent durable, fix manager-side enqueue bookkeeping, and align manifest policy docs with enforced behavior.
+- [Pipeline Autostart Extension Plan](../plans/2026-04-16-pipeline-autostart-extension-plan.md) – Extend autostart manifests so stored pipeline targets compile and launch through the ordinary first-class pipeline runtime.
 - [Agent Runtime Implementation Plan](../plans/2026-04-06-agent-runtime-implementation-plan.md) – references `MA-2` TID correlation.
 - [Persistent Agent Runtime Implementation Plan](../plans/2026-04-06-persistent-agent-runtime-implementation-plan.md) – references Manager Architecture for long-lived agent sessions.
 - [TaskSpec Clean Design Plan](../plans/2026-04-06-taskspec-clean-design-plan.md) – references Manager Architecture for TaskSpec schema alignment.
@@ -75,12 +77,16 @@ Key responsibilities implemented in `weft/core/manager.py`:
    `WEFT_MANAGER_LIFETIME_TIMEOUT`, which must parse as a non-negative float at
    config-load time. Managers then self-terminate after prolonged inactivity
    while ensuring all child processes are reaped.
-6. **Autostart manifests** – When `WEFT_AUTOSTART_TASKS` is enabled the manager
-   scans `.weft/autostart/` for manifests that reference stored task specs or
-   pipelines and launches each target using the same spawn pipeline as queue
-   submissions. Manifest lifecycle policy (`once`/`ensure`) governs restarts
-   while the manager is running. Current runtime support is limited to `task`
-   targets; `pipeline` targets are logged as unsupported and skipped.
+6. **Autostart manifests** – When autostart is enabled for the effective
+   context, the manager scans `.weft/autostart/` for manifests that reference
+   stored task specs or pipelines and launches each target using the same spawn
+   pipeline as queue submissions. Manifest lifecycle policy (`once`/`ensure`)
+   governs restarts while the manager is running. Launch and restart accounting
+   advances only after a spawn request is successfully written. Ensure-mode
+   manifests are reconsidered immediately after a tracked autostart child exits.
+   Pipeline targets are compiled into the same first-class pipeline task used by
+   `weft run --pipeline` before the manager enqueues the compiled top-level
+   pipeline task on its own inbox.
 7. **Control channel** – In addition to STOP/STATUS, managers reply `PONG` to
   `PING` messages on `ctrl_out`, supporting simple health checks.
 
@@ -90,7 +96,7 @@ _Implementation mapping_:
 - [MA-1.3] Initial payload delivery — `Manager._launch_child_task` (inbox seeding block).
 - [MA-1.4] Registry heartbeat — `Manager._register_manager`, `Manager._unregister_manager`, `Manager._atexit_unregister`.
 - [MA-1.5] Idle timeout — `Manager.process_once` (idle-timeout check), `Manager._update_idle_activity_from_broker`.
-- [MA-1.6] Autostart manifests — `Manager._tick_autostart`, `Manager._build_autostart_spawn_payload`, `Manager._load_autostart_manifest`, `Manager._load_autostart_taskspec`, `Manager._enqueue_autostart_request`. Current runtime support covers `task` targets; `pipeline` targets are skipped with a warning.
+- [MA-1.6] Autostart manifests — `Manager._tick_autostart`, `Manager._build_autostart_spawn_payload`, `Manager._load_autostart_manifest`, `Manager._load_autostart_taskspec`, `Manager._load_autostart_pipeline`, `Manager._active_autostart_sources`, `Manager._enqueue_autostart_request`, `Manager._cleanup_children`, plus `weft/core/pipelines.py::compile_linear_pipeline` for stored pipeline targets.
 - [MA-1.7] Control channel — inherited from `BaseTask._handle_control_command` (`weft/core/tasks/base.py`); PING/PONG, STOP, STATUS, KILL handling.
 
 ## TID Correlation [MA-2]
@@ -116,7 +122,9 @@ manager TID must exist with that same PID. Detached-launcher success
 acknowledgement and startup-log cleanup happen after that proof and are
 best-effort diagnostics cleanup, not the startup truth boundary. This keeps
 startup proof tied to current manager readiness rather than a fixed sleep
-window. Early bootstrap failures surface the detached child exit status and
+window. Queue-backed parts of that wait use broker-native queue waiting on
+`weft.state.managers`; only PID/process-exit checks remain as bounded
+non-queue fallbacks. Early bootstrap failures surface the detached child exit status and
 startup stderr context instead of discarding them. Operators can also manage
 managers explicitly via `weft manager start|stop|list|status` and
 `weft manager serve`. `weft manager start` is a thin operator wrapper over the

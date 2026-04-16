@@ -1,5 +1,9 @@
 # Delegated Agent Runtime Phase 2 Implementation Plan
 
+Status: proposed
+Source specs: see Source Documents below
+Superseded by: none
+
 This plan implements Phase 2 from
 [`docs/specifications/13A-Agent_Runtime_Planned.md`](../specifications/13A-Agent_Runtime_Planned.md):
 task-lifetime interactive delegated sessions for `provider_cli` while keeping

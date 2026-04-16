@@ -1,5 +1,9 @@
 # CLI Surface Doc And Help Alignment Plan
 
+Status: proposed
+Source specs: see Source Documents below
+Superseded by: none
+
 ## Goal
 
 Align the user-facing CLI contract across live help, README examples, and CLI

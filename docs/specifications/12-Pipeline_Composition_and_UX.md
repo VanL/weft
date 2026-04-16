@@ -25,7 +25,9 @@ _Implementation mapping_: `weft/core/pipelines.py` compiles stored
 `PipelineSpec`s into a first-class pipeline task plus generated child stage and
 edge tasks. `weft/core/tasks/pipeline.py` implements the pipeline and edge
 runtime classes. `weft/commands/run.py`, `weft/commands/result.py`, and
-`weft/commands/tasks.py` expose the task-shaped CLI surface.
+`weft/commands/tasks.py` expose the task-shaped CLI surface, and
+`weft/core/manager.py` reuses the same compilation path for autostart pipeline
+targets.
 
 ## UX Principles [PL-0.1]
 
@@ -97,10 +99,10 @@ with its own opaque control plane.
 - generated edge tasks for durable linear handoff and checkpointing
 - pre-started waiting stage and edge task processes for ordinary linear runs
 - stage-local defaults merged into stored task specs
-- pipeline runs becoming first-class task-shaped objects in later phases
+- pipeline runs as first-class task-shaped objects
 - pipeline-owned status reporting for unit-level progress
 - task-log and status visibility for pipeline, edge, and stage progress
-- manager-launched autostart pipeline targets in a later phase
+- manager-launched autostart pipeline targets using the existing manifest shape
 
 ### Explicit non-goals for the initial pipeline product
 
@@ -482,7 +484,7 @@ remains the pipeline's live status and terminal-report surface.
 
 ### Phase 2: Pipeline-native status and autostart [PL-3.3]
 
-After the first-class pipeline run exists:
+Current contract:
 
 - `weft status` and `weft task list` should surface pipeline runs cleanly
 - `weft task status <pipeline-tid>` should show stage progress and child TIDs
@@ -490,9 +492,9 @@ After the first-class pipeline run exists:
 - autostart manifests may target pipelines using the existing target shape
 
 Pipeline autostart should not require a separate manifest schema.
-Before this phase, manager autostart of pipeline targets should remain an
-explicitly unsupported path that logs a clear warning rather than silently
-pretending to launch them.
+The manager compiles a stored pipeline target into the same first-class
+pipeline task used by `weft run --pipeline` and then launches that compiled
+top-level pipeline task on the ordinary manager spine.
 
 ### Phase 3: Optional richer topology [PL-3.4]
 
@@ -920,6 +922,7 @@ before it has a solid, first-class, linear, task-shaped pipeline run.
 
 - [`docs/plans/2026-04-13-pipeline-spec-expansion-plan.md`](../plans/2026-04-13-pipeline-spec-expansion-plan.md)
 - [`docs/plans/2026-04-13-pipeline-first-class-runtime-implementation-plan.md`](../plans/2026-04-13-pipeline-first-class-runtime-implementation-plan.md)
+- [`docs/plans/2026-04-16-pipeline-autostart-extension-plan.md`](../plans/2026-04-16-pipeline-autostart-extension-plan.md)
 
 ## Related Documents
 

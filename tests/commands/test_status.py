@@ -21,6 +21,22 @@ from weft.ext import RunnerRuntimeDescription
 pytestmark = [pytest.mark.shared]
 
 
+class _FakeQueueChangeMonitor:
+    def __init__(self, queues, *, config=None) -> None:
+        del config
+        self.queue_names = [queue.name for queue in queues]
+        self.wait_calls: list[float | None] = []
+
+    def wait(self, timeout: float | None) -> bool:
+        self.wait_calls.append(timeout)
+        if len(self.wait_calls) >= 2:
+            raise KeyboardInterrupt
+        return False
+
+    def close(self) -> None:
+        return
+
+
 def _write_task_log_entry(
     *,
     ctx: Any,
@@ -848,3 +864,58 @@ def test_cmd_status_discovers_parent_context_from_subdirectory(
     assert exit_code == 0
     assert payload is not None
     assert "total_messages: 1" in payload
+
+
+def test_watch_task_events_uses_queue_monitor(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = "1844674407370955167"
+    created_monitors: list[_FakeQueueChangeMonitor] = []
+    log_iterations = iter(
+        [
+            [],
+            [
+                (
+                    {
+                        "tid": tid,
+                        "status": "completed",
+                        "event": "work_completed",
+                        "taskspec": {
+                            "name": "status-task",
+                            "state": {"status": "completed"},
+                        },
+                    },
+                    123,
+                )
+            ],
+        ]
+    )
+
+    def _fake_monitor(queues, *, config=None):
+        monitor = _FakeQueueChangeMonitor(queues, config=config)
+        created_monitors.append(monitor)
+        return monitor
+
+    monkeypatch.setattr(status_cmd, "QueueChangeMonitor", _fake_monitor)
+    monkeypatch.setattr(
+        status_cmd, "_iter_log_events", lambda _ctx: next(log_iterations, [])
+    )
+
+    exit_code = status_cmd._watch_task_events(
+        ctx,
+        tid_filters=None,
+        status_filter=None,
+        json_output=False,
+        interval=0.25,
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "work_completed" in captured.out
+    assert len(created_monitors) == 1
+    assert created_monitors[0].queue_names == ["weft.log.tasks"]
+    assert created_monitors[0].wait_calls == [0.25, 0.25]

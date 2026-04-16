@@ -1109,12 +1109,38 @@ def resolve_provider_cli_executable(
             spec_context=spec_context,
         )
         command = settings.executable or provider.default_executable
-    resolved = shutil.which(command)
+    resolved = _resolve_provider_cli_command_path(
+        command,
+        spec_context=spec_context,
+    )
     if resolved is None:
         raise RuntimeError(
             f"Unable to locate executable '{command}' for provider '{provider.name}'"
         )
     return resolved
+
+
+def _resolve_provider_cli_command_path(
+    command: str,
+    *,
+    spec_context: str | None,
+) -> str | None:
+    candidate = Path(command).expanduser()
+    if candidate.is_absolute():
+        return str(candidate.resolve()) if candidate.exists() else None
+
+    if "/" in command or "\\" in command:
+        if spec_context is not None:
+            resolved_candidate = (Path(spec_context).expanduser() / candidate).resolve()
+        else:
+            resolved_candidate = candidate.resolve()
+        if resolved_candidate.exists():
+            return str(resolved_candidate)
+
+    resolved = shutil.which(command)
+    if resolved is None:
+        return None
+    return str(Path(resolved).resolve())
 
 
 def _parse_opencode_json_output(stdout: str) -> str:

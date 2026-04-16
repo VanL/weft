@@ -21,6 +21,7 @@ from weft.context import (
     build_context,
     normalize_backend_resolution_error,
     resolve_context_broker_target,
+    update_project_config,
 )
 
 
@@ -63,12 +64,13 @@ def cmd_init(
     if result != 0:
         return result
 
-    build_context(
+    context = build_context(
         spec_context=root,
         create_dirs=True,
         create_database=False,
         autostart=autostart,
     )
+    update_project_config(context.config_path, {"autostart": autostart})
 
     if not quiet:
         print(f"Initialized Weft project in {root}")

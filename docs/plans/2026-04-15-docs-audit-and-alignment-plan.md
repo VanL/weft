@@ -1,5 +1,9 @@
 # Documentation Audit And Alignment
 
+Status: active
+Source specs: see Source Documents below
+Superseded by: none
+
 ## 1. Goal
 
 Bring the high-traffic docs back into clear alignment with the current Weft

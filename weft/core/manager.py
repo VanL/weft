@@ -21,13 +21,19 @@ from multiprocessing.process import BaseProcess
 from pathlib import Path
 from typing import Any, cast
 
-from simplebroker import Queue
+from pydantic import ValidationError
+
+from simplebroker import BrokerTarget, Queue
+from simplebroker.ext import BrokerError
 from weft._constants import (
     CONTROL_STOP,
     INTERNAL_RUNTIME_TASK_CLASS_KEY,
     INTERNAL_RUNTIME_TASK_CLASS_PIPELINE,
     INTERNAL_RUNTIME_TASK_CLASS_PIPELINE_EDGE,
+    MANAGER_CHILD_EXIT_POLL_INTERVAL,
     QUEUE_CTRL_IN_SUFFIX,
+    SPEC_TYPE_PIPELINE,
+    SPEC_TYPE_TASK,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MANAGER_LIFETIME_TIMEOUT,
     WEFT_MANAGERS_REGISTRY_QUEUE,
@@ -43,10 +49,21 @@ from weft.helpers import (
 )
 
 from .launcher import launch_task_process
+from .pipelines import (
+    PipelineCompilationContext,
+    compile_linear_pipeline,
+    load_pipeline_spec_payload,
+)
+from .spec_store import resolve_named_spec_from_root
 from .tasks import Consumer
 from .tasks.base import BaseTask, QueueMessageContext
 from .tasks.multiqueue_watcher import QueueMode
-from .taskspec import ReservedPolicy, TaskSpec, resolve_taskspec_payload
+from .taskspec import (
+    ReservedPolicy,
+    TaskSpec,
+    apply_bundle_root_to_taskspec_payload,
+    resolve_taskspec_payload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +126,7 @@ class Manager(BaseTask):
         try:
             # Reuse any connected queue so watcher-driven updates also refresh last_ts.
             self._broker_activity_queue = self._get_connected_queue()
-        except Exception:
+        except (BrokerError, OSError, RuntimeError):
             logger.debug("Failed to prime broker activity queue", exc_info=True)
         self._last_broker_timestamp = self._read_broker_timestamp(force=True)
         self._register_manager()
@@ -198,7 +215,7 @@ class Manager(BaseTask):
                     persistent=True,
                     config=self._config,
                 ).write(payload)
-            except Exception:
+            except (BrokerError, OSError, RuntimeError):
                 logger.debug(
                     "Failed to seed inbox %s for child %s",
                     inbox_name,
@@ -286,9 +303,10 @@ class Manager(BaseTask):
             "outbox": self._queue_names["outbox"],
             "role": self.taskspec.metadata.get("role", "manager"),
         }
+        serialized_payload = json.dumps(payload)
         try:
-            message_id = cast(int | None, registry_queue.write(json.dumps(payload)))
-        except Exception:
+            message_id = cast(int | None, registry_queue.write(serialized_payload))
+        except (BrokerError, OSError, RuntimeError):
             logger.debug("Failed to register manager", exc_info=True)
         else:
             if message_id is None:
@@ -309,7 +327,7 @@ class Manager(BaseTask):
             if self._registry_message_id is not None:
                 registry_queue.delete(message_id=self._registry_message_id)
                 deletion_performed = True
-        except Exception:
+        except (BrokerError, OSError, RuntimeError):
             logger.debug("Failed to prune active registry entry", exc_info=True)
         finally:
             self._registry_message_id = None
@@ -321,7 +339,7 @@ class Manager(BaseTask):
                 if payload.get("status") == "active":
                     try:
                         registry_queue.delete(message_id=latest_ts)
-                    except Exception:
+                    except (BrokerError, OSError, RuntimeError):
                         logger.debug(
                             "Failed to prune latest registry entry for %s",
                             self.tid,
@@ -349,9 +367,10 @@ class Manager(BaseTask):
                 self._unregistered = True
                 return
 
+        serialized_payload = json.dumps(payload)
         try:
-            registry_queue.write(json.dumps(payload))
-        except Exception:
+            registry_queue.write(serialized_payload)
+        except (BrokerError, OSError, RuntimeError):
             logger.debug("Failed to record stopped manager state", exc_info=True)
 
         self._registry_message_id = None
@@ -363,7 +382,7 @@ class Manager(BaseTask):
         latest: tuple[dict[str, Any], int] | None = None
         try:
             generator = queue.peek_generator(with_timestamps=True)
-        except Exception:
+        except (BrokerError, OSError, RuntimeError):
             return None
 
         for entry in generator:
@@ -440,7 +459,7 @@ class Manager(BaseTask):
         for timestamp in stale_timestamps:
             try:
                 queue.delete(message_id=timestamp)
-            except Exception:
+            except (BrokerError, OSError, RuntimeError):
                 logger.debug("Failed to prune stale manager record", exc_info=True)
 
         return active
@@ -545,13 +564,17 @@ class Manager(BaseTask):
         if pid is not None and not self._pid_alive(pid):
             try:
                 child.process.join(timeout=0.0)
-            except Exception:  # pragma: no cover - defensive
+            except (
+                AssertionError,
+                OSError,
+                ValueError,
+            ):  # pragma: no cover - defensive
                 pass
             return True
 
         try:
             return not child.process.is_alive()
-        except Exception:  # pragma: no cover - defensive
+        except (AssertionError, OSError, ValueError):  # pragma: no cover - defensive
             return True
 
     def _cleanup_children(self) -> None:
@@ -567,7 +590,11 @@ class Manager(BaseTask):
                     # hot loop that must stay responsive to new control
                     # messages.
                     child.process.join(timeout=0.1)
-                except Exception:  # pragma: no cover - defensive
+                except (
+                    AssertionError,
+                    OSError,
+                    ValueError,
+                ):  # pragma: no cover - defensive
                     pass
                 finally:
                     self._child_processes.pop(tid, None)
@@ -597,19 +624,27 @@ class Manager(BaseTask):
             if child.process.is_alive():
                 try:
                     child.process.join(timeout=0.2)
-                except Exception:  # pragma: no cover - defensive
+                except (
+                    AssertionError,
+                    OSError,
+                    ValueError,
+                ):  # pragma: no cover - defensive
                     pass
             if child.process.is_alive():
                 if child.process.pid is not None:
                     terminate_process_tree(child.process.pid, timeout=0.5)
                 try:
                     child.process.join(timeout=2.0)
-                except Exception:  # pragma: no cover - defensive
+                except (
+                    AssertionError,
+                    OSError,
+                    ValueError,
+                ):  # pragma: no cover - defensive
                     pass
                 if child.process.is_alive():
                     try:
                         child.process.kill()
-                    except Exception:  # pragma: no cover - defensive
+                    except OSError:  # pragma: no cover - defensive
                         pass
                     else:
                         child.process.join(timeout=1.0)
@@ -623,7 +658,7 @@ class Manager(BaseTask):
             self._cleanup_children()
             if not self._child_processes:
                 return
-            time.sleep(0.05)
+            time.sleep(MANAGER_CHILD_EXIT_POLL_INTERVAL)
 
     def _signal_children_to_stop(self) -> None:
         """Best-effort STOP broadcast to currently tracked child tasks."""
@@ -732,7 +767,7 @@ class Manager(BaseTask):
                 persistent=False,
                 config=self._config,
             ).write(CONTROL_STOP)
-        except Exception:
+        except (BrokerError, OSError, RuntimeError):
             logger.debug("Failed to send STOP to %s", queue_name, exc_info=True)
 
     def _drain_control_queue_first(self) -> None:
@@ -797,7 +832,7 @@ class Manager(BaseTask):
         if queue is None:
             try:
                 queue = self._get_connected_queue()
-            except Exception:
+            except (BrokerError, OSError, RuntimeError):
                 logger.debug(
                     "Broker activity queue unavailable for idle tracking",
                     exc_info=True,
@@ -806,15 +841,7 @@ class Manager(BaseTask):
             else:
                 self._broker_activity_queue = queue
 
-        try:
-            candidate = queue.last_ts
-        except Exception:
-            logger.debug(
-                "Failed to read queue.last_ts for idle tracking",
-                exc_info=True,
-            )
-            return last_known
-
+        candidate = queue.last_ts
         if candidate is None:
             return last_known
 
@@ -883,7 +910,7 @@ class Manager(BaseTask):
 
         try:
             self._get_reserved_queue().delete(message_id=timestamp)
-        except Exception:
+        except (BrokerError, OSError, RuntimeError):
             logger.debug(
                 "Failed to acknowledge manager message %s", timestamp, exc_info=True
             )
@@ -923,7 +950,7 @@ class Manager(BaseTask):
             child_spec = TaskSpec.model_validate(
                 resolved_payload, context={"auto_expand": False}
             )
-        except Exception:
+        except (TypeError, ValueError, ValidationError):
             logger.exception(
                 "Failed to validate child TaskSpec from payload %s", payload
             )
@@ -942,12 +969,35 @@ class Manager(BaseTask):
             return Path(spec_context) / ".weft"
         return None
 
+    def _autostart_context_root(self) -> Path | None:
+        if self._autostart_dir:
+            return self._autostart_dir.parent
+        spec_context = getattr(self.taskspec.spec, "weft_context", None)
+        if spec_context:
+            return Path(spec_context)
+        return None
+
+    def _autostart_pipeline_context(self) -> PipelineCompilationContext | None:
+        context_root = self._autostart_context_root()
+        if context_root is None:
+            return None
+        broker_config = {
+            key: value
+            for key, value in self._config.items()
+            if key.startswith("BROKER_")
+        }
+        return PipelineCompilationContext(
+            root=context_root,
+            broker_target=cast(BrokerTarget, self._db_path),
+            broker_config=broker_config,
+        )
+
     @staticmethod
     def _load_autostart_manifest(template_path: Path) -> dict[str, Any] | None:
         try:
             raw = template_path.read_text(encoding="utf-8")
             payload = json.loads(raw)
-        except Exception:
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             logger.warning("Failed to read autostart manifest %s", template_path)
             return None
 
@@ -959,20 +1009,65 @@ class Manager(BaseTask):
         return payload
 
     def _load_autostart_taskspec(self, name: str) -> dict[str, Any] | None:
-        root_dir = self._autostart_root_dir()
-        if root_dir is None:
+        spec_root = self._autostart_root_dir()
+        if spec_root is None:
             return None
-        path = root_dir / "tasks" / f"{name}.json"
         try:
-            raw = path.read_text(encoding="utf-8")
-            payload = json.loads(raw)
-        except Exception:
-            logger.warning("Failed to read stored task spec %s", path)
+            resolved = resolve_named_spec_from_root(
+                spec_root,
+                name,
+                spec_type=SPEC_TYPE_TASK,
+            )
+        except (FileNotFoundError, ValueError):
+            logger.warning("Failed to resolve stored task spec %s", name)
             return None
-        if not isinstance(payload, dict):
-            logger.warning("Stored task spec %s must contain a JSON object", path)
+        return apply_bundle_root_to_taskspec_payload(
+            dict(resolved.payload),
+            resolved.bundle_root,
+        )
+
+    def _load_autostart_pipeline(self, name: str) -> tuple[dict[str, Any], Any] | None:
+        spec_root = self._autostart_root_dir()
+        context_root = self._autostart_context_root()
+        pipeline_context = self._autostart_pipeline_context()
+        if spec_root is None or context_root is None or pipeline_context is None:
             return None
-        return payload
+
+        try:
+            resolved = resolve_named_spec_from_root(
+                spec_root,
+                name,
+                spec_type=SPEC_TYPE_PIPELINE,
+            )
+            pipeline_spec = load_pipeline_spec_payload(resolved.payload)
+        except (FileNotFoundError, ValueError, ValidationError):
+            logger.warning("Failed to resolve stored pipeline %s", name)
+            return None
+
+        def _load_pipeline_stage(task_name: str) -> dict[str, Any]:
+            stage_resolved = resolve_named_spec_from_root(
+                spec_root,
+                task_name,
+                spec_type=SPEC_TYPE_TASK,
+            )
+            return apply_bundle_root_to_taskspec_payload(
+                dict(stage_resolved.payload),
+                stage_resolved.bundle_root,
+            )
+
+        try:
+            compiled = compile_linear_pipeline(
+                pipeline_spec,
+                context=pipeline_context,
+                task_loader=_load_pipeline_stage,
+                source_ref=str(resolved.path),
+            )
+        except (FileNotFoundError, ValueError, ValidationError):
+            logger.warning("Failed to compile stored pipeline %s", name, exc_info=True)
+            return None
+        return compiled.pipeline_taskspec.model_dump(mode="json"), (
+            compiled.bootstrap_input_fallback
+        )
 
     def _build_autostart_spawn_payload(
         self, manifest: dict[str, Any], source: str
@@ -991,22 +1086,26 @@ class Manager(BaseTask):
             taskspec_payload = self._load_autostart_taskspec(target_name)
             if taskspec_payload is None:
                 return None
+            inbox_message: Any = WORK_ENVELOPE_START
         elif target_type == "pipeline":
-            logger.warning("Autostart pipeline target %s not yet supported", source)
-            return None
+            pipeline_payload = self._load_autostart_pipeline(target_name)
+            if pipeline_payload is None:
+                return None
+            taskspec_payload, inbox_message = pipeline_payload
         else:
             logger.warning("Autostart manifest %s has invalid target type", source)
             return None
 
         candidate = copy.deepcopy(taskspec_payload)
-        candidate.pop("tid", None)
+        if target_type == "task":
+            candidate.pop("tid", None)
         candidate.setdefault("version", "1.0")
         candidate.setdefault("name", target_name)
         candidate.setdefault("spec", {})
         candidate.setdefault("metadata", {})
 
         defaults = manifest.get("defaults")
-        if isinstance(defaults, dict):
+        if isinstance(defaults, dict) and target_type == "task":
             spec_section = candidate.get("spec")
             if not isinstance(spec_section, dict):
                 spec_section = {}
@@ -1033,7 +1132,6 @@ class Manager(BaseTask):
         candidate["metadata"]["autostart_source"] = source
         candidate["metadata"]["autostart"] = True
 
-        inbox_message: Any = WORK_ENVELOPE_START
         if isinstance(defaults, dict) and "input" in defaults:
             inbox_message = defaults.get("input")
 
@@ -1078,17 +1176,18 @@ class Manager(BaseTask):
 
     def _enqueue_autostart_request(
         self, payload: dict[str, Any], inbox_message: Any
-    ) -> None:
+    ) -> bool:
         spawn_payload = {
             "taskspec": payload,
             "inbox_message": inbox_message,
         }
+        serialized_payload = json.dumps(spawn_payload, ensure_ascii=False)
         try:
-            self._queue(self._queue_names["inbox"]).write(
-                json.dumps(spawn_payload, ensure_ascii=False)
-            )
-        except Exception:
+            self._queue(self._queue_names["inbox"]).write(serialized_payload)
+        except (BrokerError, OSError, RuntimeError):
             logger.warning("Failed to enqueue autostart spawn request", exc_info=True)
+            return False
+        return True
 
     def _tick_autostart(self, *, force: bool = False) -> None:
         """Scan autostart manifests and enqueue spawn requests (Spec: [MA-1.6])."""
@@ -1112,7 +1211,7 @@ class Manager(BaseTask):
             manifests = sorted(
                 path for path in directory.glob("*.json") if path.is_file()
             )
-        except Exception:
+        except OSError:
             logger.debug(
                 "Failed to enumerate autostart manifests in %s",
                 directory,
@@ -1133,8 +1232,12 @@ class Manager(BaseTask):
             )
             mode = policy.get("mode", "once") if isinstance(policy, dict) else "once"
             state = self._autostart_state.setdefault(
-                source, {"restarts": 0, "next_allowed_ns": 0}
+                source,
+                {"restarts": 0, "next_allowed_ns": 0, "launched_once": False},
             )
+            state.setdefault("restarts", 0)
+            state.setdefault("next_allowed_ns", 0)
+            state.setdefault("launched_once", False)
 
             if mode == "once":
                 if source in self._autostart_launched or source in active_sources:
@@ -1142,13 +1245,18 @@ class Manager(BaseTask):
             elif mode == "ensure":
                 if source in active_sources:
                     continue
+                launched_once = bool(state.get("launched_once", False))
                 max_restarts = (
                     policy.get("max_restarts") if isinstance(policy, dict) else None
                 )
-                if max_restarts is not None and state["restarts"] >= max_restarts:
+                if (
+                    launched_once
+                    and max_restarts is not None
+                    and state["restarts"] >= max_restarts
+                ):
                     continue
                 next_allowed = state.get("next_allowed_ns", 0)
-                if next_allowed and now_ns < next_allowed:
+                if launched_once and next_allowed and now_ns < next_allowed:
                     continue
             else:
                 logger.warning("Unknown autostart policy mode %s for %s", mode, source)
@@ -1160,18 +1268,24 @@ class Manager(BaseTask):
             taskspec_payload, inbox_message = spawn_payload
 
             logger.debug("Auto-start enqueuing spawn request from %s", manifest_path)
-            self._enqueue_autostart_request(taskspec_payload, inbox_message)
+            if not self._enqueue_autostart_request(taskspec_payload, inbox_message):
+                continue
             self._autostart_launched.add(source)
 
             if mode == "ensure":
-                state["restarts"] += 1
+                launched_once = bool(state.get("launched_once", False))
+                if launched_once:
+                    state["restarts"] += 1
+                state["launched_once"] = True
                 backoff = (
                     policy.get("backoff_seconds") if isinstance(policy, dict) else None
                 )
                 if isinstance(backoff, (int, float)) and backoff > 0:
-                    multiplier = max(0, state["restarts"] - 1)
+                    multiplier = max(0, int(state["restarts"]))
                     delay = float(backoff) * (2**multiplier)
                     state["next_allowed_ns"] = now_ns + int(delay * 1_000_000_000)
+                else:
+                    state["next_allowed_ns"] = 0
 
     # ------------------------------------------------------------------
     # Cleanup
@@ -1222,7 +1336,7 @@ class Manager(BaseTask):
             if inbox_queue.has_pending():
                 self._last_activity_ns = time.time_ns()
                 return
-        except Exception:  # pragma: no cover - defensive
+        except (BrokerError, OSError, RuntimeError):  # pragma: no cover - defensive
             logger.debug(
                 "Failed to inspect inbox queue for pending work", exc_info=True
             )
@@ -1241,7 +1355,7 @@ class Manager(BaseTask):
     def _atexit_unregister(self) -> None:
         try:
             self._unregister_manager()
-        except Exception:  # pragma: no cover - best effort cleanup
+        except Exception:  # pragma: no cover - interpreter shutdown cleanup
             pass
 
 

@@ -13,9 +13,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from weft._constants import AGENT_SESSION_PROTOCOL_VERSION
 from weft.core.agents.runtime import AgentExecutionResult
-
-AGENT_SESSION_PROTOCOL_VERSION = 1
 
 
 def make_execute_request(work_item: Any) -> dict[str, Any]:

@@ -1,5 +1,9 @@
 # Spec-Aware `weft run --spec ... --help`
 
+Status: proposed
+Source specs: see Source Documents below
+Superseded by: none
+
 ## 1. Goal
 
 Make `weft run --spec NAME|PATH --help` load the selected TaskSpec and show its

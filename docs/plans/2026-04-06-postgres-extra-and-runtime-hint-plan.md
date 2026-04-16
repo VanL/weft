@@ -1,5 +1,9 @@
 # Postgres Extra And Runtime Hint Plan
 
+Status: proposed
+Source specs: see Source Documents below
+Superseded by: none
+
 ## Goal
 
 Make Postgres support optional at install time instead of always pulling in

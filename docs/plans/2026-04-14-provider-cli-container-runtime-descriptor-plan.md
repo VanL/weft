@@ -1,5 +1,9 @@
 # Provider CLI Container Runtime Descriptor Plan
 
+Status: proposed
+Source specs: see Source Documents below
+Superseded by: none
+
 ## Goal
 
 Add a small internal "config doc" system for Docker-backed delegated

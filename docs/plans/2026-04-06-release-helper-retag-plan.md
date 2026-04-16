@@ -1,5 +1,9 @@
 # Release Helper Retag Plan
 
+Status: proposed
+Source specs: see Source Documents below
+Superseded by: none
+
 ## Goal
 
 Add an explicit `--retag` flag to `bin/release.py` so maintainers can delete

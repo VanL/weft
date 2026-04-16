@@ -1,5 +1,9 @@
 # Plan-Writing Guidance Hardening Plan
 
+Status: proposed
+Source specs: see Source Documents below
+Superseded by: none
+
 ## Goal
 
 Strengthen the plan-writing guidance so implementation plans are executable by a

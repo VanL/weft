@@ -1,5 +1,9 @@
 # Release-Gate Failure Audit Plan
 
+Status: proposed
+Source specs: see Source Documents below
+Superseded by: none
+
 ## Goal
 
 Audit the still-live release-blocking test failures with a strict root-cause

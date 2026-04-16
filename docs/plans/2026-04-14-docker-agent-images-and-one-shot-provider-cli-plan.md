@@ -1,5 +1,9 @@
 # Docker Agent Images and One-Shot Provider CLI Plan
 
+Status: proposed
+Source specs: see Source Documents below
+Superseded by: none
+
 This plan adds Docker-backed one-shot `provider_cli` agent execution with
 reusable minimal provider images and an explicit builtin cache warmer. The
 intent is narrow and practical: build the image once, create a fresh container

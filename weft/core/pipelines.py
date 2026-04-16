@@ -10,16 +10,19 @@ from __future__ import annotations
 import copy
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from simplebroker import BrokerTarget
 from weft._constants import (
     INTERNAL_RUNTIME_TASK_CLASS_KEY,
     INTERNAL_RUNTIME_TASK_CLASS_PIPELINE,
     INTERNAL_RUNTIME_TASK_CLASS_PIPELINE_EDGE,
     PIPELINE_EDGE_RUNTIME_METADATA_KEY,
     PIPELINE_OWNER_METADATA_KEY,
+    PIPELINE_PLACEHOLDER_TARGET,
     PIPELINE_RUNTIME_METADATA_KEY,
     PIPELINE_STATUS_QUEUE_SUFFIX,
 )
@@ -30,9 +33,6 @@ from weft.core.taskspec import (
     apply_bundle_root_to_taskspec_payload,
     resolve_taskspec_payload,
 )
-
-SUPPORTED_STAGE_DEFAULT_KEYS = frozenset({"input", "args", "keyword_args", "env"})
-PIPELINE_PLACEHOLDER_TARGET = "weft.core.tasks.pipeline:runtime"
 
 
 class PipelineStageDefaults(BaseModel):
@@ -177,6 +177,15 @@ class CompiledPipelineRun:
     pipeline_taskspec: TaskSpec
     runtime: PipelineRuntimePlan
     bootstrap_input_fallback: Any = None
+
+
+@dataclass(frozen=True)
+class PipelineCompilationContext:
+    """Minimal compile-time context for pipeline task realization."""
+
+    root: Path
+    broker_target: BrokerTarget
+    broker_config: dict[str, Any]
 
 
 def pipeline_queue_name(pipeline_tid: str, suffix: str) -> str:
@@ -372,7 +381,7 @@ def _build_internal_taskspec_payload(
 def compile_linear_pipeline(
     pipeline: PipelineSpec,
     *,
-    context: WeftContext,
+    context: WeftContext | PipelineCompilationContext,
     task_loader: Callable[[str], dict[str, Any]],
     source_ref: str | None = None,
 ) -> CompiledPipelineRun:

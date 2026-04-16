@@ -94,14 +94,12 @@ def test_dockerized_agent_run_input_builds_mounted_document_work_item() -> None:
         bundle_root=taskspec.get_bundle_root(),
     )
 
-    assert payload == {
-        "template": "explain_mounted",
-        "template_args": {
-            "prompt": "Summarize this document",
-            "document_target_path": "/tmp/00-Overview_and_Architecture.md",
-        },
-        "metadata": {"document_path": "/tmp/example.md"},
+    assert payload["template"] == "explain_mounted"
+    assert payload["template_args"] == {
+        "prompt": "Summarize this document",
+        "document_target_path": "/tmp/00-Overview_and_Architecture.md",
     }
+    assert Path(payload["metadata"]["document_path"]).as_posix() == "/tmp/example.md"
 
 
 def test_dockerized_agent_run_input_builds_inline_document_work_item() -> None:

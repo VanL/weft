@@ -1,5 +1,9 @@
 # Agent Runtime Package Refactor Plan
 
+Status: proposed
+Source specs: see Source Documents below
+Superseded by: none
+
 This plan performs the full agent-runtime layout refactor with no backward
 compatibility shims. The current state splits one feature area across two
 namespaces:

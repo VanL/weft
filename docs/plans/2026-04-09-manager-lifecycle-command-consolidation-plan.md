@@ -1,5 +1,9 @@
 # Manager Lifecycle Command Consolidation Plan
 
+Status: proposed
+Source specs: see Source Documents below
+Superseded by: none
+
 ## Goal
 
 Remove the remaining divergent manager lifecycle code paths after bootstrap

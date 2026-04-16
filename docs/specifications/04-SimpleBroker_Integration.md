@@ -123,7 +123,8 @@ Current boundary notes:
 
 - `WEFT_*` broker aliases are translated through `load_config()` once and then
   reused by Weft-owned context resolution
-- `.weft/config.json` is project metadata, not a broker target source
+- `.weft/config.json` is project metadata, not a broker target source; it may
+  carry the project-local autostart default used by `build_context()`
 - `.weft/agents.json` is delegated-agent launch config, not a broker target
   source
 - TaskSpec `metadata` is caller-owned runtime metadata, not a broker target
@@ -176,6 +177,15 @@ Current contract:
 - `WeftContext.broker()` opens a broker handle for backend-native operations
 - callers should work with broker targets, queue helpers, and context objects,
   not with guessed database file paths
+- command and helper code that already has a `WeftContext` should construct
+  queues through `WeftContext.queue()` rather than open-coding `Queue(...)`
+- CLI wait surfaces that already know which queues they are waiting on should
+  reuse SimpleBroker's queue-native waiting path (for example `QueueWatcher`
+  and backend-native activity waiters when available) rather than layering
+  Weft-owned sleep loops on top of queue peeks
+- direct `Queue(...)` construction in command-layer code is reserved for
+  explicit low-level edges that do not carry a `WeftContext`, such as the
+  interactive queue client that owns its own task-local inbox lifecycle
 
 ## CLI Integration and Initialization
 
@@ -227,6 +237,7 @@ connection-pooling designs are tracked in the companion doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-04-16-autostart-hardening-and-contract-alignment-plan.md`](../plans/2026-04-16-autostart-hardening-and-contract-alignment-plan.md)
 - [`docs/plans/2026-04-14-config-precedence-and-parsing-alignment-plan.md`](../plans/2026-04-14-config-precedence-and-parsing-alignment-plan.md)
 - [`docs/plans/2026-04-14-provider-cli-validation-boundary-and-agent-settings-alignment-plan.md`](../plans/2026-04-14-provider-cli-validation-boundary-and-agent-settings-alignment-plan.md)
 - [`docs/plans/2026-04-14-builtin-taskspecs-and-spec-resolution-plan.md`](../plans/2026-04-14-builtin-taskspecs-and-spec-resolution-plan.md)

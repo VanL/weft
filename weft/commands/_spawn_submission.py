@@ -10,18 +10,30 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Literal
+from typing import Final, Literal
 
 from simplebroker import Queue
 from weft._constants import (
+    CONTROL_SURFACE_WAIT_INTERVAL,
     QUEUE_RESERVED_SUFFIX,
+    SPAWN_SUBMISSION_RECONCILIATION_TIMEOUT,
     WEFT_GLOBAL_LOG_QUEUE,
+    WEFT_MANAGERS_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
 )
-from weft.commands._manager_bootstrap import _list_manager_records
 from weft.context import WeftContext
 from weft.helpers import iter_queue_json_entries
+
+from ._manager_bootstrap import _list_manager_records
+from ._queue_wait import QueueChangeMonitor
+
+_SPAWN_RECONCILIATION_STATIC_QUEUE_SPECS: Final[tuple[tuple[str, bool], ...]] = (
+    (WEFT_TID_MAPPINGS_QUEUE, False),
+    (WEFT_GLOBAL_LOG_QUEUE, False),
+    (WEFT_SPAWN_REQUESTS_QUEUE, False),
+    (WEFT_MANAGERS_REGISTRY_QUEUE, False),
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,12 +56,7 @@ def _queue_contains_exact_message(
     message_timestamp: int,
     persistent: bool = False,
 ) -> bool:
-    queue = Queue(
-        queue_name,
-        db_path=context.broker_target,
-        persistent=persistent,
-        config=context.broker_config,
-    )
+    queue = context.queue(queue_name, persistent=persistent)
     try:
         return (
             queue.peek_one(
@@ -63,12 +70,7 @@ def _queue_contains_exact_message(
 
 
 def _mapping_exists_for_tid(context: WeftContext, tid: str) -> bool:
-    queue = Queue(
-        WEFT_TID_MAPPINGS_QUEUE,
-        db_path=context.broker_target,
-        persistent=False,
-        config=context.broker_config,
-    )
+    queue = context.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
     try:
         for payload, _timestamp in iter_queue_json_entries(
             queue,
@@ -85,12 +87,7 @@ def _inspect_task_log_for_tid(
     context: WeftContext,
     tid: str,
 ) -> SpawnSubmissionReconciliation | None:
-    queue = Queue(
-        WEFT_GLOBAL_LOG_QUEUE,
-        db_path=context.broker_target,
-        persistent=False,
-        config=context.broker_config,
-    )
+    queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
     try:
         latest_child_event: tuple[int, str, str | None] | None = None
         for payload, timestamp in iter_queue_json_entries(
@@ -150,6 +147,41 @@ def _find_reserved_spawn_request_queue(
     return None
 
 
+def _reserved_spawn_request_queue_names(context: WeftContext) -> tuple[str, ...]:
+    queue_names: list[str] = []
+    for record in _list_manager_records(
+        context,
+        include_stopped=True,
+        canonical_only=True,
+        prune_stale=False,
+    ):
+        manager_tid = record.get("tid")
+        if not isinstance(manager_tid, str) or not manager_tid:
+            continue
+        queue_names.append(f"T{manager_tid}.{QUEUE_RESERVED_SUFFIX}")
+    return tuple(sorted(set(queue_names)))
+
+
+def _spawn_reconciliation_queue_specs(
+    context: WeftContext,
+) -> tuple[tuple[str, bool], ...]:
+    return _SPAWN_RECONCILIATION_STATIC_QUEUE_SPECS + tuple(
+        (queue_name, False)
+        for queue_name in _reserved_spawn_request_queue_names(context)
+    )
+
+
+def _open_spawn_reconciliation_monitor(
+    context: WeftContext,
+    queue_specs: tuple[tuple[str, bool], ...],
+) -> tuple[list[Queue], QueueChangeMonitor]:
+    queues = [
+        context.queue(queue_name, persistent=persistent)
+        for queue_name, persistent in queue_specs
+    ]
+    return queues, QueueChangeMonitor(queues, config=context.config)
+
+
 def _reconcile_submitted_spawn_once(
     context: WeftContext,
     tid: str,
@@ -188,8 +220,8 @@ def reconcile_submitted_spawn(
     context: WeftContext,
     tid: str,
     *,
-    timeout: float = 1.0,
-    poll_interval: float = 0.05,
+    timeout: float = SPAWN_SUBMISSION_RECONCILIATION_TIMEOUT,
+    poll_interval: float = CONTROL_SURFACE_WAIT_INTERVAL,
 ) -> SpawnSubmissionReconciliation:
     """Classify a previously submitted spawn request using durable state only.
 
@@ -197,8 +229,32 @@ def reconcile_submitted_spawn(
     """
 
     deadline = time.monotonic() + max(timeout, 0.0)
-    while True:
-        result = _reconcile_submitted_spawn_once(context, tid)
-        if result.outcome != "unknown" or time.monotonic() >= deadline:
-            return result
-        time.sleep(poll_interval)
+    queue_specs = _spawn_reconciliation_queue_specs(context)
+    monitor_queues, monitor = _open_spawn_reconciliation_monitor(context, queue_specs)
+    try:
+        while True:
+            result = _reconcile_submitted_spawn_once(context, tid)
+            if result.outcome != "unknown":
+                return result
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return result
+
+            current_specs = _spawn_reconciliation_queue_specs(context)
+            if current_specs != queue_specs:
+                monitor.close()
+                for queue in monitor_queues:
+                    queue.close()
+                queue_specs = current_specs
+                monitor_queues, monitor = _open_spawn_reconciliation_monitor(
+                    context,
+                    queue_specs,
+                )
+                continue
+
+            monitor.wait(min(remaining, max(poll_interval, 0.0)))
+    finally:
+        monitor.close()
+        for queue in monitor_queues:
+            queue.close()

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from simplebroker import Queue
 from weft._constants import PIPELINE_RUNTIME_METADATA_KEY, WEFT_GLOBAL_LOG_QUEUE
 from weft.context import WeftContext
 from weft.helpers import iter_queue_json_entries
@@ -21,12 +20,7 @@ def load_latest_taskspec_payload(
     tid: str,
 ) -> dict[str, Any] | None:
     """Return the latest logged TaskSpec payload for ``tid``."""
-    log_queue = Queue(
-        WEFT_GLOBAL_LOG_QUEUE,
-        db_path=context.broker_target,
-        persistent=False,
-        config=context.broker_config,
-    )
+    log_queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
     latest_taskspec: dict[str, Any] | None = None
     for payload, _timestamp in iter_queue_json_entries(log_queue):
         if payload.get("tid") != tid:

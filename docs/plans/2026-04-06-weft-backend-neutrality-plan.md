@@ -1,5 +1,9 @@
 # Weft Backend Neutrality Plan
 
+Status: proposed
+Source specs: see Source Documents below
+Superseded by: none
+
 ## 1. Goal
 
 Finish the transition from "Weft primarily assumes SQLite, with Postgres made to

@@ -1,5 +1,9 @@
 # Release-Gate Failure Audit Log
 
+Status: audit-log
+Source specs: None - audit artifact
+Superseded by: none
+
 Date: 2026-04-08
 Plan: [release-gate-failure-audit-plan.md](./release-gate-failure-audit-plan.md)
 

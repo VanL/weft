@@ -16,7 +16,6 @@ import io
 import json
 import os
 import sys
-import time
 from collections.abc import Callable, Iterator
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
@@ -27,6 +26,8 @@ from simplebroker import commands as sb_commands
 from simplebroker._timestamp import TimestampGenerator
 from weft.context import WeftContext, build_context
 from weft.helpers import resolve_broker_max_message_size, resolve_cli_message_content
+
+from ._queue_wait import QueueChangeMonitor
 
 
 @dataclass
@@ -234,7 +235,10 @@ def watch_queue(
     move_to: str | None = None,
 ) -> Iterator[QueueMessage]:
     queue = ctx.queue(queue_name, persistent=True)
+    watch_queue = ctx.queue(queue_name, persistent=True)
+    monitor: QueueChangeMonitor | None = None
     try:
+        monitor = QueueChangeMonitor([watch_queue], config=ctx.config)
         emitted = 0
         last_timestamp = since
 
@@ -273,8 +277,11 @@ def watch_queue(
                 break
 
             if not found:
-                time.sleep(interval)
+                monitor.wait(interval)
     finally:
+        if monitor is not None:
+            monitor.close()
+        watch_queue.close()
         queue.close()
 
 

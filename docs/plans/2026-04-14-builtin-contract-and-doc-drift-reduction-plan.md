@@ -1,5 +1,9 @@
 # Builtin Contract And Doc Drift Reduction Plan
 
+Status: proposed
+Source specs: see Source Documents below
+Superseded by: none
+
 ## Goal
 
 Make builtin TaskSpecs a first-class current-contract surface instead of a thin
@@ -303,4 +307,3 @@ Rollback is straightforward if this slice stays disciplined:
 - if a packaging assertion reveals a distribution-specific problem, revert the
   packaging-only change separately and keep the contract clarification only if it
   still matches the shipped wheel behavior
-

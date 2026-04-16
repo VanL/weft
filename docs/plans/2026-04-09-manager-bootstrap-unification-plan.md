@@ -1,5 +1,9 @@
 # Manager Bootstrap Unification Plan
 
+Status: proposed
+Source specs: see Source Documents below
+Superseded by: none
+
 ## Goal
 
 Remove the separate `weft manager start` manager-launch path and make operator

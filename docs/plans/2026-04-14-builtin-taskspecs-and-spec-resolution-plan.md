@@ -1,5 +1,9 @@
 # Builtin TaskSpecs and Explicit Spec Resolution Plan
 
+Status: proposed
+Source specs: see Source Documents below
+Superseded by: none
+
 This plan adds a small builtin TaskSpec surface to Weft and uses it to ship a
 real delegated-agent probe helper as an ordinary Weft task. The goal is not to
 create a second control plane. The goal is to use Weft's existing reusable task

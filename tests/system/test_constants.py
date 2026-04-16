@@ -1,14 +1,20 @@
 """Tests for the _constants module."""
 
+import ast
 import os
+import re
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from weft._constants import (
+    COMMAND_SESSION_POST_TERMINATION_WAIT,
+    COMMAND_SESSION_TERMINATION_TIMEOUT,
     CONTROL_PAUSE,
     CONTROL_RESUME,
     CONTROL_STOP,
+    CONTROL_SURFACE_WAIT_INTERVAL,
     DEFAULT_CLEANUP_ON_EXIT,
     DEFAULT_CPU_PERCENT,  # RENAMED from DEFAULT_CPU_LIMIT
     DEFAULT_FUNCTION_TARGET,
@@ -21,6 +27,17 @@ from weft._constants import (
     DEFAULT_STREAM_OUTPUT,
     DEFAULT_TIMEOUT,
     EXIT_SUCCESS,
+    FAILURE_LIKE_TASK_STATUSES,
+    INTERACTIVE_OUTPUT_DRAIN_POLL_INTERVAL,
+    INTERACTIVE_OUTPUT_DRAIN_TIMEOUT,
+    INTERACTIVE_STOP_COMPLETION_TIMEOUT,
+    INTERACTIVE_STOP_GRACE_SECONDS,
+    INTERACTIVE_STOP_POLL_INTERVAL,
+    MANAGER_CHILD_EXIT_POLL_INTERVAL,
+    MANAGER_COMPETING_STARTUP_GRACE_SECONDS,
+    MANAGER_PID_LIVENESS_RECHECK_INTERVAL,
+    MANAGER_REGISTRY_POLL_INTERVAL,
+    MANAGER_STARTUP_TIMEOUT_SECONDS,
     MAX_CPU_LIMIT,
     MIN_CONNECTIONS_LIMIT,
     MIN_CPU_LIMIT,
@@ -31,19 +48,60 @@ from weft._constants import (
     QUEUE_CTRL_OUT_SUFFIX,
     QUEUE_INBOX_SUFFIX,
     QUEUE_OUTBOX_SUFFIX,
+    SPAWN_SUBMISSION_RECONCILIATION_TIMEOUT,
     STATUS_CANCELLED,
     STATUS_COMPLETED,
     STATUS_CREATED,
     STATUS_FAILED,
     STATUS_RUNNING,
+    STATUS_WATCH_MIN_INTERVAL,
+    STREAM_CHUNK_SIZE_BYTES,
+    SUBPROCESS_POLL_INTERVAL_FLOOR,
+    SUBPROCESS_STREAM_DRAIN_TIMEOUT,
+    SUBPROCESS_STREAM_READ_SIZE,
+    SUBPROCESS_TERMINATION_WAIT_TIMEOUT,
+    TASK_PROCESS_POLL_INTERVAL,
     TASKSPEC_TID_LENGTH,
     TASKSPEC_VERSION,
+    TERMINAL_TASK_STATUSES,
     WEFT_AUTOSTART_TASKS_DEFAULT,
+    WEFT_COMPLETED_RESULT_GRACE_SECONDS,
     WEFT_MANAGER_LIFETIME_TIMEOUT,
     WEFT_MANAGER_REUSE_ENABLED,
     __version__,
     load_config,
 )
+
+_RUNTIME_OBJECT_ALLOWLIST = {
+    "extensions/weft_docker/weft_docker/agent_runner.py": {"_WORK_ITEM_MISSING"},
+    "extensions/weft_docker/weft_docker/plugin.py": {"_PLUGIN"},
+    "extensions/weft_macos_sandbox/weft_macos_sandbox/plugin.py": {"_PLUGIN"},
+    "weft/core/agents/provider_cli/registry.py": {"_PROVIDERS"},
+    "weft/core/agents/provider_cli/windows_shims.py": {"_TOKEN_RE"},
+    "weft/core/agents/runtime.py": {"_RUNTIME_REGISTRY"},
+    "weft/core/agents/templates.py": {"_TEMPLATE_PATTERN"},
+    "weft/core/runners/host.py": {"_HOST_PLUGIN"},
+    "weft/manager_detached_launcher.py": {"_NO_SIGNAL"},
+}
+
+
+def _looks_like_constant_name(name: str) -> bool:
+    return re.fullmatch(r"_?[A-Z][A-Z0-9_]*", name) is not None
+
+
+def _module_level_uppercase_assignments(path: Path) -> set[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    names: set[str] = set()
+    for node in tree.body:
+        targets: list[ast.expr] = []
+        if isinstance(node, ast.Assign):
+            targets = list(node.targets)
+        elif isinstance(node, ast.AnnAssign) and node.simple:
+            targets = [node.target]
+        for target in targets:
+            if isinstance(target, ast.Name) and _looks_like_constant_name(target.id):
+                names.add(target.id)
+    return names
 
 
 class TestConstants:
@@ -54,9 +112,6 @@ class TestConstants:
         assert isinstance(__version__, str)
 
         # Check consistency with pyproject.toml
-        import re
-        from pathlib import Path
-
         pyproject_path = Path(__file__).parent.parent.parent / "pyproject.toml"
         with open(pyproject_path, encoding="utf-8") as f:
             content = f.read()
@@ -117,6 +172,38 @@ class TestConstants:
         assert DEFAULT_REPORTING_INTERVAL == "transition"
         assert isinstance(DEFAULT_REPORTING_INTERVAL, str)
 
+        assert TASK_PROCESS_POLL_INTERVAL == 0.05
+        assert isinstance(TASK_PROCESS_POLL_INTERVAL, float)
+        assert CONTROL_SURFACE_WAIT_INTERVAL == 0.05
+        assert SPAWN_SUBMISSION_RECONCILIATION_TIMEOUT == 1.0
+        assert STATUS_WATCH_MIN_INTERVAL == 0.1
+
+        assert STREAM_CHUNK_SIZE_BYTES == 512 * 1024
+        assert SUBPROCESS_STREAM_READ_SIZE == 64 * 1024
+        assert SUBPROCESS_TERMINATION_WAIT_TIMEOUT == 0.2
+        assert SUBPROCESS_STREAM_DRAIN_TIMEOUT == 0.25
+        assert SUBPROCESS_POLL_INTERVAL_FLOOR == 0.01
+
+    def test_lifecycle_polling_and_timeout_constants(self) -> None:
+        assert MANAGER_STARTUP_TIMEOUT_SECONDS == 10.0
+        assert MANAGER_REGISTRY_POLL_INTERVAL == 0.1
+        assert MANAGER_PID_LIVENESS_RECHECK_INTERVAL == 0.5
+        assert MANAGER_CHILD_EXIT_POLL_INTERVAL == 0.05
+        assert MANAGER_COMPETING_STARTUP_GRACE_SECONDS == 0.5
+        assert WEFT_COMPLETED_RESULT_GRACE_SECONDS == 0.25
+        assert INTERACTIVE_OUTPUT_DRAIN_TIMEOUT == 0.25
+        assert INTERACTIVE_OUTPUT_DRAIN_POLL_INTERVAL == 0.01
+        assert INTERACTIVE_STOP_GRACE_SECONDS == 2.0
+        assert INTERACTIVE_STOP_POLL_INTERVAL == 0.05
+        assert COMMAND_SESSION_TERMINATION_TIMEOUT == 2.0
+        assert COMMAND_SESSION_POST_TERMINATION_WAIT == 0.2
+        assert INTERACTIVE_STOP_COMPLETION_TIMEOUT == (
+            INTERACTIVE_STOP_GRACE_SECONDS
+            + (COMMAND_SESSION_TERMINATION_TIMEOUT * 3)
+            + COMMAND_SESSION_POST_TERMINATION_WAIT
+            + 0.5
+        )
+
     def test_queue_naming_conventions(self) -> None:
         """Test queue naming suffix constants."""
         assert QUEUE_INBOX_SUFFIX == "inbox"
@@ -154,6 +241,13 @@ class TestConstants:
         ]:
             assert isinstance(status, str)
 
+        assert TERMINAL_TASK_STATUSES == frozenset(
+            {"completed", "failed", "timeout", "cancelled", "killed"}
+        )
+        assert FAILURE_LIKE_TASK_STATUSES == frozenset(
+            {"failed", "timeout", "cancelled", "killed"}
+        )
+
     def test_control_commands(self) -> None:
         """Test control command constants."""
         assert CONTROL_STOP == "STOP"
@@ -184,6 +278,39 @@ class TestConstants:
 
         assert MIN_CONNECTIONS_LIMIT == 0
         assert isinstance(MIN_CONNECTIONS_LIMIT, int)
+
+    def test_production_constants_live_in_constants_module(self) -> None:
+        """Ensure immutable policy constants stay centralized in `_constants.py`."""
+
+        repo_root = Path(__file__).resolve().parents[2]
+        candidates = sorted(repo_root.glob("weft/**/*.py")) + sorted(
+            repo_root.glob("extensions/**/*.py")
+        )
+
+        violations: list[str] = []
+        stale_allowlist_entries: list[str] = []
+        for path in candidates:
+            if path.name == "_constants.py":
+                continue
+            relative_path = path.relative_to(repo_root).as_posix()
+            assigned_names = _module_level_uppercase_assignments(path)
+            allowed_names = _RUNTIME_OBJECT_ALLOWLIST.get(relative_path, set())
+            unexpected = sorted(assigned_names - allowed_names)
+            if unexpected:
+                violations.append(f"{relative_path}: {', '.join(unexpected)}")
+            stale = sorted(allowed_names - assigned_names)
+            if stale:
+                stale_allowlist_entries.append(f"{relative_path}: {', '.join(stale)}")
+
+        assert not stale_allowlist_entries, (
+            "Stale runtime-object allowlist entries found:\n"
+            + "\n".join(stale_allowlist_entries)
+        )
+        assert not violations, (
+            "Production constants must live in weft/_constants.py. "
+            "Only runtime singletons, registries, sentinels, and compiled "
+            "patterns are exempt.\n" + "\n".join(violations)
+        )
 
 
 class TestLoadConfig:

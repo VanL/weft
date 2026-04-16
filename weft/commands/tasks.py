@@ -17,7 +17,6 @@ from dataclasses import replace
 from fnmatch import fnmatchcase
 from typing import Any
 
-from simplebroker import Queue
 from weft._constants import (
     CONTROL_KILL,
     CONTROL_STOP,
@@ -25,6 +24,7 @@ from weft._constants import (
     CONTROL_SURFACE_WAIT_TIMEOUT,
     QUEUE_CTRL_IN_SUFFIX,
     TASKSPEC_TID_SHORT_LENGTH,
+    WEFT_GLOBAL_LOG_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
 )
 from weft._runner_plugins import require_runner_plugin
@@ -37,6 +37,7 @@ from weft.helpers import (
 )
 
 from . import status as status_cmd
+from ._queue_wait import QueueChangeMonitor
 from ._task_history import load_latest_taskspec_payload, pipeline_status_queue_name
 
 
@@ -45,12 +46,7 @@ def _resolve_context(context_path: str | os.PathLike[str] | None) -> WeftContext
 
 
 def _read_tid_mapping_entries(ctx: WeftContext) -> list[dict[str, Any]]:
-    queue = Queue(
-        WEFT_TID_MAPPINGS_QUEUE,
-        db_path=ctx.broker_target,
-        persistent=False,
-        config=ctx.broker_config,
-    )
+    queue = ctx.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
     entries: list[dict[str, Any]] = []
     for payload, _timestamp in iter_queue_json_entries(queue):
         if isinstance(payload, dict):
@@ -191,12 +187,7 @@ def _latest_pipeline_status_snapshot(
     if not isinstance(status_queue, str) or not status_queue:
         return None
 
-    queue = Queue(
-        status_queue,
-        db_path=ctx.broker_target,
-        persistent=True,
-        config=ctx.broker_config,
-    )
+    queue = ctx.queue(status_queue, persistent=True)
     latest: dict[str, Any] | None = None
     for payload, _timestamp in iter_queue_json_entries(queue):
         payload_tid = payload.get("pipeline_tid")
@@ -275,7 +266,7 @@ def _pipeline_task_snapshot(
 
     activity = pipeline_status.get("activity")
     waiting_on = pipeline_status.get("waiting_on")
-    if status_text in status_cmd.TERMINAL_STATUSES:
+    if status_text in status_cmd.TERMINAL_TASK_STATUSES:
         activity = None
         waiting_on = None
 
@@ -330,12 +321,7 @@ def _send_control(ctx: WeftContext, tid: str, command: str) -> None:
     Spec: [MF-3]
     """
     ctrl_in = _ctrl_in_for_tid(ctx, tid)
-    queue = Queue(
-        ctrl_in,
-        db_path=ctx.broker_target,
-        persistent=False,
-        config=ctx.broker_config,
-    )
+    queue = ctx.queue(ctrl_in, persistent=False)
     queue.write(command)
 
 
@@ -373,18 +359,49 @@ def _await_control_surface(
     deadline = time.monotonic() + timeout
     latest_entry: dict[str, Any] | None = None
     latest_snapshot: status_cmd.TaskSnapshot | None = None
-    while True:
-        mapping_entry = mapping_for_tid(ctx, tid)
-        if mapping_entry is not None:
-            latest_entry = mapping_entry
-        snapshot = task_status(tid, context_path=ctx.root)
-        if snapshot is not None:
-            latest_snapshot = snapshot
-            if snapshot.status in status_cmd.TERMINAL_STATUSES:
+    watched_pipeline_status_queue: str | None = None
+    monitor_queues = [
+        ctx.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False),
+        ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False),
+    ]
+    monitor = QueueChangeMonitor(monitor_queues, config=ctx.config)
+    try:
+        while True:
+            pipeline_status_queue = pipeline_status_queue_name(
+                tid,
+                load_latest_taskspec_payload(ctx, tid) or {},
+            )
+            if pipeline_status_queue != watched_pipeline_status_queue:
+                monitor.close()
+                for queue in monitor_queues:
+                    queue.close()
+                monitor_queues = [
+                    ctx.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False),
+                    ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False),
+                ]
+                if isinstance(pipeline_status_queue, str) and pipeline_status_queue:
+                    monitor_queues.append(
+                        ctx.queue(pipeline_status_queue, persistent=True)
+                    )
+                monitor = QueueChangeMonitor(monitor_queues, config=ctx.config)
+                watched_pipeline_status_queue = pipeline_status_queue
+
+            mapping_entry = mapping_for_tid(ctx, tid)
+            if mapping_entry is not None:
+                latest_entry = mapping_entry
+            snapshot = task_status(tid, context_path=ctx.root)
+            if snapshot is not None:
+                latest_snapshot = snapshot
+                if snapshot.status in status_cmd.TERMINAL_TASK_STATUSES:
+                    return latest_entry, latest_snapshot
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 return latest_entry, latest_snapshot
-        if time.monotonic() >= deadline:
-            return latest_entry, latest_snapshot
-        time.sleep(CONTROL_SURFACE_WAIT_INTERVAL)
+            monitor.wait(min(remaining, CONTROL_SURFACE_WAIT_INTERVAL))
+    finally:
+        monitor.close()
+        for queue in monitor_queues:
+            queue.close()
 
 
 def _latest_task_entry(
@@ -481,12 +498,12 @@ def stop_tasks(
         _send_control(ctx, full, CONTROL_STOP)
         task_entry, snapshot = _await_control_surface(ctx, full)
         handled_by_runner = False
-        if snapshot is None or snapshot.status not in status_cmd.TERMINAL_STATUSES:
+        if snapshot is None or snapshot.status not in status_cmd.TERMINAL_TASK_STATUSES:
             task_entry = _latest_task_entry(ctx, lookup, full, task_entry)
             handled_by_runner = _stop_via_fallback(task_entry)
             task_entry, snapshot = _await_control_surface(ctx, full)
 
-        if snapshot is None or snapshot.status not in status_cmd.TERMINAL_STATUSES:
+        if snapshot is None or snapshot.status not in status_cmd.TERMINAL_TASK_STATUSES:
             if not handled_by_runner:
                 task_entry = _latest_task_entry(ctx, lookup, full, task_entry)
                 _stop_via_fallback(task_entry)

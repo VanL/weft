@@ -454,33 +454,37 @@ default inputs/arguments. They do **not** include `tid`, queue names, or runtime
 
 **Targets**
 - `task`: references a stored task spec in `.weft/tasks/`
-- `pipeline`: references a pipeline stored in `.weft/pipelines/`. This is part
-  of the intended public surface, but manager-launched pipeline targets remain
-  phased work. Current implementation still supports only `task` targets at
-  runtime; the manager logs a warning and skips the manifest. See
-  [`12-Pipeline_Composition_and_UX.md`](12-Pipeline_Composition_and_UX.md)
-  for the pipeline phase order and constraints.
+- `pipeline`: references a pipeline stored in `.weft/pipelines/`. The manager
+  compiles the stored pipeline into the same first-class pipeline task used by
+  `weft run --pipeline` and then launches that compiled pipeline task through
+  the ordinary manager child path.
 
 **Defaults**
-- `args`/`keyword_args` are merged into the target’s `spec.args`/`spec.keyword_args`.
-- `env` is merged into `spec.env`.
-- `input` becomes the initial payload (equivalent to `pipeline run --input`).
+- for `task` targets, `args`/`keyword_args` are merged into the target’s
+  `spec.args`/`spec.keyword_args`
+- for `task` targets, `env` is merged into `spec.env`
+- `input` becomes the initial payload; for pipeline targets this is equivalent
+  to `weft run --pipeline ... --input`
 
 **Lifecycle policy**
-- `mode=once` launches exactly once per manager startup (default).
-- `mode=ensure` restarts on unexpected exit with optional backoff while the
-  manager is running. Manager shutdown stops autostarted tasks regardless of
-  policy.
-- `max_restarts` is accepted in manifest policy but is not currently enforced;
-  `ensure` mode restarts unconditionally while the manager is running.
-- `backoff_seconds` is accepted in manifest policy but restart delay currently
-  remains one scan tick rather than an exponential backoff contract.
+- `mode=once` queues at most one spawn request per manager lifecycle
+  (default). Failed queue writes do not count as launched, so the manager may
+  retry the manifest on a later scan.
+- `mode=ensure` keeps the target running while the manager is running. Manager
+  shutdown still stops autostarted tasks regardless of policy.
+- `max_restarts` limits successful restarts after the initial successful
+  launch. `null` or omission means unlimited restarts.
+- `backoff_seconds` applies exponential delay before restart attempts only.
+  The initial launch is immediate. Restart attempt `N` waits
+  `backoff_seconds * 2^(N-1)` after the previous successful launch.
+- Ensure-mode restart accounting only advances after the replacement spawn
+  request is successfully written to the manager inbox.
 
 Managers record metadata linking the running task back to the manifest source
 (`metadata.autostart_source`) and set `metadata.autostart=true` for
 observability.
 
-_Implementation mapping_: `weft/core/manager.py` — `Manager._tick_autostart()` (scan loop), `Manager._load_autostart_manifest()` (JSON loading), `Manager._load_autostart_taskspec()` (task spec resolution from `.weft/tasks/`), `Manager._build_autostart_spawn_payload()` (defaults merging), `Manager._active_autostart_sources()` (active-source tracking via state log), `Manager._enqueue_autostart_request()` (spawn enqueue). Metadata fields `autostart_source` and `autostart` are set in `Manager._spawn_child()`.
+_Implementation mapping_: `weft/core/manager.py` — `Manager._tick_autostart()` (scan loop and policy accounting), `Manager._load_autostart_manifest()` (JSON loading), `Manager._load_autostart_taskspec()` and `Manager._load_autostart_pipeline()` (stored target resolution), `Manager._build_autostart_spawn_payload()` (defaults merging and pipeline compilation), `Manager._active_autostart_sources()` (active-source tracking via state log), `Manager._enqueue_autostart_request()` (spawn enqueue success boundary), and `Manager._cleanup_children()` (immediate rescan after tracked autostart child exit). Stored-name resolution is shared in `weft/core/spec_store.py`, and pipeline compilation reuses `weft/core/pipelines.py::compile_linear_pipeline()`. Metadata fields `autostart_source` and `autostart` are set on the launched top-level task in `Manager._launch_child_task()`.
 
 ### Reserved queue policies [TS-1.1]
 
@@ -511,3 +515,5 @@ _Implementation mapping_: `weft/core/tasks/base.py` (`BaseTask._apply_reserved_p
 - [`docs/plans/2026-04-14-docker-agent-images-and-one-shot-provider-cli-plan.md`](../plans/2026-04-14-docker-agent-images-and-one-shot-provider-cli-plan.md)
 - [`docs/plans/2026-04-14-provider-cli-container-runtime-descriptor-plan.md`](../plans/2026-04-14-provider-cli-container-runtime-descriptor-plan.md)
 - [`docs/plans/2026-04-15-spec-run-input-adapter-and-declared-args-plan.md`](../plans/2026-04-15-spec-run-input-adapter-and-declared-args-plan.md)
+- [`docs/plans/2026-04-16-autostart-hardening-and-contract-alignment-plan.md`](../plans/2026-04-16-autostart-hardening-and-contract-alignment-plan.md)
+- [`docs/plans/2026-04-16-pipeline-autostart-extension-plan.md`](../plans/2026-04-16-pipeline-autostart-extension-plan.md)

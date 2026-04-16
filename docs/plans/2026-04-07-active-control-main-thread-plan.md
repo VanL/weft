@@ -1,5 +1,9 @@
 # Active Control Main-Thread Ownership Plan
 
+Status: proposed
+Source specs: see Source Documents below
+Superseded by: none
+
 ## Goal
 
 Fix the post-`0.6.4` active STOP/KILL regression by removing the background

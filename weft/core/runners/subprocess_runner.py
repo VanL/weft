@@ -16,14 +16,18 @@ from collections.abc import Callable, Iterable, Sequence
 from typing import IO, TYPE_CHECKING, Any
 
 from simplebroker import BrokerTarget
-from weft._constants import ACTIVE_CONTROL_POLL_INTERVAL
+from weft._constants import (
+    ACTIVE_CONTROL_POLL_INTERVAL,
+    SUBPROCESS_POLL_INTERVAL_FLOOR,
+    SUBPROCESS_STREAM_DRAIN_TIMEOUT,
+    SUBPROCESS_STREAM_READ_SIZE,
+    SUBPROCESS_TERMINATION_WAIT_TIMEOUT,
+)
 from weft.core.resource_monitor import ResourceMetrics, load_resource_monitor
 from weft.ext import RunnerHandle
 
 if TYPE_CHECKING:
     from weft.core.runners.host import RunnerOutcome
-
-_STREAM_READ_SIZE = 64 * 1024
 
 
 def prepare_command_invocation(
@@ -197,11 +201,14 @@ def run_monitored_subprocess(
         sleep_for = ACTIVE_CONTROL_POLL_INTERVAL
         if timeout is not None:
             remaining = timeout - elapsed
-            sleep_for = min(sleep_for, max(0.01, remaining))
+            sleep_for = min(sleep_for, max(SUBPROCESS_POLL_INTERVAL_FLOOR, remaining))
         if process.poll() is not None:
-            sleep_for = min(sleep_for, 0.01)
+            sleep_for = min(sleep_for, SUBPROCESS_POLL_INTERVAL_FLOOR)
         if monitor is not None:
-            until_monitor = max(0.01, next_monitor_at - time.monotonic())
+            until_monitor = max(
+                SUBPROCESS_POLL_INTERVAL_FLOOR,
+                next_monitor_at - time.monotonic(),
+            )
             sleep_for = min(sleep_for, until_monitor)
 
         if monitor is not None and time.monotonic() >= next_monitor_at:
@@ -312,7 +319,7 @@ def _stop_process_runtime(
 ) -> None:
     stop_runtime()
     try:
-        process.wait(timeout=0.2)
+        process.wait(timeout=SUBPROCESS_TERMINATION_WAIT_TIMEOUT)
     except subprocess.TimeoutExpired:
         _kill_process_runtime(process, kill_runtime=kill_runtime)
 
@@ -324,10 +331,10 @@ def _kill_process_runtime(
 ) -> None:
     kill_runtime()
     try:
-        process.wait(timeout=0.2)
+        process.wait(timeout=SUBPROCESS_TERMINATION_WAIT_TIMEOUT)
     except subprocess.TimeoutExpired:
         process.kill()
-        process.wait(timeout=0.2)
+        process.wait(timeout=SUBPROCESS_TERMINATION_WAIT_TIMEOUT)
 
 
 def _start_stream_reader(
@@ -339,22 +346,44 @@ def _start_stream_reader(
         encoding = getattr(stream, "encoding", None) or "utf-8"
         errors = getattr(stream, "errors", None) or "replace"
         decoder = codecs.getincrementaldecoder(encoding)(errors=errors)
+        pending_cr = False
+
+        def _normalize_chunk(chunk: str) -> str:
+            nonlocal pending_cr
+            if not chunk:
+                return ""
+            normalized = chunk
+            if pending_cr:
+                if normalized.startswith("\n"):
+                    normalized = normalized[1:]
+                normalized = "\n" + normalized
+                pending_cr = False
+            normalized = normalized.replace("\r\n", "\n")
+            if normalized.endswith("\r"):
+                normalized = normalized[:-1]
+                pending_cr = True
+            return normalized.replace("\r", "\n")
+
         try:
             while True:
                 if raw_stream is not None and hasattr(raw_stream, "read1"):
-                    raw_chunk = raw_stream.read1(_STREAM_READ_SIZE)
+                    raw_chunk = raw_stream.read1(SUBPROCESS_STREAM_READ_SIZE)
                     if raw_chunk == b"":
                         break
                     chunk = decoder.decode(raw_chunk)
                 else:
-                    chunk = stream.read(_STREAM_READ_SIZE)
+                    chunk = stream.read(SUBPROCESS_STREAM_READ_SIZE)
                     if chunk == "":
                         break
+                chunk = _normalize_chunk(chunk)
                 if not chunk:
                     continue
                 target_queue.put(chunk)
 
-            final_chunk = decoder.decode(b"", final=True)
+            final_chunk = _normalize_chunk(decoder.decode(b"", final=True))
+            if pending_cr:
+                final_chunk = "\n" + final_chunk
+                pending_cr = False
             if final_chunk:
                 target_queue.put(final_chunk)
         finally:
@@ -419,7 +448,7 @@ def _drain_streams_until_closed(
     on_stderr_chunk: Callable[[str, bool], None] | None,
     stdout_closed: bool,
     stderr_closed: bool,
-    timeout: float = 0.25,
+    timeout: float = SUBPROCESS_STREAM_DRAIN_TIMEOUT,
 ) -> tuple[bool, bool]:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline and not (stdout_closed and stderr_closed):
@@ -437,7 +466,7 @@ def _drain_streams_until_closed(
         )
         if stdout_closed and stderr_closed:
             break
-        time.sleep(0.01)
+        time.sleep(SUBPROCESS_POLL_INTERVAL_FLOOR)
     return stdout_closed, stderr_closed
 
 

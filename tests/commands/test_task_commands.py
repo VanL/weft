@@ -26,6 +26,20 @@ from weft.helpers import kill_process_tree
 pytestmark = [pytest.mark.shared]
 
 
+class _FakeQueueChangeMonitor:
+    def __init__(self, queues, *, config=None) -> None:
+        del config
+        self.queue_names = [queue.name for queue in queues]
+        self.wait_calls: list[float | None] = []
+
+    def wait(self, timeout: float | None) -> bool:
+        self.wait_calls.append(timeout)
+        return False
+
+    def close(self) -> None:
+        return
+
+
 def _make_taskspec(tid: str) -> TaskSpec:
     return TaskSpec(
         tid=tid,
@@ -144,6 +158,66 @@ def test_stop_tasks_terminates_active_process_tree(tmp_path) -> None:
     finally:
         kill_process_tree(process.pid)
         kill_process_tree(worker_pid)
+
+
+def test_await_control_surface_uses_queue_monitor(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    created_monitors: list[_FakeQueueChangeMonitor] = []
+    snapshots = iter(
+        [
+            None,
+            task_cmd.status_cmd.TaskSnapshot(
+                tid=tid,
+                tid_short=tid[-10:],
+                name="task-func",
+                status="completed",
+                event="work_completed",
+                activity=None,
+                waiting_on=None,
+                started_at=None,
+                completed_at=time.time_ns(),
+                last_timestamp=time.time_ns(),
+                duration_seconds=None,
+                runner=None,
+                runtime_handle=None,
+                runtime=None,
+                metadata={},
+            ),
+        ]
+    )
+
+    def _fake_monitor(queues, *, config=None):
+        monitor = _FakeQueueChangeMonitor(queues, config=config)
+        created_monitors.append(monitor)
+        return monitor
+
+    monkeypatch.setattr(task_cmd, "QueueChangeMonitor", _fake_monitor)
+    monkeypatch.setattr(task_cmd, "mapping_for_tid", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        task_cmd, "load_latest_taskspec_payload", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(
+        task_cmd,
+        "task_status",
+        lambda *_args, **_kwargs: next(snapshots),
+    )
+
+    entry, snapshot = task_cmd._await_control_surface(ctx, tid, timeout=0.1)
+
+    assert entry is None
+    assert snapshot is not None
+    assert snapshot.status == "completed"
+    assert len(created_monitors) == 1
+    assert created_monitors[0].queue_names == [
+        "weft.state.tid_mappings",
+        "weft.log.tasks",
+    ]
+    assert created_monitors[0].wait_calls
 
 
 def test_kill_tasks_terminates_active_process_tree(tmp_path) -> None:

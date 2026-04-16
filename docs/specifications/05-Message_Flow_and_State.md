@@ -142,8 +142,12 @@ Current submission-reconciliation rules:
   explicit unknown submission outcome keyed by TID
 
 Autostart manifests follow the same overall spawn path. Current autostart
-runtime support covers stored task specs; stored pipeline targets are logged as
-unsupported and skipped.
+runtime support covers stored task specs and stored pipeline targets. Pipeline
+targets are compiled into the same top-level pipeline task submitted by
+`weft run --pipeline`. The manager only treats a manifest launch or restart
+as consumed after the synthesized spawn request is successfully written to the
+ordinary manager inbox queue, and ensure-mode manifests are rescanned
+immediately after a tracked autostart child exits.
 
 _Implementation mapping_: `weft/core/manager.py`, `weft/commands/run.py`.
 
@@ -333,3 +337,5 @@ management live in the companion doc:
 - [`docs/plans/2026-04-09-manager-bootstrap-unification-plan.md`](../plans/2026-04-09-manager-bootstrap-unification-plan.md)
 - [`docs/plans/2026-04-13-pipeline-spec-expansion-plan.md`](../plans/2026-04-13-pipeline-spec-expansion-plan.md)
 - [`docs/plans/2026-04-13-result-stream-implementation-plan.md`](../plans/2026-04-13-result-stream-implementation-plan.md)
+- [`docs/plans/2026-04-16-autostart-hardening-and-contract-alignment-plan.md`](../plans/2026-04-16-autostart-hardening-and-contract-alignment-plan.md)
+- [`docs/plans/2026-04-16-pipeline-autostart-extension-plan.md`](../plans/2026-04-16-pipeline-autostart-extension-plan.md)

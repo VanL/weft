@@ -1,5 +1,9 @@
 # First-Class Linear Pipeline Runtime Implementation Plan
 
+Status: proposed
+Source specs: see Source Documents below
+Superseded by: none
+
 This plan implements the first real pipeline runtime described in
 [`docs/specifications/12-Pipeline_Composition_and_UX.md`](../specifications/12-Pipeline_Composition_and_UX.md).
 It is written for an engineer who is good at Python but has little or no Weft

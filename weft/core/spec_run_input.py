@@ -11,41 +11,10 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Final
+from typing import Any
 
+from weft._constants import RUN_COMMAND_RESERVED_OPTION_NAMES
 from weft.core.imports import import_callable_ref, split_import_ref
-
-RUN_COMMAND_RESERVED_OPTION_NAMES: Final[frozenset[str]] = frozenset(
-    {
-        "spec",
-        "pipeline",
-        "input",
-        "function",
-        "arg",
-        "kw",
-        "env",
-        "name",
-        "interactive",
-        "non-interactive",
-        "stream-output",
-        "no-stream-output",
-        "timeout",
-        "memory",
-        "cpu",
-        "tag",
-        "context",
-        "wait",
-        "no-wait",
-        "json",
-        "verbose",
-        "monitor",
-        "continuous",
-        "once",
-        "autostart",
-        "no-autostart",
-        "help",
-    }
-)
 
 
 @dataclass(frozen=True, slots=True)

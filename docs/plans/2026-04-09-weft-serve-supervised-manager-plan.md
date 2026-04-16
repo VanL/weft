@@ -1,5 +1,9 @@
 # `weft manager serve` Supervised Manager Plan
 
+Status: proposed
+Source specs: see Source Documents below
+Superseded by: none
+
 ## Goal
 
 Add a minimal top-level `weft manager serve` command for operators who want a

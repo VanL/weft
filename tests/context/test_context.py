@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -74,6 +75,54 @@ def test_build_context_can_disable_autostart(tmp_path: Path) -> None:
 
     assert ctx.autostart_enabled is False
     assert not ctx.autostart_dir.exists()
+
+
+def test_build_context_uses_project_config_autostart_default(tmp_path: Path) -> None:
+    root = prepare_project_root(tmp_path / "project-autostart-default")
+    config_path = root / ".weft" / "config.json"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        json.dumps(
+            {
+                "version": "1.0",
+                "project_name": root.name,
+                "created": time.time_ns(),
+                "autostart": False,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    ctx = build_context(spec_context=root)
+
+    assert ctx.autostart_enabled is False
+    assert not ctx.autostart_dir.exists()
+
+
+def test_build_context_explicit_autostart_override_beats_project_default(
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path / "project-autostart-override")
+    config_path = root / ".weft" / "config.json"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        json.dumps(
+            {
+                "version": "1.0",
+                "project_name": root.name,
+                "created": time.time_ns(),
+                "autostart": False,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    ctx = build_context(spec_context=root, autostart=True)
+
+    assert ctx.autostart_enabled is True
+    assert ctx.autostart_dir.is_dir()
 
 
 def test_build_context_discovers_existing_project(tmp_path: Path) -> None:

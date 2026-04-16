@@ -6,6 +6,11 @@ Specs are normative. Plans in `docs/plans/` are not. Plans may reflect
 exploration, partial implementation, or superseded approaches. Keep the specs
 up to date when reality changes.
 
+The plan corpus is indexed in [`docs/plans/README.md`](../plans/README.md).
+That index is the current navigation layer for plan status, supersession, and
+active implementation slices. It does not change the rule above: specs remain
+authoritative for behavior.
+
 The split is intentional:
 
 - Canonical specs without an `A` suffix describe current behavior, current
@@ -115,6 +120,9 @@ comments, or reviews back to the specs.
 sync with plans and code using these rules:
 
 - Plans in `docs/plans/` should cite exact spec files and section codes.
+- Plans in `docs/plans/` should carry a normalized metadata block near the top
+  with `Status`, `Source specs`, and `Superseded by` so readers do not have to
+  infer whether a plan is current, historical, or replaced.
 - Touched specs should update nearby implementation notes and plan backlinks in
   the same change.
 - Touched code modules and major boundary functions should keep docstrings that

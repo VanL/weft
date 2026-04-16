@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from simplebroker import BrokerTarget, Queue
+from simplebroker.ext import BrokerError
 from weft._constants import (
     CONTROL_KILL,
     CONTROL_STOP,
@@ -44,7 +45,10 @@ from weft._constants import (
     QUEUE_INBOX_SUFFIX,
     QUEUE_OUTBOX_SUFFIX,
     QUEUE_RESERVED_SUFFIX,
+    STREAM_CHUNK_SIZE_BYTES,
+    TASK_PROCESS_POLL_INTERVAL,
     TASKSPEC_TID_SHORT_LENGTH,
+    TERMINAL_TASK_STATUSES,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_STREAMING_SESSIONS_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
@@ -63,12 +67,6 @@ from weft.helpers import (
 from .multiqueue_watcher import MultiQueueWatcher, QueueMessageContext, QueueMode
 
 logger = logging.getLogger(__name__)
-
-
-STREAM_CHUNK_SIZE_BYTES = 512 * 1024
-TERMINAL_TASK_STATUSES = frozenset(
-    {"completed", "failed", "timeout", "cancelled", "killed"}
-)
 
 
 class BaseTask(MultiQueueWatcher, ABC):
@@ -330,7 +328,7 @@ class BaseTask(MultiQueueWatcher, ABC):
             seen_queue_ids.add(queue_id)
             try:
                 queue.close()
-            except Exception:
+            except (BrokerError, OSError, RuntimeError):
                 logger.debug(
                     "Failed to close queue %s during cleanup", queue, exc_info=True
                 )
@@ -360,7 +358,7 @@ class BaseTask(MultiQueueWatcher, ABC):
     def run_until_stopped(
         self,
         *,
-        poll_interval: float = 0.05,
+        poll_interval: float = TASK_PROCESS_POLL_INTERVAL,
         max_iterations: int | None = None,
     ) -> None:
         """Repeatedly call :meth:`process_once` until the task stops.
@@ -626,9 +624,10 @@ class BaseTask(MultiQueueWatcher, ABC):
             else None,
         )
 
+        serialized_payload = json.dumps(payload)
         try:
-            self._queue(WEFT_GLOBAL_LOG_QUEUE).write(json.dumps(payload))
-        except Exception:
+            self._queue(WEFT_GLOBAL_LOG_QUEUE).write(serialized_payload)
+        except (BrokerError, OSError, RuntimeError):
             logger.debug(
                 "Failed to write state change event %s", payload, exc_info=True
             )
@@ -656,9 +655,10 @@ class BaseTask(MultiQueueWatcher, ABC):
             if self._waiting_on is not None:
                 payload.setdefault("waiting_on", self._waiting_on)
         payload.update(extra)
+        serialized_payload = json.dumps(payload)
         try:
-            self._ctrl_out_queue.write(json.dumps(payload))
-        except Exception:
+            self._ctrl_out_queue.write(serialized_payload)
+        except (BrokerError, OSError, RuntimeError):
             logger.debug("Failed to write control response %s", payload, exc_info=True)
 
     def handle_termination_signal(self, signum: int) -> None:
@@ -766,7 +766,7 @@ class BaseTask(MultiQueueWatcher, ABC):
         if callable(monitor):
             try:
                 monitor()
-            except Exception:
+            except Exception:  # pragma: no cover - extension hook must stay best effort
                 logger.debug("Resource monitor callback failed", exc_info=True)
 
     _process_title_warning_emitted = False
@@ -826,9 +826,9 @@ class BaseTask(MultiQueueWatcher, ABC):
             if callable(setthreadtitle):
                 try:
                     setthreadtitle(title)
-                except Exception:
+                except (AttributeError, OSError, RuntimeError):
                     logger.debug("Failed to update thread title", exc_info=True)
-        except Exception:
+        except (AttributeError, OSError, RuntimeError):
             logger.debug("Failed to update process title", exc_info=True)
 
     def _format_process_title(self, status: str, details: str | None = None) -> str:
@@ -842,11 +842,8 @@ class BaseTask(MultiQueueWatcher, ABC):
         if spec_context:
             context_path = Path(spec_context)
         else:
-            try:
-                if isinstance(self._db_path, BrokerTarget):
-                    context_path = self._db_path.project_root
-            except Exception:
-                context_path = None
+            if isinstance(self._db_path, BrokerTarget):
+                context_path = self._db_path.project_root
 
         if context_path:
             context_label = context_path.name or context_path.stem
@@ -880,9 +877,10 @@ class BaseTask(MultiQueueWatcher, ABC):
             if self._tid_mapping_equivalent(latest_payload, mapping):
                 return
 
+        serialized_mapping = json.dumps(mapping)
         try:
-            queue.write(json.dumps(mapping))
-        except Exception:
+            queue.write(serialized_mapping)
+        except (BrokerError, OSError, RuntimeError):
             logger.debug("Failed to register TID mapping %s", mapping, exc_info=True)
 
     def register_managed_pid(self, pid: int | None) -> None:
@@ -989,9 +987,10 @@ class BaseTask(MultiQueueWatcher, ABC):
             payload["activity"] = self._activity
         if self._waiting_on is not None:
             payload["waiting_on"] = self._waiting_on
+        serialized_payload = json.dumps(payload)
         try:
-            self._queue(WEFT_GLOBAL_LOG_QUEUE).write(json.dumps(payload))
-        except Exception:
+            self._queue(WEFT_GLOBAL_LOG_QUEUE).write(serialized_payload)
+        except (BrokerError, OSError, RuntimeError):
             logger.debug(
                 "Failed to write task activity event %s", payload, exc_info=True
             )
@@ -1015,9 +1014,10 @@ class BaseTask(MultiQueueWatcher, ABC):
             "timestamp": time.time_ns(),
         }
         payload.update(extra)
+        serialized_payload = json.dumps(payload)
         try:
-            self._queue(events_queue).write(json.dumps(payload))
-        except Exception:
+            self._queue(events_queue).write(serialized_payload)
+        except (BrokerError, OSError, RuntimeError):
             logger.debug(
                 "Failed to write pipeline owner event %s",
                 payload,
@@ -1112,9 +1112,10 @@ class BaseTask(MultiQueueWatcher, ABC):
         if metadata:
             payload.update(metadata)
 
+        serialized_payload = json.dumps(payload, ensure_ascii=False)
         try:
-            queue.write(json.dumps(payload, ensure_ascii=False))
-        except Exception:
+            queue.write(serialized_payload)
+        except (BrokerError, OSError, RuntimeError):
             logger.debug("Failed to register streaming session", exc_info=True)
             return
 
@@ -1136,7 +1137,7 @@ class BaseTask(MultiQueueWatcher, ABC):
         if message_id is not None:
             try:
                 queue.delete(message_id=message_id)
-            except Exception:
+            except (BrokerError, OSError, RuntimeError):
                 logger.debug(
                     "Failed to clear streaming session %s",
                     message_id,
@@ -1153,7 +1154,7 @@ class BaseTask(MultiQueueWatcher, ABC):
         latest: tuple[dict[str, Any], int] | None = None
         try:
             generator = queue.peek_generator(with_timestamps=True)
-        except Exception:
+        except (BrokerError, OSError, RuntimeError):
             return None
 
         for entry in generator:
@@ -1237,7 +1238,7 @@ class BaseTask(MultiQueueWatcher, ABC):
                 plugin.stop(handle, timeout=timeout)
             else:
                 plugin.kill(handle, timeout=timeout)
-        except Exception:
+        except Exception:  # pragma: no cover - plugin hooks must stay best effort
             logger.debug("Failed to stop runtime handle %s", handle, exc_info=True)
 
     def _write_streaming_result(
@@ -1279,6 +1280,7 @@ class BaseTask(MultiQueueWatcher, ABC):
             },
         )
 
+        write_failed = True
         try:
             for index, chunk in enumerate(chunks):
                 envelope = {
@@ -1290,9 +1292,10 @@ class BaseTask(MultiQueueWatcher, ABC):
                     "data": base64.b64encode(chunk).decode("ascii"),
                 }
                 outbox_queue.write(json.dumps(envelope))
-        except Exception:
-            self._end_streaming_session()
-            raise
+            write_failed = False
+        finally:
+            if write_failed:
+                self._end_streaming_session()
 
         return total
 
@@ -1307,7 +1310,7 @@ class BaseTask(MultiQueueWatcher, ABC):
         reserved_queue = self._get_reserved_queue()
         try:
             has_pending = reserved_queue.has_pending()
-        except Exception:
+        except (BrokerError, OSError, RuntimeError):
             logger.debug("Failed to check reserved queue state", exc_info=True)
             return
 
@@ -1325,7 +1328,7 @@ class BaseTask(MultiQueueWatcher, ABC):
         """
         try:
             self._queue(queue_name).delete(message_id=timestamp)
-        except Exception:
+        except (BrokerError, OSError, RuntimeError):
             logger.debug(
                 "Failed to acknowledge control message for %s",
                 queue_name,
@@ -1350,7 +1353,7 @@ class BaseTask(MultiQueueWatcher, ABC):
             if message_timestamp is not None:
                 try:
                     reserved_queue.delete(message_id=message_timestamp)
-                except Exception:
+                except (BrokerError, OSError, RuntimeError):
                     logger.debug(
                         "Failed to clear reserved message %s",
                         message_timestamp,
@@ -1372,7 +1375,7 @@ class BaseTask(MultiQueueWatcher, ABC):
                         with_timestamps=False,
                     )
                     return
-                except Exception:
+                except (BrokerError, OSError, RuntimeError):
                     logger.debug(
                         "Failed to requeue reserved message %s",
                         message_timestamp,
@@ -1395,7 +1398,7 @@ class BaseTask(MultiQueueWatcher, ABC):
                     with_timestamps=False,
                     require_unclaimed=True,
                 )
-            except Exception:
+            except (BrokerError, OSError, RuntimeError):
                 logger.debug(
                     "Failed moving reserved messages back to inbox", exc_info=True
                 )
@@ -1428,7 +1431,7 @@ class BaseTask(MultiQueueWatcher, ABC):
             try:
                 if directory.exists():
                     shutil.rmtree(directory, ignore_errors=False)
-            except Exception:
+            except OSError:
                 logger.debug(
                     "Failed to remove spilled output directory %s",
                     directory,

@@ -50,8 +50,23 @@ machinery instead of splitting behavior across speculative helper packages.
   and avoids inventing package boundaries that are not part of the shipped
   system.
 
+## Plan Corpus [IP-3]
+
+Implementation work is tracked through the plan corpus in
+[`docs/plans/README.md`](../plans/README.md).
+
+That index is intentionally lightweight:
+
+- specs still define behavior
+- plans describe proposed or historical implementation paths
+- the plan index records which plans are active, completed, roadmap-only, or
+  audit artifacts
+- supersession should be explicit in the indexed metadata rather than left to
+  grep and oral history
+
 ## Related Documents
 
+- [`../plans/README.md`](../plans/README.md)
 - [09A-Implementation_Roadmap_Planned.md](09A-Implementation_Roadmap_Planned.md)
 - [10-CLI_Interface.md](10-CLI_Interface.md)
 - [11-CLI_Architecture_Crosswalk.md](11-CLI_Architecture_Crosswalk.md)
