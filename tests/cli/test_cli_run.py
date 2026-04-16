@@ -560,7 +560,8 @@ def test_cli_run_spec_name_resolves_builtin_probe_helper_and_writes_agent_settin
     settings_payload = json.loads(settings_path.read_text(encoding="utf-8"))
     providers = settings_payload["provider_cli"]["providers"]
     for provider_name, wrapper in provider_wrappers:
-        assert providers[provider_name]["executable"] == str(wrapper)
+        configured_executable = providers[provider_name]["executable"]
+        assert Path(configured_executable).resolve() == wrapper.resolve()
 
 
 def test_cli_run_spec_name_prefers_local_shadow_over_builtin(
