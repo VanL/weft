@@ -376,7 +376,7 @@ WEFT_MANAGER_LIFETIME_TIMEOUT: Final[float] = 600.0
 WEFT_MANAGER_REUSE_ENABLED: Final[bool] = True
 """Whether a Manager started by the CLI should remain running after a task completes."""
 
-WEFT_COMPLETED_RESULT_GRACE_SECONDS: Final[float] = 0.25
+WEFT_COMPLETED_RESULT_GRACE_SECONDS: Final[float] = 0.5
 """Time to keep polling an outbox after a completion event before assuming no result."""
 
 INTERACTIVE_OUTPUT_DRAIN_TIMEOUT: Final[float] = 0.25

@@ -181,7 +181,7 @@ def test_wait_for_task_completion_reads_outbox_after_completion_event(
     )
 
     def _write_output() -> None:
-        time.sleep(0.05)
+        time.sleep(0.3)
         outbox_queue = ctx.queue(f"T{tid}.outbox", persistent=True)
         try:
             outbox_queue.write("hello")
