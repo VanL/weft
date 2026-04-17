@@ -703,6 +703,96 @@ def test_cmd_result_stream_succeeds_when_queue_enumeration_lags(
     assert payload == "err"
 
 
+def test_await_single_result_reuses_materialized_completion_state(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rendered = _capture_stream_echo(monkeypatch)
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    outbox_queue = ctx.queue(f"T{tid}.outbox", persistent=True)
+    outbox_queue.write(json.dumps({"stdout": "out", "stderr": "err"}))
+
+    status, value, error_message = _await_single_result(
+        ctx,
+        tid,
+        timeout=0.1,
+        show_stderr=True,
+        emit_stream=False,
+        taskspec_payload=None,
+        outbox_name=f"T{tid}.outbox",
+        ctrl_out_name=f"T{tid}.ctrl_out",
+        initial_log_last_timestamp=123,
+        initial_terminal_status="completed",
+        initial_terminal_error_message=None,
+    )
+
+    assert status == "completed"
+    assert value == "err"
+    assert error_message is None
+    assert rendered == []
+
+
+def test_cmd_result_passes_materialized_state_to_result_wait(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    tid = str(time.time_ns())
+    captured: dict[str, object] = {}
+
+    materialized = result_cmd.ResultMaterialization(
+        taskspec_payload=None,
+        outbox_name=f"T{tid}.outbox",
+        ctrl_out_name=f"T{tid}.ctrl_out",
+        log_last_timestamp=123,
+        terminal_status="completed",
+        terminal_error_message=None,
+    )
+
+    monkeypatch.setattr(
+        result_cmd.time,
+        "monotonic",
+        lambda: 100.0,
+    )
+    monkeypatch.setattr(
+        result_cmd,
+        "_await_result_materialization",
+        lambda *args, **kwargs: materialized,
+    )
+    monkeypatch.setattr(
+        result_cmd,
+        "_await_single_result",
+        lambda *args, **kwargs: (
+            captured.update(kwargs) or ("completed", "err", None)
+        ),
+    )
+
+    exit_code, payload = cmd_result(
+        tid=tid,
+        all_results=False,
+        peek=False,
+        timeout=RESULT_WAIT_TIMEOUT,
+        stream=True,
+        json_output=False,
+        show_stderr=True,
+        context_path=str(root),
+    )
+
+    assert exit_code == 0
+    assert payload == "err"
+    assert captured["taskspec_payload"] is None
+    assert captured["outbox_name"] == materialized.outbox_name
+    assert captured["ctrl_out_name"] == materialized.ctrl_out_name
+    assert captured["initial_log_last_timestamp"] == materialized.log_last_timestamp
+    assert captured["initial_terminal_status"] == materialized.terminal_status
+    assert (
+        captured["initial_terminal_error_message"]
+        == materialized.terminal_error_message
+    )
+
+
 def test_result_reads_pipeline_outbox_by_pipeline_tid(tmp_path) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)

@@ -89,6 +89,9 @@ def await_one_shot_result(
     timeout: float | None,
     show_stderr: bool,
     emit_stream: bool = False,
+    initial_log_last_timestamp: int | None = None,
+    initial_terminal_status: str | None = None,
+    initial_error_message: str | None = None,
 ) -> tuple[str, Any | None, str | None]:
     """Wait for a one-shot task to publish a terminal result."""
     outbox_queue = context.queue(outbox_name, persistent=True)
@@ -101,14 +104,22 @@ def await_one_shot_result(
         config=context.config,
     )
 
-    log_last_timestamp: int | None = None
+    log_last_timestamp: int | None = initial_log_last_timestamp
     stream_buffer: list[str] = []
     status = "running"
     result_values: list[Any] = []
     result_value: Any | None = None
-    error_message: str | None = None
-    completed_at: float | None = None
+    error_message: str | None = initial_error_message
+    completed_at: float | None = (
+        time.monotonic() if initial_terminal_status == "completed" else None
+    )
     structured_result_seen_at: float | None = None
+    materialized_completed = initial_terminal_status == "completed"
+    if (
+        initial_terminal_status is not None
+        and initial_terminal_status != "completed"
+    ):
+        status = initial_terminal_status
 
     deadline = None
     if timeout is not None and timeout > 0:
@@ -146,6 +157,10 @@ def await_one_shot_result(
                     output,
                     show_stderr=show_stderr,
                 )
+            if materialized_completed and result_values:
+                result_value = aggregate_public_outputs(result_values)
+                status = "completed"
+                break
             if drained_outbox:
                 continue
 

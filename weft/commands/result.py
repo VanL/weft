@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Iterator
+from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from typing import Any, cast
 
@@ -43,6 +44,18 @@ from ._task_history import (
     is_pipeline_taskspec_payload,
     load_latest_taskspec_payload,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class ResultMaterialization:
+    """Resolved result queues plus any terminal log state already observed."""
+
+    taskspec_payload: dict[str, Any] | None
+    outbox_name: str
+    ctrl_out_name: str
+    log_last_timestamp: int | None = None
+    terminal_status: str | None = None
+    terminal_error_message: str | None = None
 
 
 def _normalize_tid(raw_tid: str) -> str:
@@ -108,7 +121,7 @@ def _await_result_materialization(
     tid: str,
     *,
     timeout: float | None,
-) -> tuple[dict[str, Any] | None, str, str] | None:
+) -> ResultMaterialization | None:
     """Wait for taskspec metadata or result queues to become visible.
 
     For stored specs with custom outbox/control queue names, ``weft result`` can
@@ -131,7 +144,12 @@ def _await_result_materialization(
             if taskspec_payload is not None or _queue_names_exist(
                 context, outbox_name, ctrl_out_name
             ):
-                return taskspec_payload, outbox_name, ctrl_out_name
+                return ResultMaterialization(
+                    taskspec_payload=taskspec_payload,
+                    outbox_name=outbox_name,
+                    ctrl_out_name=ctrl_out_name,
+                    log_last_timestamp=log_last_timestamp,
+                )
 
             events, log_last_timestamp = poll_log_events(
                 log_queue,
@@ -139,6 +157,18 @@ def _await_result_materialization(
                 tid,
             )
             if events:
+                terminal_status: str | None = None
+                terminal_message: str | None = None
+                for event_payload, _timestamp in reversed(events):
+                    event_status = terminal_status_from_event(event_payload)
+                    if event_status is None:
+                        continue
+                    terminal_status = event_status
+                    terminal_message = terminal_error_message(
+                        event_payload,
+                        event_status,
+                    )
+                    break
                 for event_payload, _timestamp in reversed(events):
                     event_taskspec = event_payload.get("taskspec")
                     if isinstance(event_taskspec, dict):
@@ -146,8 +176,22 @@ def _await_result_materialization(
                             tid,
                             event_taskspec,
                         )
-                        return event_taskspec, outbox_name, ctrl_out_name
-                return taskspec_payload, outbox_name, ctrl_out_name
+                        return ResultMaterialization(
+                            taskspec_payload=event_taskspec,
+                            outbox_name=outbox_name,
+                            ctrl_out_name=ctrl_out_name,
+                            log_last_timestamp=log_last_timestamp,
+                            terminal_status=terminal_status,
+                            terminal_error_message=terminal_message,
+                        )
+                return ResultMaterialization(
+                    taskspec_payload=taskspec_payload,
+                    outbox_name=outbox_name,
+                    ctrl_out_name=ctrl_out_name,
+                    log_last_timestamp=log_last_timestamp,
+                    terminal_status=terminal_status,
+                    terminal_error_message=terminal_message,
+                )
 
             if deadline is None:
                 return None
@@ -293,10 +337,18 @@ def _await_single_result(
     timeout: float | None,
     show_stderr: bool,
     emit_stream: bool = False,
+    taskspec_payload: dict[str, Any] | None = None,
+    outbox_name: str | None = None,
+    ctrl_out_name: str | None = None,
+    initial_log_last_timestamp: int | None = None,
+    initial_terminal_status: str | None = None,
+    initial_terminal_error_message: str | None = None,
 ) -> tuple[str, Any | None, str | None]:
-    taskspec_payload = _load_taskspec_payload(context, tid)
+    if taskspec_payload is None:
+        taskspec_payload = _load_taskspec_payload(context, tid)
     is_persistent = _is_persistent_task(taskspec_payload)
-    outbox_name, ctrl_out_name = _queue_names_for_tid(tid, taskspec_payload)
+    if outbox_name is None or ctrl_out_name is None:
+        outbox_name, ctrl_out_name = _queue_names_for_tid(tid, taskspec_payload)
     ctrl_out_for_wait = (
         None if is_pipeline_taskspec_payload(taskspec_payload) else ctrl_out_name
     )
@@ -310,6 +362,9 @@ def _await_single_result(
             timeout=timeout,
             show_stderr=show_stderr,
             emit_stream=emit_stream,
+            initial_log_last_timestamp=initial_log_last_timestamp,
+            initial_terminal_status=initial_terminal_status,
+            initial_error_message=initial_terminal_error_message,
         )
 
     outbox_queue = context.queue(outbox_name, persistent=True)
@@ -320,17 +375,25 @@ def _await_single_result(
         config=context.config,
     )
 
-    log_last_timestamp: int | None = None
+    log_last_timestamp: int | None = initial_log_last_timestamp
     stream_buffer: list[str] = []
     status = "running"
     result_values: list[Any] = []
     result_value: Any | None = None
-    error_message: str | None = None
-    completed_at: float | None = None
+    error_message: str | None = initial_terminal_error_message
+    completed_at: float | None = (
+        time.monotonic() if initial_terminal_status == "completed" else None
+    )
     first_pending_timestamp: int | None = None
     boundary_timestamp: int | None = None
     boundary_seen_at: float | None = None
     pending_completion_timestamps: list[int] = []
+    materialized_completed = initial_terminal_status == "completed"
+    if (
+        initial_terminal_status is not None
+        and initial_terminal_status != "completed"
+    ):
+        status = initial_terminal_status
 
     deadline = None
     if timeout is not None and timeout > 0:
@@ -413,6 +476,10 @@ def _await_single_result(
                         output,
                         show_stderr=show_stderr,
                     )
+                if materialized_completed and result_values:
+                    result_value = aggregate_public_outputs(result_values)
+                    status = "completed"
+                    break
                 if (
                     drained_outputs
                     or result_values
@@ -553,6 +620,12 @@ def cmd_result(
         timeout=remaining_timeout,
         show_stderr=show_stderr,
         emit_stream=stream,
+        taskspec_payload=materialized.taskspec_payload,
+        outbox_name=materialized.outbox_name,
+        ctrl_out_name=materialized.ctrl_out_name,
+        initial_log_last_timestamp=materialized.log_last_timestamp,
+        initial_terminal_status=materialized.terminal_status,
+        initial_terminal_error_message=materialized.terminal_error_message,
     )
 
     if status == "completed":
