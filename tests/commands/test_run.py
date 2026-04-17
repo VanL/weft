@@ -6,7 +6,6 @@ import json
 import os
 import subprocess
 import sys
-import threading
 import time
 from collections.abc import Iterator, Sequence
 from pathlib import Path
@@ -16,6 +15,7 @@ import pytest
 import typer
 
 import weft.commands._manager_bootstrap as manager_lifecycle
+import weft.commands._result_wait as result_wait_cmd
 import weft.commands._spawn_submission as spawn_submission_cmd
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import (
@@ -162,6 +162,7 @@ class _FakeQueueChangeMonitor:
 
 
 def test_wait_for_task_completion_reads_outbox_after_completion_event(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     root = prepare_project_root(tmp_path)
@@ -180,25 +181,35 @@ def test_wait_for_task_completion_reads_outbox_after_completion_event(
         )
     )
 
-    def _write_output() -> None:
-        time.sleep(0.3)
-        outbox_queue = ctx.queue(f"T{tid}.outbox", persistent=True)
-        try:
-            outbox_queue.write("hello")
-        finally:
-            outbox_queue.close()
+    writes_triggered = 0
 
-    writer = threading.Thread(target=_write_output, daemon=True)
-    writer.start()
-    try:
-        status, result, error = _wait_for_task_completion(
-            ctx,
-            taskspec,
-            json_output=False,
-            verbose=False,
-        )
-    finally:
-        writer.join(timeout=1.0)
+    class _LateOutboxMonitor:
+        def __init__(self, _queues, *, config=None) -> None:
+            del config
+
+        def wait(self, timeout: float | None) -> bool:
+            del timeout
+            nonlocal writes_triggered
+            if writes_triggered == 0:
+                writes_triggered += 1
+                outbox_queue = ctx.queue(f"T{tid}.outbox", persistent=True)
+                try:
+                    outbox_queue.write("hello")
+                finally:
+                    outbox_queue.close()
+            return False
+
+        def close(self) -> None:
+            return
+
+    monkeypatch.setattr(result_wait_cmd, "QueueChangeMonitor", _LateOutboxMonitor)
+
+    status, result, error = _wait_for_task_completion(
+        ctx,
+        taskspec,
+        json_output=False,
+        verbose=False,
+    )
 
     assert status == "completed"
     assert result == "hello"
@@ -206,6 +217,7 @@ def test_wait_for_task_completion_reads_outbox_after_completion_event(
 
 
 def test_wait_for_task_completion_aggregates_multiple_outbox_messages(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     root = prepare_project_root(tmp_path)
@@ -224,27 +236,36 @@ def test_wait_for_task_completion_aggregates_multiple_outbox_messages(
         )
     )
 
-    def _write_outputs() -> None:
-        time.sleep(0.05)
-        outbox_queue = ctx.queue(f"T{tid}.outbox", persistent=True)
-        try:
-            outbox_queue.write("hello")
-            outbox_queue.write("world")
-        finally:
-            outbox_queue.close()
-        time.sleep(0.05)
+    writes_triggered = 0
 
-    writer = threading.Thread(target=_write_outputs, daemon=True)
-    writer.start()
-    try:
-        status, result, error = _wait_for_task_completion(
-            ctx,
-            taskspec,
-            json_output=False,
-            verbose=False,
-        )
-    finally:
-        writer.join(timeout=1.0)
+    class _LateOutboxMonitor:
+        def __init__(self, _queues, *, config=None) -> None:
+            del config
+
+        def wait(self, timeout: float | None) -> bool:
+            del timeout
+            nonlocal writes_triggered
+            if writes_triggered == 0:
+                writes_triggered += 1
+                outbox_queue = ctx.queue(f"T{tid}.outbox", persistent=True)
+                try:
+                    outbox_queue.write("hello")
+                    outbox_queue.write("world")
+                finally:
+                    outbox_queue.close()
+            return False
+
+        def close(self) -> None:
+            return
+
+    monkeypatch.setattr(result_wait_cmd, "QueueChangeMonitor", _LateOutboxMonitor)
+
+    status, result, error = _wait_for_task_completion(
+        ctx,
+        taskspec,
+        json_output=False,
+        verbose=False,
+    )
 
     assert status == "completed"
     assert result == ["hello", "world"]
