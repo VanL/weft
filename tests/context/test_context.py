@@ -213,11 +213,15 @@ def test_build_context_accepts_supplied_config_override(tmp_path: Path) -> None:
     root = prepare_project_root(tmp_path)
     config = compile_config({"WEFT_DIRECTORY_NAME": ".engram"})
 
-    ctx = build_context(spec_context=root, config=config)
+    ctx = build_context(spec_context=root, config=config, create_database=False)
 
     assert ctx.root == root.resolve()
     assert ctx.weft_dir == (root / ".engram").resolve()
-    assert ctx.database_path == (root / ".engram" / "broker.db").resolve()
+    assert config["BROKER_DEFAULT_DB_NAME"] == ".engram/broker.db"
+    if ctx.is_file_backed:
+        assert ctx.database_path == (root / ".engram" / "broker.db").resolve()
+    else:
+        assert ctx.database_path is None
 
 
 def test_build_context_discovers_existing_project_with_custom_weft_directory_name(
