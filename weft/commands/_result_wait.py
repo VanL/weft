@@ -108,6 +108,7 @@ def await_one_shot_result(
     result_value: Any | None = None
     error_message: str | None = None
     completed_at: float | None = None
+    last_output_at: float | None = None
 
     deadline = None
     if timeout is not None and timeout > 0:
@@ -135,6 +136,8 @@ def await_one_shot_result(
                     output,
                     show_stderr=show_stderr,
                 )
+            if ready_values:
+                last_output_at = time.monotonic()
             if drained_outbox:
                 continue
 
@@ -176,6 +179,19 @@ def await_one_shot_result(
                 status = "completed"
                 break
 
+            # If final outbox payloads are already visible but the terminal log
+            # event races or never becomes observable, treat a quiet grace
+            # window the same way we treat a late outbox after completion.
+            if (
+                completed_at is None
+                and last_output_at is not None
+                and time.monotonic() - last_output_at
+                >= WEFT_COMPLETED_RESULT_GRACE_SECONDS
+            ):
+                result_value = aggregate_public_outputs(result_values)
+                status = "completed"
+                break
+
             if deadline is not None and time.monotonic() >= deadline:
                 status = "timeout"
                 error_message = (
@@ -196,6 +212,17 @@ def await_one_shot_result(
                     grace_remaining
                     if wait_timeout is None
                     else min(wait_timeout, grace_remaining)
+                )
+            if completed_at is None and last_output_at is not None:
+                output_grace_remaining = max(
+                    0.0,
+                    WEFT_COMPLETED_RESULT_GRACE_SECONDS
+                    - (time.monotonic() - last_output_at),
+                )
+                wait_timeout = (
+                    output_grace_remaining
+                    if wait_timeout is None
+                    else min(wait_timeout, output_grace_remaining)
                 )
             monitor.wait(wait_timeout)
     finally:
