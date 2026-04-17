@@ -18,6 +18,7 @@ from weft._constants import (
     FAILURE_LIKE_TASK_STATUSES,
     QUEUE_CTRL_OUT_SUFFIX,
     QUEUE_OUTBOX_SUFFIX,
+    RESULT_SURFACE_WAIT_INTERVAL,
     WEFT_COMPLETED_RESULT_GRACE_SECONDS,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_STREAMING_SESSIONS_QUEUE,
@@ -198,6 +199,7 @@ def _await_result_materialization(
             wait_timeout = max(0.0, deadline - time.monotonic())
             if wait_timeout <= 0:
                 return None
+            wait_timeout = min(wait_timeout, RESULT_SURFACE_WAIT_INTERVAL)
             monitor.wait(wait_timeout)
     finally:
         monitor.close()
@@ -540,6 +542,11 @@ def _await_single_result(
                     if wait_timeout is None
                     else min(wait_timeout, completion_remaining)
                 )
+            wait_timeout = (
+                RESULT_SURFACE_WAIT_INTERVAL
+                if wait_timeout is None
+                else min(wait_timeout, RESULT_SURFACE_WAIT_INTERVAL)
+            )
             monitor.wait(wait_timeout)
     finally:
         monitor.close()

@@ -101,6 +101,9 @@ CONTROL_SURFACE_WAIT_TIMEOUT: Final[float] = 2.0
 CONTROL_SURFACE_WAIT_INTERVAL: Final[float] = 0.05
 """Polling interval while waiting for task terminal state in CLI control flows."""
 
+RESULT_SURFACE_WAIT_INTERVAL: Final[float] = 0.1
+"""Maximum interval between CLI result-surface rescans when watcher wakeups are missed."""
+
 SPAWN_SUBMISSION_RECONCILIATION_TIMEOUT: Final[float] = 1.0
 """Default time budget for classifying a submitted spawn request via durable state."""
 
