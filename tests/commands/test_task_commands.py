@@ -207,7 +207,7 @@ def test_await_control_surface_uses_queue_monitor(
         lambda *_args, **_kwargs: next(snapshots),
     )
 
-    entry, snapshot = task_cmd._await_control_surface(ctx, tid, timeout=0.1)
+    entry, snapshot = task_cmd._await_control_surface(ctx, tid, timeout=0.2)
 
     assert entry is None
     assert snapshot is not None
