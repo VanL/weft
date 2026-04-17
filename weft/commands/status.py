@@ -498,12 +498,18 @@ def _collect_task_snapshots(
                 "event_payload": None,
             },
         )
-        record["last_timestamp"] = timestamp
         event = payload.get("event", "unknown")
-        if isinstance(event, str):
-            record["event"] = event
+        current_status = record.get("status")
+        current_terminal = (
+            isinstance(current_status, str) and current_status in TERMINAL_TASK_STATUSES
+        )
 
         if event == "task_activity":
+            if current_terminal:
+                continue
+            record["last_timestamp"] = timestamp
+            if isinstance(event, str):
+                record["event"] = event
             status = payload.get("status")
             if isinstance(status, str) and status:
                 record["status"] = status
@@ -532,6 +538,12 @@ def _collect_task_snapshots(
         name = taskspec.get("name") or payload.get("name") or tid
         state = taskspec.get("state") or {}
         status = payload.get("status") or state.get("status") or "created"
+        incoming_terminal = isinstance(status, str) and status in TERMINAL_TASK_STATUSES
+        if current_terminal and not incoming_terminal:
+            continue
+        record["last_timestamp"] = timestamp
+        if isinstance(event, str):
+            record["event"] = event
         started_at = state.get("started_at")
         completed_at = state.get("completed_at")
         metadata = taskspec.get("metadata") or {}

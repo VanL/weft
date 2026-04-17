@@ -617,6 +617,93 @@ def test_terminal_snapshot_omits_activity_when_status_is_terminal(
     assert snapshot.waiting_on is None
 
 
+def test_task_status_ignores_late_activity_regression_after_terminal_state(
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = "1844674407370955179"
+    started = 1_762_000_000_000_000_000
+    completed = started + 2_000_000
+
+    _write_task_log_entry(
+        ctx=ctx,
+        tid=tid,
+        event="work_completed",
+        status="completed",
+        started_at=started,
+        completed_at=completed,
+        name="terminal-stage",
+    )
+    log_queue = ctx.queue("weft.log.tasks", persistent=False)
+    log_queue.write(
+        json.dumps(
+            {
+                "event": "task_activity",
+                "tid": tid,
+                "status": "running",
+                "activity": "waiting",
+                "waiting_on": "T1844674407370955179.inbox",
+            }
+        )
+    )
+
+    snapshot = task_cmd.task_status(tid, context_path=root)
+
+    assert snapshot is not None
+    assert snapshot.event == "work_completed"
+    assert snapshot.status == "completed"
+    assert snapshot.activity is None
+    assert snapshot.waiting_on is None
+
+
+def test_task_status_ignores_late_full_payload_regression_after_terminal_state(
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = "1844674407370955180"
+    started = 1_762_000_000_000_000_000
+    completed = started + 2_000_000
+
+    _write_task_log_entry(
+        ctx=ctx,
+        tid=tid,
+        event="work_completed",
+        status="completed",
+        started_at=started,
+        completed_at=completed,
+        name="terminal-stage",
+    )
+    log_queue = ctx.queue("weft.log.tasks", persistent=False)
+    log_queue.write(
+        json.dumps(
+            {
+                "event": "poll_report",
+                "status": "running",
+                "tid": tid,
+                "taskspec": {
+                    "name": "terminal-stage",
+                    "spec": {"runner": {"name": "host", "options": {}}},
+                    "state": {
+                        "status": "running",
+                        "started_at": started,
+                        "completed_at": completed,
+                    },
+                    "metadata": {},
+                },
+            }
+        )
+    )
+
+    snapshot = task_cmd.task_status(tid, context_path=root)
+
+    assert snapshot is not None
+    assert snapshot.event == "work_completed"
+    assert snapshot.status == "completed"
+    assert snapshot.completed_at == completed
+
+
 def test_task_status_reads_pipeline_snapshot_when_available(
     tmp_path: Path,
 ) -> None:

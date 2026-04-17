@@ -20,14 +20,16 @@ wheels/
 .installed.cfg
 *.egg
 MANIFEST
-.weft/
+.weft
 
 # Virtual environments
 venv/
 ENV/
 env/
 .venv
-.weft/broker.db
+.weft/broker.*
+.weft/config.json
+.weft/agents.json
 
 # IDEs
 .vscode/
