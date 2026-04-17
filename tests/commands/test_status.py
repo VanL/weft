@@ -962,6 +962,8 @@ def test_watch_task_events_uses_queue_monitor(
     ctx = build_context(spec_context=root)
     tid = "1844674407370955167"
     created_monitors: list[_FakeQueueChangeMonitor] = []
+    iter_queue_names: list[str] = []
+    iter_since_timestamps: list[int | None] = []
     log_iterations = iter(
         [
             [],
@@ -988,9 +990,13 @@ def test_watch_task_events_uses_queue_monitor(
         return monitor
 
     monkeypatch.setattr(status_cmd, "QueueChangeMonitor", _fake_monitor)
-    monkeypatch.setattr(
-        status_cmd, "_iter_log_events", lambda _ctx: next(log_iterations, [])
-    )
+
+    def _fake_iter_log_events(queue, *, since_timestamp=None):
+        iter_queue_names.append(queue.name)
+        iter_since_timestamps.append(since_timestamp)
+        return next(log_iterations, [])
+
+    monkeypatch.setattr(status_cmd, "_iter_log_events", _fake_iter_log_events)
 
     exit_code = status_cmd._watch_task_events(
         ctx,
@@ -1005,4 +1011,6 @@ def test_watch_task_events_uses_queue_monitor(
     assert "work_completed" in captured.out
     assert len(created_monitors) == 1
     assert created_monitors[0].queue_names == ["weft.log.tasks"]
+    assert iter_queue_names == ["weft.log.tasks", "weft.log.tasks"]
+    assert iter_since_timestamps == [0, 0]
     assert created_monitors[0].wait_calls == [0.25, 0.25]

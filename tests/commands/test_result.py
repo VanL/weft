@@ -68,6 +68,51 @@ def test_load_taskspec_payload_reads_full_log_history(tmp_path) -> None:
     assert taskspec["tid"] == target_tid
 
 
+def test_load_taskspec_payload_closes_log_queue() -> None:
+    tid = "1844674407370955199"
+
+    class FakeQueue:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def peek_generator(
+            self,
+            *,
+            with_timestamps: bool = False,
+            since_timestamp: int | None = None,
+        ):
+            assert with_timestamps is True
+            assert since_timestamp == int(tid) - 1
+            payload = json.dumps(
+                {
+                    "tid": tid,
+                    "taskspec": {
+                        "tid": tid,
+                        "name": "closed-queue-task",
+                        "state": {"status": "running"},
+                    },
+                }
+            )
+            return iter([(payload, int(tid))])
+
+        def close(self) -> None:
+            self.closed = True
+
+    queue = FakeQueue()
+
+    class FakeContext:
+        def queue(self, name: str, *, persistent: bool = False) -> FakeQueue:
+            assert name == WEFT_GLOBAL_LOG_QUEUE
+            assert persistent is False
+            return queue
+
+    taskspec = _load_taskspec_payload(FakeContext(), tid)
+
+    assert taskspec is not None
+    assert taskspec["tid"] == tid
+    assert queue.closed is True
+
+
 def test_cmd_result_reports_failed_task_without_outbox(tmp_path) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)

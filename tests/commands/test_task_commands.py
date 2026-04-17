@@ -216,6 +216,7 @@ def test_await_control_surface_uses_queue_monitor(
     assert created_monitors[0].queue_names == [
         "weft.state.tid_mappings",
         "weft.log.tasks",
+        f"T{tid}.ctrl_out",
     ]
     assert created_monitors[0].wait_calls
 
