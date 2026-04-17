@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.9.2 - 2026-04-17
+
+### Added
+
+- Added a built-in runtime heartbeat service plus helper APIs for best-effort
+  interval emission through ordinary Weft queues.
+
+### Changed
+
+- Changed internal runtime routing so reserved runtime task classes and reserved
+  `_weft.*` endpoints are carried on a manager-owned spawn envelope instead of
+  trusting public TaskSpec metadata.
+- Changed the canonical-owner fence and manager suspension path so fenced spawn
+  requests stay recoverable while ownership is unresolved and duplicate service
+  claimants converge by loser exit.
+- Changed the final specs to document heartbeat as a runtime-scoped interval
+  emitter, not a scheduler; broader scheduler semantics remain deferred.
+
+### Fixed
+
+- Fixed manager yield, idle-shutdown, and autostart behavior so dispatch-
+  suspended managers do not orphan fenced reserved work or self-enqueue
+  duplicate autostart requests.
+- Fixed public naming and endpoint-claim surfaces so ordinary tasks cannot
+  claim reserved internal heartbeat endpoints.
+
 ## 0.9.1 - 2026-04-17
 
 ### Added
