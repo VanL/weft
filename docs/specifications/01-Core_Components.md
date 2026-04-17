@@ -29,18 +29,24 @@ creation.
 
 _Implementation mapping_: `weft/core/taskspec.py` — `TaskSpec`, `SpecSection`,
 `IOSection`, `StateSection`, `LimitsSection`, `RunnerSection`, `AgentSection`,
-`FrozenList`, `FrozenDict`, `resolve_taskspec_payload`.
+`FrozenList`, `FrozenDict`, `resolve_taskspec_payload`,
+`apply_bundle_root_to_taskspec_payload`; supporting parameterization and
+run-input validation live in `weft/core/spec_parameterization.py` and
+`weft/core/spec_run_input.py`, and runner-environment materialization lives in
+`weft/core/environment_profiles.py`.
 
 Current contract:
 
 - `spec` and `io` are immutable after TaskSpec creation
 - `state` and metadata remain mutable
-- stored templates omit runtime-expanded fields such as `tid`, `io`, and
-  `state`
+- stored templates may omit runtime-expanded values such as `tid` and the
+  resolved queue names inside `io`
 - stored templates may also declare explicit submission-time shaping through
   `spec.parameterization` and `spec.run_input`
 - the manager resolves runtime TaskSpecs from templates at spawn time
 - runner selection lives in `spec.runner`
+- `spec.runner.environment_profile_ref` participates in runner environment
+  materialization before capability and plugin checks
 - resource limits live in `spec.limits`
 
 Why this shape exists:
@@ -105,7 +111,9 @@ Concrete task classes express different queue behaviors on top of `BaseTask`.
 
 _Implementation mapping_: `weft/core/tasks/consumer.py`,
 `weft/core/tasks/observer.py`, `weft/core/tasks/monitor.py`,
-`weft/core/tasks/interactive.py`; re-exported from `weft/core/tasks/__init__.py`.
+`weft/core/tasks/pipeline.py`, `weft/core/tasks/debugger.py`,
+`weft/core/tasks/interactive.py`, `weft/core/tasks/sessions.py`;
+re-exported from `weft/core/tasks/__init__.py`.
 
 Current task families:
 
@@ -114,15 +122,20 @@ Current task families:
 - `SelectiveConsumer`: conditionally consumes based on a selector
 - `Monitor`: forwards while observing
 - `SamplingObserver`: observer variant with interval-based sampling
+- `PipelineTask`: internal orchestrator for first-class linear pipelines
+- `PipelineEdgeTask`: generated one-shot edge task for pipeline handoff
+- `Debugger`: in-process diagnostic command surface for interactive debugging
 
-Interactive command sessions reuse the same task/runtime conventions rather than
-inventing a second terminal subsystem.
+Interactive command sessions reuse the same task/runtime conventions rather
+than inventing a second terminal subsystem, and long-lived agent sessions reuse
+the same session helpers in `weft/core/tasks/sessions.py`.
 
 ### 2.4 Control and State Expectations [CC-2.4]
 
 Current required control behavior:
 
-- `STOP`, `STATUS`, and `PING` round trips exist for live tasks
+- `STOP`, `KILL`, `STATUS`, and `PING` round trips exist for live tasks
+- `PAUSE` and `RESUME` are supported on task types that opt into live pausing
 - durable `state.status` remains the canonical lifecycle state
 - user-facing surfaces may expose derived live `activity` without creating a
   second durable state machine
@@ -147,7 +160,8 @@ a stable project-local name.
 _Implementation mapping_: `weft/core/endpoints.py` — `EndpointRecord`,
 `ResolvedEndpoint`, `list_resolved_endpoints()`, `resolve_endpoint()`;
 `weft/core/tasks/base.py` — `register_endpoint_name()`,
-`unregister_endpoint_name()`.
+`unregister_endpoint_name()`;
+`weft.state.endpoints` — runtime queue used for the registry records.
 
 Current rules:
 
@@ -180,8 +194,8 @@ Current high-level flow:
 6. publish terminal state and cleanup
 
 _Implementation mapping_: `weft/core/tasks/consumer.py` owns work-item
-execution and finalization; `weft/commands/run.py` owns CLI submission and wait
-behavior.
+execution and finalization; `weft/core/tasks/runner.py` owns runner dispatch;
+`weft/commands/run.py` owns CLI submission and wait behavior.
 
 Why this stays shared:
 
@@ -195,8 +209,10 @@ keeping queue semantics and task lifecycle in core Weft code.
 
 _Implementation mapping_: `weft/core/tasks/runner.py` — `TaskRunner`; runner
 environment-profile materialization in `weft/core/environment_profiles.py`;
-plugin loading in `weft/_runner_plugins.py`; runner plugin interface in
-`weft/ext.py`; built-in host runner in `weft/core/runners/`.
+task runner validation in `weft/core/agents/validation.py` and
+`weft/core/runner_validation.py`; plugin loading in `weft/_runner_plugins.py`;
+runner plugin interface in `weft/ext.py`; built-in host runner in
+`weft/core/runners/`.
 
 Why this boundary exists:
 
@@ -221,8 +237,9 @@ Current rule:
 - control and observability must work through a durable runtime handle, not
   only through a host PID
 
-_Implementation mapping_: `weft/ext.py` `RunnerHandle`, CLI status/control
-surfaces in `weft/commands/status.py` and `weft/commands/tasks.py`.
+_Implementation mapping_: `weft/ext.py` `RunnerHandle`; `weft/core/tasks/base.py`
+`register_runtime_handle()`; CLI status/control surfaces in
+`weft/commands/status.py` and `weft/commands/tasks.py`.
 
 Why this matters:
 
@@ -246,7 +263,8 @@ Current validation is layered:
   concrete startup failures there
 
 _Implementation mapping_: `weft/core/runner_validation.py`,
-`weft/commands/validate_taskspec.py`.
+`weft/commands/validate_taskspec.py`,
+`weft/core/agents/validation.py`.
 
 ### 3.4 Monitoring Ownership [CC-3.4]
 
@@ -256,9 +274,13 @@ Current rule:
 
 That means:
 
-- the host runner uses Weft's psutil-based monitor path
+- the host runner and session helpers use Weft's psutil-based monitor path
 - alternate runners may surface runtime-native monitoring
 - status surfaces should prefer runner-native descriptions when available
+
+_Implementation mapping_: `weft/core/resource_monitor.py`,
+`weft/core/runners/host.py`, `weft/core/runners/subprocess_runner.py`,
+`weft/core/tasks/sessions.py`, `weft/core/tasks/consumer.py`.
 
 ## Related Documents
 

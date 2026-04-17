@@ -1,46 +1,48 @@
 # Planned Companion for 01: Core Components
 
-This document tracks intended but not implemented component work adjacent to
+This document tracks intended future component work adjacent to
 [`01-Core_Components.md`](01-Core_Components.md).
 
+It does not restate shipped surfaces. The runtime endpoint registry, current
+task specializations, and session helpers already live in the current spec and
+implementation, so they are intentionally not treated as planned work here.
+
 Nothing here overrides the canonical component contract.
+If any item here ships, move it into the canonical sibling and remove it from
+this planned companion rather than treating this file as canonical.
 
 ## Planned Areas
 
-### Runtime Endpoint Follow-up [01A-1]
+### Runtime Endpoint Boundary [01A-1]
 
-The base runtime endpoint registry is now part of the current contract; see
-[`01-Core_Components.md`](01-Core_Components.md) [CC-2.4.1].
+[`01-Core_Components.md`](01-Core_Components.md) already owns the runtime
+endpoint registry. If future pressure appears around that surface, it must stay
+narrow:
 
-No additional component work is planned today. If future pressure appears, it
-must stay narrow:
-
-- keep the registry a thin runtime component, analogous to other
-  `weft.state.*` queues
+- keep the registry thin and runtime-only
 - keep registration explicit and opt-in
-- keep the registry pointed at ordinary task-local queues rather than
-  inventing a second transport
+- keep records pointed at ordinary task-local queues rather than inventing a
+  second transport
 - keep service schemas, handoff policy, and durable domain state out of Weft
   core
 
-### Additional Internal Task Variants
+### Additional Internal Task Variants [01A-2]
 
-Future runtime slices may add more internal task variants, especially around
-pipeline orchestration or richer long-lived session handling.
+Future runtime slices may add more task specializations if a new queue/control
+shape really needs first-class ownership.
 
 Constraint:
 
 - new internal variants should still reuse the same queue, control, and state
   conventions rather than inventing a parallel runtime model
 
-### Further Componentization
+### Further Componentization [01A-3]
 
-Weft does not currently need standalone `executor`, `process_tools`, or
-similar module families as part of the current contract. Future refactors may
-split more helpers out only if they clarify ownership without duplicating
-behavior.
+Weft does not currently need standalone `executor`, `process_tools`, or similar
+module families. Future refactors may split more helpers out only if they
+clarify ownership without duplicating behavior.
 
-### Higher-Level Developer Helpers
+### Higher-Level Developer Helpers [01A-4]
 
 Possible future work:
 
@@ -49,7 +51,7 @@ Possible future work:
 - additional plugin-facing extension surfaces
 
 These should emerge from demonstrated pressure in the codebase, not from a
-desire to recreate the older planned object model.
+desire to recreate an older object model.
 
 ## Related Plans
 

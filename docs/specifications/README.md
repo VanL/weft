@@ -2,29 +2,36 @@
 
 This directory is the authoritative Weft spec set.
 
-Specs are normative. Plans in `docs/plans/` are not. Plans may reflect
-exploration, partial implementation, or superseded approaches. Keep the specs
-up to date when reality changes.
+Specs in `docs/specifications/` are normative. Plans in `docs/plans/` are not.
+Plans may reflect active work, partial implementation, superseded approaches,
+or pure roadmap material. Keep the specs up to date when reality changes.
 
 The plan corpus is indexed in [`docs/plans/README.md`](../plans/README.md).
 That index is the current navigation layer for plan status, supersession, and
 active implementation slices. It does not change the rule above: specs remain
 authoritative for behavior.
 
+Do not infer status from filename alone. The document intro and section text
+decide whether a file is current contract, supporting reference, planned,
+deferred, or exploratory.
+
 The split is intentional:
 
-- Canonical specs without an `A` suffix describe current behavior, current
-  boundaries, and the reasons behind them unless this README explicitly marks
-  them as deferred or exploratory.
-- Adjacent `A` docs describe intended but unshipped behavior. They are
-  planning companions, not current contract.
-- Most adjacent `B` docs describe exploratory integration patterns for using
-  Weft inside larger systems. They are neither current contract nor promised
-  core product surface.
-- `10B-Builtin_TaskSpecs.md` is the current builtin-task contract and remains
-  canonical despite the `B` suffix.
+- Most numbered docs without an `A` suffix are current-contract specs.
+- `00-Quick_Reference.md` and `09-Implementation_Plan.md` are supporting
+  current docs. They are part of the current corpus, but they are not the core
+  behavior contract.
+- `10B-Builtin_TaskSpecs.md` is a current contract doc despite the `B` suffix.
 - `12-Pipeline_Composition_and_UX.md` is the current pipeline contract even
   though `12-Future_Ideas.md` shares the `12` prefix for deferred ideas.
+- `13-Agent_Runtime.md` is the current agent-runtime contract.
+- Adjacent `A` docs describe intended but unshipped behavior. They are
+  planning companions, not current contract.
+- If an `A`-doc item ships, migrate it into the unsuffixed canonical sibling
+  and trim or rename the companion. Do not cite an `A` doc as the live source
+  of truth for shipped behavior.
+- `13B-Using_Weft_In_Higher_Level_Systems.md` is exploratory integration
+  guidance, not product contract.
 - [`12-Future_Ideas.md`](12-Future_Ideas.md) remains the holding area for
   deferred ideas that are intentionally out of scope.
 
@@ -33,12 +40,10 @@ directly. It should not appear as "not yet implemented."
 
 ## Document Overview
 
-### Current-contract specs
+### Current contract
 
 - [`00-Overview_and_Architecture.md`](00-Overview_and_Architecture.md):
   Weft's current shape and design rationale
-- [`00-Quick_Reference.md`](00-Quick_Reference.md): queue names, states,
-  control messages, and environment variables
 - [`01-Core_Components.md`](01-Core_Components.md): current component
   boundaries and ownership
 - [`02-TaskSpec.md`](02-TaskSpec.md): TaskSpec schema and current semantics
@@ -54,8 +59,6 @@ directly. It should not appear as "not yet implemented."
   implementation must preserve
 - [`08-Testing_Strategy.md`](08-Testing_Strategy.md): current test workflow,
   harnesses, and coverage shape
-- [`09-Implementation_Plan.md`](09-Implementation_Plan.md): current
-  implementation status and active-plan map
 - [`10-CLI_Interface.md`](10-CLI_Interface.md): current CLI contract
 - [`10B-Builtin_TaskSpecs.md`](10B-Builtin_TaskSpecs.md): current builtin
   TaskSpec contract and shipped builtin inventory
@@ -65,6 +68,13 @@ directly. It should not appear as "not yet implemented."
   current pipeline composition contract
 - [`13-Agent_Runtime.md`](13-Agent_Runtime.md): current first-class agent
   runtime contract
+
+### Supporting current docs
+
+- [`00-Quick_Reference.md`](00-Quick_Reference.md): queue names, states,
+  control messages, and environment variables
+- [`09-Implementation_Plan.md`](09-Implementation_Plan.md): current
+  implementation boundary and active-plan map
 
 ### Deferred idea ledger
 
@@ -91,7 +101,7 @@ directly. It should not appear as "not yet implemented."
 - [`13B-Using_Weft_In_Higher_Level_Systems.md`](13B-Using_Weft_In_Higher_Level_Systems.md)
 
 These companion docs stay adjacent to the owning spec so the mapping is easy to
-follow, but they do not override the canonical files.
+follow, but they do not override the current-contract files.
 
 ## Reading Order
 
@@ -102,11 +112,22 @@ For current system orientation:
 3. [`01-Core_Components.md`](01-Core_Components.md)
 4. [`02-TaskSpec.md`](02-TaskSpec.md)
 5. [`03-Manager_Architecture.md`](03-Manager_Architecture.md)
-6. [`10-CLI_Interface.md`](10-CLI_Interface.md)
-7. [`12-Pipeline_Composition_and_UX.md`](12-Pipeline_Composition_and_UX.md)
+6. [`04-SimpleBroker_Integration.md`](04-SimpleBroker_Integration.md)
+7. [`05-Message_Flow_and_State.md`](05-Message_Flow_and_State.md)
+8. [`06-Resource_Management.md`](06-Resource_Management.md)
+9. [`07-System_Invariants.md`](07-System_Invariants.md)
+10. [`08-Testing_Strategy.md`](08-Testing_Strategy.md)
+11. [`09-Implementation_Plan.md`](09-Implementation_Plan.md)
+12. [`10-CLI_Interface.md`](10-CLI_Interface.md)
+13. [`10B-Builtin_TaskSpecs.md`](10B-Builtin_TaskSpecs.md)
+14. [`11-CLI_Architecture_Crosswalk.md`](11-CLI_Architecture_Crosswalk.md)
+15. [`12-Pipeline_Composition_and_UX.md`](12-Pipeline_Composition_and_UX.md)
+16. [`13-Agent_Runtime.md`](13-Agent_Runtime.md)
 
 Then read the matching `A` docs only if you need the intended future surface
-for planning work.
+for planning work. Read `12-Future_Ideas.md` only when you need the deferred
+idea ledger, and read `13B-Using_Weft_In_Higher_Level_Systems.md` only when
+you need exploratory higher-level integration guidance.
 
 ## Reference Codes
 
@@ -123,14 +144,16 @@ sync with plans and code using these rules:
 - Plans in `docs/plans/` should carry a normalized metadata block near the top
   with `Status`, `Source specs`, and `Superseded by` so readers do not have to
   infer whether a plan is current, historical, or replaced.
+- If a plan is derived from a spec, update or add a `## Related Plans` or
+  `## Plans` section in the owning spec with the backlink.
 - Touched specs should update nearby implementation notes and plan backlinks in
   the same change.
 - Touched code modules and major boundary functions should keep docstrings that
   point back to the governing spec section.
 - Companion `A` docs should link back to the owning canonical spec and state
   plainly that they are planned material.
-- Companion `B` docs should state plainly that they are exploratory usage
-  guidance, not product contract.
+- Companion `B` docs should state plainly whether they are exploratory usage
+  guidance or a shipped exception to the suffix rule.
 
 ## Mental Model
 
@@ -140,7 +163,7 @@ Weft is "SimpleBroker for processes":
 - managers and child work are both task-shaped
 - CLI verbs stay small and stable
 - rationale belongs in the canonical spec because design intent still matters
-- history does not belong in the canonical tier because it weakens authority
+- history belongs in supporting docs or plans, not in behavior contracts
 
 ## Related Plans
 

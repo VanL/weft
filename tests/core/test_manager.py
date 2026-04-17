@@ -54,6 +54,7 @@ def make_manager_spec(
     *,
     idle_timeout: float | None = None,
     role: str | None = None,
+    weft_context: str | None = None,
 ) -> TaskSpec:
     metadata = {"capabilities": ["tests.tasks.sample_targets:large_output"]}
     if idle_timeout is not None:
@@ -67,6 +68,7 @@ def make_manager_spec(
             type="function",
             function_target="weft.core.manager:Manager",
             timeout=None,
+            weft_context=weft_context,
         ),
         io=IOSection(
             inputs={"inbox": inbox},
@@ -137,6 +139,23 @@ def write_autostart_fixture(
         encoding="utf-8",
     )
     return autostart_dir, manifest_path
+
+
+def test_manager_autostart_root_dir_uses_configured_weft_directory_name(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    broker_env,
+    unique_tid: str,
+) -> None:
+    db_path, _ = broker_env
+    monkeypatch.setenv("WEFT_DIRECTORY_NAME", ".engram")
+    spec = make_manager_spec(unique_tid, weft_context=str(tmp_path / "project"))
+    manager = Manager(db_path, spec, config=load_config())
+    try:
+        assert manager._autostart_root_dir() == (tmp_path / "project" / ".engram")
+    finally:
+        manager.stop(join=False)
+        manager.cleanup()
 
 
 def write_autostart_pipeline_fixture(

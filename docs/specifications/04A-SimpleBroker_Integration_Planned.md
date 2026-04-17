@@ -1,12 +1,21 @@
 # SimpleBroker Integration - Planned Surfaces
 
-This companion document holds planned SimpleBroker-adjacent surfaces that are intentionally not part of the current contract.
+This companion document holds only unreleased SimpleBroker-adjacent surfaces.
 
 Canonical current behavior and rationale live in [04-SimpleBroker_Integration.md](04-SimpleBroker_Integration.md).
+If any item here ships, move it into the canonical sibling and remove it from
+this planned companion rather than treating this file as current integration
+contract.
+
+Shipped behavior that used to be discussed here is documented in the canonical
+specs instead:
+
+- runtime endpoint registry state: [04-SimpleBroker_Integration.md](04-SimpleBroker_Integration.md) [SB-0.5]
+- large-output spill behavior: [05-Message_Flow_and_State.md](05-Message_Flow_and_State.md) [MF-2.1]
 
 ## Planned Context Information [04A-1]
 
-Planned operator-facing context information surfaces include:
+Unreleased operator-facing context information surfaces include:
 
 - `weft info` for explicit project context inspection
 - `weft status --project` for a project-scoped summary view
@@ -32,28 +41,13 @@ class ContextMonitor:
 
 These helpers represent explicit cross-context and multi-context orchestration surfaces. Weft keeps the current contract narrower and project-local.
 
-## Runtime Endpoint Storage Follow-up [04A-2.1]
-
-The base queue-backed storage contract is now current; see
-[`04-SimpleBroker_Integration.md`](04-SimpleBroker_Integration.md) [SB-0.5].
-
-No additional endpoint storage surface is planned today. If future work is
-needed, it must preserve the same constraints:
-
-- endpoint state remains runtime-only, queue-backed, and excluded from
-  dump/load
-- no backend-specific SQL hooks or privileged table ownership for ordinary
-  tasks
-- no hidden alternate control plane outside queue-visible runtime state
-
 ## Planned Performance Surfaces [04A-3]
 
-Two performance-related additions remain planned rather than current:
+One performance-related addition remains planned rather than current:
 
-- explicit large-message spillover to disk for payloads above the broker limit
 - an explicit queue-connection pool surface
 
-The current contract relies on SimpleBroker's hard size limit and shared broker targets instead.
+The current contract already relies on SimpleBroker's hard size limit and shared broker targets. Task-runtime spillover for oversized output is shipped behavior and belongs in the canonical runtime specs, not this planned broker-surface doc.
 
 ## Backlinks [04A-4]
 

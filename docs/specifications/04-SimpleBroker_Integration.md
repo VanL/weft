@@ -8,7 +8,8 @@ workflow on top of that.
 
 _Implementation mapping_: `weft/context.py`, `weft/commands/queue.py`,
 `weft/commands/init.py`, `weft/commands/load.py`,
-`weft/core/tasks/multiqueue_watcher.py`, `weft/core/tasks/base.py`.
+`weft/core/tasks/multiqueue_watcher.py`, `weft/core/tasks/base.py`,
+`weft/core/endpoints.py`, `weft/core/agents/provider_cli/settings.py`.
 
 See also:
 
@@ -86,9 +87,11 @@ Current behavior:
 - file-backed and non-file-backed backends share the same normal runtime path
 - `MultiQueueWatcher` shares one resolved target across its queues instead of
   constructing per-operation SQLite-only handles
+- queue and status command helpers also honor `WEFT_CONTEXT` as an explicit
+  project-root override before they fall back to discovery
 
-This backend-neutral path is why older CLI surfaces like global `--dir` and
-`--file` are no longer the right mental model.
+This backend-neutral path is why the current CLI uses per-command context
+selection rather than a root-level `--dir` / `--file` targeting model.
 
 ### Runtime Endpoint Registry State [SB-0.5]
 
@@ -117,8 +120,10 @@ Current contract:
 
 Weft uses broker-scoped project discovery. The project root comes from an
 explicit context override or from SimpleBroker's upward project search.
-`.weft/` is materialized at that resolved root for Weft-owned artifacts, but
-it is not the broker-target source of truth.
+The Weft metadata directory is materialized at that resolved root for
+Weft-owned artifacts. Its default name is `.weft/`, and `WEFT_DIRECTORY_NAME`
+may override that default. The metadata directory is not the broker-target
+source of truth.
 
 _Implementation mapping_: `weft/context.py` (`build_context`,
 `_resolve_root_and_target`, `WeftContext`), `weft/commands/init.py`
@@ -128,7 +133,8 @@ Current discovery rules:
 
 1. start from the current working directory or explicit `--context`
 2. discover the enclosing project root using SimpleBroker project scoping
-3. materialize Weft-owned directories under `.weft/` when needed
+3. materialize Weft-owned directories under the configured Weft metadata
+   directory when needed
 4. resolve the active broker target for that project
 
 Current broker target precedence:
@@ -148,10 +154,16 @@ Current boundary notes:
 
 - `WEFT_*` broker aliases are translated through `load_config()` once and then
   reused by Weft-owned context resolution
-- `.weft/config.json` is project metadata, not a broker target source; it may
-  carry the project-local autostart default used by `build_context()`
-- `.weft/agents.json` is delegated-agent launch config, not a broker target
-  source
+- `WEFT_DIRECTORY_NAME` sets the Weft-owned metadata directory name before
+  discovery; `.weft/` remains the default when it is unset
+- the metadata directory's `config.json` file is project metadata, not a broker
+  target source; it may carry the project-local autostart default used by
+  `build_context()`
+- the metadata directory's `agents.json` file is project-local agent settings, not a broker target
+  source; current shipped entries are the `provider_cli.providers` executable
+  defaults, and Weft may also write those defaults when it learns them
+- the metadata directory's `agent-health.json` file is advisory
+  agent-runtime health metadata, not a broker target source
 - TaskSpec `metadata` is caller-owned runtime metadata, not a broker target
   source
 
@@ -159,37 +171,49 @@ Current project structure:
 
 ```text
 project-root/
-├── .weft/
-│   ├── agents.json        # optional explicit delegated-agent launch config
-│   ├── agent-health.json  # optional advisory delegated-provider observations
+├── .weft/              # default; WEFT_DIRECTORY_NAME may override
+│   ├── config.json        # project metadata, including optional autostart
+│   ├── agents.json        # optional project-local agent settings
+│   ├── agent-health.json  # advisory agent-runtime observations
+│   ├── autostart/         # created when autostart is enabled
 │   ├── outputs/
 │   ├── logs/
-│   └── broker metadata and runtime artifacts
+│   ├── tasks/             # stored task specs, when present
+│   └── pipelines/         # stored pipeline specs, when present
 └── project files...
 ```
 
 The reason for this shape is operator clarity. Even when the broker backend is
-not file-backed, `.weft/` remains the visible project home for Weft-owned
-artifacts.
+not file-backed, the configured Weft metadata directory remains the visible
+project home for Weft-owned artifacts.
 
 Builtin task helpers are different. They are shipped read-only with the Weft
-package rather than copied into `.weft/` during project init. Local stored task
-specs under `.weft/tasks/` may shadow builtin task helpers with the same name.
+package rather than copied into the metadata directory during project init.
+Local stored task specs under the metadata directory's `tasks/` namespace may
+shadow builtin task helpers with the same name.
 
-Current delegated-agent boundary:
+Current agent-settings and delegated-runtime boundary:
 
-- `.weft/agents.json` is explicit user-authored project config. It may select
-  delegated executable paths or other launch defaults when the TaskSpec does
-  not pin them directly
-- `.weft/agent-health.json` is observed metadata written by Weft after real
+- the metadata directory's `agents.json` file is project-local agent settings.
+  In the current shipped
+  implementation it stores `provider_cli.providers` executable defaults and
+  other explicit provider-cli launch defaults when the TaskSpec does not pin
+  them directly
+- the metadata directory's `agent-health.json` file is observed metadata
+  written by Weft after real
   delegated calls. It is advisory only and never treated as startup truth
-- neither file changes the core queue/state model. They are project-scoped
-  runtime artifacts alongside other `.weft/` metadata
+- neither file changes the core queue/state model or broker resolution. They
+  are project-scoped runtime artifacts alongside other metadata-directory
+  contents
 
 ## Current Context API
 
 `build_context()` is the canonical entry point for selecting a root,
-materializing `.weft/` directories, and resolving the broker target.
+materializing the configured Weft metadata directory, and resolving the broker
+target.
+
+Related plan:
+- `docs/plans/2026-04-16-configurable-weft-directory-name-plan.md`
 
 _Implementation mapping_: `weft/context.py` (`build_context`, `get_context`,
 `WeftContext.queue`, `WeftContext.broker`).
@@ -197,6 +221,11 @@ _Implementation mapping_: `weft/context.py` (`build_context`, `get_context`,
 Current contract:
 
 - `build_context(...)` resolves the project root and broker target
+- `build_context(..., config=...)` lets an embedding app reuse a preloaded
+  Weft config instead of forcing a fresh environment read
+- `load_config(overrides=...)` is the canonical way for an embedding app to
+  compile explicit `WEFT_*` and `BROKER_*` overrides into the same canonical
+  config shape that CLI and env-driven Weft use
 - `get_context(...)` is a convenience wrapper
 - `WeftContext.queue(name)` returns a queue bound to the resolved broker target
 - `WeftContext.broker()` opens a broker handle for backend-native operations
@@ -211,6 +240,8 @@ Current contract:
 - direct `Queue(...)` construction in command-layer code is reserved for
   explicit low-level edges that do not carry a `WeftContext`, such as the
   interactive queue client that owns its own task-local inbox lifecycle
+- `weft queue` and `weft status` helpers also honor `WEFT_CONTEXT` as an
+  explicit project-root override before falling back to discovery
 
 ## CLI Integration and Initialization
 
@@ -233,14 +264,17 @@ stateful command.
 
 ## Queue Command Delegation
 
-Weft queue commands are thin wrappers over SimpleBroker commands with context
-injection.
+Raw queue commands delegate to SimpleBroker with context injection. Endpoint
+resolve and alias helpers stay Weft-owned but run against the same
+context-bound queues.
 
 Current implications:
 
-- queue behavior stays aligned with SimpleBroker
+- raw queue mechanics stay aligned with SimpleBroker
 - Weft-specific value comes from project discovery, aliases, and task/runtime
   conventions
+- endpoint resolution, aliasing, and broadcast/watch convenience remain
+  Weft-owned layers over the same context-bound broker queues
 - direct broker maintenance and import/export flows can still rely on
   backend-native behavior
 

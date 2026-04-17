@@ -4,12 +4,15 @@ This document describes the current message flows that make Weft observable and
 durable. The central rule is simple: task lifecycle truth lives in queues and
 task-log events, not in a separate hidden state store.
 
-_Implementation snapshot_: reservation, control, and task-local queue handling
-live in `weft/core/tasks/base.py` and `weft/core/tasks/consumer.py`; manager
-spawn and bootstrap flows live in `weft/core/manager.py`,
-`weft/commands/run.py`, and `weft/commands/_manager_bootstrap.py`; status and
-shared result waiting live in `weft/commands/status.py`,
-`weft/commands/result.py`, and `weft/commands/_result_wait.py`.
+_Implementation snapshot_: reservation, control, task-local queues, spillover,
+and endpoint/streaming runtime claims live in `weft/core/tasks/base.py` and
+`weft/core/tasks/consumer.py`; manager spawn, bootstrap, and reconciliation
+flow live in `weft/core/manager.py`, `weft/core/spawn_requests.py`,
+`weft/commands/run.py`, `weft/commands/_spawn_submission.py`, and
+`weft/commands/_manager_bootstrap.py`; status, task-history replay, and shared
+result waiting live in `weft/commands/status.py`, `weft/commands/result.py`,
+`weft/commands/_result_wait.py`, `weft/commands/_task_history.py`, and
+`weft/commands/_streaming.py`.
 
 Queue names and control message constants are summarized in
 [`00-Quick_Reference.md`](00-Quick_Reference.md).
@@ -34,15 +37,22 @@ User -> CLI -> weft.spawn.requests -> Manager -> T{tid}.inbox
                                    \-> weft.log.tasks
 ```
 
-The CLI submits a spawn request. The manager expands it into a runtime TaskSpec,
-uses the spawn-request message ID as the task TID, seeds the initial inbox
-payload when provided, and records the lifecycle event in `weft.log.tasks`.
-Queue-first ordering is deliberate. Once the spawn request is written, later
-CLI error handling reconciles that submitted TID against durable task, log, and
+The CLI submits a spawn request. The manager expands it into a runtime
+TaskSpec, uses the spawn-request message ID as the task TID, seeds the initial
+inbox payload when provided, and records the lifecycle event in
+`weft.log.tasks`.
+
+Queue-first ordering is deliberate. `weft run` writes the spawn request before
+manager bootstrap proof completes. Once the request is written, later CLI
+error handling reconciles that submitted TID against durable task, log, and
 queue surfaces instead of assuming the public inbox delete path can always roll
-the request back.
+the request back. Only requests still provably present in
+`weft.spawn.requests` are safe to delete as rollback.
 
 _Implementation mapping_: `weft/commands/run.py` `_enqueue_taskspec`;
+`weft/commands/_spawn_submission.py` `reconcile_submitted_spawn`;
+`weft/core/spawn_requests.py` `submit_spawn_request`,
+`delete_spawn_request`;
 `weft/core/manager.py` `Manager._handle_work_message`,
 `Manager._build_child_spec`, `Manager._launch_child_task`.
 
@@ -65,6 +75,10 @@ Current rules:
 - crash leaves the message in reserved state for explicit operator recovery
 - direct `run_work_item()` execution has no reserved message and must not
   mutate unrelated reserved backlog as if it did
+- persistent tasks emit `work_item_completed` for each completed message and
+  `work_completed` only when the task itself reaches a terminal finish
+- `weft.state.streaming` marks active outboxes that `weft result --all` must
+  skip so live stream sessions are not re-read as static results
 
 Agent work follows the same outer reservation flow as command and function
 targets.
@@ -149,16 +163,29 @@ Task lifecycle events -> weft.log.tasks -> status/result reconstruction
 Current rules:
 
 - `weft.log.tasks` is the durable lifecycle log
-- CLI status surfaces reconstruct task snapshots from that log plus live queue
-  state where needed
+- CLI status surfaces reconstruct task snapshots from that log plus the latest
+  `weft.state.tid_mappings` entries and live runtime liveness where needed; they
+  do not depend on a separate state database
 - shared waiters use the same terminal-state interpretation for `weft run` and
   `weft result`
+- `weft result` and `weft run` share the same wait helper path: they watch the
+  outbox, ctrl-out, and log queues, tolerate the short gap between a terminal
+  log event and final outbox visibility, and do one last non-blocking outbox
+  drain before returning `completed`
+- persistent result waits treat both `work_item_completed` and
+  `work_completed` as completion boundaries for the same task
 - `weft result --stream` follows unread outbox stream chunks without changing
   the task-log boundary events that define completion
+- `weft result` first waits for taskspec metadata or outbox/control queue names
+  to materialize when those surfaces are not yet visible, then falls back to the
+  shared completion wait
 
 _Implementation mapping_: `weft/core/tasks/base.py` `_report_state_change`;
 `weft/commands/status.py` log replay and snapshot collection;
-`weft/commands/_result_wait.py`.
+`weft/commands/result.py` materialization and completion waits;
+`weft/commands/_result_wait.py`;
+`weft/commands/_task_history.py`;
+`weft/commands/_streaming.py`.
 
 ### 6. Manager Spawn Flow [MF-6]
 
@@ -178,6 +205,9 @@ Current submission-reconciliation rules:
 - if none of those surfaces prove success or rollback, the CLI reports an
   explicit unknown submission outcome keyed by TID
 
+The reconciliation helper reads only durable surfaces. It does not guess from
+in-memory startup state.
+
 Autostart manifests follow the same overall spawn path. Current autostart
 runtime support covers stored task specs and stored pipeline targets. Pipeline
 targets are compiled into the same top-level pipeline task submitted by
@@ -186,7 +216,8 @@ as consumed after the synthesized spawn request is successfully written to the
 ordinary manager inbox queue, and ensure-mode manifests are rescanned
 immediately after a tracked autostart child exits.
 
-_Implementation mapping_: `weft/core/manager.py`, `weft/commands/run.py`.
+_Implementation mapping_: `weft/core/manager.py`, `weft/core/spawn_requests.py`,
+`weft/commands/run.py`, `weft/commands/_spawn_submission.py`.
 
 ### 7. Manager Bootstrap Flow [MF-7]
 
@@ -211,8 +242,9 @@ Current rules:
   observation
 
 _Implementation mapping_: `weft/commands/_manager_bootstrap.py`,
-`weft/commands/manager.py`, `weft/commands/serve.py`,
-`weft/manager_detached_launcher.py`, `weft/manager_process.py`.
+`weft/commands/run.py`, `weft/commands/manager.py`,
+`weft/commands/serve.py`, `weft/manager_detached_launcher.py`,
+`weft/manager_process.py`.
 
 ### 8. Failure Recovery Flow
 
@@ -263,6 +295,8 @@ _Implementation mapping_: `weft/helpers.py` `redact_taskspec_dump`;
 
 When task output is too large for the broker payload limit, the task runtime
 spills that output outside the queue payload and writes a reference message.
+The runtime also emits an `output_spilled` task-log event with the spill path
+and digest so the spill can be inspected later.
 
 _Implementation mapping_: `weft/core/tasks/base.py` `_spill_large_output`;
 `weft/core/tasks/consumer.py` output emission helpers.
@@ -311,18 +345,20 @@ Field definitions:
 Path locality rules:
 
 - If `spec.weft_context` is set, the spill directory is
-  `{weft_context}/.weft/outputs/{tid}/output.dat`.
+  `{weft_context}/{WEFT_DIRECTORY_NAME}/outputs/{tid}/output.dat`, where
+  `WEFT_DIRECTORY_NAME` defaults to `.weft`.
 - Otherwise it falls back to `{tempdir}/weft/outputs/{tid}/output.dat`
   (where `{tempdir}` is the platform temporary directory).
-- The file is written atomically relative to the task's lifetime; the
-  reference `path` is always absolute.
+- The file path is always absolute and points to the file written for that
+  task's spill directory.
 
 Consumers reading the outbox must inspect `type` to detect a reference before
 treating the payload as inline output. The `sha256` field can be used to verify
 file integrity after dereferencing.
 
 _Implementation mapping_: `weft/core/tasks/base.py` `_spill_large_output`,
-`_outputs_base_dir`; `weft/core/tasks/consumer.py` `_emit_single_output`.
+`_outputs_base_dir`; `weft/core/tasks/consumer.py` `_emit_single_output`;
+`weft/commands/result.py` result rendering.
 
 ### Cleanup Boundary
 
@@ -348,6 +384,9 @@ Current rules:
 
 - queue creation is implicit on first write
 - task cleanup closes task-owned handles
+- `weft.state.managers`, `weft.state.tid_mappings`, `weft.state.streaming`,
+  and `weft.state.endpoints` are runtime-only bookkeeping queues; they may be
+  read for live reconciliation but are not durable application history
 - `weft system tidy` handles backend-native cleanup of empty queues and broker
   maintenance
 - there is no separate queue-lifecycle service in the current contract

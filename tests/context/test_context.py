@@ -16,6 +16,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from weft._constants import compile_config  # noqa: E402
 from weft.context import build_context  # noqa: E402
 
 pytestmark = [pytest.mark.shared]
@@ -53,6 +54,7 @@ def test_build_context_creates_structure(tmp_path: Path) -> None:
     ctx = build_context(spec_context=root)
 
     assert ctx.root == root.resolve()
+    assert ctx.weft_dir == (root / ".weft").resolve()
     assert ctx.weft_dir.is_dir()
     assert ctx.outputs_dir.is_dir()
     assert ctx.logs_dir.is_dir()
@@ -191,17 +193,57 @@ def test_environment_translation(
     assert isinstance(ctx.broker_config["BROKER_AUTO_VACUUM_INTERVAL"], int)
 
 
-def test_build_context_keeps_weft_dir_fixed_when_broker_name_changes(
+def test_build_context_uses_configured_weft_dir_when_broker_name_changes(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The Weft artifact directory stays rooted at ``.weft`` regardless of broker name config."""
+    """The Weft artifact directory is independent from broker db naming."""
 
+    monkeypatch.setenv("WEFT_DIRECTORY_NAME", ".engram")
     monkeypatch.setenv("WEFT_DEFAULT_DB_NAME", ".custom/weft.db")
 
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
 
-    assert ctx.weft_dir == (tmp_path / ".weft").resolve()
+    assert ctx.weft_dir == (tmp_path / ".engram").resolve()
+
+
+def test_build_context_accepts_supplied_config_override(tmp_path: Path) -> None:
+    """Embedded callers may override the Weft metadata directory in-process."""
+
+    root = prepare_project_root(tmp_path)
+    config = compile_config({"WEFT_DIRECTORY_NAME": ".engram"})
+
+    ctx = build_context(spec_context=root, config=config)
+
+    assert ctx.root == root.resolve()
+    assert ctx.weft_dir == (root / ".engram").resolve()
+    assert ctx.database_path == (root / ".engram" / "broker.db").resolve()
+
+
+def test_build_context_discovers_existing_project_with_custom_weft_directory_name(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Discovery should honor the configured Weft metadata directory name."""
+
+    monkeypatch.setenv("WEFT_DIRECTORY_NAME", ".engram")
+
+    root = prepare_project_root(tmp_path)
+    root_ctx = build_context(spec_context=root)
+    nested_dir = tmp_path / "a" / "b" / "c"
+    nested_dir.mkdir(parents=True)
+
+    original_cwd = Path.cwd()
+    try:
+        os.chdir(nested_dir)
+        discovered_ctx = build_context()
+    finally:
+        os.chdir(original_cwd)
+
+    assert root_ctx.weft_dir == (root / ".engram").resolve()
+    assert discovered_ctx.root == root_ctx.root
+    assert discovered_ctx.weft_dir == root_ctx.weft_dir
+    assert discovered_ctx.database_path == root_ctx.database_path
 
 
 def test_project_config_recovers_from_corruption(tmp_path: Path) -> None:

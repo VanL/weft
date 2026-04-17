@@ -1,68 +1,86 @@
 # Testing Strategy Planned
 
-This companion document tracks deferred test surfaces that correspond to
-[08-Testing_Strategy.md](08-Testing_Strategy.md). It contains only work that is
-still intended but not part of the current canonical test contract.
+This companion document tracks test surfaces that are still intentionally out
+of the current canonical contract in [08-Testing_Strategy.md](08-Testing_Strategy.md).
+It is not a current coverage map. Anything already shipped or already
+represented in the canonical testing spec belongs in the sibling current doc
+instead.
+If any item here ships, move it into the canonical sibling and remove it from
+this planned companion rather than treating this file as the live testing map.
 
-## 1. Unit Testing Additions [TS-A1]
+## 1. Dedicated Integration Splits [TS-A1]
 
-The current suite covers the core behavior. Deferred unit-level additions would
-focus on the last few assertions that are still useful but not required for the
-current boundary:
+There is still no separate `tests/integration/` tree. If the suite ever needs a
+dedicated integration layer, it would hold cross-surface flows that are already
+covered elsewhere today:
 
-- extra TaskSpec convenience assertions
-- explicit limit-structure assertions where runner-level coverage already
-  exists
-- additional process-title edge cases that are currently covered indirectly
+- queue and broker integration beyond the current CLI, command, core, task, and
+  spec suites
+- context and project discovery flows
+- monitoring and state-observation flows
+- other SimpleBroker-backed seams that become hard to reason about inside the
+  mixed current suites
 
-## 2. Integration Testing [TS-A2]
+Constraint:
 
-The current tree does not have a dedicated integration directory. Deferred
-integration coverage would live in explicit suites for:
+- do not move already-current coverage out of the canonical spec just because a
+  future split would make it easier to browse
 
-- queue integration
-- context integration
-- SimpleBroker integration
-- monitoring integration
+## 2. Future Performance Coverage [TS-A2]
 
-## 3. System Testing [TS-A3]
+The benchmark scripts in `tests/long_session_surface_benchmark.py` and
+`tests/multiqueue_polling_benchmark.py` are still dev-only measurement tools,
+not part of the canonical pytest contract.
 
-The current system-level coverage is distributed across CLI and command tests.
-Deferred system suites would cover:
+Planned performance work would stay limited to explicit regressions or soak
+checks that we decide are worth enforcing:
 
-- end-to-end task workflows
-- cross-platform process behavior
-- load-style workflows
-- task failure recovery at the whole-system level
-
-## 4. Performance Testing [TS-A4]
-
-Dedicated performance suites would cover:
-
-- task creation throughput
-- queue throughput
+- task-creation throughput
+- queue-throughput sensitivity
 - monitoring overhead
-- memory growth under load
+- memory growth under sustained load
 
-## 5. Property-Based Testing [TS-A5]
+Constraint:
 
-Property-based checks are still useful for invariants that are already enforced
-deterministically today. Deferred properties would focus on:
+- keep these as opt-in measurement or gated regression suites; do not make them
+  the default pytest contract unless the canonical spec is updated
+
+## 3. Property-Based Invariant Sweeps [TS-A3]
+
+Property-style checks remain useful for invariants that are already covered
+deterministically elsewhere. Future additions would focus on:
 
 - forward-only state transitions
 - delivery and reservation invariants
 - resource-limit enforcement
+- queue-history and reservation edge cases that are awkward to enumerate by hand
 
-## 6. Testing Hooks and CI [TS-A6]
+Constraint:
 
-The current suite uses local fixtures and helper modules. Deferred work in this
-area would centralize:
+- treat these as supplemental confidence checks, not the primary proof of
+  behavior
 
-- reusable fixtures
-- queue helpers
-- mock helpers
-- utility helpers for waiting, asserting, and profiling
-- dedicated CI jobs for the deferred suites above
+## 4. Test-Hook and CI Follow-Up [TS-A4]
+
+The current suite already uses shared fixtures and helper modules. Any
+additional work here would be limited to reusable utilities or dedicated job
+wiring that reduces duplication without changing behavior coverage:
+
+- reusable fixtures for newly added broker-heavy suites
+- queue and assertion helpers
+- wait and poll helpers for new asynchronous cases
+- optional CI jobs for newly added deferred suites
+
+Constraint:
+
+- centralize only what is broadly reused; do not move current-suite helpers into
+  a new abstraction unless duplication forces it
+
+## Already Canonical
+
+Current suite shape, harness selection, backend classification, and dev-only
+benchmark status are owned by [08-Testing_Strategy.md](08-Testing_Strategy.md).
+They are not repeated here.
 
 ## Backlink
 

@@ -31,7 +31,7 @@ def cmd_init(
     """Initialize a Weft project rooted at *directory*.
 
     Returns the SimpleBroker exit code.  When successful the project structure
-    (``.weft/`` directories, config metadata, database) is ensured.
+    (the Weft metadata directory, config metadata, database) is ensured.
 
     Spec: [SB-0] (Project Context and Directory Scoping)
     """

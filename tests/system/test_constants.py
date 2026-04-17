@@ -66,9 +66,11 @@ from weft._constants import (
     TERMINAL_TASK_STATUSES,
     WEFT_AUTOSTART_TASKS_DEFAULT,
     WEFT_COMPLETED_RESULT_GRACE_SECONDS,
+    WEFT_DIRECTORY_NAME_DEFAULT,
     WEFT_MANAGER_LIFETIME_TIMEOUT,
     WEFT_MANAGER_REUSE_ENABLED,
     __version__,
+    compile_config,
     load_config,
 )
 
@@ -327,6 +329,9 @@ class TestLoadConfig:
             # Logging
             assert config["WEFT_LOGGING_ENABLED"] is False
 
+            # Weft project directory
+            assert config["WEFT_DIRECTORY_NAME"] == WEFT_DIRECTORY_NAME_DEFAULT
+
             # Broker config should be complete and typed.
             assert config["BROKER_PROJECT_SCOPE"] is True
             assert config["BROKER_DEFAULT_DB_NAME"] == ".weft/broker.db"
@@ -385,6 +390,55 @@ class TestLoadConfig:
         with patch.dict(os.environ, {"WEFT_MANAGER_REUSE_ENABLED": "true"}):
             config = load_config()
             assert config["WEFT_MANAGER_REUSE_ENABLED"] is True
+
+    def test_weft_directory_name_env(self) -> None:
+        with patch.dict(os.environ, {"WEFT_DIRECTORY_NAME": ".engram"}, clear=True):
+            config = load_config()
+
+        assert config["WEFT_DIRECTORY_NAME"] == ".engram"
+        assert config["BROKER_DEFAULT_DB_NAME"] == ".engram/broker.db"
+
+    @pytest.mark.parametrize("value", ["", ".", "..", "foo/bar", "foo\\bar"])
+    def test_weft_directory_name_env_rejects_invalid_values(self, value: str) -> None:
+        with (
+            patch.dict(os.environ, {"WEFT_DIRECTORY_NAME": value}, clear=True),
+            pytest.raises(ValueError, match="WEFT_DIRECTORY_NAME"),
+        ):
+            load_config()
+
+    def test_explicit_default_db_name_beats_directory_name_default(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "WEFT_DIRECTORY_NAME": ".engram",
+                "WEFT_DEFAULT_DB_NAME": ".custom/weft.db",
+            },
+            clear=True,
+        ):
+            config = load_config()
+
+        assert config["WEFT_DIRECTORY_NAME"] == ".engram"
+        assert config["BROKER_DEFAULT_DB_NAME"] == ".custom/weft.db"
+
+    def test_compile_config_recomputes_broker_defaults_for_weft_overrides(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            config = compile_config({"WEFT_DIRECTORY_NAME": ".engram"})
+
+        assert config["WEFT_DIRECTORY_NAME"] == ".engram"
+        assert config["BROKER_DEFAULT_DB_NAME"] == ".engram/broker.db"
+
+    def test_compile_config_rejects_ambiguous_postgres_override_shapes(self) -> None:
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            pytest.raises(ValueError, match="ambiguous"),
+        ):
+            compile_config(
+                {
+                    "WEFT_BACKEND": "postgres",
+                    "WEFT_BACKEND_TARGET": "postgresql://broker@db.example.com/simplebroker",
+                    "WEFT_BACKEND_HOST": "db.example.com",
+                }
+            )
 
     def test_manager_timeout_env(self) -> None:
         """Manager timeout honours the environment variable."""
@@ -475,6 +529,7 @@ class TestLoadConfig:
             "WEFT_DEBUG",
             "WEFT_LOGGING_ENABLED",
             "WEFT_REDACT_TASKSPEC_FIELDS",
+            "WEFT_DIRECTORY_NAME",
             "WEFT_MANAGER_REUSE_ENABLED",
             "WEFT_MANAGER_LIFETIME_TIMEOUT",
             "WEFT_AUTOSTART_TASKS",
@@ -503,6 +558,7 @@ class TestLoadConfig:
         assert isinstance(config["BROKER_MAX_MESSAGE_SIZE"], int)
         assert isinstance(config["BROKER_BACKEND_PORT"], int)
         assert config["WEFT_REDACT_TASKSPEC_FIELDS"] == ""
+        assert config["WEFT_DIRECTORY_NAME"] == WEFT_DIRECTORY_NAME_DEFAULT
         assert config["WEFT_MANAGER_LIFETIME_TIMEOUT"] == WEFT_MANAGER_LIFETIME_TIMEOUT
         assert config["WEFT_MANAGER_REUSE_ENABLED"] == WEFT_MANAGER_REUSE_ENABLED
         assert config["WEFT_AUTOSTART_TASKS"] == WEFT_AUTOSTART_TASKS_DEFAULT

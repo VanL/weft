@@ -39,6 +39,7 @@ from weft._constants import (
     WEFT_MANAGERS_REGISTRY_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
     WORK_ENVELOPE_START,
+    get_weft_directory_name,
 )
 from weft.helpers import (
     is_canonical_manager_record,
@@ -976,7 +977,7 @@ class Manager(BaseTask):
             return self._autostart_dir.parent
         spec_context = getattr(self.taskspec.spec, "weft_context", None)
         if spec_context:
-            return Path(spec_context) / ".weft"
+            return Path(spec_context) / get_weft_directory_name(self._config)
         return None
 
     def _autostart_context_root(self) -> Path | None:

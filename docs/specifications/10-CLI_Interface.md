@@ -14,9 +14,9 @@ The design intent is conservative:
 
 _Implementation mapping_: `weft/cli.py` (command registration),
 `weft/commands/run.py`, `weft/commands/status.py`, `weft/commands/result.py`,
-`weft/commands/queue.py`, `weft/commands/manager.py`,
+`weft/commands/queue.py`, `weft/commands/manager.py`, `weft/commands/serve.py`,
 `weft/commands/tasks.py`, `weft/commands/specs.py`,
-`weft/commands/init.py`, `weft/commands/dump.py`,
+`weft/commands/builtins.py`, `weft/commands/init.py`, `weft/commands/dump.py`,
 `weft/commands/load.py`, `weft/commands/tidy.py`,
 `weft/commands/validate_taskspec.py`.
 
@@ -119,9 +119,16 @@ Current options:
 - `--memory MB`
 - `--cpu PERCENT`
 - `--env KEY=VALUE`
+- `--context PATH`
+- `--json`
+- `--verbose` / `-v`
+- `--stream-output` / `--no-stream-output`
 - `--wait` / `--no-wait`
 - `--interactive`
+- `--continuous` / `--once`
 - `--autostart` / `--no-autostart`
+- hidden `--monitor` exists in the parser, but it is currently unsupported and
+  always errors
 
 Current `--name` behavior:
 
@@ -165,7 +172,17 @@ Current rules:
 - `--spec`, `--pipeline`, and `--function` are mutually exclusive
 - `--spec NAME|PATH` is the explicit task-spec resolution surface
 - stored pipeline names are resolved only under `--pipeline`
-- stored task names and builtin task helpers are resolved only under `--spec`
+- stored task names, stored task bundles, and builtin task helpers are resolved
+  only under `--spec`
+- `--arg`, `--kw`, `--env`, and `--tag` are not accepted with `--spec` or
+  `--pipeline`
+- `--interactive` is currently implemented for command targets only; the spec
+  and pipeline paths do not route through the interactive client, and command
+  interactive mode rejects `--json`
+- `--continuous` / `--once` is only supported with `--spec`; it maps to a
+  persistent override for that invocation
+- `--monitor` is accepted by the parser, but `weft run` currently rejects it on
+  every path
 - when a selected TaskSpec declares `spec.parameterization`, `weft run --spec`
   materializes a concrete TaskSpec locally before queueing
 - parameterization parsing may apply TaskSpec-declared defaults and preserve
@@ -206,8 +223,8 @@ Current stdin behavior:
   the adapter before queueing the initial work payload
 - pipeline runs use piped stdin as first-stage input when `--input` is absent
 - `--autostart` / `--no-autostart` are per-invocation context overrides:
-  explicit flag, then project-local `.weft/config.json` `autostart`, then the
-  env/global default
+  explicit flag, then the project-local Weft config file's `autostart`, then
+  the env/global default
 - if `weft run` adopts an already-live canonical manager, these flags do not
   reconfigure that live manager
 
@@ -250,10 +267,11 @@ Current behavior:
 - `weft init` initializes the current directory
 - `weft init PATH` initializes another directory explicitly
 - `init` does not take `--context`
-- `init` materializes `.weft/` and broker-facing project state for the selected
+- `init` materializes the Weft metadata directory (default `.weft/`; override
+  with `WEFT_DIRECTORY_NAME`) and broker-facing project state for the selected
   root
 - `init --autostart/--no-autostart` persists the selected project-local
-  autostart default into `.weft/config.json`
+  autostart default into the project-local Weft config file
 
 This is intentionally git-like. `init` chooses or creates the project root;
 other commands operate within an existing root.
@@ -296,14 +314,19 @@ Current behavior:
 
 ### `task list`, `task status`, and `task tid` [CLI-1.2]
 
-_Implementation mapping_: `weft/commands/tasks.py`.
+_Implementation mapping_: `weft/commands/tasks.py`, `weft/commands/status.py`.
 
 Current behavior:
 
-- `weft task list` lists task snapshots and can filter by status or emit JSON
-- `weft task status TID` shows one task, optionally with process information
-- `weft task tid` resolves short TIDs or reverse lookups via the TID-mapping
-  queue
+- `weft task list` lists task snapshots, can include terminal tasks with
+  `--all`, can filter by status, can summarize counts with `--stats`, and can
+  emit JSON
+- `weft task status TID` shows one task, optionally with process information,
+  JSON output, or live watch updates
+- `weft task tid` resolves short TIDs, PID lookups, or reverse lookups via the
+  TID-mapping queue
+- `weft task stop` and `weft task kill` can act on one task, all active tasks,
+  or a name-pattern subset
 
 These commands exist because project-level status and task-level inspection are
 different operator questions.
@@ -361,10 +384,13 @@ Current rules:
 - explicit task-spec lookup follows the same `NAME|PATH` model as pipelines:
   existing file path first, then existing spec-bundle directory path, then
   local stored flat spec, then local stored bundle, then builtin task spec
+- `--type` accepts `task` / `tasks` and `pipeline` / `pipelines`
 - when a task spec is loaded from a bundle directory, Python callable refs in
   that spec keep the normal `module:function` syntax but resolve `module`
   against the bundle root first before falling back to normal Python imports
 - local stored task specs shadow builtin task specs of the same name
+- builtin task specs are task-only; Weft does not currently ship builtin
+  pipelines
 - bare `weft run foo` still means "run command `foo`"; builtin lookup only
   happens under explicit spec-management or `--spec` surfaces
 - `weft spec list` can show stored pipelines plus stored and builtin task specs
@@ -372,7 +398,7 @@ Current rules:
   builtin entries report `source: "builtin"`
 - plain `weft spec list` labels builtin task specs with `(builtin)`
 - `weft spec list` is the effective project-visible spec namespace; local
-  `.weft/tasks/` shadows affect this view
+  stored-task shadows under the Weft metadata directory affect this view
 - builtin task specs are packaged read-only with Weft; `weft spec delete`
   rejects builtin-only task specs
 - `--type` filters or disambiguates task vs pipeline names
@@ -387,6 +413,8 @@ task-spec runner validation reuses `weft/commands/validate_taskspec.py`
 Current validation layers:
 
 - default validation checks the schema only
+- `--load-runner` and `--preflight` apply only to task specs; pipeline
+  validation rejects them
 - `--load-runner` requires that the named runner plugin can be resolved; it
   also loads and materializes the configured runner environment profile. For
   agent tasks it resolves the configured agent runtime and, for delegated
@@ -394,8 +422,9 @@ Current validation layers:
 - `--preflight` runs runner-specific availability checks and, for agent tasks,
   environment-profile, agent-runtime, and delegated tool-profile preflight
   checks that remain static at validation time, such as provider CLI path
-  resolution, project-local delegated executable defaults from
-  `.weft/agents.json`, and MCP server command resolution; it implies
+  resolution, project-local agent settings from the Weft agent settings file
+  including current shipped `provider_cli.providers` executable defaults when
+  relevant, and MCP server command resolution; it implies
   `--load-runner`
 - for Docker-backed one-shot `provider_cli` agent specs, that preflight stays
   container-oriented: it validates the Docker runner path and static descriptor
@@ -471,8 +500,9 @@ Current configuration domains:
 
 - environment variables for Weft defaults and broker alias translation
 - `.broker.toml` for project-scoped broker target selection
-- Weft project metadata and delegated-agent settings under `.weft/`, including
-  the optional project-local autostart default in `.weft/config.json`
+- Weft project metadata and agent settings under the configured Weft metadata
+  directory (default `.weft/`), including the optional project-local autostart
+  default in its `config.json`
 
 Current broker resolution precedence:
 
@@ -488,32 +518,40 @@ Current broker resolution precedence:
 
 Current exclusions:
 
-- `.weft/config.json` does not participate in broker target resolution, even
+- the Weft config file does not participate in broker target resolution, even
   when it carries the project-local autostart default
-- `.weft/agents.json` does not participate in broker target resolution
+- the Weft agent settings file does not participate in broker target resolution
 - TaskSpec `metadata` does not participate in broker target resolution
 
 The CLI should not imply that runtime broker configuration lives in a
-SQLite-only `.weft/broker.db` flag model. That is why the current contract uses
+SQLite-only metadata-directory broker-db flag model. That is why the current contract uses
 context discovery plus backend-aware broker resolution.
+
+Related plan:
+- `docs/plans/2026-04-16-configurable-weft-directory-name-plan.md`
 
 ## System Maintenance (`weft system …`) [CLI-6]
 
 _Implementation mapping_: `weft/commands/tidy.py` `cmd_tidy()`,
 `weft/commands/dump.py` `cmd_dump()`, `weft/commands/load.py` `cmd_load()`,
-registered in `weft/cli.py` under the `system` sub-app.
+`weft/commands/builtins.py` `cmd_system_builtins()`, registered in
+`weft/cli.py` under the `system` sub-app.
 
 Current subcommands:
 
-- `weft system builtins`
 - `weft system tidy`
 - `weft system dump`
+- `weft system builtins`
 - `weft system load`
 
 Current behavior:
 
-- `system builtins` reports the builtin inventory Weft ships, independent of
-  local stored-spec shadows in `.weft/tasks/`
+- `system builtins` reports the shipped task-only builtin inventory Weft
+  ships, independent of local stored-spec shadows in the metadata directory's
+  `tasks/` namespace
+- `system builtins --json` emits `type`, `name`, `description`, `category`,
+  `function_target`, `supported_platforms`, `path`, and `source`
+- plain `system builtins` renders the same builtin metadata as grouped text
 - `system tidy` delegates maintenance/compaction to the active backend
 - `system dump` exports broker state while excluding runtime-only
   `weft.state.*` queues

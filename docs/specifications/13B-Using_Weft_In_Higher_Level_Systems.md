@@ -5,10 +5,20 @@ substrate inside a larger agent system.
 
 It is not current contract. It is not promised core Weft product surface. It
 exists to make the layering explicit when a higher-level system wants to build
-on top of Weft's task, runner, and queue model.
+on top of Weft's task, runner, queue, agent, and pipeline model.
 
-Examples here may be relevant to systems such as `mm-governance`, but this
-document does not define `mm-governance` policy.
+Canonical behavior lives in the current specs:
+
+- [00-Overview_and_Architecture.md](00-Overview_and_Architecture.md)
+- [07-System_Invariants.md](07-System_Invariants.md)
+- [12-Pipeline_Composition_and_UX.md](12-Pipeline_Composition_and_UX.md)
+- [13-Agent_Runtime.md](13-Agent_Runtime.md)
+
+If a pattern in this document hardens into a stable product promise, move it to
+the canonical spec that owns that behavior.
+
+Examples here may be relevant to a higher-level governance system, but this
+document does not define that system's policy.
 
 ## 1. Purpose [AR-B0]
 
@@ -26,6 +36,7 @@ The mental model is:
 
 - Weft runs work durably
 - the higher-level system decides what work to run and what it means
+- Weft stays the substrate, not the policy engine
 
 ## 2. Ownership Split [AR-B1]
 
@@ -38,11 +49,12 @@ When a larger system uses Weft, Weft should remain responsible for:
 - runner selection and isolation
 - resource limits
 - explicit tool and environment boundaries
-- artifact persistence tied to task execution
+- execution artifacts and metadata emitted by the task runtime
 - agent execution as one more task target
+- pipeline execution as one more task target
 
-This keeps the substrate stable. It also means agent work stays observable,
-controllable, and composable in the same way as any other task.
+This keeps the substrate stable. It also means agent and pipeline work stays
+observable, controllable, and composable in the same way as any other task.
 
 ### 2.2 What the larger system should own
 
@@ -53,8 +65,9 @@ The larger system should normally own:
 - approval policy and action policy
 - resolver logic that chooses which domain context to load
 - how to interpret or merge results back into domain truth
-- long-lived public conversation or thread semantics, unless Weft later makes a
-  narrower substrate contract explicit
+- long-lived public conversation, thread, or case semantics
+- how Weft task IDs, pipeline IDs, and artifacts are linked into that domain
+  record
 
 This split matters because it prevents Weft from growing a second hidden truth
 lane.
@@ -74,7 +87,8 @@ Good fits:
 - prepare a grounded answer from cited inputs
 
 The higher-level system supplies the input envelope and consumes the result.
-Weft supplies durability, isolation, and control.
+Weft supplies durability, isolation, and control. This is a pattern, not a new
+contract surface.
 
 ### 3.2 Supervisor or review tasks
 
@@ -98,9 +112,10 @@ The clean Weft shape is:
 - host that agent as a persistent Weft task
 - use Weft runners to constrain the environment
 - keep task control, stop, kill, timeout, and observability on the Weft side
+- let the higher-level system own operator identity, UX, and approval policy
 
-The higher-level system can then layer operator identity, UI, and domain state
-on top of that task.
+This uses current agent-runtime capability, but it is still a layering choice:
+the higher-level system remains the owner of public workflow and domain state.
 
 ## 4. Session And Memory Patterns [AR-B3]
 
@@ -110,12 +125,14 @@ assume Weft already owns that model.
 The safer pattern today is:
 
 - the higher-level system owns the public thread, case, or session identifier
-- Weft task IDs and artifacts are linked into that higher-level record
-- provider-native conversation IDs are treated as cache metadata
+- Weft task IDs, pipeline IDs, and task artifacts are linked into that higher-
+  level record
+- provider-native session identifiers are runtime metadata, not the system of
+  record
 
 If the delegated runtime loses its native session, the higher-level system can
 still recover by rehydrating a new task from its own durable record plus Weft
-artifacts.
+artifacts and task history.
 
 This is the right layer split for now. If Weft later standardizes a narrower
 session substrate, that should be added explicitly to the canonical or planned
@@ -130,6 +147,7 @@ different layers.
   a given domain question or workflow.
 - A tool profile is substrate execution policy that decides what machine powers
   the task may use.
+- A pipeline is composition policy for durable task chains.
 
 That means a larger system may:
 
@@ -137,6 +155,8 @@ That means a larger system may:
 - materialize the resolved context into task input, attachments, or artifact
   references
 - select a Weft tool or environment profile that matches the intended lane
+- route composed work through a Weft pipeline when the work is a sequence of
+  durable task steps
 
 This keeps domain reasoning separate from execution policy.
 
@@ -150,6 +170,7 @@ Preferred patterns:
 - spawn a bounded sub-agent as another Weft task
 - pass structured input or artifact references
 - return structured output, citations, or artifact references
+- use a Weft pipeline when the handoff is a durable multi-step chain
 - keep lifecycle and audit on the Weft side
 
 This fits Weft's "everything is a task" model and avoids hidden agent topology.
@@ -174,7 +195,7 @@ policy engine.
 
 ## 8. Example Mapping For A Larger System [AR-B7]
 
-For a system such as `mm-governance`, a clean layering looks like this:
+For a governance-style system, a clean layering looks like this:
 
 - bounded interpretation agents can use the current `llm` runtime where that is
   enough
@@ -182,6 +203,7 @@ For a system such as `mm-governance`, a clean layering looks like this:
   depending on tool depth
 - an operator-facing delegated lane can run as a persistent Weft agent task in
   a restricted runner
+- durable multi-step work can use a Weft pipeline instead of ad hoc chaining
 - domain-specific case state, approvals, and action policy stay above Weft
 
 This gives the larger system a durable substrate without forcing Weft to become
@@ -191,5 +213,7 @@ the whole product.
 
 - Current core agent-runtime contract:
   [13-Agent_Runtime.md](13-Agent_Runtime.md)
+- Current pipeline composition contract:
+  [12-Pipeline_Composition_and_UX.md](12-Pipeline_Composition_and_UX.md)
 - Planned substrate expansion:
   [13A-Agent_Runtime_Planned.md](13A-Agent_Runtime_Planned.md)

@@ -3,6 +3,7 @@
 This document defines the current contract for builtin TaskSpecs shipped with
 Weft source today. More generally, a builtin is an example task or pipeline
 that is useful enough that Weft bundles it directly. The current builtins are
+`dockerized-agent`, `prepare-agent-images`, and `probe-agents`. They are
 read-only task helpers that live in the Weft package rather than in `.weft/`.
 They are resolved only through explicit spec surfaces such as
 `weft run --spec NAME|PATH` and `weft spec show NAME`. They are discovered as
@@ -49,8 +50,8 @@ See also:
   directory name is the public spec name
 - when a builtin task spec is loaded from a bundle directory, Python callable
   refs in that spec keep the normal `module:function` form but resolve
-  `module` against the bundle root first before falling back to normal Python
-  imports
+  `module` through `weft.core.imports.import_callable_ref()` with the bundle
+  root checked first before falling back to normal Python imports
 - bundle-local Python helper code should use package-relative imports for
   sibling modules; Weft does not add the bundle root to process-global
   `sys.path`
@@ -77,6 +78,10 @@ See also:
 - a service-style builtin may offer stricter inbox schemas, request envelopes,
   or explicit claim and release helpers, but those semantics stay local to the
   builtin contract rather than redefining Weft globally
+
+_Implementation mapping_: builtin inventory surface:
+`weft/commands/builtins.py`, exposed from `weft/cli.py`. Builtin task-spec
+resolution: `weft/commands/specs.py` and `weft/commands/run.py`.
 
 ## Adding A Builtin
 
@@ -115,18 +120,23 @@ Explicit spec resolution lives in `weft/commands/specs.py` and
 
 Purpose:
 
-- probe the known delegated provider CLIs that Weft has built-in adapters for
+- probe the delegated provider CLIs registered in
+  `weft.core.agents.provider_cli.registry.list_provider_cli_providers()`
 - write missing provider executable defaults into `.weft/agents.json`
-- report what was found in ordinary task output
+- report what was found in ordinary task output, including `opencode` run
+  support when relevant
 
 What it does:
 
 - checks the current project context
-- probes the registered delegated provider executables using the isolated probe
-  helpers
+- reads project-local agent settings from `.weft/agents.json`
+- probes each registered provider CLI using the configured executable or that
+  provider's shipped default executable
 - preserves existing explicit `.weft/agents.json` entries
 - fills only missing provider executable entries
 - reports probe results per provider, including version output when available
+- reports `opencode` non-interactive `run` support separately from version
+  probing
 
 What it does not do:
 
@@ -142,6 +152,9 @@ Why it fits:
 - any settings mutation is limited to filling missing executable defaults while
   preserving existing explicit project settings
 - it remains optional and is not part of the ordinary `weft run` path
+- the current shipped mutation scope is narrow: it only fills missing
+  `provider_cli.providers.<name>.executable` defaults in project-local agent
+  settings
 
 Current output shape:
 
@@ -149,6 +162,14 @@ Current output shape:
 - `settings_path`
 - `summary`
 - `providers`
+
+`summary` currently includes:
+
+- `available`
+- `not_found`
+- `probe_failed`
+- `settings_created`
+- `settings_preserved`
 
 Each provider report currently includes:
 
@@ -158,15 +179,17 @@ Each provider report currently includes:
 - candidate executable string
 - resolved executable path, if found
 - settings action (`created`, `preserved`, or `unchanged`)
+- settings path, when available
 - probe status (`available`, `not_found`, or `probe_failed`)
 - version output or probe error
-- for `opencode`, explicit `run` support status
+- for `opencode`, explicit `run_support` status and error when unsupported
 
 _Implementation mapping_: builtin TaskSpec asset:
 `weft/builtins/tasks/probe-agents.json`. Runtime function target:
-`weft/builtins/agent_probe.py` :: `probe_agents_task`. Probe helpers:
-`weft/core/agents/provider_cli/probes.py`. Project settings mutation:
-`weft/core/agents/provider_cli/settings.py`.
+`weft/builtins/agent_probe.py` :: `probe_agents_task`. Provider discovery and
+default executable registry: `weft/core/agents/provider_cli/registry.py`.
+Probe helpers: `weft/core/agents/provider_cli/probes.py`. Project settings
+mutation: `weft/core/agents/provider_cli/settings.py`.
 
 ### `prepare-agent-images`
 
@@ -183,13 +206,16 @@ What it does:
   Windows
 - accepts optional JSON input with `providers` and `refresh`
 - stays plural because one run may warm multiple provider images
-- when `providers` are supplied explicitly, it uses those names directly; no
-  host CLI discovery is required
-- defaults to probing known providers without mutating `.weft/agents.json`, then
-  selecting only available providers
+- when `providers` are supplied explicitly, it uses those names directly and
+  skips host CLI discovery
+- when `providers` are omitted, it probes the registered provider CLIs without
+  mutating `.weft/agents.json`, then keeps only providers whose probe status is
+  `available`
 - calls the shared Docker image helper rather than owning any build logic
 - current shipped image-recipe support is explicit; today that set is
-  `claude_code`, `codex`, `gemini`, `opencode`, and `qwen`
+  `claude_code`, `codex`, `gemini`, `opencode`, and `qwen`, with default
+  executables `claude`, `codex`, `gemini`, `opencode`, and `qwen`
+  respectively
 
 What it does not do:
 
@@ -214,18 +240,29 @@ Current output shape:
 - `summary`
 - `providers`
 
+`summary` currently includes:
+
+- `requested`
+- `built`
+- `reused`
+- `unsupported`
+- `failed`
+
 Each provider report currently includes:
 
 - provider name
 - recipe status (`supported` or `unsupported`)
 - action (`built`, `reused`, `unsupported`, or `failed`)
-- image tag and cache key when an image exists
-- failure detail when the build or reuse path fails
+- image and cache key when an image exists
+- error detail when the recipe is missing or the build or reuse path fails
 
 _Implementation mapping_: builtin TaskSpec asset:
 `weft/builtins/tasks/prepare-agent-images.json`. Runtime function target:
-`weft/builtins/agent_images.py` :: `prepare_agent_images_task`. Shared Docker
-image service: `extensions/weft_docker/weft_docker/agent_images.py`.
+`weft/builtins/agent_images.py` :: `prepare_agent_images_task`. Provider probe
+fallback: `weft/builtins/agent_probe.py` :: `probe_agents`. Registered
+provider registry: `weft/core/agents/provider_cli/registry.py`. Shared Docker
+image service: `extensions/weft_docker/weft_docker/agent_images.py`,
+`extensions/weft_docker/weft_docker/images.py`.
 
 ### `dockerized-agent`
 
@@ -323,6 +360,9 @@ Why the shipped shape is a bundle:
   bundle-local Python refs for `spec.parameterization`,
   `spec.run_input`, `spec.runner.environment_profile_ref`, and the delegated
   tool profile hook
+- bundle-local refs resolve through `weft.core.imports.import_callable_ref()`,
+  so the bundle root is checked first without adding it to process-global
+  `sys.path`
 - the mounted-document prompt path is late-bound through template args from the
   shared helper module, so the example mount target is declared once in code
   rather than duplicated in both the mount helper and the prompt text
@@ -336,7 +376,8 @@ _Implementation mapping_: builtin TaskSpec asset:
 `dockerized_agent_tool_profile`. Shared helper module:
 `weft/builtins/dockerized_agent_examples.py`. Provider runtime descriptor:
 `weft/core/agents/provider_cli/container_runtime.py`,
-`weft/core/agents/provider_cli/runtime_descriptors/`.
+`weft/core/agents/provider_cli/runtime_descriptors/`. Bundle-local import
+resolution: `weft/core/imports.py`.
 
 ## Related Plans
 

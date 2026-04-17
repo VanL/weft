@@ -72,10 +72,10 @@ Key responsibilities implemented in `weft/core/manager.py`:
 4. **Registry heartbeat** – Managers publish an `active` record to
    `weft.state.managers` on startup (including queue names, PID, role, and
    capabilities) and replace it with a `stopped` record during shutdown. The
-   active record is pruned when the manager exits cleanly. The registry itself
-   remains append-only history; readers are responsible for reducing to the
-   latest relevant record for a manager TID and validating PID liveness instead
-   of treating raw queue contents as a mutable snapshot.
+   active record is pruned when the manager exits cleanly. The registry is
+   read as a live queue: callers reduce to the latest relevant record per TID,
+   prune dead active records, and then filter to canonical live managers
+   before treating the result as the active-manager view.
 5. **Idle timeout** – Managers honour the `idle_timeout` metadata field first.
    When that metadata is absent they fall back to
    `WEFT_MANAGER_LIFETIME_TIMEOUT`, which must parse as a non-negative float at
@@ -85,16 +85,16 @@ Key responsibilities implemented in `weft/core/manager.py`:
    cached `Queue.last_ts` read.
 6. **Autostart manifests** – When autostart is enabled for the effective
    context, the manager scans `.weft/autostart/` for manifests that reference
-   stored task specs or pipelines and launches each target using the same spawn
-   pipeline as queue submissions. Manifest lifecycle policy (`once`/`ensure`)
-   governs restarts while the manager is running. Launch and restart accounting
-   advances only after a spawn request is successfully written. Ensure-mode
-   manifests are reconsidered immediately after a tracked autostart child exits.
-   Scan bookkeeping for deleted manifest paths is pruned during refresh so
-   long-lived managers do not accumulate stale manifest state indefinitely.
-   Pipeline targets are compiled into the same first-class pipeline task used by
-   `weft run --pipeline` before the manager enqueues the compiled top-level
-   pipeline task on its own inbox.
+   stored task specs or pipelines and launches each target through the ordinary
+   manager spawn queue (`weft.spawn.requests`). Manifest lifecycle policy
+   (`once`/`ensure`) governs restarts while the manager is running. Launch and
+   restart accounting advances only after a spawn request is successfully
+   written. Ensure-mode manifests are reconsidered immediately after a tracked
+   autostart child exits. Scan bookkeeping for deleted manifest paths is
+   pruned during refresh so long-lived managers do not accumulate stale
+   manifest state indefinitely. Pipeline targets are compiled into the same
+   first-class pipeline task used by `weft run --pipeline` before the manager
+   enqueues the compiled top-level pipeline task on the spawn queue.
 7. **Control channel** – In addition to STOP/STATUS, managers reply `PONG` to
   `PING` messages on `ctrl_out`, supporting simple health checks.
 
@@ -102,7 +102,7 @@ _Implementation mapping_:
 - [MA-1.1] Spawn queue consumption — `Manager._handle_work_message`, `Manager._build_child_spec`.
 - [MA-1.2] Child process launch — `Manager._launch_child_task`, `launch_task_process` (`weft/core/launcher.py`).
 - [MA-1.3] Initial payload delivery — `Manager._launch_child_task` (inbox seeding block).
-- [MA-1.4] Registry heartbeat — `Manager._register_manager`, `Manager._unregister_manager`, `Manager._atexit_unregister`.
+- [MA-1.4] Registry heartbeat and leadership view — `Manager._register_manager`, `Manager._unregister_manager`, `Manager._atexit_unregister`, `Manager._active_manager_records`, `Manager._leader_tid`, `Manager._maybe_yield_leadership`, plus `weft/helpers.py::is_canonical_manager_record`.
 - [MA-1.5] Idle timeout — `Manager.process_once` (idle-timeout check), `Manager._read_broker_timestamp`, `Manager._update_idle_activity_from_broker`.
 - [MA-1.6] Autostart manifests — `Manager._tick_autostart`, `Manager._prune_autostart_state`, `Manager._build_autostart_spawn_payload`, `Manager._load_autostart_manifest`, `Manager._load_autostart_taskspec`, `Manager._load_autostart_pipeline`, `Manager._active_autostart_sources`, `Manager._enqueue_autostart_request`, `Manager._cleanup_children`, plus `weft/core/pipelines.py::compile_linear_pipeline` for stored pipeline targets.
 - [MA-1.7] Control channel — inherited from `BaseTask._handle_control_command` (`weft/core/tasks/base.py`); PING/PONG, STOP, STATUS, KILL handling.
@@ -140,18 +140,20 @@ same bootstrap helper as `weft run`; it does not accept an arbitrary manager
 TaskSpec. `weft manager serve` uses that same canonical manager TaskSpec but
 runs it in the foreground for `systemd`, `launchd`, or `supervisord` style
 supervision, forcing `idle_timeout=0.0` for that invocation only. The canonical
-manager for bootstrap and leadership is the live manager registered for
-`weft.spawn.requests`. Manager records bound to another request queue do not
-participate in default-manager selection. External `SIGTERM` and `SIGINT`
-against a Manager enter the same drain path as STOP; `SIGUSR1` retains
-immediate kill semantics.
+manager for bootstrap and leadership is the live canonical manager registered
+for `weft.spawn.requests`. Canonical records are the live `role="manager"`
+entries whose `requests` field points at `weft.spawn.requests`; leadership
+chooses the lowest-TID live canonical record. Manager records bound to another
+request queue do not participate in default-manager selection. External
+`SIGTERM` and `SIGINT` against a Manager enter the same drain path as STOP;
+`SIGUSR1` retains immediate kill semantics.
 
 _Implementation mapping_:
-- Shared manager lifecycle helper — `weft/commands/_manager_bootstrap.py` :: `_ensure_manager`, `_serve_manager_foreground`, `_list_manager_records`, `_manager_record`, `_stop_manager` (owns canonical manager bootstrap, foreground serve, normalized registry replay, and graceful/forced stop observation for CLI callers).
+- Shared manager lifecycle helper — `weft/commands/_manager_bootstrap.py` :: `_build_manager_runtime_invocation`, `_select_active_manager`, `_ensure_manager`, `_start_manager`, `_serve_manager_foreground`, `_list_manager_records`, `_manager_record`, `_stop_manager` (owns canonical manager bootstrap, foreground serve, normalized registry replay, and graceful/forced stop observation for CLI callers).
 - Detached bootstrap launcher — `weft/manager_detached_launcher.py` :: `main` (short-lived wrapper that starts the real manager runtime in a detached session/process-group boundary and reports early launch status back to `_start_manager`).
 - Manager process launch — `weft/commands/_manager_bootstrap.py` :: `_start_manager` (builds manager TaskSpec, launches the detached wrapper, requires matching pid-plus-registry readiness before success, treats post-proof acknowledgement cleanup as best effort, and reports early bootstrap diagnostics on failure).
 - Manager process entry point — `weft/manager_process.py` :: `run_manager_process`, `main` (shared runtime helper plus standalone module invoked via `python -m weft.manager_process`).
-- Leadership election — `weft/core/manager.py` :: `Manager._maybe_yield_leadership`, `Manager._leader_tid`, `Manager._active_manager_records` (lowest-TID canonical manager wins; duplicates self-cancel).
+- Leadership election — `weft/core/manager.py` :: `Manager._maybe_yield_leadership`, `Manager._leader_tid`, `Manager._active_manager_records`, `weft/helpers.py::is_canonical_manager_record` (lowest-TID canonical manager wins; duplicates self-cancel).
 - External signal handling — `weft/core/manager.py` :: `Manager.handle_termination_signal` (TERM/INT drain, SIGUSR1 kill).
 - CLI management — `weft/commands/manager.py` :: `start_command`, `stop_command`, `list_command`, `status_command`; these commands are thin wrappers over the shared lifecycle helper. `weft/commands/status.py` :: `_collect_manager_records` reuses the same lifecycle reader for manager views.
 - Foreground supervision command — `weft/commands/serve.py` :: `serve_command`, registered in `weft/cli.py` as `weft manager serve`.

@@ -1,28 +1,34 @@
-# CLI Interface - Planned Surfaces
+# CLI Interface - Planned Follow-ups
 
-This companion document holds planned CLI surfaces that are intentionally not part of the current contract.
+This companion document records residual CLI follow-ups only. Current and
+shipped CLI behavior lives in [10-CLI_Interface.md](10-CLI_Interface.md).
+Do not read this file as the current contract.
+If any item here ships, move it into the canonical sibling and remove it from
+this planned companion rather than citing this file as the live CLI contract.
 
-Canonical current behavior and rationale live in [10-CLI_Interface.md](10-CLI_Interface.md).
+Shipped surfaces that are intentionally out of scope here include the current
+result streaming path, the endpoint resolve/write/list helpers, and the
+existing task, manager, and TID-mapping command set.
 
 ## Planned Convenience Surfaces [10A-1]
 
-The following additions remain planned rather than current:
+The remaining additions are planned rather than current:
 
-- richer result streaming semantics beyond the current single-task follow mode
+- richer result streaming semantics beyond the shipped single-task `result --stream`
 - extra convenience flags that reduce manual wiring
-- broader queue or control ergonomics that should not become a second command language
-- explicit endpoint discovery and send ergonomics over ordinary task-local queues
+- broader queue or control ergonomics that stay a thin layer over ordinary queues
 
 The design goal is to preserve the same simple verbs and observability model while adding ergonomics only where they do not obscure the current contract.
 
 ## Planned Discovery Helpers [10A-2]
 
-Additional task and process discovery helpers remain planned as convenience surfaces. The current contract uses the task, manager, and TID-mapping commands instead.
+Additional task and process discovery helpers remain planned as convenience
+surfaces. The shipped task, manager, and TID-mapping commands stay the
+baseline discovery surface.
 
-### Endpoint Discovery And Send Follow-up [10A-2.1]
-
-The base endpoint discovery and send ergonomics are now current; see
-[`10-CLI_Interface.md`](10-CLI_Interface.md) [CLI-4.1].
+The endpoint resolve/write/list helpers are already current and are documented
+in [`10-CLI_Interface.md`](10-CLI_Interface.md) [CLI-4.1]; they are not
+tracked here.
 
 Possible future follow-up:
 

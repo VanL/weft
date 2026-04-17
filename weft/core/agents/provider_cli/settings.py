@@ -43,7 +43,8 @@ def load_provider_cli_project_settings(
 ) -> ProviderCLIProjectSettings:
     """Return project-local delegated launch settings for *provider_name*.
 
-    Missing `.weft/agents.json` is treated as "no project-local settings".
+    Missing project-local agent settings are treated as "no project-local
+    settings".
     Invalid settings are user-authored configuration errors and are raised.
     """
     payload = _load_agent_settings_payload(spec_context=spec_context)
@@ -53,7 +54,7 @@ def load_provider_cli_project_settings(
         return ProviderCLIProjectSettings()
     if not isinstance(provider_payload, Mapping):
         raise ValueError(
-            "Invalid delegated agent settings in .weft/agents.json: "
+            "Invalid delegated agent settings in the project-local settings file: "
             f"provider '{provider_name}' must map to an object"
         )
     executable = provider_payload.get("executable")
@@ -61,7 +62,7 @@ def load_provider_cli_project_settings(
         return ProviderCLIProjectSettings()
     if not isinstance(executable, str) or not executable.strip():
         raise ValueError(
-            "Invalid delegated agent settings in .weft/agents.json: "
+            "Invalid delegated agent settings in the project-local settings file: "
             f"provider '{provider_name}' executable must be a non-empty string"
         )
     return ProviderCLIProjectSettings(executable=executable.strip())
@@ -100,7 +101,7 @@ def ensure_provider_cli_project_executable(
         )
     if not isinstance(existing_entry, dict):
         raise ValueError(
-            "Invalid delegated agent settings in .weft/agents.json: "
+            "Invalid delegated agent settings in the project-local settings file: "
             f"provider '{provider_name}' must map to an object"
         )
 
@@ -108,7 +109,7 @@ def ensure_provider_cli_project_executable(
     if existing_executable is not None:
         if not isinstance(existing_executable, str) or not existing_executable.strip():
             raise ValueError(
-                "Invalid delegated agent settings in .weft/agents.json: "
+                "Invalid delegated agent settings in the project-local settings file: "
                 f"provider '{provider_name}' executable must be a non-empty string"
             )
         return ProviderCLIProjectSettingsWriteResult(
@@ -215,7 +216,7 @@ def _provider_settings_mapping(payload: Mapping[str, Any]) -> Mapping[str, Any]:
         return {}
     if not isinstance(provider_cli, Mapping):
         raise ValueError(
-            "Invalid delegated agent settings in .weft/agents.json: "
+            "Invalid delegated agent settings in the project-local settings file: "
             "'provider_cli' must be an object"
         )
     providers = provider_cli.get("providers")
@@ -223,7 +224,7 @@ def _provider_settings_mapping(payload: Mapping[str, Any]) -> Mapping[str, Any]:
         return {}
     if not isinstance(providers, Mapping):
         raise ValueError(
-            "Invalid delegated agent settings in .weft/agents.json: "
+            "Invalid delegated agent settings in the project-local settings file: "
             "'provider_cli.providers' must be an object"
         )
     return providers
