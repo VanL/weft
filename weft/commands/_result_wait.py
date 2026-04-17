@@ -81,6 +81,22 @@ def terminal_error_message(payload: dict[str, Any], status: str) -> str | None:
     return None
 
 
+def effective_result_surface_wait_interval(timeout: float | None) -> float:
+    """Return a poll interval that preserves useful turns inside short timeouts.
+
+    ``weft result`` can spend part of a caller timeout budget materializing
+    custom queue names before it can wait on the actual result surface. A fixed
+    100ms poll slice is cheap for long waits, but it is too coarse when the
+    caller timeout is small because two polling phases can consume most of the
+    budget before the next turn. Keep the default ceiling for normal waits,
+    while scaling down to roughly ten turns across short budgets.
+    """
+
+    if timeout is None or timeout <= 0:
+        return RESULT_SURFACE_WAIT_INTERVAL
+    return min(RESULT_SURFACE_WAIT_INTERVAL, max(0.01, timeout / 10.0))
+
+
 def await_one_shot_result(
     context: WeftContext,
     tid: str,
@@ -122,6 +138,7 @@ def await_one_shot_result(
     deadline = None
     if timeout is not None and timeout > 0:
         deadline = time.monotonic() + timeout
+    poll_interval = effective_result_surface_wait_interval(timeout)
 
     try:
         while True:
@@ -247,9 +264,9 @@ def await_one_shot_result(
                     else min(wait_timeout, output_grace_remaining)
                 )
             wait_timeout = (
-                RESULT_SURFACE_WAIT_INTERVAL
+                poll_interval
                 if wait_timeout is None
-                else min(wait_timeout, RESULT_SURFACE_WAIT_INTERVAL)
+                else min(wait_timeout, poll_interval)
             )
             monitor.wait(wait_timeout)
     finally:
