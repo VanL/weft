@@ -9,6 +9,7 @@ Spec references:
 
 from __future__ import annotations
 
+import json
 import os
 import signal
 import time
@@ -47,11 +48,14 @@ def _resolve_context(context_path: str | os.PathLike[str] | None) -> WeftContext
 
 def _read_tid_mapping_entries(ctx: WeftContext) -> list[dict[str, Any]]:
     queue = ctx.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
-    entries: list[dict[str, Any]] = []
-    for payload, _timestamp in iter_queue_json_entries(queue):
-        if isinstance(payload, dict):
-            entries.append(payload)
-    return entries
+    try:
+        entries: list[dict[str, Any]] = []
+        for payload, _timestamp in iter_queue_json_entries(queue):
+            if isinstance(payload, dict):
+                entries.append(payload)
+        return entries
+    finally:
+        queue.close()
 
 
 def mapping_for_tid(ctx: WeftContext, tid: str) -> dict[str, Any] | None:
@@ -188,15 +192,18 @@ def _latest_pipeline_status_snapshot(
         return None
 
     queue = ctx.queue(status_queue, persistent=True)
-    latest: dict[str, Any] | None = None
-    for payload, _timestamp in iter_queue_json_entries(queue):
-        payload_tid = payload.get("pipeline_tid")
-        if payload.get("type") != "pipeline_status":
-            continue
-        if isinstance(payload_tid, str) and payload_tid != tid:
-            continue
-        latest = payload
-    return latest
+    try:
+        latest: dict[str, Any] | None = None
+        for payload, _timestamp in iter_queue_json_entries(queue):
+            payload_tid = payload.get("pipeline_tid")
+            if payload.get("type") != "pipeline_status":
+                continue
+            if isinstance(payload_tid, str) and payload_tid != tid:
+                continue
+            latest = payload
+        return latest
+    finally:
+        queue.close()
 
 
 def _pipeline_task_snapshot(
@@ -315,6 +322,22 @@ def _ctrl_in_for_tid(ctx: WeftContext, tid: str) -> str:
     return f"T{tid}.{QUEUE_CTRL_IN_SUFFIX}"
 
 
+def _ctrl_out_for_tid(
+    ctx: WeftContext,
+    tid: str,
+    *,
+    taskspec: dict[str, Any] | None = None,
+) -> str:
+    taskspec = taskspec or load_latest_taskspec_payload(ctx, tid)
+    if taskspec:
+        io_section = taskspec.get("io") or {}
+        control = io_section.get("control") or {}
+        ctrl_out = control.get("ctrl_out")
+        if isinstance(ctrl_out, str) and ctrl_out:
+            return ctrl_out
+    return f"T{tid}.ctrl_out"
+
+
 def _send_control(ctx: WeftContext, tid: str, command: str) -> None:
     """Write a control command to a task's ctrl_in queue.
 
@@ -322,7 +345,10 @@ def _send_control(ctx: WeftContext, tid: str, command: str) -> None:
     """
     ctrl_in = _ctrl_in_for_tid(ctx, tid)
     queue = ctx.queue(ctrl_in, persistent=False)
-    queue.write(command)
+    try:
+        queue.write(command)
+    finally:
+        queue.close()
 
 
 def _runtime_handle_from_mapping(entry: dict[str, Any]) -> RunnerHandle | None:
@@ -359,25 +385,49 @@ def _await_control_surface(
     deadline = time.monotonic() + timeout
     latest_entry: dict[str, Any] | None = None
     latest_snapshot: status_cmd.TaskSnapshot | None = None
-    watched_pipeline_status_queue: str | None = None
+    initial_taskspec_payload = load_latest_taskspec_payload(ctx, tid) or {}
+    watched_pipeline_status_queue = pipeline_status_queue_name(
+        tid,
+        initial_taskspec_payload,
+    )
+    watched_ctrl_out_queue = _ctrl_out_for_tid(
+        ctx,
+        tid,
+        taskspec=initial_taskspec_payload
+        if isinstance(initial_taskspec_payload, dict)
+        else None,
+    )
+    public_signal_deadline: float | None = None
     monitor_queues = [
         ctx.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False),
         ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False),
+        ctx.queue(watched_ctrl_out_queue, persistent=False),
     ]
+    if isinstance(watched_pipeline_status_queue, str) and watched_pipeline_status_queue:
+        monitor_queues.append(ctx.queue(watched_pipeline_status_queue, persistent=True))
     monitor = QueueChangeMonitor(monitor_queues, config=ctx.config)
     try:
         while True:
-            pipeline_status_queue = pipeline_status_queue_name(
+            taskspec_payload = load_latest_taskspec_payload(ctx, tid) or {}
+            pipeline_status_queue = pipeline_status_queue_name(tid, taskspec_payload)
+            ctrl_out_queue = _ctrl_out_for_tid(
+                ctx,
                 tid,
-                load_latest_taskspec_payload(ctx, tid) or {},
+                taskspec=taskspec_payload
+                if isinstance(taskspec_payload, dict)
+                else None,
             )
-            if pipeline_status_queue != watched_pipeline_status_queue:
+            if (
+                pipeline_status_queue != watched_pipeline_status_queue
+                or ctrl_out_queue != watched_ctrl_out_queue
+            ):
                 monitor.close()
                 for queue in monitor_queues:
                     queue.close()
                 monitor_queues = [
                     ctx.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False),
                     ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False),
+                    ctx.queue(ctrl_out_queue, persistent=False),
                 ]
                 if isinstance(pipeline_status_queue, str) and pipeline_status_queue:
                     monitor_queues.append(
@@ -385,6 +435,34 @@ def _await_control_surface(
                     )
                 monitor = QueueChangeMonitor(monitor_queues, config=ctx.config)
                 watched_pipeline_status_queue = pipeline_status_queue
+                watched_ctrl_out_queue = ctrl_out_queue
+
+            ctrl_queue = next(
+                (
+                    queue
+                    for queue in monitor_queues
+                    if queue.name == watched_ctrl_out_queue
+                ),
+                None,
+            )
+            while ctrl_queue is not None:
+                ctrl_raw = ctrl_queue.read_one()
+                if ctrl_raw is None:
+                    break
+                ctrl_payload = ctrl_raw[0] if isinstance(ctrl_raw, tuple) else ctrl_raw
+                try:
+                    payload = json.loads(str(ctrl_payload))
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                if ("command" in payload and "status" in payload) or (
+                    payload.get("type") == "terminal"
+                    and isinstance(payload.get("status"), str)
+                ):
+                    public_signal_deadline = (
+                        time.monotonic() + CONTROL_SURFACE_WAIT_INTERVAL
+                    )
 
             mapping_entry = mapping_for_tid(ctx, tid)
             if mapping_entry is not None:
@@ -396,6 +474,13 @@ def _await_control_surface(
                     return latest_entry, latest_snapshot
             remaining = deadline - time.monotonic()
             if remaining <= 0:
+                if public_signal_deadline is not None:
+                    grace_remaining = public_signal_deadline - time.monotonic()
+                    if grace_remaining > 0:
+                        monitor.wait(
+                            min(grace_remaining, CONTROL_SURFACE_WAIT_INTERVAL)
+                        )
+                        continue
                 return latest_entry, latest_snapshot
             monitor.wait(min(remaining, CONTROL_SURFACE_WAIT_INTERVAL))
     finally:

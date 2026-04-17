@@ -221,26 +221,32 @@ def _format_manager_summary(records: list[dict[str, Any]]) -> str:
 
 def _read_tid_mappings(ctx: WeftContext) -> dict[str, str]:
     queue = _queue(ctx, WEFT_TID_MAPPINGS_QUEUE)
-    mapping: dict[str, str] = {}
-    for payload, _timestamp in iter_queue_json_entries(queue):
-        full = payload.get("full")
-        short = payload.get("short")
-        if isinstance(full, str) and isinstance(short, str):
-            mapping[short] = full
-    return mapping
+    try:
+        mapping: dict[str, str] = {}
+        for payload, _timestamp in iter_queue_json_entries(queue):
+            full = payload.get("full")
+            short = payload.get("short")
+            if isinstance(full, str) and isinstance(short, str):
+                mapping[short] = full
+        return mapping
+    finally:
+        queue.close()
 
 
 def _latest_tid_mapping_entries(ctx: WeftContext) -> dict[str, dict[str, Any]]:
     queue = _queue(ctx, WEFT_TID_MAPPINGS_QUEUE)
-    latest: dict[str, tuple[int, dict[str, Any]]] = {}
-    for payload, timestamp in iter_queue_json_entries(queue):
-        full = payload.get("full")
-        if not isinstance(full, str):
-            continue
-        previous = latest.get(full)
-        if previous is None or previous[0] <= timestamp:
-            latest[full] = (timestamp, payload)
-    return {full: payload for full, (_timestamp, payload) in latest.items()}
+    try:
+        latest: dict[str, tuple[int, dict[str, Any]]] = {}
+        for payload, timestamp in iter_queue_json_entries(queue):
+            full = payload.get("full")
+            if not isinstance(full, str):
+                continue
+            previous = latest.get(full)
+            if previous is None or previous[0] <= timestamp:
+                latest[full] = (timestamp, payload)
+        return {full: payload for full, (_timestamp, payload) in latest.items()}
+    finally:
+        queue.close()
 
 
 def _resolve_tid_filters(ctx: WeftContext, raw: str | None) -> set[str] | None:
@@ -263,14 +269,20 @@ def _resolve_tid_filters(ctx: WeftContext, raw: str | None) -> set[str] | None:
     return {candidate}
 
 
-def _iter_log_events(ctx: WeftContext) -> Iterable[tuple[dict[str, Any], int]]:
+def _iter_log_events(
+    queue: Queue,
+    *,
+    since_timestamp: int | None = None,
+) -> Iterable[tuple[dict[str, Any], int]]:
     """Replay all state-change events from the global log queue.
 
     Spec: [MF-5]
     """
-    queue = _queue(ctx, WEFT_GLOBAL_LOG_QUEUE)
     try:
-        iterator_raw = queue.peek_generator(with_timestamps=True)
+        iterator_raw = queue.peek_generator(
+            with_timestamps=True,
+            since_timestamp=since_timestamp,
+        )
     except Exception:
         return []
 
@@ -467,103 +479,111 @@ def _collect_task_snapshots(
     now_ns = time.time_ns()
     records: dict[str, dict[str, Any]] = {}
     tid_mapping_entries = _latest_tid_mapping_entries(ctx)
+    log_queue = _queue(ctx, WEFT_GLOBAL_LOG_QUEUE)
+    try:
+        for payload, timestamp in _iter_log_events(log_queue):
+            tid = payload.get("tid")
+            if not isinstance(tid, str):
+                continue
 
-    for payload, timestamp in _iter_log_events(ctx):
-        tid = payload.get("tid")
-        if not isinstance(tid, str):
-            continue
+            if (
+                tid_filters is not None
+                and tid not in tid_filters
+                and tid[-TASKSPEC_TID_SHORT_LENGTH:] not in tid_filters
+            ):
+                continue
 
-        if (
-            tid_filters is not None
-            and tid not in tid_filters
-            and tid[-TASKSPEC_TID_SHORT_LENGTH:] not in tid_filters
-        ):
-            continue
+            record = records.setdefault(
+                tid,
+                {
+                    "tid": tid,
+                    "tid_short": tid[-TASKSPEC_TID_SHORT_LENGTH:],
+                    "name": tid,
+                    "status": "created",
+                    "event": "unknown",
+                    "activity": None,
+                    "waiting_on": None,
+                    "started_at": None,
+                    "completed_at": None,
+                    "last_timestamp": timestamp,
+                    "taskspec": None,
+                    "metadata": {},
+                    "event_payload": None,
+                },
+            )
+            event = payload.get("event", "unknown")
+            current_status = record.get("status")
+            current_terminal = (
+                isinstance(current_status, str)
+                and current_status in TERMINAL_TASK_STATUSES
+            )
 
-        record = records.setdefault(
-            tid,
-            {
-                "tid": tid,
-                "tid_short": tid[-TASKSPEC_TID_SHORT_LENGTH:],
-                "name": tid,
-                "status": "created",
-                "event": "unknown",
-                "activity": None,
-                "waiting_on": None,
-                "started_at": None,
-                "completed_at": None,
-                "last_timestamp": timestamp,
-                "taskspec": None,
-                "metadata": {},
-                "event_payload": None,
-            },
-        )
-        event = payload.get("event", "unknown")
-        current_status = record.get("status")
-        current_terminal = (
-            isinstance(current_status, str) and current_status in TERMINAL_TASK_STATUSES
-        )
+            if event == "task_activity":
+                if current_terminal:
+                    continue
+                record["last_timestamp"] = timestamp
+                if isinstance(event, str):
+                    record["event"] = event
+                status = payload.get("status")
+                if isinstance(status, str) and status:
+                    record["status"] = status
+                if record["status"] in TERMINAL_TASK_STATUSES:
+                    record["activity"] = None
+                    record["waiting_on"] = None
+                else:
+                    activity = payload.get("activity")
+                    waiting_on = payload.get("waiting_on")
+                    record["activity"] = (
+                        activity.strip()
+                        if isinstance(activity, str) and activity.strip()
+                        else None
+                    )
+                    record["waiting_on"] = (
+                        waiting_on.strip()
+                        if isinstance(waiting_on, str) and waiting_on.strip()
+                        else None
+                    )
+                continue
 
-        if event == "task_activity":
-            if current_terminal:
+            taskspec = payload.get("taskspec")
+            if not isinstance(taskspec, dict):
+                continue
+
+            name = taskspec.get("name") or payload.get("name") or tid
+            state = taskspec.get("state") or {}
+            status = payload.get("status") or state.get("status") or "created"
+            incoming_terminal = (
+                isinstance(status, str) and status in TERMINAL_TASK_STATUSES
+            )
+            if current_terminal and not incoming_terminal:
                 continue
             record["last_timestamp"] = timestamp
             if isinstance(event, str):
                 record["event"] = event
-            status = payload.get("status")
-            if isinstance(status, str) and status:
-                record["status"] = status
+            started_at = state.get("started_at")
+            completed_at = state.get("completed_at")
+            metadata = taskspec.get("metadata") or {}
+            record["name"] = str(name)
+            record["status"] = str(status)
+            record["started_at"] = started_at if isinstance(started_at, int) else None
+            record["completed_at"] = (
+                completed_at if isinstance(completed_at, int) else None
+            )
+            record["taskspec"] = taskspec
+            record["metadata"] = metadata if isinstance(metadata, dict) else {}
+            record["event_payload"] = dict(payload)
             if record["status"] in TERMINAL_TASK_STATUSES:
                 record["activity"] = None
                 record["waiting_on"] = None
             else:
                 activity = payload.get("activity")
                 waiting_on = payload.get("waiting_on")
-                record["activity"] = (
-                    activity.strip()
-                    if isinstance(activity, str) and activity.strip()
-                    else None
-                )
-                record["waiting_on"] = (
-                    waiting_on.strip()
-                    if isinstance(waiting_on, str) and waiting_on.strip()
-                    else None
-                )
-            continue
-
-        taskspec = payload.get("taskspec")
-        if not isinstance(taskspec, dict):
-            continue
-
-        name = taskspec.get("name") or payload.get("name") or tid
-        state = taskspec.get("state") or {}
-        status = payload.get("status") or state.get("status") or "created"
-        incoming_terminal = isinstance(status, str) and status in TERMINAL_TASK_STATUSES
-        if current_terminal and not incoming_terminal:
-            continue
-        record["last_timestamp"] = timestamp
-        if isinstance(event, str):
-            record["event"] = event
-        started_at = state.get("started_at")
-        completed_at = state.get("completed_at")
-        metadata = taskspec.get("metadata") or {}
-        record["name"] = str(name)
-        record["status"] = str(status)
-        record["started_at"] = started_at if isinstance(started_at, int) else None
-        record["completed_at"] = completed_at if isinstance(completed_at, int) else None
-        record["taskspec"] = taskspec
-        record["metadata"] = metadata if isinstance(metadata, dict) else {}
-        record["event_payload"] = dict(payload)
-        if record["status"] in TERMINAL_TASK_STATUSES:
-            record["activity"] = None
-            record["waiting_on"] = None
-        else:
-            activity = payload.get("activity")
-            waiting_on = payload.get("waiting_on")
-            if isinstance(activity, str) and activity.strip():
-                record["activity"] = activity.strip()
-            if isinstance(waiting_on, str) and waiting_on.strip():
-                record["waiting_on"] = waiting_on.strip()
+                if isinstance(activity, str) and activity.strip():
+                    record["activity"] = activity.strip()
+                if isinstance(waiting_on, str) and waiting_on.strip():
+                    record["waiting_on"] = waiting_on.strip()
+    finally:
+        log_queue.close()
 
     snapshots: list[TaskSnapshot] = []
     for tid, record in records.items():
@@ -693,7 +713,10 @@ def _watch_task_events(
         monitor = QueueChangeMonitor([queue], config=ctx.config)
         while True:
             emitted = False
-            for payload, timestamp in _iter_log_events(ctx):
+            for payload, timestamp in _iter_log_events(
+                queue,
+                since_timestamp=last_timestamp,
+            ):
                 if timestamp <= last_timestamp:
                     continue
                 tid = payload.get("tid")

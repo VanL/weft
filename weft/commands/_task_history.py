@@ -21,14 +21,28 @@ def load_latest_taskspec_payload(
 ) -> dict[str, Any] | None:
     """Return the latest logged TaskSpec payload for ``tid``."""
     log_queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
-    latest_taskspec: dict[str, Any] | None = None
-    for payload, _timestamp in iter_queue_json_entries(log_queue):
-        if payload.get("tid") != tid:
-            continue
-        taskspec = payload.get("taskspec")
-        if isinstance(taskspec, dict):
-            latest_taskspec = taskspec
-    return latest_taskspec
+
+    def _scan_history(*, since_timestamp: int | None) -> dict[str, Any] | None:
+        latest_taskspec: dict[str, Any] | None = None
+        for payload, _timestamp in iter_queue_json_entries(
+            log_queue,
+            since_timestamp=since_timestamp,
+        ):
+            if payload.get("tid") != tid:
+                continue
+            taskspec = payload.get("taskspec")
+            if isinstance(taskspec, dict):
+                latest_taskspec = taskspec
+        return latest_taskspec
+
+    try:
+        since_timestamp = int(tid) - 1 if tid.isdigit() else None
+        latest_taskspec = _scan_history(since_timestamp=since_timestamp)
+        if latest_taskspec is not None or since_timestamp is None:
+            return latest_taskspec
+        return _scan_history(since_timestamp=None)
+    finally:
+        log_queue.close()
 
 
 def is_pipeline_taskspec_payload(taskspec_payload: dict[str, Any] | None) -> bool:
