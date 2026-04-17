@@ -938,6 +938,30 @@ def test_enqueue_taskspec_strips_reserved_internal_runtime_metadata_from_public_
     assert INTERNAL_RUNTIME_ENVELOPE_ENDPOINT_NAME_KEY not in payload
 
 
+def test_enqueue_taskspec_preserves_public_endpoint_name_on_public_submission(
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    taskspec = _make_taskspec(tid)
+    taskspec.metadata[INTERNAL_RUNTIME_ENDPOINT_NAME_KEY] = "mayor"
+
+    _enqueue_taskspec(context, taskspec, None)
+
+    queue = context.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=False)
+    try:
+        raw_message = queue.read_one()
+    finally:
+        queue.close()
+
+    assert isinstance(raw_message, str)
+    payload = json.loads(raw_message)
+    taskspec_payload = payload["taskspec"]
+    assert taskspec_payload["metadata"][INTERNAL_RUNTIME_ENDPOINT_NAME_KEY] == "mayor"
+    assert INTERNAL_RUNTIME_ENVELOPE_ENDPOINT_NAME_KEY not in payload
+
+
 def test_delete_spawn_request_swallows_delete_errors(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

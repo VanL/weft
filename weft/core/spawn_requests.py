@@ -21,6 +21,7 @@ from weft._constants import (
     WEFT_SPAWN_REQUESTS_QUEUE,
     WORK_ENVELOPE_START,
 )
+from weft.core.endpoints import is_reserved_internal_endpoint_name
 from weft.core.taskspec import (
     TaskSpec,
     apply_bundle_root_to_taskspec_payload,
@@ -123,7 +124,18 @@ def submit_spawn_request(
         internal_runtime_task_class = metadata.pop(
             INTERNAL_RUNTIME_TASK_CLASS_KEY, None
         )
-        internal_endpoint_name = metadata.pop(INTERNAL_RUNTIME_ENDPOINT_NAME_KEY, None)
+        endpoint_name = metadata.get(INTERNAL_RUNTIME_ENDPOINT_NAME_KEY)
+        if (
+            isinstance(endpoint_name, str)
+            and endpoint_name
+            and is_reserved_internal_endpoint_name(endpoint_name)
+        ):
+            if allow_internal_runtime:
+                internal_endpoint_name = metadata.pop(
+                    INTERNAL_RUNTIME_ENDPOINT_NAME_KEY, None
+                )
+            else:
+                metadata.pop(INTERNAL_RUNTIME_ENDPOINT_NAME_KEY, None)
 
     message = {
         "taskspec": taskspec_payload,
