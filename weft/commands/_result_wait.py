@@ -108,7 +108,7 @@ def await_one_shot_result(
     result_value: Any | None = None
     error_message: str | None = None
     completed_at: float | None = None
-    last_output_at: float | None = None
+    structured_result_seen_at: float | None = None
 
     deadline = None
     if timeout is not None and timeout > 0:
@@ -130,14 +130,22 @@ def await_one_shot_result(
                 stream_buffer,
                 emit_stream=emit_stream,
             )
+            if ready_values:
+                if (
+                    structured_result_seen_at is None
+                    and not result_values
+                    and len(ready_values) == 1
+                    and isinstance(ready_values[0].value, (dict, list))
+                ):
+                    structured_result_seen_at = time.monotonic()
+                else:
+                    structured_result_seen_at = None
             for output in ready_values:
                 append_public_value(
                     result_values,
                     output,
                     show_stderr=show_stderr,
                 )
-            if ready_values:
-                last_output_at = time.monotonic()
             if drained_outbox:
                 continue
 
@@ -179,13 +187,14 @@ def await_one_shot_result(
                 status = "completed"
                 break
 
-            # If final outbox payloads are already visible but the terminal log
-            # event races or never becomes observable, treat a quiet grace
-            # window the same way we treat a late outbox after completion.
+            # If one structured result payload is already visible, the caller
+            # already has the final public result shape. Treat a quiet grace
+            # window the same way we treat a late outbox after completion when
+            # the terminal log event races or never becomes observable.
             if (
                 completed_at is None
-                and last_output_at is not None
-                and time.monotonic() - last_output_at
+                and structured_result_seen_at is not None
+                and time.monotonic() - structured_result_seen_at
                 >= WEFT_COMPLETED_RESULT_GRACE_SECONDS
             ):
                 result_value = aggregate_public_outputs(result_values)
@@ -213,11 +222,11 @@ def await_one_shot_result(
                     if wait_timeout is None
                     else min(wait_timeout, grace_remaining)
                 )
-            if completed_at is None and last_output_at is not None:
+            if completed_at is None and structured_result_seen_at is not None:
                 output_grace_remaining = max(
                     0.0,
                     WEFT_COMPLETED_RESULT_GRACE_SECONDS
-                    - (time.monotonic() - last_output_at),
+                    - (time.monotonic() - structured_result_seen_at),
                 )
                 wait_timeout = (
                     output_grace_remaining
