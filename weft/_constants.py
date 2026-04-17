@@ -265,6 +265,15 @@ INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT: Final[str] = "heartbeat"
 INTERNAL_HEARTBEAT_ENDPOINT_NAME: Final[str] = "_weft.heartbeat"
 """Reserved runtime endpoint claimed by the built-in heartbeat service."""
 
+MANAGER_SPAWN_FENCED_REQUEUED_EVENT: Final[str] = "manager_spawn_fenced_requeued"
+"""Manager event emitted when a fenced spawn request is requeued exactly."""
+
+MANAGER_SPAWN_FENCED_STRANDED_EVENT: Final[str] = "manager_spawn_fenced_stranded"
+"""Manager event emitted when a fenced spawn request remains stranded in reserved."""
+
+MANAGER_SPAWN_FENCE_SUSPENDED_EVENT: Final[str] = "manager_spawn_fence_suspended"
+"""Manager event emitted when dispatch is suspended awaiting ownership recovery."""
+
 HEARTBEAT_MIN_INTERVAL_SECONDS: Final[int] = 60
 """Minimum interval accepted by the first-slice heartbeat service."""
 

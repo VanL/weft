@@ -35,6 +35,9 @@ from weft._constants import (
     INTERNAL_RUNTIME_TASK_CLASS_PIPELINE,
     INTERNAL_RUNTIME_TASK_CLASS_PIPELINE_EDGE,
     MANAGER_CHILD_EXIT_POLL_INTERVAL,
+    MANAGER_SPAWN_FENCED_REQUEUED_EVENT,
+    MANAGER_SPAWN_FENCED_STRANDED_EVENT,
+    MANAGER_SPAWN_FENCE_SUSPENDED_EVENT,
     QUEUE_CTRL_IN_SUFFIX,
     SPEC_TYPE_PIPELINE,
     SPEC_TYPE_TASK,
@@ -73,10 +76,6 @@ from .taskspec import (
 )
 
 logger = logging.getLogger(__name__)
-
-MANAGER_SPAWN_FENCED_REQUEUED_EVENT: Final[str] = "manager_spawn_fenced_requeued"
-MANAGER_SPAWN_FENCED_STRANDED_EVENT: Final[str] = "manager_spawn_fenced_stranded"
-MANAGER_SPAWN_FENCE_SUSPENDED_EVENT: Final[str] = "manager_spawn_fence_suspended"
 
 DispatchOwnershipState = Literal["self", "other", "none", "unknown"]
 DispatchSuspensionState = Literal["other", "none", "unknown"]
