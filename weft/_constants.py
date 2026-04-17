@@ -212,6 +212,9 @@ ENDPOINT_NAME_PATTERN: Final[re.Pattern[str]] = re.compile(
 )
 """Allowed stable named-endpoint syntax for runtime endpoint claims."""
 
+INTERNAL_ENDPOINT_NAMESPACE_PREFIX: Final[str] = "_weft."
+"""Reserved endpoint-name prefix for internal runtime-owned services."""
+
 WEFT_PIPELINES_STATE_QUEUE: Final[str] = "weft.state.pipelines"
 """Queue tracking active first-class pipeline runs."""
 
@@ -242,11 +245,31 @@ INTERNAL_RUNTIME_TASK_CLASS_KEY: Final[str] = "_weft_runtime_task_class"
 INTERNAL_RUNTIME_ENDPOINT_NAME_KEY: Final[str] = "_weft_endpoint_name"
 """Reserved metadata key selecting an explicit runtime endpoint claim."""
 
+INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY: Final[str] = (
+    "_weft_internal_runtime_task_class"
+)
+"""Reserved spawn-envelope key selecting an internal runtime-owned task class."""
+
+INTERNAL_RUNTIME_ENVELOPE_ENDPOINT_NAME_KEY: Final[str] = "_weft_internal_endpoint_name"
+"""Reserved spawn-envelope key selecting an internal runtime endpoint claim."""
+
 INTERNAL_RUNTIME_TASK_CLASS_PIPELINE: Final[str] = "pipeline"
 """Reserved internal runtime-owned class selector for PipelineTask."""
 
 INTERNAL_RUNTIME_TASK_CLASS_PIPELINE_EDGE: Final[str] = "pipeline_edge"
 """Reserved internal runtime-owned class selector for PipelineEdgeTask."""
+
+INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT: Final[str] = "heartbeat"
+"""Reserved internal runtime-owned class selector for HeartbeatTask."""
+
+INTERNAL_HEARTBEAT_ENDPOINT_NAME: Final[str] = "_weft.heartbeat"
+"""Reserved runtime endpoint claimed by the built-in heartbeat service."""
+
+HEARTBEAT_MIN_INTERVAL_SECONDS: Final[int] = 60
+"""Minimum interval accepted by the first-slice heartbeat service."""
+
+HEARTBEAT_IDLE_TIMEOUT_SECONDS: Final[float] = 60.0
+"""Idle timeout after the last registration before the heartbeat service exits."""
 
 PIPELINE_RUNTIME_METADATA_KEY: Final[str] = "_weft_pipeline_runtime"
 """Reserved metadata key carrying a precompiled pipeline runtime plan."""

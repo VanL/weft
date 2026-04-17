@@ -355,6 +355,7 @@ class PipelineTask(BaseTask):
             config=self._config,
             tid=taskspec_payload.get("tid"),
             seed_start_envelope=False,
+            allow_internal_runtime=True,
         )
         return str(ctrl_queue)
 

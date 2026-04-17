@@ -49,7 +49,7 @@ from weft.commands._streaming import (
 from weft.commands._task_history import is_pipeline_taskspec_payload
 from weft.commands.interactive import InteractiveStreamClient
 from weft.context import WeftContext, build_context
-from weft.core.endpoints import normalize_endpoint_name
+from weft.core.endpoints import validate_endpoint_claim_name
 from weft.core.pipelines import (
     PipelineSpec,
     compile_linear_pipeline,
@@ -371,6 +371,7 @@ def _enqueue_taskspec(
     work_payload: Any,
     *,
     seed_start_envelope: bool = True,
+    allow_internal_runtime: bool = False,
 ) -> int:
     # Spec: docs/specifications/03-Manager_Architecture.md#tid-correlation-wa-2, [MF-1]
     task_tid = taskspec.tid or _generate_tid(context)
@@ -382,6 +383,7 @@ def _enqueue_taskspec(
         tid=task_tid,
         inherited_weft_context=taskspec.spec.weft_context,
         seed_start_envelope=seed_start_envelope,
+        allow_internal_runtime=allow_internal_runtime,
     )
 
 
@@ -865,11 +867,12 @@ def _apply_explicit_run_name(taskspec: TaskSpec, explicit_name: str | None) -> T
         payload["metadata"] = metadata
     metadata.pop(INTERNAL_RUNTIME_ENDPOINT_NAME_KEY, None)
 
+    try:
+        endpoint_name = validate_endpoint_claim_name(explicit_name)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--name") from exc
+
     if bool(getattr(taskspec.spec, "persistent", False)):
-        try:
-            endpoint_name = normalize_endpoint_name(explicit_name)
-        except ValueError as exc:
-            raise typer.BadParameter(str(exc), param_hint="--name") from exc
         metadata[INTERNAL_RUNTIME_ENDPOINT_NAME_KEY] = endpoint_name
 
     renamed = TaskSpec.model_validate(
@@ -1326,6 +1329,7 @@ def _run_pipeline(
             compiled.pipeline_taskspec,
             work_payload,
             seed_start_envelope=False,
+            allow_internal_runtime=True,
         ),
         verbose=verbose,
         wait=wait,

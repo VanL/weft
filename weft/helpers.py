@@ -1,7 +1,13 @@
 """Helper utility functions for Weft.
 
-This module provides common utility functions used throughout the Weft codebase,
-including logging and debugging helpers that respect environment configuration.
+This module provides shared helpers used across command, manager, and runtime
+code. It includes queue-history readers, command-resolution helpers, and
+runtime ownership reducers that multiple spec-owned surfaces reuse.
+
+Spec references:
+- docs/specifications/03-Manager_Architecture.md [MA-3]
+- docs/specifications/05-Message_Flow_and_State.md [MF-3.1], [MF-6]
+- docs/specifications/10-CLI_Interface.md [CLI-1.1.1]
 """
 
 from __future__ import annotations
@@ -263,6 +269,32 @@ def is_canonical_manager_record(record: Mapping[str, Any]) -> bool:
     role = record.get("role", "manager")
     requests = record.get("requests", WEFT_SPAWN_REQUESTS_QUEUE)
     return bool(role == "manager" and requests == WEFT_SPAWN_REQUESTS_QUEUE)
+
+
+def canonical_owner_tid(claimant_tids: Iterable[str]) -> str | None:
+    """Return the canonical owner TID from already-eligible claimants.
+
+    This helper is intentionally narrow: callers own registry replay, liveness,
+    and schema interpretation. The helper only reduces a set of eligible live
+    claimant TIDs to the lowest numeric TID, which is Weft's canonical-owner
+    rule for convergent runtime ownership.
+
+    Spec:
+    - docs/specifications/03-Manager_Architecture.md [MA-3]
+    - docs/specifications/05-Message_Flow_and_State.md [MF-3.1]
+    """
+
+    lowest_value: int | None = None
+    lowest_tid: str | None = None
+    for tid in claimant_tids:
+        try:
+            numeric_tid = int(tid)
+        except (TypeError, ValueError):
+            continue
+        if lowest_value is None or numeric_tid < lowest_value:
+            lowest_value = numeric_tid
+            lowest_tid = tid
+    return lowest_tid
 
 
 def terminate_process_tree(

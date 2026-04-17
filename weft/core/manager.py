@@ -19,7 +19,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from multiprocessing.process import BaseProcess
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Final, Literal, cast
 
 from pydantic import ValidationError
 
@@ -27,6 +27,10 @@ from simplebroker import BrokerTarget, Queue
 from simplebroker.ext import BrokerError
 from weft._constants import (
     CONTROL_STOP,
+    INTERNAL_RUNTIME_ENDPOINT_NAME_KEY,
+    INTERNAL_RUNTIME_ENVELOPE_ENDPOINT_NAME_KEY,
+    INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY,
+    INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
     INTERNAL_RUNTIME_TASK_CLASS_KEY,
     INTERNAL_RUNTIME_TASK_CLASS_PIPELINE,
     INTERNAL_RUNTIME_TASK_CLASS_PIPELINE_EDGE,
@@ -37,11 +41,13 @@ from weft._constants import (
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MANAGER_LIFETIME_TIMEOUT,
     WEFT_MANAGERS_REGISTRY_QUEUE,
+    WEFT_SPAWN_REQUESTS_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
     WORK_ENVELOPE_START,
     get_weft_directory_name,
 )
 from weft.helpers import (
+    canonical_owner_tid,
     is_canonical_manager_record,
     iter_queue_json_entries,
     pid_is_live,
@@ -68,6 +74,13 @@ from .taskspec import (
 
 logger = logging.getLogger(__name__)
 
+MANAGER_SPAWN_FENCED_REQUEUED_EVENT: Final[str] = "manager_spawn_fenced_requeued"
+MANAGER_SPAWN_FENCED_STRANDED_EVENT: Final[str] = "manager_spawn_fenced_stranded"
+MANAGER_SPAWN_FENCE_SUSPENDED_EVENT: Final[str] = "manager_spawn_fence_suspended"
+
+DispatchOwnershipState = Literal["self", "other", "none", "unknown"]
+DispatchSuspensionState = Literal["other", "none", "unknown"]
+
 
 @dataclass
 class ManagedChild:
@@ -77,6 +90,42 @@ class ManagedChild:
     ctrl_queue: str | None
     persistent: bool = False
     autostart_source: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DispatchOwnership:
+    """Current runtime-owned view of manager dispatch eligibility.
+
+    Spec: [MA-1.4], [MF-6]
+    """
+
+    state: DispatchOwnershipState
+    leader_tid: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DispatchSuspension:
+    """Manager-owned dispatch suspension state for fenced reserved work.
+
+    Spec: [MA-1.4], [MF-6]
+    """
+
+    ownership_state: DispatchSuspensionState
+    child_tid: str
+    message_id: int
+    recovery_pending: bool
+    leader_tid: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DispatchSuspensionRefresh:
+    """Outcome of one dispatch-suspension refresh cycle.
+
+    Spec: [MA-1.4], [MF-6]
+    """
+
+    ownership: DispatchOwnership
+    halt_turn: bool = False
 
 
 class Manager(BaseTask):
@@ -112,6 +161,7 @@ class Manager(BaseTask):
         self._draining = False
         self._drain_reason: str | None = None
         self._drain_completion_event = "manager_stop_drained"
+        self._dispatch_suspension: DispatchSuspension | None = None
         self._autostart_enabled = bool(self._config.get("WEFT_AUTOSTART_TASKS", True))
         autostart_dir = self._config.get("WEFT_AUTOSTART_DIR")
         self._autostart_dir = Path(autostart_dir) if autostart_dir else None
@@ -280,6 +330,10 @@ class Manager(BaseTask):
             from .tasks.pipeline import PipelineEdgeTask
 
             return PipelineEdgeTask
+        if runtime_class == INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT:
+            from .tasks.heartbeat import HeartbeatTask
+
+            return HeartbeatTask
         raise ValueError(f"unknown internal runtime task class '{runtime_class}'")
 
     # ------------------------------------------------------------------
@@ -428,20 +482,48 @@ class Manager(BaseTask):
     def _pid_alive(pid: int | None) -> bool:
         return pid_is_live(pid)
 
-    def _active_manager_records(self) -> dict[str, dict[str, Any]]:
+    def _read_active_manager_records(self) -> dict[str, dict[str, Any]] | None:
+        """Return the live canonical manager snapshot or ``None`` on read failure.
+
+        Spec: [MA-1.4], [MA-3]
+        """
+
         queue = self._queue(WEFT_MANAGERS_REGISTRY_QUEUE)
         snapshot: dict[str, dict[str, Any]] = {}
         stale_timestamps: list[int] = []
 
-        for payload, timestamp in iter_queue_json_entries(queue):
-            tid = payload.get("tid")
-            if not isinstance(tid, str) or not tid:
-                continue
-            payload["_timestamp"] = timestamp
-            existing = snapshot.get(tid)
-            existing_timestamp = int(existing.get("_timestamp", -1)) if existing else -1
-            if existing is None or existing_timestamp < timestamp:
-                snapshot[tid] = payload
+        try:
+            raw_entries = queue.peek_generator(with_timestamps=True)
+        except (BrokerError, OSError, RuntimeError):
+            logger.debug("Failed to open manager registry replay", exc_info=True)
+            return None
+
+        try:
+            for entry in raw_entries:
+                if not isinstance(entry, tuple) or len(entry) != 2:
+                    continue
+                body, timestamp = entry
+                if not isinstance(timestamp, int):
+                    continue
+                try:
+                    payload = json.loads(body)
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                tid = payload.get("tid")
+                if not isinstance(tid, str) or not tid:
+                    continue
+                payload["_timestamp"] = timestamp
+                existing = snapshot.get(tid)
+                existing_timestamp = (
+                    int(existing.get("_timestamp", -1)) if existing else -1
+                )
+                if existing is None or existing_timestamp < timestamp:
+                    snapshot[tid] = payload
+        except (BrokerError, OSError, RuntimeError):
+            logger.debug("Failed to replay manager registry", exc_info=True)
+            return None
 
         active: dict[str, dict[str, Any]] = {}
         for tid, record in snapshot.items():
@@ -465,11 +547,119 @@ class Manager(BaseTask):
 
         return active
 
+    def _active_manager_records(self) -> dict[str, dict[str, Any]]:
+        active = self._read_active_manager_records()
+        if active is None:
+            return {}
+        return active
+
     def _leader_tid(self) -> str | None:
         active = self._active_manager_records()
-        if not active:
+        return canonical_owner_tid(active)
+
+    def _evaluate_dispatch_ownership(self) -> DispatchOwnership:
+        """Return the current manager-owned dispatch eligibility state.
+
+        Spec: [MA-1.4], [MF-6]
+        """
+
+        if self._queue_names["inbox"] != WEFT_SPAWN_REQUESTS_QUEUE:
+            return DispatchOwnership(state="self", leader_tid=self.tid)
+
+        active = self._read_active_manager_records()
+        if active is None:
+            return DispatchOwnership(state="unknown")
+
+        leader_tid = canonical_owner_tid(active)
+        if leader_tid is None:
+            return DispatchOwnership(state="none")
+        if leader_tid == self.tid and self.tid in active:
+            return DispatchOwnership(state="self", leader_tid=leader_tid)
+        return DispatchOwnership(state="other", leader_tid=leader_tid)
+
+    def _refresh_dispatch_suspension(self) -> DispatchSuspensionRefresh | None:
+        """Refresh manager-wide dispatch suspension, clearing it once owned again.
+
+        Spec: [MA-1.4], [MF-6]
+        """
+
+        if self._dispatch_suspension is None:
             return None
-        return min(active, key=int)
+
+        ownership = self._evaluate_dispatch_ownership()
+        suspension = self._dispatch_suspension
+
+        if ownership.state == "self":
+            if not suspension.recovery_pending:
+                self._dispatch_suspension = None
+                return DispatchSuspensionRefresh(ownership=ownership)
+
+            if self._reserved_spawn_request_missing(message_id=suspension.message_id):
+                self._dispatch_suspension = None
+                return DispatchSuspensionRefresh(ownership=ownership, halt_turn=True)
+
+            requeued = self._requeue_reserved_spawn_request(
+                message_id=suspension.message_id
+            )
+            if requeued:
+                self._dispatch_suspension = None
+            return DispatchSuspensionRefresh(ownership=ownership, halt_turn=True)
+
+        self._dispatch_suspension = DispatchSuspension(
+            ownership_state=ownership.state,
+            child_tid=suspension.child_tid,
+            message_id=suspension.message_id,
+            recovery_pending=suspension.recovery_pending,
+            leader_tid=ownership.leader_tid,
+        )
+
+        if suspension.recovery_pending and ownership.state == "other":
+            if self._reserved_spawn_request_missing(message_id=suspension.message_id):
+                self._dispatch_suspension = DispatchSuspension(
+                    ownership_state="other",
+                    child_tid=suspension.child_tid,
+                    message_id=suspension.message_id,
+                    recovery_pending=False,
+                    leader_tid=ownership.leader_tid,
+                )
+            else:
+                requeued = self._requeue_reserved_spawn_request(
+                    message_id=suspension.message_id
+                )
+                if requeued:
+                    self._dispatch_suspension = DispatchSuspension(
+                        ownership_state="other",
+                        child_tid=suspension.child_tid,
+                        message_id=suspension.message_id,
+                        recovery_pending=False,
+                        leader_tid=ownership.leader_tid,
+                    )
+
+        return DispatchSuspensionRefresh(ownership=ownership)
+
+    @property
+    def _dispatch_suspended_state(self) -> DispatchSuspensionState | None:
+        suspension = self._dispatch_suspension
+        if suspension is None:
+            return None
+        return suspension.ownership_state
+
+    def _dispatch_recovery_pending(self) -> bool:
+        suspension = self._dispatch_suspension
+        return bool(suspension is not None and suspension.recovery_pending)
+
+    def _reserved_spawn_request_missing(self, *, message_id: int) -> bool:
+        try:
+            return (
+                self._get_reserved_queue().peek_one(exact_timestamp=message_id) is None
+            )
+        except (BrokerError, OSError, RuntimeError):
+            logger.debug(
+                "Failed to inspect reserved queue for fenced spawn request %s",
+                message_id,
+                exc_info=True,
+            )
+            return False
 
     def _maybe_yield_leadership(self, *, force: bool = False) -> bool:
         """Check whether this manager should yield leadership and act on it.
@@ -515,6 +705,9 @@ class Manager(BaseTask):
             as a signal to wind down), ``False`` if this manager is the leader
             or the check interval has not elapsed.
         """
+        if self._dispatch_recovery_pending():
+            return False
+
         now_ns = time.time_ns()
         if (
             not force
@@ -813,10 +1006,14 @@ class Manager(BaseTask):
         not start new child work from that in-flight reserved request.
         """
 
-        if self._draining or self.should_stop:
+        if self._draining or self.should_stop or self._dispatch_suspension is not None:
             return False
         self._drain_control_queue_first()
-        return not self._draining and not self.should_stop
+        return (
+            not self._draining
+            and not self.should_stop
+            and self._dispatch_suspension is None
+        )
 
     def _read_broker_timestamp(self, *, force: bool = False) -> int:
         last_known = getattr(self, "_last_broker_timestamp", 0)
@@ -879,6 +1076,94 @@ class Manager(BaseTask):
     # ------------------------------------------------------------------
     # Message handling
     # ------------------------------------------------------------------
+    def _requeue_reserved_spawn_request(self, *, message_id: int) -> bool:
+        """Attempt to move one reserved spawn request back to the global inbox.
+
+        Spec: [MF-6]
+        """
+
+        try:
+            moved = self._get_reserved_queue().move_one(
+                WEFT_SPAWN_REQUESTS_QUEUE,
+                exact_timestamp=message_id,
+                require_unclaimed=True,
+                with_timestamps=False,
+            )
+        except (BrokerError, OSError, RuntimeError):
+            logger.debug(
+                "Failed to requeue reserved spawn request %s",
+                message_id,
+                exc_info=True,
+            )
+            return False
+        return moved is not None
+
+    def _apply_final_dispatch_fence(
+        self,
+        child_spec: TaskSpec,
+        *,
+        message_id: int,
+    ) -> bool:
+        """Apply the final ownership fence before a child launch side effect.
+
+        Spec: [MA-1.1], [MA-1.4], [MF-6]
+        """
+
+        ownership = self._evaluate_dispatch_ownership()
+        if ownership.state == "self":
+            return True
+
+        child_tid = child_spec.tid
+        assert child_tid is not None
+        reserved_queue = self._queue_names["reserved"]
+
+        if ownership.state == "other":
+            self._dispatch_suspension = DispatchSuspension(
+                ownership_state="other",
+                child_tid=child_tid,
+                message_id=message_id,
+                recovery_pending=True,
+                leader_tid=ownership.leader_tid,
+            )
+            requeued = self._requeue_reserved_spawn_request(message_id=message_id)
+            self._dispatch_suspension = DispatchSuspension(
+                ownership_state="other",
+                child_tid=child_tid,
+                message_id=message_id,
+                recovery_pending=not requeued,
+                leader_tid=ownership.leader_tid,
+            )
+            event = (
+                MANAGER_SPAWN_FENCED_REQUEUED_EVENT
+                if requeued
+                else MANAGER_SPAWN_FENCED_STRANDED_EVENT
+            )
+            self._report_state_change(
+                event=event,
+                child_tid=child_tid,
+                leader_tid=ownership.leader_tid,
+                reserved_queue=reserved_queue,
+                message_id=message_id,
+            )
+            if requeued:
+                self._maybe_yield_leadership(force=True)
+            return False
+
+        self._dispatch_suspension = DispatchSuspension(
+            ownership_state=cast(DispatchSuspensionState, ownership.state),
+            child_tid=child_tid,
+            message_id=message_id,
+            recovery_pending=True,
+        )
+        self._report_state_change(
+            event=MANAGER_SPAWN_FENCE_SUSPENDED_EVENT,
+            child_tid=child_tid,
+            reserved_queue=reserved_queue,
+            message_id=message_id,
+            ownership_state=ownership.state,
+        )
+        return False
+
     def _handle_work_message(
         self, message: str, timestamp: int, context: QueueMessageContext
     ) -> None:
@@ -909,6 +1194,8 @@ class Manager(BaseTask):
 
         inbox_message = payload.get("inbox_message", WORK_ENVELOPE_START)
         if not self._control_allows_child_launch():
+            return
+        if not self._apply_final_dispatch_fence(child_spec, message_id=timestamp):
             return
 
         launched = self._launch_child_task(
@@ -947,6 +1234,23 @@ class Manager(BaseTask):
                 "state": payload.get("state", {}),
                 "metadata": payload.get("metadata", {}),
             }
+
+        metadata = candidate.setdefault("metadata", {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+            candidate["metadata"] = metadata
+
+        internal_runtime_task_class = payload.get(
+            INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY
+        )
+        if isinstance(internal_runtime_task_class, str) and internal_runtime_task_class:
+            metadata[INTERNAL_RUNTIME_TASK_CLASS_KEY] = internal_runtime_task_class
+
+        internal_endpoint_name = payload.get(
+            INTERNAL_RUNTIME_ENVELOPE_ENDPOINT_NAME_KEY
+        )
+        if isinstance(internal_endpoint_name, str) and internal_endpoint_name:
+            metadata[INTERNAL_RUNTIME_ENDPOINT_NAME_KEY] = internal_endpoint_name
 
         candidate["metadata"].setdefault("parent_tid", self.tid)
 
@@ -1343,6 +1647,20 @@ class Manager(BaseTask):
             self._cleanup_children()
             if not self._child_processes:
                 self._finish_graceful_shutdown()
+            return
+        refresh = self._refresh_dispatch_suspension()
+        ownership = refresh.ownership if refresh is not None else None
+        if refresh is not None and refresh.halt_turn:
+            self._cleanup_children()
+            return
+        if ownership is not None and ownership.state == "other":
+            if self._maybe_yield_leadership(force=True):
+                return
+        if self._dispatch_suspension is not None:
+            self._cleanup_children()
+            if self._child_processes:
+                self._last_activity_ns = max(self._last_activity_ns, time.time_ns())
+                self._idle_shutdown_logged = False
             return
         super().process_once()
         if self._draining:

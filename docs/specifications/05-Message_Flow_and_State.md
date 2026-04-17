@@ -129,6 +129,10 @@ Current rules:
   there is no separate endpoint lease or heartbeat contract
 - if multiple live tasks claim the same name, the canonical live owner is the
   lowest eligible TID; duplicate live claims remain observable conflicts
+- names under `_weft.` are reserved for Weft-owned internal runtime services;
+  public naming surfaces reject that namespace
+- the current shipped internal runtime endpoint is `_weft.heartbeat`, owned by
+  the built-in heartbeat service
 - sending to a named endpoint is still an ordinary queue write to the resolved
   inbox or `ctrl_in`
 - missing-name resolution is an explicit failure. It does not auto-spawn,
@@ -137,6 +141,41 @@ Current rules:
 _Implementation mapping_: `weft/core/tasks/base.py`
 `register_endpoint_name()` and `unregister_endpoint_name()`;
 `weft/core/endpoints.py`; `weft/commands/queue.py`.
+
+### 3.2 Heartbeat Service Flow
+
+Current heartbeat flow is task-shaped:
+
+```text
+helper -> resolve _weft.heartbeat -> ordinary queue write to service inbox
+service inbox -> in-memory registration heap -> ordinary queue write to destination
+```
+
+Current rules:
+
+- the built-in heartbeat service is one internal persistent task that
+  multiplexes many registrations in one process
+- heartbeat registrations are runtime-only and disappear on service or Weft
+  restart
+- helper startup ensures a manager exists, submits the internal heartbeat
+  runtime through the ordinary spawn path, and waits for live endpoint
+  resolution of `_weft.heartbeat`
+- registration messages are ordinary inbox payloads with `action` `upsert` or
+  `cancel`
+- `upsert` resets `next_due_at` to `now + interval_seconds`
+- intervals are integer seconds with a first-slice minimum of 60 seconds
+- on each due wake, the canonical owner writes at most one message per
+  registration to the configured destination queue, then advances to the next
+  future slot
+- if a due registration is late, the service coalesces to one emit and does
+  not replay every missed slot
+- duplicate heartbeat services converge by loser exit once a lower-TID live
+  owner is positively visible
+- the heartbeat service is an interval emitter, not a scheduler: there is no
+  cron syntax, wall-clock scheduling, timezone handling, or missed-run replay
+
+_Implementation mapping_: `weft/core/heartbeat.py`;
+`weft/core/tasks/heartbeat.py`; `weft/core/endpoints.py`.
 
 ### 4. Pipeline Flow [MF-4]
 
@@ -205,19 +244,56 @@ Current submission-reconciliation rules:
 - if none of those surfaces prove success or rollback, the CLI reports an
   explicit unknown submission outcome keyed by TID
 
+Current manager-dispatch fence rules:
+
+- after reserving a spawn request and building the child TaskSpec, the manager
+  performs one final ownership check before `_launch_child_task()`
+- only positive `self` ownership permits launch
+- on positive `other` ownership proof, the manager must not launch the child;
+  it becomes non-dispatching for later loop iterations before attempting to
+  move the exact reserved message back to `weft.spawn.requests`
+- if that exact-message move succeeds, the manager emits
+  `manager_spawn_fenced_requeued` with required fields `child_tid`,
+  `leader_tid`, `reserved_queue`, and `message_id`
+- if that exact-message move fails, the manager leaves the exact request in
+  reserved and emits `manager_spawn_fenced_stranded` with required fields
+  `child_tid`, `leader_tid`, `reserved_queue`, and `message_id`
+- on `none` or `unknown`, the manager must not launch and must not requeue on
+  guesswork; it leaves the exact request in reserved, emits
+  `manager_spawn_fence_suspended` with required fields `child_tid`,
+  `reserved_queue`, `message_id`, and `ownership_state`, and enters
+  manager-wide dispatch suspension
+- while dispatch-suspended, the manager may continue control handling and child
+  supervision, but it must not reserve or launch later spawn requests until a
+  later ownership check resolves to `self` or `other`
+- while a fenced exact request is still pending recovery in the manager's
+  private reserved queue, the manager must not leadership-yield, idle-exit, or
+  run ensure-style autostart scans that enqueue more undispatchable work
+- if ownership later resolves back to `self`, the manager exact-message
+  requeues the older fenced request back to `weft.spawn.requests` before later
+  inbox work resumes
+- these manager-scoped fence diagnostics are not spawn rejection and must not
+  be interpreted as `task_spawn_rejected`
+
 The reconciliation helper reads only durable surfaces. It does not guess from
 in-memory startup state.
 
 Autostart manifests follow the same overall spawn path. Current autostart
 runtime support covers stored task specs and stored pipeline targets. Pipeline
 targets are compiled into the same top-level pipeline task submitted by
-`weft run --pipeline`. The manager only treats a manifest launch or restart
+`weft run --pipeline`, and internal runtime classes such as pipelines and the
+built-in heartbeat service travel on the manager-owned spawn envelope rather
+than public TaskSpec metadata. The manager only treats a manifest launch or restart
 as consumed after the synthesized spawn request is successfully written to the
 ordinary manager inbox queue, and ensure-mode manifests are rescanned
 immediately after a tracked autostart child exits.
 
-_Implementation mapping_: `weft/core/manager.py`, `weft/core/spawn_requests.py`,
-`weft/commands/run.py`, `weft/commands/_spawn_submission.py`.
+_Implementation mapping_: `weft/core/manager.py` — `Manager._handle_work_message`,
+`Manager._build_child_spec`, `Manager._apply_final_dispatch_fence`,
+`Manager._requeue_reserved_spawn_request`, `Manager._control_allows_child_launch`,
+`Manager.process_once`; `weft/core/spawn_requests.py`;
+`weft/commands/run.py`; `weft/commands/_spawn_submission.py` —
+`_inspect_task_log_for_tid`, `_reconcile_submitted_spawn_once`.
 
 ### 7. Manager Bootstrap Flow [MF-7]
 
@@ -416,3 +492,4 @@ management live in the companion doc:
 - [`docs/plans/2026-04-16-autostart-hardening-and-contract-alignment-plan.md`](../plans/2026-04-16-autostart-hardening-and-contract-alignment-plan.md)
 - [`docs/plans/2026-04-16-pipeline-autostart-extension-plan.md`](../plans/2026-04-16-pipeline-autostart-extension-plan.md)
 - [`docs/plans/2026-04-16-review-findings-remediation-plan.md`](../plans/2026-04-16-review-findings-remediation-plan.md)
+- [`docs/plans/2026-04-17-canonical-owner-fence-plan.md`](../plans/2026-04-17-canonical-owner-fence-plan.md)

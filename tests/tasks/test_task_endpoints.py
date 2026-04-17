@@ -12,8 +12,15 @@ import time
 import pytest
 
 from tests.tasks.test_task_execution import make_function_taskspec
-from weft._constants import WEFT_ENDPOINTS_REGISTRY_QUEUE
-from weft.core.tasks import Consumer
+from weft._constants import (
+    INTERNAL_HEARTBEAT_ENDPOINT_NAME,
+    INTERNAL_RUNTIME_ENDPOINT_NAME_KEY,
+    INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
+    INTERNAL_RUNTIME_TASK_CLASS_KEY,
+    WEFT_ENDPOINTS_REGISTRY_QUEUE,
+)
+from weft.core.tasks import Consumer, HeartbeatTask
+from weft.core.taskspec import TaskSpec
 from weft.helpers import iter_queue_json_entries
 
 
@@ -96,5 +103,53 @@ def test_task_endpoint_name_validation_rejects_invalid_names(
 
         assert _entries(registry) == []
     finally:
+        task.cleanup()
+        registry.close()
+
+
+def test_task_endpoint_name_validation_rejects_reserved_internal_names(
+    broker_env,
+    unique_tid: str,
+) -> None:
+    db_path, make_queue = broker_env
+    spec = make_function_taskspec(unique_tid, "tests.tasks.sample_targets:echo_payload")
+    task = Consumer(db_path, spec)
+    registry = make_queue(WEFT_ENDPOINTS_REGISTRY_QUEUE)
+
+    try:
+        with pytest.raises(ValueError, match="reserved for internal runtime services"):
+            task.register_endpoint_name("_weft.heartbeat")
+
+        assert _entries(registry) == []
+    finally:
+        task.cleanup()
+        registry.close()
+
+
+def test_internal_runtime_task_can_claim_reserved_internal_endpoint_name(
+    broker_env,
+    unique_tid: str,
+) -> None:
+    db_path, make_queue = broker_env
+    spec_payload = make_function_taskspec(
+        unique_tid,
+        "tests.tasks.sample_targets:echo_payload",
+    ).model_dump(mode="json")
+    spec_payload["spec"]["persistent"] = True
+    spec = TaskSpec.model_validate(spec_payload)
+    spec.metadata[INTERNAL_RUNTIME_TASK_CLASS_KEY] = (
+        INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT
+    )
+    spec.metadata[INTERNAL_RUNTIME_ENDPOINT_NAME_KEY] = INTERNAL_HEARTBEAT_ENDPOINT_NAME
+    task = HeartbeatTask(db_path, spec)
+    registry = make_queue(WEFT_ENDPOINTS_REGISTRY_QUEUE)
+
+    try:
+        records = _entries(registry)
+        assert len(records) == 1
+        assert records[0]["name"] == INTERNAL_HEARTBEAT_ENDPOINT_NAME
+        assert records[0]["tid"] == unique_tid
+    finally:
+        task.stop(join=False)
         task.cleanup()
         registry.close()

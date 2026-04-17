@@ -14,6 +14,7 @@ import pytest
 from simplebroker.ext import BrokerError
 from weft._constants import (
     CONTROL_STOP,
+    INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
     INTERNAL_RUNTIME_TASK_CLASS_KEY,
     INTERNAL_RUNTIME_TASK_CLASS_PIPELINE,
     INTERNAL_RUNTIME_TASK_CLASS_PIPELINE_EDGE,
@@ -26,8 +27,13 @@ from weft._constants import (
     WEFT_TID_MAPPINGS_QUEUE,
     load_config,
 )
-from weft.core.manager import ManagedChild, Manager
-from weft.core.tasks import Consumer, PipelineEdgeTask, PipelineTask
+from weft.core.manager import (
+    DispatchOwnership,
+    DispatchSuspension,
+    ManagedChild,
+    Manager,
+)
+from weft.core.tasks import Consumer, HeartbeatTask, PipelineEdgeTask, PipelineTask
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 
 
@@ -44,6 +50,17 @@ def drain(queue):
             break
         items.append(value)
     return items
+
+
+def pending_timestamps(queue) -> list[int]:
+    timestamps: list[int] = []
+    for entry in queue.peek_generator(with_timestamps=True):
+        if not isinstance(entry, tuple) or len(entry) != 2:
+            continue
+        _body, timestamp = entry
+        if isinstance(timestamp, int):
+            timestamps.append(timestamp)
+    return timestamps
 
 
 def make_manager_spec(
@@ -266,9 +283,7 @@ def test_manager_spawns_child(manager_setup) -> None:
     manager, make_queue = manager_setup
     inbox_queue = make_queue(manager._queue_names["inbox"])
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
-    registry_queue = make_queue(WEFT_MANAGERS_REGISTRY_QUEUE)
     drain(log_queue)
-    drain(registry_queue)
 
     inbox_queue.write(json.dumps(make_child_spec()))
 
@@ -344,6 +359,22 @@ def test_manager_launches_pipeline_task_for_reserved_internal_class(
         }
     )
     assert manager._resolve_child_task_class(edge_spec) is PipelineEdgeTask
+
+    heartbeat_spec = TaskSpec.model_validate(
+        {
+            **child_spec.model_dump(mode="json"),
+            "name": "heartbeat-child",
+            "spec": {
+                "type": "function",
+                "function_target": "weft.tasks:noop",
+                "persistent": True,
+            },
+            "metadata": {
+                INTERNAL_RUNTIME_TASK_CLASS_KEY: INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
+            },
+        }
+    )
+    assert manager._resolve_child_task_class(heartbeat_spec) is HeartbeatTask
 
 
 def test_manager_rejects_unknown_internal_task_class(manager_setup) -> None:
@@ -804,6 +835,436 @@ def test_manager_stop_mid_handler_keeps_reserved_work_unlaunched(
     assert not any(event.get("event") == "task_spawned" for event in events)
 
 
+def test_manager_other_owner_fence_requeues_request_and_emits_exact_event(
+    manager_setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, make_queue = manager_setup
+    inbox_queue = make_queue(manager._queue_names["inbox"])
+    reserved_queue = make_queue(manager._queue_names["reserved"])
+    spawn_queue = make_queue(WEFT_SPAWN_REQUESTS_QUEUE)
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    drain(log_queue)
+    drain(spawn_queue)
+
+    payload = {
+        "name": "fenced-requeue",
+        "spec": {
+            "type": "function",
+            "function_target": "tests.tasks.sample_targets:echo_payload",
+        },
+    }
+    inbox_queue.write(json.dumps(payload))
+    message_id = pending_timestamps(inbox_queue)[0]
+    lower_leader_tid = str(int(manager.tid) - 1)
+    monkeypatch.setattr(
+        manager,
+        "_evaluate_dispatch_ownership",
+        lambda: DispatchOwnership(state="other", leader_tid=lower_leader_tid),
+    )
+
+    manager.process_once()
+
+    assert reserved_queue.peek_one(exact_timestamp=message_id) is None
+    assert spawn_queue.peek_one(exact_timestamp=message_id) is not None
+    assert manager._dispatch_suspended_state == "other"
+
+    events = [json.loads(item) for item in drain(log_queue)]
+    fenced_event = next(
+        event
+        for event in events
+        if event.get("event") == "manager_spawn_fenced_requeued"
+    )
+    assert fenced_event["child_tid"] == str(message_id)
+    assert fenced_event["leader_tid"] == lower_leader_tid
+    assert fenced_event["reserved_queue"] == manager._queue_names["reserved"]
+    assert fenced_event["message_id"] == message_id
+    assert not any(
+        event.get("event") in {"task_spawned", "task_spawn_rejected"}
+        for event in events
+    )
+
+
+def test_manager_other_owner_fence_strands_request_when_exact_move_fails(
+    manager_setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, make_queue = manager_setup
+    inbox_queue = make_queue(manager._queue_names["inbox"])
+    reserved_queue = make_queue(manager._queue_names["reserved"])
+    spawn_queue = make_queue(WEFT_SPAWN_REQUESTS_QUEUE)
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    drain(log_queue)
+    drain(spawn_queue)
+
+    payload = {
+        "name": "fenced-stranded",
+        "spec": {
+            "type": "function",
+            "function_target": "tests.tasks.sample_targets:echo_payload",
+        },
+    }
+    inbox_queue.write(json.dumps(payload))
+    message_id = pending_timestamps(inbox_queue)[0]
+    lower_leader_tid = str(int(manager.tid) - 1)
+    monkeypatch.setattr(
+        manager,
+        "_evaluate_dispatch_ownership",
+        lambda: DispatchOwnership(state="other", leader_tid=lower_leader_tid),
+    )
+
+    reserved_queue_obj = manager._get_reserved_queue()
+
+    def _fail_move_one(*args, **kwargs):
+        del args, kwargs
+        raise RuntimeError("move failed")
+
+    monkeypatch.setattr(reserved_queue_obj, "move_one", _fail_move_one)
+
+    manager.process_once()
+
+    assert reserved_queue.peek_one(exact_timestamp=message_id) is not None
+    assert spawn_queue.peek_one(exact_timestamp=message_id) is None
+    assert manager._dispatch_suspended_state == "other"
+
+    events = [json.loads(item) for item in drain(log_queue)]
+    stranded_event = next(
+        event
+        for event in events
+        if event.get("event") == "manager_spawn_fenced_stranded"
+    )
+    assert stranded_event["child_tid"] == str(message_id)
+    assert stranded_event["leader_tid"] == lower_leader_tid
+    assert stranded_event["reserved_queue"] == manager._queue_names["reserved"]
+    assert stranded_event["message_id"] == message_id
+    assert not any(
+        event.get("event") in {"task_spawned", "task_spawn_rejected"}
+        for event in events
+    )
+
+
+@pytest.mark.parametrize("ownership_state", ["none", "unknown"])
+def test_manager_dispatch_fence_suspends_and_logs_exact_state(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+    ownership_state: str,
+) -> None:
+    manager, make_queue = manager_setup
+    inbox_queue = make_queue(manager._queue_names["inbox"])
+    reserved_queue = make_queue(manager._queue_names["reserved"])
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    drain(log_queue)
+
+    payload = {
+        "name": f"fence-{ownership_state}",
+        "spec": {
+            "type": "function",
+            "function_target": "tests.tasks.sample_targets:echo_payload",
+        },
+    }
+    inbox_queue.write(json.dumps(payload))
+    message_id = pending_timestamps(inbox_queue)[0]
+    monkeypatch.setattr(
+        manager,
+        "_evaluate_dispatch_ownership",
+        lambda: DispatchOwnership(state=ownership_state),
+    )
+
+    manager.process_once()
+
+    assert reserved_queue.peek_one(exact_timestamp=message_id) is not None
+    assert manager._dispatch_suspended_state == ownership_state
+    assert manager._draining is False
+    assert manager.should_stop is False
+
+    events = [json.loads(item) for item in drain(log_queue)]
+    suspended_event = next(
+        event
+        for event in events
+        if event.get("event") == "manager_spawn_fence_suspended"
+    )
+    assert suspended_event["child_tid"] == str(message_id)
+    assert suspended_event["reserved_queue"] == manager._queue_names["reserved"]
+    assert suspended_event["message_id"] == message_id
+    assert suspended_event["ownership_state"] == ownership_state
+    assert not any(
+        event.get("event") in {"task_spawned", "task_spawn_rejected"}
+        for event in events
+    )
+
+
+@pytest.mark.parametrize("ownership_state", ["none", "unknown"])
+def test_manager_suspension_recovers_reserved_request_before_later_inbox_work(
+    broker_env,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+    ownership_state: str,
+) -> None:
+    db_path, make_queue = broker_env
+    manager = Manager(db_path, make_manager_spec(unique_tid))
+    spawn_queue = make_queue(WEFT_SPAWN_REQUESTS_QUEUE)
+    reserved_queue = make_queue(manager._queue_names["reserved"])
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    drain(spawn_queue)
+    drain(log_queue)
+
+    first_payload = {
+        "name": "suspend-first",
+        "spec": {
+            "type": "function",
+            "function_target": "tests.tasks.sample_targets:echo_payload",
+        },
+    }
+    second_payload = {
+        "name": "suspend-second",
+        "spec": {
+            "type": "function",
+            "function_target": "tests.tasks.sample_targets:echo_payload",
+        },
+    }
+    spawn_queue.write(json.dumps(first_payload))
+    spawn_queue.write(json.dumps(second_payload))
+    first_message_id, second_message_id = pending_timestamps(spawn_queue)
+    ownership_states = iter(
+        [
+            DispatchOwnership(state=ownership_state),
+            DispatchOwnership(state=ownership_state),
+            DispatchOwnership(state="self", leader_tid=manager.tid),
+            DispatchOwnership(state="self", leader_tid=manager.tid),
+        ]
+    )
+    launched: list[str] = []
+
+    def _next_ownership() -> DispatchOwnership:
+        try:
+            return next(ownership_states)
+        except StopIteration:
+            return DispatchOwnership(state="self", leader_tid=manager.tid)
+
+    def _record_launch(child_spec: TaskSpec, *_args: object, **_kwargs: object) -> bool:
+        assert child_spec.tid is not None
+        launched.append(child_spec.tid)
+        return True
+
+    monkeypatch.setattr(manager, "_evaluate_dispatch_ownership", _next_ownership)
+    monkeypatch.setattr(manager, "_launch_child_task", _record_launch)
+
+    try:
+        manager.process_once()
+        assert reserved_queue.peek_one(exact_timestamp=first_message_id) is not None
+        assert manager._dispatch_suspended_state == ownership_state
+
+        manager.process_once()
+        assert spawn_queue.peek_one(exact_timestamp=second_message_id) is not None
+        assert manager._dispatch_suspended_state == ownership_state
+
+        manager.process_once()
+        assert manager._dispatch_suspended_state is None
+        assert spawn_queue.peek_one(exact_timestamp=first_message_id) is not None
+        assert spawn_queue.peek_one(exact_timestamp=second_message_id) is not None
+        assert launched == []
+
+        manager.process_once()
+        assert launched == [str(first_message_id)]
+        assert spawn_queue.peek_one(exact_timestamp=second_message_id) is not None
+    finally:
+        manager.stop(join=False)
+        manager.cleanup()
+
+
+def test_manager_stranded_other_owner_does_not_yield_with_unrecovered_reserved_work(
+    manager_setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, make_queue = manager_setup
+    inbox_queue = make_queue(manager._queue_names["inbox"])
+    reserved_queue = make_queue(manager._queue_names["reserved"])
+    spawn_queue = make_queue(WEFT_SPAWN_REQUESTS_QUEUE)
+    drain(spawn_queue)
+
+    payload = {
+        "name": "fenced-stranded-yield",
+        "spec": {
+            "type": "function",
+            "function_target": "tests.tasks.sample_targets:echo_payload",
+        },
+    }
+    inbox_queue.write(json.dumps(payload))
+    message_id = pending_timestamps(inbox_queue)[0]
+    lower_leader_tid = str(int(manager.tid) - 1)
+    monkeypatch.setattr(
+        manager,
+        "_evaluate_dispatch_ownership",
+        lambda: DispatchOwnership(state="other", leader_tid=lower_leader_tid),
+    )
+
+    reserved_queue_obj = manager._get_reserved_queue()
+
+    def _fail_move_one(*args, **kwargs):
+        del args, kwargs
+        raise RuntimeError("move failed")
+
+    monkeypatch.setattr(reserved_queue_obj, "move_one", _fail_move_one)
+
+    manager.process_once()
+    manager.process_once()
+
+    assert manager.should_stop is False
+    assert manager._dispatch_suspended_state == "other"
+    assert reserved_queue.peek_one(exact_timestamp=message_id) is not None
+    assert spawn_queue.peek_one(exact_timestamp=message_id) is None
+
+
+@pytest.mark.parametrize("ownership_state", ["none", "unknown"])
+def test_manager_suspension_blocks_idle_shutdown_while_recovery_pending(
+    broker_env,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+    ownership_state: str,
+) -> None:
+    db_path, make_queue = broker_env
+    manager = Manager(
+        db_path,
+        make_manager_spec(unique_tid, idle_timeout=0.01),
+    )
+    inbox_queue = make_queue(manager._queue_names["inbox"])
+    reserved_queue = make_queue(manager._queue_names["reserved"])
+
+    payload = {
+        "name": f"idle-blocked-{ownership_state}",
+        "spec": {
+            "type": "function",
+            "function_target": "tests.tasks.sample_targets:echo_payload",
+        },
+    }
+    inbox_queue.write(json.dumps(payload))
+    message_id = pending_timestamps(inbox_queue)[0]
+    monkeypatch.setattr(
+        manager,
+        "_evaluate_dispatch_ownership",
+        lambda: DispatchOwnership(state=ownership_state),
+    )
+
+    try:
+        manager.process_once()
+        manager._last_activity_ns = time.time_ns() - 5_000_000_000
+
+        manager.process_once()
+
+        assert manager.should_stop is False
+        assert manager.taskspec.state.status == "running"
+        assert reserved_queue.peek_one(exact_timestamp=message_id) is not None
+    finally:
+        manager.stop(join=False)
+        manager.cleanup()
+
+
+def test_manager_suspension_skips_autostart_tick_while_dispatch_is_blocked(
+    manager_setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, _make_queue = manager_setup
+    calls: list[bool] = []
+
+    manager._dispatch_suspension = DispatchSuspension(
+        ownership_state="unknown",
+        child_tid="1777000000000000001",
+        message_id=1777000000000000001,
+        recovery_pending=True,
+    )
+    monkeypatch.setattr(
+        manager,
+        "_evaluate_dispatch_ownership",
+        lambda: DispatchOwnership(state="unknown"),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_tick_autostart",
+        lambda *args, **kwargs: calls.append(True),
+    )
+
+    manager.process_once()
+
+    assert calls == []
+
+
+def test_manager_other_owner_fence_keeps_persistent_child_supervised_while_suspended(
+    manager_setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, make_queue = manager_setup
+    inbox_queue = make_queue(manager._queue_names["inbox"])
+    reserved_queue = make_queue(manager._queue_names["reserved"])
+    spawn_queue = make_queue(WEFT_SPAWN_REQUESTS_QUEUE)
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    drain(log_queue)
+    drain(spawn_queue)
+
+    class FakeProcess:
+        pid = None
+        exitcode = None
+
+        def is_alive(self) -> bool:
+            return True
+
+        def join(self, timeout: float | None = None) -> None:
+            return None
+
+    manager._child_processes["persistent-child"] = ManagedChild(
+        process=FakeProcess(),
+        ctrl_queue=None,
+        persistent=True,
+    )
+
+    try:
+        lower_leader_tid = str(int(manager.tid) - 1)
+        monkeypatch.setattr(
+            manager,
+            "_evaluate_dispatch_ownership",
+            lambda: DispatchOwnership(state="other", leader_tid=lower_leader_tid),
+        )
+
+        first_payload = json.dumps(
+            {
+                "name": "persistent-first",
+                "spec": {
+                    "type": "function",
+                    "function_target": "tests.tasks.sample_targets:echo_payload",
+                },
+            }
+        )
+        inbox_queue.write(first_payload)
+        first_message_id = pending_timestamps(inbox_queue)[0]
+        moved = inbox_queue.move_one(
+            manager._queue_names["reserved"],
+            exact_timestamp=first_message_id,
+            with_timestamps=False,
+        )
+        assert moved is not None
+
+        manager._handle_work_message(first_payload, first_message_id, None)
+
+        assert spawn_queue.peek_one(exact_timestamp=first_message_id) is not None
+        assert reserved_queue.peek_one(exact_timestamp=first_message_id) is None
+        assert manager._dispatch_suspended_state == "other"
+        assert manager._draining is False
+        assert "persistent-child" in manager._child_processes
+
+        inbox_queue.write(
+            json.dumps(
+                {
+                    "name": "persistent-second",
+                    "spec": {
+                        "type": "function",
+                        "function_target": "tests.tasks.sample_targets:echo_payload",
+                    },
+                }
+            )
+        )
+        second_message_id = pending_timestamps(inbox_queue)[0]
+
+        manager.process_once()
+
+        assert inbox_queue.peek_one(exact_timestamp=second_message_id) is not None
+    finally:
+        manager._child_processes.pop("persistent-child", None)
+
+
 def test_manager_leadership_yield_drains_nonpersistent_children(
     manager_setup, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -896,6 +1357,7 @@ def test_manager_leadership_yield_waits_while_persistent_children_exist(
     assert manager._draining is False
     assert manager.should_stop is False
     assert manager.taskspec.state.status == "running"
+    manager._child_processes.clear()
 
 
 def test_manager_leadership_ignores_noncanonical_lower_manager(

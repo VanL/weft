@@ -3,7 +3,7 @@
 This directory holds non-normative implementation plans, roadmaps, and audit artifacts.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 63 tracked plan files in this directory.
+There are currently 65 tracked plan files in this directory.
 
 ## Status Taxonomy
 
@@ -33,6 +33,8 @@ There are currently 63 tracked plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-04-17-heartbeat-service-plan.md`](./2026-04-17-heartbeat-service-plan.md) | Heartbeat Service Plan | `completed` | none |
+| [`2026-04-17-canonical-owner-fence-plan.md`](./2026-04-17-canonical-owner-fence-plan.md) | Shared Canonical Owner Fence Plan | `completed` | none |
 | [`2026-04-16-runtime-endpoint-registry-boundary-plan.md`](./2026-04-16-runtime-endpoint-registry-boundary-plan.md) | Runtime Endpoint Registry Boundary Plan | `completed` | none |
 | [`2026-04-16-review-findings-remediation-plan.md`](./2026-04-16-review-findings-remediation-plan.md) | Review Findings Remediation Plan | `completed` | none |
 | [`2026-04-16-manager-and-basetask-exception-hardening-plan.md`](./2026-04-16-manager-and-basetask-exception-hardening-plan.md) | Manager And BaseTask Exception Hardening | `completed` | none |

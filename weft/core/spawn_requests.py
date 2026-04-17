@@ -13,7 +13,14 @@ from pathlib import Path
 from typing import Any
 
 from simplebroker import BrokerTarget, Queue
-from weft._constants import WEFT_SPAWN_REQUESTS_QUEUE, WORK_ENVELOPE_START
+from weft._constants import (
+    INTERNAL_RUNTIME_ENDPOINT_NAME_KEY,
+    INTERNAL_RUNTIME_ENVELOPE_ENDPOINT_NAME_KEY,
+    INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY,
+    INTERNAL_RUNTIME_TASK_CLASS_KEY,
+    WEFT_SPAWN_REQUESTS_QUEUE,
+    WORK_ENVELOPE_START,
+)
 from weft.core.taskspec import (
     TaskSpec,
     apply_bundle_root_to_taskspec_payload,
@@ -81,6 +88,7 @@ def submit_spawn_request(
     tid: str | int | None = None,
     inherited_weft_context: str | None = None,
     seed_start_envelope: bool = True,
+    allow_internal_runtime: bool = False,
 ) -> int:
     """Write a manager spawn request using exact-timestamp TID correlation."""
 
@@ -108,10 +116,28 @@ def submit_spawn_request(
     ):
         inbox_message = WORK_ENVELOPE_START
 
+    metadata = taskspec_payload.get("metadata")
+    internal_runtime_task_class = None
+    internal_endpoint_name = None
+    if isinstance(metadata, dict):
+        internal_runtime_task_class = metadata.pop(
+            INTERNAL_RUNTIME_TASK_CLASS_KEY, None
+        )
+        internal_endpoint_name = metadata.pop(INTERNAL_RUNTIME_ENDPOINT_NAME_KEY, None)
+
     message = {
         "taskspec": taskspec_payload,
         "inbox_message": inbox_message,
     }
+    if allow_internal_runtime:
+        if isinstance(internal_runtime_task_class, str) and internal_runtime_task_class:
+            message[INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY] = (
+                internal_runtime_task_class
+            )
+        if isinstance(internal_endpoint_name, str) and internal_endpoint_name:
+            message[INTERNAL_RUNTIME_ENVELOPE_ENDPOINT_NAME_KEY] = (
+                internal_endpoint_name
+            )
     message_json = json.dumps(message)
     message_timestamp = int(resolved_tid)
 

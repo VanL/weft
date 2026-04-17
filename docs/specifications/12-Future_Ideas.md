@@ -47,3 +47,19 @@ _Implementation status: Not implemented._ No `weft task recover` or `weft task
 retry` commands exist. `weft queue move` and `weft queue peek` provide the
 low-level primitives for manual recovery of reserved-queue messages.
 (Audited 2026-04-16.)
+
+## Scheduler Surface Beyond Heartbeat
+
+The built-in heartbeat service now exists and is documented in the canonical
+specs. The still-deferred part is any broader scheduler surface above that
+runtime primitive, such as:
+
+- cron expressions
+- wall-clock "run at 09:00" semantics
+- time zones
+- durable missed-run replay or catch-up
+- exactly-once schedule guarantees
+
+_Implementation status: Deferred above the heartbeat layer._ Weft ships a
+runtime-scoped heartbeat interval emitter, but it does not ship a general
+scheduler surface. (Audited 2026-04-17.)

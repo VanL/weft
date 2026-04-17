@@ -219,6 +219,23 @@ runbook needs to become stricter.
 
 ## 2026-04-09 Manager Bootstrap Unification
 
+## 2026-04-17 Canonical Ownership Fences
+
+- When more than one runtime surface needs "lowest live claimant wins,"
+  keep the shared helper pure and narrow. The shared helper should reduce
+  already-eligible claimant TIDs to one canonical owner; queue replay,
+  registry decoding, liveness, and `unknown` versus `none` semantics belong in
+  the caller that owns that runtime state.
+- Late duplicate-dispatch hardening belongs at the last side-effect boundary,
+  not only in startup or outer-loop leadership checks. For manager spawn
+  requests, that means one final ownership fence immediately before child
+  launch, with exact-message durability preserved on every non-launch path.
+- If an internal runtime capability must stay manager-owned, do not trust
+  stored TaskSpec metadata alone. Carry the selector on a manager-owned spawn
+  envelope and strip reserved internal keys from ordinary public submission
+  helpers so user-authored TaskSpecs cannot spoof internal runtime classes or
+  reserved endpoint claims.
+
 ## 2026-04-16 Docker Builtin Boundaries
 
 - Docker-dependent builtins must declare their supported platforms in builtin

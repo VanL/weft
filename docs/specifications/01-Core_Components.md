@@ -20,6 +20,8 @@ See also:
 - [`docs/plans/2026-04-07-active-control-main-thread-plan.md`](../plans/2026-04-07-active-control-main-thread-plan.md)
 - [`docs/plans/2026-04-16-review-findings-remediation-plan.md`](../plans/2026-04-16-review-findings-remediation-plan.md)
 - [`docs/plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md`](../plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md)
+- [`docs/plans/2026-04-17-canonical-owner-fence-plan.md`](../plans/2026-04-17-canonical-owner-fence-plan.md)
+- [`docs/plans/2026-04-17-heartbeat-service-plan.md`](../plans/2026-04-17-heartbeat-service-plan.md)
 
 ## 1. TaskSpec (`weft/core/taskspec.py`) [CC-1]
 
@@ -112,7 +114,8 @@ Concrete task classes express different queue behaviors on top of `BaseTask`.
 _Implementation mapping_: `weft/core/tasks/consumer.py`,
 `weft/core/tasks/observer.py`, `weft/core/tasks/monitor.py`,
 `weft/core/tasks/pipeline.py`, `weft/core/tasks/debugger.py`,
-`weft/core/tasks/interactive.py`, `weft/core/tasks/sessions.py`;
+`weft/core/tasks/heartbeat.py`, `weft/core/tasks/interactive.py`,
+`weft/core/tasks/sessions.py`;
 re-exported from `weft/core/tasks/__init__.py`.
 
 Current task families:
@@ -124,6 +127,8 @@ Current task families:
 - `SamplingObserver`: observer variant with interval-based sampling
 - `PipelineTask`: internal orchestrator for first-class linear pipelines
 - `PipelineEdgeTask`: generated one-shot edge task for pipeline handoff
+- `HeartbeatTask`: internal runtime-owned interval emitter for runtime-scoped
+  periodic queue writes
 - `Debugger`: in-process diagnostic command surface for interactive debugging
 
 Interactive command sessions reuse the same task/runtime conventions rather
@@ -161,6 +166,7 @@ _Implementation mapping_: `weft/core/endpoints.py` — `EndpointRecord`,
 `ResolvedEndpoint`, `list_resolved_endpoints()`, `resolve_endpoint()`;
 `weft/core/tasks/base.py` — `register_endpoint_name()`,
 `unregister_endpoint_name()`;
+`weft/helpers.py` — `canonical_owner_tid()`;
 `weft.state.endpoints` — runtime queue used for the registry records.
 
 Current rules:
@@ -170,6 +176,14 @@ Current rules:
   time
 - endpoint records point at ordinary task-local queues (`inbox`, `outbox`,
   `ctrl_in`, `ctrl_out`)
+- when duplicate live claimants exist for the same endpoint name, discovery
+  remains conflict-tolerant: the lowest live claimant TID is canonical for
+  resolution, and the duplicate count stays observable through
+  `live_candidates`
+- names under `_weft.` are reserved for Weft-owned internal runtime services;
+  public naming surfaces such as `weft run --name` reject them
+- the current shipped reserved internal endpoint is `_weft.heartbeat`, owned by
+  the built-in heartbeat service
 - the registry is discovery only; it does not introduce a second transport,
   task kind, or workflow router
 - endpoint records are runtime-only hints and must not become durable domain
