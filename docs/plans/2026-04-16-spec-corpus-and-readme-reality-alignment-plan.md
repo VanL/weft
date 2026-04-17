@@ -1,7 +1,8 @@
 # Spec Corpus And README Reality Alignment
 
-**Status**: In progress
-**Date**: 2026-04-16
+Status: completed
+Source specs: see Source Documents below
+Superseded by: none
 
 ## 1. Goal
 

@@ -1,3 +1,9 @@
+# Configurable Weft Directory Name Plan
+
+Status: completed
+Source specs: see Source Documents below
+Superseded by: none
+
 ## Goal
 
 Make the Weft project metadata directory name configurable through a Weft-owned
