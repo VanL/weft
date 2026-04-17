@@ -18,7 +18,6 @@ from weft._constants import (
     FAILURE_LIKE_TASK_STATUSES,
     QUEUE_CTRL_OUT_SUFFIX,
     QUEUE_OUTBOX_SUFFIX,
-    RESULT_SURFACE_WAIT_INTERVAL,
     WEFT_COMPLETED_RESULT_GRACE_SECONDS,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_STREAMING_SESSIONS_QUEUE,
@@ -30,6 +29,7 @@ from ._queue_wait import QueueChangeMonitor
 from ._result_wait import (
     append_public_value,
     await_one_shot_result,
+    effective_result_surface_wait_interval,
     terminal_error_message,
     terminal_status_from_event,
 )
@@ -134,6 +134,7 @@ def _await_result_materialization(
     deadline = None
     if timeout is not None and timeout > 0:
         deadline = time.monotonic() + timeout
+    poll_interval = effective_result_surface_wait_interval(timeout)
     log_queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
     monitor = QueueChangeMonitor([log_queue], config=context.config)
     log_last_timestamp: int | None = None
@@ -199,7 +200,7 @@ def _await_result_materialization(
             wait_timeout = max(0.0, deadline - time.monotonic())
             if wait_timeout <= 0:
                 return None
-            wait_timeout = min(wait_timeout, RESULT_SURFACE_WAIT_INTERVAL)
+            wait_timeout = min(wait_timeout, poll_interval)
             monitor.wait(wait_timeout)
     finally:
         monitor.close()
@@ -397,6 +398,7 @@ def _await_single_result(
     deadline = None
     if timeout is not None and timeout > 0:
         deadline = time.monotonic() + timeout
+    poll_interval = effective_result_surface_wait_interval(timeout)
 
     try:
         while True:
@@ -543,9 +545,9 @@ def _await_single_result(
                     else min(wait_timeout, completion_remaining)
                 )
             wait_timeout = (
-                RESULT_SURFACE_WAIT_INTERVAL
+                poll_interval
                 if wait_timeout is None
-                else min(wait_timeout, RESULT_SURFACE_WAIT_INTERVAL)
+                else min(wait_timeout, poll_interval)
             )
             monitor.wait(wait_timeout)
     finally:
