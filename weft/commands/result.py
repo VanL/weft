@@ -122,6 +122,7 @@ def _await_result_materialization(
         deadline = time.monotonic() + timeout
     log_queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
     monitor = QueueChangeMonitor([log_queue], config=context.config)
+    log_last_timestamp: int | None = None
 
     try:
         while True:
@@ -130,6 +131,22 @@ def _await_result_materialization(
             if taskspec_payload is not None or _queue_names_exist(
                 context, outbox_name, ctrl_out_name
             ):
+                return taskspec_payload, outbox_name, ctrl_out_name
+
+            events, log_last_timestamp = poll_log_events(
+                log_queue,
+                log_last_timestamp,
+                tid,
+            )
+            if events:
+                for event_payload, _timestamp in reversed(events):
+                    event_taskspec = event_payload.get("taskspec")
+                    if isinstance(event_taskspec, dict):
+                        outbox_name, ctrl_out_name = _queue_names_for_tid(
+                            tid,
+                            event_taskspec,
+                        )
+                        return event_taskspec, outbox_name, ctrl_out_name
                 return taskspec_payload, outbox_name, ctrl_out_name
 
             if deadline is None:

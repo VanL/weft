@@ -11,6 +11,7 @@ import pytest
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import WEFT_GLOBAL_LOG_QUEUE
 from weft.commands import _result_wait as result_wait
+from weft.commands import result as result_cmd
 from weft.commands.result import (
     _await_single_result,
     _load_taskspec_payload,
@@ -649,6 +650,43 @@ def test_cmd_result_stream_preserves_error_payload_selection(tmp_path) -> None:
         )
     )
     outbox_queue.write(json.dumps({"stdout": "out", "stderr": "err"}))
+
+    exit_code, payload = cmd_result(
+        tid=tid,
+        all_results=False,
+        peek=False,
+        timeout=RESULT_WAIT_TIMEOUT,
+        stream=True,
+        json_output=False,
+        show_stderr=True,
+        context_path=str(root),
+    )
+
+    assert exit_code == 0
+    assert payload == "err"
+
+
+def test_cmd_result_stream_succeeds_when_queue_enumeration_lags(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    log_queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
+    outbox_queue = ctx.queue(f"T{tid}.outbox", persistent=True)
+
+    log_queue.write(
+        json.dumps(
+            {
+                "tid": tid,
+                "status": "completed",
+                "event": "work_completed",
+            }
+        )
+    )
+    outbox_queue.write(json.dumps({"stdout": "out", "stderr": "err"}))
+    monkeypatch.setattr(result_cmd, "_queue_names_exist", lambda *args, **kwargs: False)
 
     exit_code, payload = cmd_result(
         tid=tid,
