@@ -7,13 +7,13 @@ $ weft run echo "hello world"
 hello world
 
 $ weft run --spec NAME|PATH
-# streams task output and returns when complete
+# resolves a stored spec or builtin helper and waits by default
 
 $ weft run --spec review-agent.json
 # runs an agent TaskSpec through the normal manager/task path
 
 $ weft status
-System: OK
+# shows current task, manager, and broker status
 ```
 
 Weft is a durable task runner for commands, functions, pipelines, and agents.
@@ -68,7 +68,7 @@ explicit image recipes. The current shipped image-recipe set is
 ```bash
 # Initialize the current directory (like `git init`)
 $ weft init
-Initialized Weft project in /path/to/project
+# initializes the current directory as a Weft project
 
 # Run a simple command
 $ weft run echo "hello world"
@@ -93,6 +93,7 @@ $ weft run --pipeline etl-job
 $ printf "hello\n" | weft run -- python summarize.py
 $ printf "hello\n" | weft run --spec summarize.json
 $ printf "hello\n" | weft run --pipeline etl-job
+# Use --input for explicit pipeline input; do not mix it with piped stdin.
 
 # Run a Python function
 $ weft run --function mymodule:process_data --arg input.csv --kw mode=fast
@@ -102,11 +103,11 @@ $ weft run --spec review-agent.json
 
 # Check system status
 $ weft status
-System: OK
+# shows task, manager, and broker status for the current context
 
 # Get task result as structured JSON
 $ weft result 1234567890 --json
-{"tid": "1234567890", "status": "completed", "result": "..."}
+# emits the completed result payload as JSON
 ```
 
 For a guided walkthrough, see [Your First Weft Task](docs/tutorials/first-task.md).
@@ -193,13 +194,13 @@ one sentence. The current default provider is `codex`. To point it at this
 repo's architecture overview, run either:
 
 ```bash
-cat /Users/van/Developer/weft/docs/specifications/00-Overview_and_Architecture.md | weft run --spec dockerized-agent --provider codex --prompt "Explain this document in one sentence."
+cat docs/specifications/00-Overview_and_Architecture.md | weft run --spec dockerized-agent --provider codex --prompt "Explain this document in one sentence."
 ```
 
 or:
 
 ```bash
-weft run --spec dockerized-agent --provider gemini --prompt "Explain this document in one sentence." --document /Users/van/Developer/weft/docs/specifications/00-Overview_and_Architecture.md
+weft run --spec dockerized-agent --provider gemini --prompt "Explain this document in one sentence." --document docs/specifications/00-Overview_and_Architecture.md
 ```
 
 This is the one public builtin for that lane. Provider choice stays an
@@ -287,16 +288,8 @@ input-mount abstraction.
     "working_dir": "/Users/me/project",
     "runner": {
       "name": "docker",
-      "options": {
-        "container_workdir": "/workspace",
-        "mounts": [
-          {
-            "source": "/Users/me/project",
-            "target": "/workspace",
-            "read_only": false
-          }
-        ]
-      }
+      "environment_profile_ref": "dockerized_agent:dockerized_agent_environment_profile",
+      "options": {}
     }
   }
 }
@@ -313,7 +306,8 @@ For the current builtin catalog and contract, see
 
 ### Project Context
 
-Weft uses `.weft/` directories for project isolation, similar to git repositories:
+Weft uses a project-local metadata directory for isolation. By default that
+directory is `.weft/`, similar to git repositories:
 
 ```text
 myproject/
@@ -327,17 +321,19 @@ myproject/
     ...
 ```
 
-Run `weft` commands from anywhere in the project tree - it searches upward to find `.weft/`.
+You can override the metadata-directory name with `WEFT_DIRECTORY_NAME`
+(for example `.engram`). Run `weft` commands from anywhere in the project tree;
+discovery uses the configured metadata-directory name.
 
 `weft init` follows the same targeting model as tools like `git init`: it
 defaults to the current directory, or you can pass a positional directory to
 initialize another root explicitly. It does not take `--context`; `--context`
 is for commands that operate inside an already existing Weft project.
 
-For non-file-backed backends such as Postgres, `.weft/` still holds Weft
-metadata, logs, outputs, and autostart manifests, but the broker target is
-resolved through SimpleBroker project configuration rather than assuming an
-on-disk `.weft/broker.db`.
+For non-file-backed backends such as Postgres, the configured metadata
+directory still holds Weft metadata, logs, outputs, and autostart manifests,
+but the broker target is resolved through SimpleBroker project configuration
+rather than assuming an on-disk broker db under the default `.weft/` layout.
 
 ### Selecting A Backend
 
@@ -457,12 +453,13 @@ Format: `weft-{context_short}-{short_tid}:{name}:{status}[:details]`
 
 | Topic | Where to look |
 |-------|--------------|
-| Agent tasks (LLM-powered) | [Agent Runtime spec](docs/specifications/13-Agent_Runtime.md) |
+| CLI surface and flags | [CLI Interface spec](docs/specifications/10-CLI_Interface.md) |
+| Builtin task helpers | [Builtin TaskSpecs](docs/specifications/10B-Builtin_TaskSpecs.md) |
+| Agent tasks and runner-specific Docker lane | [Agent Runtime spec](docs/specifications/13-Agent_Runtime.md) |
 | Pipeline composition | [Pipeline spec](docs/specifications/12-Pipeline_Composition_and_UX.md) |
 | TaskSpec schema reference | [TaskSpec spec](docs/specifications/02-TaskSpec.md) |
 | Queue patterns and state | [Message Flow spec](docs/specifications/05-Message_Flow_and_State.md) |
 | System invariants | [Invariants spec](docs/specifications/07-System_Invariants.md) |
-| Runner plugins (Docker, sandbox) | [Core Components spec](docs/specifications/01-Core_Components.md) |
 
 ## Command Reference
 
@@ -473,19 +470,24 @@ Format: `weft-{context_short}-{short_tid}:{name}:{status}[:details]`
 weft init [DIRECTORY] [--autostart/--no-autostart]
 
 # Show system status
-weft status [--json]
+weft status [--all] [--status STATUS] [--json] [--watch] [--interval SECONDS] [--context PATH]
 
 # Task detail view
-weft task status TID [--process] [--watch] [--json]
+weft task status TID [--process] [--watch] [--json] [--context PATH]
+weft task tid [TID] [--pid PID] [--reverse FULL_TID] [--context PATH]
 
 # List tasks
-weft task list [--stats] [--status STATUS] [--json]
+weft task list [--status STATUS] [--all] [--stats] [--json] [--context PATH]
 
-# List managers
-weft manager list [--json]
+# Manager lifecycle
+weft manager start [--context PATH]
+weft manager serve [--context PATH]
+weft manager stop TID [--force] [--timeout SECONDS] [--context PATH]
+weft manager list [--all] [--json] [--context PATH]
+weft manager status TID [--json] [--context PATH]
 
 # System maintenance
-weft system builtins        # shipped builtin inventory
+weft system builtins [--json]  # shipped builtin inventory
 weft system tidy            # backend-native broker compaction
 weft system dump -o FILE
 weft system load -i FILE    # preflight import; exits 3 on alias conflicts
@@ -516,7 +518,7 @@ container.
 
 ```bash
 # Run command
-weft run COMMAND [args...]
+weft run COMMAND [args...] [--context PATH]
 weft run --spec NAME|PATH
 weft run --pipeline NAME|PATH
 weft run --function module:func [--arg VALUE] [--kw KEY=VALUE]
@@ -525,21 +527,25 @@ weft run --function module:func [--arg VALUE] [--kw KEY=VALUE]
 printf "hello\n" | weft run -- python worker.py
 printf "hello\n" | weft run --spec summarize.json
 printf "hello\n" | weft run --pipeline etl-job
-# --input is still available for structured pipeline input and cannot be mixed
-# with piped stdin.
+# --input is for explicit pipeline input and cannot be mixed with piped stdin.
 
 # Execution options
---wait              # Wait for completion
+--wait / --no-wait   # Wait for completion
 --timeout N         # Timeout in seconds
 --memory N          # Memory limit in MB
 --cpu N            # CPU limit (percentage)
 --env KEY=VALUE      # Environment variable
+--name TEXT          # Explicit task name
+--interactive / --non-interactive  # Line-oriented task IO
+--stream-output / --no-stream-output  # Stream stdout/stderr to queues
+--continuous / --once  # Continuously process spec queue messages
 --autostart/--no-autostart  # Enable/disable autostart manifests
 --arg VALUE          # Positional arg for --function (repeatable)
 --kw KEY=VALUE       # Keyword arg for --function (repeatable)
+--input TEXT         # Explicit pipeline input
 
 # Get results
-weft result TID [--timeout N] [--stream] [--json]
+weft result TID [--timeout N] [--stream] [--json] [--error] [--context PATH]
 weft result --all [--peek]
 ```
 
@@ -549,10 +555,13 @@ weft result --all [--peek]
 # Direct queue access
 weft queue read QUEUE [--json] [--all]
 weft queue write QUEUE [MESSAGE]
+weft queue write --endpoint NAME [MESSAGE]
 weft queue peek QUEUE [--json] [--all]
 weft queue move SOURCE DEST [--all]
-weft queue list [--pattern PATTERN]
+weft queue list [--json] [--stats] [--endpoints] [-p PATTERN]
+weft queue resolve ENDPOINT_NAME [--json]
 weft queue watch QUEUE [--json] [--peek]
+weft queue delete QUEUE
 
 # Broadcast and aliases
 weft queue broadcast [MESSAGE] [--pattern GLOB]

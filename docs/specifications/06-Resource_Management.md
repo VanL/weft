@@ -4,13 +4,15 @@ This document describes the current resource-monitoring and error-handling
 contract. The current system favors simple, explicit termination and visible
 failure over complex partial mitigation.
 
-_Implementation snapshot_: the host runner enforces limits through a
-psutil-based monitor path. Limit violations become task failures that are
-visible through state, control, and reserved-queue behavior.
+_Implementation snapshot_: resource limits are enforced at the runner
+boundary. The default host-path monitor is psutil-based, but runner plugins
+may also map limits into native runtime controls. Limit violations become task
+failures that are visible through state, control, and reserved-queue behavior.
 
 _Implementation mapping_: `weft/core/resource_monitor.py`,
-`weft/core/runners/host.py`, `weft/core/tasks/runner.py`,
-`weft/core/tasks/base.py`, `weft/core/tasks/consumer.py`.
+`weft/core/runners/host.py`, `weft/core/runners/subprocess_runner.py`,
+`weft/core/tasks/runner.py`, `weft/core/tasks/base.py`,
+`weft/core/tasks/consumer.py`, `weft/ext.py`, `weft/_runner_plugins.py`.
 
 See also:
 
@@ -21,7 +23,7 @@ See also:
 
 ## Resource Management [RM-0]
 
-Current Weft resource management is monitor-and-react:
+Current Weft resource management is monitor-and-react at the runner boundary:
 
 - sample live process metrics
 - compare against configured limits
@@ -35,20 +37,25 @@ audit than a mix of throttling, grace-period heuristics, and silent recovery.
 
 Current behavior:
 
-- memory usage is sampled from the runtime process tree
+- memory usage is sampled from the runtime process tree on psutil-backed
+  runtimes and from runner-native stats on Docker-backed runtimes
 - configured memory limits are treated as hard limits
 - violations terminate the task and surface a limit failure
 
 _Implementation mapping_: `weft/core/resource_monitor.py`
-`PsutilResourceMonitor.check_limits`; `weft/core/taskspec.py`
+`ResourceMonitor`, `PsutilResourceMonitor.check_limits`;
+`weft/core/taskspec.py`
 `LimitsSection.memory_mb`.
 
 ### 2. CPU Management [RM-2]
 
 Current behavior:
 
-- CPU usage is evaluated over a rolling sample window
-- the host runner treats sustained over-limit CPU as a hard violation
+- CPU usage is evaluated over a rolling sample window on psutil-backed
+  runtimes
+- the host path treats sustained over-limit CPU as a hard violation
+- Docker-backed runners map CPU limits into native runtime quotas instead of
+  relying on the psutil window
 - the response is termination, not throttling
 
 _Implementation mapping_: `weft/core/resource_monitor.py`
@@ -61,7 +68,8 @@ _Implementation mapping_: `weft/core/resource_monitor.py`
 Current behavior:
 
 - open-file counts are sampled when the backend can provide them
-- configured fd limits are enforced as hard limits
+- psutil-backed runtimes enforce configured fd limits as hard limits
+- Docker-backed runners map fd limits into native runtime ulimits
 
 _Implementation mapping_: `weft/core/resource_monitor.py`
 `PsutilResourceMonitor._open_file_count`; `weft/core/taskspec.py`
@@ -72,7 +80,9 @@ _Implementation mapping_: `weft/core/resource_monitor.py`
 Current behavior:
 
 - connection counts are sampled when the backend can provide them
-- configured connection limits are enforced as hard limits
+- psutil-backed runtimes enforce configured connection limits as hard limits
+- Docker-backed runners currently support only `max_connections=0`, which maps
+  to network isolation; other values are rejected
 
 _Implementation mapping_: `weft/core/resource_monitor.py`
 `PsutilResourceMonitor._connection_count`; `weft/core/taskspec.py`
@@ -87,16 +97,23 @@ Why:
 
 - limits apply to concrete runtimes
 - monitoring ownership should stay close to runtime creation and teardown
-- alternate runners may need alternate monitoring backends
+- runner plugins also own runtime-specific stop, kill, and describe hooks
+- alternate runners may need alternate monitoring backends or native runtime
+  controls
 
 ### Default psutil-Based Monitor [RM-5.1]
 
-The current default monitor is `PsutilResourceMonitor`.
+The current default monitor name is `weft.core.resource_monitor.ResourceMonitor`;
+it aliases the psutil-backed `PsutilResourceMonitor` implementation.
 
 _Implementation mapping_: `weft/core/resource_monitor.py`
-(`ResourceMetrics`, `BaseResourceMonitor`, `PsutilResourceMonitor`,
-`load_resource_monitor`); `weft/core/runners/host.py`
-(`HostTaskRunner.run_with_hooks`).
+(`ResourceMetrics`, `BaseResourceMonitor`, `ResourceMonitor`,
+`PsutilResourceMonitor`, `load_resource_monitor`);
+`weft/core/runners/host.py` (`HostTaskRunner.run_with_hooks`,
+`HostRunnerPlugin.stop`, `HostRunnerPlugin.kill`, `HostRunnerPlugin.describe`);
+`weft/core/runners/subprocess_runner.py` (`run_monitored_subprocess`);
+`weft/ext.py` (`RunnerPlugin`, `RunnerHandle`); `weft/_runner_plugins.py`
+(`get_runner_plugin`, `require_runner_plugin`).
 
 Current responsibilities:
 
@@ -104,6 +121,7 @@ Current responsibilities:
 - capture the latest resource metrics
 - compare those metrics to configured limits
 - retain recent metrics so the task can publish peak or recent values
+- surface runner-specific stop/kill/describe hooks through the active plugin
 
 ## Error Handling
 
@@ -150,9 +168,10 @@ an already trusted environment.
 
 ### Resource Isolation
 
-Current resource isolation is observe-and-react, not sandboxing. The runtime
-can terminate over-limit work, but it does not promise cgroup or container
-isolation as part of the current contract.
+Current resource isolation is observe-and-react on the host path, with
+backend-specific controls in some runner plugins. The contract does not promise
+a universal cgroup or container sandbox, and it does not require every runner
+to expose the same native controls.
 
 ### Environment Variables
 
@@ -177,7 +196,8 @@ filesystem destinations.
 ## Scope Boundary
 
 Soft limits, throttling, explicit sandboxing, richer validation helpers, and
-automatic retry patterns live in the companion doc:
+automatic retry patterns live in the companion doc. Backend-specific native
+controls stay here only when they are already shipped and observable:
 
 - [`06A-Resource_Management_Planned.md`](06A-Resource_Management_Planned.md)
 

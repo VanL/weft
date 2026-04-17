@@ -28,10 +28,12 @@ _Implementation mapping_: `weft/core/taskspec.py`.
 _Implementation mapping_: `weft/core/taskspec.py` state validators and
 `TaskSpec.set_status()`.
 
-- **STATE.1**: state transitions move forward only
-- **STATE.2**: terminal states do not roll back
+- **STATE.1**: valid transitions are `created -> spawning|failed|cancelled`,
+  `spawning -> running|completed|failed|timeout|cancelled|killed`, and
+  `running -> completed|failed|timeout|cancelled|killed`
+- **STATE.2**: terminal states do not transition back to non-terminal states
 - **STATE.3**: running state requires `started_at`
-- **STATE.4**: terminal states require `completed_at`
+- **STATE.4**: terminal states require `completed_at` once execution has started
 - **STATE.5**: `completed_at` is later than `started_at` when both exist
 
 ### Queue Invariants
@@ -44,10 +46,11 @@ _Implementation mapping_: `weft/core/taskspec.py`, `weft/core/tasks/base.py`,
 - **QUEUE.3**: default task-local queue names are `T{tid}.…`
 - **QUEUE.4**: delivery uses reserve/claim semantics rather than ad hoc
   destructive reads
-- **QUEUE.5**: reserved-state handling stays consistent with one work-item
-  lifecycle at a time
-- **QUEUE.6**: failure remains visible through reserved state unless policy
-  explicitly requeues or clears it
+- **QUEUE.5**: the active reserved message, if present, is treated as the
+  single in-flight work item for that task
+- **QUEUE.6**: reserved-policy handling is explicit: `keep` leaves the
+  reserved message in place, `requeue` moves it back to inbox, and `clear`
+  deletes it
 
 ### Resource Invariants
 
@@ -66,12 +69,14 @@ _Implementation mapping_: `weft/core/taskspec.py`, `weft/core/resource_monitor.p
 
 _Implementation mapping_: `weft/core/tasks/consumer.py`,
 `weft/core/runners/host.py`, `weft/core/runners/subprocess_runner.py`,
-`weft/core/taskspec.py`.
+`weft/core/taskspec.py`, `weft/core/tasks/sessions.py`, `weft/ext.py`.
 
 - **EXEC.1**: each work item is executed exactly once per successful reservation
   path
 - **EXEC.2**: timeout enforcement happens through the active runner loop
-- **EXEC.3**: runtime PID data is published only once real execution starts
+- **EXEC.3**: task PID and caller PID appear in the initial mapping record,
+  while live `runtime_handle` and `managed_pids` data are only published after
+  a runner or session actually starts
 - **EXEC.4**: return-code publication belongs to terminal execution outcomes
 
 ### Observability Invariants
@@ -83,8 +88,9 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
 - **OBS.2**: Weft does not use a separate state database for task lifecycle
 - **OBS.3**: task state remains observable through task-local queues and the
   global task log
-- **OBS.4**: process titles follow the shell-friendly Weft format
-- **OBS.5**: TID short form uses the low-order digits
+- **OBS.4**: process titles follow `weft-{context_short}-{tid_short}:{name}:{status}[:details]`
+- **OBS.5**: TID short form uses the low-order digits from the resolved
+  19-digit TID
 - **OBS.6**: TID mappings are written to `weft.state.tid_mappings`
 - **OBS.7**: process-title segments are sanitized for shell-safe use
 - **OBS.8**: process titles stay within the allowed character vocabulary
@@ -109,7 +115,10 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
 ### Manager Invariants
 
 _Implementation mapping_: `weft/core/manager.py`,
-`weft/commands/_manager_bootstrap.py`, `weft/core/spawn_requests.py`.
+`weft/commands/_manager_bootstrap.py`, `weft/commands/manager.py`,
+`weft/commands/run.py`, `weft/commands/serve.py`,
+`weft/core/spawn_requests.py`, `weft/helpers.py`,
+`weft/manager_detached_launcher.py`, `weft/manager_process.py`.
 
 - **MANAGER.1**: managers are task-shaped runtimes with a long-lived dispatcher
   loop
@@ -117,10 +126,14 @@ _Implementation mapping_: `weft/core/manager.py`,
 - **MANAGER.3**: managers register themselves in `weft.state.managers`
 - **MANAGER.4**: spawn-request message ID becomes child task TID
 - **MANAGER.5**: managers spawn child tasks through the same overall task model
-- **MANAGER.6**: one canonical manager bootstrap path owns startup and
-  foreground-serve behavior
+- **MANAGER.6**: one shared manager bootstrap path owns startup and
+  foreground-serve behavior for `weft run`, `weft manager start`, and
+  `weft manager serve`
 - **MANAGER.7**: managers obey the same control semantics as other tasks, with
   graceful drain on normal termination signals
+- **MANAGER.8**: live canonical managers converge on one lowest-TID leader per
+  context; non-leaders yield or drain once they no longer need to protect
+  persistent children
 
 ### Context Invariants
 

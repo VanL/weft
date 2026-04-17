@@ -16,7 +16,8 @@ def cmd_system_builtins(*, json_output: bool = False) -> tuple[int, str | None]:
     """Return the shipped builtin TaskSpec inventory.
 
     This command reports what Weft ships, not the project-resolved spec
-    namespace. Local shadows in `.weft/tasks/` do not affect this output.
+    namespace. Local shadows in the project's stored-task namespace do not
+    affect this output.
 
     Spec: docs/specifications/10-CLI_Interface.md [CLI-6],
     docs/specifications/10B-Builtin_TaskSpecs.md

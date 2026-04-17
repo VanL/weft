@@ -433,6 +433,42 @@ def test_large_output_spills_to_disk(tmp_path, broker_env, unique_tid: str) -> N
     assert any(event["event"] == "output_spilled" for event in events)
 
 
+def test_large_output_spills_to_custom_weft_directory_name(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    broker_env,
+    unique_tid: str,
+) -> None:
+    db_path, make_queue = broker_env
+    context_root = tmp_path / "project"
+    monkeypatch.setenv("WEFT_DIRECTORY_NAME", ".engram")
+
+    spec = make_function_taskspec(
+        unique_tid,
+        "tests.tasks.sample_targets:large_output",
+        cleanup_on_exit=False,
+        weft_context=str(context_root),
+        output_size_limit_mb=1,
+    )
+
+    task = Consumer(db_path, spec)
+    inbox = make_queue(spec.io.inputs["inbox"])
+    output_size = 2 * 1024 * 1024
+    inbox.write(json.dumps({"kwargs": {"size": output_size}}))
+
+    task._drain_queue()
+
+    outbox = make_queue(spec.io.outputs["outbox"])
+    reference = json.loads(outbox.read_one())
+    expected_path = (
+        Path(context_root) / ".engram" / "outputs" / unique_tid / "output.dat"
+    )
+
+    assert Path(reference["path"]) == expected_path
+    assert expected_path.exists()
+    assert expected_path.read_bytes() == b"x" * output_size
+
+
 def test_large_output_cleanup_on_exit(tmp_path, broker_env, unique_tid: str) -> None:
     db_path, make_queue = broker_env
     context_root = tmp_path / "project"

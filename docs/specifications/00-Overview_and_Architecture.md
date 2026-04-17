@@ -8,13 +8,15 @@ single shell session.
 _Implementation mapping_: CLI entrypoints in `weft/cli.py` and
 `weft/commands/`; context resolution in `weft/context.py`; manager runtime in
 `weft/core/manager.py` and `weft/manager_process.py`; task runtime in
-`weft/core/tasks/`; runner plugins in `weft/core/runners/`.
+`weft/core/tasks/`; runner plugin contracts and resolution in
+`weft/_runner_plugins.py` and `weft/ext.py`; built-in runner implementations in
+`weft/core/runners/`.
 
 See also:
 
 - planned companion:
   [`00A-Overview_and_Architecture_Planned.md`](00A-Overview_and_Architecture_Planned.md)
-- pipeline-specific current contract:
+- pipeline status and composition contract:
   [`12-Pipeline_Composition_and_UX.md`](12-Pipeline_Composition_and_UX.md)
 
 ## Executive Summary
@@ -126,7 +128,8 @@ lifecycle, task semantics, and observability, not on rebuilding a broker.
 
 The current public surface is:
 
-- single-task execution through `weft run`
+- task and pipeline execution through `weft run` for commands, Python
+  callables, TaskSpecs, and pipelines
 - stored task specs and stored pipeline specs
 - shipped builtin task helpers resolved only through explicit spec surfaces
   such as `weft run --spec`, `weft spec ...`, and `weft system builtins`
@@ -221,6 +224,7 @@ The companion file answers "what may exist later."
 ## Related Documents
 
 - [`01-Core_Components.md`](01-Core_Components.md)
+- [`00A-Overview_and_Architecture_Planned.md`](00A-Overview_and_Architecture_Planned.md)
 - [`03-Manager_Architecture.md`](03-Manager_Architecture.md)
 - [`04-SimpleBroker_Integration.md`](04-SimpleBroker_Integration.md)
 - [`10-CLI_Interface.md`](10-CLI_Interface.md)

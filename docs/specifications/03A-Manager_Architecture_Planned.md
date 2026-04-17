@@ -1,47 +1,67 @@
 # Planned Companion for 03: Manager Architecture
 
-This document tracks intended but not implemented manager-runtime work adjacent
-to [`03-Manager_Architecture.md`](03-Manager_Architecture.md).
-
-Nothing here overrides the canonical manager contract.
+This document tracks future manager-architecture work only. The canonical
+manager contract already covers manager bootstrap, autostart, and runtime
+endpoint discovery in [`03-Manager_Architecture.md`](03-Manager_Architecture.md)
+and its linked specs. Nothing here redefines shipped behavior.
+If any item here ships, move it into the canonical sibling and remove it from
+this planned companion rather than citing this file as live contract.
 
 ## Planned Areas
 
-### Autostart Expansion
+### Manager Specialization [03A-1]
 
-Current autostart support covers stored task specs. Future work may extend that
-surface to additional target kinds such as stored pipelines once the runtime
-semantics are clear enough to document as current contract.
+Future work may introduce explicit manager roles, capability-based task
+routing, or richer multi-manager coordination.
 
-### Manager Specialization
+Boundary:
 
-Future work may introduce:
+- the current manager remains the canonical spawn dispatcher for
+  `weft.spawn.requests`
+- specialization must preserve TID, control, and lifecycle invariants
+- specialization must not become a hidden second routing plane or a generic
+  task broker
 
-- specialized manager roles
-- richer capability-based task routing
-- more explicit multi-manager coordination
+### Named Endpoint Extensions [03A-2]
 
-The constraint is that any specialization must preserve the current TID,
-control, and lifecycle invariants rather than bypassing them.
+The runtime endpoint registry already exists. Future work, if it proves
+necessary, should stay adjacent to that discovery surface rather than turning
+the manager into a broader service-router abstraction.
 
-### Named Endpoint Boundary [03A-1]
+Possible extensions:
 
-If Weft later grows a runtime endpoint registry for stable task names, that
-surface should remain adjacent to the manager runtime, not collapse into it.
+- higher-level aliases over the existing endpoint registry
+- richer operator diagnostics for duplicate or stale claims
+- explicit handoff helpers that still resolve to ordinary queue writes
 
-Constraint:
+Boundary:
 
-- the manager remains the spawn dispatcher for `weft.spawn.requests`
-- named-endpoint resolution is discovery, not a second manager-owned routing
-  language
-- ordinary persistent tasks should continue to own service logic such as
-  request handling, fan-out, and child-task spawning on top of the existing
-  spawn path
-- the manager must not quietly become a universal "send by name" router for
-  arbitrary higher-level agent policy
+- endpoint resolution remains discovery only
+- sending to a named endpoint remains an ordinary queue write to the resolved
+  `inbox` or `ctrl_in`
+- missing-name resolution stays an explicit failure
+- the manager must not become a universal "send by name" router for arbitrary
+  higher-level policy
+
+### Autostart Adjuncts [03A-3]
+
+The shipped autostart contract already covers task specs and pipeline targets.
+Any later work in this area should be treated as a refinement layer only:
+better policy knobs, better diagnostics, or better operator ergonomics that do
+not change the canonical manager path.
+
+Boundary:
+
+- autostart must continue to enter through the ordinary manager spawn queue
+- no alternate bootstrap path should appear in the manager
+- no new durable scheduler or service framework should be implied by this doc
 
 ## Related Plans
 
 - [`docs/plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md`](../plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md)
+- [`docs/plans/2026-04-09-manager-bootstrap-unification-plan.md`](../plans/2026-04-09-manager-bootstrap-unification-plan.md)
 - [`docs/plans/2026-04-09-manager-lifecycle-command-consolidation-plan.md`](../plans/2026-04-09-manager-lifecycle-command-consolidation-plan.md)
-- [`docs/plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md`](../plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md)
+- [`docs/plans/2026-04-09-weft-serve-supervised-manager-plan.md`](../plans/2026-04-09-weft-serve-supervised-manager-plan.md)
+- [`docs/plans/2026-04-13-detached-manager-bootstrap-hardening-plan.md`](../plans/2026-04-13-detached-manager-bootstrap-hardening-plan.md)
+- [`docs/plans/2026-04-13-manager-bootstrap-readiness-and-cleanup-test-plan.md`](../plans/2026-04-13-manager-bootstrap-readiness-and-cleanup-test-plan.md)
+- [`docs/plans/2026-04-14-weft-road-to-excellent-plan.md`](../plans/2026-04-14-weft-road-to-excellent-plan.md)

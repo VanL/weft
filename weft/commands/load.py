@@ -449,7 +449,8 @@ def cmd_load(
     """Import broker state from JSONL format.
 
     Args:
-        input_file: Input file path, defaults to `.weft/weft_export.jsonl`.
+        input_file: Input file path, defaults to `weft_export.jsonl` under the
+            active Weft metadata directory.
         dry_run: Preview what would be imported without making changes.
         context_path: Weft context directory.
 

@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any, Final, Literal
 
 from simplebroker import resolve_config as resolve_broker_config
@@ -34,7 +34,7 @@ from simplebroker import resolve_config as resolve_broker_config
 # VERSION INFORMATION
 # ==============================================================================
 
-__version__: Final[str] = "0.9.0"
+__version__: Final[str] = "0.9.1"
 """Current version of Weft."""
 
 # ==============================================================================
@@ -126,7 +126,7 @@ MANAGER_TASK_CLASS_PATH: Final[str] = "weft.core.manager.Manager"
 """Import path for the runtime-owned Manager task class."""
 
 MANAGER_STARTUP_LOG_DIRNAME: Final[str] = "manager-startup"
-"""Subdirectory under `.weft/logs/` used for detached manager bootstrap stderr."""
+"""Subdirectory under the Weft logs directory used for detached manager bootstrap stderr."""
 
 MANAGER_LAUNCHER_SIGNAL_SUCCESS: Final[str] = "SUCCESS"
 """Parent-to-launcher signal indicating detached manager startup succeeded."""
@@ -148,6 +148,9 @@ DEFAULT_OUTPUT_SIZE_LIMIT_MB: Final[int] = 10
 
 DEFAULT_WEFT_CONTEXT: Final[str | None] = None
 """Default weft context directory. None means auto-discovery."""
+
+WEFT_DIRECTORY_NAME_DEFAULT: Final[str] = ".weft"
+"""Default name for the Weft-owned project metadata directory."""
 
 PROVIDER_CLI_VERSION_PROBE_TIMEOUT_SECONDS: Final[float] = 5.0
 """Timeout for basic provider CLI version probes."""
@@ -378,16 +381,16 @@ Composition:
 # Autostart behaviour
 # -------------------
 WEFT_AUTOSTART_DIRECTORY_NAME: Final[str] = "autostart"
-"""Name of the directory under .weft/ that stores auto-start TaskSpec templates."""
+"""Name of the directory under the Weft metadata directory that stores auto-start TaskSpec templates."""
 
 WEFT_AUTOSTART_TASKS_DEFAULT: Final[bool] = True
 """Default for enabling auto-start TaskSpec templates when a Manager boots."""
 
 WEFT_AGENT_SETTINGS_FILENAME: Final[str] = "agents.json"
-"""Project-local delegated-agent launch settings stored under `.weft/`."""
+"""Project-local delegated-agent launch settings stored under the Weft metadata directory."""
 
 WEFT_AGENT_HEALTH_FILENAME: Final[str] = "agent-health.json"
-"""Best-effort delegated-agent health observations stored under `.weft/`."""
+"""Best-effort delegated-agent health observations stored under the Weft metadata directory."""
 
 BROKER_PROJECT_CONFIG_FILENAME: Final[str] = ".broker.toml"
 """Project-scoped broker configuration filename."""
@@ -626,27 +629,33 @@ SIMPLEBROKER_ENV_MAPPING: Final[dict[str, str]] = {
 # Weft-specific defaults for SimpleBroker integration
 WEFT_SIMPLEBROKER_DEFAULTS: Final[dict[str, Any]] = {
     "BROKER_PROJECT_SCOPE": True,
-    "BROKER_DEFAULT_DB_NAME": ".weft/broker.db",
 }
 
 
-def _translate_weft_env_vars() -> dict[str, Any]:
-    """Translate WEFT_* environment variables to BROKER_* equivalents.
+def _default_broker_default_db_name(weft_directory_name: str) -> str:
+    """Return the default sqlite broker path rooted under the Weft metadata directory."""
 
-    Returns:
-        Dict with BROKER_* keys and values from corresponding WEFT_* env vars
-    """
+    return f"{weft_directory_name}/broker.db"
+
+
+def _translate_weft_config_vars(config: Mapping[str, Any]) -> dict[str, Any]:
+    """Translate raw WEFT_* config values to BROKER_* equivalents."""
+
     translated: dict[str, Any] = {}
 
     for weft_key, broker_key in SIMPLEBROKER_ENV_MAPPING.items():
-        env_value = os.environ.get(weft_key)
-        if env_value is not None:
-            translated[broker_key] = env_value
+        if weft_key not in config:
+            continue
+        value = config[weft_key]
+        if value is not None:
+            translated[broker_key] = value
 
     return translated
 
 
-def _apply_weft_simplebroker_defaults(config: dict[str, Any]) -> None:
+def _apply_weft_simplebroker_defaults(
+    config: dict[str, Any], *, weft_directory_name: str
+) -> None:
     """Apply weft-specific defaults for SimpleBroker integration.
 
     Args:
@@ -654,17 +663,32 @@ def _apply_weft_simplebroker_defaults(config: dict[str, Any]) -> None:
     """
     for key, default_value in WEFT_SIMPLEBROKER_DEFAULTS.items():
         config.setdefault(key, default_value)
+    config.setdefault(
+        "BROKER_DEFAULT_DB_NAME",
+        _default_broker_default_db_name(weft_directory_name),
+    )
 
 
-def _resolve_weft_broker_config(config: dict[str, Any]) -> dict[str, Any]:
-    """Return the complete typed SimpleBroker config for the current Weft env."""
+def _resolve_weft_broker_config(
+    config: Mapping[str, Any],
+    *,
+    base_broker_config: Mapping[str, Any] | None = None,
+    explicit_broker_overrides: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return the complete typed SimpleBroker config for the supplied Weft config."""
 
-    broker_overrides = _translate_weft_env_vars()
-    _apply_weft_simplebroker_defaults(broker_overrides)
+    broker_overrides = dict(base_broker_config or {})
+    broker_overrides.update(_translate_weft_config_vars(config))
+    if explicit_broker_overrides is not None:
+        broker_overrides.update(explicit_broker_overrides)
+    _apply_weft_simplebroker_defaults(
+        broker_overrides,
+        weft_directory_name=get_weft_directory_name(config),
+    )
     broker_overrides["BROKER_DEBUG"] = config["WEFT_DEBUG"]
     broker_overrides["BROKER_LOGGING_ENABLED"] = config["WEFT_LOGGING_ENABLED"]
+    _validate_postgres_backend_config_shape(broker_overrides)
     resolved = resolve_broker_config(broker_overrides)
-    _validate_postgres_backend_env_shape(resolved)
     return resolved
 
 
@@ -712,6 +736,24 @@ def _parse_manager_lifetime_timeout(value: str) -> float:
     return _parse_non_negative_float(value, name="WEFT_MANAGER_LIFETIME_TIMEOUT")
 
 
+def _parse_weft_directory_name(value: str) -> str:
+    """Parse the configurable Weft metadata directory name.
+
+    The value is intentionally a directory name, not an arbitrary path.
+    """
+
+    name = value.strip()
+    if not name:
+        raise ValueError("WEFT_DIRECTORY_NAME must be a non-empty directory name")
+    if name in {".", ".."}:
+        raise ValueError(
+            "WEFT_DIRECTORY_NAME must not be '.' or '..'; use a real directory name"
+        )
+    if "/" in name or "\\" in name:
+        raise ValueError("WEFT_DIRECTORY_NAME must be a directory name, not a path")
+    return name
+
+
 def _load_weft_env_value(
     name: str,
     *,
@@ -726,34 +768,39 @@ def _load_weft_env_value(
     return parser(raw_value)
 
 
-def _env_has_non_empty_value(*keys: str) -> bool:
-    """Return whether any named environment variable is set to a non-empty value."""
+def _config_has_non_empty_value(config: Mapping[str, Any], *keys: str) -> bool:
+    """Return whether any named config key is set to a non-empty value."""
 
     for key in keys:
-        value = os.environ.get(key)
-        if value is not None and value.strip():
-            return True
+        value = config.get(key)
+        if value is None:
+            continue
+        if isinstance(value, str):
+            if value.strip():
+                return True
+            continue
+        return True
     return False
 
 
-def _validate_postgres_backend_env_shape(config: dict[str, Any]) -> None:
-    """Reject ambiguous Postgres env configuration shapes."""
+def _validate_postgres_backend_config_shape(config: Mapping[str, Any]) -> None:
+    """Reject ambiguous Postgres backend configuration shapes."""
 
     backend_name = str(config.get("BROKER_BACKEND", "sqlite")).strip().lower()
     if backend_name != "postgres":
         return
 
-    if not _env_has_non_empty_value("WEFT_BACKEND_TARGET", "BROKER_BACKEND_TARGET"):
+    if not _config_has_non_empty_value(config, "BROKER_BACKEND_TARGET"):
         return
 
     conflicting_parts: list[str] = []
-    if _env_has_non_empty_value("WEFT_BACKEND_HOST", "BROKER_BACKEND_HOST"):
+    if _config_has_non_empty_value(config, "BROKER_BACKEND_HOST"):
         conflicting_parts.append("host")
-    if _env_has_non_empty_value("WEFT_BACKEND_PORT", "BROKER_BACKEND_PORT"):
+    if _config_has_non_empty_value(config, "BROKER_BACKEND_PORT"):
         conflicting_parts.append("port")
-    if _env_has_non_empty_value("WEFT_BACKEND_USER", "BROKER_BACKEND_USER"):
+    if _config_has_non_empty_value(config, "BROKER_BACKEND_USER"):
         conflicting_parts.append("user")
-    if _env_has_non_empty_value("WEFT_BACKEND_DATABASE", "BROKER_BACKEND_DATABASE"):
+    if _config_has_non_empty_value(config, "BROKER_BACKEND_DATABASE"):
         conflicting_parts.append("database")
 
     if conflicting_parts:
@@ -771,7 +818,7 @@ def _load_weft_env_vars() -> dict[str, Any]:
     Returns:
         Dict with WEFT_* configuration values
     """
-    return {
+    env_vars = {
         "WEFT_DEBUG": _load_weft_env_value(
             "WEFT_DEBUG",
             default=False,
@@ -786,6 +833,11 @@ def _load_weft_env_vars() -> dict[str, Any]:
             "WEFT_REDACT_TASKSPEC_FIELDS",
             default="",
             parser=str,
+        ),
+        "WEFT_DIRECTORY_NAME": _load_weft_env_value(
+            "WEFT_DIRECTORY_NAME",
+            default=WEFT_DIRECTORY_NAME_DEFAULT,
+            parser=_parse_weft_directory_name,
         ),
         "WEFT_MANAGER_LIFETIME_TIMEOUT": _load_weft_env_value(
             "WEFT_MANAGER_LIFETIME_TIMEOUT",
@@ -803,6 +855,13 @@ def _load_weft_env_vars() -> dict[str, Any]:
             parser=_parse_bool,
         ),
     }
+    for weft_key in SIMPLEBROKER_ENV_MAPPING:
+        if weft_key in env_vars:
+            continue
+        raw_value = os.environ.get(weft_key)
+        if raw_value is not None:
+            env_vars[weft_key] = raw_value
+    return env_vars
 
 
 def _add_simplebroker_env_vars(config: dict[str, Any]) -> None:
@@ -816,6 +875,50 @@ def _add_simplebroker_env_vars(config: dict[str, Any]) -> None:
     2. Applies weft-specific defaults for SimpleBroker integration
     """
     config.update(_resolve_weft_broker_config(config))
+
+
+def _normalize_weft_override_value(name: str, value: Any) -> Any:
+    """Normalize one explicit in-process config override."""
+
+    if name == "WEFT_DEBUG":
+        return _parse_bool(value) if isinstance(value, str) else bool(value)
+    if name == "WEFT_LOGGING_ENABLED":
+        if isinstance(value, str):
+            return _parse_logging_enabled(value)
+        if isinstance(value, bool):
+            return value
+        raise TypeError("WEFT_LOGGING_ENABLED override must be bool or str")
+    if name == "WEFT_REDACT_TASKSPEC_FIELDS":
+        if isinstance(value, str):
+            return value
+        raise TypeError("WEFT_REDACT_TASKSPEC_FIELDS override must be str")
+    if name == "WEFT_DIRECTORY_NAME":
+        if isinstance(value, str):
+            return _parse_weft_directory_name(value)
+        raise TypeError("WEFT_DIRECTORY_NAME override must be str")
+    if name == "WEFT_MANAGER_LIFETIME_TIMEOUT":
+        if isinstance(value, str):
+            return _parse_manager_lifetime_timeout(value)
+        if isinstance(value, int | float):
+            return _parse_non_negative_float(
+                str(float(value)),
+                name="WEFT_MANAGER_LIFETIME_TIMEOUT",
+            )
+        raise TypeError(
+            "WEFT_MANAGER_LIFETIME_TIMEOUT override must be int, float, or str"
+        )
+    if name in {"WEFT_MANAGER_REUSE_ENABLED", "WEFT_AUTOSTART_TASKS"}:
+        return _parse_bool(value) if isinstance(value, str) else bool(value)
+    return value
+
+
+def _normalize_weft_overrides(overrides: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize explicit in-process config overrides."""
+
+    return {
+        key: _normalize_weft_override_value(key, value)
+        for key, value in overrides.items()
+    }
 
 
 def load_environment() -> dict[str, Any]:
@@ -851,8 +954,54 @@ def load_environment() -> dict[str, Any]:
     return env_vars
 
 
-def load_config() -> dict[str, Any]:
+def compile_config(overrides: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Compile canonical Weft config from env plus optional in-process overrides.
+
+    Args:
+        overrides: Optional mapping of explicit WEFT_* and/or BROKER_* overrides.
+
+    Returns:
+        A fresh configuration dictionary containing resolved WEFT_* and BROKER_* keys.
+    """
+
+    base_config = load_environment()
+    if overrides is None:
+        return base_config
+
+    normalized_overrides = _normalize_weft_overrides(overrides)
+    resolved_config = dict(base_config)
+    resolved_config.update(normalized_overrides)
+
+    base_broker_config = {
+        key: value for key, value in base_config.items() if key.startswith("BROKER_")
+    }
+    explicit_broker_overrides = {
+        key: value
+        for key, value in normalized_overrides.items()
+        if key.startswith("BROKER_")
+    }
+    if (
+        "WEFT_DIRECTORY_NAME" in normalized_overrides
+        and "WEFT_DEFAULT_DB_NAME" not in normalized_overrides
+        and "BROKER_DEFAULT_DB_NAME" not in explicit_broker_overrides
+    ):
+        base_broker_config.pop("BROKER_DEFAULT_DB_NAME", None)
+    resolved_config.update(
+        _resolve_weft_broker_config(
+            resolved_config,
+            base_broker_config=base_broker_config,
+            explicit_broker_overrides=explicit_broker_overrides,
+        )
+    )
+    return resolved_config
+
+
+def load_config(overrides: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Public entry point for retrieving the current configuration.
+
+    Args:
+        overrides: Optional explicit WEFT_* and/or BROKER_* overrides to
+            compile on top of the current process environment.
 
     Returns:
         A fresh configuration dictionary containing both WEFT_* and BROKER_* keys.
@@ -861,7 +1010,17 @@ def load_config() -> dict[str, Any]:
         The returned dictionary is not cached; callers should cache it themselves
         if repeated lookups are required.
     """
-    return load_environment()
+    return compile_config(overrides)
+
+
+def get_weft_directory_name(config: Mapping[str, Any] | None = None) -> str:
+    """Return the configured Weft metadata directory name."""
+
+    source = config if config is not None else load_config()
+    value = source.get("WEFT_DIRECTORY_NAME")
+    if isinstance(value, str) and value.strip():
+        return value
+    return WEFT_DIRECTORY_NAME_DEFAULT
 
 
 def reload_environment(config: dict[str, Any]) -> dict[str, Any]:

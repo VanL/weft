@@ -10,11 +10,20 @@ Weft tests through the repo-managed environment and a small set of shared
 harnesses:
 
 - `.envrc` and the in-repo `.venv` keep verification deterministic.
-- `WeftTestHarness` isolates broker state, project roots, and cleanup.
+- `WeftTestHarness` in `tests/helpers/weft_harness.py` owns isolated project
+  roots, live runtime tracking, and cleanup.
+- `run_cli()` in `tests/conftest.py` drives the real subprocess CLI surface.
+- `broker_env`, `queue_factory`, and `task_factory` in `tests/conftest.py`
+  provide broker-backed fixtures for queue and task tests.
 - `shared` vs `sqlite_only` keeps backend-neutral coverage separate from
   SQLite-specific coverage.
-- The shared Postgres suite (`bin/pytest-pg --all`) is the current check for
-  backend-sensitive changes.
+- `tests/specs/test_test_audit_policy.py` enforces the classification tables,
+  and `tests/test_harness_registration.py` guards harness-registration plumbing.
+- The Postgres-backed check is `bin/pytest-pg --all` for backend-sensitive
+  changes.
+- The benchmark scripts in `tests/long_session_surface_benchmark.py` and
+  `tests/multiqueue_polling_benchmark.py` are dev-only measurement tools, not
+  part of the canonical test contract.
 
 The point is not to maximize suite count. The point is to keep the current
 contract exercised where it matters and to make backend-sensitive drift easy to
@@ -25,29 +34,53 @@ Current classification rule:
 - test modules should declare backend scope explicitly through `shared` or
   `sqlite_only`, either directly or through the central classification tables in
   `tests/conftest.py`
-- broad directory-level audit exemptions should be treated as temporary migration
-  scaffolding and removed once a subtree has been reviewed
+- broker-heavy tests that use `weft_harness`, `broker_env`, `queue_factory`,
+  `task_factory`, or `workdir` are grouped onto one xdist worker
+- broad directory-level audit exemptions are temporary migration scaffolding
+  and should disappear once a subtree has been reviewed
 - any remaining unaudited debt should stay module-scoped, explicit, and
   reviewable rather than becoming the default home for new tests
 
 ## Current Coverage [TS-1]
 
+- `tests/cli/` covers subprocess CLI behavior and operator-visible output.
+- `tests/commands/` covers command-layer helpers, including direct handler paths
+  and queue/output boundaries.
+- `tests/context/` covers context discovery and backend-aware project setup.
+- `tests/core/` covers manager behavior, pipelines, agent/runtime code,
+  provider CLI adapters, target execution helpers, and related validation
+  surfaces.
+- `tests/specs/` covers spec-level invariants and cross-surface contracts. This
+  tree already includes focused subdirectories such as
+  `manager_architecture/`, `message_flow/`, `quick_reference/`,
+  `resource_management/`, and `taskspec/`, plus root-level guard tests like
+  `test_command_queue_seam.py`, `test_plan_metadata.py`, and
+  `test_test_audit_policy.py`.
+- `tests/system/` holds repository-level checks for constants, helper behavior,
+  backend test plumbing, and release-script invariants.
+- `tests/tasks/` covers execution, reservation flow, control messages, process
+  titles, observability, interactive behavior, pipeline runtime, and
+  task-endpoint behavior.
 - `tests/taskspec/` covers TaskSpec validation, immutability, defaults, and
   state transitions.
-- `tests/tasks/` covers execution, reservation flow, control messages, process
-  titles, and agent/task runtime behavior.
-- `tests/commands/` and `tests/cli/` cover command wiring and end-to-end CLI
-  behavior.
-- `tests/context/` and `tests/core/` cover context discovery, manager behavior,
-  pipeline runtime, agent runtime, and execution helpers.
-- `tests/specs/` covers spec-level invariants and cross-surface validation.
-- `tests/system/` holds the system-level checks that are already implemented.
+- `tests/helpers/` and `tests/fixtures/` provide shared harness, backend, and
+  scenario setup for the above suites. They are support code, not their own
+  test contract.
+- `tests/test_harness_registration.py` is a root-level guard for harness
+  cleanup and registration behavior.
 
 ## What Is Not Canonical [TS-2]
 
-There is no dedicated `tests/integration/`, `tests/performance/`, or
-`tests/property/` tree yet. Those deferred surfaces live in the companion doc
-instead of being mixed into this canonical file.
+- There is no dedicated `tests/integration/` tree yet. Integration-style
+  coverage already lives inside the existing CLI, command, core, task, and
+  spec suites.
+- There is no dedicated `tests/performance/` tree yet. Current performance work
+  is in the dev-only benchmark modules under `tests/`, but those modules are not
+  part of the canonical pytest contract.
+- There is no dedicated `tests/property/` tree yet. Property-style checks remain
+  embedded in normal pytest modules where they are needed.
+- Deferred test surfaces stay in the companion planned doc instead of being
+  mixed into this canonical file.
 
 ## Related Documents
 

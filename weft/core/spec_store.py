@@ -233,8 +233,9 @@ def resolve_named_spec_from_root(
     """Resolve a named spec from an explicit Weft spec root.
 
     The spec root is the directory that contains `tasks/` and `pipelines/`.
-    This is `.weft/` in the normal project layout, but tests and explicit
-    autostart directory overrides may use an alternate sibling layout.
+    This is the Weft metadata directory in the normal project layout (default
+    `.weft/`), but tests and explicit autostart directory overrides may use an
+    alternate sibling layout.
     """
 
     candidates: list[ResolvedSpecReference] = []

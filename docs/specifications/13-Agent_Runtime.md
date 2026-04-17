@@ -32,7 +32,7 @@ agent runtime follows that layering:
 
 ## Current Support [AR-0.1]
 
-The current implementation supports:
+Supported runtimes include:
 
 - `spec.type="agent"`
 - runtime: `llm`
@@ -41,15 +41,14 @@ The current implementation supports:
 - runner-specific delegated lane: Docker-backed one-shot `provider_cli`
   execution when `spec.runner.name="docker"`,
   `spec.agent.conversation_scope="per_message"`, `spec.persistent=false`, and
-  the selected provider has an explicit image recipe; the current shipped
-  image-recipe set is `claude_code`, `codex`, `gemini`, `opencode`, and
-  `qwen`
+  the selected provider has both an explicit image recipe and a container
+  runtime descriptor; the shipped set for both is `claude_code`, `codex`,
+  `gemini`, `opencode`, and `qwen`
 - authority classes:
   - `llm`: `bounded`
   - `provider_cli`: explicit `bounded` or `general`, with missing values
     resolving to `general` for compatibility
-- tools: `python` for `llm`; `provider_cli` rejects `spec.agent.tools` in
-  Phase 1
+- tools: `python` for `llm`; `provider_cli` rejects `spec.agent.tools`
 - output modes:
   - `llm`: `text`, `json`, `messages`
   - `provider_cli`: `text` only
@@ -165,25 +164,24 @@ model defines the full `spec.agent` schema. `SpecSection.type` includes
 - `llm` only supports `authority_class="bounded"`.
 - `provider_cli` requires `spec.agent.runtime_config.provider`.
 - `provider_cli` supports `authority_class="bounded"` only for providers that
-  can actually enforce a bounded mode. In the current built-in set that means
-  `claude_code`, `codex`, `gemini`, and `qwen`. `opencode` is currently
-  `general` only.
+  can actually enforce a bounded mode. In the built-in set that means
+  `claude_code`, `codex`, `gemini`, and `qwen`. `opencode` is `general`
+  only.
 - `provider_cli` only supports `spec.agent.output_mode="text"`.
-- `provider_cli` rejects `spec.agent.tools` in Phase 2.
+- `provider_cli` rejects `spec.agent.tools`.
 - `provider_cli` supports:
   - one-shot execution with `conversation_scope="per_message"`
   - persistent task-lifetime sessions only for
     `spec.persistent=true` plus `conversation_scope="per_task"`
 - `provider_cli` only accepts `spec.agent.model` for providers whose concrete
-  non-interactive CLI surface supports model override. In the current built-in
+  non-interactive CLI surface supports model override. In the built-in
   provider set, that means `claude_code`, `codex`, `gemini`, `opencode`, and
   `qwen`.
 - `provider_cli` structured tool policy is explicit and provider-limited:
   - `workspace_access="read-only"` is supported by `claude_code`, `codex`,
     `gemini`, and `qwen`
   - `workspace_access="workspace-write"` is supported by `codex`
-  - explicit stdio MCP server descriptors are currently supported by
-    `claude_code` only
+  - explicit stdio MCP server descriptors are supported by `claude_code` only
 
 _Implementation mapping:_ `weft/core/taskspec.py` -- `SpecSection` model
 validator `validate_type_targets` enforces mutual exclusion of
@@ -376,13 +374,16 @@ Public callers do not send or receive:
 - `{"type": "execute"}`
 - `{"type": "result"}`
 - `{"type": "ready"}`
+- `{"type": "stop"}`
+- `{"type": "startup_error"}`
 
 Those are private runtime-session messages only.
 
 _Implementation mapping:_ `weft/core/tasks/agent_session_protocol.py` --
 `make_execute_request`, `make_stop_request`, `make_ready_response`,
-`make_result_response`, `parse_request_type`, `parse_result_response`,
-`is_ready_response`, `startup_error_message`. Versioned via
+`make_startup_error_response`, `make_result_response`, `parse_request_type`,
+`parse_result_response`, `is_ready_response`, `startup_error_message`.
+Versioned via
 `AGENT_SESSION_PROTOCOL_VERSION`. Session management:
 `weft/core/tasks/sessions.py` (`AgentSession` class),
 `weft/core/tasks/consumer.py` (`_uses_agent_session`, `_ensure_agent_session`,
@@ -393,7 +394,7 @@ _Implementation mapping:_ `weft/core/tasks/agent_session_protocol.py` --
 
 ### `llm` backend
 
-The built-in `llm` adapter currently behaves as follows:
+The built-in `llm` adapter behaves as follows:
 
 - resolves models through the Python `llm` API
 - forwards `instructions` as the system prompt
@@ -409,7 +410,7 @@ Backend-specific notes:
   to an `llm` prompt inside the adapter
 - `per_task` uses one live `llm` conversation for the life of the persistent
   task process
-- conversation state is currently process-local, not restart-durable
+- conversation state is process-local, not restart-durable
 
 _Implementation mapping:_ `weft/core/agents/backends/llm.py` --
 `LLMBackend` (one-shot `.execute`, persistent `.start_session`),
@@ -421,7 +422,7 @@ registration: `_register_plugin_modules`. Backend is registered via
 
 ### `provider_cli` backend
 
-The built-in `provider_cli` adapter currently behaves as follows:
+The built-in `provider_cli` adapter behaves as follows:
 
 - supports host-backed one-shot delegated execution
 - supports Docker-backed one-shot delegated execution when
@@ -442,12 +443,12 @@ The built-in `provider_cli` adapter currently behaves as follows:
   before falling back to normal Python imports
 - supports structured delegated tool-profile fields for `workspace_access` and
   stdio MCP server descriptors
-- currently ships provider adapters for `claude_code`, `codex`, `gemini`,
-  `opencode`, and `qwen`
-- current shipped Docker image-recipe support is explicit; today that set is
+- ships provider adapters for `claude_code`, `codex`, `gemini`, `opencode`,
+  and `qwen`
+- shipped Docker image-recipe support is explicit for `claude_code`, `codex`,
+  `gemini`, `opencode`, and `qwen`
+- shipped Docker container runtime descriptor support is explicit for
   `claude_code`, `codex`, `gemini`, `opencode`, and `qwen`
-- current shipped Docker container runtime descriptor support is also explicit;
-  today that set is `claude_code`, `codex`, `gemini`, `opencode`, and `qwen`
 - keeps the public outbox contract unchanged by returning plain text only
 - persists internal runtime metadata and referenced artifacts through normal
   task-log events rather than a new public result envelope
@@ -456,7 +457,7 @@ Backend-specific notes:
 
 - the built-in provider names and non-interactive dispatch strings intentionally
   follow the concrete provider surfaces already used in `agent-mcp`
-- `spec.agent.model` is currently forwarded for `claude_code`, `codex`,
+- `spec.agent.model` is forwarded for `claude_code`, `codex`,
   `gemini`, `opencode`, and `qwen`
 - Docker-backed provider runtime defaults are explicit and provider-specific:
   - `codex`: optional writable `~/.codex` mount, and Docker-lane examples use
@@ -472,7 +473,7 @@ Backend-specific notes:
     plus portable auth env forwarding. On macOS, a host `claude.ai` login is
     stored in Keychain and is not portable into the Linux container by mount
     alone
-- `authority_class="bounded"` currently means Weft enforces the strongest
+- `authority_class="bounded"` means Weft enforces the strongest
   deterministic narrowing it knows how to express for that provider. It does
   not mean Weft has taken over the provider's full inner safety policy
 - delegated tool-profile validation is split from agent-runtime validation so
@@ -501,23 +502,23 @@ Backend-specific notes:
   - `codex`: `read-only`, `workspace-write`
   - `gemini`: `read-only`
   - `qwen`: `read-only`
-  - `opencode`: none in the current built-in adapter
-- explicit stdio MCP server descriptors are currently translated only for
-  `claude_code`, using temporary `--mcp-config` JSON plus
-  `--strict-mcp-config`
+  - `opencode`: none in the built-in adapter
+- explicit stdio MCP server descriptors are translated only for `claude_code`,
+  using temporary `--mcp-config` JSON plus `--strict-mcp-config`
 - when `authority_class="bounded"` and no explicit Claude MCP servers are
   declared, Weft supplies an empty strict MCP config rather than inheriting
   ambient local MCP state
 - delegated provider executable defaults may come from user-authored
-  `.weft/agents.json` project settings when the TaskSpec does not pin an
-  executable explicitly
+  `.weft/agents.json` agent settings when the TaskSpec does not pin an
+  executable explicitly; in the current shipped settings shape those defaults
+  live under `provider_cli.providers`
 - observed delegated provider status may be recorded in
   `.weft/agent-health.json` for UX and diagnostics, but that cache is advisory
   only and never gates startup correctness
 - synthetic provider probes may still exist in isolated helpers or explicit
   diagnostics flows, but they are not part of the ordinary startup-validation
   path
-- Weft currently ships that explicit diagnostics shape as a builtin
+- Weft ships that explicit diagnostics shape as a builtin
   `probe-agents` task helper rather than as hidden startup work
 - Weft also ships an explicit optional `prepare-agent-images` builtin helper to
   warm the Docker image cache for providers with shipped image recipes; it is a
@@ -581,7 +582,7 @@ Example TaskSpec shape for the Docker-backed one-shot lane:
 In this lane, the image is provider-scoped and reusable, while mounts, runtime
 env, working directory, and network policy remain per-run container inputs.
 That preserves the Weft task contract while keeping Docker-specific variation
-at the runner boundary. The current shipped provider runtime descriptors are:
+at the runner boundary. The shipped provider runtime descriptors are:
 
 - `codex`: optional writable `~/.codex` at `/root/.codex`
 - `gemini`: optional `GEMINI_API_KEY` forwarding plus a generated runtime home
@@ -607,7 +608,10 @@ registry, provider-specific invocation building, and output parsing:
 runtime descriptors and resolution:
 `weft/core/agents/provider_cli/container_runtime.py`. Shared one-shot delegated
 execution preparation: `weft/core/agents/provider_cli/execution.py`.
-Project-local delegated launch settings and advisory health cache:
+Docker-backed runtime-home and environment prep:
+`weft/core/agents/provider_cli/runtime_prep.py`.
+Project-local agent settings and advisory delegated-provider health cache
+(current shipped settings shape: `provider_cli.providers`):
 `weft/core/agents/provider_cli/settings.py`. Optional synthetic delegated probe
 helpers: `weft/core/agents/provider_cli/probes.py`. One-shot and persistent
 runtime adapter: `weft/core/agents/backends/provider_cli.py`.
@@ -647,8 +651,10 @@ This slice does not attempt to:
   `weft/core/agents/backends/provider_cli.py`,
   `weft/core/agents/provider_cli/registry.py`,
   `weft/core/agents/provider_cli/container_runtime.py`,
+  `weft/core/agents/provider_cli/runtime_prep.py`,
   `weft/core/agents/provider_cli/execution.py`
-- Project-local delegated settings and advisory provider-health metadata:
+- Project-local agent settings and advisory delegated-provider health cache
+  (current shipped settings shape: `provider_cli.providers`):
   `weft/core/agents/provider_cli/settings.py`
 - Optional synthetic delegated probe helpers:
   `weft/core/agents/provider_cli/probes.py`

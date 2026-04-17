@@ -1,19 +1,24 @@
 # Planned Companion for 07: System Invariants
 
-This document tracks intended but not implemented invariant machinery adjacent
-to [`07-System_Invariants.md`](07-System_Invariants.md).
+This document tracks future invariant machinery that is not part of the current
+contract in [`07-System_Invariants.md`](07-System_Invariants.md).
 
-Nothing here overrides the canonical invariants.
+Keep this file planned-only. If a guarantee or operator rule is already shipped,
+it belongs in the canonical current docs instead of here. For example, current
+idempotency guidance already lives in [`02-TaskSpec.md`](02-TaskSpec.md) and
+should not be restated as a planned gap in this file.
+If any item here ships, move it into the canonical sibling and remove it from
+this planned companion rather than citing this file as the invariant contract.
 
 ## Planned Areas
 
-### Stronger Idempotency Contract
+### Future Idempotency Contract
 
 Possible future work:
 
-- explicit idempotency-key conventions
 - stronger inbox/reserved correlation rules for replay-safe work
 - clearer operator guidance for retried or resumed work
+- any future idempotency-key scheme beyond the current TaskSpec guidance
 
 ### Centralized Invariant Checking
 
@@ -30,6 +35,19 @@ Possible future work:
 - domain-specific invariant exceptions
 - more structured invariant-failure payloads
 - stronger alerting semantics
+
+## Current Boundary
+
+The canonical current doc already covers the shipped invariant contract:
+
+- immutability of `TaskSpec.spec` and `TaskSpec.io`
+- forward-only state transitions
+- queue and reserved-policy invariants
+- resource, execution, observability, manager, and context invariants
+- the absence of a dedicated invariant-monitor daemon or exception family
+
+Those behaviors belong in [`07-System_Invariants.md`](07-System_Invariants.md),
+not in this planned companion.
 
 ## Related Plans
 

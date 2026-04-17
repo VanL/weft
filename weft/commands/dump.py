@@ -96,7 +96,8 @@ def cmd_dump(
     """Export database state to JSONL format.
 
     Args:
-        output: Output file path, defaults to .weft/weft_export.jsonl
+        output: Output file path, defaults to `weft_export.jsonl` under the
+            active Weft metadata directory.
         context_path: Weft context directory
 
     Returns:

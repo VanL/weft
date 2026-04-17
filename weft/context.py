@@ -3,7 +3,7 @@
 The vNext context design is intentionally small and predictable. Rather than
 maintaining a parallel discovery system, Weft now delegates broker discovery to
 SimpleBroker's public project API and keeps only the logic that is specific to
-Weft (environment overrides, `.weft/` ancillary directories, and project
+Weft (environment overrides, the Weft metadata directory, and project
 metadata).
 
 Spec references: docs/specifications/04-SimpleBroker_Integration.md [SB-0], [SB-0.4]
@@ -24,9 +24,10 @@ Key behaviours
 * **Explicit overrides** – If `weft_context` *is* provided we treat it as the
   authoritative project root, expand the path, and ask SimpleBroker for the
   default target rooted at that directory.
-* **Ancillary structure** – Regardless of how the root is chosen we ensure
-  `.weft/`, `.weft/outputs/`, `.weft/logs/`, and a JSON metadata file exist.
-  These directories belong to Weft and never influence SimpleBroker itself.
+* **Ancillary structure** – Regardless of how the root is chosen we ensure the
+  configured Weft metadata directory, its `outputs/` and `logs/` children, and
+  a JSON metadata file exist. These directories belong to Weft and never
+  influence SimpleBroker itself.
 
 The module exposes a single dataclass, :class:`WeftContext`, plus two helper
 functions:
@@ -69,6 +70,7 @@ from weft._constants import (
     POSTGRES_BACKEND_UNAVAILABLE,
     WEFT_AUTOSTART_DIRECTORY_NAME,
     WEFT_AUTOSTART_TASKS_DEFAULT,
+    get_weft_directory_name,
     load_config,
 )
 
@@ -92,7 +94,7 @@ class WeftContext:
     """Project root directory."""
 
     weft_dir: Path
-    """.weft directory used for Weft-specific artefacts."""
+    """Weft metadata directory used for project-scoped artefacts."""
 
     outputs_dir: Path
     """Directory for large-output spillover files."""
@@ -101,7 +103,7 @@ class WeftContext:
     """Directory for aggregated log files."""
 
     config_path: Path
-    """.weft/config.json path containing project metadata."""
+    """Weft project metadata path containing project-local settings."""
 
     broker_target: BrokerTarget
     """Opaque SimpleBroker target to pass back into Queue/open_broker."""
@@ -116,7 +118,7 @@ class WeftContext:
     """Subset of configuration containing only BROKER_* keys."""
 
     project_config: dict[str, Any]
-    """Project metadata loaded from .weft/config.json (may be empty)."""
+    """Project metadata loaded from the Weft project config file (may be empty)."""
 
     discovered: bool
     """True if the database was found via upward project search."""
@@ -165,6 +167,7 @@ class WeftContext:
 def build_context(
     spec_context: str | os.PathLike[str] | None = None,
     *,
+    config: Mapping[str, Any] | None = None,
     create_dirs: bool = True,
     create_database: bool = True,
     autostart: bool | None = None,
@@ -175,8 +178,11 @@ def build_context(
         spec_context: Optional override for the project root (equivalent to
             TaskSpec.spec.weft_context).  When omitted we discover an existing
             project by searching upward from :func:`Path.cwd`.
-        create_dirs: When True (default) ensure `.weft/`, `outputs/`,
-            `logs/`, and (when enabled) `autostart/` directories exist.
+        config: Optional preloaded Weft config mapping. When omitted, the
+            current process environment is loaded through `load_config()`.
+        create_dirs: When True (default) ensure the configured Weft metadata
+            directory plus `outputs/`, `logs/`, and (when enabled)
+            `autostart/` directories exist.
         create_database: When True (default) ensure the configured broker
             target is initialized if it does not already exist.
         autostart: Optional override for enabling auto-start TaskSpecs. When
@@ -187,10 +193,14 @@ def build_context(
 
     Spec: [SB-0], [SB-0.1], [SB-0.4], [MA-3]
     """
-    config = dict(load_config())
-    root, broker_target, discovered = _resolve_root_and_target(spec_context, config)
+    resolved_config = dict(config) if config is not None else dict(load_config())
+    root, broker_target, discovered = _resolve_root_and_target(
+        spec_context,
+        resolved_config,
+    )
     database_path = broker_target.target_path
-    weft_dir = (root / ".weft").resolve(strict=False)
+    weft_dir_name = get_weft_directory_name(resolved_config)
+    weft_dir = (root / weft_dir_name).resolve(strict=False)
     outputs_dir = weft_dir / "outputs"
     logs_dir = weft_dir / "logs"
     config_path = weft_dir / "config.json"
@@ -204,14 +214,21 @@ def build_context(
         else (
             project_autostart
             if project_autostart is not None
-            else bool(config.get("WEFT_AUTOSTART_TASKS", WEFT_AUTOSTART_TASKS_DEFAULT))
+            else bool(
+                resolved_config.get(
+                    "WEFT_AUTOSTART_TASKS",
+                    WEFT_AUTOSTART_TASKS_DEFAULT,
+                )
+            )
         )
     )
-    config["WEFT_AUTOSTART_TASKS"] = autostart_enabled
-    config["WEFT_AUTOSTART_DIR"] = str(autostart_dir)
+    resolved_config["WEFT_AUTOSTART_TASKS"] = autostart_enabled
+    resolved_config["WEFT_AUTOSTART_DIR"] = str(autostart_dir)
 
     broker_config = {
-        key: value for key, value in config.items() if key.startswith("BROKER_")
+        key: value
+        for key, value in resolved_config.items()
+        if key.startswith("BROKER_")
     }
 
     if create_dirs:
@@ -234,7 +251,7 @@ def build_context(
         config_path=config_path,
         broker_target=broker_target,
         database_path=database_path,
-        config=config,
+        config=resolved_config,
         broker_config=broker_config,
         project_config=project_config,
         discovered=discovered,
@@ -243,9 +260,13 @@ def build_context(
     )
 
 
-def get_context(spec_context: str | os.PathLike[str] | None = None) -> WeftContext:
+def get_context(
+    spec_context: str | os.PathLike[str] | None = None,
+    *,
+    config: Mapping[str, Any] | None = None,
+) -> WeftContext:
     """Convenience wrapper around :func:`build_context` with default options (Spec: [SB-0])."""
-    return build_context(spec_context=spec_context)
+    return build_context(spec_context=spec_context, config=config)
 
 
 def resolve_context_broker_target(
@@ -266,25 +287,28 @@ def resolve_context_broker_target(
 
 def find_existing_weft_dir(
     spec_context: str | os.PathLike[str] | None = None,
+    *,
+    config: Mapping[str, Any] | None = None,
 ) -> Path | None:
-    """Return the nearest existing `.weft` directory without materializing state.
+    """Return the nearest existing Weft metadata directory without materializing state.
 
     Args:
         spec_context: Optional directory override to search from. When omitted,
             the current working directory is used.
 
     Returns:
-        Path to the nearest existing `.weft` directory, or ``None`` when the
+        Path to the nearest existing Weft metadata directory, or ``None`` when the
         search root is not inside an initialized Weft project.
 
     Spec: [SB-0]
     """
     start = Path(spec_context) if spec_context is not None else Path.cwd()
     current = start.expanduser().resolve(strict=False)
+    weft_dir_name = get_weft_directory_name(config)
     if current.is_file():
         current = current.parent
     for candidate in (current, *current.parents):
-        weft_dir = candidate / ".weft"
+        weft_dir = candidate / weft_dir_name
         if weft_dir.is_dir():
             return weft_dir
     return None
@@ -352,7 +376,7 @@ def _ensure_database(
 
 
 def _load_project_config(config_path: Path) -> dict[str, Any]:
-    """Load project metadata from .weft/config.json, creating defaults if missing (Spec: [SB-0])."""
+    """Load project metadata from the Weft config file, creating defaults if missing (Spec: [SB-0])."""
     if not config_path.exists():
         payload = {
             "version": "1.0",
@@ -391,7 +415,7 @@ def update_project_config(
     config_path: Path,
     updates: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Persist Weft-owned project metadata updates in `.weft/config.json`.
+    """Persist Weft-owned project metadata updates in the Weft config file.
 
     Spec: [SB-0], [CLI-1.1]
     """

@@ -3,18 +3,21 @@
 This document captures ideas that are intentionally **not** part of the current
 spec, but may return once there is a concrete use case.
 
-## Task Pause / Resume
+If a behavior is already shipped or already covered by canonical specs, it does
+not belong in this deferred ledger except as a note about the still-missing
+surface area.
+
+## Task Pause / Resume CLI
 
 Potentially expose `weft task pause` / `weft task resume` once we have a clear
-runtime story (SIGSTOP vs. cooperative pause via `ctrl_in`). Deferred for now to
-avoid over-specifying control semantics.
+operator story for the CLI surface. The underlying `PAUSE` / `RESUME` control
+messages already exist for task types that opt into live pausing, so the
+deferred part here is the explicit user-facing command layer and its UX.
 
-_Implementation status: Partially implemented._ The core runtime handles
-PAUSE/RESUME control messages (`weft/core/tasks/base.py` dispatches them,
-`weft/_constants.py` defines `CONTROL_PAUSE` / `CONTROL_RESUME`, and
-`weft/core/tasks/consumer.py` requeues in-flight messages while paused). No CLI
-commands (`weft task pause` / `weft task resume`) exist yet -- the feature is
-core-only with no user-facing surface. (Audited 2026-04-07.)
+_Implementation status: Deferred at the CLI layer._ The runtime control path is
+already shipped and documented in the canonical specs (`00-Quick_Reference.md`
+and `01-Core_Components.md`). No `weft task pause` / `weft task resume`
+commands exist yet. (Audited 2026-04-16.)
 
 ## Task TUI (`weft task top`)
 
@@ -22,9 +25,9 @@ A curses-style live dashboard for task state, resource metrics, and tailing
 logs. This would be a distinct UX from `weft task list` and should be implemented as
 an opt-in TUI, not a default code path.
 
-_Implementation status: Not implemented._ `weft status --watch` and `weft task
-status --watch` provide streaming text output but no curses/TUI interface exists.
-(Audited 2026-04-07.)
+_Implementation status: Not implemented._ `weft status --watch` and
+`weft task status --watch` provide streaming text output, but no curses/TUI
+interface exists. (Audited 2026-04-16.)
 
 ## Reserved Queue UX (Retry / Recover)
 
@@ -43,4 +46,4 @@ usage patterns are established.
 _Implementation status: Not implemented._ No `weft task recover` or `weft task
 retry` commands exist. `weft queue move` and `weft queue peek` provide the
 low-level primitives for manual recovery of reserved-queue messages.
-(Audited 2026-04-07.)
+(Audited 2026-04-16.)

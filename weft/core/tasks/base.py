@@ -54,6 +54,7 @@ from weft._constants import (
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_STREAMING_SESSIONS_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
+    get_weft_directory_name,
     load_config,
 )
 from weft._runner_plugins import require_runner_plugin
@@ -289,7 +290,7 @@ class BaseTask(MultiQueueWatcher, ABC):
         spec_context = getattr(self.taskspec.spec, "weft_context", None)
         if spec_context:
             base = Path(spec_context).expanduser()
-            return base / ".weft" / "outputs"
+            return base / get_weft_directory_name(self._config) / "outputs"
         return Path(tempfile.gettempdir()) / "weft" / "outputs"
 
     def _spill_large_output(self, encoded: bytes) -> dict[str, Any]:

@@ -22,12 +22,13 @@ The core rule is:
 That rule now governs the implemented runtime.
 
 _Implementation mapping_: `weft/core/pipelines.py` compiles stored
-`PipelineSpec`s into a first-class pipeline task plus generated child stage and
-edge tasks. `weft/core/tasks/pipeline.py` implements the pipeline and edge
-runtime classes. `weft/commands/run.py`, `weft/commands/result.py`, and
-`weft/commands/tasks.py` expose the task-shaped CLI surface, and
-`weft/core/manager.py` reuses the same compilation path for autostart pipeline
-targets.
+`PipelineSpec`s into a first-class pipeline `TaskSpec` plus generated child
+stage and edge `TaskSpec`s. `weft/core/tasks/pipeline.py` implements the
+pipeline and edge runtime classes. `weft/commands/run.py`,
+`weft/commands/result.py`, `weft/commands/status.py`,
+`weft/commands/tasks.py`, and `weft/commands/_task_history.py` expose and
+interpret the task-shaped CLI surface, and `weft/core/manager.py` reuses the
+same compilation path for autostart pipeline targets.
 
 ## UX Principles [PL-0.1]
 
@@ -166,6 +167,10 @@ Current behavior:
 - `weft run --pipeline ... --no-wait` returns the pipeline TID
 - pipeline-level `result`, `task status`, `task stop`, and `task kill` all act
   on that pipeline TID
+- `weft run --pipeline` rejects `--arg`, `--kw`, `--env`, `--tag`,
+  `--monitor`, `--continuous`, and `--once`
+- `weft result --all` remains an ordinary-task aggregation surface and does
+  not include `P{tid}.outbox` pipeline results
 
 ### Pipeline results [PL-1.3]
 
@@ -210,6 +215,8 @@ closure.
 - `--input` provides explicit initial input for the pipeline run
 - piped stdin may provide initial input when `--input` is absent
 - providing both `--input` and piped stdin is a validation error
+- if neither `--input` nor piped stdin is present, the run falls back to the
+  first stage's `defaults.input` when it exists
 - stage-local `defaults.input` overrides the inherited input for that stage
 
 Pipeline input is stage input, not a live stream. If a user needs true stream
@@ -246,8 +253,8 @@ Target state:
 - `ctrl_out` carries control replies for the pipeline run as a unit
 - `P{pipeline_tid}.status` carries retained `pipeline_status` snapshots for the
   pipeline run as a unit
-- `weft.state.pipelines` carries the active pipeline registry used to discover
-  owned children, bindings, and recovery scope
+- `weft.state.pipelines` carries the active pipeline registry used to record
+  owned children and bindings for live inspection and future recovery
 - `weft.log.tasks` remains the audit trail, not the primary live status path
 - child stage and edge tasks remain visible as ordinary tasks for deeper
   inspection
@@ -830,8 +837,8 @@ Pipelines should also register themselves in a runtime state queue:
 - record owned and deleted by the pipeline task
 
 The active record is not the primary live status surface. That remains
-`P{pipeline_tid}.status`. The active record exists to bound recovery and inspection. It
-should contain enough information to answer:
+`P{pipeline_tid}.status`. The active record exists to bound inspection and
+future recovery. It should contain enough information to answer:
 
 - which pipeline spec or stored pipeline name this run came from
 - which stage and edge child TIDs belong to this pipeline
@@ -846,8 +853,7 @@ Cleanup rule:
 - the pipeline task writes the active record during bootstrap before it starts
   depending on child work
 - on a clean terminal path, the pipeline task deletes the active record only
-  after publishing its terminal `status` snapshot and after any final public
-  pipeline outbox result is durably available
+  after publishing its terminal `status` snapshot
 - if the process crashes before cleanup, the stale record is intentional and is
   the breadcrumb used for orphan inspection and later replay work
 

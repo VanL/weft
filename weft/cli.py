@@ -13,7 +13,7 @@ from typing import Annotated, Any
 
 import typer
 
-from ._constants import PROG_NAME, __version__
+from ._constants import PROG_NAME, __version__, get_weft_directory_name
 from .commands import cmd_init, cmd_status, cmd_tidy
 from .commands import manager as manager_cmd
 from .commands import queue as queue_cmd
@@ -41,6 +41,7 @@ manager_app = typer.Typer(help="Manager lifecycle management")
 spec_app = typer.Typer(help="Spec management")
 task_app = typer.Typer(help="Task management")
 system_app = typer.Typer(help="System maintenance")
+default_export_path_help = f"{get_weft_directory_name()}/weft_export.jsonl"
 
 
 def _emit_queue_result(result: tuple[int, str, str]) -> None:
@@ -1277,7 +1278,9 @@ def dump_command(
     output: Annotated[
         str | None,
         typer.Option(
-            "--output", "-o", help="Output file path (default: .weft/weft_export.jsonl)"
+            "--output",
+            "-o",
+            help=f"Output file path (default: {default_export_path_help})",
         ),
     ] = None,
     context_dir: Annotated[
@@ -1317,7 +1320,8 @@ def load_command(
     input_file: Annotated[
         str | None,
         typer.Option(
-            "--input", help="Input file path (default: .weft/weft_export.jsonl)"
+            "--input",
+            help=f"Input file path (default: {default_export_path_help})",
         ),
     ] = None,
     dry_run: Annotated[

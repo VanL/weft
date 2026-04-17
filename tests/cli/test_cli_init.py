@@ -70,6 +70,38 @@ def test_cli_init_creates_project(workdir: Path, weft_harness) -> None:
     assert (weft_dir / "config.json").is_file()
 
 
+def test_cli_init_honors_weft_directory_name_env(
+    monkeypatch: pytest.MonkeyPatch,
+    workdir: Path,
+    weft_harness,
+) -> None:
+    project_root = workdir / "custom-weft-dir-project"
+    env = os.environ.copy()
+    env["WEFT_DIRECTORY_NAME"] = ".engram"
+    monkeypatch.setenv("WEFT_DIRECTORY_NAME", ".engram")
+
+    rc, out, err = run_cli(
+        "init",
+        project_root,
+        cwd=workdir,
+        env=env,
+        harness=weft_harness,
+    )
+
+    assert rc == 0
+    assert "Initialized Weft project" in out
+    assert err == ""
+
+    weft_dir = project_root / ".engram"
+    assert weft_dir.is_dir()
+
+    project_context = build_context(spec_context=project_root)
+    assert project_context.weft_dir == weft_dir.resolve()
+    assert (weft_dir / "outputs").is_dir()
+    assert (weft_dir / "logs").is_dir()
+    assert (weft_dir / "config.json").is_file()
+
+
 def test_cli_init_defaults_to_current_directory(workdir: Path, weft_harness) -> None:
     project_root = workdir / "cwd-project"
     project_root.mkdir()

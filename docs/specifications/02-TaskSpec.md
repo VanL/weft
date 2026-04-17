@@ -30,37 +30,43 @@ models in `weft/core/taskspec.py`. Runtime behaviour honours `stream_output`
 (chunked, base64-encoded messages), `output_size_limit_mb` (disk spillover),
 and `interactive` (long-lived, line-oriented command sessions with streaming
 stdin/stdout over task-local queues rather than terminal emulation).
-`spec.type="agent"` is implemented with `spec.agent.runtime="llm"` and
-`spec.agent.runtime="provider_cli"`. `llm` supports Python tools,
-`output_mode` values `text`/`json`/`messages`, and persistent continuations
-when `spec.persistent=true` and `spec.agent.conversation_scope="per_task"`.
-`provider_cli` supports `output_mode="text"` only, rejects `spec.agent.tools`,
-and allows persistent continuation only for
-`spec.persistent=true` plus `spec.agent.conversation_scope="per_task"`.
-The current Docker-backed delegated lane is narrower:
-`spec.runner.name="docker"` currently supports one-shot `provider_cli` only,
+`spec.agent.runtime` is extensible: the TaskSpec schema accepts any non-empty
+runtime name, and the agent runtime layer resolves it through the runtime
+registry. The built-in runtimes currently are `llm` and `provider_cli`.
+`llm` supports Python tools, `output_mode` values `text`/`json`/`messages`,
+and persistent continuations when `spec.persistent=true` and
+`spec.agent.conversation_scope="per_task"`. `provider_cli` supports
+`output_mode="text"` only, rejects `spec.agent.tools`, and allows persistent
+continuation only for `spec.persistent=true` plus
+`spec.agent.conversation_scope="per_task"`. The Docker-backed delegated lane is
+narrower: `spec.runner.name="docker"` supports one-shot `provider_cli` only,
 with `spec.agent.conversation_scope="per_message"`, `spec.persistent=false`,
 and a provider that has both an explicit shipped Docker image recipe and an
 internal provider container runtime descriptor.
-Weft also exposes a coarse delegated-agent authority declaration through
+Weft also exposes a coarse agent authority declaration through
 `spec.agent.authority_class`. `llm` is bounded only. `provider_cli` accepts
 `"bounded"` and `"general"`, with missing values resolving to `"general"` for
 compatibility with older stored specs.
+`provider_cli` requires `spec.agent.runtime_config.provider`; optional
+string refs such as `executable`, `resolver_ref`, and `tool_profile_ref` are
+resolved by the agent-runtime validation and execution layers.
 Delegated runtimes may also use
 `spec.agent.runtime_config.tool_profile_ref` to load explicit structured tool
 policy such as `workspace_access` and stdio MCP server descriptors. The schema
 below treats one-off vs persistent execution as a **task lifecycle concern**,
 not an agent-specific field.
 
-Project-local delegated launch settings live outside TaskSpec. When a delegated
-TaskSpec does not pin an executable path directly, Weft may consult
-`.weft/agents.json` for explicit project defaults. Observed delegated-provider
-health may be recorded in `.weft/agent-health.json`, but that advisory cache is
-not part of the TaskSpec contract and does not affect schema validity.
+Project-local agent settings live outside TaskSpec. When an agent TaskSpec
+does not pin an executable path directly, delegated runtime paths may consult
+`.weft/agents.json` for explicit project defaults. The current shipped settings
+shape stores `provider_cli` defaults under `provider_cli.providers`. Observed
+delegated-provider health may be recorded in `.weft/agent-health.json`, but
+that advisory cache is not part of the TaskSpec contract and does not affect
+schema validity.
 
 ```jsonc
 {
-  "tid": "1837025672140161024" | null,       // REQUIRED at runtime. In templates, omit or set null as a placeholder. The Manager sets this to the spawn-request message ID (SimpleBroker 64-bit timestamp).
+  "tid": "1837025672140161024" | null,       // REQUIRED on resolved TaskSpecs. Templates may omit it or set it to null. The Manager sets this to the spawn-request message ID (SimpleBroker 64-bit timestamp).
   "version": "1.0",                          // REQUIRED. Spec version for future evolution.
   "name": "analyze-specification-v4",        // REQUIRED. Human-readable name for reporting and legibility.
   "description": "Tool to analyze ...",      // OPTIONAL. Long form human-readable description.
@@ -97,7 +103,7 @@ not part of the TaskSpec contract and does not affect schema validity.
           "required": true | false,
           "default": "codex" | null,
           "choices": ["codex", "gemini"] | [],
-          "help": "Shown in docs and examples only"
+          "help": "Shown in generated CLI help, docs, and examples"
         }
       }
     } | null,
@@ -107,28 +113,29 @@ not part of the TaskSpec contract and does not affect schema validity.
         "prompt": {
           "type": "string" | "path",
           "required": true | false,
-          "help": "Shown in docs and examples only"
+          "help": "Shown in generated CLI help, docs, and examples"
         }
       },
       "stdin": {
         "type": "text",
         "required": true | false,
-        "help": "Shown in docs and examples only"
+        "help": "Shown in generated CLI help, docs, and examples"
       } | null
     } | null,
     "args": [],                              // OPTIONAL. For commands, args are appended to build argv. For functions, args become *args.
     "keyword_args": {},                      // OPTIONAL. Keyword arguments for a function (named differently from Python kwargs due to technical constraints).
     "runner": {                              // OPTIONAL. Execution backend selection. Defaults to the built-in host runner.
       "name": "host",                        // REQUIRED when the runner object is present. Runner plugin name.
-      "options": {}                          // OPTIONAL. Runner-specific JSON-serializable options.
+      "options": {},                         // OPTIONAL. Runner-specific JSON-serializable options.
+      "environment_profile_ref": null        // OPTIONAL. Runner environment profile callable ref.
     },
     "timeout": 300.0 | null,                 // OPTIONAL. Timeout in seconds. null means no timeout.
     
     "limits": {                              // OPTIONAL. Resource limits for task execution.
-      "memory_mb": 256 | null,               // OPTIONAL. Memory limit in MB (default value 1Gb) null means no limit.
-      "cpu_percent": 50 | null,              // OPTIONAL. CPU limit in percent (0-100). null means no limit.
-      "max_fds": 20 | null,                  // OPTIONAL. Maximum number of open file descriptors. null means no limit.
-      "max_connections": 0 | null            // OPTIONAL. Maximum number of network connections. null means no limit.
+      "memory_mb": 1024 | null,              // OPTIONAL. Memory limit in MB (default 1024 MB). null means no limit.
+      "cpu_percent": null,                   // OPTIONAL. CPU limit in percent (0-100). null means no limit.
+      "max_fds": null,                       // OPTIONAL. Maximum number of open file descriptors. null means no limit.
+      "max_connections": null                // OPTIONAL. Maximum number of network connections. null means no limit.
     },
     
     "env": { "DEBUG": "1" } | null,          // OPTIONAL. Environment variables to set in the task's process. These update, not replace, the existing environment.
@@ -141,30 +148,30 @@ not part of the TaskSpec contract and does not affect schema validity.
     "reserved_policy_on_error": "keep",     // OPTIONAL. Behaviour for messages left in T{tid}.reserved when execution fails, times out, or is killed. Same options and default as above.
     "polling_interval": 1,                   // OPTIONAL. psutil polling interval in seconds. Defaults to 1 second.
     "reporting_interval": "poll" | "transition",  // OPTIONAL. Send reports to weft.log.tasks either on each transition or on each polling interval. Defaults to "transition"
-    "monitor_class": "weft.core.resource_monitor.ResourceMonitor",   // OPTIONAL. Default value is "weft.core.resource_monitor.ResourceMonitor". A class conforming to the ResourceMonitor spec that will be used to wrap the target. NOTE: Module will be created at weft/core.resource_monitor.py
+    "monitor_class": "weft.core.resource_monitor.ResourceMonitor",   // OPTIONAL. Default value is "weft.core.resource_monitor.ResourceMonitor". A class conforming to the ResourceMonitor spec that will be used to wrap the target.
     
     "enable_process_title": true,            // OPTIONAL. Enable OS process title updates for observability. Defaults to true.
     "output_size_limit_mb": 10               // OPTIONAL. Max output size before disk spill. Defaults to 10MB (SimpleBroker limit).
   },
-  "io": {                                    // REQUIRED (runtime). Defines the communication queues.
-    "inputs" : {                             // REQUIRED (runtime). May be empty or have *n* input queues.
+  "io": {                                    // OPTIONAL in templates. Resolved TaskSpecs populate default queue names. Defines the communication queues.
+    "inputs" : {                             // OPTIONAL in templates. May be empty or have *n* input queues.
       "inbox": "T183...inbox"                // OPTIONAL. Initial input and ongoing work queue. `weft run` seeds this queue from spawn-time input (including piped stdin when provided), and persistent/interactive tasks continue draining it for later stdin/work items.
     },   
-    "outputs": {                             // REQUIRED (runtime). Must include at least the "outbox" queue. May include *n* output queues.
+    "outputs": {                             // OPTIONAL in templates. Resolved TaskSpecs populate at least the "outbox" queue. May include *n* output queues.
        "outbox": "T183...outbox",            // REQUIRED. Result/output queue. Follows naming convention if not provided on task initialization.
     },
-    "control": {                             // REQUIRED (runtime). Must include only the keys for the ctrl_in and ctrl_out queues.
+    "control": {                             // OPTIONAL in templates. Resolved TaskSpecs populate the ctrl_in and ctrl_out queues.
       "ctrl_in": "T183...ctrl_in",           // REQUIRED. INPUT. Control input monitored by the Task. Used for job control/side-channel comms for tasks. 
       "ctrl_out": "T183...ctrl_out",         // REQUIRED. OUTPUT. Status, error messages reported by the Task. Used for side-channel comms. 
     }        
   },
-  "state": {                                 // REQUIRED. Element must be present. 
-    "status": "created|spawning|running|[...]", // REQUIRED, Current process state
-    "pid": null,                             // OPTIONAL. Process ID when running
-    "return_code": null,                     // REQUIRED. null means no return code yet (probably still running).
-    "started_at": null,                      // REQUIRED. Nanosecond timestamp (e.g. time.time_ns())
-    "completed_at": null,                    // REQUIRED. Nanosecond timestamp (e.g. time.time_ns())
-    "error": null,                           // OPTIONAL. Error message if failed
+  "state": {                                 // OPTIONAL in templates. Resolved TaskSpecs populate the runtime state section.
+    "status": "created|spawning|running|[...]", // OPTIONAL. Defaults to "created".
+    "pid": null,                             // OPTIONAL. Process ID when running.
+    "return_code": null,                     // OPTIONAL. Null means no return code yet.
+    "started_at": null,                      // OPTIONAL. Nanosecond timestamp (e.g. time.time_ns()).
+    "completed_at": null,                    // OPTIONAL. Nanosecond timestamp (e.g. time.time_ns()).
+    "error": null,                           // OPTIONAL. Error message if failed.
     "time": 60.0 | null,                     // OPTIONAL. Time spent running so far (wall-clock in seconds). null = not started/measured yet, 0.0+ = actual measurement
     "memory": 4.8 | null,                    // OPTIONAL. Last memory measurement from psutil in MB. null = not measured yet, 0.0+ = actual measurement
     "cpu": 4 | null,                         // OPTIONAL. Last CPU percentage from psutil. null = not measured yet, 0+ = actual measurement (can be 0%)
@@ -175,7 +182,7 @@ not part of the TaskSpec contract and does not affect schema validity.
     "peak_fds": 3 | null,                    // OPTIONAL. Highest number of open file descriptors over the life of the process. null = not measured yet
     "peak_net_connections": 0 | null         // OPTIONAL. Highest number of network connections over the life of the process. null = not measured yet
   },
-  "metadata": {                              // REQUIRED. Section must be present, but all keys are optional. User-defined metadata for querying and tracking. These can be updated by the Task or from outside by sending an update_metadata: {"key": "value" } over the ctrl_in queue.
+  "metadata": {                              // OPTIONAL. Defaults to an empty dict. User-defined metadata for querying and tracking. These can be updated by the Task or from outside by sending an update_metadata: {"key": "value" } over the ctrl_in queue.
     "owner": "claude-session-123",
     "session_id": "design-session-001",
     "agent_id": "agent-alpha"
@@ -206,7 +213,7 @@ constraint in the model layer.
 **Spec field groupings (for readability)**
 - **Target**: `type`, `function_target`/`process_target`/`agent`, `args`, `keyword_args`
 - **Submission UX**: `parameterization`, `run_input`
-- **Runner**: `runner.name`, `runner.options`
+- **Runner**: `runner.name`, `runner.options`, `runner.environment_profile_ref`
 - **Lifecycle**: `persistent`
 - **Limits**: `limits.*`
 - **Environment**: `env`, `working_dir`, `weft_context`
@@ -221,10 +228,11 @@ constraint in the model layer.
 - Recommended composite key: `tid:message_id`.
 
 **Templates vs runtime-expanded specs**
-- **TaskSpecTemplate**: Stored specs in `.weft/tasks/` omit `tid`, `io`, `state`, and `spec.weft_context` (or set `tid` to null). These templates declare *what to run*.
-- **Resolved TaskSpec**: The Manager expands templates at spawn time, populating `tid`, `io`, `state`, and `spec.weft_context`, then seeds `io.inputs.inbox` with the initial payload when one was supplied by the caller.
+- **TaskSpecTemplate**: Stored specs in `.weft/tasks/` may omit `tid`, `io`, `state`, `metadata`, and `spec.weft_context`, or leave those sections empty. These templates declare *what to run*.
+- **Resolved TaskSpec**: The Manager expands templates at spawn time, populating `tid`, `io`, `state`, `metadata`, and `spec.weft_context`, then seeds `io.inputs.inbox` with the initial payload when one was supplied by the caller.
 - **TID assignment**: The spawn-request message ID (SimpleBroker 64-bit timestamp) is the task's TID for the full lifecycle.
 - **Runner defaulting**: Templates may omit `spec.runner`; resolution defaults it to `{ "name": "host", "options": {} }`.
+- **Submission-only hooks**: `spec.parameterization` is removed from the materialized TaskSpec after local adaptation; `spec.run_input` is evaluated after materialization and before queueing the initial work payload.
 
 _Implementation mapping_:
 - **Schema & validation**: `weft/core/taskspec.py` — `TaskSpec`, `SpecSection`, `IOSection`, `StateSection`, `LimitsSection`, `RunnerSection`, `AgentSection`, `AgentToolSection`, `AgentTemplateSection`, `ReservedPolicy`.
@@ -301,13 +309,14 @@ reinterpret metadata keys as submission configuration.
 
 ### Submission-Time And Runtime Shaping Hooks [TS-1.4A]
 
-Weft now has several explicit shaping hooks. They are related, but they have
+Weft exposes several explicit shaping hooks. They are related, but they have
 different owners and run at different points:
 
 - `spec.parameterization`: local `weft run --spec` materialization from
   declared long options into a concrete TaskSpec template before queueing
 - `spec.run_input`: local `weft run --spec` shaping from declared long options
-  plus optional stdin into the ordinary initial work payload before queueing
+  plus optional stdin into the ordinary initial work payload after
+  materialization and before queueing
 - explicit `weft run --name TEXT`: local submission-time override of the
   top-level task name and, for persistent resolved tasks only, injection of a
   private runtime endpoint-claim metadata key before queueing
@@ -334,7 +343,7 @@ Boundary rule:
 - CLI-owned explicit name override is one of those local shaping hooks. It does
   not add a public TaskSpec field
 
-Current declared-option rules:
+Declared-option rules:
 
 - declared submission-time arguments use identifier keys in the TaskSpec and
   normalize `_` to `-` for the public long option name
@@ -349,12 +358,14 @@ Current declared-option rules:
   currently declares only argument type, requiredness, help text, and optional
   stdin acceptance
 
-_Implementation mapping_: `StateSection` fields are written by
-`BaseTask._report_state_change()` (lifecycle events, resource metrics) and
-`Consumer._finalize_result()` (return_code, completed_at, final metrics).
-`metadata` is a plain mutable dict on `TaskSpec`; it is updated via
-`TaskSpec.update_metadata()` at creation time or from ctrl_in messages
-(see the `update_metadata` key in the schema comment at line 129 above).
+_Implementation mapping_: `TaskSpec.mark_started()`, `mark_running()`,
+`mark_completed()`, `mark_failed()`, `mark_timeout()`, `mark_cancelled()`,
+`mark_killed()`, and `update_metrics()` mutate the runtime `state` fields.
+`BaseTask._report_state_change()` mirrors the live state into queue/log events.
+`Consumer._ensure_outcome_ok()` and `Consumer._finalize_message()` drive the
+terminal state transitions, return codes, and final metrics. `metadata` is a
+plain mutable dict on `TaskSpec`; it is updated via `TaskSpec.update_metadata()`
+at creation time or from `update_metadata` control messages over `ctrl_in`.
 
 ### Runner Selection and Extensibility [TS-1.3]
 
