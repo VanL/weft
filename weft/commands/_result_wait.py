@@ -11,6 +11,7 @@ import time
 from typing import Any
 
 from weft._constants import (
+    RESULT_SURFACE_WAIT_INTERVAL,
     TERMINAL_TASK_STATUSES,
     WEFT_COMPLETED_RESULT_GRACE_SECONDS,
     WEFT_GLOBAL_LOG_QUEUE,
@@ -245,6 +246,11 @@ def await_one_shot_result(
                     if wait_timeout is None
                     else min(wait_timeout, output_grace_remaining)
                 )
+            wait_timeout = (
+                RESULT_SURFACE_WAIT_INTERVAL
+                if wait_timeout is None
+                else min(wait_timeout, RESULT_SURFACE_WAIT_INTERVAL)
+            )
             monitor.wait(wait_timeout)
     finally:
         monitor.close()
