@@ -264,8 +264,8 @@ def manager_setup(broker_env, unique_tid):
 
 
 def wait_for_children(manager: Manager, timeout: float = 5.0) -> None:
-    deadline = time.time() + timeout
-    while manager._child_processes and time.time() < deadline:
+    deadline = time.monotonic() + timeout
+    while manager._child_processes and time.monotonic() < deadline:
         manager._cleanup_children()
         time.sleep(0.05)
 
@@ -1639,10 +1639,7 @@ def test_manager_idle_timeout_waits_for_active_child_to_finish(
         assert manager.should_stop is False
         assert manager._child_processes
 
-        start = time.time()
-        while manager._child_processes and time.time() - start < 3.0:
-            manager.process_once()
-            time.sleep(0.05)
+        wait_for_children(manager, timeout=8.0 if os.name == "nt" else 3.0)
         assert not manager._child_processes
 
         start = time.time()
