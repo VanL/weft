@@ -764,9 +764,7 @@ def test_cmd_result_passes_materialized_state_to_result_wait(
     monkeypatch.setattr(
         result_cmd,
         "_await_single_result",
-        lambda *args, **kwargs: (
-            captured.update(kwargs) or ("completed", "err", None)
-        ),
+        lambda *args, **kwargs: captured.update(kwargs) or ("completed", "err", None),
     )
 
     exit_code, payload = cmd_result(

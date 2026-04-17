@@ -115,10 +115,7 @@ def await_one_shot_result(
     )
     structured_result_seen_at: float | None = None
     materialized_completed = initial_terminal_status == "completed"
-    if (
-        initial_terminal_status is not None
-        and initial_terminal_status != "completed"
-    ):
+    if initial_terminal_status is not None and initial_terminal_status != "completed":
         status = initial_terminal_status
 
     deadline = None
