@@ -389,10 +389,7 @@ def _await_single_result(
     boundary_seen_at: float | None = None
     pending_completion_timestamps: list[int] = []
     materialized_completed = initial_terminal_status == "completed"
-    if (
-        initial_terminal_status is not None
-        and initial_terminal_status != "completed"
-    ):
+    if initial_terminal_status is not None and initial_terminal_status != "completed":
         status = initial_terminal_status
 
     deadline = None
