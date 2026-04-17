@@ -222,6 +222,40 @@ def test_await_one_shot_result_accepts_prewritten_outbox_when_log_event_is_misse
     assert error is None
 
 
+def test_await_one_shot_result_does_not_infer_completion_from_ambiguous_outbox(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    outbox_name = f"T{tid}.outbox"
+    outbox_queue = ctx.queue(outbox_name, persistent=True)
+    outbox_queue.write("hello")
+    outbox_queue.write("world")
+    monkeypatch.setattr(
+        result_wait,
+        "poll_log_events",
+        lambda log_queue, last_timestamp, target_tid: ([], last_timestamp),
+    )
+
+    try:
+        status, result, error = await_one_shot_result(
+            ctx,
+            tid,
+            outbox_name=outbox_name,
+            ctrl_out_name=f"T{tid}.ctrl_out",
+            timeout=0.3,
+            show_stderr=False,
+        )
+    finally:
+        outbox_queue.close()
+
+    assert status == "timeout"
+    assert result is None
+    assert error == f"Timed out after 0.3 seconds waiting for task {tid}"
+
+
 def test_await_single_result_aggregates_multiple_outbox_messages(tmp_path) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
