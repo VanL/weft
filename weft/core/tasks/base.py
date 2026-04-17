@@ -39,7 +39,10 @@ from weft._constants import (
     CONTROL_KILL,
     CONTROL_STOP,
     DEFAULT_OUTPUT_SIZE_LIMIT_MB,
+    INTERNAL_HEARTBEAT_ENDPOINT_NAME,
     INTERNAL_RUNTIME_ENDPOINT_NAME_KEY,
+    INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
+    INTERNAL_RUNTIME_TASK_CLASS_KEY,
     PIPELINE_OWNER_METADATA_KEY,
     QUEUE_CTRL_IN_SUFFIX,
     QUEUE_CTRL_OUT_SUFFIX,
@@ -61,7 +64,7 @@ from weft._runner_plugins import require_runner_plugin
 from weft.core.endpoints import (
     build_endpoint_record_payload,
     find_endpoint_registry_message,
-    normalize_endpoint_name,
+    validate_endpoint_claim_name,
 )
 from weft.core.taskspec import ReservedPolicy, TaskSpec
 from weft.ext import RunnerHandle
@@ -1136,20 +1139,33 @@ class BaseTask(MultiQueueWatcher, ABC):
         if not isinstance(configured_name, str) or not configured_name:
             return
 
-        self.register_endpoint_name(configured_name)
+        self.register_endpoint_name(
+            configured_name,
+            _allow_reserved_internal=True,
+        )
 
     def register_endpoint_name(
         self,
         name: str,
         *,
         metadata: Mapping[str, Any] | None = None,
+        _allow_reserved_internal: bool = False,
     ) -> None:
         """Claim a stable runtime endpoint name for this live task.
 
         Spec: [CC-2.2], [CC-2.4.1], [MF-3.1]
         """
 
-        normalized_name = normalize_endpoint_name(name)
+        runtime_class = self.taskspec.metadata.get(INTERNAL_RUNTIME_TASK_CLASS_KEY)
+        allow_reserved_internal = (
+            _allow_reserved_internal
+            and runtime_class == INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT
+            and str(name).strip() == INTERNAL_HEARTBEAT_ENDPOINT_NAME
+        )
+        normalized_name = validate_endpoint_claim_name(
+            name,
+            allow_reserved_internal=allow_reserved_internal,
+        )
         queue = self._queue(WEFT_ENDPOINTS_REGISTRY_QUEUE)
         registered_at = time.time_ns()
         payload = build_endpoint_record_payload(

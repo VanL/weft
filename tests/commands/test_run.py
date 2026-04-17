@@ -19,7 +19,12 @@ import weft.commands._manager_bootstrap as manager_lifecycle
 import weft.commands._spawn_submission as spawn_submission_cmd
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import (
+    INTERNAL_HEARTBEAT_ENDPOINT_NAME,
     INTERNAL_RUNTIME_ENDPOINT_NAME_KEY,
+    INTERNAL_RUNTIME_ENVELOPE_ENDPOINT_NAME_KEY,
+    INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY,
+    INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
+    INTERNAL_RUNTIME_TASK_CLASS_KEY,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MANAGERS_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
@@ -902,6 +907,37 @@ def test_delete_spawn_request_removes_queued_message(tmp_path: Path) -> None:
     assert deleted is True
 
 
+def test_enqueue_taskspec_strips_reserved_internal_runtime_metadata_from_public_submission(
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    taskspec = _make_taskspec(tid)
+    taskspec.metadata[INTERNAL_RUNTIME_TASK_CLASS_KEY] = (
+        INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT
+    )
+    taskspec.metadata[INTERNAL_RUNTIME_ENDPOINT_NAME_KEY] = (
+        INTERNAL_HEARTBEAT_ENDPOINT_NAME
+    )
+
+    _enqueue_taskspec(context, taskspec, None)
+
+    queue = context.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=False)
+    try:
+        raw_message = queue.read_one()
+    finally:
+        queue.close()
+
+    assert isinstance(raw_message, str)
+    payload = json.loads(raw_message)
+    taskspec_payload = payload["taskspec"]
+    assert INTERNAL_RUNTIME_TASK_CLASS_KEY not in taskspec_payload["metadata"]
+    assert INTERNAL_RUNTIME_ENDPOINT_NAME_KEY not in taskspec_payload["metadata"]
+    assert INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY not in payload
+    assert INTERNAL_RUNTIME_ENVELOPE_ENDPOINT_NAME_KEY not in payload
+
+
 def test_delete_spawn_request_swallows_delete_errors(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1020,6 +1056,108 @@ def test_reconcile_submitted_spawn_reports_rejected_from_manager_log(
         outcome="rejected",
         tid=submitted_tid,
         error="manager rejected child task",
+    )
+
+
+def test_reconcile_submitted_spawn_ignores_manager_fenced_requeued_event(
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    taskspec = _make_taskspec(tid)
+    submitted_tid = str(_enqueue_taskspec(context, taskspec, None))
+    log_queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
+    try:
+        log_queue.write(
+            json.dumps(
+                {
+                    "event": "manager_spawn_fenced_requeued",
+                    "tid": "1776000000000000002",
+                    "status": "running",
+                    "child_tid": submitted_tid,
+                    "leader_tid": "1776000000000000001",
+                    "reserved_queue": "T1776000000000000002.reserved",
+                    "message_id": int(submitted_tid),
+                }
+            )
+        )
+    finally:
+        log_queue.close()
+
+    result = reconcile_submitted_spawn(context, submitted_tid, timeout=0.0)
+
+    assert result == SpawnSubmissionReconciliation(
+        outcome="queued",
+        tid=submitted_tid,
+    )
+
+
+@pytest.mark.parametrize(
+    "event_name",
+    ["manager_spawn_fenced_stranded", "manager_spawn_fence_suspended"],
+)
+def test_reconcile_submitted_spawn_ignores_manager_fence_reserved_diagnostics(
+    tmp_path: Path,
+    event_name: str,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+    manager_tid = "1776000000000000001"
+    registry = context.queue(WEFT_MANAGERS_REGISTRY_QUEUE, persistent=False)
+    try:
+        registry.write(
+            json.dumps(
+                {
+                    "tid": manager_tid,
+                    "status": "active",
+                    "pid": 424242,
+                    "requests": WEFT_SPAWN_REQUESTS_QUEUE,
+                    "role": "manager",
+                }
+            )
+        )
+    finally:
+        registry.close()
+
+    tid = str(time.time_ns())
+    taskspec = _make_taskspec(tid)
+    submitted_tid = str(_enqueue_taskspec(context, taskspec, None))
+    spawn_queue = context.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=False)
+    try:
+        moved = spawn_queue.move_one(
+            f"T{manager_tid}.reserved",
+            exact_timestamp=int(submitted_tid),
+            with_timestamps=False,
+        )
+    finally:
+        spawn_queue.close()
+    assert moved is not None
+
+    log_queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
+    try:
+        payload = {
+            "event": event_name,
+            "tid": "1776000000000000002",
+            "status": "running",
+            "child_tid": submitted_tid,
+            "reserved_queue": f"T{manager_tid}.reserved",
+            "message_id": int(submitted_tid),
+        }
+        if event_name == "manager_spawn_fence_suspended":
+            payload["ownership_state"] = "unknown"
+        else:
+            payload["leader_tid"] = "1776000000000000001"
+        log_queue.write(json.dumps(payload))
+    finally:
+        log_queue.close()
+
+    result = reconcile_submitted_spawn(context, submitted_tid, timeout=0.0)
+
+    assert result == SpawnSubmissionReconciliation(
+        outcome="reserved",
+        tid=submitted_tid,
+        reserved_queue=f"T{manager_tid}.reserved",
     )
 
 
@@ -1336,8 +1474,9 @@ def test_run_spec_via_manager_explicit_name_overrides_name_and_claims_endpoint(
         work_payload: Any,
         *,
         seed_start_envelope: bool = True,
+        allow_internal_runtime: bool = False,
     ) -> int:
-        del context_arg, work_payload, seed_start_envelope
+        del context_arg, work_payload, seed_start_envelope, allow_internal_runtime
         captured["name"] = taskspec.name
         captured["metadata"] = dict(taskspec.metadata)
         return 1777000000000000001
@@ -1397,8 +1536,9 @@ def test_run_spec_via_manager_explicit_name_keeps_nonpersistent_tasks_label_only
         work_payload: Any,
         *,
         seed_start_envelope: bool = True,
+        allow_internal_runtime: bool = False,
     ) -> int:
-        del context_arg, work_payload, seed_start_envelope
+        del context_arg, work_payload, seed_start_envelope, allow_internal_runtime
         captured["name"] = taskspec.name
         captured["metadata"] = dict(taskspec.metadata)
         return 1777000000000000002
@@ -1428,6 +1568,49 @@ def test_run_spec_via_manager_explicit_name_keeps_nonpersistent_tasks_label_only
     assert exit_code == 0
     assert captured["name"] == "mayor"
     assert INTERNAL_RUNTIME_ENDPOINT_NAME_KEY not in captured["metadata"]
+
+
+@pytest.mark.parametrize("persistent", [False, True])
+def test_run_spec_via_manager_rejects_reserved_internal_name_prefix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    persistent: bool,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+    spec_path = root / "named_task.json"
+    _write_json(
+        spec_path,
+        {
+            "name": "demo-task",
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:echo_payload",
+                "weft_context": str(root),
+                **({"persistent": True} if persistent else {}),
+            },
+            "metadata": {},
+        },
+    )
+
+    monkeypatch.setattr(
+        "weft.commands.run.build_context",
+        lambda spec_context=None, autostart=True: context,
+    )
+    monkeypatch.setattr("weft.commands.run._read_piped_stdin", lambda context: None)
+
+    with pytest.raises(
+        typer.BadParameter, match="reserved for internal runtime services"
+    ):
+        _run_spec_via_manager(
+            spec_path,
+            name="_weft.heartbeat",
+            verbose=False,
+            wait=False,
+            json_output=False,
+            autostart_enabled=True,
+            persistent_override=None,
+        )
 
 
 def test_run_pipeline_deletes_spawn_request_when_ensure_manager_fails(
@@ -1521,8 +1704,9 @@ def test_run_pipeline_explicit_name_overrides_pipeline_task_name(
         work_payload: Any,
         *,
         seed_start_envelope: bool = True,
+        allow_internal_runtime: bool = False,
     ) -> int:
-        del context_arg, work_payload, seed_start_envelope
+        del context_arg, work_payload, seed_start_envelope, allow_internal_runtime
         captured["name"] = taskspec.name
         captured["metadata"] = dict(taskspec.metadata)
         return 1777000000000000003

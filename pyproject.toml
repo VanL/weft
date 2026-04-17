@@ -100,6 +100,7 @@ markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "shared: backend-agnostic tests that should pass across supported backends",
     "sqlite_only: tests that intentionally validate SQLite/file-backed behavior",
+    "xdist_group(name): groups broker-heavy tests onto one xdist worker when pytest-xdist is enabled",
 ]
 
 [tool.mypy]

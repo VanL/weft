@@ -94,6 +94,8 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
 - **OBS.6**: TID mappings are written to `weft.state.tid_mappings`
 - **OBS.7**: process-title segments are sanitized for shell-safe use
 - **OBS.8**: process titles stay within the allowed character vocabulary
+- **OBS.9**: endpoint names under `_weft.` are reserved for Weft-owned
+  internal runtime services and are not claimable from public naming surfaces
 
 ### Implementation Invariants
 
@@ -111,6 +113,9 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
   inherited connections
 - **IMPL.6**: spawned child process creation uses spawn-style multiprocessing
   context
+- **IMPL.7**: public submission surfaces do not authorize internal runtime
+  class selection through stored TaskSpec metadata alone; internal runtime
+  selection travels on the manager-owned spawn envelope
 
 ### Manager Invariants
 
@@ -134,6 +139,25 @@ _Implementation mapping_: `weft/core/manager.py`,
 - **MANAGER.8**: live canonical managers converge on one lowest-TID leader per
   context; non-leaders yield or drain once they no longer need to protect
   persistent children
+- **MANAGER.9**: only positive `self` ownership authorizes child launch from a
+  reserved spawn request; `none` and `unknown` are not launch authority
+- **MANAGER.10**: if a lower-TID canonical owner is positively proved after
+  reservation but before launch, the manager must keep the exact work item
+  durable by either exact-message requeue to `weft.spawn.requests` or visibly
+  stranded reserved state
+- **MANAGER.11**: manager-scoped fence diagnostics
+  (`manager_spawn_fenced_requeued`, `manager_spawn_fenced_stranded`,
+  `manager_spawn_fence_suspended`) must not be reused as spawn rejection
+  signals
+- **MANAGER.12**: dispatch suspension blocks later spawn reservation and launch
+  until ownership is re-established, while still allowing control handling and
+  supervision of already-running children
+- **MANAGER.13**: a manager that still owns a fenced exact spawn request in its
+  private reserved queue must not leadership-yield, idle-exit, or enqueue new
+  ensure-mode autostart work before that exact request is recovered
+- **MANAGER.14**: if dispatch ownership returns to `self` after suspension, the
+  exact fenced spawn request is requeued to `weft.spawn.requests` before later
+  inbox work resumes
 
 ### Context Invariants
 
@@ -193,6 +217,7 @@ doc:
 - [`docs/plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md`](../plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md)
 - [`docs/plans/2026-04-07-spec-plan-code-traceability-plan.md`](../plans/2026-04-07-spec-plan-code-traceability-plan.md)
 - [`docs/plans/2026-04-14-weft-road-to-excellent-plan.md`](../plans/2026-04-14-weft-road-to-excellent-plan.md)
+- [`docs/plans/2026-04-17-canonical-owner-fence-plan.md`](../plans/2026-04-17-canonical-owner-fence-plan.md)
 
 ## Related Documents
 

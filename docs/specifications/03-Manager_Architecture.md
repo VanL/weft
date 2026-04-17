@@ -36,6 +36,8 @@ always be rolled back from the public request queue.
 - [Autostart Hardening And Contract Alignment Plan](../plans/2026-04-16-autostart-hardening-and-contract-alignment-plan.md) – Make project-level autostart intent durable, fix manager-side enqueue bookkeeping, and align manifest policy docs with enforced behavior.
 - [Pipeline Autostart Extension Plan](../plans/2026-04-16-pipeline-autostart-extension-plan.md) – Extend autostart manifests so stored pipeline targets compile and launch through the ordinary first-class pipeline runtime.
 - [Review Findings Remediation Plan](../plans/2026-04-16-review-findings-remediation-plan.md) – Fix forced broker-activity freshness, autostart-state pruning, and nearby contract ambiguity surfaced by the deep-read review.
+- [Canonical Owner Fence Plan](../plans/2026-04-17-canonical-owner-fence-plan.md) – Add a shared canonical-owner reduction helper and harden manager child dispatch with a final ownership fence before launch.
+- [Heartbeat Service Plan](../plans/2026-04-17-heartbeat-service-plan.md) – Add the built-in runtime heartbeat service, reserve its internal endpoint namespace, and reuse the canonical-owner fence in a long-lived interval emitter.
 - [Agent Runtime Implementation Plan](../plans/2026-04-06-agent-runtime-implementation-plan.md) – references `MA-2` TID correlation.
 - [Persistent Agent Runtime Implementation Plan](../plans/2026-04-06-persistent-agent-runtime-implementation-plan.md) – references Manager Architecture for long-lived agent sessions.
 - [TaskSpec Clean Design Plan](../plans/2026-04-06-taskspec-clean-design-plan.md) – references Manager Architecture for TaskSpec schema alignment.
@@ -62,7 +64,9 @@ Key responsibilities implemented in `weft/core/manager.py`:
 1. **Spawn queue consumption** – A manager’s inbox is bound to
    `weft.spawn.requests`. Each message contains a serialized child TaskSpec and
    an optional `inbox_message`. Messages are reserved, parsed, and acknowledged
-   via the `BaseTask` helpers.
+   via the `BaseTask` helpers. The manager performs a final dispatch-ownership
+   check immediately before child launch side effects. Only positive `self`
+   ownership preserves the normal launch path.
 2. **Child process launch** – Validated TaskSpecs are executed via
    `launch_task_process(Consumer, …)`, preserving the standard isolation model
    (a dedicated subprocess per child task).
@@ -75,7 +79,10 @@ Key responsibilities implemented in `weft/core/manager.py`:
    active record is pruned when the manager exits cleanly. The registry is
    read as a live queue: callers reduce to the latest relevant record per TID,
    prune dead active records, and then filter to canonical live managers
-   before treating the result as the active-manager view.
+   before treating the result as the active-manager view. Canonical ownership
+   is lowest-live-TID among canonical claimants for `weft.spawn.requests`.
+   Manager dispatch keeps four runtime-owned outcomes distinct:
+   `self`, `other`, `none`, and `unknown`.
 5. **Idle timeout** – Managers honour the `idle_timeout` metadata field first.
    When that metadata is absent they fall back to
    `WEFT_MANAGER_LIFETIME_TIMEOUT`, which must parse as a non-negative float at
@@ -102,10 +109,46 @@ _Implementation mapping_:
 - [MA-1.1] Spawn queue consumption — `Manager._handle_work_message`, `Manager._build_child_spec`.
 - [MA-1.2] Child process launch — `Manager._launch_child_task`, `launch_task_process` (`weft/core/launcher.py`).
 - [MA-1.3] Initial payload delivery — `Manager._launch_child_task` (inbox seeding block).
-- [MA-1.4] Registry heartbeat and leadership view — `Manager._register_manager`, `Manager._unregister_manager`, `Manager._atexit_unregister`, `Manager._active_manager_records`, `Manager._leader_tid`, `Manager._maybe_yield_leadership`, plus `weft/helpers.py::is_canonical_manager_record`.
+- [MA-1.4] Registry heartbeat and leadership view — `Manager._register_manager`, `Manager._unregister_manager`, `Manager._atexit_unregister`, `Manager._read_active_manager_records`, `Manager._active_manager_records`, `Manager._leader_tid`, `Manager._evaluate_dispatch_ownership`, `Manager._refresh_dispatch_suspension`, `Manager._maybe_yield_leadership`, plus `weft/helpers.py::is_canonical_manager_record` and `weft/helpers.py::canonical_owner_tid`.
 - [MA-1.5] Idle timeout — `Manager.process_once` (idle-timeout check), `Manager._read_broker_timestamp`, `Manager._update_idle_activity_from_broker`.
 - [MA-1.6] Autostart manifests — `Manager._tick_autostart`, `Manager._prune_autostart_state`, `Manager._build_autostart_spawn_payload`, `Manager._load_autostart_manifest`, `Manager._load_autostart_taskspec`, `Manager._load_autostart_pipeline`, `Manager._active_autostart_sources`, `Manager._enqueue_autostart_request`, `Manager._cleanup_children`, plus `weft/core/pipelines.py::compile_linear_pipeline` for stored pipeline targets.
 - [MA-1.7] Control channel — inherited from `BaseTask._handle_control_command` (`weft/core/tasks/base.py`); PING/PONG, STOP, STATUS, KILL handling.
+
+Current ownership-fence rules:
+
+- `self` means this manager is still positively dispatch-eligible
+- `other` means a lower-TID canonical manager is positively proved
+- `none` means the registry replay succeeded, but no canonical dispatch owner
+  is positively visible, including this manager
+- `unknown` means runtime state could not be read confidently enough to choose
+  among the other outcomes
+- `other` prevents launch, marks this manager non-dispatching for later loop
+  iterations, and attempts an exact-message move of the reserved spawn request
+  back to `weft.spawn.requests`
+- `none` and `unknown` prevent launch and place the manager into
+  dispatch-suspended mode; while suspended the manager may still handle
+  control, supervise existing children, and re-check ownership, but it must
+  not reserve or launch later spawn requests
+- while a fenced exact request is still pending recovery in the manager's
+  private reserved queue, the manager must not leadership-yield, idle-exit, or
+  run ensure-style autostart scans that enqueue more undispatchable work
+- if ownership later resolves back to `self`, the manager must exact-message
+  requeue the older fenced request back to `weft.spawn.requests` before later
+  inbox work resumes
+- dispatch eligibility and child supervision may diverge after supersession:
+  a manager may keep supervising already-launched persistent children while
+  refusing all new dispatch
+
+Current fence diagnostics:
+
+- `manager_spawn_fenced_requeued` with required fields `child_tid`,
+  `leader_tid`, `reserved_queue`, and `message_id`
+- `manager_spawn_fenced_stranded` with required fields `child_tid`,
+  `leader_tid`, `reserved_queue`, and `message_id`
+- `manager_spawn_fence_suspended` with required fields `child_tid`,
+  `reserved_queue`, `message_id`, and `ownership_state`
+
+These are manager-scoped diagnostics, not spawn rejection signals.
 
 ## TID Correlation [MA-2]
 
@@ -153,7 +196,11 @@ _Implementation mapping_:
 - Detached bootstrap launcher — `weft/manager_detached_launcher.py` :: `main` (short-lived wrapper that starts the real manager runtime in a detached session/process-group boundary and reports early launch status back to `_start_manager`).
 - Manager process launch — `weft/commands/_manager_bootstrap.py` :: `_start_manager` (builds manager TaskSpec, launches the detached wrapper, requires matching pid-plus-registry readiness before success, treats post-proof acknowledgement cleanup as best effort, and reports early bootstrap diagnostics on failure).
 - Manager process entry point — `weft/manager_process.py` :: `run_manager_process`, `main` (shared runtime helper plus standalone module invoked via `python -m weft.manager_process`).
-- Leadership election — `weft/core/manager.py` :: `Manager._maybe_yield_leadership`, `Manager._leader_tid`, `Manager._active_manager_records`, `weft/helpers.py::is_canonical_manager_record` (lowest-TID canonical manager wins; duplicates self-cancel).
+- Leadership election and ownership fencing — `weft/core/manager.py` :: `Manager._maybe_yield_leadership`, `Manager._leader_tid`, `Manager._read_active_manager_records`, `Manager._active_manager_records`, `Manager._evaluate_dispatch_ownership`, `Manager._refresh_dispatch_suspension`, `Manager._apply_final_dispatch_fence`, `Manager._requeue_reserved_spawn_request`; `weft/helpers.py::is_canonical_manager_record`; `weft/helpers.py::canonical_owner_tid` (lowest-TID canonical manager wins; non-leaders yield, requeue, or suspend according to the final ownership proof).
+- Internal runtime submission envelope — `weft/core/spawn_requests.py`
+  `submit_spawn_request` carries internal runtime selectors on the manager-owned
+  spawn envelope, and `weft/core/manager.py` `Manager._build_child_spec`
+  re-applies them when materializing the child TaskSpec.
 - External signal handling — `weft/core/manager.py` :: `Manager.handle_termination_signal` (TERM/INT drain, SIGUSR1 kill).
 - CLI management — `weft/commands/manager.py` :: `start_command`, `stop_command`, `list_command`, `status_command`; these commands are thin wrappers over the shared lifecycle helper. `weft/commands/status.py` :: `_collect_manager_records` reuses the same lifecycle reader for manager views.
 - Foreground supervision command — `weft/commands/serve.py` :: `serve_command`, registered in `weft/cli.py` as `weft manager serve`.
@@ -166,6 +213,9 @@ are outside the current contract and are tracked in the companion doc:
 
 - [`03A-Manager_Architecture_Planned.md`](03A-Manager_Architecture_Planned.md)
 
-_Implementation mapping_: the Manager currently launches `Consumer` as the
-child task class via `Manager._launch_child_task`. Runner extensibility affects
-execution backends, not manager specialization.
+_Implementation mapping_: `weft/core/manager.py`
+`Manager._resolve_child_task_class()` currently routes to `Consumer`,
+`PipelineTask`, `PipelineEdgeTask`, or `HeartbeatTask` via the manager-owned
+internal runtime envelope. Public submission surfaces do not authorize
+internal runtime class selection through stored TaskSpec metadata alone.
+Runner extensibility affects execution backends, not manager specialization.

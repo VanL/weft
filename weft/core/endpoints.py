@@ -22,13 +22,14 @@ from simplebroker import Queue
 from simplebroker.ext import BrokerError
 from weft._constants import (
     ENDPOINT_NAME_PATTERN,
+    INTERNAL_ENDPOINT_NAMESPACE_PREFIX,
     TERMINAL_TASK_STATUSES,
     WEFT_ENDPOINTS_REGISTRY_QUEUE,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
 )
 from weft.context import WeftContext
-from weft.helpers import iter_queue_json_entries, pid_is_live
+from weft.helpers import canonical_owner_tid, iter_queue_json_entries, pid_is_live
 
 
 def normalize_endpoint_name(name: str) -> str:
@@ -37,12 +38,46 @@ def normalize_endpoint_name(name: str) -> str:
     candidate = name.strip()
     if not candidate:
         raise ValueError("endpoint name must not be empty")
+    if candidate.startswith(INTERNAL_ENDPOINT_NAMESPACE_PREFIX):
+        internal_suffix = candidate.removeprefix(INTERNAL_ENDPOINT_NAMESPACE_PREFIX)
+        if ENDPOINT_NAME_PATTERN.fullmatch(internal_suffix):
+            return candidate
+        raise ValueError(
+            "internal endpoint name must use the reserved prefix "
+            f"'{INTERNAL_ENDPOINT_NAMESPACE_PREFIX}' followed by a valid endpoint "
+            "suffix"
+        )
     if not ENDPOINT_NAME_PATTERN.fullmatch(candidate):
         raise ValueError(
             "endpoint name must start with an alphanumeric character and use "
             "only letters, digits, '.', '_', or '-'"
         )
     return candidate
+
+
+def is_reserved_internal_endpoint_name(name: str) -> bool:
+    """Return whether a normalized endpoint name is reserved for Weft internals."""
+
+    normalized_name = normalize_endpoint_name(name)
+    return normalized_name.startswith(INTERNAL_ENDPOINT_NAMESPACE_PREFIX)
+
+
+def validate_endpoint_claim_name(
+    name: str,
+    *,
+    allow_reserved_internal: bool = False,
+) -> str:
+    """Validate a claimable endpoint name for a concrete caller surface."""
+
+    normalized_name = normalize_endpoint_name(name)
+    if not allow_reserved_internal and normalized_name.startswith(
+        INTERNAL_ENDPOINT_NAMESPACE_PREFIX
+    ):
+        raise ValueError(
+            f"endpoint names under '{INTERNAL_ENDPOINT_NAMESPACE_PREFIX}' are "
+            "reserved for internal runtime services"
+        )
+    return normalized_name
 
 
 @dataclass(frozen=True, slots=True)
@@ -300,8 +335,15 @@ def list_resolved_endpoints(
         for name, candidates in grouped.items():
             del name
             ordered = sorted(candidates, key=lambda item: int(item.tid))
+            canonical_tid = canonical_owner_tid(record.tid for record in ordered)
+            if canonical_tid is None:
+                continue
+            canonical_record = next(
+                (record for record in ordered if record.tid == canonical_tid),
+                ordered[0],
+            )
             resolved.append(
-                ResolvedEndpoint(record=ordered[0], live_candidates=len(ordered))
+                ResolvedEndpoint(record=canonical_record, live_candidates=len(ordered))
             )
         resolved.sort(key=lambda item: (item.record.name, int(item.record.tid)))
         return resolved
@@ -326,7 +368,9 @@ __all__ = [
     "build_endpoint_record_payload",
     "endpoint_record_from_payload",
     "find_endpoint_registry_message",
+    "is_reserved_internal_endpoint_name",
     "list_resolved_endpoints",
     "normalize_endpoint_name",
+    "validate_endpoint_claim_name",
     "resolve_endpoint",
 ]

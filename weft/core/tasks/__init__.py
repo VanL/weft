@@ -10,6 +10,7 @@ from __future__ import annotations
 from .base import BaseTask
 from .consumer import Consumer, SelectiveConsumer
 from .debugger import Debugger
+from .heartbeat import HeartbeatTask
 from .interactive import InteractiveTaskMixin
 from .monitor import Monitor
 from .multiqueue_watcher import MultiQueueWatcher
@@ -25,6 +26,7 @@ __all__ = [
     "SamplingObserver",
     "Monitor",
     "Debugger",
+    "HeartbeatTask",
     "MultiQueueWatcher",
     "PipelineTask",
     "PipelineEdgeTask",
