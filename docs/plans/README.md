@@ -36,6 +36,8 @@ There are currently 63 tracked plan files in this directory.
 | [`2026-04-16-runtime-endpoint-registry-boundary-plan.md`](./2026-04-16-runtime-endpoint-registry-boundary-plan.md) | Runtime Endpoint Registry Boundary Plan | `completed` | none |
 | [`2026-04-16-review-findings-remediation-plan.md`](./2026-04-16-review-findings-remediation-plan.md) | Review Findings Remediation Plan | `completed` | none |
 | [`2026-04-16-manager-and-basetask-exception-hardening-plan.md`](./2026-04-16-manager-and-basetask-exception-hardening-plan.md) | Manager And BaseTask Exception Hardening | `completed` | none |
+| [`2026-04-16-configurable-weft-directory-name-plan.md`](./2026-04-16-configurable-weft-directory-name-plan.md) | Configurable Weft Directory Name Plan | `completed` | none |
+| [`2026-04-16-spec-corpus-and-readme-reality-alignment-plan.md`](./2026-04-16-spec-corpus-and-readme-reality-alignment-plan.md) | Spec Corpus And README Reality Alignment | `completed` | none |
 | [`2026-04-16-docker-builtins-windows-guard-plan.md`](./2026-04-16-docker-builtins-windows-guard-plan.md) | Docker Builtins Windows Guard Plan | `proposed` | none |
 | [`2026-04-15-docs-audit-and-alignment-plan.md`](./2026-04-15-docs-audit-and-alignment-plan.md) | Documentation Audit And Alignment | `active` | none |
 | [`2026-04-15-maintainability-and-boundary-remediation-plan.md`](./2026-04-15-maintainability-and-boundary-remediation-plan.md) | Maintainability And Boundary Remediation | `active` | none |
