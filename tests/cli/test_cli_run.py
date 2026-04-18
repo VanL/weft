@@ -2048,6 +2048,9 @@ def test_harness_wait_for_completion_reports_cancelled_task(
 
 
 def test_cli_run_wait_reports_cancelled_task(workdir, weft_harness) -> None:
+    run_timeout = 30.0 if sys.platform == "win32" else 15.0
+    result_timeout = 35.0 if sys.platform == "win32" else 20.0
+
     with ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(
             run_cli,
@@ -2058,7 +2061,7 @@ def test_cli_run_wait_reports_cancelled_task(workdir, weft_harness) -> None:
             "duration=5",
             cwd=workdir,
             harness=weft_harness,
-            timeout=15.0,
+            timeout=run_timeout,
         )
 
         task_tid = _wait_for_started_task_tid(
@@ -2074,7 +2077,7 @@ def test_cli_run_wait_reports_cancelled_task(workdir, weft_harness) -> None:
         )
         assert rc == 0, err
 
-        rc, out, err = future.result(timeout=20.0)
+        rc, out, err = future.result(timeout=result_timeout)
 
     assert rc == 1
     assert out == ""

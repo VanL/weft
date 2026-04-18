@@ -616,48 +616,39 @@ def test_cmd_result_waits_for_custom_result_channels_to_materialize(
         "metadata": {},
     }
 
-    writes_triggered = 0
-
     class _WakeMonitor:
         def __init__(self, _queues, *, config=None) -> None:
             del config
 
         def wait(self, timeout: float | None) -> bool:
             del timeout
-            nonlocal writes_triggered
-            writes_triggered += 1
-            if writes_triggered == 1:
-                log_queue.write(
-                    json.dumps(
-                        {
-                            "tid": tid,
-                            "status": "running",
-                            "event": "task_initialized",
-                            "taskspec": taskspec_payload,
-                        }
-                    )
+            log_queue.write(
+                json.dumps(
+                    {
+                        "tid": tid,
+                        "status": "running",
+                        "event": "task_initialized",
+                        "taskspec": taskspec_payload,
+                    }
                 )
-                return True
-            if writes_triggered == 2:
-                outbox_queue.write("hello")
-                log_queue.write(
-                    json.dumps(
-                        {
-                            "tid": tid,
-                            "status": "running",
-                            "event": "work_item_completed",
-                            "taskspec": taskspec_payload,
-                        }
-                    )
+            )
+            outbox_queue.write("hello")
+            log_queue.write(
+                json.dumps(
+                    {
+                        "tid": tid,
+                        "status": "running",
+                        "event": "work_item_completed",
+                        "taskspec": taskspec_payload,
+                    }
                 )
-                return True
+            )
             return False
 
         def close(self) -> None:
             return
 
     monkeypatch.setattr(result_cmd, "QueueChangeMonitor", _WakeMonitor)
-    monkeypatch.setattr(result_wait, "QueueChangeMonitor", _WakeMonitor)
     try:
         exit_code, payload = cmd_result(
             tid=tid,
@@ -699,6 +690,17 @@ def test_cmd_result_polls_custom_result_channels_when_monitor_misses_activity(
         "metadata": {},
     }
 
+    log_queue.write(
+        json.dumps(
+            {
+                "tid": tid,
+                "status": "running",
+                "event": "task_initialized",
+                "taskspec": taskspec_payload,
+            }
+        )
+    )
+
     writes_triggered = 0
 
     class _NoWakeMonitor:
@@ -710,17 +712,6 @@ def test_cmd_result_polls_custom_result_channels_when_monitor_misses_activity(
             nonlocal writes_triggered
             writes_triggered += 1
             if writes_triggered == 1:
-                log_queue.write(
-                    json.dumps(
-                        {
-                            "tid": tid,
-                            "status": "running",
-                            "event": "task_initialized",
-                            "taskspec": taskspec_payload,
-                        }
-                    )
-                )
-            elif writes_triggered == 2:
                 outbox_queue.write("hello")
                 log_queue.write(
                     json.dumps(
@@ -738,7 +729,6 @@ def test_cmd_result_polls_custom_result_channels_when_monitor_misses_activity(
             return
 
     monkeypatch.setattr(result_cmd, "QueueChangeMonitor", _NoWakeMonitor)
-    monkeypatch.setattr(result_wait, "QueueChangeMonitor", _NoWakeMonitor)
     try:
         exit_code, payload = cmd_result(
             tid=tid,
