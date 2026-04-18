@@ -700,17 +700,6 @@ def test_cmd_result_polls_custom_result_channels_when_monitor_misses_activity(
         "metadata": {},
     }
 
-    log_queue.write(
-        json.dumps(
-            {
-                "tid": tid,
-                "status": "running",
-                "event": "task_initialized",
-                "taskspec": taskspec_payload,
-            }
-        )
-    )
-
     writes_triggered = 0
 
     class _NoWakeMonitor:
@@ -722,6 +711,16 @@ def test_cmd_result_polls_custom_result_channels_when_monitor_misses_activity(
             nonlocal writes_triggered
             writes_triggered += 1
             if writes_triggered == 1:
+                log_queue.write(
+                    json.dumps(
+                        {
+                            "tid": tid,
+                            "status": "running",
+                            "event": "task_initialized",
+                            "taskspec": taskspec_payload,
+                        }
+                    )
+                )
                 outbox_queue.write("hello")
                 log_queue.write(
                     json.dumps(
@@ -891,6 +890,7 @@ def test_cmd_result_passes_materialized_state_to_result_wait(
         log_last_timestamp=123,
         terminal_status="completed",
         terminal_error_message=None,
+        batch_boundary_timestamps=(456,),
     )
 
     monkeypatch.setattr(
@@ -930,6 +930,10 @@ def test_cmd_result_passes_materialized_state_to_result_wait(
     assert (
         captured["initial_terminal_error_message"]
         == materialized.terminal_error_message
+    )
+    assert (
+        captured["initial_batch_boundary_timestamps"]
+        == materialized.batch_boundary_timestamps
     )
 
 
