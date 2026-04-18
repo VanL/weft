@@ -787,7 +787,7 @@ def test_cmd_result_stream_preserves_error_payload_selection(
         tid=tid,
         all_results=False,
         peek=False,
-        timeout=0.1,
+        timeout=0.0,
         stream=True,
         json_output=False,
         show_stderr=True,

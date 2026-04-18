@@ -117,6 +117,32 @@ def _queue_names_exist(context: WeftContext, *queue_names: str) -> bool:
     return any(name in wanted for name, _count in queues)
 
 
+def _result_surface_has_activity(
+    context: WeftContext,
+    *,
+    outbox_name: str,
+    ctrl_out_name: str,
+) -> bool:
+    """Return ``True`` when the default result surface already has messages.
+
+    Queue enumeration can lag behind direct queue reads on some backends. For
+    the default ``T{tid}`` surface, visible outbox or control-stream traffic is
+    enough to start result collection even when list_queues() and task-log
+    discovery have not caught up yet.
+    """
+
+    outbox_queue = context.queue(outbox_name, persistent=True)
+    ctrl_queue = context.queue(ctrl_out_name, persistent=False)
+    try:
+        return (
+            outbox_queue.peek_one() is not None
+            or ctrl_queue.peek_one() is not None
+        )
+    finally:
+        outbox_queue.close()
+        ctrl_queue.close()
+
+
 def _await_result_materialization(
     context: WeftContext,
     tid: str,
@@ -148,6 +174,17 @@ def _await_result_materialization(
             ):
                 return ResultMaterialization(
                     taskspec_payload=taskspec_payload,
+                    outbox_name=outbox_name,
+                    ctrl_out_name=ctrl_out_name,
+                    log_last_timestamp=log_last_timestamp,
+                )
+            if taskspec_payload is None and _result_surface_has_activity(
+                context,
+                outbox_name=outbox_name,
+                ctrl_out_name=ctrl_out_name,
+            ):
+                return ResultMaterialization(
+                    taskspec_payload=None,
                     outbox_name=outbox_name,
                     ctrl_out_name=ctrl_out_name,
                     log_last_timestamp=log_last_timestamp,
@@ -199,17 +236,7 @@ def _await_result_materialization(
                 return None
             wait_timeout = max(0.0, deadline - time.monotonic())
             if wait_timeout <= 0:
-                # For the default ``T{tid}`` result surface, the caller already
-                # knows which queues to read. If queue enumeration or the task
-                # log lags until the timeout boundary, hand those default names
-                # to the one-shot waiter instead of failing before it can drain
-                # a result that is already present.
-                return ResultMaterialization(
-                    taskspec_payload=taskspec_payload,
-                    outbox_name=outbox_name,
-                    ctrl_out_name=ctrl_out_name,
-                    log_last_timestamp=log_last_timestamp,
-                )
+                return None
             wait_timeout = min(wait_timeout, poll_interval)
             monitor.wait(wait_timeout)
     finally:
