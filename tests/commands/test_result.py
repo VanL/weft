@@ -766,29 +766,28 @@ def test_cmd_result_rejects_stream_json_combination(tmp_path) -> None:
     assert payload == "weft result: --stream cannot be used with --json"
 
 
-def test_cmd_result_stream_preserves_error_payload_selection(tmp_path) -> None:
+def test_cmd_result_stream_preserves_error_payload_selection(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     tid = str(time.time_ns())
-    log_queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
     outbox_queue = ctx.queue(f"T{tid}.outbox", persistent=True)
 
-    log_queue.write(
-        json.dumps(
-            {
-                "tid": tid,
-                "status": "completed",
-                "event": "work_completed",
-            }
-        )
-    )
     outbox_queue.write(json.dumps({"stdout": "out", "stderr": "err"}))
+    monkeypatch.setattr(result_cmd, "_queue_names_exist", lambda *_args: False)
+
+    def _no_log_events(_queue, last_timestamp, _tid):
+        return [], last_timestamp
+
+    monkeypatch.setattr(result_cmd, "poll_log_events", _no_log_events)
 
     exit_code, payload = cmd_result(
         tid=tid,
         all_results=False,
         peek=False,
-        timeout=RESULT_WAIT_TIMEOUT,
+        timeout=0.1,
         stream=True,
         json_output=False,
         show_stderr=True,
