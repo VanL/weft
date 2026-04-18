@@ -37,6 +37,8 @@ from simplebroker import BrokerTarget, Queue
 from simplebroker.ext import BrokerError
 from weft._constants import (
     CONTROL_KILL,
+    CONTROL_PAUSE,
+    CONTROL_RESUME,
     CONTROL_STOP,
     DEFAULT_OUTPUT_SIZE_LIMIT_MB,
     INTERNAL_HEARTBEAT_ENDPOINT_NAME,
@@ -554,24 +556,24 @@ class BaseTask(MultiQueueWatcher, ABC):
             self._send_control_response("KILL", "ack")
             return True
 
-        if command == "PAUSE":
+        if command == CONTROL_PAUSE:
             if not self._paused:
                 self._paused = True
                 self._report_state_change(
                     event="control_pause", message_id=context.timestamp
                 )
                 self._update_process_title("paused")
-            self._send_control_response("PAUSE", "ack", paused=True)
+            self._send_control_response(CONTROL_PAUSE, "ack", paused=True)
             return True
 
-        if command == "RESUME":
+        if command == CONTROL_RESUME:
             if self._paused:
                 self._paused = False
                 self._report_state_change(
                     event="control_resume", message_id=context.timestamp
                 )
                 self._update_process_title("running")
-            self._send_control_response("RESUME", "ack", paused=False)
+            self._send_control_response(CONTROL_RESUME, "ack", paused=False)
             return True
 
         if command == "STATUS":

@@ -207,8 +207,6 @@ def test_wait_for_task_completion_reads_outbox_after_completion_event(
     status, result, error = _wait_for_task_completion(
         ctx,
         taskspec,
-        json_output=False,
-        verbose=False,
     )
 
     assert status == "completed"
@@ -263,8 +261,6 @@ def test_wait_for_task_completion_aggregates_multiple_outbox_messages(
     status, result, error = _wait_for_task_completion(
         ctx,
         taskspec,
-        json_output=False,
-        verbose=False,
     )
 
     assert status == "completed"
@@ -295,8 +291,6 @@ def test_wait_for_task_completion_classifies_timeout_event_as_timeout(
     status, result, error = _wait_for_task_completion(
         ctx,
         taskspec,
-        json_output=False,
-        verbose=False,
     )
 
     assert status == "timeout"
@@ -1469,7 +1463,7 @@ def test_run_spec_via_manager_returns_timeout_exit_code(
     )
     monkeypatch.setattr(
         "weft.commands.run._wait_for_task_completion",
-        lambda context, resolved_spec, *, json_output, verbose: (
+        lambda context, resolved_spec: (
             "timeout",
             None,
             "Timed out waiting for task",

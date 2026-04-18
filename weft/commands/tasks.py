@@ -30,7 +30,6 @@ from weft._constants import (
 )
 from weft._runner_plugins import require_runner_plugin
 from weft.context import WeftContext, build_context
-from weft.ext import RunnerHandle
 from weft.helpers import (
     iter_queue_json_entries,
     kill_process_tree,
@@ -351,16 +350,6 @@ def _send_control(ctx: WeftContext, tid: str, command: str) -> None:
         queue.close()
 
 
-def _runtime_handle_from_mapping(entry: dict[str, Any]) -> RunnerHandle | None:
-    payload = entry.get("runtime_handle")
-    if not isinstance(payload, dict):
-        return None
-    try:
-        return RunnerHandle.from_dict(payload)
-    except ValueError:
-        return None
-
-
 def _task_pid_from_mapping(entry: dict[str, Any]) -> int | None:
     pid = entry.get("pid") or entry.get("task_pid")
     return pid if isinstance(pid, int) else None
@@ -507,7 +496,7 @@ def _stop_via_fallback(task_entry: dict[str, Any] | None) -> bool:
         terminate_process_tree(pid, timeout=0.2, kill_after=False)
         return False
 
-    handle = _runtime_handle_from_mapping(task_entry)
+    handle = status_cmd._runtime_handle_from_mapping(task_entry)
     if handle is not None:
         plugin = require_runner_plugin(handle.runner_name)
         plugin.stop(handle, timeout=0.2)
@@ -531,7 +520,7 @@ def _kill_via_fallback(task_entry: dict[str, Any] | None) -> bool:
             kill_process_tree(pid, timeout=0.2)
         return False
 
-    handle = _runtime_handle_from_mapping(task_entry)
+    handle = status_cmd._runtime_handle_from_mapping(task_entry)
     if handle is not None:
         plugin = require_runner_plugin(handle.runner_name)
         plugin.kill(handle, timeout=0.2)

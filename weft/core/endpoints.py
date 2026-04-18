@@ -332,8 +332,7 @@ def list_resolved_endpoints(
                 continue
 
         resolved: list[ResolvedEndpoint] = []
-        for name, candidates in grouped.items():
-            del name
+        for candidates in grouped.values():
             ordered = sorted(candidates, key=lambda item: int(item.tid))
             canonical_tid = canonical_owner_tid(record.tid for record in ordered)
             if canonical_tid is None:

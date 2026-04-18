@@ -345,10 +345,10 @@ CONTROL_KILL: Final[str] = "KILL"
 """Control command to force-kill a running task."""
 
 CONTROL_PAUSE: Final[str] = "PAUSE"
-"""Control command to pause a running task (future feature)."""
+"""Control command to pause a task that supports live pausing."""
 
 CONTROL_RESUME: Final[str] = "RESUME"
-"""Control command to resume a paused task (future feature)."""
+"""Control command to resume a paused task that supports live pausing."""
 
 # Resource Limits
 # ---------------
