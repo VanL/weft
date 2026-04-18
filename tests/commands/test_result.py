@@ -657,6 +657,7 @@ def test_cmd_result_waits_for_custom_result_channels_to_materialize(
             return
 
     monkeypatch.setattr(result_cmd, "QueueChangeMonitor", _WakeMonitor)
+    monkeypatch.setattr(result_wait, "QueueChangeMonitor", _WakeMonitor)
     try:
         exit_code, payload = cmd_result(
             tid=tid,
@@ -737,6 +738,7 @@ def test_cmd_result_polls_custom_result_channels_when_monitor_misses_activity(
             return
 
     monkeypatch.setattr(result_cmd, "QueueChangeMonitor", _NoWakeMonitor)
+    monkeypatch.setattr(result_wait, "QueueChangeMonitor", _NoWakeMonitor)
     try:
         exit_code, payload = cmd_result(
             tid=tid,
