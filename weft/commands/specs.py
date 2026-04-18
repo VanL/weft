@@ -239,9 +239,7 @@ def list_specs(
     for kind in kinds:
         local_names: set[str] = set()
         directory = _spec_dir(context, kind)
-        if not directory.exists():
-            pass
-        else:
+        if directory.exists():
             for path in sorted(directory.glob("*.json")):
                 local_names.add(path.stem)
                 specs.append(

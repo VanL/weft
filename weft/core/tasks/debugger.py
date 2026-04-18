@@ -35,19 +35,16 @@ class Debugger(Consumer):
 
     def _handle_session_input(self, raw: str) -> tuple[str | None, str | None, bool]:
         responses: list[str] = []
+        done = False
         for line in filter(None, raw.splitlines()):
             try:
                 payload = json.loads(line)
             except json.JSONDecodeError:
                 payload = {"command": line}
             response = self._handle_command(payload)
+            done = done or bool(response.get("exit"))
             responses.append(json.dumps(response, ensure_ascii=False))
         stdout = "\n".join(responses) + ("\n" if responses else "")
-        done = (
-            any(resp.get("exit") for resp in (json.loads(r) for r in responses))
-            if responses
-            else False
-        )
         return (stdout or None, None, done)
 
     def _handle_command(self, payload: dict[str, Any]) -> dict[str, Any]:

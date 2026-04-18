@@ -453,19 +453,18 @@ def _await_single_result(
                 ctrl_payload = ctrl_raw[0] if isinstance(ctrl_raw, tuple) else ctrl_raw
                 handle_ctrl_stream(str(ctrl_payload))
 
-            if is_persistent:
-                peeked = outbox_queue.peek_one(with_timestamps=True)
-                if (
-                    peeked is not None
-                    and isinstance(peeked, tuple)
-                    and first_pending_timestamp is None
-                ):
-                    _payload, first_pending_timestamp = peeked
-                    for completion_timestamp in pending_completion_timestamps:
-                        if completion_timestamp >= first_pending_timestamp:
-                            boundary_timestamp = completion_timestamp
-                            boundary_seen_at = time.monotonic()
-                            break
+            peeked = outbox_queue.peek_one(with_timestamps=True)
+            if (
+                peeked is not None
+                and isinstance(peeked, tuple)
+                and first_pending_timestamp is None
+            ):
+                _payload, first_pending_timestamp = peeked
+                for completion_timestamp in pending_completion_timestamps:
+                    if completion_timestamp >= first_pending_timestamp:
+                        boundary_timestamp = completion_timestamp
+                        boundary_seen_at = time.monotonic()
+                        break
 
             events: list[tuple[dict[str, Any], int]]
             events, log_last_timestamp = poll_log_events(
@@ -474,7 +473,7 @@ def _await_single_result(
                 tid,
             )
             for event_payload, _ts in events:
-                if is_persistent and event_payload.get("event") in {
+                if event_payload.get("event") in {
                     "work_item_completed",
                     "work_completed",
                 }:
@@ -492,8 +491,7 @@ def _await_single_result(
                 if event_status is None:
                     continue
                 if (
-                    is_persistent
-                    and first_pending_timestamp is not None
+                    first_pending_timestamp is not None
                     and _ts >= first_pending_timestamp
                     and boundary_timestamp is None
                 ):
@@ -508,7 +506,7 @@ def _await_single_result(
             if status != "running":
                 break
 
-            if is_persistent and boundary_timestamp is not None:
+            if boundary_timestamp is not None:
                 drained_outputs = _drain_outbox_until_timestamp(
                     outbox_queue,
                     boundary_timestamp=boundary_timestamp,

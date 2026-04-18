@@ -879,9 +879,6 @@ def _format_duration(seconds: float, *, max_units: int = 2) -> str:
         if value:
             parts.append(_pluralize(value, name))
 
-    if len(parts) < max_units and remaining and components[-1][0] != "second":
-        parts.append(_pluralize(remaining, "second"))
-
     if not parts:
         parts.append(_pluralize(int(round(seconds)), "second"))
 

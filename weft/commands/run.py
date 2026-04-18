@@ -465,11 +465,7 @@ def _ensure_manager_after_submission(
 def _wait_for_task_completion(
     context: WeftContext,
     taskspec: TaskSpec,
-    *,
-    json_output: bool,
-    verbose: bool,
 ) -> tuple[str, Any | None, str | None]:
-    _ = json_output, verbose
     assert taskspec.tid is not None
     outbox_name = taskspec.io.outputs.get("outbox")
     ctrl_out_name = taskspec.io.control.get("ctrl_out")
@@ -1036,8 +1032,6 @@ def _run_inline(
         return _wait_for_task_completion(
             context,
             resolved_spec,
-            json_output=json_output,
-            verbose=verbose,
         )
 
     try:
@@ -1183,8 +1177,6 @@ def _run_spec_via_manager(
         return _wait_for_task_completion(
             context,
             resolved_spec,
-            json_output=json_output,
-            verbose=verbose,
         )
 
     try:
@@ -1339,8 +1331,6 @@ def _run_pipeline(
                 lambda _tid: _wait_for_task_completion(
                     context,
                     compiled.pipeline_taskspec,
-                    json_output=json_output,
-                    verbose=verbose,
                 )
             )
             if wait

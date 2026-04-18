@@ -28,10 +28,7 @@ from pydantic import (
 
 from weft._constants import (
     DEFAULT_CLEANUP_ON_EXIT,
-    DEFAULT_CPU_PERCENT,
     DEFAULT_ENABLE_PROCESS_TITLE,
-    DEFAULT_MAX_CONNECTIONS,
-    DEFAULT_MAX_FDS,
     DEFAULT_MEMORY_MB,
     DEFAULT_OUTPUT_SIZE_LIMIT_MB,
     DEFAULT_POLLING_INTERVAL,
@@ -272,15 +269,8 @@ def resolve_taskspec_payload(
             limits = {}
             spec_section["limits"] = limits
         if isinstance(limits, dict):
-            limits_defaults = {
-                "memory_mb": DEFAULT_MEMORY_MB,
-                "cpu_percent": DEFAULT_CPU_PERCENT,
-                "max_fds": DEFAULT_MAX_FDS,
-                "max_connections": DEFAULT_MAX_CONNECTIONS,
-            }
-            for field, default_value in limits_defaults.items():
-                if default_value is not None and limits.get(field) is None:
-                    limits[field] = default_value
+            if limits.get("memory_mb") is None:
+                limits["memory_mb"] = DEFAULT_MEMORY_MB
 
     return candidate
 
