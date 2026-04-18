@@ -455,45 +455,55 @@ def test_await_single_result_stream_mode_emits_chunks_without_replay(
         )
     )
 
-    def _write_outputs() -> None:
-        time.sleep(0.05)
-        outbox_queue.write(
-            json.dumps(
-                {
-                    "type": "stream",
-                    "stream": "stdout",
-                    "chunk": 0,
-                    "final": False,
-                    "encoding": "text",
-                    "data": "hello ",
-                }
-            )
-        )
-        outbox_queue.write(
-            json.dumps(
-                {
-                    "type": "stream",
-                    "stream": "stdout",
-                    "chunk": 1,
-                    "final": True,
-                    "encoding": "text",
-                    "data": "world",
-                }
-            )
-        )
+    writes_triggered = 0
 
-    writer = threading.Thread(target=_write_outputs, daemon=True)
-    writer.start()
-    try:
-        status, result, error = _await_single_result(
-            ctx,
-            tid,
-            timeout=RESULT_WAIT_TIMEOUT,
-            show_stderr=False,
-            emit_stream=True,
-        )
-    finally:
-        writer.join(timeout=RESULT_WAIT_TIMEOUT)
+    class _LateStreamMonitor:
+        def __init__(self, _queues, *, config=None) -> None:
+            del config
+
+        def wait(self, timeout: float | None) -> bool:
+            del timeout
+            nonlocal writes_triggered
+            writes_triggered += 1
+            if writes_triggered == 1:
+                outbox_queue.write(
+                    json.dumps(
+                        {
+                            "type": "stream",
+                            "stream": "stdout",
+                            "chunk": 0,
+                            "final": False,
+                            "encoding": "text",
+                            "data": "hello ",
+                        }
+                    )
+                )
+                outbox_queue.write(
+                    json.dumps(
+                        {
+                            "type": "stream",
+                            "stream": "stdout",
+                            "chunk": 1,
+                            "final": True,
+                            "encoding": "text",
+                            "data": "world",
+                        }
+                    )
+                )
+            return False
+
+        def close(self) -> None:
+            return
+
+    monkeypatch.setattr(result_wait, "QueueChangeMonitor", _LateStreamMonitor)
+
+    status, result, error = _await_single_result(
+        ctx,
+        tid,
+        timeout=RESULT_WAIT_TIMEOUT,
+        show_stderr=False,
+        emit_stream=True,
+    )
 
     assert status == "completed"
     assert result is None
