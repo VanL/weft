@@ -678,14 +678,12 @@ def test_cmd_result_waits_for_custom_result_channels_to_materialize(
     assert payload == "hello"
 
 
-def test_cmd_result_polls_custom_result_channels_when_monitor_misses_activity(
-    monkeypatch: pytest.MonkeyPatch,
+def test_await_single_result_reuses_materialized_batch_boundary_state(
     tmp_path,
 ) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     tid = str(time.time_ns())
-    log_queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
     outbox_queue = ctx.queue("late.custom.outbox", persistent=True)
 
     taskspec_payload = {
@@ -700,61 +698,29 @@ def test_cmd_result_polls_custom_result_channels_when_monitor_misses_activity(
         "metadata": {},
     }
 
-    writes_triggered = 0
+    outbox_queue.write("hello")
+    outbox_item = outbox_queue.peek_one(with_timestamps=True)
+    assert isinstance(outbox_item, tuple)
+    _payload, outbox_timestamp = outbox_item
 
-    class _NoWakeMonitor:
-        def __init__(self, _queues, *, config=None) -> None:
-            del config
-
-        def wait(self, timeout: float | None) -> bool:
-            del timeout
-            nonlocal writes_triggered
-            writes_triggered += 1
-            if writes_triggered == 1:
-                log_queue.write(
-                    json.dumps(
-                        {
-                            "tid": tid,
-                            "status": "running",
-                            "event": "task_initialized",
-                            "taskspec": taskspec_payload,
-                        }
-                    )
-                )
-                outbox_queue.write("hello")
-                log_queue.write(
-                    json.dumps(
-                        {
-                            "tid": tid,
-                            "status": "running",
-                            "event": "work_item_completed",
-                            "taskspec": taskspec_payload,
-                        }
-                    )
-                )
-            return False
-
-        def close(self) -> None:
-            return
-
-    monkeypatch.setattr(result_cmd, "QueueChangeMonitor", _NoWakeMonitor)
     try:
-        exit_code, payload = cmd_result(
+        status, result, error = _await_single_result(
+            ctx,
             tid=tid,
-            all_results=False,
-            peek=False,
-            timeout=0.5,
-            stream=False,
-            json_output=False,
+            timeout=0.1,
             show_stderr=False,
-            context_path=str(root),
+            taskspec_payload=taskspec_payload,
+            outbox_name="late.custom.outbox",
+            ctrl_out_name="late.custom.ctrl_out",
+            initial_log_last_timestamp=123,
+            initial_batch_boundary_timestamps=(outbox_timestamp,),
         )
     finally:
         outbox_queue.close()
-        log_queue.close()
 
-    assert exit_code == 0
-    assert payload == "hello"
+    assert status == "completed"
+    assert result == "hello"
+    assert error is None
 
 
 def test_cmd_result_rejects_stream_json_combination(tmp_path) -> None:
