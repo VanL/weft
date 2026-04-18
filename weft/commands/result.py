@@ -57,6 +57,7 @@ class ResultMaterialization:
     log_last_timestamp: int | None = None
     terminal_status: str | None = None
     terminal_error_message: str | None = None
+    batch_boundary_timestamps: tuple[int, ...] = ()
 
 
 def _normalize_tid(raw_tid: str) -> str:
@@ -134,10 +135,7 @@ def _result_surface_has_activity(
     outbox_queue = context.queue(outbox_name, persistent=True)
     ctrl_queue = context.queue(ctrl_out_name, persistent=False)
     try:
-        return (
-            outbox_queue.peek_one() is not None
-            or ctrl_queue.peek_one() is not None
-        )
+        return outbox_queue.peek_one() is not None or ctrl_queue.peek_one() is not None
     finally:
         outbox_queue.close()
         ctrl_queue.close()
@@ -198,6 +196,12 @@ def _await_result_materialization(
             if events:
                 terminal_status: str | None = None
                 terminal_message: str | None = None
+                batch_boundary_timestamps = tuple(
+                    timestamp
+                    for event_payload, timestamp in events
+                    if event_payload.get("event")
+                    in {"work_item_completed", "work_completed"}
+                )
                 for event_payload, _timestamp in reversed(events):
                     event_status = terminal_status_from_event(event_payload)
                     if event_status is None:
@@ -222,6 +226,7 @@ def _await_result_materialization(
                             log_last_timestamp=log_last_timestamp,
                             terminal_status=terminal_status,
                             terminal_error_message=terminal_message,
+                            batch_boundary_timestamps=batch_boundary_timestamps,
                         )
                 return ResultMaterialization(
                     taskspec_payload=taskspec_payload,
@@ -230,6 +235,7 @@ def _await_result_materialization(
                     log_last_timestamp=log_last_timestamp,
                     terminal_status=terminal_status,
                     terminal_error_message=terminal_message,
+                    batch_boundary_timestamps=batch_boundary_timestamps,
                 )
 
             if deadline is None:
@@ -383,6 +389,7 @@ def _await_single_result(
     initial_log_last_timestamp: int | None = None,
     initial_terminal_status: str | None = None,
     initial_terminal_error_message: str | None = None,
+    initial_batch_boundary_timestamps: tuple[int, ...] = (),
 ) -> tuple[str, Any | None, str | None]:
     if taskspec_payload is None:
         taskspec_payload = _load_taskspec_payload(context, tid)
@@ -427,7 +434,7 @@ def _await_single_result(
     first_pending_timestamp: int | None = None
     boundary_timestamp: int | None = None
     boundary_seen_at: float | None = None
-    pending_completion_timestamps: list[int] = []
+    pending_completion_timestamps: list[int] = list(initial_batch_boundary_timestamps)
     materialized_completed = initial_terminal_status == "completed"
     if initial_terminal_status is not None and initial_terminal_status != "completed":
         status = initial_terminal_status
@@ -669,6 +676,7 @@ def cmd_result(
         initial_log_last_timestamp=materialized.log_last_timestamp,
         initial_terminal_status=materialized.terminal_status,
         initial_terminal_error_message=materialized.terminal_error_message,
+        initial_batch_boundary_timestamps=materialized.batch_boundary_timestamps,
     )
 
     if status == "completed":
