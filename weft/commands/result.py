@@ -199,7 +199,17 @@ def _await_result_materialization(
                 return None
             wait_timeout = max(0.0, deadline - time.monotonic())
             if wait_timeout <= 0:
-                return None
+                # For the default ``T{tid}`` result surface, the caller already
+                # knows which queues to read. If queue enumeration or the task
+                # log lags until the timeout boundary, hand those default names
+                # to the one-shot waiter instead of failing before it can drain
+                # a result that is already present.
+                return ResultMaterialization(
+                    taskspec_payload=taskspec_payload,
+                    outbox_name=outbox_name,
+                    ctrl_out_name=ctrl_out_name,
+                    log_last_timestamp=log_last_timestamp,
+                )
             wait_timeout = min(wait_timeout, poll_interval)
             monitor.wait(wait_timeout)
     finally:
