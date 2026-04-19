@@ -5,10 +5,14 @@ from __future__ import annotations
 import os
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from weft_docker import get_runner_plugin, plugin
+
+from weft.ext import RunnerRuntimeDescription
 
 pytestmark = [pytest.mark.shared]
 
@@ -400,3 +404,102 @@ def test_describe_runtime_falls_back_to_container_list_when_name_get_misses(
     assert description.state == "running"
     assert description.metadata["container_id"] == "container-456"
     assert description.metadata["container_name"] == "weft-runtime-name"
+
+
+def test_command_runner_waits_for_container_to_leave_created_before_runtime_handle(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    states: list[str] = ["created", "running"]
+
+    class FakeProcess:
+        pid = 4321
+        stdout = object()
+        stderr = object()
+
+        def poll(self) -> int | None:
+            return None
+
+    class FakeContainer:
+        id = "container-789"
+        attrs: dict[str, Any] = {
+            "Name": "/weft-test",
+            "Config": {"Image": "busybox:latest"},
+            "State": {"Status": "created"},
+        }
+
+        def reload(self) -> None:
+            current = states.pop(0) if len(states) > 1 else states[0]
+            self.attrs["State"]["Status"] = current
+
+    fake_container = FakeContainer()
+    callback_state: dict[str, str] = {}
+
+    @contextmanager
+    def fake_docker_client() -> Iterator[object]:
+        yield object()
+
+    def fake_run_monitored_subprocess(**kwargs: Any) -> Any:
+        on_runtime_handle_started = kwargs["on_runtime_handle_started"]
+        runtime_handle = kwargs["runtime_handle"]
+        if on_runtime_handle_started is not None:
+            on_runtime_handle_started(runtime_handle)
+        callback_state["status"] = fake_container.attrs["State"]["Status"]
+        return plugin.RunnerOutcome(
+            status="ok",
+            value=None,
+            error=None,
+            stdout=None,
+            stderr=None,
+            returncode=0,
+            duration=0.0,
+            runtime_handle=runtime_handle,
+        )
+
+    monkeypatch.setattr(
+        plugin.subprocess, "Popen", lambda *args, **kwargs: FakeProcess()
+    )
+    monkeypatch.setattr(plugin, "_resolve_docker_binary", lambda value: value)
+    monkeypatch.setattr(
+        plugin.DockerCommandRunner,
+        "_ensure_image",
+        lambda self, executable: "busybox:latest",
+    )
+    monkeypatch.setattr(plugin, "_docker_client", fake_docker_client)
+    monkeypatch.setattr(
+        plugin,
+        "_wait_for_container",
+        lambda client, runtime_id, process: fake_container,
+    )
+    monkeypatch.setattr(
+        plugin, "run_monitored_subprocess", fake_run_monitored_subprocess
+    )
+    monkeypatch.setattr(
+        plugin,
+        "_describe_runtime",
+        lambda client, runtime_id, base_metadata: RunnerRuntimeDescription(
+            runner_name="docker",
+            runtime_id=runtime_id,
+            state="running",
+            metadata=dict(base_metadata),
+        ),
+    )
+    monkeypatch.setattr(plugin, "_remove_container", lambda client, runtime_id: None)
+
+    runner = plugin.DockerCommandRunner(
+        tid="1234567890",
+        process_target="python3",
+        args=["-c", "print('hello')"],
+        env={},
+        working_dir=str(tmp_path),
+        timeout=5.0,
+        limits=None,
+        monitor_class=None,
+        monitor_interval=0.01,
+        runner_options={"image": "busybox:latest"},
+    )
+
+    outcome = runner.run_with_hooks({})
+
+    assert outcome.status == "ok"
+    assert callback_state["status"] == "running"
