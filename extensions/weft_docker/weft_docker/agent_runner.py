@@ -16,6 +16,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+import weft._constants as weft_constants
 from simplebroker import BrokerTarget
 from weft.core.agents.provider_cli.container_runtime import (
     ProviderContainerRuntimeResolution,
@@ -38,7 +39,7 @@ from weft.core.tasks.runner import AgentSession, CommandSession
 from weft.core.taskspec import AgentSection
 from weft.ext import RunnerHandle
 
-from ._sdk import docker_client, load_docker_sdk
+from ._sdk import docker_client, load_docker_sdk, wait_for_container_runtime_start
 from .agent_images import ensure_agent_image
 
 
@@ -214,6 +215,11 @@ class DockerProviderCLIRunner:
                         **create_kwargs,
                     )
                     container.start()
+                    wait_for_container_runtime_start(
+                        container,
+                        timeout=weft_constants.DOCKER_CONTAINER_LOOKUP_TIMEOUT,
+                        interval=weft_constants.DOCKER_CONTAINER_LOOKUP_INTERVAL,
+                    )
                     runtime_handle = RunnerHandle(
                         runner_name="docker",
                         runtime_id=container.name,

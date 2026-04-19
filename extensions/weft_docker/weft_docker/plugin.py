@@ -42,6 +42,7 @@ from weft.ext import (
 from ._sdk import docker_client as shared_docker_client
 from ._sdk import docker_client_from_env as shared_docker_client_from_env
 from ._sdk import load_docker_sdk as shared_load_docker_sdk
+from ._sdk import wait_for_container_runtime_start
 from .agent_images import get_agent_image_recipe
 from .agent_runner import (
     DockerProviderCLIRunner,
@@ -220,6 +221,12 @@ class DockerCommandRunner:
                 client,
                 runtime_id=container_name,
                 process=process,
+            )
+            wait_for_container_runtime_start(
+                container,
+                process=process,
+                timeout=weft_constants.DOCKER_CONTAINER_LOOKUP_TIMEOUT,
+                interval=weft_constants.DOCKER_CONTAINER_LOOKUP_INTERVAL,
             )
             runtime_handle = _runtime_handle_for_container(
                 container_name=container_name,
