@@ -66,7 +66,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Wait for successful Test workflow on release commit
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           EXPECTED_SHA: ${{ inputs.expected_tag_commit }}
           POLL_INTERVAL_SECONDS: "30"
