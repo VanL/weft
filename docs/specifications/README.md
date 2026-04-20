@@ -32,6 +32,8 @@ The split is intentional:
   of truth for shipped behavior.
 - `13B-Using_Weft_In_Higher_Level_Systems.md` is exploratory integration
   guidance, not product contract.
+- `13C-Using_Weft_With_Django.md` is a proposed first-party framework
+  integration contract. It is not current core Weft behavior.
 - [`12-Future_Ideas.md`](12-Future_Ideas.md) remains the holding area for
   deferred ideas that are intentionally out of scope.
 
@@ -99,6 +101,7 @@ directly. It should not appear as "not yet implemented."
 ### Exploratory integration docs
 
 - [`13B-Using_Weft_In_Higher_Level_Systems.md`](13B-Using_Weft_In_Higher_Level_Systems.md)
+- [`13C-Using_Weft_With_Django.md`](13C-Using_Weft_With_Django.md)
 
 These companion docs stay adjacent to the owning spec so the mapping is easy to
 follow, but they do not override the current-contract files.
@@ -126,8 +129,9 @@ For current system orientation:
 
 Then read the matching `A` docs only if you need the intended future surface
 for planning work. Read `12-Future_Ideas.md` only when you need the deferred
-idea ledger, and read `13B-Using_Weft_In_Higher_Level_Systems.md` only when
-you need exploratory higher-level integration guidance.
+idea ledger, and read `13B-Using_Weft_In_Higher_Level_Systems.md` or
+`13C-Using_Weft_With_Django.md` only when you need exploratory higher-level
+integration guidance.
 
 ## Reference Codes
 
