@@ -130,6 +130,7 @@ def test_result_stream_attaches_to_running_command_and_emits_live_output(
     workdir,
     weft_harness,
 ) -> None:
+    ready_path = workdir / "result-stream-ready.txt"
     rc, out, err = run_cli(
         "run",
         "--no-wait",
@@ -138,9 +139,11 @@ def test_result_stream_attaches_to_running_command_and_emits_live_output(
         sys.executable,
         "-c",
         (
-            "import time; "
+            "from pathlib import Path; import time; "
+            f"ready = Path({str(ready_path)!r}); "
             "print('first', flush=True); "
-            "time.sleep(2); "
+            "ready.write_text('ready', encoding='utf-8'); "
+            "time.sleep(5); "
             "print('second', flush=True)"
         ),
         cwd=workdir,
@@ -149,6 +152,10 @@ def test_result_stream_attaches_to_running_command_and_emits_live_output(
     assert rc == 0, err
     tid = out.strip()
     weft_harness.register_tid(tid)
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline and not ready_path.exists():
+        time.sleep(0.05)
+    assert ready_path.exists(), "streaming command did not publish readiness marker"
 
     rc, out, err = run_cli(
         "result",
