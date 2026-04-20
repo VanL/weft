@@ -273,6 +273,10 @@ runbook needs to become stricter.
   report a live state, not merely for `runtime` to become non-null. Runner
   handles can materialize before Docker or other external runtime probes stop
   returning transient `missing`.
+- External runner cleanup must live in a `finally`, not only on the success
+  path. Docker-backed tests can fail after the container is created but before
+  the monitored subprocess returns, and without unconditional removal that
+  leaves stranded `weft-*` containers behind.
 - Manager drain loops must honor an existing `_draining` state before
   reevaluating leadership. If a draining non-leader re-enters leadership
   yield after the leader-check interval and after children are gone, it can

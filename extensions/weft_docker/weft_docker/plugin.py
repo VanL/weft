@@ -217,75 +217,77 @@ class DockerCommandRunner:
         )
 
         with _docker_client() as client:
-            container = _wait_for_container(
-                client,
-                runtime_id=container_name,
-                process=process,
-            )
-            wait_for_container_runtime_start(
-                container,
-                process=process,
-                timeout=weft_constants.DOCKER_CONTAINER_LOOKUP_TIMEOUT,
-                interval=weft_constants.DOCKER_CONTAINER_LOOKUP_INTERVAL,
-            )
-            runtime_handle = _runtime_handle_for_container(
-                container_name=container_name,
-                image=image,
-                docker_binary=self._docker_binary,
-                container=container,
-            )
-            monitor = DockerContainerMonitor(
-                runtime_id=container_name,
-                limits=self._limits,
-                image=image,
-            )
+            try:
+                container = _wait_for_container(
+                    client,
+                    runtime_id=container_name,
+                    process=process,
+                )
+                wait_for_container_runtime_start(
+                    container,
+                    process=process,
+                    timeout=weft_constants.DOCKER_CONTAINER_LOOKUP_TIMEOUT,
+                    interval=weft_constants.DOCKER_CONTAINER_LOOKUP_INTERVAL,
+                )
+                runtime_handle = _runtime_handle_for_container(
+                    container_name=container_name,
+                    image=image,
+                    docker_binary=self._docker_binary,
+                    container=container,
+                )
+                monitor = DockerContainerMonitor(
+                    runtime_id=container_name,
+                    limits=self._limits,
+                    image=image,
+                )
 
-            def _stop_runtime() -> None:
-                _docker_stop(client, container_name, timeout=2.0)
+                def _stop_runtime() -> None:
+                    _docker_stop(client, container_name, timeout=2.0)
 
-            def _kill_runtime() -> None:
-                _docker_kill(client, container_name)
+                def _kill_runtime() -> None:
+                    _docker_kill(client, container_name)
 
-            outcome = run_monitored_subprocess(
-                process=process,
-                stdin_data=stdin_data,
-                timeout=self._timeout,
-                limits=self._limits,
-                monitor_class=None,
-                monitor_interval=self._monitor_interval,
-                monitor=monitor,
-                db_path=None,
-                config=None,
-                runtime_handle=runtime_handle,
-                cancel_requested=cancel_requested,
-                on_worker_started=on_worker_started,
-                on_runtime_handle_started=on_runtime_handle_started,
-                on_stdout_chunk=on_stdout_chunk,
-                on_stderr_chunk=on_stderr_chunk,
-                stop_runtime=_stop_runtime,
-                kill_runtime=_kill_runtime,
-                worker_pid=process.pid,
-            )
+                outcome = run_monitored_subprocess(
+                    process=process,
+                    stdin_data=stdin_data,
+                    timeout=self._timeout,
+                    limits=self._limits,
+                    monitor_class=None,
+                    monitor_interval=self._monitor_interval,
+                    monitor=monitor,
+                    db_path=None,
+                    config=None,
+                    runtime_handle=runtime_handle,
+                    cancel_requested=cancel_requested,
+                    on_worker_started=on_worker_started,
+                    on_runtime_handle_started=on_runtime_handle_started,
+                    on_stdout_chunk=on_stdout_chunk,
+                    on_stderr_chunk=on_stderr_chunk,
+                    stop_runtime=_stop_runtime,
+                    kill_runtime=_kill_runtime,
+                    worker_pid=process.pid,
+                )
 
-            final_description = _describe_runtime(
-                client,
-                runtime_id=container_name,
-                base_metadata=dict(runtime_handle.metadata),
-            )
-            outcome = _apply_terminal_state(
-                outcome,
-                final_description=final_description,
-                limits=self._limits,
-            )
+                final_description = _describe_runtime(
+                    client,
+                    runtime_id=container_name,
+                    base_metadata=dict(runtime_handle.metadata),
+                )
+                outcome = _apply_terminal_state(
+                    outcome,
+                    final_description=final_description,
+                    limits=self._limits,
+                )
 
-            updated_handle = _handle_with_runtime_metadata(
-                runtime_handle,
-                final_description,
-            )
-            outcome.runtime_handle = updated_handle
-
-            _remove_container(client, container_name)
-            return outcome
+                updated_handle = _handle_with_runtime_metadata(
+                    runtime_handle,
+                    final_description,
+                )
+                outcome.runtime_handle = updated_handle
+                return outcome
+            finally:
+                _cleanup_process(process)
+                _remove_container(client, container_name)
 
     def start_session(self) -> CommandSession:
         raise ValueError("Docker runner does not support interactive sessions")
@@ -1063,6 +1065,19 @@ def _remove_container(client: Any, runtime_id: str) -> None:
         return
     try:
         container.remove(force=True)
+    except Exception:  # pragma: no cover - best-effort cleanup
+        return
+
+
+def _cleanup_process(process: subprocess.Popen[str]) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        process.kill()
+    except Exception:  # pragma: no cover - best-effort cleanup
+        return
+    try:
+        process.wait(timeout=1.0)
     except Exception:  # pragma: no cover - best-effort cleanup
         return
 
