@@ -273,6 +273,7 @@ def test_stop_tasks_uses_runner_handle_when_available(
     monkeypatch.setattr(
         task_cmd, "require_runner_plugin", lambda name: FakeRunnerPlugin()
     )
+    monkeypatch.setattr(task_cmd, "_pid_exists", lambda pid: False)
     monkeypatch.setattr(
         task_cmd,
         "terminate_process_tree",
@@ -396,6 +397,7 @@ def test_kill_tasks_uses_runner_handle_when_available(
     monkeypatch.setattr(
         task_cmd, "require_runner_plugin", lambda name: FakeRunnerPlugin()
     )
+    monkeypatch.setattr(task_cmd, "_pid_exists", lambda pid: False)
     monkeypatch.setattr(
         task_cmd,
         "kill_process_tree",

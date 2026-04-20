@@ -258,6 +258,17 @@ runbook needs to become stricter.
   running-task readiness boundary first. `weft run --no-wait` still pays
   manager bootstrap before returning the TID, so submission-to-timeout wall
   clock assumptions flake under slower Windows or xdist-heavy runners.
+
+## 2026-04-20 Result Materialization And Synthetic PIDs
+
+- `weft result` must not treat non-terminal task-log activity without a logged
+  TaskSpec as enough to choose default `T{tid}` result queues. For persistent
+  tasks with custom queue names, returning early on `task_activity` can bind the
+  waiter to the wrong surface and turn a live task into a false timeout.
+- Control-command tests that use synthetic mapping PIDs must stub PID liveness
+  explicitly. A fake integer PID can belong to a real process on CI, which
+  turns "runner handle vs PID fallback" assertions into machine-dependent
+  flakes and can accidentally signal unrelated processes.
 - Manager drain loops must honor an existing `_draining` state before
   reevaluating leadership. If a draining non-leader re-enters leadership
   yield after the leader-check interval and after children are gone, it can
