@@ -1314,6 +1314,7 @@ def test_manager_leadership_yield_drains_nonpersistent_children(
     assert yield_events[0]["status"] == "running"
 
     manager._child_processes.clear()
+    time.sleep(manager._leader_check_interval_ns / 1_000_000_000 + 0.05)
     manager.process_once()
 
     assert manager.should_stop is True

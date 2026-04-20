@@ -252,6 +252,18 @@ runbook needs to become stricter.
   present in the registry (`requests == weft.spawn.requests`) instead of
   treating every live `role="manager"` record as equivalent.
 
+## 2026-04-19 Drain And Streaming Timing Boundaries
+
+- Tests that assert `weft result --stream --timeout N` must establish a real
+  running-task readiness boundary first. `weft run --no-wait` still pays
+  manager bootstrap before returning the TID, so submission-to-timeout wall
+  clock assumptions flake under slower Windows or xdist-heavy runners.
+- Manager drain loops must honor an existing `_draining` state before
+  reevaluating leadership. If a draining non-leader re-enters leadership
+  yield after the leader-check interval and after children are gone, it can
+  emit a second `manager_leadership_yielded` and skip
+  `manager_leadership_drained`.
+
 ## 2026-04-15 Structural Start Payloads
 
 - The synthetic start envelope for non-persistent tasks must stay structural all

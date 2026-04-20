@@ -1632,13 +1632,16 @@ class Manager(BaseTask):
         super().cleanup()
 
     def process_once(self) -> None:
-        if self._maybe_yield_leadership():
-            return
         if self._draining:
+            # Finish an in-flight drain before reevaluating leadership. Otherwise a
+            # slow turn can re-enter the yield path and skip the corresponding
+            # *_drained completion event once children are gone.
             self._signal_children_to_stop()
             self._cleanup_children()
             if not self._child_processes:
                 self._finish_graceful_shutdown()
+            return
+        if self._maybe_yield_leadership():
             return
         self._drain_control_queue_first()
         if self._draining:
