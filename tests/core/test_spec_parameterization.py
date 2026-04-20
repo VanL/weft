@@ -7,12 +7,12 @@ from pathlib import Path
 
 import pytest
 
-from weft.core.spec_parameterization import (
+from weft.core.taskspec import ParameterizationArgumentSection, TaskSpec
+from weft.core.taskspec.parameterization import (
     SpecParameterizationRequest,
     materialize_taskspec_template,
     parse_declared_parameterization_args,
 )
-from weft.core.taskspec import ParameterizationArgumentSection, TaskSpec
 
 
 def _create_parameterized_taskspec(

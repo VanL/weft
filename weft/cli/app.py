@@ -13,20 +13,21 @@ from typing import Annotated, Any
 
 import typer
 
-from ._constants import PROG_NAME, __version__, get_weft_directory_name
-from .commands import cmd_init, cmd_status, cmd_tidy
-from .commands import manager as manager_cmd
-from .commands import queue as queue_cmd
-from .commands import serve as serve_cmd
-from .commands import specs as spec_cmd
-from .commands import status as status_cmd
-from .commands import tasks as task_cmd
-from .commands.builtins import cmd_system_builtins
-from .commands.dump import cmd_dump
-from .commands.load import cmd_load
-from .commands.result import cmd_result
-from .commands.run import cmd_run, render_spec_aware_run_help
-from .commands.validate_taskspec import cmd_validate_taskspec
+from weft._constants import PROG_NAME, __version__, get_weft_directory_name
+from weft.commands import cmd_init, cmd_status, cmd_tidy
+from weft.commands import manager as manager_cmd
+from weft.commands import queue as queue_cmd
+from weft.commands import serve as serve_cmd
+from weft.commands import specs as spec_cmd
+from weft.commands import status as status_cmd
+from weft.commands import tasks as task_cmd
+from weft.commands.builtins import cmd_system_builtins
+from weft.commands.dump import cmd_dump
+from weft.commands.load import cmd_load
+from weft.commands.result import cmd_result
+from weft.commands.validate_taskspec import cmd_validate_taskspec
+
+from .run import cmd_run, render_spec_aware_run_help
 
 app = typer.Typer(
     name=PROG_NAME,

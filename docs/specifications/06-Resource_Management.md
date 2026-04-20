@@ -44,7 +44,7 @@ Current behavior:
 
 _Implementation mapping_: `weft/core/resource_monitor.py`
 `ResourceMonitor`, `PsutilResourceMonitor.check_limits`;
-`weft/core/taskspec.py`
+`weft/core/taskspec/model.py`
 `LimitsSection.memory_mb`.
 
 ### 2. CPU Management [RM-2]
@@ -60,7 +60,7 @@ Current behavior:
 
 _Implementation mapping_: `weft/core/resource_monitor.py`
 `PsutilResourceMonitor._is_sustained_cpu_violation`,
-`_get_average_cpu`; `weft/core/taskspec.py`
+`_get_average_cpu`; `weft/core/taskspec/model.py`
 `LimitsSection.cpu_percent`.
 
 ### 3. File Descriptor Management [RM-3]
@@ -72,7 +72,7 @@ Current behavior:
 - Docker-backed runners map fd limits into native runtime ulimits
 
 _Implementation mapping_: `weft/core/resource_monitor.py`
-`PsutilResourceMonitor._open_file_count`; `weft/core/taskspec.py`
+`PsutilResourceMonitor._open_file_count`; `weft/core/taskspec/model.py`
 `LimitsSection.max_fds`.
 
 ### 4. Network Connection Management [RM-4]
@@ -85,7 +85,7 @@ Current behavior:
   to network isolation; other values are rejected
 
 _Implementation mapping_: `weft/core/resource_monitor.py`
-`PsutilResourceMonitor._connection_count`; `weft/core/taskspec.py`
+`PsutilResourceMonitor._connection_count`; `weft/core/taskspec/model.py`
 `LimitsSection.max_connections`.
 
 ## Resource Monitoring Implementation [RM-5]

@@ -108,15 +108,15 @@ class TestCLIConstants:
         result = runner.invoke(app, ["--version"])
         assert __version__ in result.stdout
 
-    @patch("weft.cli.PROG_NAME", "test-prog")
-    @patch("weft.cli.__version__", "9.9.9")
+    @patch("weft.cli.app.PROG_NAME", "test-prog")
+    @patch("weft.cli.app.__version__", "9.9.9")
     def test_constants_override(self):
         """Test that CLI correctly uses overridden constants."""
-        from weft.cli import version_callback
+        from weft.cli.app import version_callback
 
         # Mock the typer.echo and Exit
-        with patch("weft.cli.typer.echo") as mock_echo:
-            with patch("weft.cli.typer.Exit", side_effect=SystemExit) as mock_exit:
+        with patch("weft.cli.app.typer.echo") as mock_echo:
+            with patch("weft.cli.app.typer.Exit", side_effect=SystemExit) as mock_exit:
                 with pytest.raises(SystemExit):
                     version_callback(True)
                 mock_echo.assert_called_with("test-prog 9.9.9")

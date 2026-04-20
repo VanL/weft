@@ -169,6 +169,16 @@ def test_inspect_release_state_uses_target_package_name_and_tag_namespace(
     assert state.target is release.DOCKER_RELEASE_TARGET
 
 
+def test_django_release_target_uses_namespaced_tag_and_package_dir() -> None:
+    """The Django integration should publish like the other first-party packages."""
+
+    release = _load_release_module()
+
+    assert release.DJANGO_RELEASE_TARGET.package_name == "weft-django"
+    assert release.DJANGO_RELEASE_TARGET.tag_name("0.1.0") == "weft_django/v0.1.0"
+    assert release.DJANGO_RELEASE_TARGET.package_dir == release.DJANGO_INTEGRATION_DIR
+
+
 def test_main_dry_run_publish_flag_defers_to_release_gate(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -321,7 +331,13 @@ def test_collect_extension_release_plans_skips_already_published_packages(
     monkeypatch.setattr(
         release,
         "read_target_version",
-        lambda target: "0.1.0" if target is release.DOCKER_RELEASE_TARGET else "0.2.0",
+        lambda target: (
+            "0.1.0"
+            if target is release.DOCKER_RELEASE_TARGET
+            else "0.2.0"
+            if target is release.DJANGO_RELEASE_TARGET
+            else "0.3.0"
+        ),
     )
     monkeypatch.setattr(
         release,
@@ -340,8 +356,9 @@ def test_collect_extension_release_plans_skips_already_published_packages(
         allow_retag=False,
     )
 
-    assert len(plans) == 1
-    assert plans[0].state.target is release.MACOS_SANDBOX_RELEASE_TARGET
+    assert len(plans) == 2
+    assert plans[0].state.target is release.DJANGO_RELEASE_TARGET
+    assert plans[1].state.target is release.MACOS_SANDBOX_RELEASE_TARGET
     assert len(skipped) == 1
     assert skipped[0].target is release.DOCKER_RELEASE_TARGET
 
@@ -523,7 +540,13 @@ def test_main_dry_run_pushes_unpublished_extension_tags(
     monkeypatch.setattr(
         release,
         "read_target_version",
-        lambda target: "0.2.0" if target is release.DOCKER_RELEASE_TARGET else "0.3.0",
+        lambda target: (
+            "0.2.0"
+            if target is release.DOCKER_RELEASE_TARGET
+            else "0.3.0"
+            if target is release.DJANGO_RELEASE_TARGET
+            else "0.4.0"
+        ),
     )
     monkeypatch.setattr(release, "is_dirty_worktree", lambda: False)
     monkeypatch.setattr(
@@ -543,9 +566,11 @@ def test_main_dry_run_pushes_unpublished_extension_tags(
 
     assert exit_code == 0
     assert "weft_docker/v0.2.0" in captured.out
-    assert "weft_macos_sandbox/v0.3.0" in captured.out
+    assert "weft_django/v0.3.0" in captured.out
+    assert "weft_macos_sandbox/v0.4.0" in captured.out
     assert "$ git push origin weft_docker/v0.2.0" in captured.out
-    assert "$ git push origin weft_macos_sandbox/v0.3.0" in captured.out
+    assert "$ git push origin weft_django/v0.3.0" in captured.out
+    assert "$ git push origin weft_macos_sandbox/v0.4.0" in captured.out
 
 
 def test_build_precheck_commands_cover_release_gate_and_quality_gates() -> None:
@@ -558,17 +583,20 @@ def test_build_precheck_commands_cover_release_gate_and_quality_gates() -> None:
     )
     sqlite_command = commands[0]
     postgres_command = commands[1]
-    ruff_check_command = commands[2]
-    ruff_format_command = commands[3]
-    mypy_command = commands[4]
+    django_command = commands[2]
+    ruff_check_command = commands[3]
+    ruff_format_command = commands[4]
+    mypy_command = commands[5]
 
-    assert sqlite_command[:11] == (
+    assert sqlite_command[:13] == (
         "uv",
         "run",
         "--extra",
         "dev",
         "--extra",
         "docker",
+        "--extra",
+        "django",
         "--extra",
         "macos-sandbox",
         "pytest",
@@ -590,10 +618,13 @@ def test_build_precheck_commands_cover_release_gate_and_quality_gates() -> None:
         "--extra",
         "docker",
         "--extra",
+        "django",
+        "--extra",
         "macos-sandbox",
         "bin/pytest-pg",
         "--all",
     )
+    assert django_command == release.DJANGO_INTEGRATION_TEST_COMMAND
     assert ruff_check_command == (
         "uv",
         "run",
@@ -602,11 +633,14 @@ def test_build_precheck_commands_cover_release_gate_and_quality_gates() -> None:
         "--extra",
         "docker",
         "--extra",
+        "django",
+        "--extra",
         "macos-sandbox",
         "ruff",
         "check",
         "weft",
         "tests",
+        "integrations/weft_django",
         "extensions/weft_docker",
         "extensions/weft_macos_sandbox",
     )
@@ -618,12 +652,15 @@ def test_build_precheck_commands_cover_release_gate_and_quality_gates() -> None:
         "--extra",
         "docker",
         "--extra",
+        "django",
+        "--extra",
         "macos-sandbox",
         "ruff",
         "format",
         "--check",
         "weft",
         "tests",
+        "integrations/weft_django",
         "extensions/weft_docker",
         "extensions/weft_macos_sandbox",
     )
@@ -635,9 +672,12 @@ def test_build_precheck_commands_cover_release_gate_and_quality_gates() -> None:
         "--extra",
         "docker",
         "--extra",
+        "django",
+        "--extra",
         "macos-sandbox",
         "mypy",
         "weft",
+        "integrations/weft_django/weft_django",
         "extensions/weft_docker/weft_docker",
         "extensions/weft_macos_sandbox/weft_macos_sandbox",
         "--config-file",
@@ -650,7 +690,7 @@ def test_build_precheck_commands_cover_release_gate_and_quality_gates() -> None:
 
 
 def test_build_postupdate_steps_build_all_publishable_packages() -> None:
-    """Post-update verification should build the root and both extension packages."""
+    """Post-update verification should build every publishable first-party package."""
 
     release = _load_release_module()
 
@@ -666,9 +706,13 @@ def test_build_postupdate_steps_build_all_publishable_packages() -> None:
     assert steps[1] == release.CommandStep(("uv", "build"), cwd=release.PROJECT_ROOT)
     assert steps[2] == release.CommandStep(
         ("uv", "build"),
-        cwd=release.DOCKER_EXTENSION_DIR,
+        cwd=release.DJANGO_INTEGRATION_DIR,
     )
     assert steps[3] == release.CommandStep(
+        ("uv", "build"),
+        cwd=release.DOCKER_EXTENSION_DIR,
+    )
+    assert steps[4] == release.CommandStep(
         ("uv", "build"),
         cwd=release.MACOS_SANDBOX_EXTENSION_DIR,
     )
@@ -683,8 +727,9 @@ def test_build_precheck_commands_include_extension_tests_when_supported() -> Non
         include_macos_sandbox_extension_tests=True,
     )
 
-    assert commands[2] == release.DOCKER_EXTENSION_TEST_COMMAND
-    assert commands[3] == release.MACOS_SANDBOX_EXTENSION_TEST_COMMAND
+    assert commands[2] == release.DJANGO_INTEGRATION_TEST_COMMAND
+    assert commands[3] == release.DOCKER_EXTENSION_TEST_COMMAND
+    assert commands[4] == release.MACOS_SANDBOX_EXTENSION_TEST_COMMAND
 
 
 def test_build_precheck_commands_skip_extension_tests_when_unavailable() -> None:
@@ -696,6 +741,7 @@ def test_build_precheck_commands_skip_extension_tests_when_unavailable() -> None
         include_macos_sandbox_extension_tests=False,
     )
 
+    assert release.DJANGO_INTEGRATION_TEST_COMMAND in commands
     assert release.DOCKER_EXTENSION_TEST_COMMAND not in commands
     assert release.MACOS_SANDBOX_EXTENSION_TEST_COMMAND not in commands
 
@@ -772,6 +818,7 @@ def test_release_workflows_require_green_test_workflow() -> None:
     [
         Path(".github/workflows/release-gate.yml"),
         Path(".github/workflows/release-gate-docker.yml"),
+        Path(".github/workflows/release-gate-django.yml"),
         Path(".github/workflows/release-gate-macos-sandbox.yml"),
     ],
 )

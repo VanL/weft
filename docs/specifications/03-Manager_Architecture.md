@@ -13,7 +13,7 @@ The CLI component that submits work is referred to as the **Client**.
 
 _Implementation status_: `Manager` (`weft/core/manager.py`), the spawn registry
 queue, and the CLI wrappers (`weft manager …`, `weft run`) are fully
-implemented. The Client (`weft/commands/run.py`) builds TaskSpec templates,
+implemented. The Client (`weft/cli/run.py`) builds TaskSpec templates,
 enqueues them on `weft.spawn.requests`, and optionally waits for completion by
 tailing task logs/outboxes. The spawn-request message ID becomes the task TID.
 Managers consume those requests, expand the TaskSpec, launch child Consumers via
@@ -158,8 +158,8 @@ Task IDs are the message IDs assigned when spawn requests are written to
 outbox/control messages.
 
 _Implementation mapping_:
-- TID generation — `weft/commands/run.py` :: `_generate_tid` (uses `Queue.generate_timestamp` on the spawn-requests queue).
-- Enqueue with TID as message timestamp — `weft/commands/run.py` :: `_enqueue_taskspec` (writes spawn payload at `int(task_tid)`).
+- TID generation — `weft/cli/run.py` :: `_generate_tid` (uses `Queue.generate_timestamp` on the spawn-requests queue).
+- Enqueue with TID as message timestamp — `weft/cli/run.py` :: `_enqueue_taskspec` (writes spawn payload at `int(task_tid)`).
 - Manager-side TID propagation — `weft/core/manager.py` :: `Manager._build_child_spec` (passes `str(timestamp)` as child TID via `resolve_taskspec_payload`).
 
 ## Bootstrap and Lifecycle [MA-3]
@@ -192,9 +192,10 @@ request queue do not participate in default-manager selection. External
 `SIGUSR1` retains immediate kill semantics.
 
 _Implementation mapping_:
-- Shared manager lifecycle helper — `weft/commands/_manager_bootstrap.py` :: `_build_manager_runtime_invocation`, `_select_active_manager`, `_ensure_manager`, `_start_manager`, `_serve_manager_foreground`, `_list_manager_records`, `_manager_record`, `_stop_manager` (owns canonical manager bootstrap, foreground serve, normalized registry replay, and graceful/forced stop observation for CLI callers).
+- Shared manager lifecycle owner — `weft/core/manager_runtime.py` :: `_build_manager_runtime_invocation`, `_select_active_manager`, `_ensure_manager`, `_start_manager`, `_serve_manager_foreground`, `_list_manager_records`, `_manager_record`, `_stop_manager` (owns canonical manager bootstrap, foreground serve, normalized registry replay, and graceful/forced stop observation).
+- Command-side capability surface — `weft/commands/manager.py` and `weft/commands/serve.py` (thin manager-facing commands layered over the shared runtime helper).
 - Detached bootstrap launcher — `weft/manager_detached_launcher.py` :: `main` (short-lived wrapper that starts the real manager runtime in a detached session/process-group boundary and reports early launch status back to `_start_manager`).
-- Manager process launch — `weft/commands/_manager_bootstrap.py` :: `_start_manager` (builds manager TaskSpec, launches the detached wrapper, requires matching pid-plus-registry readiness before success, treats post-proof acknowledgement cleanup as best effort, and reports early bootstrap diagnostics on failure).
+- Manager process launch — `weft/core/manager_runtime.py` :: `_start_manager` (builds manager TaskSpec, launches the detached wrapper, requires matching pid-plus-registry readiness before success, treats post-proof acknowledgement cleanup as best effort, and reports early bootstrap diagnostics on failure).
 - Manager process entry point — `weft/manager_process.py` :: `run_manager_process`, `main` (shared runtime helper plus standalone module invoked via `python -m weft.manager_process`).
 - Leadership election and ownership fencing — `weft/core/manager.py` :: `Manager._maybe_yield_leadership`, `Manager._leader_tid`, `Manager._read_active_manager_records`, `Manager._active_manager_records`, `Manager._evaluate_dispatch_ownership`, `Manager._refresh_dispatch_suspension`, `Manager._apply_final_dispatch_fence`, `Manager._requeue_reserved_spawn_request`; `weft/helpers.py::is_canonical_manager_record`; `weft/helpers.py::canonical_owner_tid` (lowest-TID canonical manager wins; non-leaders yield, requeue, or suspend according to the final ownership proof).
 - Internal runtime submission envelope — `weft/core/spawn_requests.py`
@@ -203,7 +204,7 @@ _Implementation mapping_:
   re-applies them when materializing the child TaskSpec.
 - External signal handling — `weft/core/manager.py` :: `Manager.handle_termination_signal` (TERM/INT drain, SIGUSR1 kill).
 - CLI management — `weft/commands/manager.py` :: `start_command`, `stop_command`, `list_command`, `status_command`; these commands are thin wrappers over the shared lifecycle helper. `weft/commands/status.py` :: `_collect_manager_records` reuses the same lifecycle reader for manager views.
-- Foreground supervision command — `weft/commands/serve.py` :: `serve_command`, registered in `weft/cli.py` as `weft manager serve`.
+- Foreground supervision command — `weft/commands/serve.py` :: `serve_command`, registered in `weft/cli/app.py` as `weft manager serve`.
 
 ## Scope Boundary [MA-4]
 

@@ -8,7 +8,7 @@ shaped this way. The deferred roadmap lives in
 
 The current codebase is intentionally narrower than the old roadmap:
 
-- CLI wiring lives in `weft/cli.py` plus the current command modules under
+- CLI wiring lives in `weft/cli/app.py` plus the current command modules under
   `weft/commands/`.
 - The current root surface is `init`, `status`, `result`, and `run`, with
   sub-apps for `queue`, `manager`, `task`, `spec`, and `system`.
@@ -29,31 +29,32 @@ packages.
 
 ## Current Ownership [IP-1]
 
-- `weft/commands/run.py` owns `weft run` orchestration, spec-aware help,
-  explicit `NAME|PATH` loading, and delegation into the current manager,
-  submission, result, and streaming helpers.
+- `weft/commands/run.py` owns shared `weft run` orchestration, spec-aware
+  loading, local materialization, and delegation into the current manager,
+  submission, result, and streaming helpers; `weft/cli/run.py` is the Typer
+  adapter over that shared surface.
 - `weft/commands/init.py` owns project initialization and broker-facing
   project bootstrap for the root `weft init` command.
-- `weft/commands/_manager_bootstrap.py` owns detached manager bootstrap,
+- `weft/core/manager_runtime.py` owns detached manager bootstrap,
   shared manager start/stop coordination, and TID generation for submission
-  paths.
+  paths; `weft/commands/manager.py` and `weft/commands/serve.py` are the
+  command-side capability surfaces.
 - `weft/commands/_spawn_submission.py` owns queue-first spawn reconciliation
   after a TID has been submitted.
 - `weft/commands/result.py`, `weft/commands/_result_wait.py`,
-  `weft/commands/_streaming.py`, and `weft/commands/_queue_wait.py` own the
+  `weft/commands/_streaming.py`, and `weft/core/queue_wait.py` own the
   result surface and the shared waiting/streaming behavior behind it.
 - `weft/commands/status.py`, `weft/commands/tasks.py`, and
   `weft/commands/_task_history.py` own task inspection, short/full TID
   handling, and pipeline-aware status reconstruction.
 - `weft/commands/manager.py` and `weft/commands/serve.py` own the manager
-  lifecycle commands, while `_manager_bootstrap.py` provides the shared
-  runtime seam.
+  lifecycle commands over the shared runtime helper.
 - `weft/commands/queue.py` owns direct queue operations, endpoint resolution,
   queue watching, and alias management.
 - `weft/commands/specs.py` and `weft/commands/validate_taskspec.py` own the
   CLI-facing spec management and validation surfaces; `weft/core/spec_store.py`
-  owns the shared `NAME|PATH` resolution logic; `weft/core/spec_parameterization.py`
-  and `weft/core/spec_run_input.py` own submission-time materialization and
+  owns the shared `NAME|PATH` resolution logic; `weft/core/taskspec/parameterization.py`
+  and `weft/core/taskspec/run_input.py` own submission-time materialization and
   run-input shaping; `weft/core/pipelines.py` owns pipeline validation and
   compilation.
 - `weft/commands/builtins.py` owns the shipped builtin inventory surface;

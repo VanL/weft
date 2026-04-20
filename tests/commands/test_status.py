@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 
 from tests.helpers.test_backend import prepare_project_root
-from weft.commands import status as status_cmd
+from weft.commands import system as status_cmd
 from weft.commands import tasks as task_cmd
 from weft.commands.status import cmd_status, collect_status
 from weft.context import build_context

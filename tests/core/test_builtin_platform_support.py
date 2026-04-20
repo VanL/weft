@@ -7,8 +7,8 @@ import pytest
 from weft.builtins import builtin_task_catalog
 from weft.builtins.agent_images import prepare_agent_images_task
 from weft.commands import specs as spec_cmd
-from weft.core.spec_parameterization import materialize_taskspec_template
 from weft.core.taskspec import TaskSpec
+from weft.core.taskspec.parameterization import materialize_taskspec_template
 
 pytestmark = [pytest.mark.shared]
 

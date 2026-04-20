@@ -1,22 +1,38 @@
 #!/usr/bin/env python3
-"""Run Postgres-backed Weft test suites with automatic Docker setup."""
+"""Run Postgres-backed Weft test suites with automatic Docker setup.
+
+Spec references:
+- docs/specifications/08-Testing_Strategy.md [TS-0], [TS-1]
+"""
 
 from __future__ import annotations
 
 import argparse
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import time
 import uuid
 from pathlib import Path
+from typing import Any, Final, Literal
 
 ROOT = Path(__file__).resolve().parents[1]
 POSTGRES_IMAGE = os.environ.get("SIMPLEBROKER_PG_TEST_IMAGE", "postgres:18")
 POSTGRES_DB = os.environ.get("SIMPLEBROKER_PG_TEST_DB", "simplebroker_test")
 POSTGRES_USER = os.environ.get("SIMPLEBROKER_PG_TEST_USER", "postgres")
 POSTGRES_PASSWORD = os.environ.get("SIMPLEBROKER_PG_TEST_PASSWORD", "postgres")
+PYTEST_INTERRUPT_GRACE_SECONDS: Final[float] = 8.0
+"""Wait after forwarding Ctrl-C before escalating pytest shutdown."""
+
+PYTEST_TERMINATE_GRACE_SECONDS: Final[float] = 2.0
+"""Wait after a terminate request before force-killing pytest."""
+
+PYTEST_WAIT_POLL_SECONDS: Final[float] = 0.2
+"""Bounded wait interval so repeated Ctrl-C can escalate promptly."""
+
+WaitOutcome = Literal["exited", "timeout", "interrupted"]
 
 
 def _run(
@@ -156,6 +172,185 @@ def _build_test_env(*, dsn: str) -> dict[str, str]:
     return env
 
 
+def _build_pytest_command(*, marker: str) -> list[str]:
+    """Return the repo-local pytest command for the requested marker."""
+
+    return [
+        "uv",
+        "run",
+        "--extra",
+        "dev",
+        "--with-editable",
+        ".",
+        "--with",
+        "simplebroker-pg[dev]",
+        "pytest",
+        "tests",
+        "-x",
+        "-m",
+        marker,
+        "-n",
+        "auto",
+        "--dist",
+        "loadgroup",
+    ]
+
+
+def _launch_pytest_process(
+    command: list[str],
+    *,
+    env: dict[str, str],
+) -> subprocess.Popen[Any]:
+    """Launch pytest in its own process group so Ctrl-C can be staged here."""
+
+    print(f"+ {' '.join(command)}", flush=True)
+    popen_kwargs: dict[str, Any] = {
+        "cwd": ROOT,
+        "env": env,
+        "close_fds": True,
+    }
+    creationflags = 0
+    if os.name == "nt":
+        creationflags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        if creationflags:
+            popen_kwargs["creationflags"] = creationflags
+    else:
+        # Keep terminal Ctrl-C on the wrapper first so we can stage teardown.
+        popen_kwargs["start_new_session"] = True
+    return subprocess.Popen(command, **popen_kwargs)
+
+
+def _wait_for_process_exit(
+    process: subprocess.Popen[Any],
+    *,
+    timeout: float,
+) -> WaitOutcome:
+    """Wait briefly for process exit while allowing repeated Ctrl-C escalation."""
+
+    deadline = time.monotonic() + timeout
+    while True:
+        if process.poll() is not None:
+            return "exited"
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return "timeout"
+        try:
+            process.wait(timeout=min(PYTEST_WAIT_POLL_SECONDS, remaining))
+            return "exited"
+        except subprocess.TimeoutExpired:
+            continue
+        except KeyboardInterrupt:
+            return "interrupted"
+
+
+def _send_pytest_interrupt(process: subprocess.Popen[Any]) -> None:
+    """Forward a graceful interrupt to the pytest process group."""
+
+    if process.poll() is not None:
+        return
+    try:
+        if os.name == "nt":
+            ctrl_break = getattr(signal, "CTRL_BREAK_EVENT", None)
+            if ctrl_break is not None:
+                process.send_signal(ctrl_break)
+                return
+            process.send_signal(signal.SIGINT)
+            return
+        os.killpg(process.pid, signal.SIGINT)
+    except Exception:
+        try:
+            process.terminate()
+        except Exception:
+            return
+
+
+def _terminate_pytest_process_tree(process: subprocess.Popen[Any]) -> None:
+    """Request orderly process-tree termination for stubborn pytest children."""
+
+    if process.poll() is not None:
+        return
+    pid = process.pid
+    if not isinstance(pid, int) or pid <= 0:
+        return
+    try:
+        from weft.helpers import terminate_process_tree
+    except Exception:
+        try:
+            process.terminate()
+        except Exception:
+            return
+        return
+    terminate_process_tree(pid, timeout=1.0)
+
+
+def _kill_pytest_process_tree(process: subprocess.Popen[Any]) -> None:
+    """Force-kill the pytest process tree as the final interrupt fallback."""
+
+    if process.poll() is not None:
+        return
+    pid = process.pid
+    if not isinstance(pid, int) or pid <= 0:
+        return
+    try:
+        from weft.helpers import kill_process_tree
+    except Exception:
+        try:
+            process.kill()
+        except Exception:
+            return
+        return
+    kill_process_tree(pid, timeout=0.5)
+
+
+def _run_pytest_command(
+    command: list[str],
+    *,
+    env: dict[str, str],
+) -> int:
+    """Run pytest and stage Ctrl-C shutdown before escalating to tree kill."""
+
+    process = _launch_pytest_process(command, env=env)
+    try:
+        while True:
+            try:
+                return process.wait(timeout=PYTEST_WAIT_POLL_SECONDS)
+            except subprocess.TimeoutExpired:
+                continue
+    except KeyboardInterrupt:
+        print("Interrupted; forwarding SIGINT to pytest", file=sys.stderr)
+        _send_pytest_interrupt(process)
+        outcome = _wait_for_process_exit(
+            process,
+            timeout=PYTEST_INTERRUPT_GRACE_SECONDS,
+        )
+        if outcome == "exited":
+            return 130
+        if outcome == "interrupted":
+            print(
+                "Interrupted again; terminating pytest process tree",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                "Pytest did not exit after interrupt; terminating process tree",
+                file=sys.stderr,
+            )
+        _terminate_pytest_process_tree(process)
+        outcome = _wait_for_process_exit(
+            process,
+            timeout=PYTEST_TERMINATE_GRACE_SECONDS,
+        )
+        if outcome == "exited":
+            return 130
+        if outcome == "interrupted":
+            print("Interrupted again; killing pytest process tree", file=sys.stderr)
+        else:
+            print("Pytest did not terminate; killing process tree", file=sys.stderr)
+        _kill_pytest_process_tree(process)
+        _wait_for_process_exit(process, timeout=PYTEST_TERMINATE_GRACE_SECONDS)
+        return 130
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Run PG-backed Weft tests with automatic Docker setup."
@@ -198,30 +393,10 @@ def main() -> int:
     try:
         container_name, dsn = _start_postgres_container()
         print(f"Postgres test DSN: {dsn}", flush=True)
-
-        _run(
-            [
-                "uv",
-                "run",
-                "--extra",
-                "dev",
-                "--with-editable",
-                ".",
-                "--with",
-                "simplebroker-pg[dev]",
-                "pytest",
-                "tests",
-                "-x",
-                "-m",
-                marker,
-                "-n",
-                "auto",
-                "--dist",
-                "loadgroup",
-            ],
+        return _run_pytest_command(
+            _build_pytest_command(marker=marker),
             env=_build_test_env(dsn=dsn),
         )
-        return 0
     except subprocess.CalledProcessError as exc:
         return exc.returncode or 1
     except KeyboardInterrupt:

@@ -23,10 +23,10 @@ from weft._constants import (
     WEFT_TID_MAPPINGS_QUEUE,
 )
 from weft.context import WeftContext
+from weft.core.queue_wait import QueueChangeMonitor
 from weft.helpers import iter_queue_json_entries
 
-from ._manager_bootstrap import _list_manager_records
-from ._queue_wait import QueueChangeMonitor
+from .manager import _list_manager_records
 
 _spawn_reconciliation_static_queue_specs: Final[tuple[tuple[str, bool], ...]] = (
     (WEFT_TID_MAPPINGS_QUEUE, False),

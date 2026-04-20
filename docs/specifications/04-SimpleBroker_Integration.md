@@ -250,7 +250,7 @@ project initializer is different: `weft init [DIRECTORY]` creates or selects the
 project root itself.
 
 _Implementation mapping_: `weft/commands/init.py`, `weft/context.py`,
-`weft/commands/queue.py`, `weft/commands/status.py`, `weft/commands/run.py`.
+`weft/commands/queue.py`, `weft/commands/status.py`, `weft/cli/run.py`.
 
 Current rules:
 

@@ -28,21 +28,33 @@ from weft._constants import (
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
 )
+from weft._exceptions import ControlRejected, TaskNotFound
 from weft._runner_plugins import require_runner_plugin
+from weft.commands.types import TaskSnapshot as PublicTaskSnapshot
 from weft.context import WeftContext, build_context
+from weft.core.queue_wait import QueueChangeMonitor
 from weft.helpers import (
     iter_queue_json_entries,
     kill_process_tree,
     terminate_process_tree,
 )
 
-from . import status as status_cmd
-from ._queue_wait import QueueChangeMonitor
+from . import system as status_cmd
 from ._task_history import load_latest_taskspec_payload, pipeline_status_queue_name
 
 
 def _resolve_context(context_path: str | os.PathLike[str] | None) -> WeftContext:
     return build_context(spec_context=context_path)
+
+
+def _coerce_context(
+    *,
+    context: WeftContext | None = None,
+    context_path: str | os.PathLike[str] | None = None,
+) -> WeftContext:
+    if context is not None:
+        return context
+    return _resolve_context(context_path)
 
 
 def _read_tid_mapping_entries(ctx: WeftContext) -> list[dict[str, Any]]:
@@ -121,15 +133,53 @@ def list_tasks(
     *,
     status_filter: str | None = None,
     include_terminal: bool = False,
+    context: WeftContext | None = None,
     context_path: str | os.PathLike[str] | None = None,
 ) -> list[status_cmd.TaskSnapshot]:
-    ctx = _resolve_context(context_path)
+    ctx = _coerce_context(context=context, context_path=context_path)
     snapshots = status_cmd._collect_task_snapshots(
         ctx, include_terminal=include_terminal, tid_filters=None
     )
     if status_filter:
         snapshots = [s for s in snapshots if s.status == status_filter]
     return snapshots
+
+
+def _state_from_taskspec(taskspec_payload: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(taskspec_payload, dict):
+        return {}
+    state = taskspec_payload.get("state")
+    return state if isinstance(state, dict) else {}
+
+
+def _public_snapshot(
+    status_snapshot: status_cmd.TaskSnapshot,
+    *,
+    taskspec_payload: dict[str, Any] | None,
+) -> PublicTaskSnapshot:
+    state = _state_from_taskspec(taskspec_payload)
+    error = state.get("error")
+    return_code = state.get("return_code")
+    return PublicTaskSnapshot(
+        tid=status_snapshot.tid,
+        tid_short=status_snapshot.tid_short,
+        name=status_snapshot.name,
+        status=status_snapshot.status,
+        event=status_snapshot.event,
+        activity=status_snapshot.activity,
+        waiting_on=status_snapshot.waiting_on,
+        return_code=return_code if isinstance(return_code, int) else None,
+        started_at=status_snapshot.started_at,
+        completed_at=status_snapshot.completed_at,
+        error=error if isinstance(error, str) and error else None,
+        last_timestamp=status_snapshot.last_timestamp,
+        duration_seconds=status_snapshot.duration_seconds,
+        runner=status_snapshot.runner,
+        runtime_handle=status_snapshot.runtime_handle,
+        runtime=status_snapshot.runtime,
+        metadata=dict(status_snapshot.metadata),
+        pipeline_status=status_snapshot.pipeline_status,
+    )
 
 
 def task_status(
@@ -154,6 +204,131 @@ def task_status(
     if pipeline_snapshot is not None and base_snapshot is not None:
         return replace(base_snapshot, pipeline_status=pipeline_snapshot)
     return base_snapshot
+
+
+def list_task_snapshots(
+    *,
+    status_filter: str | None = None,
+    include_terminal: bool = False,
+    context: WeftContext | None = None,
+    context_path: str | os.PathLike[str] | None = None,
+) -> list[PublicTaskSnapshot]:
+    """Return public task snapshots for the selected context."""
+
+    ctx = _coerce_context(context=context, context_path=context_path)
+    snapshots = list_tasks(
+        status_filter=status_filter,
+        include_terminal=include_terminal,
+        context=ctx,
+    )
+    return [
+        _public_snapshot(
+            snapshot,
+            taskspec_payload=load_latest_taskspec_payload(ctx, snapshot.tid),
+        )
+        for snapshot in snapshots
+    ]
+
+
+def task_stats(
+    *,
+    status_filter: str | None = None,
+    include_terminal: bool = False,
+    context: WeftContext | None = None,
+    context_path: str | os.PathLike[str] | None = None,
+) -> dict[str, int]:
+    """Return status counts for the selected task set."""
+
+    counts: dict[str, int] = {}
+    for snapshot in list_task_snapshots(
+        status_filter=status_filter,
+        include_terminal=include_terminal,
+        context=context,
+        context_path=context_path,
+    ):
+        counts[snapshot.status] = counts.get(snapshot.status, 0) + 1
+    return counts
+
+
+def task_snapshot(
+    tid: str,
+    *,
+    include_process: bool = False,
+    include_terminal: bool = True,
+    context: WeftContext | None = None,
+    context_path: str | os.PathLike[str] | None = None,
+) -> PublicTaskSnapshot | None:
+    """Return one public task snapshot or `None` if absent."""
+
+    del include_process
+    ctx = _coerce_context(context=context, context_path=context_path)
+    snapshot = task_status(
+        tid,
+        include_terminal=include_terminal,
+        context_path=ctx.root,
+    )
+    if snapshot is None:
+        return None
+    return _public_snapshot(
+        snapshot,
+        taskspec_payload=load_latest_taskspec_payload(ctx, snapshot.tid),
+    )
+
+
+def watch_task_status(
+    tid: str,
+    *,
+    include_process: bool = False,
+    include_terminal: bool = True,
+    context: WeftContext | None = None,
+    context_path: str | os.PathLike[str] | None = None,
+) -> Iterable[PublicTaskSnapshot]:
+    """Yield snapshots as the task changes until terminal state."""
+
+    del include_process
+    ctx = _coerce_context(context=context, context_path=context_path)
+    full_tid = resolve_full_tid(ctx, tid) or tid.strip().lstrip("T")
+    monitor_queues = [
+        ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False),
+        ctx.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False),
+    ]
+    monitor = QueueChangeMonitor(monitor_queues, config=ctx.config)
+    last_seen: tuple[int | None, str | None] | None = None
+    try:
+        while True:
+            snapshot = task_snapshot(
+                full_tid,
+                include_terminal=include_terminal,
+                context=ctx,
+            )
+            current = (
+                snapshot.last_timestamp if snapshot is not None else None,
+                snapshot.status if snapshot is not None else None,
+            )
+            if snapshot is not None and current != last_seen:
+                last_seen = current
+                yield snapshot
+                if snapshot.status in status_cmd.TERMINAL_TASK_STATUSES:
+                    return
+            monitor.wait(status_cmd.STATUS_WATCH_MIN_INTERVAL)
+    finally:
+        monitor.close()
+        for queue in monitor_queues:
+            queue.close()
+
+
+def resolve_tid(
+    *,
+    tid: str | None = None,
+    pid: int | None = None,
+    reverse: str | None = None,
+    context: WeftContext | None = None,
+    context_path: str | os.PathLike[str] | None = None,
+) -> str | None:
+    """Resolve task id variants through the public TID mapping rules."""
+
+    ctx = _coerce_context(context=context, context_path=context_path)
+    return task_tid(tid=tid, pid=pid, reverse=reverse, context_path=ctx.root)
 
 
 def _pipeline_snapshot_timestamp(pipeline_status: dict[str, Any]) -> int | None:
@@ -551,13 +726,14 @@ def _force_kill_task_processes(task_entry: dict[str, Any] | None) -> bool:
 def stop_tasks(
     tids: Iterable[str],
     *,
+    context: WeftContext | None = None,
     context_path: str | os.PathLike[str] | None = None,
 ) -> int:
     """Gracefully stop one or more tasks by sending STOP control messages.
 
     Spec: [CLI-1.2] (task stop)
     """
-    ctx = _resolve_context(context_path)
+    ctx = _coerce_context(context=context, context_path=context_path)
     entries = _read_tid_mapping_entries(ctx)
     lookup: dict[str, dict[str, Any]] = {}
     for mapping_entry in entries:
@@ -585,16 +761,36 @@ def stop_tasks(
     return count
 
 
+def stop_task(
+    tid: str,
+    *,
+    context: WeftContext | None = None,
+    context_path: str | os.PathLike[str] | None = None,
+) -> None:
+    """Stop one task or raise a typed exception."""
+
+    ctx = _coerce_context(context=context, context_path=context_path)
+    full = resolve_full_tid(ctx, tid) or tid.strip().lstrip("T")
+    if (
+        task_status(full, context_path=ctx.root) is None
+        and mapping_for_tid(ctx, full) is None
+    ):
+        raise TaskNotFound(f"Task {tid} not found")
+    if stop_tasks([full], context=ctx) <= 0:
+        raise ControlRejected(f"Failed to stop task {tid}")
+
+
 def kill_tasks(
     tids: Iterable[str],
     *,
+    context: WeftContext | None = None,
     context_path: str | os.PathLike[str] | None = None,
 ) -> int:
     """Force-terminate one or more tasks by sending KILL control messages.
 
     Spec: [CLI-1.2] (task kill)
     """
-    ctx = _resolve_context(context_path)
+    ctx = _coerce_context(context=context, context_path=context_path)
     entries = _read_tid_mapping_entries(ctx)
     lookup: dict[str, dict[str, Any]] = {}
     for mapping_entry in entries:
@@ -630,8 +826,28 @@ def kill_tasks(
     return killed
 
 
+def kill_task(
+    tid: str,
+    *,
+    context: WeftContext | None = None,
+    context_path: str | os.PathLike[str] | None = None,
+) -> None:
+    """Kill one task or raise a typed exception."""
+
+    ctx = _coerce_context(context=context, context_path=context_path)
+    full = resolve_full_tid(ctx, tid) or tid.strip().lstrip("T")
+    if (
+        task_status(full, context_path=ctx.root) is None
+        and mapping_for_tid(ctx, full) is None
+    ):
+        raise TaskNotFound(f"Task {tid} not found")
+    if kill_tasks([full], context=ctx) <= 0:
+        raise ControlRejected(f"Failed to kill task {tid}")
+
+
 def filter_tids_by_pattern(
-    snapshots: Iterable[status_cmd.TaskSnapshot], pattern: str
+    snapshots: Iterable[status_cmd.TaskSnapshot | PublicTaskSnapshot],
+    pattern: str,
 ) -> list[str]:
     if not pattern:
         return [snap.tid for snap in snapshots]

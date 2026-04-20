@@ -32,7 +32,7 @@ jobs:
 
     - name: Install dependencies
       run: |
-        uv pip install --system -e ".[dev,docker,macos-sandbox]"
+        uv pip install --system -e ".[dev,docker,django,macos-sandbox]"
 
     - name: Run tests with pytest
       run: |
@@ -59,19 +59,43 @@ jobs:
 
     - name: Install dependencies
       run: |
-        uv pip install --system -e ".[dev,docker,macos-sandbox]"
+        uv pip install --system -e ".[dev,docker,django,macos-sandbox]"
 
     - name: Run linting with ruff
       run: |
-        ruff check weft tests extensions/weft_docker extensions/weft_macos_sandbox
+        ruff check weft tests integrations/weft_django extensions/weft_docker extensions/weft_macos_sandbox
 
     - name: Check formatting with ruff
       run: |
-        ruff format --check weft tests extensions/weft_docker extensions/weft_macos_sandbox
+        ruff format --check weft tests integrations/weft_django extensions/weft_docker extensions/weft_macos_sandbox
 
     - name: Type check with mypy
       run: |
-        mypy weft extensions/weft_docker/weft_docker extensions/weft_macos_sandbox/weft_macos_sandbox --config-file pyproject.toml
+        mypy weft integrations/weft_django/weft_django extensions/weft_docker/weft_docker extensions/weft_macos_sandbox/weft_macos_sandbox --config-file pyproject.toml
+
+  test-django-integration:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+    - name: Set up Python
+      uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+      with:
+        python-version: "3.13"
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      with:
+        enable-cache: true
+        cache-dependency-glob: "pyproject.toml"
+
+    - name: Install dependencies
+      run: |
+        uv pip install --system -e ".[dev,django]"
+
+    - name: Run Django integration tests
+      run: |
+        pytest -q -n 0 integrations/weft_django/tests
 
   test-docker-extension:
     runs-on: ubuntu-latest
@@ -91,7 +115,7 @@ jobs:
 
     - name: Install dependencies
       run: |
-        uv pip install --system -e ".[dev,docker]"
+        uv pip install --system -e ".[dev,docker,django]"
 
     - name: Verify Docker is available
       run: |
@@ -119,7 +143,7 @@ jobs:
 
     - name: Install dependencies
       run: |
-        uv pip install --system -e ".[dev,macos-sandbox]"
+        uv pip install --system -e ".[dev,django,macos-sandbox]"
 
     - name: Run macOS sandbox extension tests
       run: |
@@ -142,7 +166,7 @@ jobs:
 
     - name: Install dependencies
       run: |
-        uv pip install --system -e ".[dev,docker,macos-sandbox]"
+        uv pip install --system -e ".[dev,docker,django,macos-sandbox]"
         uv pip install --system pytest-cov
 
     - name: Run tests with coverage

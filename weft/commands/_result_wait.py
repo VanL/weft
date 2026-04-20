@@ -17,8 +17,8 @@ from weft._constants import (
     WEFT_GLOBAL_LOG_QUEUE,
 )
 from weft.context import WeftContext
+from weft.core.queue_wait import QueueChangeMonitor
 
-from ._queue_wait import QueueChangeMonitor
 from ._streaming import (
     DecodedOutboxValue,
     aggregate_public_outputs,

@@ -1,4 +1,8 @@
-"""CLI helper to execute TaskSpecs or inline targets.
+"""Shared `weft run` orchestration for CLI-facing execution modes.
+
+This module is shared below the Typer adapter, but it remains CLI-oriented:
+streaming and interactive paths emit directly to stdout/stderr. It is not yet
+the basis for a public programmatic `WeftClient.run()` surface.
 
 Spec references:
 - docs/specifications/10-CLI_Interface.md [CLI-1.1.1]
@@ -14,11 +18,9 @@ import json
 import subprocess
 import sys
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
-
-import typer
 
 from simplebroker import Queue
 from weft._constants import (
@@ -33,7 +35,13 @@ from weft._constants import (
     QUEUE_OUTBOX_SUFFIX,
 )
 from weft.commands import specs as spec_cmd
-from weft.commands._manager_bootstrap import (
+from weft.commands._result_wait import await_one_shot_result
+from weft.commands._streaming import (
+    collect_interactive_queue_output as _collect_interactive_queue_output,
+)
+from weft.commands._task_history import is_pipeline_taskspec_payload
+from weft.commands.interactive import InteractiveStreamClient
+from weft.commands.manager import (
     _build_manager_spec,
     _ensure_manager,
     _generate_tid,
@@ -41,13 +49,10 @@ from weft.commands._manager_bootstrap import (
     _start_manager,
     _stop_manager,
 )
-from weft.commands._result_wait import await_one_shot_result
-from weft.commands._spawn_submission import reconcile_submitted_spawn
-from weft.commands._streaming import (
-    collect_interactive_queue_output as _collect_interactive_queue_output,
+from weft.commands.submission import (
+    ensure_manager_after_submission as _shared_ensure_manager_after_submission,
 )
-from weft.commands._task_history import is_pipeline_taskspec_payload
-from weft.commands.interactive import InteractiveStreamClient
+from weft.commands.types import RunExecutionResult
 from weft.context import WeftContext, build_context
 from weft.core.endpoints import validate_endpoint_claim_name
 from weft.core.pipelines import (
@@ -55,23 +60,16 @@ from weft.core.pipelines import (
     compile_linear_pipeline,
     load_pipeline_spec_payload,
 )
-from weft.core.spawn_requests import (
-    delete_spawn_request as delete_spawn_request_message,
-)
-from weft.core.spawn_requests import submit_spawn_request
-from weft.core.spec_parameterization import (
-    materialize_taskspec_template,
-    parse_declared_parameterization_args,
-)
-from weft.core.spec_run_input import (
-    SpecRunInputRequest,
-    invoke_run_input_adapter,
-    normalize_declared_option_name,
-    parse_declared_run_input_args,
-)
+from weft.core.spawn_requests import delete_spawn_request, submit_spawn_request
 from weft.core.taskspec import (
+    SpecRunInputRequest,
     TaskSpec,
     apply_bundle_root_to_taskspec_payload,
+    invoke_run_input_adapter,
+    materialize_taskspec_template,
+    normalize_declared_option_name,
+    parse_declared_parameterization_args,
+    parse_declared_run_input_args,
     resolve_taskspec_payload,
 )
 from weft.helpers import (
@@ -85,14 +83,48 @@ from weft.helpers import (
 # -----------------------------------------------------------------------------
 
 
-@dataclass(slots=True)
-class _ManagedExecutionResult:
-    """Shared manager-backed submission result for run-mode helpers."""
+class RunUsageError(ValueError):
+    """Raised when run-surface inputs do not satisfy the command contract."""
 
-    tid: str
-    status: str | None = None
-    result_value: Any | None = None
-    error_message: str | None = None
+    def __init__(self, message: str, *, param_hint: str | None = None) -> None:
+        super().__init__(message)
+        self.param_hint = param_hint
+
+
+class RunResolutionError(RuntimeError):
+    """Raised when a spec or pipeline reference cannot be loaded for run-mode use."""
+
+
+def _echo(message: Any = "", *, err: bool = False, nl: bool = True) -> None:
+    """Write a CLI-facing message without importing the Typer adapter layer."""
+
+    stream = sys.stderr if err else sys.stdout
+    text = "" if message is None else str(message)
+    stream.write(text)
+    if nl:
+        stream.write("\n")
+    stream.flush()
+
+
+def _emit_manager_started(record: dict[str, Any]) -> None:
+    """Emit the CLI-visible manager startup event for verbose runs."""
+
+    _echo(
+        json.dumps(
+            {
+                "event": "manager_started",
+                "manager_tid": record.get("tid"),
+                "pid": record.get("pid"),
+                "queues": {
+                    key: record.get(key)
+                    for key in ("requests", "outbox", "ctrl_in", "ctrl_out")
+                    if record.get(key)
+                },
+                "timestamp": record.get("timestamp"),
+            },
+            ensure_ascii=False,
+        )
+    )
 
 
 def _run_with_managed_execution(
@@ -104,7 +136,7 @@ def _run_with_managed_execution(
     reuse_enabled: bool,
     wait_for_completion: Callable[[str], tuple[str, Any, str | None]] | None = None,
     on_submitted: Callable[[str], None] | None = None,
-) -> _ManagedExecutionResult:
+) -> RunExecutionResult:
     """Share the manager-backed bootstrap -> submit -> wait -> optional stop flow."""
     manager_record: dict[str, Any] | None = None
     started_here = False
@@ -118,18 +150,20 @@ def _run_with_managed_execution(
             submitted_tid=tid_int,
             verbose=verbose,
         )
+        if started_here and verbose and manager_record is not None:
+            _emit_manager_started(manager_record)
         tid = str(tid_int)
         if on_submitted is not None:
             on_submitted(tid)
 
         if not wait:
-            return _ManagedExecutionResult(tid=tid)
+            return RunExecutionResult(tid=tid)
 
         if wait_for_completion is None:  # pragma: no cover - caller contract guard
             raise RuntimeError("wait_for_completion is required when wait=True")
 
         status, result_value, error_message = wait_for_completion(tid)
-        return _ManagedExecutionResult(
+        return RunExecutionResult(
             tid=tid,
             status=status,
             result_value=result_value,
@@ -170,7 +204,7 @@ def _load_taskspec_reference(
         taskspec.set_bundle_root(resolved.bundle_root)
         return taskspec
     except Exception as exc:  # pragma: no cover - validation tested elsewhere
-        raise typer.Exit(code=2) from exc
+        raise RunResolutionError(str(exc)) from exc
 
 
 def _load_pipeline_spec(
@@ -221,7 +255,7 @@ def _format_declared_option_help(name: str, declaration: Any) -> str:
 
 
 def render_spec_aware_run_help(
-    ctx: typer.Context,
+    base_help: str,
     *,
     spec: str | Path,
     context_dir: Path | None,
@@ -229,7 +263,7 @@ def render_spec_aware_run_help(
     """Return `weft run` help augmented with selected TaskSpec help."""
     taskspec = _load_taskspec_reference(spec, context_dir=context_dir)
 
-    lines = [ctx.get_help(), "", f"Spec Help: {taskspec.name}"]
+    lines = [base_help, "", f"Spec Help: {taskspec.name}"]
     if taskspec.description:
         lines.append(taskspec.description)
 
@@ -285,7 +319,7 @@ def _parse_cli_kwargs(values: Sequence[str]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for item in values:
         if "=" not in item:
-            raise typer.BadParameter(
+            raise RunUsageError(
                 f"Keyword argument '{item}' is missing '=' (expected key=value)"
             )
         key, value = item.split("=", 1)
@@ -297,7 +331,7 @@ def _parse_env(values: Sequence[str]) -> dict[str, str]:
     env: dict[str, str] = {}
     for item in values:
         if "=" not in item:
-            raise typer.BadParameter(
+            raise RunUsageError(
                 f"Environment entry '{item}' is missing '=' (expected KEY=VALUE)"
             )
         key, value = item.split("=", 1)
@@ -312,7 +346,7 @@ def _read_piped_stdin(context: WeftContext) -> str | None:
             max_bytes = resolve_broker_max_message_size(context.config)
             data = read_limited_stdin(max_bytes)
         except ValueError as exc:
-            raise typer.BadParameter(str(exc)) from exc
+            raise RunUsageError(str(exc)) from exc
         return data if data else None
     return None
 
@@ -389,77 +423,33 @@ def _enqueue_taskspec(
 
 def _delete_spawn_request(context: WeftContext, message_timestamp: int) -> bool:
     """Best-effort removal of a queued spawn request after submission failure."""
-    return delete_spawn_request_message(
+
+    return delete_spawn_request(
         context.broker_target,
         message_timestamp=message_timestamp,
         config=context.broker_config,
     )
 
 
-def _recover_submitted_spawn(
-    context: WeftContext,
-    *,
-    submitted_tid: str,
-    startup_error: Exception,
-) -> tuple[dict[str, Any] | None, bool, subprocess.Popen[Any] | None]:
-    reconciliation = reconcile_submitted_spawn(context, submitted_tid)
-    if reconciliation.outcome == "spawned":
-        return None, False, None
-    if reconciliation.outcome == "rejected":
-        reason = (
-            reconciliation.error or f"Manager rejected submitted task {submitted_tid}"
-        )
-        raise RuntimeError(reason) from startup_error
-    if reconciliation.outcome == "queued":
-        deleted = _delete_spawn_request(context, int(submitted_tid))
-        if deleted:
-            raise startup_error
-        reconciliation = reconcile_submitted_spawn(
-            context,
-            submitted_tid,
-            timeout=0.2,
-        )
-        if reconciliation.outcome == "spawned":
-            return None, False, None
-        if reconciliation.outcome == "rejected":
-            reason = (
-                reconciliation.error
-                or f"Manager rejected submitted task {submitted_tid}"
-            )
-            raise RuntimeError(reason) from startup_error
-    if reconciliation.outcome == "reserved":
-        raise RuntimeError(
-            f"Submitted task {submitted_tid} was already claimed into "
-            f"{reconciliation.reserved_queue}; manual recovery is required."
-        ) from startup_error
-    if reconciliation.outcome == "queued":
-        raise RuntimeError(
-            f"Submitted task {submitted_tid} is still queued, but rollback could "
-            "not be confirmed."
-        ) from startup_error
-    raise RuntimeError(
-        f"Submitted task {submitted_tid} could not be reconciled; rollback "
-        "could not be proven."
-    ) from startup_error
-
-
 def _ensure_manager_after_submission(
     context: WeftContext,
     *,
-    submitted_tid: int,
-    verbose: bool,
+    submitted_tid: str | int,
+    verbose: bool = False,
 ) -> tuple[dict[str, Any] | None, bool, subprocess.Popen[Any] | None]:
-    try:
-        return _ensure_manager(
-            context,
-            verbose=verbose,
-        )
-    except Exception as exc:
-        return _recover_submitted_spawn(
-            context,
-            submitted_tid=str(submitted_tid),
-            startup_error=exc,
-        )
+    """CLI seam for queue-first submission recovery.
+
+    This keeps `weft.cli.run` patch points stable for CLI tests while
+    routing the actual recovery policy through the shared submission helper.
+    """
+
+    return _shared_ensure_manager_after_submission(
+        context,
+        submitted_tid=submitted_tid,
+        verbose=verbose,
+        ensure_manager_fn=_ensure_manager,
+        delete_spawn_request_fn=_delete_spawn_request,
+    )
 
 
 def _wait_for_task_completion(
@@ -522,18 +512,18 @@ def _run_interactive_session(
     def _stdout_callback(chunk: str, final: bool) -> None:
         if use_prompt:
             if chunk:
-                typer.echo(chunk, nl=False)
+                _echo(chunk, nl=False)
             if final and (not chunk or not chunk.endswith("\n")):
-                typer.echo()
+                _echo()
         else:
             if chunk:
                 stdout_chunks.append(chunk)
 
     def _stderr_callback(chunk: str, final: bool) -> None:
         if chunk:
-            typer.echo(chunk, err=True, nl=False)
+            _echo(chunk, err=True, nl=False)
         if final and (not chunk or not chunk.endswith("\n")):
-            typer.echo(err=True)
+            _echo(err=True)
 
     def _state_callback(event: dict[str, Any]) -> None:
         status = event.get("status")
@@ -608,7 +598,7 @@ def _run_interactive_session(
                 from prompt_toolkit import PromptSession
                 from prompt_toolkit.patch_stdout import patch_stdout
             except ImportError as exc:  # pragma: no cover - optional dependency guard
-                raise typer.BadParameter(
+                raise RunUsageError(
                     "prompt_toolkit is required for interactive mode when stdin is a TTY"
                 ) from exc
 
@@ -639,7 +629,7 @@ def _run_interactive_session(
                         client.close_input()
                         break
                     except KeyboardInterrupt:
-                        typer.echo()
+                        _echo()
                         continue
 
                     if line is None:  # Completion triggered while waiting for input
@@ -750,7 +740,7 @@ def _build_taskspec_dict(
         limits["memory_mb"] = memory
     if cpu is not None:
         if not 0 < cpu <= 100:
-            raise typer.BadParameter("CPU limit must be between 1 and 100 percent")
+            raise RunUsageError("CPU limit must be between 1 and 100 percent")
         limits["cpu_percent"] = cpu
     if limits:
         spec_section["limits"] = limits
@@ -806,7 +796,7 @@ def _build_spec_work_payload(
     run_input = taskspec.spec.run_input
     if run_input is None:
         if run_input_tokens:
-            raise typer.BadParameter(
+            raise RunUsageError(
                 "This TaskSpec does not declare spec.run_input; extra "
                 "arguments are not supported with --spec."
             )
@@ -817,13 +807,11 @@ def _build_spec_work_payload(
         )
 
     if stdin_data is not None and run_input.stdin is None:
-        raise typer.BadParameter(
+        raise RunUsageError(
             "This TaskSpec does not declare stdin input for spec.run_input."
         )
     if run_input.stdin is not None and run_input.stdin.required and stdin_data is None:
-        raise typer.BadParameter(
-            "This TaskSpec requires piped stdin for spec.run_input."
-        )
+        raise RunUsageError("This TaskSpec requires piped stdin for spec.run_input.")
 
     try:
         arguments = parse_declared_run_input_args(
@@ -841,7 +829,7 @@ def _build_spec_work_payload(
             bundle_root=taskspec.get_bundle_root(),
         )
     except (TypeError, ValueError) as exc:
-        raise typer.BadParameter(str(exc)) from exc
+        raise RunUsageError(str(exc)) from exc
 
 
 def _apply_explicit_run_name(taskspec: TaskSpec, explicit_name: str | None) -> TaskSpec:
@@ -866,7 +854,7 @@ def _apply_explicit_run_name(taskspec: TaskSpec, explicit_name: str | None) -> T
     try:
         endpoint_name = validate_endpoint_claim_name(explicit_name)
     except ValueError as exc:
-        raise typer.BadParameter(str(exc), param_hint="--name") from exc
+        raise RunUsageError(str(exc), param_hint="--name") from exc
 
     if bool(getattr(taskspec.spec, "persistent", False)):
         metadata[INTERNAL_RUNTIME_ENDPOINT_NAME_KEY] = endpoint_name
@@ -899,7 +887,7 @@ def _materialize_parameterized_spec(
             context_root=context_root,
         )
     except (TypeError, ValueError) as exc:
-        raise typer.BadParameter(str(exc)) from exc
+        raise RunUsageError(str(exc)) from exc
     return materialized, remaining_tokens
 
 
@@ -925,10 +913,10 @@ def _run_inline(
 ) -> int:
     target_type = "command" if command else "function"
     if target_type == "command" and not command:
-        raise typer.BadParameter("Provide a command to execute or use --function")
+        raise RunUsageError("Provide a command to execute or use --function")
     if target_type == "function":
         if not function_target or ":" not in function_target:
-            raise typer.BadParameter(
+            raise RunUsageError(
                 "Use --function with module:callable to execute a Python function"
             )
 
@@ -986,7 +974,7 @@ def _run_inline(
     def _emit_verbose_submission(tid: str) -> None:
         if not verbose:
             return
-        typer.echo(
+        _echo(
             json.dumps(
                 {
                     "tid": tid,
@@ -1023,9 +1011,9 @@ def _run_inline(
                 use_prompt=use_prompt,
             )
             if not use_prompt and result_value:
-                typer.echo(result_value, nl=False)
+                _echo(result_value, nl=False)
                 if not str(result_value).endswith("\n"):
-                    typer.echo()
+                    _echo()
                 result_value = ""
             return status, result_value, error_message
 
@@ -1034,16 +1022,13 @@ def _run_inline(
             resolved_spec,
         )
 
+    if interactive:
+        if target_type != "command":
+            raise RunUsageError("--interactive is only supported for command targets")
+        if json_output:
+            raise RunUsageError("--json is not supported together with --interactive")
+
     try:
-        if interactive:
-            if target_type != "command":
-                raise typer.BadParameter(
-                    "--interactive is only supported for command targets"
-                )
-            if json_output:
-                raise typer.BadParameter(
-                    "--json is not supported together with --interactive"
-                )
         execution = _run_with_managed_execution(
             context=context,
             submit=lambda: _enqueue_taskspec(
@@ -1058,20 +1043,20 @@ def _run_inline(
             on_submitted=_emit_verbose_submission,
         )
     except Exception as exc:
-        typer.echo(f"Error submitting task: {exc}", err=True)
+        _echo(f"Error submitting task: {exc}", err=True)
         return 1
 
     tid = execution.tid
     if not wait:
         if json_output:
-            typer.echo(
+            _echo(
                 json.dumps(
                     {"tid": tid, "status": "queued"},
                     ensure_ascii=False,
                 )
             )
         else:
-            typer.echo(tid)
+            _echo(tid)
         return 0
 
     status = execution.status
@@ -1080,7 +1065,7 @@ def _run_inline(
 
     if status == "completed":
         if json_output:
-            typer.echo(
+            _echo(
                 json.dumps(
                     {
                         "tid": tid,
@@ -1092,9 +1077,9 @@ def _run_inline(
             )
         else:
             if isinstance(result_value, (dict, list)):
-                typer.echo(json.dumps(result_value, ensure_ascii=False))
+                _echo(json.dumps(result_value, ensure_ascii=False))
             elif result_value not in (None, ""):
-                typer.echo(str(result_value))
+                _echo(str(result_value))
         return 0
 
     display_error = error_message
@@ -1104,7 +1089,7 @@ def _run_inline(
         display_error = "Task killed"
 
     if json_output:
-        typer.echo(
+        _echo(
             json.dumps(
                 {
                     "tid": tid,
@@ -1115,7 +1100,7 @@ def _run_inline(
             )
         )
     else:
-        typer.echo(f"Error executing task: {display_error}", err=True)
+        _echo(f"Error executing task: {display_error}", err=True)
     return 124 if status == "timeout" else 1
 
 
@@ -1151,7 +1136,7 @@ def _run_spec_via_manager(
     )
     spec = _apply_explicit_run_name(spec, name)
     if spec.spec.persistent and wait:
-        raise typer.BadParameter(
+        raise RunUsageError(
             "--wait is not supported for persistent TaskSpecs; use --no-wait."
         )
     context = build_context(spec.spec.weft_context, autostart=autostart_enabled)
@@ -1193,20 +1178,20 @@ def _run_spec_via_manager(
             wait_for_completion=_wait_for_spec_completion if wait else None,
         )
     except Exception as exc:
-        typer.echo(f"Error submitting TaskSpec: {exc}", err=True)
+        _echo(f"Error submitting TaskSpec: {exc}", err=True)
         return 1
 
     tid = execution.tid
     if not wait:
         if json_output:
-            typer.echo(
+            _echo(
                 json.dumps(
                     {"tid": tid, "status": "queued"},
                     ensure_ascii=False,
                 )
             )
         else:
-            typer.echo(tid)
+            _echo(tid)
         return 0
 
     status = execution.status
@@ -1215,7 +1200,7 @@ def _run_spec_via_manager(
 
     if status == "completed":
         if json_output:
-            typer.echo(
+            _echo(
                 json.dumps(
                     {
                         "tid": tid,
@@ -1227,13 +1212,13 @@ def _run_spec_via_manager(
             )
         else:
             if isinstance(result_value, (dict, list)):
-                typer.echo(json.dumps(result_value, ensure_ascii=False))
+                _echo(json.dumps(result_value, ensure_ascii=False))
             elif result_value not in (None, ""):
-                typer.echo(str(result_value))
+                _echo(str(result_value))
         return 0
 
     if json_output:
-        typer.echo(
+        _echo(
             json.dumps(
                 {
                     "tid": tid,
@@ -1244,7 +1229,7 @@ def _run_spec_via_manager(
             )
         )
     else:
-        typer.echo(f"Error executing task: {error_message}", err=True)
+        _echo(f"Error executing task: {error_message}", err=True)
     return 124 if status == "timeout" else 1
 
 
@@ -1263,7 +1248,7 @@ def _run_pipeline(
     pipeline_spec, source_ref = _load_pipeline_spec(pipeline, context_dir=context_dir)
     stdin_data = _read_piped_stdin(context)
     if pipeline_input is not None and stdin_data is not None:
-        raise typer.BadParameter("--input cannot be used together with piped stdin")
+        raise RunUsageError("--input cannot be used together with piped stdin")
 
     requested_input: Any = None
     if pipeline_input is not None:
@@ -1303,7 +1288,7 @@ def _run_pipeline(
     def _emit_pipeline_submission(tid: str) -> None:
         if not verbose:
             return
-        typer.echo(
+        _echo(
             json.dumps(
                 {
                     "tid": tid,
@@ -1342,14 +1327,14 @@ def _run_pipeline(
     tid = execution.tid
     if not wait:
         if json_output:
-            typer.echo(
+            _echo(
                 json.dumps(
                     {"tid": tid, "status": "queued"},
                     ensure_ascii=False,
                 )
             )
         else:
-            typer.echo(tid)
+            _echo(tid)
         return 0
 
     status = execution.status
@@ -1358,7 +1343,7 @@ def _run_pipeline(
 
     if status == "completed":
         if json_output:
-            typer.echo(
+            _echo(
                 json.dumps(
                     {
                         "tid": tid,
@@ -1370,13 +1355,13 @@ def _run_pipeline(
             )
         else:
             if isinstance(result_value, (dict, list)):
-                typer.echo(json.dumps(result_value, ensure_ascii=False))
+                _echo(json.dumps(result_value, ensure_ascii=False))
             elif result_value not in (None, ""):
-                typer.echo(str(result_value))
+                _echo(str(result_value))
         return 0
 
     if json_output:
-        typer.echo(
+        _echo(
             json.dumps(
                 {
                     "tid": tid,
@@ -1387,7 +1372,7 @@ def _run_pipeline(
             )
         )
     else:
-        typer.echo(f"Pipeline failed: {error_message}", err=True)
+        _echo(f"Pipeline failed: {error_message}", err=True)
     return 124 if status == "timeout" else 1
 
 
@@ -1446,19 +1431,17 @@ def cmd_run(
     """
     if pipeline is not None:
         if spec is not None or command or function:
-            raise typer.BadParameter(
+            raise RunUsageError(
                 "--pipeline cannot be combined with --spec, --function, or commands"
             )
         if args or kwargs or env or tags:
-            raise typer.BadParameter(
+            raise RunUsageError(
                 "--arg/--kw/--env/--tag are not compatible with --pipeline."
             )
         if monitor:
-            raise typer.BadParameter("--monitor is not supported with pipelines.")
+            raise RunUsageError("--monitor is not supported with pipelines.")
         if persistent_override is not None:
-            raise typer.BadParameter(
-                "--continuous/--once is not supported with pipelines."
-            )
+            raise RunUsageError("--continuous/--once is not supported with pipelines.")
         return _run_pipeline(
             pipeline,
             name=name,
@@ -1471,15 +1454,15 @@ def cmd_run(
         )
     if spec is not None:
         if command:
-            raise typer.BadParameter("Provide either a TaskSpec file or a command.")
+            raise RunUsageError("Provide either a TaskSpec file or a command.")
         if function:
-            raise typer.BadParameter("--function cannot be used together with --spec.")
+            raise RunUsageError("--function cannot be used together with --spec.")
         if args or kwargs or env or tags:
-            raise typer.BadParameter(
+            raise RunUsageError(
                 "--arg/--kw/--env/--tag are not compatible with --spec."
             )
         if monitor:
-            raise typer.BadParameter("--monitor is not yet supported with the Manager.")
+            raise RunUsageError("--monitor is not yet supported with the Manager.")
         return _run_spec_via_manager(
             spec,
             name=name,
@@ -1493,22 +1476,22 @@ def cmd_run(
         )
 
     if monitor:
-        raise typer.BadParameter("--monitor is only supported together with --spec.")
+        raise RunUsageError("--monitor is only supported together with --spec.")
     if persistent_override is not None:
-        raise typer.BadParameter(
+        raise RunUsageError(
             "--continuous/--once is only supported together with --spec."
         )
 
     if not command and not function:
-        raise typer.BadParameter(
+        raise RunUsageError(
             "Provide a command to execute or specify --function module:callable."
         )
     if command and function:
-        raise typer.BadParameter(
+        raise RunUsageError(
             "Cannot execute a shell command and --function simultaneously."
         )
     if command and command[0].startswith("--"):
-        raise typer.BadParameter(
+        raise RunUsageError(
             f"Unknown option '{command[0]}'. If this is intentional command "
             "input, use a command that does not begin with '--'."
         )
@@ -1535,11 +1518,20 @@ def cmd_run(
 
 
 __all__ = [
+    "RunResolutionError",
+    "RunUsageError",
     "_build_manager_spec",
+    "_collect_interactive_queue_output",
+    "_delete_spawn_request",
+    "_enqueue_taskspec",
     "_ensure_manager",
     "_generate_tid",
+    "_run_inline",
+    "_run_pipeline",
+    "_run_spec_via_manager",
     "_select_active_manager",
     "_start_manager",
+    "_wait_for_task_completion",
     "cmd_run",
     "render_spec_aware_run_help",
 ]

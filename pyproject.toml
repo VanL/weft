@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "weft"
-version = "0.9.4"
+version = "0.9.5"
 description = "The durable task substrate for agent systems"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -45,12 +45,16 @@ pg = [
 docker = [
     "weft-docker>=0.6.1,<1",
 ]
+django = [
+    "weft-django>=0.9.5,<1",
+]
 macos-sandbox = [
     "weft-macos-sandbox>=0.5.1,<1",
 ]
 all = [
     "simplebroker-pg>=1.0.5",
     "weft-docker>=0.6.1,<1",
+    "weft-django>=0.9.5,<1",
     "weft-macos-sandbox>=0.5.1,<1",
 ]
 dev = [
@@ -75,6 +79,7 @@ Issues = "https://github.com/VanL/weft/issues"
 
 [tool.uv.sources]
 weft-docker = { path = "./extensions/weft_docker", editable = true }
+weft-django = { path = "./integrations/weft_django", editable = true }
 weft-macos-sandbox = { path = "./extensions/weft_macos_sandbox", editable = true }
 
 [tool.hatch.build]
@@ -129,6 +134,14 @@ ignore_missing_imports = true
 module = "weft_docker.*"
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+module = "django.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "channels.*"
+ignore_missing_imports = true
+
 [tool.ruff]
 target-version = "py312"
 line-length = 88
@@ -149,4 +162,4 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["weft", "simplebroker"]
+known-first-party = ["weft", "weft_django", "simplebroker"]

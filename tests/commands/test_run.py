@@ -12,9 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-import typer
 
-import weft.commands._manager_bootstrap as manager_lifecycle
 import weft.commands._result_wait as result_wait_cmd
 import weft.commands._spawn_submission as spawn_submission_cmd
 from tests.helpers.test_backend import prepare_project_root
@@ -30,12 +28,14 @@ from weft._constants import (
     WEFT_SPAWN_REQUESTS_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
 )
+from weft._exceptions import ManagerStartFailed
 from weft.commands import tasks as task_cmd
 from weft.commands._spawn_submission import (
     SpawnSubmissionReconciliation,
     reconcile_submitted_spawn,
 )
 from weft.commands.run import (
+    RunUsageError,
     _build_manager_spec,
     _collect_interactive_queue_output,
     _delete_spawn_request,
@@ -48,7 +48,9 @@ from weft.commands.run import (
     _wait_for_task_completion,
 )
 from weft.context import build_context
+from weft.core import manager_runtime as core_manager_runtime
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
+from weft.helpers import iter_queue_json_entries
 
 pytestmark = [pytest.mark.shared]
 
@@ -122,10 +124,10 @@ def _wait_for_task_status(
 
 
 def _stop_active_manager(context) -> None:
-    record = manager_lifecycle._select_active_manager(context)
+    record = core_manager_runtime.select_active_manager(context)
     if record is None:
         return
-    stopped, error = manager_lifecycle._stop_manager(
+    stopped, error = core_manager_runtime.stop_manager(
         context,
         record,
         timeout=5.0,
@@ -139,8 +141,8 @@ def _registry_view(
     active: dict[str, Any] | None = None,
     target: dict[str, Any] | None = None,
     records: dict[str, dict[str, Any]] | None = None,
-) -> manager_lifecycle._ManagerRegistryView:
-    return manager_lifecycle._ManagerRegistryView(
+) -> core_manager_runtime.ManagerRegistryView:
+    return core_manager_runtime.ManagerRegistryView(
         records={} if records is None else records,
         active_manager=active,
         target_record=target,
@@ -376,32 +378,32 @@ def test_start_manager_does_not_terminate_competing_startup_manager(
     ctx = build_context(spec_context=root)
     fake_process = _FakePopen(poll_results=[1])
     competing_record = {"tid": "1775619800000000000", "pid": 31337}
-    launch = manager_lifecycle._DetachedManagerLaunch(
+    launch = core_manager_runtime.DetachedManagerLaunch(
         pid=4242,
         stderr_path=root / ".weft" / "logs" / "manager-startup" / "manager.stderr",
         launcher_process=fake_process,
     )
 
     monkeypatch.setattr(
-        "weft.commands._manager_bootstrap._build_manager_runtime_invocation",
-        lambda context: manager_lifecycle._ManagerRuntimeInvocation(
+        "weft.core.manager_runtime._build_manager_runtime_invocation",
+        lambda context: core_manager_runtime.ManagerRuntimeInvocation(
             task_cls_path="weft.core.manager.Manager",
             tid="9" * 19,
             spec=_FakeManagerSpec(),
         ),
     )
     monkeypatch.setattr(
-        "weft.commands._manager_bootstrap._launch_detached_manager",
+        "weft.core.manager_runtime._launch_detached_manager",
         lambda context, invocation: launch,
     )
     monkeypatch.setattr(
-        "weft.commands._manager_bootstrap.QueueChangeMonitor",
+        "weft.core.manager_runtime.QueueChangeMonitor",
         _FakeQueueChangeMonitor,
     )
 
     records = iter([competing_record, competing_record])
     monkeypatch.setattr(
-        "weft.commands._manager_bootstrap._registry_view",
+        "weft.core.manager_runtime._registry_view",
         lambda context, *, target_tid=None, prune_stale=True, queue=None: (
             _registry_view(
                 active=next(records),
@@ -416,7 +418,7 @@ def test_start_manager_does_not_terminate_competing_startup_manager(
         terminated = True
 
     monkeypatch.setattr(
-        "weft.commands._manager_bootstrap._terminate_manager_process",
+        "weft.core.manager_runtime._terminate_manager_process",
         _unexpected_terminate,
     )
 
@@ -442,7 +444,7 @@ def test_start_manager_adopts_competing_manager_after_losing_pid_exits(
         "requests": WEFT_SPAWN_REQUESTS_QUEUE,
         "role": "manager",
     }
-    launch = manager_lifecycle._DetachedManagerLaunch(
+    launch = core_manager_runtime.DetachedManagerLaunch(
         pid=4242,
         stderr_path=root / ".weft" / "logs" / "manager-startup" / "manager.stderr",
         launcher_process=fake_process,
@@ -450,47 +452,47 @@ def test_start_manager_adopts_competing_manager_after_losing_pid_exits(
     cleaned_paths: list[Path] = []
 
     monkeypatch.setattr(
-        "weft.commands._manager_bootstrap._build_manager_runtime_invocation",
-        lambda context: manager_lifecycle._ManagerRuntimeInvocation(
+        "weft.core.manager_runtime._build_manager_runtime_invocation",
+        lambda context: core_manager_runtime.ManagerRuntimeInvocation(
             task_cls_path="weft.core.manager.Manager",
             tid="9" * 19,
             spec=_FakeManagerSpec(),
         ),
     )
     monkeypatch.setattr(
-        "weft.commands._manager_bootstrap._launch_detached_manager",
+        "weft.core.manager_runtime._launch_detached_manager",
         lambda context, invocation: launch,
     )
     monkeypatch.setattr(
-        "weft.commands._manager_bootstrap.QueueChangeMonitor",
+        "weft.core.manager_runtime.QueueChangeMonitor",
         _FakeQueueChangeMonitor,
     )
 
     monkeypatch.setattr(
-        "weft.commands._manager_bootstrap._registry_view",
+        "weft.core.manager_runtime._registry_view",
         lambda context, *, target_tid=None, prune_stale=True, queue=None: (
             _registry_view()
         ),
     )
     monkeypatch.setattr(
-        "weft.commands._manager_bootstrap._await_manager_start_settlement",
+        "weft.core.manager_runtime._await_manager_start_settlement",
         lambda context, *, manager_tid, deadline: competing_record,
     )
     monkeypatch.setattr(
-        "weft.commands._manager_bootstrap._is_pid_alive",
+        "weft.core.manager_runtime._is_pid_alive",
         lambda pid: False,
     )
     monotonic_values = iter([0.0, 0.0, 0.1, 0.2])
     monkeypatch.setattr(
-        "weft.commands._manager_bootstrap.time.monotonic",
+        "weft.core.manager_runtime.time.monotonic",
         lambda: next(monotonic_values, 1.0),
     )
     monkeypatch.setattr(
-        "weft.commands._manager_bootstrap.time.sleep",
+        "weft.core.manager_runtime.time.sleep",
         lambda seconds: None,
     )
     monkeypatch.setattr(
-        "weft.commands._manager_bootstrap._cleanup_startup_stderr",
+        "weft.core.manager_runtime._cleanup_startup_stderr",
         lambda path: cleaned_paths.append(path),
     )
 
@@ -509,7 +511,7 @@ def test_start_manager_builds_detached_launch_from_shared_runtime_invocation(
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     fake_process = _FakePopen(poll_results=[None, None])
-    invocation = manager_lifecycle._ManagerRuntimeInvocation(
+    invocation = core_manager_runtime.ManagerRuntimeInvocation(
         task_cls_path="weft.core.manager.Manager",
         tid="9" * 19,
         spec=_FakeManagerSpec(),
@@ -517,7 +519,7 @@ def test_start_manager_builds_detached_launch_from_shared_runtime_invocation(
     helper_calls: list[tuple[object, object]] = []
     launch_calls: list[tuple[object, object]] = []
     acked: list[object] = []
-    launch = manager_lifecycle._DetachedManagerLaunch(
+    launch = core_manager_runtime.DetachedManagerLaunch(
         pid=fake_process.pid,
         stderr_path=root / ".weft" / "logs" / "manager-startup" / "manager.stderr",
         launcher_process=fake_process,
@@ -532,23 +534,23 @@ def test_start_manager_builds_detached_launch_from_shared_runtime_invocation(
         return launch
 
     monkeypatch.setattr(
-        "weft.commands._manager_bootstrap._build_manager_runtime_invocation",
+        "weft.core.manager_runtime._build_manager_runtime_invocation",
         _fake_build_invocation,
     )
     monkeypatch.setattr(
-        "weft.commands._manager_bootstrap._launch_detached_manager",
+        "weft.core.manager_runtime._launch_detached_manager",
         _fake_launch,
     )
     monkeypatch.setattr(
-        "weft.commands._manager_bootstrap.QueueChangeMonitor",
+        "weft.core.manager_runtime.QueueChangeMonitor",
         _FakeQueueChangeMonitor,
     )
     monkeypatch.setattr(
-        "weft.commands._manager_bootstrap._acknowledge_manager_launch_success",
+        "weft.core.manager_runtime._acknowledge_manager_launch_success",
         lambda launch_arg: acked.append(launch_arg),
     )
     monkeypatch.setattr(
-        "weft.commands._manager_bootstrap._registry_view",
+        "weft.core.manager_runtime._registry_view",
         lambda context, *, target_tid=None, prune_stale=True, queue=None: (
             _registry_view(
                 active={
@@ -562,15 +564,15 @@ def test_start_manager_builds_detached_launch_from_shared_runtime_invocation(
         ),
     )
     monkeypatch.setattr(
-        "weft.commands._manager_bootstrap._is_pid_alive",
+        "weft.core.manager_runtime._is_pid_alive",
         lambda pid: True,
     )
     monkeypatch.setattr(
-        "weft.commands._manager_bootstrap._cleanup_startup_stderr",
+        "weft.core.manager_runtime._cleanup_startup_stderr",
         lambda path: None,
     )
     monkeypatch.setattr(
-        "weft.commands._manager_bootstrap.time.sleep",
+        "weft.core.manager_runtime.time.sleep",
         lambda seconds: None,
     )
 
@@ -592,12 +594,12 @@ def test_start_manager_treats_post_proof_ack_failure_as_nonfatal(
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     fake_process = _FakePopen(poll_results=[None, None, 0])
-    invocation = manager_lifecycle._ManagerRuntimeInvocation(
+    invocation = core_manager_runtime.ManagerRuntimeInvocation(
         task_cls_path="weft.core.manager.Manager",
         tid="9" * 19,
         spec=_FakeManagerSpec(),
     )
-    launch = manager_lifecycle._DetachedManagerLaunch(
+    launch = core_manager_runtime.DetachedManagerLaunch(
         pid=fake_process.pid,
         stderr_path=root / ".weft" / "logs" / "manager-startup" / "manager.stderr",
         launcher_process=fake_process,
@@ -605,25 +607,25 @@ def test_start_manager_treats_post_proof_ack_failure_as_nonfatal(
     warnings: list[str] = []
 
     monkeypatch.setattr(
-        "weft.commands._manager_bootstrap._build_manager_runtime_invocation",
+        "weft.core.manager_runtime._build_manager_runtime_invocation",
         lambda context: invocation,
     )
     monkeypatch.setattr(
-        "weft.commands._manager_bootstrap._launch_detached_manager",
+        "weft.core.manager_runtime._launch_detached_manager",
         lambda context, invocation_arg: launch,
     )
     monkeypatch.setattr(
-        "weft.commands._manager_bootstrap.QueueChangeMonitor",
+        "weft.core.manager_runtime.QueueChangeMonitor",
         _FakeQueueChangeMonitor,
     )
     monkeypatch.setattr(
-        "weft.commands._manager_bootstrap._acknowledge_manager_launch_success",
+        "weft.core.manager_runtime._acknowledge_manager_launch_success",
         lambda launch_arg: (_ for _ in ()).throw(
             RuntimeError("post-proof acknowledgement failed")
         ),
     )
     monkeypatch.setattr(
-        "weft.commands._manager_bootstrap._registry_view",
+        "weft.core.manager_runtime._registry_view",
         lambda context, *, target_tid=None, prune_stale=True, queue=None: (
             _registry_view(
                 active={
@@ -637,15 +639,15 @@ def test_start_manager_treats_post_proof_ack_failure_as_nonfatal(
         ),
     )
     monkeypatch.setattr(
-        "weft.commands._manager_bootstrap._is_pid_alive",
+        "weft.core.manager_runtime._is_pid_alive",
         lambda pid: True,
     )
     monkeypatch.setattr(
-        "weft.commands._manager_bootstrap.logger.warning",
+        "weft.core.manager_runtime.logger.warning",
         lambda message, *args, **kwargs: warnings.append(str(message)),
     )
     monkeypatch.setattr(
-        "weft.commands._manager_bootstrap.time.sleep",
+        "weft.core.manager_runtime.time.sleep",
         lambda seconds: None,
     )
 
@@ -674,47 +676,40 @@ def test_start_manager_surfaces_detached_launch_stderr_when_manager_exits_early(
             "",
         ),
     )
-    launch = manager_lifecycle._DetachedManagerLaunch(
+    launch = core_manager_runtime.DetachedManagerLaunch(
         pid=4242,
         stderr_path=stderr_path,
         launcher_process=fake_process,
     )
-    errors: list[str] = []
-
     monkeypatch.setattr(
-        "weft.commands._manager_bootstrap._build_manager_runtime_invocation",
-        lambda context: manager_lifecycle._ManagerRuntimeInvocation(
+        "weft.core.manager_runtime._build_manager_runtime_invocation",
+        lambda context: core_manager_runtime.ManagerRuntimeInvocation(
             task_cls_path="weft.core.manager.Manager",
             tid="9" * 19,
             spec=_FakeManagerSpec(),
         ),
     )
     monkeypatch.setattr(
-        "weft.commands._manager_bootstrap._launch_detached_manager",
+        "weft.core.manager_runtime._launch_detached_manager",
         lambda context, invocation: launch,
     )
     monkeypatch.setattr(
-        "weft.commands._manager_bootstrap.QueueChangeMonitor",
+        "weft.core.manager_runtime.QueueChangeMonitor",
         _FakeQueueChangeMonitor,
     )
     monkeypatch.setattr(
-        "weft.commands._manager_bootstrap._registry_view",
+        "weft.core.manager_runtime._registry_view",
         lambda context, *, target_tid=None, prune_stale=True, queue=None: (
             _registry_view()
         ),
     )
-    monkeypatch.setattr(
-        "weft.commands._manager_bootstrap.typer.echo",
-        lambda message, err=False: errors.append(message) if err else None,
-    )
 
-    with pytest.raises(typer.Exit) as exc_info:
+    with pytest.raises(ManagerStartFailed) as exc_info:
         _start_manager(ctx, verbose=False)
 
-    assert exc_info.value.exit_code == 1
-    assert errors
-    assert "return code 23" in errors[0]
-    assert "traceback details" in errors[0]
+    message = str(exc_info.value)
+    assert "return code 23" in message
+    assert "traceback details" in message
 
 
 def test_run_inline_enqueues_task_before_ensuring_manager(
@@ -731,7 +726,7 @@ def test_run_inline_enqueues_task_before_ensuring_manager(
     )
     monkeypatch.setattr("weft.commands.run._read_piped_stdin", lambda context: None)
     monkeypatch.setattr("weft.commands.run.stdin_is_tty", lambda: False)
-    monkeypatch.setattr("weft.commands.run.typer.echo", lambda *args, **kwargs: None)
+    monkeypatch.setattr("weft.commands.run._echo", lambda *args, **kwargs: None)
 
     def _fake_enqueue(context_arg, taskspec, work_payload):
         calls.append("enqueue")
@@ -804,10 +799,10 @@ def test_run_inline_no_wait_succeeds_when_post_proof_acknowledgement_fails(
     monkeypatch.setattr("weft.commands.run.stdin_is_tty", lambda: False)
     monkeypatch.setattr("weft.commands.run._enqueue_taskspec", _recording_enqueue)
     monkeypatch.setattr(
-        "weft.commands._manager_bootstrap._acknowledge_manager_launch_success",
+        "weft.core.manager_runtime._acknowledge_manager_launch_success",
         _fail_ack_after_spawn,
     )
-    monkeypatch.setattr("weft.commands.run.typer.echo", lambda *args, **kwargs: None)
+    monkeypatch.setattr("weft.commands.run._echo", lambda *args, **kwargs: None)
 
     try:
         exit_code = _run_inline(
@@ -870,10 +865,10 @@ def test_run_inline_wait_succeeds_when_post_proof_acknowledgement_fails(
     monkeypatch.setattr("weft.commands.run.stdin_is_tty", lambda: False)
     monkeypatch.setattr("weft.commands.run._enqueue_taskspec", _recording_enqueue)
     monkeypatch.setattr(
-        "weft.commands._manager_bootstrap._acknowledge_manager_launch_success",
+        "weft.core.manager_runtime._acknowledge_manager_launch_success",
         _fail_ack_after_spawn,
     )
-    monkeypatch.setattr("weft.commands.run.typer.echo", lambda *args, **kwargs: None)
+    monkeypatch.setattr("weft.commands.run._echo", lambda *args, **kwargs: None)
 
     try:
         exit_code = _run_inline(
@@ -1350,7 +1345,7 @@ def test_run_inline_deletes_spawn_request_when_ensure_manager_fails(
     )
     monkeypatch.setattr("weft.commands.run._read_piped_stdin", lambda context: None)
     monkeypatch.setattr("weft.commands.run.stdin_is_tty", lambda: False)
-    monkeypatch.setattr("weft.commands.run.typer.echo", lambda *args, **kwargs: None)
+    monkeypatch.setattr("weft.commands.run._echo", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         "weft.commands.run._ensure_manager",
         lambda context_arg, *, verbose: (_ for _ in ()).throw(RuntimeError("boom")),
@@ -1408,7 +1403,7 @@ def test_run_spec_via_manager_deletes_spawn_request_when_ensure_manager_fails(
         lambda spec_context=None, autostart=True: context,
     )
     monkeypatch.setattr("weft.commands.run._read_piped_stdin", lambda context: None)
-    monkeypatch.setattr("weft.commands.run.typer.echo", lambda *args, **kwargs: None)
+    monkeypatch.setattr("weft.commands.run._echo", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         "weft.commands.run._ensure_manager",
         lambda context_arg, *, verbose: (_ for _ in ()).throw(RuntimeError("boom")),
@@ -1469,7 +1464,7 @@ def test_run_spec_via_manager_returns_timeout_exit_code(
             "Timed out waiting for task",
         ),
     )
-    monkeypatch.setattr("weft.commands.run.typer.echo", lambda *args, **kwargs: None)
+    monkeypatch.setattr("weft.commands.run._echo", lambda *args, **kwargs: None)
 
     exit_code = _run_spec_via_manager(
         spec_path,
@@ -1530,7 +1525,7 @@ def test_run_spec_via_manager_explicit_name_overrides_name_and_claims_endpoint(
         lambda context, *, submitted_tid, verbose: (None, False, None),
     )
     monkeypatch.setattr("weft.commands.run._enqueue_taskspec", _capture_enqueue)
-    monkeypatch.setattr("weft.commands.run.typer.echo", lambda *args, **kwargs: None)
+    monkeypatch.setattr("weft.commands.run._echo", lambda *args, **kwargs: None)
 
     exit_code = _run_spec_via_manager(
         spec_path,
@@ -1592,7 +1587,7 @@ def test_run_spec_via_manager_explicit_name_keeps_nonpersistent_tasks_label_only
         lambda context, *, submitted_tid, verbose: (None, False, None),
     )
     monkeypatch.setattr("weft.commands.run._enqueue_taskspec", _capture_enqueue)
-    monkeypatch.setattr("weft.commands.run.typer.echo", lambda *args, **kwargs: None)
+    monkeypatch.setattr("weft.commands.run._echo", lambda *args, **kwargs: None)
 
     exit_code = _run_spec_via_manager(
         spec_path,
@@ -1638,9 +1633,7 @@ def test_run_spec_via_manager_rejects_reserved_internal_name_prefix(
     )
     monkeypatch.setattr("weft.commands.run._read_piped_stdin", lambda context: None)
 
-    with pytest.raises(
-        typer.BadParameter, match="reserved for internal runtime services"
-    ):
+    with pytest.raises(RunUsageError, match="reserved for internal runtime services"):
         _run_spec_via_manager(
             spec_path,
             name="_weft.heartbeat",
@@ -1756,7 +1749,7 @@ def test_run_pipeline_explicit_name_overrides_pipeline_task_name(
         lambda context, *, submitted_tid, verbose: (None, False, None),
     )
     monkeypatch.setattr("weft.commands.run._enqueue_taskspec", _capture_enqueue)
-    monkeypatch.setattr("weft.commands.run.typer.echo", lambda *args, **kwargs: None)
+    monkeypatch.setattr("weft.commands.run._echo", lambda *args, **kwargs: None)
 
     exit_code = _run_pipeline(
         pipeline_path,
@@ -1962,12 +1955,12 @@ def test_list_manager_records_prunes_dead_active_and_preserves_stopped_history(
     finally:
         registry.close()
 
-    first = manager_lifecycle._list_manager_records(
+    first = core_manager_runtime.list_manager_records(
         ctx,
         include_stopped=True,
         canonical_only=False,
     )
-    second = manager_lifecycle._list_manager_records(
+    second = core_manager_runtime.list_manager_records(
         ctx,
         include_stopped=True,
         canonical_only=False,
@@ -1979,10 +1972,7 @@ def test_list_manager_records_prunes_dead_active_and_preserves_stopped_history(
     registry_reader = ctx.queue(WEFT_MANAGERS_REGISTRY_QUEUE, persistent=False)
     try:
         entries = [
-            payload
-            for payload, _timestamp in manager_lifecycle.iter_queue_json_entries(
-                registry_reader
-            )
+            payload for payload, _timestamp in iter_queue_json_entries(registry_reader)
         ]
     finally:
         registry_reader.close()
@@ -2009,15 +1999,15 @@ def test_stop_manager_waits_for_pid_exit_after_stopped_status(
     )
     pid_states = iter([True, True, False, False])
 
-    monkeypatch.setattr(manager_lifecycle, "_send_stop", lambda *args, **kwargs: None)
     monkeypatch.setattr(
-        manager_lifecycle,
-        "QueueChangeMonitor",
+        "weft.core.manager_runtime._send_stop", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        "weft.core.manager_runtime.QueueChangeMonitor",
         _FakeQueueChangeMonitor,
     )
     monkeypatch.setattr(
-        manager_lifecycle,
-        "_registry_view",
+        "weft.core.manager_runtime._registry_view",
         lambda *args, **kwargs: next(responses),
     )
 
@@ -2025,9 +2015,9 @@ def test_stop_manager_waits_for_pid_exit_after_stopped_status(
         seen_pids.append(pid)
         return next(pid_states)
 
-    monkeypatch.setattr(manager_lifecycle, "_is_pid_alive", fake_pid_alive)
+    monkeypatch.setattr("weft.core.manager_runtime._is_pid_alive", fake_pid_alive)
 
-    stopped, message = manager_lifecycle._stop_manager(
+    stopped, message = core_manager_runtime.stop_manager(
         ctx,
         None,
         tid=tid,
@@ -2050,19 +2040,17 @@ def test_stop_manager_stop_if_absent_short_circuits_after_stop_write(
     sent: list[str] = []
 
     monkeypatch.setattr(
-        manager_lifecycle,
-        "_send_stop",
+        "weft.core.manager_runtime._send_stop",
         lambda _context, target_tid, *, record=None: sent.append(target_tid),
     )
     monkeypatch.setattr(
-        manager_lifecycle,
-        "_await_manager_stop_confirmation",
+        "weft.core.manager_runtime._await_manager_stop_confirmation",
         lambda *args, **kwargs: pytest.fail(
             "absent stop_if_absent path should not wait on registry confirmation"
         ),
     )
 
-    stopped, message = manager_lifecycle._stop_manager(
+    stopped, message = core_manager_runtime.stop_manager(
         ctx,
         None,
         tid=tid,
@@ -2084,21 +2072,24 @@ def test_stop_manager_force_prefers_process_tree_kill_when_pid_known(
     tid = "1775622400000000006"
     killed: list[tuple[int, float]] = []
 
-    monkeypatch.setattr(manager_lifecycle, "_send_stop", lambda *args, **kwargs: None)
     monkeypatch.setattr(
-        manager_lifecycle,
-        "QueueChangeMonitor",
+        "weft.core.manager_runtime._send_stop", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        "weft.core.manager_runtime.QueueChangeMonitor",
         _FakeQueueChangeMonitor,
     )
     monkeypatch.setattr(
-        manager_lifecycle,
-        "_registry_view",
+        "weft.core.manager_runtime._registry_view",
         lambda *args, **kwargs: _registry_view(),
     )
     monkeypatch.setattr(
-        manager_lifecycle, "_lookup_manager_pid", lambda *args, **kwargs: 8765
+        "weft.core.manager_runtime._lookup_manager_pid",
+        lambda *args, **kwargs: 8765,
     )
-    monkeypatch.setattr(manager_lifecycle, "_is_pid_alive", lambda pid: pid == 8765)
+    monkeypatch.setattr(
+        "weft.core.manager_runtime._is_pid_alive", lambda pid: pid == 8765
+    )
 
     def fake_terminate_process_tree(
         pid: int, *, timeout: float, kill_after: bool = True
@@ -2107,12 +2098,11 @@ def test_stop_manager_force_prefers_process_tree_kill_when_pid_known(
         return {pid}
 
     monkeypatch.setattr(
-        manager_lifecycle,
-        "terminate_process_tree",
+        "weft.core.manager_runtime.terminate_process_tree",
         fake_terminate_process_tree,
     )
 
-    stopped, message = manager_lifecycle._stop_manager(
+    stopped, message = core_manager_runtime.stop_manager(
         ctx,
         None,
         tid=tid,

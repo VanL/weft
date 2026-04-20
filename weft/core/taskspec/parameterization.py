@@ -15,7 +15,8 @@ from pathlib import Path
 from typing import Any
 
 from weft.core.imports import import_callable_ref, split_import_ref
-from weft.core.spec_run_input import (
+
+from .run_input import (
     ensure_json_serializable_work_payload,
     parse_declared_option_args,
 )
@@ -126,9 +127,7 @@ def materialize_taskspec_template(
     if isinstance(payload.get("spec"), dict):
         payload["spec"].pop("parameterization", None)
 
-    from weft.core.taskspec import TaskSpec
-
-    materialized = TaskSpec.model_validate(
+    materialized = type(taskspec).model_validate(
         payload,
         context={"template": True, "auto_expand": False},
     )

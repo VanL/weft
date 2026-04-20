@@ -32,7 +32,6 @@ def test_manager_proctitle_updates_to_running(weft_harness: WeftTestHarness) -> 
         harness=weft_harness,
     )
     assert rc == 0, err
-    time.sleep(1)  # Give the manager time to start and update its title
 
     # The output of run --verbose contains two JSON objects, one for the manager
     # and one for the task. We need to parse them to get the manager's PID.

@@ -16,7 +16,7 @@ See also:
 
 ### Immutability Invariants
 
-_Implementation mapping_: `weft/core/taskspec.py`.
+_Implementation mapping_: `weft/core/taskspec/model.py`.
 
 - **IMMUT.1**: `TaskSpec.spec` is immutable after creation
 - **IMMUT.2**: `TaskSpec.io` is immutable after creation
@@ -25,7 +25,7 @@ _Implementation mapping_: `weft/core/taskspec.py`.
 
 ### State Machine Invariants
 
-_Implementation mapping_: `weft/core/taskspec.py` state validators and
+_Implementation mapping_: `weft/core/taskspec/model.py` state validators and
 `TaskSpec.set_status()`.
 
 - **STATE.1**: valid transitions are `created -> spawning|failed|cancelled`,
@@ -38,7 +38,7 @@ _Implementation mapping_: `weft/core/taskspec.py` state validators and
 
 ### Queue Invariants
 
-_Implementation mapping_: `weft/core/taskspec.py`, `weft/core/tasks/base.py`,
+_Implementation mapping_: `weft/core/taskspec/model.py`, `weft/core/tasks/base.py`,
 `weft/_constants.py`.
 
 - **QUEUE.1**: every task has one inbox, reserved queue, and outbox
@@ -54,7 +54,7 @@ _Implementation mapping_: `weft/core/taskspec.py`, `weft/core/tasks/base.py`,
 
 ### Resource Invariants
 
-_Implementation mapping_: `weft/core/taskspec.py`, `weft/core/resource_monitor.py`,
+_Implementation mapping_: `weft/core/taskspec/model.py`, `weft/core/resource_monitor.py`,
 `weft/core/tasks/consumer.py`, `weft/core/tasks/sessions.py`,
 `weft/core/runners/host.py`, `weft/core/runners/subprocess_runner.py`.
 
@@ -69,7 +69,7 @@ _Implementation mapping_: `weft/core/taskspec.py`, `weft/core/resource_monitor.p
 
 _Implementation mapping_: `weft/core/tasks/consumer.py`,
 `weft/core/runners/host.py`, `weft/core/runners/subprocess_runner.py`,
-`weft/core/taskspec.py`, `weft/core/tasks/sessions.py`, `weft/ext.py`.
+`weft/core/taskspec/model.py`, `weft/core/tasks/sessions.py`, `weft/ext.py`.
 
 - **EXEC.1**: each work item is executed exactly once per successful reservation
   path
@@ -120,8 +120,8 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
 ### Manager Invariants
 
 _Implementation mapping_: `weft/core/manager.py`,
-`weft/commands/_manager_bootstrap.py`, `weft/commands/manager.py`,
-`weft/commands/run.py`, `weft/commands/serve.py`,
+`weft/core/manager_runtime.py`, `weft/commands/manager.py`,
+`weft/cli/run.py`, `weft/commands/serve.py`,
 `weft/core/spawn_requests.py`, `weft/helpers.py`,
 `weft/manager_detached_launcher.py`, `weft/manager_process.py`.
 

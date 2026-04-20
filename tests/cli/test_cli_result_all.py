@@ -7,6 +7,7 @@ import time
 
 from tests.conftest import run_cli
 from tests.helpers.weft_harness import WeftTestHarness
+from weft.commands import tasks as task_cmd
 
 
 def _submit_task(harness: WeftTestHarness, *run_args: str) -> str:
@@ -22,6 +23,87 @@ def _submit_task(harness: WeftTestHarness, *run_args: str) -> str:
     assert tid.startswith("1"), tid
     harness.register_tid(tid)
     return tid
+
+
+def _wait_for_result_all_text(
+    harness: WeftTestHarness,
+    *,
+    contains: list[str] | None = None,
+    excludes: list[str] | None = None,
+    peek: bool = True,
+    timeout: float = 5.0,
+) -> str:
+    deadline = time.monotonic() + timeout
+    last_out = ""
+    last_err = ""
+    while time.monotonic() < deadline:
+        rc, out, err = run_cli(
+            "result",
+            "--all",
+            *(["--peek"] if peek else []),
+            cwd=harness.root,
+            harness=harness,
+        )
+        if rc == 0:
+            if all(item in out for item in (contains or [])) and all(
+                item not in out for item in (excludes or [])
+            ):
+                return out
+        last_out = out
+        last_err = err
+        time.sleep(0.05)
+    raise AssertionError(
+        "Timed out waiting for `weft result --all` text output; "
+        f"last_out={last_out!r} last_err={last_err!r}"
+    )
+
+
+def _wait_for_result_all_json(
+    harness: WeftTestHarness,
+    *,
+    predicate,
+    peek: bool = True,
+    timeout: float = 5.0,
+) -> dict[str, object]:
+    deadline = time.monotonic() + timeout
+    last_out = ""
+    last_err = ""
+    while time.monotonic() < deadline:
+        rc, out, err = run_cli(
+            "result",
+            "--all",
+            "--json",
+            *(["--peek"] if peek else []),
+            cwd=harness.root,
+            harness=harness,
+        )
+        if rc == 0:
+            payload = json.loads(out)
+            if predicate(payload):
+                return payload
+        last_out = out
+        last_err = err
+        time.sleep(0.05)
+    raise AssertionError(
+        "Timed out waiting for `weft result --all --json`; "
+        f"last_out={last_out!r} last_err={last_err!r}"
+    )
+
+
+def _wait_for_task_status(
+    harness: WeftTestHarness,
+    tid: str,
+    *,
+    status: str,
+    timeout: float = 5.0,
+) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        snapshot = task_cmd.task_status(tid, context_path=harness.root)
+        if snapshot is not None and snapshot.status == status:
+            return
+        time.sleep(0.05)
+    raise AssertionError(f"Timed out waiting for task {tid} to reach {status!r}")
 
 
 def test_result_all_empty(weft_harness: WeftTestHarness) -> None:
@@ -52,14 +134,10 @@ def test_result_all_simple_tasks(weft_harness: WeftTestHarness) -> None:
 
     weft_harness.wait_for_completion(tid1)
     weft_harness.wait_for_completion(tid2)
-
-    # Let the filesystem settle
-    time.sleep(0.2)
-
-    rc, out, err = run_cli(
-        "result", "--all", cwd=weft_harness.root, harness=weft_harness
+    out = _wait_for_result_all_text(
+        weft_harness,
+        contains=[f"{tid1}: result1", f"{tid2}: result2"],
     )
-    assert rc == 0, err
 
     assert f"{tid1}: result1" in out
     assert f"{tid2}: result2" in out
@@ -75,16 +153,15 @@ def test_result_all_json_output(weft_harness: WeftTestHarness) -> None:
         "json1",
     )
     weft_harness.wait_for_completion(tid1)
-
-    # Let the filesystem settle
-    time.sleep(0.2)
-
-    rc, out, err = run_cli(
-        "result", "--all", "--json", cwd=weft_harness.root, harness=weft_harness
+    data = _wait_for_result_all_json(
+        weft_harness,
+        predicate=lambda payload: (
+            "results" in payload
+            and len(payload["results"]) == 1
+            and payload["results"][0]["tid"] == tid1
+        ),
     )
-    assert rc == 0, err
 
-    data = json.loads(out)
     assert "results" in data
     assert len(data["results"]) == 1
     assert data["results"][0]["tid"] == tid1
@@ -109,13 +186,12 @@ def test_result_all_filters_running_tasks(weft_harness: WeftTestHarness) -> None
         "tests.tasks.sample_targets:streaming_echo",
         "--stream-output",
     )
-    # Give it a moment to start and produce some output
-    time.sleep(1)
-
-    rc, out, err = run_cli(
-        "result", "--all", cwd=weft_harness.root, harness=weft_harness
+    _wait_for_task_status(weft_harness, streaming_tid, status="running")
+    out = _wait_for_result_all_text(
+        weft_harness,
+        contains=[f"{completed_tid}: done"],
+        excludes=[streaming_tid],
     )
-    assert rc == 0, err
 
     assert f"{completed_tid}: done" in out
     assert streaming_tid not in out
@@ -130,7 +206,7 @@ def test_result_all_peek_preserves_messages(weft_harness: WeftTestHarness) -> No
         "keep",
     )
     weft_harness.wait_for_completion(tid)
-    time.sleep(0.2)
+    out = _wait_for_result_all_text(weft_harness, contains=[f"{tid}: keep"])
 
     rc, out, err = run_cli(
         "result",

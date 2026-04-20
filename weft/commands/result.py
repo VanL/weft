@@ -22,10 +22,11 @@ from weft._constants import (
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_STREAMING_SESSIONS_QUEUE,
 )
+from weft.commands.types import TaskResult
 from weft.context import WeftContext, build_context
+from weft.core.queue_wait import QueueChangeMonitor
 from weft.helpers import iter_queue_json_entries
 
-from ._queue_wait import QueueChangeMonitor
 from ._result_wait import (
     append_public_value,
     await_one_shot_result,
@@ -603,6 +604,83 @@ def _await_single_result(
     return status, result_value, error_message
 
 
+def _split_stdio(value: Any) -> tuple[str | None, str | None]:
+    if not isinstance(value, dict):
+        return None, None
+    stdout = value.get("stdout")
+    stderr = value.get("stderr")
+    return (
+        stdout if isinstance(stdout, str) else None,
+        stderr if isinstance(stderr, str) else None,
+    )
+
+
+def await_task_result(
+    context: WeftContext,
+    tid: str,
+    *,
+    timeout: float | None = None,
+    show_stderr: bool = False,
+    emit_stream: bool = False,
+) -> TaskResult:
+    """Wait for and return the public result payload for one task."""
+
+    normalized_tid = _normalize_tid(tid)
+    start_monotonic = time.monotonic()
+    materialized = _await_result_materialization(
+        context,
+        normalized_tid,
+        timeout=timeout,
+    )
+    if materialized is None:
+        if timeout is not None and timeout > 0:
+            return TaskResult(
+                tid=normalized_tid,
+                status="timeout",
+                value=None,
+                stdout=None,
+                stderr=None,
+                error=f"Timed out after {timeout} seconds waiting for task {normalized_tid}",
+            )
+        return TaskResult(
+            tid=normalized_tid,
+            status="missing",
+            value=None,
+            stdout=None,
+            stderr=None,
+            error=f"No outbox queue for task {normalized_tid}",
+        )
+
+    remaining_timeout = timeout
+    if timeout is not None and timeout > 0:
+        elapsed = time.monotonic() - start_monotonic
+        remaining_timeout = max(0.0, timeout - elapsed)
+
+    status, value, error_message = _await_single_result(
+        context,
+        normalized_tid,
+        timeout=remaining_timeout,
+        show_stderr=show_stderr,
+        emit_stream=emit_stream,
+        taskspec_payload=materialized.taskspec_payload,
+        outbox_name=materialized.outbox_name,
+        ctrl_out_name=materialized.ctrl_out_name,
+        initial_log_last_timestamp=materialized.log_last_timestamp,
+        initial_terminal_status=materialized.terminal_status,
+        initial_terminal_error_message=materialized.terminal_error_message,
+        initial_batch_boundary_timestamps=materialized.batch_boundary_timestamps,
+    )
+    stdout, stderr = _split_stdio(value)
+    return TaskResult(
+        tid=normalized_tid,
+        status=status,
+        value=value,
+        stdout=stdout,
+        stderr=stderr,
+        error=error_message,
+    )
+
+
 def cmd_result(
     *,
     tid: str | None,
@@ -701,4 +779,4 @@ def cmd_result(
     return 2, f"weft result: task {full_tid} not found"
 
 
-__all__ = ["cmd_result"]
+__all__ = ["ResultMaterialization", "await_task_result", "cmd_result"]

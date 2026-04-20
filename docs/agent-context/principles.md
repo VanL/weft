@@ -30,7 +30,7 @@ Agent-usable guidance should make these explicit when relevant:
 Example:
 
 - weak: "update the startup flow"
-- stronger: "owner: `weft/commands/run.py` manager wait path; boundary: no
+- stronger: "owner: `weft/cli/run.py` manager wait path; boundary: no
   second startup path; verification: targeted manager-startup regression;
   required action: extend the existing registry wait logic"
 

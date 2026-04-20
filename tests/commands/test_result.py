@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import threading
 import time
 
 import pytest
@@ -159,7 +158,10 @@ def test_cmd_result_reports_failed_task_without_outbox(tmp_path) -> None:
     assert payload == "intentional failure"
 
 
-def test_await_single_result_reads_outbox_after_completion_event(tmp_path) -> None:
+def test_await_single_result_reads_outbox_after_completion_event(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     tid = str(time.time_ns())
@@ -176,11 +178,22 @@ def test_await_single_result_reads_outbox_after_completion_event(tmp_path) -> No
         )
     )
 
-    writer = threading.Thread(
-        target=lambda: (time.sleep(0.05), outbox_queue.write("hello")),
-        daemon=True,
-    )
-    writer.start()
+    class _WakeMonitor:
+        def __init__(self, _queues, *, config=None) -> None:
+            del config
+            self._written = False
+
+        def wait(self, timeout: float | None) -> bool:
+            del timeout
+            if not self._written:
+                outbox_queue.write("hello")
+                self._written = True
+            return False
+
+        def close(self) -> None:
+            return
+
+    monkeypatch.setattr(result_wait, "QueueChangeMonitor", _WakeMonitor)
     try:
         status, result, error = _await_single_result(
             ctx,
@@ -189,14 +202,18 @@ def test_await_single_result_reads_outbox_after_completion_event(tmp_path) -> No
             show_stderr=False,
         )
     finally:
-        writer.join(timeout=RESULT_WAIT_TIMEOUT)
+        outbox_queue.close()
+        log_queue.close()
 
     assert status == "completed"
     assert result == "hello"
     assert error is None
 
 
-def test_await_one_shot_result_reads_outbox_after_completion_event(tmp_path) -> None:
+def test_await_one_shot_result_reads_outbox_after_completion_event(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     tid = str(time.time_ns())
@@ -213,11 +230,22 @@ def test_await_one_shot_result_reads_outbox_after_completion_event(tmp_path) -> 
         )
     )
 
-    writer = threading.Thread(
-        target=lambda: (time.sleep(0.05), outbox_queue.write("hello")),
-        daemon=True,
-    )
-    writer.start()
+    class _WakeMonitor:
+        def __init__(self, _queues, *, config=None) -> None:
+            del config
+            self._written = False
+
+        def wait(self, timeout: float | None) -> bool:
+            del timeout
+            if not self._written:
+                outbox_queue.write("hello")
+                self._written = True
+            return False
+
+        def close(self) -> None:
+            return
+
+    monkeypatch.setattr(result_wait, "QueueChangeMonitor", _WakeMonitor)
     try:
         status, result, error = await_one_shot_result(
             ctx,
@@ -228,7 +256,8 @@ def test_await_one_shot_result_reads_outbox_after_completion_event(tmp_path) -> 
             show_stderr=False,
         )
     finally:
-        writer.join(timeout=RESULT_WAIT_TIMEOUT)
+        outbox_queue.close()
+        log_queue.close()
 
     assert status == "completed"
     assert result == "hello"
@@ -302,7 +331,10 @@ def test_await_one_shot_result_does_not_infer_completion_from_ambiguous_outbox(
     assert error == f"Timed out after 0.3 seconds waiting for task {tid}"
 
 
-def test_await_single_result_aggregates_multiple_outbox_messages(tmp_path) -> None:
+def test_await_single_result_aggregates_multiple_outbox_messages(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     tid = str(time.time_ns())
@@ -319,13 +351,23 @@ def test_await_single_result_aggregates_multiple_outbox_messages(tmp_path) -> No
         )
     )
 
-    def _write_outputs() -> None:
-        time.sleep(0.05)
-        outbox_queue.write("hello")
-        outbox_queue.write("world")
+    class _WakeMonitor:
+        def __init__(self, _queues, *, config=None) -> None:
+            del config
+            self._written = False
 
-    writer = threading.Thread(target=_write_outputs, daemon=True)
-    writer.start()
+        def wait(self, timeout: float | None) -> bool:
+            del timeout
+            if not self._written:
+                outbox_queue.write("hello")
+                outbox_queue.write("world")
+                self._written = True
+            return False
+
+        def close(self) -> None:
+            return
+
+    monkeypatch.setattr(result_wait, "QueueChangeMonitor", _WakeMonitor)
     try:
         status, result, error = _await_single_result(
             ctx,
@@ -334,7 +376,8 @@ def test_await_single_result_aggregates_multiple_outbox_messages(tmp_path) -> No
             show_stderr=False,
         )
     finally:
-        writer.join(timeout=RESULT_WAIT_TIMEOUT)
+        outbox_queue.close()
+        log_queue.close()
 
     assert status == "completed"
     assert result == ["hello", "world"]

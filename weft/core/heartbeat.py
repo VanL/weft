@@ -44,7 +44,7 @@ def _heartbeat_service_taskspec_payload(context: WeftContext) -> dict[str, Any]:
 
 
 def _ensure_manager_running(context: WeftContext) -> None:
-    from weft.commands._manager_bootstrap import _ensure_manager
+    from weft.core.manager_runtime import _ensure_manager
 
     _ensure_manager(context, verbose=False)
 
