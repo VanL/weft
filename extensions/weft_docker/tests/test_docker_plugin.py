@@ -503,3 +503,94 @@ def test_command_runner_waits_for_container_to_leave_created_before_runtime_hand
 
     assert outcome.status == "ok"
     assert callback_state["status"] == "running"
+
+
+def test_command_runner_cleans_up_container_when_runtime_start_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class FakeProcess:
+        pid = 4321
+        stdout = object()
+        stderr = object()
+
+        def __init__(self) -> None:
+            self.killed = False
+            self.wait_timeout: float | None = None
+
+        def poll(self) -> int | None:
+            return 137 if self.killed else None
+
+        def kill(self) -> None:
+            self.killed = True
+
+        def wait(self, timeout: float | None = None) -> int:
+            self.wait_timeout = timeout
+            return 137
+
+    class FakeContainer:
+        id = "container-789"
+        attrs: dict[str, Any] = {
+            "Name": "/weft-test",
+            "Config": {"Image": "busybox:latest"},
+            "State": {"Status": "created"},
+        }
+
+        def reload(self) -> None:
+            return None
+
+    fake_process = FakeProcess()
+    fake_container = FakeContainer()
+    fake_client = object()
+    removed: list[tuple[object, str]] = []
+
+    @contextmanager
+    def fake_docker_client() -> Iterator[object]:
+        yield fake_client
+
+    monkeypatch.setattr(
+        plugin.subprocess, "Popen", lambda *args, **kwargs: fake_process
+    )
+    monkeypatch.setattr(plugin, "_resolve_docker_binary", lambda value: value)
+    monkeypatch.setattr(
+        plugin.DockerCommandRunner,
+        "_ensure_image",
+        lambda self, executable: "busybox:latest",
+    )
+    monkeypatch.setattr(plugin, "_container_name", lambda tid: "weft-cleanup-test")
+    monkeypatch.setattr(plugin, "_docker_client", fake_docker_client)
+    monkeypatch.setattr(
+        plugin,
+        "_wait_for_container",
+        lambda client, runtime_id, process: fake_container,
+    )
+    monkeypatch.setattr(
+        plugin,
+        "wait_for_container_runtime_start",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("startup failed")),
+    )
+    monkeypatch.setattr(
+        plugin,
+        "_remove_container",
+        lambda client, runtime_id: removed.append((client, runtime_id)),
+    )
+
+    runner = plugin.DockerCommandRunner(
+        tid="1234567890",
+        process_target="python3",
+        args=["-c", "print('hello')"],
+        env={},
+        working_dir=str(tmp_path),
+        timeout=5.0,
+        limits=None,
+        monitor_class=None,
+        monitor_interval=0.01,
+        runner_options={"image": "busybox:latest"},
+    )
+
+    with pytest.raises(RuntimeError, match="startup failed"):
+        runner.run_with_hooks({})
+
+    assert fake_process.killed is True
+    assert fake_process.wait_timeout == 1.0
+    assert removed == [(fake_client, "weft-cleanup-test")]

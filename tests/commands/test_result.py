@@ -842,7 +842,9 @@ def test_await_result_materialization_waits_for_taskspec_after_activity_event(
     def _poll(_queue, last_timestamp, requested_tid: str):
         assert requested_tid == tid
         if last_timestamp is None:
-            return [({"tid": tid, "status": "running", "event": "task_activity"}, 123)], 123
+            return [
+                ({"tid": tid, "status": "running", "event": "task_activity"}, 123)
+            ], 123
         return [], last_timestamp
 
     class _NoWakeMonitor:
