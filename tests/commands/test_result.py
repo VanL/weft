@@ -773,27 +773,28 @@ def test_cmd_result_stream_preserves_error_payload_selection(
     assert payload == "err"
 
 
-def test_cmd_result_stream_succeeds_when_queue_enumeration_lags(
+def test_cmd_result_stream_reuses_materialized_completion_state(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     tid = str(time.time_ns())
-    log_queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
     outbox_queue = ctx.queue(f"T{tid}.outbox", persistent=True)
-
-    log_queue.write(
-        json.dumps(
-            {
-                "tid": tid,
-                "status": "completed",
-                "event": "work_completed",
-            }
-        )
-    )
     outbox_queue.write(json.dumps({"stdout": "out", "stderr": "err"}))
-    monkeypatch.setattr(result_cmd, "_queue_names_exist", lambda *args, **kwargs: False)
+    materialized = result_cmd.ResultMaterialization(
+        taskspec_payload=None,
+        outbox_name=f"T{tid}.outbox",
+        ctrl_out_name=f"T{tid}.ctrl_out",
+        log_last_timestamp=123,
+        terminal_status="completed",
+        terminal_error_message=None,
+    )
+    monkeypatch.setattr(
+        result_cmd,
+        "_await_result_materialization",
+        lambda *_args, **_kwargs: materialized,
+    )
 
     exit_code, payload = cmd_result(
         tid=tid,
@@ -808,6 +809,73 @@ def test_cmd_result_stream_succeeds_when_queue_enumeration_lags(
 
     assert exit_code == 0
     assert payload == "err"
+
+
+def test_await_result_materialization_waits_for_taskspec_after_activity_event(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    taskspec_payload = {
+        "tid": tid,
+        "name": "late-custom-result",
+        "spec": {"type": "function", "persistent": True},
+        "io": {
+            "outputs": {"outbox": "late.custom.outbox"},
+            "control": {"ctrl_out": "late.custom.ctrl_out"},
+        },
+        "state": {"status": "running"},
+        "metadata": {},
+    }
+    load_calls = 0
+
+    def _load(_context, requested_tid: str):
+        nonlocal load_calls
+        assert requested_tid == tid
+        load_calls += 1
+        if load_calls == 1:
+            return None
+        return taskspec_payload
+
+    def _poll(_queue, last_timestamp, requested_tid: str):
+        assert requested_tid == tid
+        if last_timestamp is None:
+            return [({"tid": tid, "status": "running", "event": "task_activity"}, 123)], 123
+        return [], last_timestamp
+
+    class _NoWakeMonitor:
+        def __init__(self, _queues, *, config=None) -> None:
+            del config
+
+        def wait(self, timeout: float | None) -> bool:
+            del timeout
+            raise AssertionError("materialization should retry before waiting again")
+
+        def close(self) -> None:
+            return
+
+    monkeypatch.setattr(result_cmd, "_load_taskspec_payload", _load)
+    monkeypatch.setattr(result_cmd, "_queue_names_exist", lambda *_args: False)
+    monkeypatch.setattr(
+        result_cmd,
+        "_result_surface_has_activity",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(result_cmd, "poll_log_events", _poll)
+    monkeypatch.setattr(result_cmd, "QueueChangeMonitor", _NoWakeMonitor)
+
+    materialized = result_cmd._await_result_materialization(
+        ctx,
+        tid,
+        timeout=RESULT_WAIT_TIMEOUT,
+    )
+
+    assert materialized is not None
+    assert materialized.taskspec_payload == taskspec_payload
+    assert materialized.outbox_name == "late.custom.outbox"
+    assert materialized.ctrl_out_name == "late.custom.ctrl_out"
 
 
 def test_await_single_result_reuses_materialized_completion_state(

@@ -228,15 +228,17 @@ def _await_result_materialization(
                             terminal_error_message=terminal_message,
                             batch_boundary_timestamps=batch_boundary_timestamps,
                         )
-                return ResultMaterialization(
-                    taskspec_payload=taskspec_payload,
-                    outbox_name=outbox_name,
-                    ctrl_out_name=ctrl_out_name,
-                    log_last_timestamp=log_last_timestamp,
-                    terminal_status=terminal_status,
-                    terminal_error_message=terminal_message,
-                    batch_boundary_timestamps=batch_boundary_timestamps,
-                )
+                if terminal_status is not None:
+                    return ResultMaterialization(
+                        taskspec_payload=taskspec_payload,
+                        outbox_name=outbox_name,
+                        ctrl_out_name=ctrl_out_name,
+                        log_last_timestamp=log_last_timestamp,
+                        terminal_status=terminal_status,
+                        terminal_error_message=terminal_message,
+                        batch_boundary_timestamps=batch_boundary_timestamps,
+                    )
+                continue
 
             if deadline is None:
                 return None
