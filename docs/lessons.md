@@ -269,6 +269,10 @@ runbook needs to become stricter.
   explicitly. A fake integer PID can belong to a real process on CI, which
   turns "runner handle vs PID fallback" assertions into machine-dependent
   flakes and can accidentally signal unrelated processes.
+- External runner parity tests should wait for the runtime description to
+  report a live state, not merely for `runtime` to become non-null. Runner
+  handles can materialize before Docker or other external runtime probes stop
+  returning transient `missing`.
 - Manager drain loops must honor an existing `_draining` state before
   reevaluating leadership. If a draining non-leader re-enters leadership
   yield after the leader-check interval and after children are gone, it can
