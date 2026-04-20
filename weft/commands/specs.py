@@ -10,17 +10,18 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from weft._constants import (
-    SPEC_ENTRY_FILES,
     SPEC_SOURCE_BUILTIN,
     SPEC_SOURCE_FILE,
     SPEC_SOURCE_STORED,
     SPEC_TYPE_PIPELINE,
     SPEC_TYPE_TASK,
 )
-from weft.builtins import builtin_task_specs, builtin_tasks_dir
+from weft._exceptions import SpecNotFound
+from weft.builtins import builtin_task_specs
+from weft.commands.types import SpecRecord, SpecValidationResult
 from weft.context import WeftContext, build_context
 from weft.core.pipelines import (
     generate_pipeline_example,
@@ -28,6 +29,11 @@ from weft.core.pipelines import (
 )
 from weft.core.spec_store import (
     ResolvedSpecReference,
+    load_resolved_spec_reference,
+    read_spec_json,
+    spec_directory,
+    spec_entry_filename,
+    stored_spec_path,
 )
 from weft.core.spec_store import (
     resolve_named_spec as core_resolve_named_spec,
@@ -35,159 +41,50 @@ from weft.core.spec_store import (
 from weft.core.taskspec import validate_taskspec
 
 
-def _spec_root(context: WeftContext) -> Path:
-    return context.weft_dir
-
-
-def _spec_dir(context: WeftContext, spec_type: str) -> Path:
-    if spec_type == SPEC_TYPE_TASK:
-        return _spec_root(context) / "tasks"
-    if spec_type == SPEC_TYPE_PIPELINE:
-        return _spec_root(context) / "pipelines"
-    raise ValueError(f"Unknown spec type: {spec_type}")
-
-
-def _read_json(path: Path) -> dict[str, Any]:
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        raise ValueError(f"Failed to read JSON from {path}: {exc}") from exc
-    if not isinstance(payload, dict):
-        raise ValueError(f"Spec file {path} must contain a JSON object")
-    return payload
+def _coerce_context(
+    *,
+    context: WeftContext | None = None,
+    context_path: Path | None = None,
+) -> WeftContext:
+    if context is not None:
+        return context
+    return build_context(spec_context=context_path)
 
 
 def _ensure_directory(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
-def _spec_path(context: WeftContext, spec_type: str, name: str) -> Path:
-    directory = _spec_dir(context, spec_type)
-    return directory / f"{name}.json"
-
-
-def _spec_bundle_path(context: WeftContext, spec_type: str, name: str) -> Path:
-    directory = _spec_dir(context, spec_type)
-    return directory / name / _spec_entry_file(spec_type)
-
-
-def _builtin_spec_dir(spec_type: str) -> Path | None:
-    if spec_type == SPEC_TYPE_TASK:
-        return builtin_tasks_dir()
-    if spec_type == SPEC_TYPE_PIPELINE:
-        return None
-    raise ValueError(f"Unknown spec type: {spec_type}")
-
-
-def _builtin_spec_path(spec_type: str, name: str) -> Path | None:
-    directory = _builtin_spec_dir(spec_type)
-    if directory is None:
-        return None
-    return directory / f"{name}.json"
-
-
-def _builtin_spec_bundle_path(spec_type: str, name: str) -> Path | None:
-    directory = _builtin_spec_dir(spec_type)
-    if directory is None:
-        return None
-    return directory / name / _spec_entry_file(spec_type)
-
-
-def _spec_entry_file(spec_type: str) -> str:
-    try:
-        return SPEC_ENTRY_FILES[spec_type]
-    except KeyError as exc:
-        raise ValueError(f"Unknown spec type: {spec_type}") from exc
-
-
 def _spec_name_from_path(path: Path, *, spec_type: str) -> str:
-    if path.name == _spec_entry_file(spec_type):
+    if path.name == spec_entry_filename(spec_type):
         return path.parent.name
     return path.stem
 
 
 def _resolve_explicit_spec_path(path: Path, *, spec_type: str) -> Path:
     if path.is_dir():
-        entry = path / _spec_entry_file(spec_type)
+        entry = path / spec_entry_filename(spec_type)
         if entry.is_file():
             return entry
         raise FileNotFoundError(
-            f"Spec bundle directory '{path}' does not contain {_spec_entry_file(spec_type)!r}"
+            f"Spec bundle directory '{path}' does not contain {spec_entry_filename(spec_type)!r}"
         )
     return path
-
-
-def _resolved_spec(
-    *,
-    spec_type: str,
-    name: str,
-    path: Path,
-    source: Literal["file", "stored", "builtin"],
-) -> ResolvedSpecReference:
-    bundle_root = path.parent if path.name == _spec_entry_file(spec_type) else None
-    return ResolvedSpecReference(
-        spec_type=spec_type,
-        name=name,
-        path=path,
-        bundle_root=bundle_root,
-        payload=_read_json(path),
-        source=source,
-    )
-
-
-def _resolve_named_candidate(
-    context: WeftContext,
-    *,
-    spec_type: str,
-    name: str,
-) -> ResolvedSpecReference | None:
-    stored_path = _spec_path(context, spec_type, name)
-    if stored_path.exists():
-        return _resolved_spec(
-            spec_type=spec_type,
-            name=name,
-            path=stored_path,
-            source=SPEC_SOURCE_STORED,
-        )
-    stored_bundle_path = _spec_bundle_path(context, spec_type, name)
-    if stored_bundle_path.exists():
-        return _resolved_spec(
-            spec_type=spec_type,
-            name=name,
-            path=stored_bundle_path,
-            source=SPEC_SOURCE_STORED,
-        )
-
-    builtin_path = _builtin_spec_path(spec_type, name)
-    if builtin_path is not None and builtin_path.exists():
-        return _resolved_spec(
-            spec_type=spec_type,
-            name=name,
-            path=builtin_path,
-            source=SPEC_SOURCE_BUILTIN,
-        )
-    builtin_bundle_path = _builtin_spec_bundle_path(spec_type, name)
-    if builtin_bundle_path is not None and builtin_bundle_path.exists():
-        return _resolved_spec(
-            spec_type=spec_type,
-            name=name,
-            path=builtin_bundle_path,
-            source=SPEC_SOURCE_BUILTIN,
-        )
-    return None
 
 
 def resolve_named_spec(
     name: str,
     *,
     spec_type: str | None = None,
+    context: WeftContext | None = None,
     context_path: Path | None = None,
 ) -> ResolvedSpecReference:
     """Resolve a stored or builtin spec name."""
+    ctx = _coerce_context(context=context, context_path=context_path)
     return core_resolve_named_spec(
         name,
         spec_type=spec_type,
-        context_path=context_path,
+        context_path=ctx.root,
     )
 
 
@@ -195,6 +92,7 @@ def resolve_spec_reference(
     reference: str | Path,
     *,
     spec_type: str,
+    context: WeftContext | None = None,
     context_path: Path | None = None,
 ) -> ResolvedSpecReference:
     """Resolve an explicit file-or-name spec reference using current CLI rules.
@@ -207,10 +105,11 @@ def resolve_spec_reference(
     Spec: docs/specifications/10-CLI_Interface.md [CLI-1.4],
     docs/specifications/10B-Builtin_TaskSpecs.md
     """
+    ctx = _coerce_context(context=context, context_path=context_path)
     path = Path(reference)
     if path.exists():
         resolved_path = _resolve_explicit_spec_path(path, spec_type=spec_type)
-        return _resolved_spec(
+        return load_resolved_spec_reference(
             spec_type=spec_type,
             name=_spec_name_from_path(resolved_path, spec_type=spec_type),
             path=resolved_path,
@@ -219,26 +118,38 @@ def resolve_spec_reference(
     return resolve_named_spec(
         str(reference),
         spec_type=spec_type,
-        context_path=context_path,
+        context=ctx,
     )
 
 
 def load_spec(
-    name: str, *, spec_type: str | None = None, context_path: Path | None = None
+    name: str,
+    *,
+    spec_type: str | None = None,
+    context: WeftContext | None = None,
+    context_path: Path | None = None,
 ) -> tuple[str, Path, dict[str, Any]]:
-    resolved = resolve_named_spec(name, spec_type=spec_type, context_path=context_path)
+    resolved = resolve_named_spec(
+        name,
+        spec_type=spec_type,
+        context=context,
+        context_path=context_path,
+    )
     return resolved.spec_type, resolved.path, resolved.payload
 
 
 def list_specs(
-    *, spec_type: str | None = None, context_path: Path | None = None
+    *,
+    spec_type: str | None = None,
+    context: WeftContext | None = None,
+    context_path: Path | None = None,
 ) -> list[dict[str, Any]]:
-    context = build_context(spec_context=context_path)
+    context = _coerce_context(context=context, context_path=context_path)
     kinds = [spec_type] if spec_type else [SPEC_TYPE_TASK, SPEC_TYPE_PIPELINE]
     specs: list[dict[str, Any]] = []
     for kind in kinds:
         local_names: set[str] = set()
-        directory = _spec_dir(context, kind)
+        directory = spec_directory(context, kind)
         if directory.exists():
             for path in sorted(directory.glob("*.json")):
                 local_names.add(path.stem)
@@ -253,7 +164,7 @@ def list_specs(
             for bundle_dir in sorted(
                 path for path in directory.iterdir() if path.is_dir()
             ):
-                entry = bundle_dir / _spec_entry_file(kind)
+                entry = bundle_dir / spec_entry_filename(kind)
                 if not entry.is_file():
                     continue
                 if bundle_dir.name in local_names:
@@ -289,16 +200,17 @@ def create_spec(
     *,
     spec_type: str,
     source_path: Path,
+    context: WeftContext | None = None,
     context_path: Path | None = None,
     force: bool = False,
 ) -> Path:
-    context = build_context(spec_context=context_path)
-    dest = _spec_path(context, spec_type, name)
+    context = _coerce_context(context=context, context_path=context_path)
+    dest = stored_spec_path(context, spec_type, name)
     _ensure_directory(dest.parent)
     if dest.exists() and not force:
         raise FileExistsError(f"Spec '{name}' already exists at {dest}")
 
-    payload = _read_json(source_path)
+    payload = read_spec_json(source_path)
 
     if spec_type == SPEC_TYPE_TASK:
         valid, errors = validate_taskspec(json.dumps(payload))
@@ -316,11 +228,16 @@ def create_spec(
 
 
 def delete_spec(
-    name: str, *, spec_type: str | None = None, context_path: Path | None = None
+    name: str,
+    *,
+    spec_type: str | None = None,
+    context: WeftContext | None = None,
+    context_path: Path | None = None,
 ) -> Path:
     resolved = resolve_named_spec(
         name,
         spec_type=spec_type,
+        context=context,
         context_path=context_path,
     )
     if resolved.source == SPEC_SOURCE_BUILTIN:
@@ -345,14 +262,14 @@ def generate_spec(spec_type: str) -> dict[str, Any]:
 
 
 def infer_spec_type(path: Path) -> str:
-    payload = _read_json(path)
+    payload = read_spec_json(path)
     return SPEC_TYPE_PIPELINE if "stages" in payload else SPEC_TYPE_TASK
 
 
 def validate_spec(
     path: Path, *, spec_type: str | None = None
 ) -> tuple[bool, dict[str, Any]]:
-    payload = _read_json(path)
+    payload = read_spec_json(path)
     if spec_type is None:
         spec_type = SPEC_TYPE_PIPELINE if "stages" in payload else SPEC_TYPE_TASK
 
@@ -370,3 +287,148 @@ def normalize_spec_type(spec_type: str) -> str:
     if lowered in {SPEC_TYPE_PIPELINE, "pipelines"}:
         return SPEC_TYPE_PIPELINE
     raise ValueError(f"Unknown spec type: {spec_type}")
+
+
+def list_spec_records(
+    *,
+    spec_type: str | None = None,
+    context: WeftContext | None = None,
+    context_path: Path | None = None,
+) -> list[SpecRecord]:
+    """Return structured spec listings."""
+
+    return [
+        SpecRecord(
+            spec_type=str(item["type"]),
+            name=str(item["name"]),
+            path=Path(str(item["path"])),
+            source=str(item["source"]),
+        )
+        for item in list_specs(
+            spec_type=spec_type,
+            context=context,
+            context_path=context_path,
+        )
+    ]
+
+
+def show_spec(
+    name: str,
+    *,
+    spec_type: str | None = None,
+    context: WeftContext | None = None,
+    context_path: Path | None = None,
+) -> dict[str, Any]:
+    """Return a serialized stored or builtin spec payload."""
+
+    try:
+        _resolved_type, _path, payload = load_spec(
+            name,
+            spec_type=spec_type,
+            context=context,
+            context_path=context_path,
+        )
+    except FileNotFoundError as exc:
+        raise SpecNotFound(str(exc)) from exc
+    return payload
+
+
+def create_spec_record(
+    name: str,
+    source: Path | dict[str, Any],
+    *,
+    spec_type: str = SPEC_TYPE_TASK,
+    force: bool = False,
+    context: WeftContext | None = None,
+    context_path: Path | None = None,
+) -> SpecRecord:
+    """Create a stored spec from a path or serialized payload."""
+
+    context = _coerce_context(context=context, context_path=context_path)
+    if isinstance(source, Path):
+        created_path = create_spec(
+            name,
+            spec_type=spec_type,
+            source_path=source,
+            context=context,
+            force=force,
+        )
+    else:
+        destination = stored_spec_path(context, spec_type, name)
+        _ensure_directory(destination.parent)
+        if destination.exists() and not force:
+            raise FileExistsError(f"Spec '{name}' already exists at {destination}")
+        payload = dict(source)
+        if spec_type == SPEC_TYPE_TASK:
+            valid, errors = validate_taskspec(json.dumps(payload))
+            if not valid:
+                raise ValueError(f"Invalid TaskSpec: {errors}")
+        elif spec_type == SPEC_TYPE_PIPELINE:
+            valid, errors = validate_pipeline_spec_payload(payload)
+            if not valid:
+                raise ValueError(f"Invalid pipeline spec: {errors}")
+        destination.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        created_path = destination
+    return SpecRecord(
+        spec_type=spec_type,
+        name=name,
+        path=created_path,
+        source=SPEC_SOURCE_STORED,
+    )
+
+
+def validate_spec_source(
+    source: Path | dict[str, Any],
+    *,
+    spec_type: str | None = None,
+    load_runner: bool = False,
+    preflight: bool = False,
+    context: WeftContext | None = None,
+    context_path: Path | None = None,
+) -> SpecValidationResult:
+    """Validate a spec source and return a structured result."""
+
+    del load_runner, preflight
+    if isinstance(source, Path):
+        resolved_source = source
+        if not source.is_absolute() and (
+            context is not None or context_path is not None
+        ):
+            ctx = _coerce_context(context=context, context_path=context_path)
+            resolved_source = (ctx.root / source).resolve(strict=False)
+
+        valid, errors = validate_spec(resolved_source, spec_type=spec_type)
+        error_messages = (
+            [str(item) for item in errors.values()]
+            if isinstance(errors, dict)
+            else [str(errors)]
+        )
+        effective_type = spec_type or infer_spec_type(resolved_source)
+        return SpecValidationResult(
+            valid=bool(valid),
+            spec_type=effective_type,
+            errors=[] if valid else error_messages,
+            payload=read_spec_json(resolved_source),
+        )
+
+    payload = dict(source)
+    effective_type = spec_type or (
+        SPEC_TYPE_PIPELINE if "stages" in payload else SPEC_TYPE_TASK
+    )
+    if effective_type == SPEC_TYPE_TASK:
+        valid, errors = validate_taskspec(json.dumps(payload))
+    elif effective_type == SPEC_TYPE_PIPELINE:
+        valid, errors = validate_pipeline_spec_payload(payload)
+    else:
+        valid, errors = False, {"type": f"Unknown spec type: {effective_type}"}
+    error_messages = (
+        [str(item) for item in errors.values()]
+        if isinstance(errors, dict)
+        else [str(errors)]
+    )
+    return SpecValidationResult(
+        valid=bool(valid),
+        spec_type=effective_type,
+        errors=[] if valid else error_messages,
+        payload=payload,
+    )

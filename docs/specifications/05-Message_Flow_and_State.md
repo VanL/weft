@@ -8,8 +8,8 @@ _Implementation snapshot_: reservation, control, task-local queues, spillover,
 and endpoint/streaming runtime claims live in `weft/core/tasks/base.py` and
 `weft/core/tasks/consumer.py`; manager spawn, bootstrap, and reconciliation
 flow live in `weft/core/manager.py`, `weft/core/spawn_requests.py`,
-`weft/commands/run.py`, `weft/commands/_spawn_submission.py`, and
-`weft/commands/_manager_bootstrap.py`; status, task-history replay, and shared
+`weft/cli/run.py`, `weft/commands/_spawn_submission.py`, and
+`weft/core/manager_runtime.py`; status, task-history replay, and shared
 result waiting live in `weft/commands/status.py`, `weft/commands/result.py`,
 `weft/commands/_result_wait.py`, `weft/commands/_task_history.py`, and
 `weft/commands/_streaming.py`.
@@ -49,7 +49,7 @@ queue surfaces instead of assuming the public inbox delete path can always roll
 the request back. Only requests still provably present in
 `weft.spawn.requests` are safe to delete as rollback.
 
-_Implementation mapping_: `weft/commands/run.py` `_enqueue_taskspec`;
+_Implementation mapping_: `weft/cli/run.py` `_enqueue_taskspec`;
 `weft/commands/_spawn_submission.py` `reconcile_submitted_spawn`;
 `weft/core/spawn_requests.py` `submit_spawn_request`,
 `delete_spawn_request`;
@@ -292,7 +292,7 @@ _Implementation mapping_: `weft/core/manager.py` — `Manager._handle_work_messa
 `Manager._build_child_spec`, `Manager._apply_final_dispatch_fence`,
 `Manager._requeue_reserved_spawn_request`, `Manager._control_allows_child_launch`,
 `Manager.process_once`; `weft/core/spawn_requests.py`;
-`weft/commands/run.py`; `weft/commands/_spawn_submission.py` —
+`weft/cli/run.py`; `weft/commands/_spawn_submission.py` —
 `_inspect_task_log_for_tid`, `_reconcile_submitted_spawn_once`.
 
 ### 7. Manager Bootstrap Flow [MF-7]
@@ -317,8 +317,8 @@ Current rules:
 - the shared lifecycle helper owns manager discovery, bootstrap, and stop
   observation
 
-_Implementation mapping_: `weft/commands/_manager_bootstrap.py`,
-`weft/commands/run.py`, `weft/commands/manager.py`,
+_Implementation mapping_: `weft/core/manager_runtime.py`,
+`weft/cli/run.py`, `weft/commands/manager.py`,
 `weft/commands/serve.py`, `weft/manager_detached_launcher.py`,
 `weft/manager_process.py`.
 
@@ -354,7 +354,7 @@ Current rules:
 - each state-change event includes enough TaskSpec data for log-driven
   reconstruction
 
-_Implementation mapping_: `weft/core/taskspec.py` state helpers and validators;
+_Implementation mapping_: `weft/core/taskspec/model.py` state helpers and validators;
 `weft/core/tasks/base.py` state reporting.
 
 ## TaskSpec Redaction

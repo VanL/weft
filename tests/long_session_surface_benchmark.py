@@ -32,10 +32,10 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from weft._constants import WEFT_COMPLETED_RESULT_GRACE_SECONDS
+from weft.cli.run import cmd_run
 from weft.commands import queue as queue_cmd
 from weft.commands.manager import stop_command
 from weft.commands.result import cmd_result
-from weft.commands.run import cmd_run
 from weft.commands.status import cmd_status
 from weft.commands.tasks import stop_tasks
 

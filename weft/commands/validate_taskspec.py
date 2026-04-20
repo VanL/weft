@@ -25,13 +25,13 @@ from weft.core.runner_validation import (
     validate_taskspec_runner,
     validate_taskspec_runner_environment,
 )
-from weft.core.spec_parameterization import validate_parameterization_adapter
-from weft.core.spec_run_input import validate_run_input_adapter
 from weft.core.taskspec import (
     apply_bundle_root_to_taskspec_payload,
     bundle_root_from_taskspec_payload,
     validate_taskspec,
 )
+from weft.core.taskspec.parameterization import validate_parameterization_adapter
+from weft.core.taskspec.run_input import validate_run_input_adapter
 
 console = Console()
 

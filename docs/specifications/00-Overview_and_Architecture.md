@@ -5,10 +5,11 @@ massive distributed orchestration. The target is a small, reliable, observable
 process system that feels as direct as Unix tools while surviving beyond a
 single shell session.
 
-_Implementation mapping_: CLI entrypoints in `weft/cli.py` and
-`weft/commands/`; context resolution in `weft/context.py`; manager runtime in
-`weft/core/manager.py` and `weft/manager_process.py`; task runtime in
-`weft/core/tasks/`; runner plugin contracts and resolution in
+_Implementation mapping_: CLI adapters in `weft/cli/`; shared capability code
+in `weft/commands/`; public Python client in `weft/client/`; context
+resolution in `weft/context.py`; manager runtime in `weft/core/manager.py`,
+`weft/core/manager_runtime.py`, and `weft/manager_process.py`; task runtime
+in `weft/core/tasks/`; runner plugin contracts and resolution in
 `weft/_runner_plugins.py` and `weft/ext.py`; built-in runner implementations in
 `weft/core/runners/`.
 
@@ -150,10 +151,10 @@ execution, not a second workflow language.
 ### Runtime Layers
 
 ```text
-CLI and operator surfaces
+CLI and client adapters
         |
         v
-Command handlers and context resolution
+Shared command/client capabilities and context resolution
         |
         v
 Manager dispatcher and task launch
@@ -167,10 +168,11 @@ SimpleBroker queues and broker target
 
 _Implementation mapping per layer_:
 
-- **CLI and operator surfaces**: `weft/cli.py`, `weft/commands/`
+- **CLI and client adapters**: `weft/cli/`, `weft/client/`
+- **Shared application capabilities**: `weft/commands/`
 - **Context resolution**: `weft/context.py`
 - **Manager dispatcher**: `weft/core/manager.py`,
-  `weft/commands/_manager_bootstrap.py`, `weft/manager_process.py`
+  `weft/core/manager_runtime.py`, `weft/manager_process.py`
 - **Task runtime**: `weft/core/tasks/base.py`,
   `weft/core/tasks/consumer.py`, `weft/core/tasks/runner.py`,
   `weft/core/tasks/sessions.py`

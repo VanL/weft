@@ -24,7 +24,7 @@ That rule now governs the implemented runtime.
 _Implementation mapping_: `weft/core/pipelines.py` compiles stored
 `PipelineSpec`s into a first-class pipeline `TaskSpec` plus generated child
 stage and edge `TaskSpec`s. `weft/core/tasks/pipeline.py` implements the
-pipeline and edge runtime classes. `weft/commands/run.py`,
+pipeline and edge runtime classes. `weft/cli/run.py`,
 `weft/commands/result.py`, `weft/commands/status.py`,
 `weft/commands/tasks.py`, and `weft/commands/_task_history.py` expose and
 interpret the task-shaped CLI surface, and `weft/core/manager.py` reuses the

@@ -12,8 +12,8 @@ The design intent is conservative:
 - make current behavior explicit
 - avoid CLI sugar that hides which project or broker target is in play
 
-_Implementation mapping_: `weft/cli.py` (command registration),
-`weft/commands/run.py`, `weft/commands/status.py`, `weft/commands/result.py`,
+_Implementation mapping_: `weft/cli/app.py` (command registration),
+`weft/cli/run.py`, `weft/commands/status.py`, `weft/commands/result.py`,
 `weft/commands/queue.py`, `weft/commands/manager.py`, `weft/commands/serve.py`,
 `weft/commands/tasks.py`, `weft/commands/specs.py`,
 `weft/commands/builtins.py`, `weft/commands/init.py`, `weft/commands/dump.py`,
@@ -59,7 +59,7 @@ weft system <subcommand> [options]
 
 The current root-level global options are intentionally small.
 
-_Implementation mapping_: `weft/cli.py` `app` and `main()` callback.
+_Implementation mapping_: `weft/cli/app.py` `app` and callback helpers.
 
 | Option | Current behavior |
 | --- | --- |
@@ -83,8 +83,10 @@ Removed or superseded surfaces:
 `weft run` is the center of gravity for execution. It always routes work
 through the manager path rather than bypassing the runtime.
 
-_Implementation mapping_: `weft/commands/run.py` `cmd_run()` and helpers;
-manager bootstrap in `weft/commands/_manager_bootstrap.py`.
+_Implementation mapping_: `weft/commands/run.py` owns shared `weft run`
+orchestration and helpers; `weft/cli/run.py` is the Typer adapter; shared
+submission lives in `weft/commands/submission.py`; manager bootstrap lives in
+`weft/core/manager_runtime.py` and is surfaced through `weft/commands/manager.py`.
 
 Current behavior:
 
@@ -238,7 +240,7 @@ Current interactive behavior:
 ### `manager serve` - Run the manager in the foreground [CLI-1.1.2]
 
 _Implementation mapping_: `weft/commands/serve.py` `serve_command()`,
-registered in `weft/cli.py` as `weft manager serve`.
+registered in `weft/cli/app.py` as `weft manager serve`.
 
 Current behavior:
 
@@ -260,7 +262,7 @@ post-proof cleanup, and surfaces early detached-start diagnostics on failure.
 ### `init` - Initialize a project
 
 _Implementation mapping_: `weft/commands/init.py` `cmd_init()`, registered in
-`weft/cli.py` as `weft init`.
+`weft/cli/app.py` as `weft init`.
 
 Current behavior:
 
@@ -281,7 +283,7 @@ other commands operate within an existing root.
 ### `status` - Show project status [CLI-1.2.1]
 
 _Implementation mapping_: `weft/commands/status.py` `cmd_status()`, registered
-in `weft/cli.py` as `weft status`.
+in `weft/cli/app.py` as `weft status`.
 
 Current behavior:
 
@@ -366,7 +368,7 @@ discoverable without adding more top-level verbs.
 
 _Implementation mapping_: `weft/commands/specs.py` (`create_spec`, `list_specs`,
 `load_spec`, `delete_spec`, `validate_spec`, `generate_spec()`), registered in
-`weft/cli.py` under the `spec` sub-app.
+`weft/cli/app.py` under the `spec` sub-app.
 
 Current subcommands:
 
@@ -443,7 +445,7 @@ Current validation layers:
 
 ## Queue Operations [CLI-4]
 
-_Implementation mapping_: `weft/commands/queue.py`, registered in `weft/cli.py`
+_Implementation mapping_: `weft/commands/queue.py`, registered in `weft/cli/app.py`
 under the `queue` sub-app.
 
 Current queue subcommands:
@@ -488,7 +490,7 @@ Current rules:
   redirecting work
 
 _Implementation mapping_: `weft/commands/queue.py` `resolve_command()`,
-`list_command()`, `write_command()`; `weft/cli.py` `queue_resolve()`,
+`list_command()`, `write_command()`; `weft/cli/app.py` `queue_resolve()`,
 `queue_list()`, `queue_write()`.
 
 ## Configuration [CLI-5]
@@ -535,7 +537,7 @@ Related plan:
 _Implementation mapping_: `weft/commands/tidy.py` `cmd_tidy()`,
 `weft/commands/dump.py` `cmd_dump()`, `weft/commands/load.py` `cmd_load()`,
 `weft/commands/builtins.py` `cmd_system_builtins()`, registered in
-`weft/cli.py` under the `system` sub-app.
+`weft/cli/app.py` under the `system` sub-app.
 
 Current subcommands:
 

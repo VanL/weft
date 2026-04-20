@@ -35,8 +35,20 @@ class ResolvedSpecReference:
     source: Literal["file", "stored", "builtin"]
 
 
+def spec_root(context: WeftContext) -> Path:
+    """Return the Weft metadata root that stores named task and pipeline specs."""
+
+    return _spec_root(context)
+
+
 def _spec_root(context: WeftContext) -> Path:
     return context.weft_dir
+
+
+def spec_directory(context: WeftContext, spec_type: str) -> Path:
+    """Return the directory that stores one spec type for this context."""
+
+    return _spec_dir(context, spec_type)
 
 
 def _spec_dir(context: WeftContext, spec_type: str) -> Path:
@@ -61,11 +73,29 @@ def _read_json(path: Path) -> dict[str, Any]:
     return payload
 
 
+def read_spec_json(path: Path) -> dict[str, Any]:
+    """Read and validate one stored spec payload from disk."""
+
+    return _read_json(path)
+
+
+def spec_entry_filename(spec_type: str) -> str:
+    """Return the canonical bundle entry filename for one spec type."""
+
+    return _spec_entry_file(spec_type)
+
+
 def _spec_entry_file(spec_type: str) -> str:
     try:
         return SPEC_ENTRY_FILES[spec_type]
     except KeyError as exc:
         raise ValueError(f"Unknown spec type: {spec_type}") from exc
+
+
+def stored_spec_path(context: WeftContext, spec_type: str, name: str) -> Path:
+    """Return the flat-file storage path for one named stored spec."""
+
+    return _spec_path(context, spec_type, name)
 
 
 def _spec_path(context: WeftContext, spec_type: str, name: str) -> Path:
@@ -113,7 +143,7 @@ def _resolved_spec(
     spec_type: str,
     name: str,
     path: Path,
-    source: Literal["stored", "builtin"],
+    source: Literal["file", "stored", "builtin"],
 ) -> ResolvedSpecReference:
     bundle_root = path.parent if path.name == _spec_entry_file(spec_type) else None
     return ResolvedSpecReference(
@@ -122,6 +152,23 @@ def _resolved_spec(
         path=path,
         bundle_root=bundle_root,
         payload=_read_json(path),
+        source=source,
+    )
+
+
+def load_resolved_spec_reference(
+    *,
+    spec_type: str,
+    name: str,
+    path: Path,
+    source: Literal["file", "stored", "builtin"],
+) -> ResolvedSpecReference:
+    """Build a resolved spec record with payload and bundle metadata loaded."""
+
+    return _resolved_spec(
+        spec_type=spec_type,
+        name=name,
+        path=path,
         source=source,
     )
 
@@ -264,3 +311,16 @@ def resolve_named_spec_from_root(
             f"Spec '{name}' exists as multiple types; pass --type to disambiguate"
         )
     return candidates[0]
+
+
+__all__ = [
+    "ResolvedSpecReference",
+    "load_resolved_spec_reference",
+    "read_spec_json",
+    "resolve_named_spec",
+    "resolve_named_spec_from_root",
+    "spec_directory",
+    "spec_entry_filename",
+    "spec_root",
+    "stored_spec_path",
+]

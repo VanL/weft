@@ -9,13 +9,28 @@ from __future__ import annotations
 
 import base64
 import json
+import sys
 from dataclasses import dataclass
 from typing import Any
 
-import typer
-
 from simplebroker import Queue
 from weft.helpers import iter_queue_json_entries
+
+
+class _TyperCompat:
+    """Tiny echo surface kept for test compatibility without importing Typer."""
+
+    @staticmethod
+    def echo(text: str = "", *, err: bool = False, nl: bool = True) -> None:
+        stream = sys.stderr if err else sys.stdout
+        if text:
+            stream.write(text)
+        if nl:
+            stream.write("\n")
+        stream.flush()
+
+
+typer = _TyperCompat()
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,16 +41,20 @@ class DecodedOutboxValue:
     emitted: bool = False
 
 
+def _emit_text(text: str = "", *, err: bool = False, nl: bool = True) -> None:
+    typer.echo(text, err=err, nl=nl)
+
+
 def handle_ctrl_stream(raw: str) -> None:
     """Render a ctrl_out stream/control payload for the CLI."""
     try:
         envelope = json.loads(raw)
     except json.JSONDecodeError:
-        typer.echo(raw, err=True)
+        _emit_text(raw, err=True)
         return
 
     if not isinstance(envelope, dict):
-        typer.echo(str(envelope), err=True)
+        _emit_text(str(envelope), err=True)
         return
 
     data = envelope.get("data", "")
@@ -51,9 +70,9 @@ def handle_ctrl_stream(raw: str) -> None:
 
     is_stderr = envelope.get("stream") == "stderr"
     if text:
-        typer.echo(text, err=is_stderr, nl=False)
+        _emit_text(text, err=is_stderr, nl=False)
         if envelope.get("final"):
-            typer.echo(err=is_stderr)
+            _emit_text(err=is_stderr)
 
 
 def process_outbox_message(
@@ -82,11 +101,11 @@ def process_outbox_message(
             text = str(data)
         if text:
             if emit_stream:
-                typer.echo(text, err=stream_name == "stderr", nl=False)
+                _emit_text(text, err=stream_name == "stderr", nl=False)
             stream_buffer.append(text)
         if envelope.get("final"):
             if emit_stream:
-                typer.echo(err=stream_name == "stderr")
+                _emit_text(err=stream_name == "stderr")
             value = "".join(stream_buffer)
             if envelope.get("result_transform") == "strip":
                 value = value.strip()

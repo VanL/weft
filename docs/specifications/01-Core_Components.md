@@ -23,18 +23,18 @@ See also:
 - [`docs/plans/2026-04-17-canonical-owner-fence-plan.md`](../plans/2026-04-17-canonical-owner-fence-plan.md)
 - [`docs/plans/2026-04-17-heartbeat-service-plan.md`](../plans/2026-04-17-heartbeat-service-plan.md)
 
-## 1. TaskSpec (`weft/core/taskspec.py`) [CC-1]
+## 1. TaskSpec (`weft/core/taskspec/model.py`) [CC-1]
 
 **Purpose**: define execution intent, queue wiring, and mutable runtime state in
 one validated model while freezing the parts that should not drift after task
 creation.
 
-_Implementation mapping_: `weft/core/taskspec.py` — `TaskSpec`, `SpecSection`,
+_Implementation mapping_: `weft/core/taskspec/model.py` — `TaskSpec`, `SpecSection`,
 `IOSection`, `StateSection`, `LimitsSection`, `RunnerSection`, `AgentSection`,
 `FrozenList`, `FrozenDict`, `resolve_taskspec_payload`,
 `apply_bundle_root_to_taskspec_payload`; supporting parameterization and
-run-input validation live in `weft/core/spec_parameterization.py` and
-`weft/core/spec_run_input.py`, and runner-environment materialization lives in
+run-input validation live in `weft/core/taskspec/parameterization.py` and
+`weft/core/taskspec/run_input.py`, and runner-environment materialization lives in
 `weft/core/environment_profiles.py`.
 
 Current contract:
@@ -209,7 +209,7 @@ Current high-level flow:
 
 _Implementation mapping_: `weft/core/tasks/consumer.py` owns work-item
 execution and finalization; `weft/core/tasks/runner.py` owns runner dispatch;
-`weft/commands/run.py` owns CLI submission and wait behavior.
+`weft/cli/run.py` owns CLI submission and wait behavior.
 
 Why this stays shared:
 

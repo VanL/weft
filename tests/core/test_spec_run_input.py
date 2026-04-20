@@ -6,12 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from weft.core.spec_run_input import (
+from weft.core.taskspec import RunInputArgumentSection
+from weft.core.taskspec.run_input import (
     SpecRunInputRequest,
     invoke_run_input_adapter,
     parse_declared_run_input_args,
 )
-from weft.core.taskspec import RunInputArgumentSection
 
 
 def test_parse_declared_run_input_args_parses_string_and_path_values(

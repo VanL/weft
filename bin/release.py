@@ -23,6 +23,10 @@ PYPROJECT_PATH: Final[Path] = PROJECT_ROOT / "pyproject.toml"
 CONSTANTS_PATH: Final[Path] = PROJECT_ROOT / "weft" / "_constants.py"
 DOCKER_EXTENSION_DIR: Final[Path] = PROJECT_ROOT / "extensions" / "weft_docker"
 DOCKER_EXTENSION_PYPROJECT_PATH: Final[Path] = DOCKER_EXTENSION_DIR / "pyproject.toml"
+DJANGO_INTEGRATION_DIR: Final[Path] = PROJECT_ROOT / "integrations" / "weft_django"
+DJANGO_INTEGRATION_PYPROJECT_PATH: Final[Path] = (
+    DJANGO_INTEGRATION_DIR / "pyproject.toml"
+)
 MACOS_SANDBOX_EXTENSION_DIR: Final[Path] = (
     PROJECT_ROOT / "extensions" / "weft_macos_sandbox"
 )
@@ -32,6 +36,7 @@ MACOS_SANDBOX_EXTENSION_PYPROJECT_PATH: Final[Path] = (
 UV_LOCK_PATH: Final[Path] = PROJECT_ROOT / "uv.lock"
 ROOT_RELEASE_GATE_WORKFLOW: Final[str] = ".github/workflows/release-gate.yml"
 DOCKER_RELEASE_GATE_WORKFLOW: Final[str] = ".github/workflows/release-gate-docker.yml"
+DJANGO_RELEASE_GATE_WORKFLOW: Final[str] = ".github/workflows/release-gate-django.yml"
 MACOS_SANDBOX_RELEASE_GATE_WORKFLOW: Final[str] = (
     ".github/workflows/release-gate-macos-sandbox.yml"
 )
@@ -57,6 +62,8 @@ BASE_PRECHECK_COMMANDS: Final[tuple[tuple[str, ...], ...]] = (
         "--extra",
         "docker",
         "--extra",
+        "django",
+        "--extra",
         "macos-sandbox",
         "pytest",
         "-v",
@@ -73,6 +80,8 @@ BASE_PRECHECK_COMMANDS: Final[tuple[tuple[str, ...], ...]] = (
         "--extra",
         "docker",
         "--extra",
+        "django",
+        "--extra",
         "macos-sandbox",
         "bin/pytest-pg",
         "--all",
@@ -85,11 +94,14 @@ BASE_PRECHECK_COMMANDS: Final[tuple[tuple[str, ...], ...]] = (
         "--extra",
         "docker",
         "--extra",
+        "django",
+        "--extra",
         "macos-sandbox",
         "ruff",
         "check",
         "weft",
         "tests",
+        "integrations/weft_django",
         "extensions/weft_docker",
         "extensions/weft_macos_sandbox",
     ),
@@ -100,6 +112,8 @@ BASE_PRECHECK_COMMANDS: Final[tuple[tuple[str, ...], ...]] = (
         "dev",
         "--extra",
         "docker",
+        "--extra",
+        "django",
         "--extra",
         "macos-sandbox",
         "ruff",
@@ -107,6 +121,7 @@ BASE_PRECHECK_COMMANDS: Final[tuple[tuple[str, ...], ...]] = (
         "--check",
         "weft",
         "tests",
+        "integrations/weft_django",
         "extensions/weft_docker",
         "extensions/weft_macos_sandbox",
     ),
@@ -118,14 +133,34 @@ BASE_PRECHECK_COMMANDS: Final[tuple[tuple[str, ...], ...]] = (
         "--extra",
         "docker",
         "--extra",
+        "django",
+        "--extra",
         "macos-sandbox",
         "mypy",
         "weft",
+        "integrations/weft_django/weft_django",
         "extensions/weft_docker/weft_docker",
         "extensions/weft_macos_sandbox/weft_macos_sandbox",
         "--config-file",
         "pyproject.toml",
     ),
+)
+DJANGO_INTEGRATION_TEST_COMMAND: Final[tuple[str, ...]] = (
+    "uv",
+    "run",
+    "--extra",
+    "dev",
+    "--extra",
+    "docker",
+    "--extra",
+    "django",
+    "--extra",
+    "macos-sandbox",
+    "pytest",
+    "-q",
+    "-n",
+    "0",
+    "integrations/weft_django/tests",
 )
 DOCKER_EXTENSION_TEST_COMMAND: Final[tuple[str, ...]] = (
     "uv",
@@ -134,6 +169,8 @@ DOCKER_EXTENSION_TEST_COMMAND: Final[tuple[str, ...]] = (
     "dev",
     "--extra",
     "docker",
+    "--extra",
+    "django",
     "--extra",
     "macos-sandbox",
     "pytest",
@@ -149,6 +186,8 @@ MACOS_SANDBOX_EXTENSION_TEST_COMMAND: Final[tuple[str, ...]] = (
     "dev",
     "--extra",
     "docker",
+    "--extra",
+    "django",
     "--extra",
     "macos-sandbox",
     "pytest",
@@ -246,6 +285,15 @@ DOCKER_RELEASE_TARGET: Final[ReleaseTarget] = ReleaseTarget(
     tag_namespace="weft_docker",
     release_gate_workflow=DOCKER_RELEASE_GATE_WORKFLOW,
 )
+DJANGO_RELEASE_TARGET: Final[ReleaseTarget] = ReleaseTarget(
+    key="django",
+    package_name="weft-django",
+    display_name="weft-django",
+    package_dir=DJANGO_INTEGRATION_DIR,
+    pyproject_path=DJANGO_INTEGRATION_PYPROJECT_PATH,
+    tag_namespace="weft_django",
+    release_gate_workflow=DJANGO_RELEASE_GATE_WORKFLOW,
+)
 MACOS_SANDBOX_RELEASE_TARGET: Final[ReleaseTarget] = ReleaseTarget(
     key="macos-sandbox",
     package_name="weft-macos-sandbox",
@@ -257,6 +305,7 @@ MACOS_SANDBOX_RELEASE_TARGET: Final[ReleaseTarget] = ReleaseTarget(
 )
 FIRST_PARTY_EXTENSION_TARGETS: Final[tuple[ReleaseTarget, ...]] = (
     DOCKER_RELEASE_TARGET,
+    DJANGO_RELEASE_TARGET,
     MACOS_SANDBOX_RELEASE_TARGET,
 )
 
@@ -438,6 +487,7 @@ def build_precheck_commands(
     """Return the release-helper precheck commands for the current host."""
 
     commands = list(BASE_PRECHECK_COMMANDS)
+    commands.insert(2, DJANGO_INTEGRATION_TEST_COMMAND)
 
     if include_docker_extension_tests is None:
         include_docker_extension_tests = _docker_available_for_tests()
@@ -445,9 +495,9 @@ def build_precheck_commands(
         include_macos_sandbox_extension_tests = _host_supports_macos_sandbox_tests()
 
     if include_docker_extension_tests:
-        commands.insert(2, DOCKER_EXTENSION_TEST_COMMAND)
+        commands.insert(3, DOCKER_EXTENSION_TEST_COMMAND)
     if include_macos_sandbox_extension_tests:
-        insert_at = 3 if include_docker_extension_tests else 2
+        insert_at = 4 if include_docker_extension_tests else 3
         commands.insert(insert_at, MACOS_SANDBOX_EXTENSION_TEST_COMMAND)
 
     return tuple(commands)
@@ -459,6 +509,7 @@ def build_postupdate_steps() -> tuple[CommandStep, ...]:
     return (
         CommandStep(("uv", "run", "pytest", "tests/system/test_constants.py", "-q")),
         CommandStep(("uv", "build"), cwd=PROJECT_ROOT),
+        CommandStep(("uv", "build"), cwd=DJANGO_INTEGRATION_DIR),
         CommandStep(("uv", "build"), cwd=DOCKER_EXTENSION_DIR),
         CommandStep(("uv", "build"), cwd=MACOS_SANDBOX_EXTENSION_DIR),
     )

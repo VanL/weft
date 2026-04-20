@@ -24,6 +24,18 @@ from typing import Any, cast
 
 from simplebroker import commands as sb_commands
 from simplebroker._timestamp import TimestampGenerator
+from weft.commands.types import (
+    EndpointResolution,
+    QueueAliasRecord,
+    QueueBroadcastReceipt,
+    QueueDeleteReceipt,
+    QueueEntry,
+    QueueMoveReceipt,
+    QueueWriteReceipt,
+)
+from weft.commands.types import (
+    QueueInfo as PublicQueueInfo,
+)
 from weft.context import WeftContext, build_context
 from weft.core.endpoints import (
     ResolvedEndpoint,
@@ -31,9 +43,8 @@ from weft.core.endpoints import (
     normalize_endpoint_name,
     resolve_endpoint,
 )
+from weft.core.queue_wait import QueueChangeMonitor
 from weft.helpers import resolve_broker_max_message_size, resolve_cli_message_content
-
-from ._queue_wait import QueueChangeMonitor
 
 
 @dataclass
@@ -129,6 +140,41 @@ def _format_endpoint_list(records: list[ResolvedEndpoint]) -> str:
     return "\n".join(lines)
 
 
+def _queue_entry(queue_name: str, message: QueueMessage) -> QueueEntry:
+    return QueueEntry(
+        queue=queue_name,
+        message=message.body,
+        timestamp=message.timestamp,
+    )
+
+
+def _endpoint_resolution(record: ResolvedEndpoint) -> EndpointResolution:
+    payload = record.to_dict()
+    return EndpointResolution(
+        name=str(payload["name"]),
+        tid=str(payload["tid"]),
+        status=str(payload["status"]),
+        inbox=str(payload["inbox"]),
+        outbox=str(payload["outbox"]),
+        ctrl_in=str(payload["ctrl_in"]),
+        ctrl_out=str(payload["ctrl_out"]),
+        registered_at=(
+            int(payload["registered_at"])
+            if payload.get("registered_at") is not None
+            else None
+        ),
+        last_seen=(
+            int(payload["last_seen"]) if payload.get("last_seen") is not None else None
+        ),
+        live_candidates=int(payload["live_candidates"]),
+        metadata=(
+            dict(payload["metadata"])
+            if isinstance(payload.get("metadata"), dict)
+            else None
+        ),
+    )
+
+
 def read_messages(
     ctx: WeftContext,
     queue_name: str,
@@ -165,12 +211,75 @@ def read_messages(
         queue.close()
 
 
+def read_queue(
+    ctx: WeftContext,
+    queue_name: str,
+    *,
+    all_messages: bool = False,
+    message_id: int | None = None,
+    since: int | None = None,
+) -> list[QueueEntry]:
+    """Read queue messages as structured entries."""
+
+    queue = ctx.queue(queue_name, persistent=True)
+    try:
+        entries: list[QueueEntry] = []
+        if message_id is not None:
+            item = queue.read_one(exact_timestamp=message_id, with_timestamps=True)
+            if item is None:
+                return []
+            body, timestamp = cast(tuple[str, int], item)
+            return [
+                QueueEntry(
+                    queue=queue_name, message=str(body), timestamp=int(timestamp)
+                )
+            ]
+
+        iterator = queue.read_generator(
+            with_timestamps=True,
+            since_timestamp=since,
+        )
+        for index, item in enumerate(iterator):
+            body, timestamp = cast(tuple[Any, Any], item)
+            entries.append(
+                QueueEntry(
+                    queue=queue_name, message=str(body), timestamp=int(timestamp)
+                )
+            )
+            if not all_messages and index == 0:
+                break
+        return entries
+    finally:
+        queue.close()
+
+
 def write_message(ctx: WeftContext, queue_name: str, message: str) -> None:
     queue = ctx.queue(queue_name, persistent=True)
     try:
         queue.write(message)
     finally:
         queue.close()
+
+
+def write_queue(ctx: WeftContext, queue_name: str, message: str) -> QueueWriteReceipt:
+    """Write one message to a queue."""
+
+    write_message(ctx, queue_name, message)
+    return QueueWriteReceipt(queue=queue_name, message=message)
+
+
+def write_endpoint(
+    ctx: WeftContext,
+    endpoint_name: str,
+    message: str,
+) -> QueueWriteReceipt:
+    """Resolve an endpoint and write to its inbox queue."""
+
+    resolved = resolve_endpoint(ctx, endpoint_name)
+    if resolved is None:
+        normalized = normalize_endpoint_name(endpoint_name)
+        raise LookupError(f"No active endpoint named '{normalized}'")
+    return write_queue(ctx, resolved.record.inbox, message)
 
 
 def peek_messages(
@@ -209,6 +318,48 @@ def peek_messages(
         queue.close()
 
 
+def peek_queue(
+    ctx: WeftContext,
+    queue_name: str,
+    *,
+    all_messages: bool = False,
+    message_id: int | None = None,
+    since: int | None = None,
+) -> list[QueueEntry]:
+    """Peek queue messages as structured entries."""
+
+    queue = ctx.queue(queue_name, persistent=True)
+    try:
+        entries: list[QueueEntry] = []
+        if message_id is not None:
+            item = queue.peek_one(exact_timestamp=message_id, with_timestamps=True)
+            if item is None:
+                return []
+            body, timestamp = cast(tuple[str, int], item)
+            return [
+                QueueEntry(
+                    queue=queue_name, message=str(body), timestamp=int(timestamp)
+                )
+            ]
+
+        iterator = queue.peek_generator(
+            with_timestamps=True,
+            since_timestamp=since,
+        )
+        for index, item in enumerate(iterator):
+            body, timestamp = cast(tuple[Any, Any], item)
+            entries.append(
+                QueueEntry(
+                    queue=queue_name, message=str(body), timestamp=int(timestamp)
+                )
+            )
+            if not all_messages and index == 0:
+                break
+        return entries
+    finally:
+        queue.close()
+
+
 def move_messages(
     ctx: WeftContext,
     source: str,
@@ -226,6 +377,71 @@ def move_messages(
         return len(moved)
     finally:
         src_queue.close()
+
+
+def move_queue_messages(
+    ctx: WeftContext,
+    source: str,
+    destination: str,
+    *,
+    limit: int | None = None,
+    all_messages: bool = False,
+    message_id: int | None = None,
+    since: int | None = None,
+) -> QueueMoveReceipt:
+    """Move queue messages and return a structured receipt."""
+
+    queue = ctx.queue(source, persistent=True)
+    try:
+        if message_id is not None:
+            moved = list(
+                queue.move_generator(
+                    destination,
+                    with_timestamps=True,
+                    exact_timestamp=message_id,
+                )
+            )
+            return QueueMoveReceipt(
+                source=source,
+                destination=destination,
+                moved_count=len(moved),
+            )
+        if limit is not None:
+            moved_count = move_messages(ctx, source, destination, limit=limit)
+            return QueueMoveReceipt(
+                source=source,
+                destination=destination,
+                moved_count=moved_count,
+            )
+        if not all_messages:
+            iterator = queue.move_generator(
+                destination,
+                with_timestamps=True,
+                since_timestamp=since,
+            )
+            moved_count = 0
+            for _item in iterator:
+                moved_count += 1
+                break
+            return QueueMoveReceipt(
+                source=source,
+                destination=destination,
+                moved_count=moved_count,
+            )
+        moved = list(
+            queue.move_generator(
+                destination,
+                with_timestamps=True,
+                since_timestamp=since,
+            )
+        )
+        return QueueMoveReceipt(
+            source=source,
+            destination=destination,
+            moved_count=len(moved),
+        )
+    finally:
+        queue.close()
 
 
 def list_queues(
@@ -256,6 +472,39 @@ def list_queues(
             )
         )
     return queues
+
+
+def list_queue_infos(
+    ctx: WeftContext,
+    *,
+    pattern: str | None = None,
+    include_stats: bool = False,
+    include_endpoints: bool = False,
+) -> list[PublicQueueInfo]:
+    """Return queue or endpoint listings as structured rows."""
+
+    if include_endpoints:
+        return [
+            PublicQueueInfo(
+                name=record.record.name,
+                messages=0,
+                is_endpoint=True,
+            )
+            for record in list_resolved_endpoints(ctx, pattern=pattern)
+        ]
+    return [
+        PublicQueueInfo(
+            name=item.name,
+            messages=item.unclaimed,
+            total_messages=item.total if include_stats else None,
+            claimed_messages=(
+                max(item.total - item.unclaimed, 0)
+                if include_stats and item.total is not None
+                else None
+            ),
+        )
+        for item in list_queues(ctx, include_stats=include_stats, pattern=pattern)
+    ]
 
 
 def watch_queue(
@@ -319,6 +568,119 @@ def watch_queue(
             monitor.close()
         watch_queue.close()
         queue.close()
+
+
+def watch_queue_entries(
+    ctx: WeftContext,
+    queue_name: str,
+    *,
+    limit: int | None = None,
+    interval: float = 0.5,
+    peek: bool = False,
+    since: int | None = None,
+    move_to: str | None = None,
+) -> Iterator[QueueEntry]:
+    """Yield queue activity as structured entries."""
+
+    for message in watch_queue(
+        ctx,
+        queue_name,
+        interval=interval,
+        max_messages=limit,
+        with_timestamps=True,
+        json_output=False,
+        peek=peek,
+        since=since,
+        move_to=move_to,
+    ):
+        yield _queue_entry(queue_name, message)
+
+
+def resolve_queue_endpoint(
+    ctx: WeftContext,
+    endpoint_name: str,
+) -> EndpointResolution | None:
+    """Resolve a runtime endpoint to its live queue surface."""
+
+    resolved = resolve_endpoint(ctx, endpoint_name)
+    if resolved is None:
+        return None
+    return _endpoint_resolution(resolved)
+
+
+def delete_queue_messages(
+    ctx: WeftContext,
+    queue_name: str | None = None,
+    *,
+    all_queues: bool = False,
+    message_id: int | None = None,
+) -> QueueDeleteReceipt:
+    """Delete a queue, all queues, or one exact message."""
+
+    if message_id is not None and queue_name is not None:
+        queue = ctx.queue(queue_name, persistent=True)
+        try:
+            deleted = queue.delete(message_id=message_id)
+            return QueueDeleteReceipt(
+                queue=queue_name,
+                deleted_count=1 if deleted else 0,
+                all_queues=False,
+            )
+        finally:
+            queue.close()
+
+    target_queue = None if all_queues else queue_name
+    with ctx.broker() as db:
+        deleted_count = int(db.delete(target_queue))
+    return QueueDeleteReceipt(
+        queue=target_queue,
+        deleted_count=deleted_count,
+        all_queues=all_queues,
+    )
+
+
+def broadcast(
+    ctx: WeftContext,
+    message: str,
+    *,
+    pattern: str | None = None,
+) -> QueueBroadcastReceipt:
+    """Broadcast one message to matching queues."""
+
+    with ctx.broker() as db:
+        target_count = int(db.broadcast(message, pattern=pattern))
+    return QueueBroadcastReceipt(pattern=pattern, target_count=target_count)
+
+
+def add_alias(ctx: WeftContext, alias: str, target: str) -> QueueAliasRecord:
+    """Create or update one queue alias."""
+
+    with ctx.broker() as db:
+        db.add_alias(alias, target)
+    return QueueAliasRecord(alias=alias, target=target)
+
+
+def list_alias_records(
+    ctx: WeftContext,
+    *,
+    target: str | None = None,
+) -> list[QueueAliasRecord]:
+    """Return queue alias rows."""
+
+    with ctx.broker() as db:
+        aliases = list(db.list_aliases())
+    return [
+        QueueAliasRecord(alias=alias, target=alias_target)
+        for alias, alias_target in aliases
+        if target is None or alias_target == target
+    ]
+
+
+def remove_alias(ctx: WeftContext, alias: str) -> None:
+    """Remove one queue alias."""
+
+    with ctx.broker() as db:
+        db.remove_alias(alias)
 
 
 def read_command(

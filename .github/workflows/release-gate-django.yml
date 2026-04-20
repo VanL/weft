@@ -1,0 +1,58 @@
+name: Release Gate (weft-django)
+
+on:
+  push:
+    tags:
+      - "weft_django/v*"
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: release-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-django-integration:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+
+      - name: Install dependencies
+        run: |
+          uv pip install --system -e ".[dev,django]"
+
+      - name: Run Django integration tests
+        run: |
+          pytest -q -n 0 integrations/weft_django/tests
+
+  publish-release:
+    needs:
+      - test-django-integration
+    uses: ./.github/workflows/release.yml
+    with:
+      package_name: weft-django
+      package_dir: integrations/weft_django
+      tag_name: ${{ github.ref_name }}
+      release_ref: ${{ github.sha }}
+      expected_tag_commit: ${{ github.sha }}
+      create_github_release: false
+    permissions:
+      actions: read
+      contents: write
+      id-token: write

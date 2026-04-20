@@ -4,6 +4,7 @@ A Python framework for orchestrating multi-agent workflows.
 """
 
 from ._constants import PROG_NAME, __version__
+from .client import Task, TaskEvent, TaskResult, TaskSnapshot, WeftClient
 from .helpers import (
     debug_print,
     log_debug,
@@ -16,6 +17,11 @@ from .helpers import (
 __all__ = [
     "__version__",
     "PROG_NAME",
+    "Task",
+    "TaskEvent",
+    "TaskResult",
+    "TaskSnapshot",
+    "WeftClient",
     "debug_print",
     "send_log",
     "log_debug",

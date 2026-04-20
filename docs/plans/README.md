@@ -3,7 +3,7 @@
 This directory holds non-normative implementation plans, roadmaps, and audit artifacts.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 66 tracked plan files in this directory.
+There are currently 69 tracked plan files in this directory.
 
 ## Status Taxonomy
 
@@ -24,6 +24,7 @@ There are currently 66 tracked plan files in this directory.
 
 ## Current Focus
 
+- [`2026-04-20-weft-django-v1-reality-alignment-plan.md`](./2026-04-20-weft-django-v1-reality-alignment-plan.md): active follow-up plan for fixing `weft_django` contract drift and resetting the v1 boundary after the initial landing.
 - [`2026-04-16-manager-and-basetask-exception-hardening-plan.md`](./2026-04-16-manager-and-basetask-exception-hardening-plan.md): completed slice for narrowing broad `except Exception` catches in `Manager` and `BaseTask`.
 - [`2026-04-15-maintainability-and-boundary-remediation-plan.md`](./2026-04-15-maintainability-and-boundary-remediation-plan.md): umbrella remediation plan for maintainability, seams, testing, and lifecycle policy.
 - [`2026-04-15-docs-audit-and-alignment-plan.md`](./2026-04-15-docs-audit-and-alignment-plan.md): current docs-alignment slice for high-traffic entry points.
@@ -33,6 +34,9 @@ There are currently 66 tracked plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-04-20-weft-django-v1-reality-alignment-plan.md`](./2026-04-20-weft-django-v1-reality-alignment-plan.md) | Weft Django V1 Reality Alignment Plan | `active` | none |
+| [`2026-04-20-weft-client-pythonic-surface-and-path-unification-plan.md`](./2026-04-20-weft-client-pythonic-surface-and-path-unification-plan.md) | Weft Client Pythonic Surface And CLI Path Unification Plan | `completed` | none |
+| [`2026-04-20-weft-django-integration-implementation-plan.md`](./2026-04-20-weft-django-integration-implementation-plan.md) | Weft Django Integration Implementation Plan | `completed` | ./2026-04-20-weft-django-v1-reality-alignment-plan.md |
 | [`2026-04-18-safe-maintainability-cleanups-plan.md`](./2026-04-18-safe-maintainability-cleanups-plan.md) | Safe Maintainability Cleanups Plan | `completed` | none |
 | [`2026-04-17-heartbeat-service-plan.md`](./2026-04-17-heartbeat-service-plan.md) | Heartbeat Service Plan | `completed` | none |
 | [`2026-04-17-canonical-owner-fence-plan.md`](./2026-04-17-canonical-owner-fence-plan.md) | Shared Canonical Owner Fence Plan | `completed` | none |

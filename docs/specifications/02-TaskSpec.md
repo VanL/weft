@@ -21,12 +21,12 @@ workers are runtime-owned internal tasks. The pipeline runtime may realize them
 with reserved internal task classes or reserved internal targets without
 expanding the normal user-authored `spec.type` vocabulary.
 
-_Implementation mapping_: `weft/core/taskspec.py` (`TaskSpec`, `SpecSection`, `IOSection`, `StateSection`, `_freeze_spec`, `FrozenList`, `FrozenDict`). Partial immutability is enforced via `_freeze_spec()` on `model_post_init`, which recursively freezes `spec` and `io` sections using `_freeze()` methods on each sub-model. `state` and `metadata` remain mutable via `__setattr__` guards checking `_frozen_fields`.
+_Implementation mapping_: `weft/core/taskspec/model.py` (`TaskSpec`, `SpecSection`, `IOSection`, `StateSection`, `_freeze_spec`, `FrozenList`, `FrozenDict`). Partial immutability is enforced via `_freeze_spec()` on `model_post_init`, which recursively freezes `spec` and `io` sections using `_freeze()` methods on each sub-model. `state` and `metadata` remain mutable via `__setattr__` guards checking `_frozen_fields`.
 
 ## JSON Schema v1.0 [TS-1]
 
 _Implementation coverage_: Field validation and defaults correspond to Pydantic
-models in `weft/core/taskspec.py`. Runtime behaviour honours `stream_output`
+models in `weft/core/taskspec/model.py`. Runtime behaviour honours `stream_output`
 (chunked, base64-encoded messages), `output_size_limit_mb` (disk spillover),
 and `interactive` (long-lived, line-oriented command sessions with streaming
 stdin/stdout over task-local queues rather than terminal emulation).
@@ -235,15 +235,15 @@ constraint in the model layer.
 - **Submission-only hooks**: `spec.parameterization` is removed from the materialized TaskSpec after local adaptation; `spec.run_input` is evaluated after materialization and before queueing the initial work payload.
 
 _Implementation mapping_:
-- **Schema & validation**: `weft/core/taskspec.py` — `TaskSpec`, `SpecSection`, `IOSection`, `StateSection`, `LimitsSection`, `RunnerSection`, `AgentSection`, `AgentToolSection`, `AgentTemplateSection`, `ReservedPolicy`.
-- **Payload resolution & defaults**: `weft/core/taskspec.py` — `resolve_taskspec_payload()`, `rewrite_tid_in_io()`, `TaskSpec.prepare_payload()` (model_validator mode="before").
+- **Schema & validation**: `weft/core/taskspec/model.py` — `TaskSpec`, `SpecSection`, `IOSection`, `StateSection`, `LimitsSection`, `RunnerSection`, `AgentSection`, `AgentToolSection`, `AgentTemplateSection`, `ReservedPolicy`.
+- **Payload resolution & defaults**: `weft/core/taskspec/model.py` — `resolve_taskspec_payload()`, `rewrite_tid_in_io()`, `TaskSpec.prepare_payload()` (model_validator mode="before").
 - **Target semantics**: `weft/core/targets.py` — `decode_work_message()`, `build_argv()` (command argv construction), `resolve_function_target()`.
-- **Submission-time TaskSpec materialization**: `weft/core/spec_parameterization.py` — declared long-option parsing for `spec.parameterization`, adapter invocation, JSON-serializable payload checks, and local concrete-TaskSpec materialization; `weft/commands/run.py` — local materialization before run-input shaping and spawn submission; `weft/commands/validate_taskspec.py` — explicit adapter-ref validation.
-- **Submission-time run-input shaping**: `weft/core/spec_run_input.py` — declared long-option parsing, adapter invocation, JSON-serializable payload checks; `weft/commands/run.py` — `weft run --spec` local adapter execution after materialization and before spawn submission; `weft/commands/validate_taskspec.py` — explicit adapter-ref validation.
+- **Submission-time TaskSpec materialization**: `weft/core/taskspec/parameterization.py` — declared long-option parsing for `spec.parameterization`, adapter invocation, JSON-serializable payload checks, and local concrete-TaskSpec materialization; `weft/commands/run.py` — shared `weft run` materialization before run-input shaping and spawn submission; `weft/commands/validate_taskspec.py` — explicit adapter-ref validation.
+- **Submission-time run-input shaping**: `weft/core/taskspec/run_input.py` — declared long-option parsing, adapter invocation, JSON-serializable payload checks; `weft/commands/run.py` — shared `weft run --spec` local adapter execution after materialization and before spawn submission; `weft/commands/validate_taskspec.py` — explicit adapter-ref validation.
 - **Runtime execution**: `weft/core/tasks/consumer.py` (`Consumer` — streaming, output handling, reserved policy application), `weft/core/tasks/base.py` (`BaseTask` — queue wiring, state tracking, process titles, reserved policy), `weft/core/tasks/interactive.py` (`InteractiveTaskMixin` — line-oriented interactive command sessions over task-local queues).
 - **Resource monitoring**: `weft/core/resource_monitor.py` (`ResourceMonitor` — psutil-based metrics collection), `weft/core/runners/host.py` (`HostTaskRunner` — monitor_class loading).
-- **Runner dispatch**: `weft/core/runners/host.py` (`HostTaskRunner`, `HostRunnerPlugin`), `weft/core/tasks/runner.py` (`TaskRunner`), `weft/core/taskspec.py` (`RunnerSection`).
-- **Agent runtime**: `weft/ext.py` (agent adapter wiring), `weft/core/taskspec.py` (`AgentSection`, `AgentToolSection`, `AgentTemplateSection`).
+- **Runner dispatch**: `weft/core/runners/host.py` (`HostTaskRunner`, `HostRunnerPlugin`), `weft/core/tasks/runner.py` (`TaskRunner`), `weft/core/taskspec/model.py` (`RunnerSection`).
+- **Agent runtime**: `weft/ext.py` (agent adapter wiring), `weft/core/taskspec/model.py` (`AgentSection`, `AgentToolSection`, `AgentTemplateSection`).
 
 _Per-field implementation status_:
 - `tid`: Implemented. `TaskSpec.validate_tid()` — 19-digit validation, timestamp bounds.
@@ -253,8 +253,8 @@ _Per-field implementation status_:
 - `spec.persistent`: Implemented. `SpecSection.persistent` — used by agent/interactive task paths.
 - `spec.function_target`, `spec.process_target`: Implemented. Cross-validated in `SpecSection.validate_target()`.
 - `spec.agent`: Implemented. `AgentSection` with full sub-schema (`runtime`, `authority_class`, `model`, `instructions`, `templates`, `tools`, `output_mode`, `output_schema`, `max_turns`, `options`, `conversation_scope`, `runtime_config`).
-- `spec.parameterization`: Implemented. `ParameterizationSection` and `ParameterizationArgumentSection` in `weft/core/taskspec.py`; adapter parsing and materialization in `weft/core/spec_parameterization.py`; local `weft run --spec` integration in `weft/commands/run.py`.
-- `spec.run_input`: Implemented. `RunInputSection`, `RunInputArgumentSection`, and `RunInputStdinSection` in `weft/core/taskspec.py`; adapter parsing and invocation in `weft/core/spec_run_input.py`; local `weft run --spec` integration in `weft/commands/run.py`.
+- `spec.parameterization`: Implemented. `ParameterizationSection` and `ParameterizationArgumentSection` in `weft/core/taskspec/model.py`; adapter parsing and materialization in `weft/core/taskspec/parameterization.py`; local `weft run --spec` integration in `weft/cli/run.py`.
+- `spec.run_input`: Implemented. `RunInputSection`, `RunInputArgumentSection`, and `RunInputStdinSection` in `weft/core/taskspec/model.py`; adapter parsing and invocation in `weft/core/taskspec/run_input.py`; local `weft run --spec` integration in `weft/cli/run.py`.
 - `spec.args`, `spec.keyword_args`: Implemented. Frozen after creation.
 - `spec.timeout`: Implemented. `SpecSection.timeout`.
 - `spec.limits.*`: Implemented. `LimitsSection` — `memory_mb`, `cpu_percent`, `max_fds`, `max_connections`. Runtime enforcement in `ResourceMonitor` and `TaskSpec.check_limits()`.
@@ -437,7 +437,7 @@ runner, descriptor, and Docker availability, but it does not require the host
 provider executable to exist because the real provider runtime lives inside the
 container.
 
-_Implementation mapping_: `weft/core/taskspec.py` (`RunnerSection`, `resolve_taskspec_payload()`), `weft/core/environment_profiles.py` (`RunnerEnvironmentProfileResult`, `materialize_runner_environment()`, `materialize_runner_environment_from_taskspec()`), `weft/core/runner_validation.py` (`validate_taskspec_runner()`, `validate_taskspec_runner_environment()`, `validate_runner_capabilities()`, `runner_name_from_taskspec()`), `weft/ext.py` (`RunnerPlugin`, `RunnerHandle`, `RunnerEnvironmentProfile`), `weft/_runner_plugins.py` (`get_runner_plugin()`, `require_runner_plugin()`), `weft/core/tasks/runner.py` (`TaskRunner`, `_build_runner_validation_payload()`).
+_Implementation mapping_: `weft/core/taskspec/model.py` (`RunnerSection`, `resolve_taskspec_payload()`), `weft/core/environment_profiles.py` (`RunnerEnvironmentProfileResult`, `materialize_runner_environment()`, `materialize_runner_environment_from_taskspec()`), `weft/core/runner_validation.py` (`validate_taskspec_runner()`, `validate_taskspec_runner_environment()`, `validate_runner_capabilities()`, `runner_name_from_taskspec()`), `weft/ext.py` (`RunnerPlugin`, `RunnerHandle`, `RunnerEnvironmentProfile`), `weft/_runner_plugins.py` (`get_runner_plugin()`, `require_runner_plugin()`), `weft/core/tasks/runner.py` (`TaskRunner`, `_build_runner_validation_payload()`).
 
 ### Autostart Manifests [TS-1.2]
 
@@ -513,7 +513,7 @@ Timeouts are treated as error exits for reserved-policy purposes:
 `reserved_policy_on_error` applies when a task exceeds its timeout, is
 killed, or fails with a non-zero exit code.
 
-_Implementation mapping_: `weft/core/tasks/base.py` (`BaseTask._apply_reserved_policy()`), `weft/core/tasks/consumer.py` (`Consumer._apply_reserved_policy_on_error()`, `Consumer._handle_stop()`, `Consumer._handle_kill()`), `weft/core/tasks/interactive.py` (`InteractiveTaskMixin` — applies policies on stop/kill/error for interactive sessions). The `ReservedPolicy` enum lives in `weft/core/taskspec.py`.
+_Implementation mapping_: `weft/core/tasks/base.py` (`BaseTask._apply_reserved_policy()`), `weft/core/tasks/consumer.py` (`Consumer._apply_reserved_policy_on_error()`, `Consumer._handle_stop()`, `Consumer._handle_kill()`), `weft/core/tasks/interactive.py` (`InteractiveTaskMixin` — applies policies on stop/kill/error for interactive sessions). The `ReservedPolicy` enum lives in `weft/core/taskspec/model.py`.
 
 ## Related Plans
 

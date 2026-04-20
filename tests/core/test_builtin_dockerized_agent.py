@@ -7,13 +7,14 @@ from pathlib import Path
 
 import pytest
 
+from weft._constants import CLAUDE_PORTABLE_AUTH_ENV_NAMES
 from weft.builtins import dockerized_agent_examples as builtin_examples
 from weft.commands import specs as spec_cmd
 from weft.core.agents.resolution import resolve_agent_tool_profile
 from weft.core.environment_profiles import materialize_runner_environment
-from weft.core.spec_parameterization import materialize_taskspec_template
-from weft.core.spec_run_input import SpecRunInputRequest, invoke_run_input_adapter
 from weft.core.taskspec import TaskSpec
+from weft.core.taskspec.parameterization import materialize_taskspec_template
+from weft.core.taskspec.run_input import SpecRunInputRequest, invoke_run_input_adapter
 
 pytestmark = [
     pytest.mark.skipif(
@@ -21,6 +22,12 @@ pytestmark = [
         reason="Docker builtins are currently supported only on Linux and macOS",
     )
 ]
+
+
+@pytest.fixture(autouse=True)
+def _clear_host_auth_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in CLAUDE_PORTABLE_AUTH_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
 
 
 def _load_builtin_taskspec() -> TaskSpec:

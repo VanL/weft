@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import pytest
 
-import weft.commands._manager_bootstrap as manager_lifecycle
 from tests.helpers.test_backend import prepare_project_root
+from weft._constants import MANAGER_POLL_INTERVAL
 from weft.context import build_context
+from weft.core import manager_runtime as core_manager_runtime
 
 pytestmark = [pytest.mark.shared]
 
@@ -63,7 +64,7 @@ def test_serve_foreground_uses_shared_runtime_invocation_helper(
 ) -> None:
     context_root = prepare_project_root(tmp_path / "proj")
     context = build_context(context_root)
-    invocation = manager_lifecycle._ManagerRuntimeInvocation(
+    invocation = core_manager_runtime.ManagerRuntimeInvocation(
         task_cls_path="weft.core.manager.Manager",
         tid="1761000000000000002",
         spec=object(),
@@ -72,7 +73,7 @@ def test_serve_foreground_uses_shared_runtime_invocation_helper(
     run_calls: list[tuple[object, object, object, object, object]] = []
 
     monkeypatch.setattr(
-        manager_lifecycle,
+        core_manager_runtime,
         "_select_active_manager",
         lambda context_arg: None,
     )
@@ -91,17 +92,17 @@ def test_serve_foreground_uses_shared_runtime_invocation_helper(
         run_calls.append((task_cls_path, broker_target, spec, config, poll_interval))
 
     monkeypatch.setattr(
-        manager_lifecycle,
+        core_manager_runtime,
         "_build_manager_runtime_invocation",
         _fake_build_invocation,
     )
     monkeypatch.setattr(
-        manager_lifecycle,
+        core_manager_runtime,
         "run_manager_process",
         _fake_run_manager_process,
     )
 
-    exit_code, message = manager_lifecycle._serve_manager_foreground(context)
+    exit_code, message = core_manager_runtime.serve_manager_foreground(context)
 
     assert exit_code == 0
     assert message is None
@@ -112,6 +113,6 @@ def test_serve_foreground_uses_shared_runtime_invocation_helper(
             context.broker_target,
             invocation.spec,
             context.config,
-            manager_lifecycle._MANAGER_POLL_INTERVAL,
+            MANAGER_POLL_INTERVAL,
         )
     ]

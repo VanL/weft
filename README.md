@@ -54,14 +54,15 @@ selection still happens at runtime through project config or environment
 variables; the extra only makes the Postgres backend available.
 
 Runner extras work the same way: `weft[docker]` adds the Docker runner plugin
-plus the Docker SDK dependency, and `weft[macos-sandbox]` adds the macOS
-sandbox runner plugin. The first-party Docker runner is currently supported on
-Linux and macOS only. `weft[all]` installs the current first-party optional
-backends and runners together. Runner selection still happens per TaskSpec
-through `spec.runner`. The current Docker runner owns normal command tasks and
-the Docker-backed one-shot `provider_cli` agent lane for providers with
-explicit image recipes. The current shipped image-recipe set is
-`claude_code`, `codex`, `gemini`, `opencode`, and `qwen`.
+plus the Docker SDK dependency, `weft[macos-sandbox]` adds the macOS sandbox
+runner plugin, and `weft[django]` adds the first-party Django integration
+package. The first-party Docker runner is currently supported on Linux and
+macOS only. `weft[all]` installs the current first-party optional backends,
+runner plugins, and framework integrations together. Runner selection still
+happens per TaskSpec through `spec.runner`. The current Docker runner owns
+normal command tasks and the Docker-backed one-shot `provider_cli` agent lane
+for providers with explicit image recipes. The current shipped image-recipe set
+is `claude_code`, `codex`, `gemini`, `opencode`, and `qwen`.
 
 ## Quick Start
 
@@ -111,6 +112,43 @@ $ weft result 1234567890 --json
 ```
 
 For a guided walkthrough, see [Your First Weft Task](docs/tutorials/first-task.md).
+
+## Embedding Weft in Python
+
+`weft.client` is the public Python surface over the same shared command layer
+the CLI uses. The basic pattern is `submit(...) -> Task`, then inspect or wait
+through the task handle.
+
+```python
+from weft.client import WeftClient
+
+client = WeftClient(path=".")
+
+task = client.submit_command(["echo", "hello"])
+result = task.result(timeout=30.0)
+
+assert result.status == "completed"
+assert "hello" in (result.stdout or str(result.value))
+```
+
+Stored specs and pipelines use the same reference grammar as
+`weft run --spec NAME|PATH` and `weft run --pipeline NAME|PATH`:
+
+```python
+task = client.submit_spec("probe-agents")
+pipeline = client.submit_pipeline("etl-job", payload={"batch": 7})
+```
+
+Use namespaces when you want the broader control surface:
+
+```python
+snapshot = client.task(task.tid).snapshot()
+events = list(client.task(task.tid).follow())
+queues = client.queues.list(include_stats=True)
+managers = client.managers.list()
+specs = client.specs.list()
+system = client.system.status()
+```
 
 ## Builtin Task Helpers
 
@@ -897,6 +935,10 @@ Weft uses a tag-driven release flow in GitHub Actions:
   runs on pushed `weft_docker/v*` tags, executes the Docker extension package
   tests on Ubuntu, and publishes the `weft-docker` package to PyPI if the tag
   still points at the tested commit.
+- [`.github/workflows/release-gate-django.yml`](./.github/workflows/release-gate-django.yml)
+  runs on pushed `weft_django/v*` tags, executes the Django integration package
+  tests on Ubuntu, and publishes the `weft-django` package to PyPI if the tag
+  still points at the tested commit.
 - [`.github/workflows/release-gate-macos-sandbox.yml`](./.github/workflows/release-gate-macos-sandbox.yml)
   runs on pushed `weft_macos_sandbox/v*` tags, executes the macOS sandbox
   extension package tests on macOS, and publishes the `weft-macos-sandbox`
@@ -933,16 +975,18 @@ The helper also inspects the current versions in the first-party extension
 packages:
 
 - `extensions/weft_docker/pyproject.toml`
+- `integrations/weft_django/pyproject.toml`
 - `extensions/weft_macos_sandbox/pyproject.toml`
 
-If either extension version is still unpublished on PyPI, the helper pushes the
+If any package version is still unpublished on PyPI, the helper pushes the
 matching namespaced tag from the tested commit:
 
 - `weft_docker/vX.Y.Z`
+- `weft_django/vX.Y.Z`
 - `weft_macos_sandbox/vX.Y.Z`
 
 Those namespaced tags can also be pushed manually when you want to release just
-one extension package.
+one first-party package.
 
 When the helper does need to bump the version, it updates both canonical
 version sources:
@@ -954,33 +998,37 @@ Before it tags and pushes, the helper runs:
 
 1. The SQLite release precheck with xdist
 2. The PG-compatible release precheck with `uv run bin/pytest-pg --all`
-3. The Docker extension tests when Docker is available locally
-4. The macOS sandbox extension tests when running on macOS
+3. The Django integration tests
+4. The Docker extension tests when Docker is available locally
+5. The macOS sandbox extension tests when running on macOS
 
 After the helper pushes `v0.1.1`, the release gate workflow will:
 
 1. Run the full SQLite suite
 2. Run the PG-compatible suite with `uv run bin/pytest-pg --all`
-3. Run the Docker extension tests on Ubuntu
-4. Run the macOS sandbox extension tests on macOS
-5. Confirm the tag still points at the tested commit
-6. Invoke the package release workflow only if all suites pass
-7. Build distributions with `uv build`
-8. Publish to PyPI with `uv publish --trusted-publishing always dist/*`
-9. Sign artifacts, create the GitHub Release, and upload the release files once PyPI succeeds
+3. Run the Django integration tests on Ubuntu
+4. Run the Docker extension tests on Ubuntu
+5. Run the macOS sandbox extension tests on macOS
+6. Confirm the tag still points at the tested commit
+7. Invoke the package release workflow only if all suites pass
+8. Build distributions with `uv build`
+9. Publish to PyPI with `uv publish --trusted-publishing always dist/*`
+10. Sign artifacts, create the GitHub Release, and upload the release files once PyPI succeeds
 
-If the helper also pushes `weft_docker/vX.Y.Z` or `weft_macos_sandbox/vX.Y.Z`,
-the package-specific release gates will:
+If the helper also pushes a namespaced package tag such as `weft_docker/vX.Y.Z`,
+`weft_django/vX.Y.Z`, or `weft_macos_sandbox/vX.Y.Z`, the package-specific
+release gates will:
 
-1. Run the matching extension package test suite
+1. Run the matching package test suite
 2. Verify the namespaced tag still points at the tested commit
-3. Build the extension package from its subdirectory
-4. Publish the extension distribution to PyPI
+3. Build the package from its subdirectory
+4. Publish the distribution to PyPI
 
 Prerequisite:
 
-- Configure the PyPI Trusted Publisher for `weft`, `weft-docker`, and
-  `weft-macos-sandbox`, each with the corresponding GitHub Actions workflow.
+- Configure the PyPI Trusted Publisher for `weft`, `weft-docker`,
+  `weft-django`, and `weft-macos-sandbox`, each with the corresponding
+  GitHub Actions workflow.
 
 ## Supervised Manager
 

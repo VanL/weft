@@ -1,4 +1,4 @@
-"""Shared manager lifecycle helpers for CLI commands.
+"""Low-level manager runtime launch and registry mechanics.
 
 Spec references:
 - docs/specifications/03-Manager_Architecture.md [MA-1], [MA-3]
@@ -17,14 +17,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn
 
-import typer
-
 from simplebroker import Queue, serialize_broker_target
 from weft._constants import (
     MANAGER_COMPETING_STARTUP_GRACE_SECONDS,
     MANAGER_LAUNCHER_SIGNAL_ABORT,
     MANAGER_LAUNCHER_SIGNAL_SUCCESS,
     MANAGER_PID_LIVENESS_RECHECK_INTERVAL,
+    MANAGER_POLL_INTERVAL,
     MANAGER_REGISTRY_POLL_INTERVAL,
     MANAGER_STARTUP_LOG_DIRNAME,
     MANAGER_STARTUP_TIMEOUT_SECONDS,
@@ -38,9 +37,7 @@ from weft._constants import (
     WEFT_SPAWN_REQUESTS_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
 )
-from weft._constants import (
-    MANAGER_POLL_INTERVAL as _MANAGER_POLL_INTERVAL,
-)
+from weft._exceptions import ManagerStartFailed
 from weft.context import WeftContext
 from weft.core.spawn_requests import generate_spawn_request_timestamp
 from weft.core.taskspec import TaskSpec, resolve_taskspec_payload
@@ -52,7 +49,7 @@ from weft.helpers import (
 )
 from weft.manager_process import run_manager_process
 
-from ._queue_wait import QueueChangeMonitor
+from .queue_wait import QueueChangeMonitor
 
 logger = logging.getLogger(__name__)
 
@@ -679,16 +676,14 @@ def _fail_manager_start(
             launch.launcher_process,
             timeout=1.0,
         )
-    typer.echo(
+    raise ManagerStartFailed(
         _format_manager_start_failure(
             message=message,
             launch=launch,
             launcher_events=launcher_events,
             launcher_stderr=launcher_stderr,
-        ),
-        err=True,
+        )
     )
-    raise typer.Exit(code=1)
 
 
 def _acknowledge_manager_launch_success(launch: _DetachedManagerLaunch) -> None:
@@ -722,18 +717,7 @@ def _start_manager(
     invocation = _build_manager_runtime_invocation(context)
     manager_tid = invocation.tid
     launch = _launch_detached_manager(context, invocation)
-
-    if verbose:
-        typer.echo(
-            json.dumps(
-                {
-                    "manager_tid": manager_tid,
-                    "pid": launch.pid,
-                    "db": context.broker_display_target,
-                },
-                ensure_ascii=False,
-            )
-        )
+    del verbose
 
     deadline = time.monotonic() + MANAGER_STARTUP_TIMEOUT_SECONDS
     competing_record: dict[str, Any] | None = None
@@ -768,8 +752,6 @@ def _start_manager(
                                 exc_info=True,
                             )
                         _cleanup_startup_stderr(launch.stderr_path)
-                        if verbose:
-                            _emit_manager_registry_snapshot(selected_record)
                         return selected_record, True, None
 
             if launch.launcher_process.poll() is not None:
@@ -850,23 +832,6 @@ def _terminate_manager_process(
             return
 
 
-def _emit_manager_registry_snapshot(record: dict[str, Any]) -> None:
-    """Emit a manager_started event mirroring legacy verbose output."""
-
-    payload = {
-        "event": "manager_started",
-        "manager_tid": record.get("tid"),
-        "pid": record.get("pid"),
-        "queues": {
-            key: record.get(key)
-            for key in ("requests", "outbox", "ctrl_in", "ctrl_out")
-            if record.get(key)
-        },
-        "timestamp": record.get("timestamp"),
-    }
-    typer.echo(json.dumps(payload, ensure_ascii=False))
-
-
 def _ensure_manager(
     context: WeftContext, *, verbose: bool
 ) -> tuple[dict[str, Any], bool, subprocess.Popen[Any] | None]:
@@ -903,7 +868,7 @@ def _serve_manager_foreground(context: WeftContext) -> tuple[int, str | None]:
         context.broker_target,
         invocation.spec,
         context.config,
-        _MANAGER_POLL_INTERVAL,
+        MANAGER_POLL_INTERVAL,
     )
     return 0, None
 
@@ -933,7 +898,6 @@ def _stop_manager(
     try:
         _send_stop(context, target_tid, record=current)
     except Exception:
-        typer.echo("Warning: failed to send STOP to manager.", err=True)
         return False, "failed to send STOP to manager"
 
     if current is None and stop_if_absent and process is None:
@@ -978,15 +942,126 @@ def _stop_manager(
     return False, f"Manager {target_tid} did not stop within {timeout:.1f}s"
 
 
+ManagerRuntimeInvocation = _ManagerRuntimeInvocation
+DetachedManagerLaunch = _DetachedManagerLaunch
+ManagerRegistryView = _ManagerRegistryView
+
+
+def generate_tid(context: WeftContext) -> str:
+    """Return one durable manager-related TID from the active broker target."""
+
+    return _generate_tid(context)
+
+
+def manager_record(
+    context: WeftContext,
+    tid: str,
+    *,
+    prune_stale: bool = True,
+) -> dict[str, Any] | None:
+    """Return one manager registry record."""
+
+    return _manager_record(context, tid, prune_stale=prune_stale)
+
+
+def list_manager_records(
+    context: WeftContext,
+    *,
+    include_stopped: bool = False,
+    canonical_only: bool = False,
+    prune_stale: bool = True,
+) -> list[dict[str, Any]]:
+    """Return manager registry records for command-layer consumers."""
+
+    return _list_manager_records(
+        context,
+        include_stopped=include_stopped,
+        canonical_only=canonical_only,
+        prune_stale=prune_stale,
+    )
+
+
+def select_active_manager(context: WeftContext) -> dict[str, Any] | None:
+    """Return the current canonical active manager record, if any."""
+
+    return _select_active_manager(context)
+
+
+def build_manager_spec(
+    context: WeftContext,
+    tid: str,
+    *,
+    idle_timeout_override: float | None = None,
+) -> TaskSpec:
+    """Build the canonical manager TaskSpec."""
+
+    return _build_manager_spec(
+        context,
+        tid,
+        idle_timeout_override=idle_timeout_override,
+    )
+
+
+def start_manager(
+    context: WeftContext,
+    *,
+    verbose: bool,
+) -> tuple[dict[str, Any], bool, subprocess.Popen[Any] | None]:
+    """Start a canonical manager if one does not already exist."""
+
+    return _start_manager(context, verbose=verbose)
+
+
+def ensure_manager(
+    context: WeftContext,
+    *,
+    verbose: bool,
+) -> tuple[dict[str, Any], bool, subprocess.Popen[Any] | None]:
+    """Ensure a canonical manager exists."""
+
+    return _ensure_manager(context, verbose=verbose)
+
+
+def serve_manager_foreground(context: WeftContext) -> tuple[int, str | None]:
+    """Run the canonical manager in the current process."""
+
+    return _serve_manager_foreground(context)
+
+
+def stop_manager(
+    context: WeftContext,
+    record: dict[str, Any] | None,
+    process: subprocess.Popen[Any] | None = None,
+    *,
+    tid: str | None = None,
+    timeout: float = 5.0,
+    force: bool = False,
+    stop_if_absent: bool = False,
+) -> tuple[bool, str | None]:
+    """Stop one manager via the shared runtime mechanism."""
+
+    return _stop_manager(
+        context,
+        record,
+        process,
+        tid=tid,
+        timeout=timeout,
+        force=force,
+        stop_if_absent=stop_if_absent,
+    )
+
+
 __all__ = [
-    "_build_manager_spec",
-    "_ensure_manager",
-    "_list_manager_records",
-    "_manager_record",
-    "_select_active_manager",
-    "_serve_manager_foreground",
-    "_snapshot_registry",
-    "_lookup_manager_pid",
-    "_start_manager",
-    "_stop_manager",
+    "DetachedManagerLaunch",
+    "ManagerRegistryView",
+    "ManagerRuntimeInvocation",
+    "build_manager_spec",
+    "ensure_manager",
+    "generate_tid",
+    "list_manager_records",
+    "manager_record",
+    "select_active_manager",
+    "serve_manager_foreground",
+    "start_manager",
+    "stop_manager",
 ]

@@ -168,7 +168,7 @@ Shared path — do not duplicate:
   - weft/core/tasks/runner.py handles the monitored subprocess boundary
 
 Current structure:
-  - weft/commands/run.py owns the manager launch/wait path today
+  - weft/cli/run.py owns the manager launch/wait path today
 ```
 
 Do not make the implementer infer the file list from prose later in the plan.
@@ -264,7 +264,7 @@ Recommended task shape:
      - existing manager startup tests
    - Reuse:
      - existing registry payload helpers
-     - existing launch/wait path in `weft/commands/run.py`
+     - existing launch/wait path in `weft/cli/run.py`
    - Constraints:
      - no second startup path
      - preserve one-manager-per-context behavior

@@ -9,7 +9,6 @@ import sys
 
 import pytest
 
-import weft.commands._manager_bootstrap as manager_lifecycle
 from simplebroker import Queue
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import WEFT_MANAGERS_REGISTRY_QUEUE
@@ -341,8 +340,7 @@ def test_stop_command_force_ignores_registry_only_pid_without_mapping(
     )
 
     monkeypatch.setattr(
-        manager_lifecycle,
-        "terminate_process_tree",
+        "weft.core.manager_runtime.terminate_process_tree",
         lambda *args, **kwargs: pytest.fail(
             "force stop must not trust an uncorroborated registry pid"
         ),

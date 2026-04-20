@@ -8,9 +8,9 @@ them. Deferred command surfaces live in
 
 The CLI stays thin on purpose:
 
-- `weft/cli.py` wires the Typer app and global command structure.
-- Command handlers live in `weft/commands/*.py`, not in a monolithic command
-  module.
+- `weft/cli/app.py` wires the Typer app and global command structure.
+- `weft/cli/*.py` contains CLI-only parsing, formatting, and exit behavior.
+- Shared capabilities live in `weft/commands/*.py`, not in the CLI adapter.
 - Context discovery is owned outside the CLI surface so backend-neutral project
   roots stay separate from command parsing.
 - The CLI delegates to current task, queue, manager, spec, pipeline, and agent
@@ -24,11 +24,11 @@ command grows beyond its owning module.
 | Command family | Owning modules | Why it exists |
 |---|---|---|
 | `init` | `weft/commands/init.py` | project bootstrap and root discovery |
-| `run` | `weft/commands/run.py`, `weft/commands/_manager_bootstrap.py`, `weft/commands/_result_wait.py`, `weft/commands/_spawn_submission.py`, `weft/commands/_streaming.py`, `weft/commands/_task_history.py` | task submission, explicit `NAME|PATH` spec resolution, local spec materialization or run-input shaping when declared, queue-first spawn reconciliation, and optional completion wait or interactive queue-stream handling |
-| `status` | `weft/commands/status.py`, `weft/commands/_manager_bootstrap.py`, `weft/commands/_queue_wait.py`, `weft/commands/_task_history.py` | reconstruct current status from task logs, manager registry records, and watch loops |
-| `result` | `weft/commands/result.py`, `weft/commands/_queue_wait.py`, `weft/commands/_result_wait.py`, `weft/commands/_streaming.py`, `weft/commands/_task_history.py` | gather public output with the shared waiter, stream decoder, and task-log classification helpers |
-| `task` | `weft/commands/tasks.py`, `weft/commands/status.py`, `weft/commands/_queue_wait.py`, `weft/commands/_task_history.py` | TID lookup, list, stop, kill, and task-level status built on shared snapshot and control helpers |
-| `manager` / `serve` | `weft/commands/manager.py`, `weft/commands/serve.py`, `weft/commands/_manager_bootstrap.py` | manage the canonical manager lifecycle and registry control |
+| `run` | `weft/cli/run.py`, `weft/commands/run.py`, `weft/commands/submission.py`, `weft/commands/manager.py`, `weft/core/manager_runtime.py`, `weft/commands/_result_wait.py`, `weft/commands/_spawn_submission.py`, `weft/commands/_streaming.py`, `weft/commands/_task_history.py` | CLI adapter over the shared run orchestration, durable submission, explicit `NAME|PATH` spec resolution, local spec materialization or run-input shaping when declared, queue-first spawn reconciliation, and optional completion wait or interactive queue-stream handling |
+| `status` | `weft/commands/status.py`, `weft/core/manager_runtime.py`, `weft/core/queue_wait.py`, `weft/commands/_task_history.py` | reconstruct current status from task logs, manager registry records, and watch loops |
+| `result` | `weft/commands/result.py`, `weft/core/queue_wait.py`, `weft/commands/_result_wait.py`, `weft/commands/_streaming.py`, `weft/commands/_task_history.py` | gather public output with the shared waiter, stream decoder, and task-log classification helpers |
+| `task` | `weft/commands/tasks.py`, `weft/commands/status.py`, `weft/core/queue_wait.py`, `weft/commands/_task_history.py` | TID lookup, list, stop, kill, and task-level status built on shared snapshot and control helpers |
+| `manager` / `serve` | `weft/commands/manager.py`, `weft/commands/serve.py`, `weft/core/manager_runtime.py` | manage the canonical manager lifecycle and registry control |
 | `queue` | `weft/commands/queue.py` | direct SimpleBroker queue access |
 | `spec` | `weft/commands/specs.py`, `weft/commands/validate_taskspec.py` | stored spec management, resolution, builtin task-spec discovery, and explicit TaskSpec validation |
 | `system` | `weft/commands/builtins.py`, `weft/commands/tidy.py`, `weft/commands/dump.py`, `weft/commands/load.py` | builtin inventory plus maintenance and broker-state operations |
@@ -38,10 +38,11 @@ command grows beyond its owning module.
 The command-family table above is only the top layer. Several shared helpers
 are already shipped and are part of the current ownership map:
 
-- `weft/commands/_manager_bootstrap.py` owns manager discovery, detached or
-  foreground startup, registry polling, and convergence on the canonical live
-  manager record
-- `weft/commands/_queue_wait.py`, `weft/commands/_result_wait.py`, and
+- `weft/core/manager_runtime.py` owns shared manager discovery,
+  detached or foreground startup, registry polling, and convergence on the
+  canonical live manager record; `weft/commands/manager.py` and
+  `weft/commands/serve.py` are the command-side capability surfaces
+- `weft/core/queue_wait.py`, `weft/commands/_result_wait.py`, and
   `weft/commands/_streaming.py` own queue-native waiting, result assembly,
   completion-boundary handling, and stream decoding reused by `run`, `result`,
   and long-lived task surfaces
@@ -63,7 +64,7 @@ are already shipped and are part of the current ownership map:
 ## Current Result Surface [CLI-X3]
 
 `weft run` and `weft result` both use the shared queue-wait and result-assembly
-helpers in `weft/commands/_queue_wait.py`, `weft/commands/_result_wait.py`, and
+helpers in `weft/core/queue_wait.py`, `weft/commands/_result_wait.py`, and
 `weft/commands/_streaming.py` so timeout handling, terminal-state
 classification, and stream decoding stay in sync. That shared waiter path is
 intentional. It avoids a second result model and keeps the public CLI surface

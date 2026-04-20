@@ -125,4 +125,4 @@ Format rules and sanitization live in `01-Core_Components.md`.
 - `spec.process_target` is now a **string** (executable path). `args` are
   appended to form argv. Implementation must be updated to match.
 
-_Implementation mapping_: `weft/core/taskspec.py` (process_target, peak_* fields), `weft/core/targets.py` (argv construction).
+_Implementation mapping_: `weft/core/taskspec/model.py` (process_target, peak_* fields), `weft/core/targets.py` (argv construction).

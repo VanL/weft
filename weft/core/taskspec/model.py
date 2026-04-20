@@ -50,8 +50,9 @@ from weft._constants import (
     TASKSPEC_TID_LENGTH,
     TASKSPEC_VERSION,
 )
-from weft.core.spec_parameterization import validate_parameterization_adapter_ref
-from weft.core.spec_run_input import (
+
+from .parameterization import validate_parameterization_adapter_ref
+from .run_input import (
     RUN_COMMAND_RESERVED_OPTION_NAMES,
     normalize_declared_option_name,
     validate_run_input_adapter_ref,

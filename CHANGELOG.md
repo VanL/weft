@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.9.5 - 2026-04-20
+
+### Added
+
+- Added a package-based public `weft.client` surface with a `Task` handle,
+  noun namespaces, and shared capability ownership below the CLI adapter.
+- Added the first-party `weft-django` integration package on top of the public
+  client surface, including the shipped embedding and inspection path.
+
+### Changed
+
+- Changed the repo architecture so `weft.commands` is the shared capability
+  layer, `weft.cli` is the Typer adapter, `weft.client` is the Python adapter,
+  and the temporary `core.ops` scaffolding is gone.
+- Changed `weft run` and related manager, task, spec, and system surfaces to
+  share the canonical command-layer owners and updated the README and specs to
+  match the shipped package layout.
+
+### Fixed
+
+- Fixed divergent submission, wait, and manager-bootstrap paths between the
+  CLI and Python client so the shared durable behavior now has one owner.
+- Fixed Django request-id capture and submit-override parity so enqueue-time
+  request metadata survives teardown and the integration applies the same
+  supported override set as the shared submission surface.
+
 ## 0.9.2 - 2026-04-17
 
 ### Added

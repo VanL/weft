@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from weft.cli_utils import ArgumentParserError, rearrange_args
+from weft.cli._argv import ArgumentParserError, rearrange_args
 
 
 def test_rearrange_simple():

@@ -80,8 +80,8 @@ See also:
   builtin contract rather than redefining Weft globally
 
 _Implementation mapping_: builtin inventory surface:
-`weft/commands/builtins.py`, exposed from `weft/cli.py`. Builtin task-spec
-resolution: `weft/commands/specs.py` and `weft/commands/run.py`.
+`weft/commands/builtins.py`, exposed from `weft/cli/app.py`. Builtin task-spec
+resolution: `weft/commands/specs.py` and `weft/cli/run.py`.
 
 ## Adding A Builtin
 
@@ -108,7 +108,7 @@ should be added only when they meet all of these rules:
 
 _Implementation mapping_: builtin assets live under `weft/builtins/tasks/`.
 Explicit spec resolution lives in `weft/commands/specs.py` and
-`weft/commands/run.py`.
+`weft/cli/run.py`.
 
 ## Related Plans
 

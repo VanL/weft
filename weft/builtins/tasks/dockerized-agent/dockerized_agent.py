@@ -24,7 +24,7 @@ from weft.builtins.dockerized_agent_examples import (
     dockerized_agent_environment_profile,
     dockerized_agent_run_input,
 )
-from weft.core.spec_parameterization import SpecParameterizationRequest
+from weft.core.taskspec.parameterization import SpecParameterizationRequest
 from weft.ext import AgentToolProfileResult
 
 

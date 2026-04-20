@@ -34,7 +34,7 @@ from simplebroker import resolve_config as resolve_broker_config
 # VERSION INFORMATION
 # ==============================================================================
 
-__version__: Final[str] = "0.9.4"
+__version__: Final[str] = "0.9.5"
 """Current version of Weft."""
 
 # ==============================================================================
@@ -535,6 +535,24 @@ RUN_COMMAND_RESERVED_OPTION_NAMES: Final[frozenset[str]] = frozenset(
     }
 )
 """Long option names reserved by `weft run` and unavailable to spec adapters."""
+
+SUBMIT_OVERRIDE_NAMES: Final[frozenset[str]] = frozenset(
+    {
+        "name",
+        "description",
+        "tags",
+        "env",
+        "working_dir",
+        "stream_output",
+        "timeout",
+        "memory_mb",
+        "cpu_percent",
+        "runner",
+        "runner_options",
+        "metadata",
+    }
+)
+"""Public TaskSpec fields that the shared submission surface accepts as overrides."""
 
 TASKSPEC_BUNDLE_ROOT_FIELD: Final[str] = "_weft_bundle_root"
 """Private extra-field key storing a resolved TaskSpec bundle root path."""

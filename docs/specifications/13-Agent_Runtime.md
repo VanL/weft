@@ -143,7 +143,7 @@ Agent execution is enabled by `spec.type="agent"` plus a required
 }
 ```
 
-_Implementation mapping:_ `weft/core/taskspec.py` -- `AgentSection` Pydantic
+_Implementation mapping:_ `weft/core/taskspec/model.py` -- `AgentSection` Pydantic
 model defines the full `spec.agent` schema. `SpecSection.type` includes
 `"agent"` as a valid literal. `SpecSection.agent` field typed as
 `AgentSection | None`.
@@ -183,7 +183,7 @@ model defines the full `spec.agent` schema. `SpecSection.type` includes
   - `workspace_access="workspace-write"` is supported by `codex`
   - explicit stdio MCP server descriptors are supported by `claude_code` only
 
-_Implementation mapping:_ `weft/core/taskspec.py` -- `SpecSection` model
+_Implementation mapping:_ `weft/core/taskspec/model.py` -- `SpecSection` model
 validator `validate_type_targets` enforces mutual exclusion of
 `function_target`/`process_target`/`agent`; `AgentSection.validate_runtime_constraints`
 enforces runtime-specific schema constraints; `SpecSection` model validator
@@ -213,7 +213,7 @@ enforces
     state across work items.
 - `runtime_config`: backend-specific escape hatch.
 
-_Implementation mapping:_ `weft/core/taskspec.py` -- `AgentSection`,
+_Implementation mapping:_ `weft/core/taskspec/model.py` -- `AgentSection`,
 `AgentToolSection`, `AgentTemplateSection` Pydantic models define all fields.
 Template rendering: `weft/core/agents/templates.py`
 (`render_agent_template`).
@@ -635,7 +635,7 @@ This slice does not attempt to:
 ## Implementation Mapping [AR-9]
 
 - TaskSpec models (`AgentSection`, `AgentToolSection`, `AgentTemplateSection`):
-  `weft/core/taskspec.py`
+  `weft/core/taskspec/model.py`
 - Runtime normalization, registry, and dispatch:
   `weft/core/agents/runtime.py`
 - Resolver and tool-profile loading: `weft/core/agents/resolution.py`
@@ -664,7 +664,7 @@ This slice does not attempt to:
 - Persistent session management (`AgentSession`): `weft/core/tasks/sessions.py`
 - Persistent runtime subprocess orchestration: `weft/core/tasks/runner.py`
 - Private session protocol: `weft/core/tasks/agent_session_protocol.py`
-- CLI result aggregation: `weft/commands/run.py`, `weft/commands/result.py`
+- CLI result aggregation: `weft/cli/run.py`, `weft/commands/result.py`
 
 ## Related Plans
 

@@ -161,9 +161,10 @@ User ──► weft run ──► Manager (background) ──► Consumer (child
 **Key files**:
 | File | Purpose |
 |------|---------|
-| `weft/cli.py` | Entry point, command routing |
-| `weft/commands/run.py` | Main command |
-| `weft/core/taskspec.py` | TaskSpec schema (source of truth) |
+| `weft/cli/app.py` | Typer entry point and command registration |
+| `weft/cli/run.py` | CLI adapter for `weft run` |
+| `weft/commands/` | Shared capability layer used by CLI and client |
+| `weft/core/taskspec/model.py` | TaskSpec schema (source of truth) |
 | `weft/core/manager.py` | Background manager |
 | `weft/core/tasks/consumer.py` | Executes work |
 | `weft/core/tasks/base.py` | Queue wiring, control handling |
@@ -209,10 +210,11 @@ This section defines how code should be written to match existing patterns.
 weft/
 ├── _constants.py       # ALL constants, env vars, config loading
 ├── _exceptions.py      # Custom exceptions (if needed)
-├── cli.py              # Entry point
+├── cli/                # Typer adapter package
+├── client/             # Public Python adapter package
 ├── helpers.py          # Shared utilities
-├── commands/           # CLI command handlers (one file per command group)
-├── core/               # Business logic
+├── commands/           # Shared application capabilities
+├── core/               # Runtime internals
 │   ├── taskspec.py     # Data models
 │   └── tasks/          # Task implementations
 └── shell/              # Subprocess helpers
@@ -222,8 +224,11 @@ weft/
 - `_constants.py` is the single source for all constants and environment variable loading
 - `_exceptions.py` for custom exceptions (dual-inherit from stdlib + domain base)
 - `helpers.py` for utility functions shared across modules
-- One command file per CLI command group
-- `core/` for business logic, separate from CLI concerns
+- `cli/` contains Typer-only parsing, rendering, and exit-code behavior
+- `client/` contains the public Python adapter surface
+- `commands/` contains shared capabilities used by both CLI and client
+- `core/` contains runtime internals only; it must not import `commands`, `cli`, or `client`
+- `commands/` must not import `cli` or `client`
 
 ### 4.2 Imports
 
@@ -691,9 +696,9 @@ the repo-managed toolchain and local `bin/` wiring.
 - Resource limits: configure limit → trigger → verify terminal state + error.
 
 **Add a CLI command**:
-1. Create `weft/commands/mycommand.py`
-2. Add to `weft/commands/__init__.py`
-3. Register in `weft/cli.py`
+1. Create or extend the shared capability in `weft/commands/`
+2. Add or extend the CLI adapter in `weft/cli/app.py` or `weft/cli/*.py`
+3. Keep `weft/cli/* -> weft/commands/* -> weft/core/*` one-way
 4. Add test in `tests/cli/test_cli_mycommand.py`
 
 **Debug a task**:
