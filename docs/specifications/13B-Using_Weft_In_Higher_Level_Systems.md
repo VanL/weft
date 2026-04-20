@@ -215,5 +215,7 @@ the whole product.
   [13-Agent_Runtime.md](13-Agent_Runtime.md)
 - Current pipeline composition contract:
   [12-Pipeline_Composition_and_UX.md](12-Pipeline_Composition_and_UX.md)
+- Proposed Django-specific companion:
+  [13C-Using_Weft_With_Django.md](13C-Using_Weft_With_Django.md)
 - Planned substrate expansion:
   [13A-Agent_Runtime_Planned.md](13A-Agent_Runtime_Planned.md)
