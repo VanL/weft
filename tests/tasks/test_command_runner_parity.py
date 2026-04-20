@@ -390,6 +390,7 @@ def _wait_for_running_snapshot(
                 snapshot.status == "running"
                 and snapshot.runtime_handle is not None
                 and snapshot.runtime is not None
+                and snapshot.runtime.get("state") == "running"
             ):
                 return snapshot
         time.sleep(0.05)
