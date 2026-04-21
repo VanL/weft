@@ -66,7 +66,7 @@ def cmd_run(
     autostart_enabled: bool,
 ) -> int:
     try:
-        return run_cmd.cmd_run(
+        execution = run_cmd.execute_run(
             command,
             spec_run_args=spec_run_args,
             spec=spec,
@@ -90,6 +90,12 @@ def cmd_run(
             monitor=monitor,
             persistent_override=persistent_override,
             autostart_enabled=autostart_enabled,
+        )
+        return run_cmd.render_run_execution_result(
+            execution,
+            wait=wait,
+            json_output=json_output,
+            verbose=verbose,
         )
     except Exception as exc:
         raise _translate_run_error(exc) from exc

@@ -150,12 +150,27 @@ Current required control behavior:
   result/status surfaces
 - streaming markers are runtime-only ownership hints and must clear before a
   persistent task returns to `waiting`
+- task subclasses that override STOP/KILL handling must declare their
+  `TaskControlPolicy` in code; the declaration states whether control is
+  immediate, deferred, draining, broadcast, or local-only, and whether
+  reserved-policy handling is applied by the base class, by the subclass, or is
+  intentionally not applicable
+- handled STOP/KILL commands must produce a `ctrl_out` acknowledgement and must
+  not emit duplicate terminal state events when the task is already terminal
 
 Why this boundary matters:
 
 - operators need one durable truth and one lightweight live explanation
 - control replies should stay off the data plane
 - task-local streaming state should remain explicit and inspectable
+
+_Implementation mapping_: `weft/core/tasks/base.py` owns
+`TaskControlPolicy`, default STOP/KILL behavior, and late-terminal guards;
+specialized policies live on `Manager`, `Consumer`, `PipelineTask`, and
+`Monitor`.
+
+Implementation plan backlink:
+[`2026-04-21-run-boundary-dispatch-fence-control-contract-plan.md`](../plans/2026-04-21-run-boundary-dispatch-fence-control-contract-plan.md).
 
 ### 2.4.1 Runtime Endpoint Registry [CC-2.4.1]
 

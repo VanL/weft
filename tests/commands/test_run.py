@@ -15,6 +15,7 @@ import pytest
 
 import weft.commands._result_wait as result_wait_cmd
 import weft.commands._spawn_submission as spawn_submission_cmd
+import weft.commands.run as run_cmd
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import (
     INTERNAL_HEARTBEAT_ENDPOINT_NAME,
@@ -765,6 +766,68 @@ def test_run_inline_enqueues_task_before_ensuring_manager(
 
     assert exit_code == 0
     assert calls == ["enqueue", "ensure"]
+
+
+def test_execute_run_inline_returns_structured_result_without_rendering(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+
+    monkeypatch.setattr(
+        "weft.commands.run.build_context",
+        lambda spec_context=None, autostart=True: context,
+    )
+    monkeypatch.setattr("weft.commands.run._read_piped_stdin", lambda context: None)
+    monkeypatch.setattr("weft.commands.run.stdin_is_tty", lambda: False)
+    monkeypatch.setattr(
+        "weft.commands.run._echo",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("execute_run must not render")
+        ),
+    )
+    monkeypatch.setattr(
+        "weft.commands.run._enqueue_taskspec",
+        lambda context_arg, taskspec, work_payload: 1775679597297004544,
+    )
+    monkeypatch.setattr(
+        "weft.commands.run._ensure_manager",
+        lambda context_arg, *, verbose: (
+            {"tid": "1775679596841701376", "ctrl_in": "Tmanager.ctrl_in"},
+            False,
+            None,
+        ),
+    )
+
+    execution = run_cmd.execute_run(
+        (),
+        spec_run_args=(),
+        spec=None,
+        pipeline=None,
+        pipeline_input=None,
+        function="tests.tasks.sample_targets:echo_payload",
+        args=(),
+        kwargs=(),
+        env=(),
+        name=None,
+        interactive=False,
+        stream_output=None,
+        timeout=None,
+        memory=None,
+        cpu=None,
+        tags=(),
+        context_dir=root,
+        wait=False,
+        json_output=False,
+        verbose=False,
+        monitor=False,
+        persistent_override=None,
+        autostart_enabled=True,
+    )
+
+    assert execution.tid == "1775679597297004544"
+    assert execution.submission_error is None
 
 
 def test_run_inline_no_wait_succeeds_when_post_proof_acknowledgement_fails(
@@ -1840,7 +1903,9 @@ def test_build_manager_spec_uses_tid_scoped_control_queues(tmp_path: Path) -> No
     assert spec.io.control["ctrl_out"] == f"T{tid}.ctrl_out"
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX only")
+# POSIX exposes dead-child PID state in the way manager registry pruning relies on;
+# Windows process handles do not provide an equivalent zombie/dead-PID contract here.
+@pytest.mark.skipif(os.name == "nt", reason="POSIX dead-PID semantics only")
 def test_select_active_manager_ignores_zombie_registry_pid(
     tmp_path: Path,
 ) -> None:
@@ -1907,7 +1972,9 @@ def test_select_active_manager_ignores_noncanonical_request_queue(
     assert _select_active_manager(ctx) is None
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX only")
+# This test validates pruning of active records whose PID has exited while keeping
+# stopped history. The dead-PID probe is POSIX-specific.
+@pytest.mark.skipif(os.name == "nt", reason="POSIX dead-PID semantics only")
 def test_list_manager_records_prunes_dead_active_and_preserves_stopped_history(
     tmp_path: Path,
 ) -> None:

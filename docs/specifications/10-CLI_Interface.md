@@ -84,9 +84,18 @@ Removed or superseded surfaces:
 through the manager path rather than bypassing the runtime.
 
 _Implementation mapping_: `weft/commands/run.py` owns shared `weft run`
-orchestration and helpers; `weft/cli/run.py` is the Typer adapter; shared
-submission lives in `weft/commands/submission.py`; manager bootstrap lives in
-`weft/core/manager_runtime.py` and is surfaced through `weft/commands/manager.py`.
+execution helpers and the structured `execute_run()` result surface;
+`weft/cli/run.py` is the Typer adapter and owns rendering that structured
+result to stdout/stderr and exit codes; shared submission lives in
+`weft/commands/submission.py`; manager bootstrap lives in
+`weft/core/manager_runtime.py` and is surfaced through
+`weft/commands/manager.py`.
+
+The command-layer `cmd_run()` wrapper remains as a compatibility renderer for
+tests and non-Typer callers, but new adapter work should prefer
+`execute_run()` plus `render_run_execution_result()`. Interactive prompt mode
+still has presentation callbacks in the command layer because the prompt loop
+is not yet a public `WeftClient.run()` API.
 
 Current behavior:
 

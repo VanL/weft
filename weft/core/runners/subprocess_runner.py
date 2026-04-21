@@ -211,7 +211,11 @@ def run_monitored_subprocess(
             )
             sleep_for = min(sleep_for, until_monitor)
 
-        if monitor is not None and time.monotonic() >= next_monitor_at:
+        if (
+            monitor is not None
+            and process.poll() is None
+            and time.monotonic() >= next_monitor_at
+        ):
             try:
                 ok, violation = monitor.check_limits()
             except Exception:  # pragma: no cover - process may have exited

@@ -6,7 +6,7 @@ import os
 from collections.abc import Callable, Mapping
 from importlib import import_module
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Final, Literal, cast
 
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
@@ -14,7 +14,31 @@ from django.utils.module_loading import import_string
 
 DEFAULT_AUTODISCOVER_MODULE = "weft_tasks"
 DEFAULT_REALTIME_TRANSPORT = "sse"
-DEFAULT_TEST_MODE = "broker"
+VALID_REALTIME_TRANSPORTS: Final[set[str]] = {"none", "sse", "channels"}
+CORE_CONTEXT_OVERRIDE_ENV_KEYS: Final[set[str]] = {
+    "WEFT_BACKEND",
+    "WEFT_BACKEND_TARGET",
+    "WEFT_BACKEND_HOST",
+    "WEFT_BACKEND_PORT",
+    "WEFT_BACKEND_USER",
+    "WEFT_BACKEND_PASSWORD",
+    "WEFT_BACKEND_DATABASE",
+    "WEFT_BACKEND_SCHEMA",
+    "WEFT_DEFAULT_DB_LOCATION",
+    "WEFT_DEFAULT_DB_NAME",
+    "WEFT_PROJECT_SCOPE",
+    "BROKER_BACKEND",
+    "BROKER_BACKEND_TARGET",
+    "BROKER_BACKEND_HOST",
+    "BROKER_BACKEND_PORT",
+    "BROKER_BACKEND_USER",
+    "BROKER_BACKEND_PASSWORD",
+    "BROKER_BACKEND_DATABASE",
+    "BROKER_BACKEND_SCHEMA",
+    "BROKER_DEFAULT_DB_LOCATION",
+    "BROKER_DEFAULT_DB_NAME",
+    "BROKER_PROJECT_SCOPE",
+}
 
 
 def _import_ref(ref: str) -> Any:
@@ -59,8 +83,12 @@ def get_default_task_settings() -> dict[str, Any]:
     return dict(defaults)
 
 
-def _has_weft_environment_override() -> bool:
-    return any(key.startswith("WEFT_") for key in os.environ)
+def _has_core_context_override() -> bool:
+    for key in CORE_CONTEXT_OVERRIDE_ENV_KEYS:
+        value = os.environ.get(key)
+        if value not in (None, ""):
+            return True
+    return False
 
 
 def resolve_context_override() -> str | Path | None:
@@ -70,7 +98,7 @@ def resolve_context_override() -> str | Path | None:
         if isinstance(explicit, Path):
             return explicit
         return str(explicit)
-    if _has_weft_environment_override():
+    if _has_core_context_override():
         return None
     base_dir = getattr(settings, "BASE_DIR", None)
     if base_dir is None:
@@ -78,25 +106,24 @@ def resolve_context_override() -> str | Path | None:
     return str(base_dir)
 
 
-def get_realtime_transport() -> str:
+def get_realtime_transport() -> Literal["none", "sse", "channels"]:
     realtime = _settings_dict().get("REALTIME", {})
     if realtime is None:
-        return DEFAULT_REALTIME_TRANSPORT
+        return cast(Literal["none", "sse", "channels"], DEFAULT_REALTIME_TRANSPORT)
     if not isinstance(realtime, dict):
         raise ImproperlyConfigured("WEFT_DJANGO['REALTIME'] must be a dict")
-    transport = realtime.get("TRANSPORT", DEFAULT_REALTIME_TRANSPORT)
-    if not isinstance(transport, str) or not transport.strip():
+    raw_transport = realtime.get("TRANSPORT", DEFAULT_REALTIME_TRANSPORT)
+    if not isinstance(raw_transport, str) or not raw_transport.strip():
         raise ImproperlyConfigured(
             "WEFT_DJANGO['REALTIME']['TRANSPORT'] must be a string"
         )
-    return transport
-
-
-def get_test_mode() -> str:
-    test_mode = _settings_dict().get("TEST_MODE", DEFAULT_TEST_MODE)
-    if not isinstance(test_mode, str) or not test_mode.strip():
-        raise ImproperlyConfigured("WEFT_DJANGO['TEST_MODE'] must be a string")
-    return test_mode
+    transport = raw_transport.strip().lower()
+    if transport not in VALID_REALTIME_TRANSPORTS:
+        valid = ", ".join(sorted(VALID_REALTIME_TRANSPORTS))
+        raise ImproperlyConfigured(
+            f"WEFT_DJANGO['REALTIME']['TRANSPORT'] must be one of: {valid}"
+        )
+    return cast(Literal["none", "sse", "channels"], transport)
 
 
 def _import_callable(setting_name: str) -> Callable[..., Any] | None:

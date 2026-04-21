@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+import weft.core.manager as manager_mod
 from simplebroker.ext import BrokerError
 from weft._constants import (
     CONTROL_STOP,
@@ -1112,6 +1113,158 @@ def test_manager_stranded_other_owner_does_not_yield_with_unrecovered_reserved_w
     assert spawn_queue.peek_one(exact_timestamp=message_id) is None
 
 
+def test_manager_stranded_other_owner_exhausts_recovery_and_can_yield(
+    manager_setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, make_queue = manager_setup
+    inbox_queue = make_queue(manager._queue_names["inbox"])
+    reserved_queue = make_queue(manager._queue_names["reserved"])
+    spawn_queue = make_queue(WEFT_SPAWN_REQUESTS_QUEUE)
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    drain(spawn_queue)
+    drain(log_queue)
+
+    payload = {
+        "name": "fenced-exhausted-other",
+        "spec": {
+            "type": "function",
+            "function_target": "tests.tasks.sample_targets:echo_payload",
+        },
+    }
+    inbox_queue.write(json.dumps(payload))
+    message_id = pending_timestamps(inbox_queue)[0]
+    lower_leader_tid = str(int(manager.tid) - 1)
+    monkeypatch.setattr(manager_mod, "MANAGER_DISPATCH_RECOVERY_MAX_ATTEMPTS", 2)
+    monkeypatch.setattr(
+        manager,
+        "_evaluate_dispatch_ownership",
+        lambda: DispatchOwnership(state="other", leader_tid=lower_leader_tid),
+    )
+    monkeypatch.setattr(manager, "_leader_tid", lambda: lower_leader_tid)
+
+    reserved_queue_obj = manager._get_reserved_queue()
+
+    def _fail_move_one(*args, **kwargs):
+        del args, kwargs
+        raise RuntimeError("move failed")
+
+    monkeypatch.setattr(reserved_queue_obj, "move_one", _fail_move_one)
+
+    manager.process_once()
+    manager.process_once()
+
+    assert manager.should_stop is True
+    assert manager._dispatch_suspended_state == "other"
+    assert manager._dispatch_recovery_pending() is False
+    assert reserved_queue.peek_one(exact_timestamp=message_id) is not None
+    assert spawn_queue.peek_one(exact_timestamp=message_id) is None
+
+    events = [json.loads(item) for item in drain(log_queue)]
+    exhausted_events = [
+        event
+        for event in events
+        if event.get("event") == "manager_spawn_fence_recovery_exhausted"
+    ]
+    assert len(exhausted_events) == 1
+    assert exhausted_events[0]["child_tid"] == str(message_id)
+    assert exhausted_events[0]["leader_tid"] == lower_leader_tid
+    assert exhausted_events[0]["reserved_queue"] == manager._queue_names["reserved"]
+    assert exhausted_events[0]["message_id"] == message_id
+    assert exhausted_events[0]["ownership_state"] == "other"
+    assert exhausted_events[0]["attempts"] == 2
+    assert any(event.get("event") == "manager_leadership_yielded" for event in events)
+
+
+def test_manager_self_owner_exhausts_recovery_before_later_inbox_work(
+    broker_env,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    manager = Manager(db_path, make_manager_spec(unique_tid))
+    spawn_queue = make_queue(WEFT_SPAWN_REQUESTS_QUEUE)
+    reserved_queue = make_queue(manager._queue_names["reserved"])
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    drain(spawn_queue)
+    drain(log_queue)
+
+    first_payload = {
+        "name": "exhaust-first",
+        "spec": {
+            "type": "function",
+            "function_target": "tests.tasks.sample_targets:echo_payload",
+        },
+    }
+    second_payload = {
+        "name": "exhaust-second",
+        "spec": {
+            "type": "function",
+            "function_target": "tests.tasks.sample_targets:echo_payload",
+        },
+    }
+    spawn_queue.write(json.dumps(first_payload))
+    spawn_queue.write(json.dumps(second_payload))
+    first_message_id, second_message_id = pending_timestamps(spawn_queue)
+    ownership_states = iter(
+        [
+            DispatchOwnership(state="unknown"),
+            DispatchOwnership(state="self", leader_tid=manager.tid),
+            DispatchOwnership(state="self", leader_tid=manager.tid),
+        ]
+    )
+    launched: list[str] = []
+
+    def _next_ownership() -> DispatchOwnership:
+        try:
+            return next(ownership_states)
+        except StopIteration:
+            return DispatchOwnership(state="self", leader_tid=manager.tid)
+
+    def _record_launch(child_spec: TaskSpec, *_args: object, **_kwargs: object) -> bool:
+        assert child_spec.tid is not None
+        launched.append(child_spec.tid)
+        return True
+
+    reserved_queue_obj = manager._get_reserved_queue()
+
+    def _fail_move_one(*args, **kwargs):
+        del args, kwargs
+        raise RuntimeError("move failed")
+
+    monkeypatch.setattr(manager_mod, "MANAGER_DISPATCH_RECOVERY_MAX_ATTEMPTS", 1)
+    monkeypatch.setattr(manager, "_evaluate_dispatch_ownership", _next_ownership)
+    monkeypatch.setattr(manager, "_launch_child_task", _record_launch)
+    monkeypatch.setattr(reserved_queue_obj, "move_one", _fail_move_one)
+
+    try:
+        manager.process_once()
+        assert manager._dispatch_suspended_state == "unknown"
+        assert reserved_queue.peek_one(exact_timestamp=first_message_id) is not None
+
+        manager.process_once()
+        assert manager._dispatch_suspended_state is None
+        assert reserved_queue.peek_one(exact_timestamp=first_message_id) is not None
+        assert spawn_queue.peek_one(exact_timestamp=second_message_id) is not None
+        assert launched == []
+
+        manager.process_once()
+        assert launched == [str(second_message_id)]
+
+        events = [json.loads(item) for item in drain(log_queue)]
+        exhausted_events = [
+            event
+            for event in events
+            if event.get("event") == "manager_spawn_fence_recovery_exhausted"
+        ]
+        assert len(exhausted_events) == 1
+        assert exhausted_events[0]["child_tid"] == str(first_message_id)
+        assert exhausted_events[0]["ownership_state"] == "self"
+        assert exhausted_events[0]["attempts"] == 1
+    finally:
+        manager.stop(join=False)
+        manager.cleanup()
+
+
 @pytest.mark.parametrize("ownership_state", ["none", "unknown"])
 def test_manager_suspension_blocks_idle_shutdown_while_recovery_pending(
     broker_env,
@@ -1314,7 +1467,6 @@ def test_manager_leadership_yield_drains_nonpersistent_children(
     assert yield_events[0]["status"] == "running"
 
     manager._child_processes.clear()
-    time.sleep(manager._leader_check_interval_ns / 1_000_000_000 + 0.05)
     manager.process_once()
 
     assert manager.should_stop is True
@@ -1391,6 +1543,45 @@ def test_manager_leadership_ignores_noncanonical_lower_manager(
     assert manager._draining is False
     assert manager.should_stop is False
     assert manager.taskspec.state.status == "running"
+
+
+def test_manager_leadership_yields_to_canonical_lower_manager(
+    manager_setup,
+) -> None:
+    manager, make_queue = manager_setup
+    registry_queue = make_queue(WEFT_MANAGERS_REGISTRY_QUEUE)
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    drain(log_queue)
+    lower_tid = str(int(manager.tid) - 1)
+    registry_queue.write(
+        json.dumps(
+            {
+                "tid": lower_tid,
+                "name": "manager",
+                "status": "active",
+                "pid": os.getpid(),
+                "timestamp": registry_queue.generate_timestamp(),
+                "inbox": WEFT_SPAWN_REQUESTS_QUEUE,
+                "requests": WEFT_SPAWN_REQUESTS_QUEUE,
+                "ctrl_in": WEFT_MANAGER_CTRL_IN_QUEUE,
+                "ctrl_out": WEFT_MANAGER_CTRL_OUT_QUEUE,
+                "outbox": WEFT_MANAGER_OUTBOX_QUEUE,
+                "role": "manager",
+            }
+        )
+    )
+
+    yielded = manager._maybe_yield_leadership(force=True)
+
+    assert yielded is True
+    assert manager.should_stop is True
+    assert manager.taskspec.state.status == "cancelled"
+
+    events = [json.loads(item) for item in drain(log_queue)]
+    yield_event = next(
+        event for event in events if event.get("event") == "manager_leadership_yielded"
+    )
+    assert yield_event["leader_tid"] == lower_tid
 
 
 def test_cleanup_children_reaps_os_dead_child_without_mapping_scan(
@@ -1704,10 +1895,9 @@ def test_manager_idle_timeout_does_not_kill_persistent_child(
             time.sleep(0.05)
         assert manager._child_processes
 
-        time.sleep(0.4)
+        manager._last_activity_ns = time.time_ns() - 5_000_000_000
         for _ in range(5):
             manager.process_once()
-            time.sleep(0.05)
 
         assert manager.should_stop is False
         assert manager._child_processes

@@ -33,7 +33,7 @@ dependencies = [
     "pydantic>=2.0.0",
     "rich>=14.0.0",
     "setproctitle>=1.3.7",
-    "simplebroker>=3.1.6",
+    "simplebroker>=3.1.8",
     "typer>=0.16.0",
     "typing-extensions>=4.0.0",
 ]
@@ -47,6 +47,9 @@ docker = [
 ]
 django = [
     "weft-django>=0.9.5,<1",
+]
+django-channels = [
+    "weft-django[channels]>=0.9.5,<1",
 ]
 macos-sandbox = [
     "weft-macos-sandbox>=0.5.1,<1",
@@ -86,6 +89,7 @@ weft-macos-sandbox = { path = "./extensions/weft_macos_sandbox", editable = true
 include = [
     "weft/**/*.py",
     "weft/**/*.json",
+    "weft/py.typed",
     "README.md",
     "LICENSE",
 ]

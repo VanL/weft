@@ -30,8 +30,9 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 from simplebroker import BrokerTarget, Queue
 from simplebroker.ext import BrokerError
@@ -82,8 +83,35 @@ from .multiqueue_watcher import MultiQueueWatcher, QueueMessageContext, QueueMod
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True, slots=True)
+class TaskControlPolicy:
+    """Declared STOP/KILL behavior for task subclasses.
+
+    The declaration is intentionally descriptive. The control implementation
+    remains ordinary Python methods, but any subclass that overrides STOP/KILL
+    behavior must make its ack, terminal-state, and reserved-policy choices
+    visible to readers and tests.
+
+    Spec: [CC-2.4], [MF-3]
+    """
+
+    stop: str
+    kill: str
+    reserved_policy: str
+    ack: str
+    terminal_state: str
+
+
 class BaseTask(MultiQueueWatcher, ABC):
     """Abstract base for task runtimes that share queue wiring and state tracking (Spec: [CC-2.2], [MF-2], [MF-3], [MF-5])."""
+
+    control_policy: ClassVar[TaskControlPolicy] = TaskControlPolicy(
+        stop="immediate",
+        kill="immediate",
+        reserved_policy="base",
+        ack="immediate",
+        terminal_state="immediate",
+    )
 
     # --- properties required by InteractiveTaskMixin ---------------------------------
     @property
@@ -526,6 +554,12 @@ class BaseTask(MultiQueueWatcher, ABC):
 
         Returns:
             True if the command was handled and no further processing is required.
+
+        Subclass override contract:
+        - declare `control_policy`
+        - send a ctrl-out response for handled STOP/KILL commands
+        - emit exactly one terminal task-log event when the command changes state
+        - apply reserved-queue policy or explicitly document why it is not applicable
 
         Spec: [CC-2.4], [MF-3]
         """

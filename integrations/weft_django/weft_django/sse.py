@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
 from typing import Any
 
 from django.http import StreamingHttpResponse
 
 from weft_django.client import get_core_client
+from weft_django.realtime import iter_task_event_payloads
 
 
 def _serialize_event(event_type: str, payload: dict[str, Any]) -> bytes:
@@ -20,43 +20,14 @@ def _serialize_event(event_type: str, payload: dict[str, Any]) -> bytes:
 def event_stream(tid: str) -> Any:
     client = get_core_client()
     task = client.task(tid)
-    snapshot = task.snapshot()
-    if snapshot is not None:
-        yield _serialize_event(
-            "snapshot",
-            {
-                "tid": tid,
-                "event_type": "snapshot",
-                "timestamp": snapshot.started_at or snapshot.completed_at or 0,
-                "payload": asdict(snapshot),
-            },
-        )
-    for event in task.follow():
-        event_type = event.event_type
-        if event_type not in {"result"}:
-            event_type = "state"
-        yield _serialize_event(
-            event_type,
-            {
-                "tid": event.tid,
-                "event_type": event_type,
-                "timestamp": event.timestamp,
-                "payload": event.payload,
-            },
-        )
-    yield _serialize_event(
-        "end",
-        {
-            "tid": tid,
-            "event_type": "end",
-            "timestamp": 0,
-            "payload": {},
-        },
-    )
+    for payload in iter_task_event_payloads(task, follow=True):
+        yield _serialize_event(str(payload["event_type"]), payload)
 
 
 def sse_response(tid: str) -> StreamingHttpResponse:
-    return StreamingHttpResponse(
+    response = StreamingHttpResponse(
         event_stream(tid),
         content_type="text/event-stream",
     )
+    response["Cache-Control"] = "no-cache"
+    return response

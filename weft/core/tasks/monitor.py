@@ -17,12 +17,20 @@ from weft._constants import (
 )
 from weft.core.taskspec import TaskSpec
 
-from .base import BaseTask
+from .base import BaseTask, TaskControlPolicy
 from .multiqueue_watcher import QueueMessageContext
 
 
 class Monitor(BaseTask):
     """Forward messages to a downstream queue while observing them (Spec: [CC-2.3], [MF-5])."""
+
+    control_policy = TaskControlPolicy(
+        stop="local-cancel",
+        kill="immediate",
+        reserved_policy="not-applicable",
+        ack="immediate",
+        terminal_state="immediate",
+    )
 
     def __init__(
         self,
@@ -72,14 +80,13 @@ class Monitor(BaseTask):
         Spec: [CC-2.4], [MF-3]
         """
         if command == CONTROL_STOP:
-            self.should_stop = True
-            self.taskspec.mark_cancelled(reason="STOP command received")
-            self._report_state_change(
-                event="control_stop", message_id=context.timestamp
+            self._handle_stop_request(
+                reason="STOP command received",
+                event="control_stop",
+                message_id=context.timestamp,
+                apply_reserved_policy=False,
             )
-            self._update_process_title("cancelled")
-            if self._stop_event:
-                self._stop_event.set()
+            self._send_control_response("STOP", "ack")
             return True
         return False
 

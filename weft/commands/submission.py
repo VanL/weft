@@ -8,6 +8,7 @@ Spec references:
 
 from __future__ import annotations
 
+import json
 import shlex
 import subprocess
 import time
@@ -25,7 +26,7 @@ from weft._constants import (
 from weft._exceptions import InvalidTID, SpecNotFound
 from weft.commands import specs
 from weft.commands.manager import _ensure_manager, _generate_tid
-from weft.commands.types import SubmittedTaskReceipt
+from weft.commands.types import PreparedSubmissionRequest, SubmittedTaskReceipt
 from weft.context import WeftContext
 from weft.core.endpoints import validate_endpoint_claim_name
 from weft.core.pipelines import compile_linear_pipeline, load_pipeline_spec_payload
@@ -154,6 +155,28 @@ def _validate_submit_overrides(overrides: Mapping[str, Any]) -> None:
         raise TypeError(f"Unknown submit override(s): {unknown_text}")
 
 
+def _snapshot_payload(payload: Any) -> Any:
+    """Return a JSON-compatible copy of a work payload."""
+
+    if payload is None:
+        return None
+    try:
+        return json.loads(json.dumps(payload))
+    except TypeError as exc:
+        raise ValueError("Submission payload must be JSON-serializable") from exc
+
+
+def _snapshot_taskspec(taskspec: TaskSpec | Mapping[str, Any]) -> TaskSpec:
+    normalized = normalize_taskspec(taskspec)
+    payload = json.loads(json.dumps(normalized.model_dump(mode="json")))
+    snapshotted = TaskSpec.model_validate(
+        payload,
+        context={"template": normalized.tid is None, "auto_expand": False},
+    )
+    snapshotted.set_bundle_root(normalized.get_bundle_root())
+    return snapshotted
+
+
 def _receipt(name: str, tid: str) -> SubmittedTaskReceipt:
     return SubmittedTaskReceipt(
         tid=tid,
@@ -242,6 +265,49 @@ def ensure_manager_after_submission(
     ) from startup_error
 
 
+def prepare_taskspec(
+    context: WeftContext,
+    taskspec: TaskSpec | Mapping[str, Any],
+    *,
+    payload: Any = None,
+    seed_start_envelope: bool = True,
+    allow_internal_runtime: bool = False,
+) -> PreparedSubmissionRequest:
+    """Validate and snapshot a TaskSpec submission without queue writes."""
+
+    del context
+    normalized = _snapshot_taskspec(taskspec)
+    return PreparedSubmissionRequest(
+        name=normalized.name,
+        taskspec=normalized,
+        payload=_snapshot_payload(payload),
+        seed_start_envelope=seed_start_envelope,
+        allow_internal_runtime=allow_internal_runtime,
+    )
+
+
+def submit_prepared(
+    context: WeftContext,
+    prepared: PreparedSubmissionRequest,
+) -> SubmittedTaskReceipt:
+    """Write a previously prepared submission through the spawn queue."""
+
+    normalized = normalize_taskspec(prepared.taskspec)
+    task_tid = normalized.tid or generate_tid(context)
+    submit_spawn_request(
+        context.broker_target,
+        taskspec=normalized,
+        work_payload=prepared.payload,
+        config=context.broker_config,
+        tid=task_tid,
+        inherited_weft_context=normalized.spec.weft_context,
+        seed_start_envelope=prepared.seed_start_envelope,
+        allow_internal_runtime=prepared.allow_internal_runtime,
+    )
+    ensure_manager_after_submission(context, submitted_tid=task_tid)
+    return _receipt(prepared.name, task_tid)
+
+
 def submit_taskspec(
     context: WeftContext,
     taskspec: TaskSpec | Mapping[str, Any],
@@ -252,20 +318,28 @@ def submit_taskspec(
 ) -> SubmittedTaskReceipt:
     """Submit a TaskSpec through the durable manager-backed spawn path."""
 
-    normalized = normalize_taskspec(taskspec)
-    task_tid = normalized.tid or generate_tid(context)
-    submit_spawn_request(
-        context.broker_target,
-        taskspec=normalized,
-        work_payload=payload,
-        config=context.broker_config,
-        tid=task_tid,
-        inherited_weft_context=normalized.spec.weft_context,
+    prepared = prepare_taskspec(
+        context,
+        taskspec,
+        payload=payload,
         seed_start_envelope=seed_start_envelope,
         allow_internal_runtime=allow_internal_runtime,
     )
-    ensure_manager_after_submission(context, submitted_tid=task_tid)
-    return _receipt(normalized.name, task_tid)
+    return submit_prepared(context, prepared)
+
+
+def prepare(
+    context: WeftContext,
+    taskspec: TaskSpec | Mapping[str, Any],
+    *,
+    payload: Any = None,
+    **overrides: Any,
+) -> PreparedSubmissionRequest:
+    """Validate, normalize, and snapshot a TaskSpec submission."""
+
+    _validate_submit_overrides(overrides)
+    updated = apply_submit_overrides(normalize_taskspec(taskspec), **overrides)
+    return prepare_taskspec(context, updated, payload=payload)
 
 
 def submit(
@@ -277,19 +351,20 @@ def submit(
 ) -> SubmittedTaskReceipt:
     """Submit a TaskSpec after applying the public override contract."""
 
-    _validate_submit_overrides(overrides)
-    updated = apply_submit_overrides(normalize_taskspec(taskspec), **overrides)
-    return submit_taskspec(context, updated, payload=payload)
+    return submit_prepared(
+        context,
+        prepare(context, taskspec, payload=payload, **overrides),
+    )
 
 
-def submit_spec(
+def prepare_spec(
     context: WeftContext,
     reference: str | Path,
     *,
     payload: Any = None,
     **overrides: Any,
-) -> SubmittedTaskReceipt:
-    """Resolve and submit a stored, builtin, or file-backed task spec."""
+) -> PreparedSubmissionRequest:
+    """Resolve, validate, and snapshot a stored or file-backed task spec."""
 
     _validate_submit_overrides(overrides)
     try:
@@ -306,17 +381,32 @@ def submit_spec(
     )
     taskspec.set_bundle_root(resolved.bundle_root)
     updated = apply_submit_overrides(taskspec, **overrides)
-    return submit_taskspec(context, updated, payload=payload)
+    return prepare_taskspec(context, updated, payload=payload)
 
 
-def submit_pipeline(
+def submit_spec(
     context: WeftContext,
     reference: str | Path,
     *,
     payload: Any = None,
     **overrides: Any,
 ) -> SubmittedTaskReceipt:
-    """Resolve, compile, and submit a stored or file-backed pipeline spec."""
+    """Resolve and submit a stored, builtin, or file-backed task spec."""
+
+    return submit_prepared(
+        context,
+        prepare_spec(context, reference, payload=payload, **overrides),
+    )
+
+
+def prepare_pipeline(
+    context: WeftContext,
+    reference: str | Path,
+    *,
+    payload: Any = None,
+    **overrides: Any,
+) -> PreparedSubmissionRequest:
+    """Resolve, compile, validate, and snapshot a pipeline submission."""
 
     _validate_submit_overrides(overrides)
     try:
@@ -350,12 +440,27 @@ def submit_pipeline(
     bootstrap_payload = (
         payload if payload is not None else compiled.bootstrap_input_fallback
     )
-    return submit_taskspec(
+    return prepare_taskspec(
         context,
         updated,
         payload=bootstrap_payload,
         seed_start_envelope=False,
         allow_internal_runtime=True,
+    )
+
+
+def submit_pipeline(
+    context: WeftContext,
+    reference: str | Path,
+    *,
+    payload: Any = None,
+    **overrides: Any,
+) -> SubmittedTaskReceipt:
+    """Resolve, compile, and submit a stored or file-backed pipeline spec."""
+
+    return submit_prepared(
+        context,
+        prepare_pipeline(context, reference, payload=payload, **overrides),
     )
 
 
