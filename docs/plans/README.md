@@ -3,7 +3,7 @@
 This directory holds non-normative implementation plans, roadmaps, and audit artifacts.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 72 tracked plan files in this directory.
+There are currently 73 tracked plan files in this directory.
 
 ## Status Taxonomy
 
@@ -25,6 +25,7 @@ There are currently 72 tracked plan files in this directory.
 ## Current Focus
 
 - [`2026-04-21-run-boundary-dispatch-fence-control-contract-plan.md`](./2026-04-21-run-boundary-dispatch-fence-control-contract-plan.md): completed follow-up plan for `weft run` boundary cleanup, dispatch-fence liveness, task-control policy, and brittle test coverage.
+- [`2026-04-21-client-follow-hardening-plan.md`](./2026-04-21-client-follow-hardening-plan.md): completed hardening slice for bounded client follow/watch waits and terminal materialization races.
 - [`2026-04-21-weft-client-and-django-first-class-hardening-plan.md`](./2026-04-21-weft-client-and-django-first-class-hardening-plan.md): completed hardening slice for making `weft.client` and `weft_django` first-class library surfaces.
 - [`2026-04-20-weft-django-v1-reality-alignment-plan.md`](./2026-04-20-weft-django-v1-reality-alignment-plan.md): completed follow-up plan for bringing `weft_django` up to the current spec while keeping it thin and `weft.client`-backed.
 - [`2026-04-16-manager-and-basetask-exception-hardening-plan.md`](./2026-04-16-manager-and-basetask-exception-hardening-plan.md): completed slice for narrowing broad `except Exception` catches in `Manager` and `BaseTask`.
@@ -37,6 +38,7 @@ There are currently 72 tracked plan files in this directory.
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
 | [`2026-04-21-run-boundary-dispatch-fence-control-contract-plan.md`](./2026-04-21-run-boundary-dispatch-fence-control-contract-plan.md) | Run Boundary, Dispatch Fence, And Control Contract Plan | `completed` | none |
+| [`2026-04-21-client-follow-hardening-plan.md`](./2026-04-21-client-follow-hardening-plan.md) | Client Follow Hardening Plan | `completed` | none |
 | [`2026-04-21-weft-client-and-django-first-class-hardening-plan.md`](./2026-04-21-weft-client-and-django-first-class-hardening-plan.md) | Weft Client And Django First-Class Hardening Plan | `completed` | none |
 | [`2026-04-20-weft-django-v1-reality-alignment-plan.md`](./2026-04-20-weft-django-v1-reality-alignment-plan.md) | Weft Django V1 Reality Alignment Plan | `completed` | ./2026-04-21-weft-client-and-django-first-class-hardening-plan.md |
 | [`2026-04-20-weft-client-pythonic-surface-and-path-unification-plan.md`](./2026-04-20-weft-client-pythonic-surface-and-path-unification-plan.md) | Weft Client Pythonic Surface And CLI Path Unification Plan | `completed` | none |
