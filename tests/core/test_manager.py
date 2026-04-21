@@ -616,9 +616,23 @@ def test_manager_stop_command_drains_nonpersistent_children(manager_setup) -> No
     _child_tid, child_info = next(iter(manager._child_processes.items()))
     assert child_info.process.is_alive()
 
+    child_started = False
+    deadline = time.time() + 8.0
+    while time.time() < deadline and not child_started:
+        manager.process_once()
+        time.sleep(0.05)
+        for item in drain(log_queue):
+            event = json.loads(item)
+            child_started = (
+                event.get("tid") == _child_tid and event.get("event") == "work_started"
+            )
+            if child_started:
+                break
+    assert child_started
+
     ctrl_in_queue.write(CONTROL_STOP)
 
-    deadline = time.time() + 2.0
+    deadline = time.time() + 8.0
     while time.time() < deadline and not manager.should_stop:
         manager.process_once()
         time.sleep(0.05)
@@ -1948,6 +1962,54 @@ def test_manager_autostart_skips_active_templates(
         assert not manager._child_processes
         assert not manager._autostart_launched
     finally:
+        manager.cleanup()
+
+
+def test_manager_autostart_active_sources_include_tracked_children(
+    tmp_path: Path, broker_env, unique_tid
+) -> None:
+    db_path, make_queue = broker_env
+    autostart_dir, _manifest_path = write_autostart_fixture(
+        tmp_path,
+        task_name="tracked-autostart",
+        manifest_name="tracked-autostart",
+        mode="ensure",
+    )
+
+    config = load_config()
+    config["WEFT_AUTOSTART_TASKS"] = True
+    config["WEFT_AUTOSTART_DIR"] = str(autostart_dir)
+
+    spec = make_manager_spec(unique_tid, idle_timeout=0.0)
+    manager = Manager(db_path, spec, config=config)
+    source = str((autostart_dir / "tracked-autostart.json").resolve())
+    inbox_queue = make_queue(manager._queue_names["inbox"])
+
+    class FakeProcess:
+        pid = None
+        exitcode = None
+
+        def is_alive(self) -> bool:
+            return True
+
+        def join(self, timeout: float | None = None) -> None:
+            return None
+
+    try:
+        manager._child_processes["tracked-child"] = ManagedChild(
+            process=FakeProcess(),
+            ctrl_queue=None,
+            persistent=False,
+            autostart_source=source,
+        )
+
+        assert source in manager._active_autostart_sources()
+        drain(inbox_queue)
+        manager._tick_autostart(force=True)
+        assert drain(inbox_queue) == []
+    finally:
+        inbox_queue.close()
+        manager._child_processes.clear()
         manager.cleanup()
 
 
