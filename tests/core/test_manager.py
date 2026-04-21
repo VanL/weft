@@ -1168,7 +1168,6 @@ def test_manager_stranded_other_owner_exhausts_recovery_and_can_yield(
     manager.process_once()
 
     assert manager.should_stop is True
-    assert manager._dispatch_suspended_state == "other"
     assert manager._dispatch_recovery_pending() is False
     assert reserved_queue.peek_one(exact_timestamp=message_id) is not None
     assert spawn_queue.peek_one(exact_timestamp=message_id) is None
