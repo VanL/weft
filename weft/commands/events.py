@@ -52,6 +52,33 @@ def _is_cancelled(cancel_event: Any | None) -> bool:
     return bool(cancel_event is not None and cancel_event.is_set())
 
 
+def _deadline_from_timeout(timeout: float | None) -> float | None:
+    if timeout is None:
+        return None
+    return time.monotonic() + max(0.0, timeout)
+
+
+def _remaining_timeout(deadline: float | None) -> float | None:
+    if deadline is None:
+        return None
+    return max(0.0, deadline - time.monotonic())
+
+
+def _timed_out(deadline: float | None) -> bool:
+    return deadline is not None and time.monotonic() >= deadline
+
+
+def _raise_follow_timeout(
+    *,
+    tid: str,
+    operation: str,
+    timeout: float | None,
+) -> None:
+    raise TimeoutError(
+        f"Timed out after {timeout} seconds waiting for task {tid} {operation}"
+    )
+
+
 def _state_payload(payload: dict[str, Any]) -> dict[str, Any]:
     normalized: dict[str, Any] = {}
     for key in ("status", "event", "activity", "waiting_on", "error"):
@@ -139,10 +166,12 @@ def iter_task_events(
     tid: str,
     *,
     follow: bool = False,
+    timeout: float | None = None,
 ) -> Iterator[TaskEvent]:
     """Yield raw lifecycle events for one task."""
 
     normalized_tid = normalize_tid(tid)
+    deadline = _deadline_from_timeout(timeout)
     log_queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
     monitor = QueueChangeMonitor([log_queue], config=context.config)
     last_timestamp: int | None = int(normalized_tid) - 1
@@ -173,8 +202,16 @@ def iter_task_events(
 
             if terminal_seen or not follow:
                 return
+            if _timed_out(deadline):
+                _raise_follow_timeout(
+                    tid=normalized_tid,
+                    operation="events",
+                    timeout=timeout,
+                )
             if not saw_event:
-                monitor.wait(0.1)
+                remaining = _remaining_timeout(deadline)
+                wait_timeout = 0.1 if remaining is None else min(0.1, remaining)
+                monitor.wait(wait_timeout)
     finally:
         monitor.close()
         log_queue.close()
@@ -183,16 +220,38 @@ def iter_task_events(
 def follow_task_events(
     context: WeftContext,
     tid: str,
+    *,
+    timeout: float | None = None,
 ) -> Iterator[TaskEvent]:
     """Yield raw events followed by one synthetic final result event."""
 
     normalized_tid = normalize_tid(tid)
-    yield from iter_task_events(context, normalized_tid, follow=True)
+    deadline = _deadline_from_timeout(timeout)
+    yield from iter_task_events(
+        context,
+        normalized_tid,
+        follow=True,
+        timeout=timeout,
+    )
 
+    remaining = _remaining_timeout(deadline)
+    if remaining is not None and remaining <= 0:
+        _raise_follow_timeout(
+            tid=normalized_tid,
+            operation="result",
+            timeout=timeout,
+        )
     result = await_task_result(
         context,
         normalized_tid,
+        timeout=remaining,
     )
+    if result.status == "timeout":
+        _raise_follow_timeout(
+            tid=normalized_tid,
+            operation="result",
+            timeout=timeout,
+        )
     yield TaskEvent(
         tid=normalized_tid,
         event_type="result",
@@ -213,6 +272,7 @@ def iter_task_realtime_events(
     *,
     follow: bool = True,
     cancel_event: Any | None = None,
+    timeout: float | None = None,
 ) -> Iterator[TaskEvent]:
     """Yield read-only browser-oriented task events.
 
@@ -221,10 +281,15 @@ def iter_task_realtime_events(
     """
 
     normalized_tid = normalize_tid(tid)
+    deadline = _deadline_from_timeout(timeout)
+    materialization_timeout = 0.2 if follow else 0.0
+    remaining = _remaining_timeout(deadline)
+    if remaining is not None:
+        materialization_timeout = min(materialization_timeout, remaining)
     materialized = _await_result_materialization(
         context,
         normalized_tid,
-        timeout=0.2 if follow else 0.0,
+        timeout=materialization_timeout,
     )
     taskspec_payload = (
         materialized.taskspec_payload if materialized is not None else None
@@ -254,8 +319,25 @@ def iter_task_realtime_events(
     )
     last_outbox_timestamp: int | None = None
     last_ctrl_timestamp: int | None = None
-    terminal_payload: dict[str, Any] | None = None
-    terminal_timestamp: int | None = None
+    terminal_payload: dict[str, Any] | None = (
+        materialized.terminal_event_payload if materialized is not None else None
+    )
+    terminal_timestamp: int | None = (
+        materialized.terminal_event_timestamp if materialized is not None else None
+    )
+    if (
+        terminal_payload is None
+        and materialized is not None
+        and materialized.terminal_status is not None
+    ):
+        terminal_payload = {
+            "tid": normalized_tid,
+            "status": materialized.terminal_status,
+        }
+        if materialized.terminal_error_message is not None:
+            terminal_payload["error"] = materialized.terminal_error_message
+        terminal_timestamp = materialized.log_last_timestamp
+    terminal_state_emitted = False
 
     try:
         while not _is_cancelled(cancel_event):
@@ -327,11 +409,20 @@ def iter_task_realtime_events(
                 if status in TERMINAL_TASK_STATUSES:
                     terminal_payload = payload
                     terminal_timestamp = timestamp
+                    terminal_state_emitted = True
 
             if terminal_payload is not None:
                 terminal_status = (
                     terminal_status_from_event(terminal_payload) or "unknown"
                 )
+                if not terminal_state_emitted:
+                    yield TaskEvent(
+                        tid=normalized_tid,
+                        event_type="state",
+                        timestamp=terminal_timestamp or time.time_ns(),
+                        payload=_state_payload(terminal_payload),
+                    )
+                    terminal_state_emitted = True
                 if not snapshot_emitted:
                     snapshot_event = _task_snapshot_event(context, normalized_tid)
                     if snapshot_event is not None:
@@ -339,16 +430,31 @@ def iter_task_realtime_events(
                         snapshot_emitted = True
                 result_value = _peek_result_value(context, outbox_name=outbox_name)
                 if terminal_status == "completed" and result_value is None:
-                    deadline = time.monotonic() + WEFT_COMPLETED_RESULT_GRACE_SECONDS
+                    grace_deadline = (
+                        time.monotonic() + WEFT_COMPLETED_RESULT_GRACE_SECONDS
+                    )
                     while (
                         result_value is None
-                        and time.monotonic() < deadline
+                        and time.monotonic() < grace_deadline
                         and not _is_cancelled(cancel_event)
                     ):
-                        monitor.wait(0.05)
+                        remaining = _remaining_timeout(deadline)
+                        grace_remaining = max(0.0, grace_deadline - time.monotonic())
+                        wait_timeout = (
+                            min(0.05, grace_remaining)
+                            if remaining is None
+                            else min(0.05, remaining, grace_remaining)
+                        )
+                        monitor.wait(wait_timeout)
                         result_value = _peek_result_value(
                             context,
                             outbox_name=outbox_name,
+                        )
+                    if result_value is None and _timed_out(deadline):
+                        _raise_follow_timeout(
+                            tid=normalized_tid,
+                            operation="realtime result",
+                            timeout=timeout,
                         )
                 if _is_cancelled(cancel_event):
                     return
@@ -374,8 +480,16 @@ def iter_task_realtime_events(
 
             if not follow:
                 return
+            if _timed_out(deadline):
+                _raise_follow_timeout(
+                    tid=normalized_tid,
+                    operation="realtime events",
+                    timeout=timeout,
+                )
             if not saw_event:
-                monitor.wait(0.1)
+                remaining = _remaining_timeout(deadline)
+                wait_timeout = 0.1 if remaining is None else min(0.1, remaining)
+                monitor.wait(wait_timeout)
     finally:
         monitor.close()
         outbox_queue.close()

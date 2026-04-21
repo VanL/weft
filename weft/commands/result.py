@@ -58,6 +58,8 @@ class ResultMaterialization:
     log_last_timestamp: int | None = None
     terminal_status: str | None = None
     terminal_error_message: str | None = None
+    terminal_event_payload: dict[str, Any] | None = None
+    terminal_event_timestamp: int | None = None
     batch_boundary_timestamps: tuple[int, ...] = ()
 
 
@@ -197,13 +199,15 @@ def _await_result_materialization(
             if events:
                 terminal_status: str | None = None
                 terminal_message: str | None = None
+                terminal_payload: dict[str, Any] | None = None
+                terminal_timestamp: int | None = None
                 batch_boundary_timestamps = tuple(
                     timestamp
                     for event_payload, timestamp in events
                     if event_payload.get("event")
                     in {"work_item_completed", "work_completed"}
                 )
-                for event_payload, _timestamp in reversed(events):
+                for event_payload, event_timestamp in reversed(events):
                     event_status = terminal_status_from_event(event_payload)
                     if event_status is None:
                         continue
@@ -212,6 +216,8 @@ def _await_result_materialization(
                         event_payload,
                         event_status,
                     )
+                    terminal_payload = event_payload
+                    terminal_timestamp = event_timestamp
                     break
                 for event_payload, _timestamp in reversed(events):
                     event_taskspec = event_payload.get("taskspec")
@@ -227,6 +233,8 @@ def _await_result_materialization(
                             log_last_timestamp=log_last_timestamp,
                             terminal_status=terminal_status,
                             terminal_error_message=terminal_message,
+                            terminal_event_payload=terminal_payload,
+                            terminal_event_timestamp=terminal_timestamp,
                             batch_boundary_timestamps=batch_boundary_timestamps,
                         )
                 if terminal_status is not None:
@@ -237,6 +245,8 @@ def _await_result_materialization(
                         log_last_timestamp=log_last_timestamp,
                         terminal_status=terminal_status,
                         terminal_error_message=terminal_message,
+                        terminal_event_payload=terminal_payload,
+                        terminal_event_timestamp=terminal_timestamp,
                         batch_boundary_timestamps=batch_boundary_timestamps,
                     )
                 continue

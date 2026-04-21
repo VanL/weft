@@ -205,7 +205,7 @@ def test_task_follow_ends_with_result_event() -> None:
     with WeftTestHarness() as harness:
         client = WeftClient(path=harness.root)
         task = client.submit_command(["echo", "done"])
-        events = list(task.follow())
+        events = list(task.follow(timeout=30.0))
 
         assert events[-1].event_type == "result"
         assert events[-1].payload["status"] == "completed"
@@ -215,7 +215,7 @@ def test_task_realtime_events_expose_browser_event_contract() -> None:
     with WeftTestHarness() as harness:
         client = WeftClient(path=harness.root)
         task = client.submit_command(["echo", "done"])
-        events = list(task.realtime_events())
+        events = list(task.realtime_events(timeout=30.0))
 
         event_types = [event.event_type for event in events]
         assert "snapshot" in event_types
@@ -241,7 +241,7 @@ def test_tasks_watch_yields_terminal_snapshot() -> None:
     with WeftTestHarness() as harness:
         client = WeftClient(path=harness.root)
         task = client.submit_command(["echo", "watched"])
-        snapshots = list(client.tasks.watch(task.tid))
+        snapshots = list(client.tasks.watch(task.tid, timeout=30.0))
 
         assert snapshots
         assert snapshots[-1].tid == task.tid

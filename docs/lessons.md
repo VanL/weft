@@ -259,6 +259,19 @@ runbook needs to become stricter.
   manager bootstrap before returning the TID, so submission-to-timeout wall
   clock assumptions flake under slower Windows or xdist-heavy runners.
 
+## 2026-04-21 Client Follow Boundaries
+
+- Tests that drain client follow/watch iterators with `list(...)` must pass an
+  explicit timeout or cancellation boundary. Follow-style APIs are allowed to be
+  long-lived by default for UI streams; CI tests need a caller-local deadline so
+  a missed terminal observation becomes a useful failure instead of a stuck
+  runner.
+- If a materialization helper observes a terminal task-log event while deriving
+  queue names or result surfaces, downstream iterators must carry that terminal
+  observation forward. Advancing the log cursor without preserving the terminal
+  payload can skip the only completion signal and leave a completed task
+  looking live forever.
+
 ## 2026-04-20 Result Materialization And Synthetic PIDs
 
 - `weft result` must not treat non-terminal task-log activity without a logged
