@@ -102,6 +102,31 @@ def test_cli_init_honors_weft_directory_name_env(
     assert (weft_dir / "config.json").is_file()
 
 
+def test_cmd_init_accepts_in_process_config_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Embedded callers can initialize without mutating process env."""
+
+    project_root = tmp_path / "embedded-project"
+    monkeypatch.delenv("WEFT_DIRECTORY_NAME", raising=False)
+
+    rc = cmd_init(
+        project_root,
+        quiet=True,
+        overrides={"WEFT_DIRECTORY_NAME": ".engram"},
+    )
+
+    assert rc == 0
+    assert os.environ.get("WEFT_DIRECTORY_NAME") is None
+    weft_dir = project_root / ".engram"
+    assert weft_dir.is_dir()
+    assert not (project_root / ".weft").exists()
+    assert (weft_dir / "outputs").is_dir()
+    assert (weft_dir / "logs").is_dir()
+    assert (weft_dir / "config.json").is_file()
+
+
 def test_cli_init_defaults_to_current_directory(workdir: Path, weft_harness) -> None:
     project_root = workdir / "cwd-project"
     project_root.mkdir()

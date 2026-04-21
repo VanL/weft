@@ -8,7 +8,9 @@ Spec references:
 from __future__ import annotations
 
 import sys
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 from simplebroker.commands import cmd_init as sb_cmd_init
 from weft._constants import (
@@ -26,16 +28,22 @@ from weft.context import (
 
 
 def cmd_init(
-    directory: Path | None = None, *, quiet: bool = False, autostart: bool = True
+    directory: Path | None = None,
+    *,
+    quiet: bool = False,
+    autostart: bool = True,
+    overrides: Mapping[str, Any] | None = None,
 ) -> int:
     """Initialize a Weft project rooted at *directory*.
 
     Returns the SimpleBroker exit code.  When successful the project structure
     (the Weft metadata directory, config metadata, database) is ensured.
+    Explicit overrides let embedding callers supply WEFT_* or BROKER_* config
+    without temporarily mutating process environment.
 
     Spec: [SB-0] (Project Context and Directory Scoping)
     """
-    config = load_config()
+    config = load_config(overrides) if overrides is not None else load_config()
     root = Path(directory or Path.cwd()).expanduser().resolve()
     backend_name = str(config.get("BROKER_BACKEND", "sqlite")).strip().lower()
     if (
@@ -66,6 +74,7 @@ def cmd_init(
 
     context = build_context(
         spec_context=root,
+        config=config,
         create_dirs=True,
         create_database=False,
         autostart=autostart,
