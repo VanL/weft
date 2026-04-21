@@ -1530,6 +1530,11 @@ class Manager(BaseTask):
         return candidate, inbox_message
 
     def _active_autostart_sources(self) -> set[str]:
+        tracked_sources = {
+            child.autostart_source
+            for child in self._child_processes.values()
+            if child.autostart_source and not self._child_has_exited(child)
+        }
         queue = self._queue(WEFT_GLOBAL_LOG_QUEUE)
         active: dict[str, tuple[str | None, int]] = {}
         for payload, timestamp in iter_queue_json_entries(queue):
@@ -1545,9 +1550,10 @@ class Manager(BaseTask):
                 active[source] = (payload.get("status"), timestamp)
 
         terminal = {"completed", "failed", "timeout", "cancelled", "killed"}
-        return {
+        durable_sources = {
             source for source, (status, _ts) in active.items() if status not in terminal
         }
+        return durable_sources | tracked_sources
 
     def _managed_pids_for_child(self, tid: str) -> set[int]:
         queue = self._queue(WEFT_TID_MAPPINGS_QUEUE)
