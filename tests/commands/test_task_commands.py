@@ -207,7 +207,9 @@ def test_await_control_surface_uses_queue_monitor(
         lambda *_args, **_kwargs: next(snapshots),
     )
 
-    entry, snapshot = task_cmd._await_control_surface(ctx, tid, timeout=0.2)
+    # Use the production wait budget: this test still builds real queue handles,
+    # and PG-backed setup under xdist can exhaust artificial sub-second budgets.
+    entry, snapshot = task_cmd._await_control_surface(ctx, tid)
 
     assert entry is None
     assert snapshot is not None
