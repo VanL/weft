@@ -256,12 +256,23 @@ class PsutilResourceMonitor(BaseResourceMonitor):
         if psutil is None:
             return 0
         try:
-            return len(process.net_connections())
-        except (psutil.AccessDenied, AttributeError):
+            net_connections = process.net_connections
+        except AttributeError:
+            net_connections = None
+        if net_connections is not None:
             try:
-                return len(process.connections())
-            except (psutil.AccessDenied, AttributeError):
+                return len(net_connections())
+            except (psutil.NoSuchProcess, psutil.ZombieProcess, psutil.AccessDenied):
                 return 0
+        try:
+            return len(process.connections())
+        except (
+            psutil.NoSuchProcess,
+            psutil.ZombieProcess,
+            psutil.AccessDenied,
+            AttributeError,
+        ):
+            return 0
 
     def get_current_metrics(self) -> ResourceMetrics:
         if psutil is None:
