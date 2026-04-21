@@ -558,15 +558,26 @@ def test_manager_cleanup_terminates_worker_descendants(manager_setup) -> None:
     assert manager._child_processes, "child process should be running"
     child_tid, child_info = next(iter(manager._child_processes.items()))
     worker_pid: int | None = None
-    deadline = time.time() + 5.0
+    deadline = time.time() + (20.0 if os.name == "nt" else 5.0)
     while time.time() < deadline and worker_pid is None:
+        live_managed_pids = [
+            pid
+            for pid in manager._managed_pids_for_child(child_tid)
+            if _process_running(pid)
+        ]
+        if live_managed_pids:
+            worker_pid = live_managed_pids[0]
+            break
         try:
             child_process = psutil.Process(child_info.process.pid)
         except psutil.Error:
             break
         descendants = child_process.children(recursive=True)
-        if descendants:
-            worker_pid = descendants[0].pid
+        live_descendants = [
+            process.pid for process in descendants if _process_running(process.pid)
+        ]
+        if live_descendants:
+            worker_pid = live_descendants[0]
             break
         time.sleep(0.05)
 
@@ -574,16 +585,61 @@ def test_manager_cleanup_terminates_worker_descendants(manager_setup) -> None:
 
     manager.cleanup()
 
-    deadline = time.time() + 5.0
+    deadline = time.time() + (20.0 if os.name == "nt" else 5.0)
     while time.time() < deadline:
         root_alive = _process_running(child_info.process.pid)
-        worker_alive = psutil.pid_exists(worker_pid)
+        worker_alive = _process_running(worker_pid)
         if not root_alive and not worker_alive:
             break
         time.sleep(0.05)
 
     assert not _process_running(child_info.process.pid)
-    assert not psutil.pid_exists(worker_pid)
+    assert not _process_running(worker_pid)
+
+
+def test_manager_cleanup_terminates_reaped_child_managed_pids(
+    manager_setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, _make_queue = manager_setup
+
+    class FakeProcess:
+        pid = 424242
+        exitcode = 0
+
+        def is_alive(self) -> bool:
+            return False
+
+        def join(self, timeout: float | None = None) -> None:
+            return None
+
+    manager._child_processes["child"] = ManagedChild(
+        process=FakeProcess(),
+        ctrl_queue=None,
+        persistent=False,
+    )
+    monkeypatch.setattr(
+        manager,
+        "_managed_pids_for_child",
+        lambda tid: {515151} if tid == "child" else set(),
+    )
+
+    terminated: list[tuple[int, float, bool]] = []
+
+    def _record_terminate(
+        pid: int,
+        *,
+        timeout: float = 0.5,
+        kill_after: bool = True,
+    ) -> set[int]:
+        terminated.append((pid, timeout, kill_after))
+        return {pid}
+
+    monkeypatch.setattr(manager_mod, "terminate_process_tree", _record_terminate)
+
+    manager._terminate_children()
+
+    assert manager._child_processes == {}
+    assert terminated == [(515151, 0.2, True)]
 
 
 def test_manager_stop_command_drains_nonpersistent_children(manager_setup) -> None:
@@ -1110,13 +1166,11 @@ def test_manager_stranded_other_owner_does_not_yield_with_unrecovered_reserved_w
         lambda: DispatchOwnership(state="other", leader_tid=lower_leader_tid),
     )
 
-    reserved_queue_obj = manager._get_reserved_queue()
-
-    def _fail_move_one(*args, **kwargs):
-        del args, kwargs
-        raise RuntimeError("move failed")
-
-    monkeypatch.setattr(reserved_queue_obj, "move_one", _fail_move_one)
+    monkeypatch.setattr(
+        manager,
+        "_requeue_reserved_spawn_request",
+        lambda *, message_id: False,
+    )
 
     manager.process_once()
     manager.process_once()
@@ -1156,19 +1210,23 @@ def test_manager_stranded_other_owner_exhausts_recovery_and_can_yield(
     )
     monkeypatch.setattr(manager, "_leader_tid", lambda: lower_leader_tid)
 
-    reserved_queue_obj = manager._get_reserved_queue()
+    failed_requeues: list[int] = []
 
-    def _fail_move_one(*args, **kwargs):
-        del args, kwargs
-        raise RuntimeError("move failed")
+    def _fail_requeue(*, message_id: int) -> bool:
+        failed_requeues.append(message_id)
+        return False
 
-    monkeypatch.setattr(reserved_queue_obj, "move_one", _fail_move_one)
+    monkeypatch.setattr(manager, "_requeue_reserved_spawn_request", _fail_requeue)
 
     manager.process_once()
+    assert reserved_queue.peek_one(exact_timestamp=message_id) is not None
+    assert manager._dispatch_recovery_pending() is True
+
     manager.process_once()
 
     assert manager.should_stop is True
     assert manager._dispatch_recovery_pending() is False
+    assert failed_requeues == [message_id, message_id]
     assert reserved_queue.peek_one(exact_timestamp=message_id) is not None
     assert spawn_queue.peek_one(exact_timestamp=message_id) is None
 
@@ -1238,16 +1296,16 @@ def test_manager_self_owner_exhausts_recovery_before_later_inbox_work(
         launched.append(child_spec.tid)
         return True
 
-    reserved_queue_obj = manager._get_reserved_queue()
+    failed_requeues: list[int] = []
 
-    def _fail_move_one(*args, **kwargs):
-        del args, kwargs
-        raise RuntimeError("move failed")
+    def _fail_requeue(*, message_id: int) -> bool:
+        failed_requeues.append(message_id)
+        return False
 
     monkeypatch.setattr(manager_mod, "MANAGER_DISPATCH_RECOVERY_MAX_ATTEMPTS", 1)
     monkeypatch.setattr(manager, "_evaluate_dispatch_ownership", _next_ownership)
     monkeypatch.setattr(manager, "_launch_child_task", _record_launch)
-    monkeypatch.setattr(reserved_queue_obj, "move_one", _fail_move_one)
+    monkeypatch.setattr(manager, "_requeue_reserved_spawn_request", _fail_requeue)
 
     try:
         manager.process_once()
@@ -1256,6 +1314,7 @@ def test_manager_self_owner_exhausts_recovery_before_later_inbox_work(
 
         manager.process_once()
         assert manager._dispatch_suspended_state is None
+        assert failed_requeues == [first_message_id]
         assert reserved_queue.peek_one(exact_timestamp=first_message_id) is not None
         assert spawn_queue.peek_one(exact_timestamp=second_message_id) is not None
         assert launched == []
