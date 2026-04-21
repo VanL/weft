@@ -258,6 +258,15 @@ runbook needs to become stricter.
   running-task readiness boundary first. `weft run --no-wait` still pays
   manager bootstrap before returning the TID, so submission-to-timeout wall
   clock assumptions flake under slower Windows or xdist-heavy runners.
+- Manager shutdown must snapshot the children it intends to terminate before
+  graceful waits can reap them from `_child_processes`. Otherwise an exited
+  task process can disappear from the in-memory map before manager-owned
+  managed-PID cleanup runs, leaving a descendant visible on slower Windows
+  process tables.
+- Manager recovery state-machine tests should patch the manager-owned recovery
+  seam directly. Keep one integration test for the exact queue move failure,
+  but do not make every recovery/yield assertion depend on monkeypatching a
+  specific `Queue` instance across multiple scheduling turns.
 
 ## 2026-04-21 Client Follow Boundaries
 

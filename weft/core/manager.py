@@ -876,16 +876,32 @@ class Manager(BaseTask):
             self._last_activity_ns = time.time_ns()
 
     def _terminate_children(self) -> None:
+        children: dict[str, ManagedChild] = dict(self._child_processes)
+        managed_pids: dict[str, set[int]] = {
+            tid: self._managed_pids_for_child(tid) for tid in children
+        }
+
         self._wait_for_children_to_exit(timeout=1.0)
-        if not self._child_processes:
+        children.update(self._child_processes)
+        for tid in self._child_processes:
+            managed_pids.setdefault(tid, set()).update(
+                self._managed_pids_for_child(tid)
+            )
+
+        if not children:
             return
 
         for tid, child in list(self._child_processes.items()):
             ctrl_queue = child.ctrl_queue or f"T{tid}.{QUEUE_CTRL_IN_SUFFIX}"
             self._send_stop_command(ctrl_queue)
         self._wait_for_children_to_exit(timeout=1.0)
+        children.update(self._child_processes)
+        for tid in children:
+            managed_pids.setdefault(tid, set()).update(
+                self._managed_pids_for_child(tid)
+            )
 
-        for tid, child in list(self._child_processes.items()):
+        for tid, child in list(children.items()):
             if child.process.is_alive():
                 try:
                     child.process.join(timeout=0.2)
@@ -913,7 +929,10 @@ class Manager(BaseTask):
                         pass
                     else:
                         child.process.join(timeout=1.0)
-            for pid in self._managed_pids_for_child(tid):
+            managed_pids.setdefault(tid, set()).update(
+                self._managed_pids_for_child(tid)
+            )
+            for pid in managed_pids[tid]:
                 terminate_process_tree(pid, timeout=0.2)
             self._child_processes.pop(tid, None)
 
