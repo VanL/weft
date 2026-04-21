@@ -32,27 +32,48 @@ class Task:
     def result(self, timeout: float | None = None) -> TaskResult:
         return result_cmd.await_task_result(self._context, self.tid, timeout=timeout)
 
-    def events(self, *, follow: bool = False) -> Iterator[TaskEvent]:
+    def events(
+        self,
+        *,
+        follow: bool = False,
+        timeout: float | None = None,
+    ) -> Iterator[TaskEvent]:
         if follow:
-            yield from events.iter_task_events(self._context, self.tid, follow=True)
+            yield from events.iter_task_events(
+                self._context,
+                self.tid,
+                follow=True,
+                timeout=timeout,
+            )
             return
-        yield from events.iter_task_events(self._context, self.tid, follow=False)
+        yield from events.iter_task_events(
+            self._context,
+            self.tid,
+            follow=False,
+            timeout=timeout,
+        )
 
     def realtime_events(
         self,
         *,
         follow: bool = True,
         cancel_event: Any | None = None,
+        timeout: float | None = None,
     ) -> Iterator[TaskEvent]:
         yield from events.iter_task_realtime_events(
             self._context,
             self.tid,
             follow=follow,
             cancel_event=cancel_event,
+            timeout=timeout,
         )
 
-    def follow(self) -> Iterator[TaskEvent]:
-        yield from events.follow_task_events(self._context, self.tid)
+    def follow(self, *, timeout: float | None = None) -> Iterator[TaskEvent]:
+        yield from events.follow_task_events(
+            self._context,
+            self.tid,
+            timeout=timeout,
+        )
 
     def stop(self) -> None:
         task_ops.stop_task(self.tid, context=self._context)

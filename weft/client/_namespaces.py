@@ -77,10 +77,12 @@ class TasksNamespace:
         tid: str,
         *,
         include_process: bool = False,
+        timeout: float | None = None,
     ) -> Iterator[TaskSnapshot]:
         yield from tasks.watch_task_status(
             tid,
             include_process=include_process,
+            timeout=timeout,
             context=self.client.context,
         )
 

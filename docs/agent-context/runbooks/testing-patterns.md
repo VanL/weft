@@ -175,6 +175,28 @@ guaranteed to be visible in the same instant.
 - If you must assert directly, use bounded polling rather than a single
   immediate outbox read.
 
+### Pattern 7: Client Follow Tests Hang Instead Of Failing
+
+**Symptoms**
+
+- CI prints the last completed module and then stays quiet for tens of minutes.
+- The stuck test drains `Task.follow()`, `Task.realtime_events()`, or
+  `client.tasks.watch()` with `list(...)`.
+
+**Why it happens**
+
+Follow-style client APIs are intentionally long-lived by default so UI streams
+can stay attached until task completion. If a platform-specific race misses the
+terminal observation, an unbounded test drain has no failure boundary.
+
+**What to do**
+
+- Pass an explicit timeout or cancellation boundary in tests.
+- Add a regression at the shared command layer if the iterator skipped a
+  terminal event that was already observed during result materialization.
+- Keep the timeout caller-local. Do not publish task timeout state just because
+  a test or UI stream stopped waiting.
+
 ## Verification Pattern
 
 For changes that touch queue semantics, manager behavior, or task lifecycle:

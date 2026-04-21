@@ -221,9 +221,9 @@ Submission methods should return a `Task` handle whose stable minimum surface is
 - `tid`
 - `snapshot()`
 - `result(timeout=None)`
-- `events(...)`
-- `realtime_events(follow=True)`
-- `follow()`
+- `events(..., timeout=None)`
+- `realtime_events(follow=True, timeout=None)`
+- `follow(timeout=None)`
 - `stop()`
 - `kill()`
 
@@ -237,6 +237,10 @@ ordinary `submit*` methods.
 The client should internally reuse the same context resolution, spawn
 submission, and result-wait paths that the CLI uses today. It should not invent
 second-path semantics.
+
+Caller-supplied timeouts on follow-style client iterators are local wait
+budgets. They may stop the client-side iterator with a timeout error, but they
+must not publish task timeout state or change the underlying task lifecycle.
 
 Reference-resolution rule:
 
@@ -1277,6 +1281,8 @@ Once the package is split into a sibling repo:
 
 ## Backlinks
 
+- Active hardening plan:
+  [../plans/2026-04-21-client-follow-hardening-plan.md](../plans/2026-04-21-client-follow-hardening-plan.md)
 - Completed hardening plan:
   [../plans/2026-04-21-weft-client-and-django-first-class-hardening-plan.md](../plans/2026-04-21-weft-client-and-django-first-class-hardening-plan.md)
 - Superseded v1 reality-alignment plan:

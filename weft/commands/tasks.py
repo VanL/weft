@@ -182,6 +182,26 @@ def _public_snapshot(
     )
 
 
+def _deadline_from_timeout(timeout: float | None) -> float | None:
+    if timeout is None:
+        return None
+    return time.monotonic() + max(0.0, timeout)
+
+
+def _remaining_timeout(deadline: float | None) -> float | None:
+    if deadline is None:
+        return None
+    return max(0.0, deadline - time.monotonic())
+
+
+def _raise_watch_timeout(
+    *,
+    tid: str,
+    timeout: float | None,
+) -> None:
+    raise TimeoutError(f"Timed out after {timeout} seconds watching task {tid}")
+
+
 def task_status(
     tid: str,
     *,
@@ -280,6 +300,7 @@ def watch_task_status(
     *,
     include_process: bool = False,
     include_terminal: bool = True,
+    timeout: float | None = None,
     context: WeftContext | None = None,
     context_path: str | os.PathLike[str] | None = None,
 ) -> Iterable[PublicTaskSnapshot]:
@@ -288,6 +309,7 @@ def watch_task_status(
     del include_process
     ctx = _coerce_context(context=context, context_path=context_path)
     full_tid = resolve_full_tid(ctx, tid) or tid.strip().lstrip("T")
+    deadline = _deadline_from_timeout(timeout)
     monitor_queues = [
         ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False),
         ctx.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False),
@@ -310,7 +332,15 @@ def watch_task_status(
                 yield snapshot
                 if snapshot.status in status_cmd.TERMINAL_TASK_STATUSES:
                     return
-            monitor.wait(status_cmd.STATUS_WATCH_MIN_INTERVAL)
+            if deadline is not None and time.monotonic() >= deadline:
+                _raise_watch_timeout(tid=full_tid, timeout=timeout)
+            remaining = _remaining_timeout(deadline)
+            wait_timeout = (
+                status_cmd.STATUS_WATCH_MIN_INTERVAL
+                if remaining is None
+                else min(status_cmd.STATUS_WATCH_MIN_INTERVAL, remaining)
+            )
+            monitor.wait(wait_timeout)
     finally:
         monitor.close()
         for queue in monitor_queues:
