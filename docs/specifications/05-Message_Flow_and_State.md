@@ -272,6 +272,18 @@ Current manager-dispatch fence rules:
 - if ownership later resolves back to `self`, the manager exact-message
   requeues the older fenced request back to `weft.spawn.requests` before later
   inbox work resumes
+- exact-message requeue recovery is bounded by
+  `MANAGER_DISPATCH_RECOVERY_MAX_ATTEMPTS`; when the ceiling is reached, the
+  manager emits `manager_spawn_fence_recovery_exhausted` with required fields
+  `child_tid`, `leader_tid`, `reserved_queue`, `message_id`,
+  `ownership_state`, and `attempts`
+- exhausted recovery never deletes the reserved message and never emits
+  `task_spawn_rejected`; it leaves the stranded work operator-visible in the
+  reserved queue
+- after exhausted recovery, a non-owner manager may leadership-yield and a
+  self-owner manager may clear the in-memory suspension so later spawn work can
+  proceed; this is an availability tradeoff after durable diagnostics prove the
+  older exact request needs manual recovery
 - these manager-scoped fence diagnostics are not spawn rejection and must not
   be interpreted as `task_spawn_rejected`
 
@@ -290,10 +302,15 @@ immediately after a tracked autostart child exits.
 
 _Implementation mapping_: `weft/core/manager.py` — `Manager._handle_work_message`,
 `Manager._build_child_spec`, `Manager._apply_final_dispatch_fence`,
-`Manager._requeue_reserved_spawn_request`, `Manager._control_allows_child_launch`,
-`Manager.process_once`; `weft/core/spawn_requests.py`;
+`Manager._requeue_reserved_spawn_request`,
+`Manager._record_dispatch_recovery_failure`,
+`Manager._control_allows_child_launch`, `Manager.process_once`;
+`weft/core/spawn_requests.py`;
 `weft/cli/run.py`; `weft/commands/_spawn_submission.py` —
 `_inspect_task_log_for_tid`, `_reconcile_submitted_spawn_once`.
+
+Implementation plan backlink:
+[`2026-04-21-run-boundary-dispatch-fence-control-contract-plan.md`](../plans/2026-04-21-run-boundary-dispatch-fence-control-contract-plan.md).
 
 ### 7. Manager Bootstrap Flow [MF-7]
 

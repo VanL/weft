@@ -1,36 +1,38 @@
 # Weft Django V1 Reality Alignment Plan
 
-Status: active
+Status: completed
 Source specs: see Source Documents below
-Superseded by: none
+Superseded by: ./2026-04-21-weft-client-and-django-first-class-hardening-plan.md
 
 ## Goal
 
-Replace the overly optimistic "completed" status of the initial `weft_django`
-landing with an active v1 alignment slice. The package that shipped is a thin
-broker-backed, SSE-first Django integration on top of `weft.client`, with
-release and CI wiring already in place. The remaining work is to fix the real
-public-contract bugs, expand tests around those boundaries, and either
-implement or explicitly defer the spec-promised features that are still absent
-or stubbed so the spec and README stop outrunning the code.
+Bring `weft_django` up to the current 13C spec without changing the thin
+architecture that already landed. The first slice proved packaging, the
+broker-backed path, transaction deferral, and read-only diagnostics. This
+follow-up slice finishes the missing spec-promised features, closes the known
+contract bugs, and makes the docs, tests, and shipped code agree again.
 
 Recommended v1 stance for this slice:
 
-- keep `weft_django` thin and built on `weft.client`
+- keep `weft_django` thin and layered over `weft.client`
 - keep broker-backed submission as the normal path
 - keep HTTP read-only
-- keep SSE as the only shipped realtime transport in this slice
-- treat inline test mode, real Channels transport, and other larger optional
-  surfaces as explicit future work unless separately approved
+- do not ship inline/eager execution mode in v1; direct Python calls cover
+  unit tests and broker-backed tests cover production semantics
+- keep Channels optional behind the package extra, but make the optional path
+  real instead of stubbed
+- allow small shared-core additions only when the Django transport or handle
+  contract cannot be satisfied as a thin wrapper
 
 ## Source Documents
 
 Source specs:
 - `docs/specifications/13C-Using_Weft_With_Django.md` [DJ-0.1], [DJ-2.1],
-  [DJ-6.1], [DJ-8.1], [DJ-8.2], [DJ-8.4], [DJ-10.1], [DJ-11.1], [DJ-12.1],
-  [DJ-12.2], [DJ-12.3], [DJ-13.2], [DJ-15.1], [DJ-17.1], [DJ-17.2],
-  [DJ-17.3]
+  [DJ-6.1], [DJ-8.1], [DJ-8.2], [DJ-8.4], [DJ-9.1], [DJ-10.1], [DJ-11.1],
+  [DJ-11.2], [DJ-12.1], [DJ-12.2], [DJ-12.3], [DJ-13.2], [DJ-15.1],
+  [DJ-17.1], [DJ-17.2], [DJ-17.3]
 - `docs/specifications/13-Agent_Runtime.md` [AR-0], [AR-2]
+- `docs/specifications/05-Message_Flow_and_State.md` [MF-5], [MF-6]
 - `docs/specifications/02-TaskSpec.md` [TS-1], [TS-1.3]
 - `docs/specifications/04-SimpleBroker_Integration.md` [SB-0.4]
 - `docs/specifications/08-Testing_Strategy.md` [TS-0]
@@ -48,130 +50,114 @@ Historical plan context:
   landed the initial package, tests, CI, and release wiring, but closed too
   aggressively relative to the current spec and the actual shipped surface
 - `docs/plans/2026-04-20-weft-client-pythonic-surface-and-path-unification-plan.md`
-  landed the shared `weft.client` surface the Django package now depends on
+  landed the shared `weft.client` surface the Django package depends on
 
-## Context and Key Files
+## Ownership And Boundary
 
-Files to modify:
-- `docs/specifications/13C-Using_Weft_With_Django.md`
-- `docs/plans/2026-04-20-weft-django-v1-reality-alignment-plan.md` (new)
-- `docs/plans/2026-04-20-weft-django-integration-implementation-plan.md`
-- `docs/plans/README.md`
-- `integrations/weft_django/README.md`
-- `integrations/weft_django/weft_django/conf.py`
-- `integrations/weft_django/weft_django/client.py`
-- `integrations/weft_django/weft_django/views.py`
-- `integrations/weft_django/weft_django/sse.py`
-- `integrations/weft_django/tests/test_weft_django.py`
+Primary owner boundary:
+- `integrations/weft_django/weft_django/` owns the Django-facing API, settings,
+  transaction hook behavior, HTTP views, SSE, and optional Channels transport
 
-Read first:
-- `docs/specifications/13C-Using_Weft_With_Django.md`
-- `integrations/weft_django/weft_django/client.py`
-- `integrations/weft_django/weft_django/conf.py`
-- `integrations/weft_django/weft_django/views.py`
-- `integrations/weft_django/weft_django/sse.py`
-- `integrations/weft_django/tests/test_weft_django.py`
-- `weft/client/_task.py`
-- `weft/commands/events.py`
+Shared-core boundary:
+- `weft.client` remains the only durable Python submission and observation
+  dependency for Django callers
+- if the richer handle or realtime contract needs new shared behavior, the only
+  acceptable shared-core extension points are small additions in
+  `weft/client/` or `weft/commands/events.py`
 
-Shared paths and helpers to reuse:
-- `weft.client.WeftClient` remains the only public submission and observation
-  dependency for the Django package
-- `Task.result()` and `Task.follow()` remain the canonical result/event paths
-  unless the spec is explicitly widened
-- Django transaction deferral remains a thin wrapper over
-  `django.db.transaction.on_commit()`
+Not allowed:
+- a second Django-owned task truth store
+- a Django model for task state
+- Django-only queue watchers that bypass the shared client/command layer when a
+  shared helper can own the behavior instead
+
+## Context And Current Gaps
 
 Current structure and known drift:
+
 - `weft_django.WeftSubmission` is currently just an alias to
-  `weft.client.Task`; it does not match the richer `DJ-10.1` handle currently
-  described in the spec
+  `weft.client.Task`; it does not satisfy the richer handle described by
+  [DJ-10.1]
 - `resolve_context_override()` falls back to ordinary core discovery whenever
   any `WEFT_*` env var is present, so unrelated flags like `WEFT_DEBUG=1` can
-  redirect the package to the process cwd
+  redirect the package to the process cwd instead of `settings.BASE_DIR`
 - native helper tests currently exercise only the local `payload=` keyword,
-  while the spec still documents `work_payload=` and `input=`
-- `get_test_mode()` and `get_realtime_transport()` exist, but inline mode and
-  transport switching are not wired into the runtime path
-- `channels.py` is a stub import guard plus a close-immediately consumer, not a
-  real transport implementation
-- SSE currently maps every non-`result` event to `state`; it does not emit the
-  full `snapshot/state/stdout/stderr/result/end` taxonomy promised by the
-  current spec
+  while older draft docs still mention `work_payload=` and `input=`
+- `get_realtime_transport()` exists, but transport switching is not fully
+  proven through installed optional Channels CI
+- `channels.py` is an import guard plus a close-immediately stub consumer, not
+  a real transport implementation
+- SSE currently maps every non-`result` event to `state`; it does not match the
+  `snapshot/state/stdout/stderr/result/end` contract described by [DJ-12.1]
+  and [DJ-12.3]
+- malformed task ids still escape the read-only HTTP/SSE views as uncaught
+  client errors instead of normal operator-facing failures
 
-Comprehension questions before editing:
-- Which layer owns durable submission and result truth for Django callers?
-  Answer: `weft.client` and the underlying Weft queues/logs, not Django-local
-  wrappers or models.
-- Which currently documented Django features are real today versus merely
-  stubbed? Answer: broker-backed submission, transaction deferral, read-only
-  SSE, management commands, CI, and packaging are real; inline mode and real
-  Channels transport are not.
+Comprehension checkpoints before implementation:
 
-## Invariants and Constraints
+- durable submission, status, and result truth stays in Weft queues and logs,
+  surfaced through `weft.client`
+- the richer Django submission handle is a wrapper, not a second backend
+- inline mode is intentionally out of scope for v1
+- WebSocket support stays optional even though the optional path must become
+  real
+
+## Invariants And Constraints
 
 - Keep the current durable spine:
   `TaskSpec -> Manager -> Consumer -> TaskRunner -> queues/state log`.
-- Do not introduce a second Django-owned submission, wait, or event-reading
-  path when `weft.client` already provides one.
-- `weft_django` must stay a thin integration layer. No mirrored Django task
-  models, no hidden manager startup in `AppConfig.ready()`, and no
-  Django-specific runtime class.
+- Do not introduce a second Django-owned submission, wait, or result path when
+  `weft.client` already provides one.
+- `weft_django` must stay thin. No mirrored Django task models, no hidden
+  manager startup in `AppConfig.ready()`, and no Django-specific runtime class.
 - Native Weft TaskSpecs and pipelines must preserve their declared runner and
   target semantics.
 - HTTP remains read-only. No stop/kill endpoints in this slice.
 - Django context selection must not use process cwd as the primary default when
   `settings.BASE_DIR` is available.
-- If the Django helper keyword contract is widened, keep backward compatibility
-  for the already-shipped `payload=` keyword unless the user explicitly asks to
-  break it.
+- Native helper payload input is named `payload` only. Do not add
+  `work_payload`, `input`, or other aliases in v1.
+- SSE and Channels must share one normalized event contract. Do not duplicate
+  event-shaping logic per transport.
+- If realtime `stdout` / `stderr` delivery needs more than the current
+  `Task.follow()` surface, add the missing behavior once in shared code rather
+  than teaching Django transports to read raw queues independently.
 - Do not reopen CI or release automation in this slice except for doc or test
-  drift directly required by the new scope statement.
-- Broker-backed and transaction-sensitive proofs must stay real. Do not mock
-  away `transaction.on_commit()`, manager startup, or result visibility.
+  drift directly required by the new implementation work.
 
 Review gates:
-- No second execution path.
+
+- No second execution path for normal broker-backed work.
 - No drive-by refactor of `weft.client` or the shared command layer.
-- No new dependency.
-- No silent spec drift. If the intended v1 surface narrows, the spec must be
-  updated in the same slice instead of leaving dead promises in place.
+- No new dependency outside the existing optional `channels` extra.
+- No silent spec drift. If an exact method return value or event shape must be
+  clarified, update the spec and nearby implementation notes in the same slice.
 
 ## Tasks
 
-1. Reset the normative v1 boundary for `weft_django`.
-   - Outcome: the spec, README, and plan corpus describe the actual intended
-     v1 package rather than the optimistic first-pass landing.
+1. Reset the active Django execution boundary to "thin but complete", not
+   "thin but deferred".
+   - Outcome: the active plan and plan corpus explicitly target completion of
+     the current 13C surface instead of narrowing 13C down to the thin landing
+     that already shipped.
    - Files to touch:
-     - `docs/specifications/13C-Using_Weft_With_Django.md`
-     - `integrations/weft_django/README.md`
-     - `docs/plans/2026-04-20-weft-django-integration-implementation-plan.md`
+     - `docs/plans/2026-04-20-weft-django-v1-reality-alignment-plan.md`
      - `docs/plans/README.md`
-   - Read first:
-     - `integrations/weft_django/weft_django/client.py`
-     - `integrations/weft_django/weft_django/channels.py`
-     - `integrations/weft_django/weft_django/sse.py`
+     - `docs/plans/2026-04-20-weft-django-integration-implementation-plan.md`
    - Implement:
-     - update `DJ-10.1` so the public submission handle truthfully describes
-       the shared `weft.client.Task`-based surface, or explicitly call out the
-       follow-up if a richer wrapper is still desired
-     - narrow or defer the unshipped optional surfaces:
-       inline test mode, real Channels transport, and any SSE event taxonomy
-       that the code does not actually emit today
-     - add backlinks from the spec to this plan and mark the initial landing
-       plan as superseded
-   - Stop and re-evaluate if:
-     - the preferred outcome becomes "implement inline mode and Channels now"
-       instead of tightening the v1 boundary
-     - the work starts inventing a Django-specific result backend instead of
-       documenting the shared `weft.client` handle
+     - keep the initial landing plan marked historical/superseded
+     - update the active-plan description so it is clear that the remaining
+       work is implementation, not scope reduction
+     - preserve the thin-layer boundary in the plan itself so future slices do
+       not invent Django-local runtime behavior
    - Done signal:
-     - the spec no longer promises dead code or stubs as part of the current v1
-       contract
+     - plan readers can tell, without inference, that broker-backed execution,
+       the richer submission handle, the full realtime contract, and optional
+       Channels are current implementation work
 
-2. Fix Django context selection and native helper keyword drift.
+2. Fix the two current P1 contract bugs first.
    - Outcome: Django callers resolve the intended Weft context and can use the
-     documented native helper keywords without falling into submit-override
+     documented native helper keyword without falling into submit-override
      errors.
    - Files to touch:
      - `integrations/weft_django/weft_django/conf.py`
@@ -185,105 +171,194 @@ Review gates:
        explicit context-selection rule that preserves the `settings.BASE_DIR`
        default and only defers when a real context-selection override is
        intended
-     - accept the spec-owned helper keywords (`work_payload=` for TaskSpec
-       helpers and `input=` for spec/pipeline helpers) while preserving the
-       current `payload=` alias for backward compatibility
-     - reject ambiguous calls where both names are supplied at once
+     - keep `payload=` as the only native helper payload keyword
+     - reject legacy draft names such as `work_payload=` and `input=` locally
    - Tests to add or update:
      - `WEFT_DEBUG=1` must not redirect the package away from `BASE_DIR`
      - explicit `WEFT_DJANGO["CONTEXT"]` still wins
-     - `work_payload=` and `input=` route to the same durable submission path
-     - ambiguous duplicate payload arguments raise locally
+     - `payload=` routes to the durable submission path for TaskSpecs, spec
+       refs, and pipelines
+     - `work_payload=` and `input=` raise locally with a clear message
      - deferred helpers still reject `wait=True`
-   - Stop and re-evaluate if:
-     - the fix requires importing low-level submission internals into the
-       Django package instead of staying on `weft.client`
    - Done signal:
-     - the two existing P1 findings are covered by broker-backed or direct
-       Django-config regression tests
+     - the two known P1 findings are covered by direct regression tests
 
-3. Harden the read-only HTTP and SSE surfaces.
+3. Ship a real Django submission handle on top of `weft.client.Task`.
+   - Outcome: decorated task methods and native helpers return thin wrappers
+     that satisfy [DJ-10.1] without creating a second result backend.
+   - Files to touch:
+     - `integrations/weft_django/weft_django/client.py`
+     - `integrations/weft_django/weft_django/__init__.py`
+     - `integrations/weft_django/README.md`
+     - `docs/specifications/13C-Using_Weft_With_Django.md`
+     - `integrations/weft_django/tests/test_weft_django.py`
+   - Read first:
+     - `docs/specifications/13C-Using_Weft_With_Django.md` [DJ-8.1], [DJ-10.1]
+     - `weft/client/_task.py`
+   - Implement:
+     - add a small `WeftSubmission` wrapper with `tid`, `name`, `status()`,
+       `wait(timeout=None)`, `result(timeout=None)`, `stop()`, `kill()`, and
+       `events(follow=False)` over an underlying `Task`
+     - keep `WeftDeferredSubmission` as the `transaction.on_commit()` handle,
+       but make its pre-bind behavior explicit and local rather than exposing a
+       partially initialized raw task
+     - if the exact return values of `status()` or `wait()` are too loose in
+       the current spec text, clarify them in the spec and README in the same
+       slice instead of leaving them implicit
+   - Tests to add or update:
+     - direct helper submission returns the richer wrapper
+     - decorated `enqueue()` returns the richer wrapper
+     - deferred handles expose `name`, gain `tid` after commit, and fail
+       locally with a clear error if result-like methods are called before bind
+     - wrapper `stop()` / `kill()` still delegate to the shared task controls
+   - Stop and re-evaluate if:
+     - the wrapper starts caching task state instead of delegating
+     - the design starts inventing Django-only result objects outside the thin
+       adapter boundary
+   - Done signal:
+     - the public Python surface described by [DJ-10.1] is real in code and
+       covered by tests
+
+4. Remove inline/eager mode from the v1 surface.
+   - Outcome: `weft_django` has one production-equivalent execution path:
+     broker-backed Weft submission through `weft.client`.
+   - Files to touch:
+     - `integrations/weft_django/weft_django/conf.py`
+     - `integrations/weft_django/weft_django/client.py`
+     - `integrations/weft_django/README.md`
+     - `docs/specifications/13C-Using_Weft_With_Django.md`
+     - `integrations/weft_django/tests/test_weft_django.py`
+   - Read first:
+     - `docs/specifications/13C-Using_Weft_With_Django.md` [DJ-9.1],
+       [DJ-17.1], [DJ-17.2], [DJ-17.3]
+   - Implement:
+     - remove `WEFT_DJANGO["TEST_MODE"]` and `get_test_mode()`
+     - remove in-process `Consumer` execution from `weft_django`
+     - keep `transaction.on_commit()` semantics broker-backed, including
+       rollback suppression
+     - document direct Python calls as the narrow unit-test path
+   - Tests to add or update:
+     - rollback prevents `enqueue_on_commit()` binding
+     - `weft_django.client` does not import core runtime internals
+   - Stop and re-evaluate if:
+     - unit-test convenience starts recreating a fake manager, fake task ids, or
+       a shadow lifecycle store
+   - Done signal:
+     - there is no inline/eager mode setting, code path, or documentation
+
+5. Harden the read-only HTTP and SSE surfaces and implement the full realtime
+   contract.
    - Outcome: malformed input is handled as a normal operator error and the
-     documented realtime contract matches what the code actually emits.
+     default realtime transport matches [DJ-12.1] and [DJ-12.3].
    - Files to touch:
      - `integrations/weft_django/weft_django/views.py`
      - `integrations/weft_django/weft_django/sse.py`
-     - `integrations/weft_django/tests/test_weft_django.py`
+     - `integrations/weft_django/weft_django/client.py`
+     - `weft/commands/events.py` or related shared event helpers, if needed
      - `docs/specifications/13C-Using_Weft_With_Django.md`
+     - `integrations/weft_django/tests/test_weft_django.py`
    - Read first:
      - `docs/specifications/13C-Using_Weft_With_Django.md` [DJ-11.1],
-       [DJ-12.1], [DJ-12.3]
+       [DJ-11.2], [DJ-12.1], [DJ-12.3]
      - `weft/commands/events.py`
+     - `weft/client/_task.py`
    - Implement:
-     - validate TIDs before creating task handles and return a normal HTTP error
-       before the SSE response starts streaming
-     - choose one v1 event contract and make code, tests, and docs agree on it
-       in the same change
-     - keep the transport on the shared `Task.follow()` path rather than
-       opening a second outbox/control watcher surface from Django
+     - validate TIDs before creating task handles and return a normal HTTP
+       error before the SSE response starts streaming
+     - introduce one normalized event-shaping path that both transports can
+       reuse
+     - emit `snapshot`, `state`, `stdout`, `stderr`, `result`, and `end` using
+       shared Weft event truth
+     - if `stdout` / `stderr` cannot be represented from the current shared
+       event helpers, extend shared code once rather than adding Django-only
+       queue watchers
    - Tests to add or update:
      - malformed task id on detail endpoint
      - malformed task id on SSE endpoint
      - unknown-but-well-formed task id behavior
      - authorized and unauthorized read/stream requests
-     - first SSE chunk shape under the chosen v1 contract
+     - first SSE chunks and terminal chunks under the normalized contract
    - Stop and re-evaluate if:
-     - supporting `stdout` / `stderr` event types requires a new core event path
-       rather than a thin Django wrapper
+     - satisfying the realtime contract requires a second Django-only event
+       source
    - Done signal:
-     - the fourth review finding is closed and the SSE spec no longer outruns
-       the current event source
+     - the fourth review finding is closed and the default realtime transport
+       matches the documented payload taxonomy
 
-4. Expand the Django test surface around the real contract.
-   - Outcome: the package has regression tests for the contract-sensitive edges
-     that were missing from the initial happy-path suite.
+6. Replace the Channels stub with a real optional transport.
+   - Outcome: projects that install the `channels` extra and enable the
+     transport get a working WebSocket consumer that reuses the same normalized
+     event contract as SSE.
+   - Files to touch:
+     - `integrations/weft_django/weft_django/channels.py`
+     - `integrations/weft_django/weft_django/conf.py`
+     - `integrations/weft_django/weft_django/__init__.py`
+     - optional new routing helper under `integrations/weft_django/weft_django/`
+     - `integrations/weft_django/README.md`
+     - `docs/specifications/13C-Using_Weft_With_Django.md`
+     - `integrations/weft_django/tests/test_weft_django.py`
+   - Read first:
+     - `docs/specifications/13C-Using_Weft_With_Django.md` [DJ-12.2], [DJ-12.3]
+     - `integrations/weft_django/weft_django/channels.py`
+     - the existing package `pyproject.toml` extra definitions
+   - Implement:
+     - make `WEFT_DJANGO["REALTIME"]["TRANSPORT"]` actually select between
+       `none`, `sse`, and `channels`
+     - provide a real consumer that validates authz, validates TIDs, and emits
+       the shared normalized event payloads
+     - keep the import guard and optional dependency boundary explicit
+   - Tests to add or update:
+     - transport setting validation
+     - clean import-guard behavior when Channels is unavailable
+     - consumer-level behavior when Channels is available, or a direct unit
+       test of the shared transport adapter if the test environment does not
+       ship Channels
+   - Stop and re-evaluate if:
+     - the WebSocket path starts diverging from the SSE payload contract
+     - the transport selection logic starts implying a mandatory Channels
+       dependency
+   - Done signal:
+     - the optional WebSocket surface is real, optional, and contract-matched
+
+7. Expand the Django test surface and sync the docs to the shipped contract.
+   - Outcome: the package stops depending on happy-path manual repros for
+     contract-sensitive edges, and the README/spec implementation notes match
+     what the code now does.
    - Files to touch:
      - `integrations/weft_django/tests/test_weft_django.py`
-     - optional small helper test modules under `integrations/weft_django/tests/`
-   - Reuse:
-     - the existing fixture project
-     - real `transaction.atomic()` / `transaction.on_commit()`
-     - real broker-backed Weft execution for submission and result behavior
+     - optional helper test modules under `integrations/weft_django/tests/`
+     - `integrations/weft_django/README.md`
+     - `docs/specifications/13C-Using_Weft_With_Django.md`
    - Add coverage for:
      - duplicate task-name registration failure
      - URL import failure without `AUTHZ`
-     - native helper keyword aliases and ambiguous-call rejection
+     - native helper `payload=` behavior and legacy keyword rejection
+     - richer submission-handle behavior
+     - direct-call unit-test guidance versus broker-backed submission behavior
      - malformed TID handling
      - context-selection behavior under representative `WEFT_*` env settings
-   - Stop and re-evaluate if:
-     - new tests start mocking the manager or queue layer to make the package
-       look more complete than it is
+     - SSE / Channels contract behavior through the shared normalizer
+   - Documentation work:
+     - package README sections for install, `@weft_task`, native submission
+       helpers, richer handle semantics, broker-backed tests, and
+       SSE/Channels operator notes
+     - nearby spec implementation notes and backlinks for the modules that now
+       own the completed behavior
    - Done signal:
-     - the package test tree proves the negative cases that currently require
-       manual repros
-
-5. Defer the larger optional surfaces explicitly instead of leaving stubs.
-   - Outcome: the remaining big-ticket features are either split into future
-     work or intentionally removed from the current v1 story.
-   - Features to decide explicitly in docs:
-     - inline test mode (`DJ-17.1`)
-     - real Channels transport (`DJ-12.2`)
-     - any richer Django-specific result handle beyond the shared
-       `weft.client.Task` surface
-     - duplicated envelope `tid` for worker-side correlation if a clean
-       public-core path does not exist yet
-   - Rule:
-     - do not quietly leave `get_test_mode()`, `get_realtime_transport()`, or
-       `channels.py` as "future promises" while the spec still calls them part
-       of the current contract
-   - Done signal:
-     - the remaining not-now surfaces are visibly deferred rather than
-       accidentally implied
+     - the integration package has enough negative-path coverage that the main
+       remaining risk is product design choice, not contract drift
 
 ## Testing Plan
 
 - Keep broker-backed submission, result, and `on_commit()` proofs real.
-- Use direct Django config tests for the context-selection helper where a full
-  broker run is not needed.
+- Use direct Django config tests for context selection and transport selection
+  where a full broker run is not needed.
 - Keep malformed-TID endpoint checks in the integration test suite so the HTTP
   behavior is proven through the real Django URLs.
-- Do not add a mock-only inline-mode test in this slice. If inline mode remains
-  in scope, it needs its own plan and real design pass.
+- If shared event helpers change, add the smallest shared-core tests there
+  rather than proving everything only through Django views.
+- Do not add inline-mode tests. Narrow unit tests should call Python functions
+  directly; submission behavior should use real broker-backed tests.
 
 ## Verification
 
@@ -291,24 +366,36 @@ Run the smallest meaningful sets first:
 
 ```bash
 ./.venv/bin/python -m pytest integrations/weft_django/tests/test_weft_django.py -q -n 0
+./.venv/bin/python -m pytest tests/core tests/commands -q -n 0
 ./.venv/bin/python -m mypy weft integrations/weft_django/weft_django --config-file pyproject.toml
-./.venv/bin/python -m ruff check integrations/weft_django docs/plans docs/specifications
+./.venv/bin/python -m ruff check weft integrations/weft_django docs/plans docs/specifications
 ```
 
 Success looks like:
 
-- the known Django review findings are covered by tests and fixed,
-- the spec and README describe the same v1 package that the code actually
-  ships,
-- the initial Django landing plan is clearly historical rather than the active
-  execution document,
-- and the remaining big optional surfaces are either implemented in a separate
-  approved slice or explicitly deferred.
+- the known Django review findings are fixed and covered by tests
+- `weft_django` exposes the richer submission handle described by [DJ-10.1]
+  without creating a second backend
+- there is no inline/eager execution mode in the v1 Django package
+- SSE and optional Channels share one event contract that matches the docs
+- and the README/spec/plan corpus describe the same thin but now-complete v1
+  package
 
-## Out of Scope
+## Required Action
 
-- Real Channels/WebSocket transport implementation in this slice
-- Inline-mode execution design and implementation in this slice
+- Implement tasks 2 through 6 in order.
+- Run an independent review after task 3 because it changes the public Python
+  surface.
+- Run a second independent review after task 6 because it changes runtime and
+  transport behavior across both HTTP and optional WebSocket paths.
+- Do not mark the Django slice complete until task 7 lands with the doc and
+  regression-test updates.
+
+## Out Of Scope
+
 - Admin integration
-- Reworking the already-landed CI/release automation beyond doc or test drift
-- A second Django-local result backend or task-truth store
+- HTTP control endpoints
+- A Django model or database table for task truth
+- Mandatory WebSocket / Channels dependency
+- Reworking the already-landed CI and release automation beyond test or doc
+  drift directly needed for this implementation slice

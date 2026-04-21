@@ -277,6 +277,14 @@ MANAGER_SPAWN_FENCED_STRANDED_EVENT: Final[str] = "manager_spawn_fenced_stranded
 MANAGER_SPAWN_FENCE_SUSPENDED_EVENT: Final[str] = "manager_spawn_fence_suspended"
 """Manager event emitted when dispatch is suspended awaiting ownership recovery."""
 
+MANAGER_SPAWN_FENCE_RECOVERY_EXHAUSTED_EVENT: Final[str] = (
+    "manager_spawn_fence_recovery_exhausted"
+)
+"""Manager event emitted when fenced reserved-work recovery reaches its ceiling."""
+
+MANAGER_DISPATCH_RECOVERY_MAX_ATTEMPTS: Final[int] = 5
+"""Maximum exact-requeue attempts before a fenced spawn request is left stranded."""
+
 HEARTBEAT_MIN_INTERVAL_SECONDS: Final[int] = 60
 """Minimum interval accepted by the first-slice heartbeat service."""
 

@@ -103,18 +103,28 @@ def test_client_submit_uses_shared_submission_module(
 ) -> None:
     captured: dict[str, object] = {}
 
-    def _fake_submit(context, taskspec, *, payload=None, **overrides):
-        captured["context"] = context
+    def _fake_prepare(context, taskspec, *, payload=None, **overrides):
+        captured["prepare_context"] = context
         captured["taskspec"] = taskspec
         captured["payload"] = payload
         captured["overrides"] = overrides
+        return submission_mod.PreparedSubmissionRequest(
+            name="demo",
+            taskspec=taskspec,
+            payload=payload,
+        )
+
+    def _fake_submit_prepared(context, prepared):
+        captured["submit_context"] = context
+        captured["prepared"] = prepared
         return submission_mod.SubmittedTaskReceipt(
             tid="1776000000000000001",
             name="demo",
             submitted_at_ns=1776000000000000001,
         )
 
-    monkeypatch.setattr(submission_mod, "submit", _fake_submit)
+    monkeypatch.setattr(submission_mod, "prepare", _fake_prepare)
+    monkeypatch.setattr(submission_mod, "submit_prepared", _fake_submit_prepared)
 
     with WeftTestHarness() as harness:
         client = WeftClient(path=harness.root)
@@ -123,7 +133,13 @@ def test_client_submit_uses_shared_submission_module(
         )
 
     assert task.tid == "1776000000000000001"
+    assert captured["submit_context"] is captured["prepare_context"]
     assert captured["payload"] is None
+    assert captured["prepared"] == submission_mod.PreparedSubmissionRequest(
+        name="demo",
+        taskspec=captured["taskspec"],
+        payload=None,
+    )
 
 
 def test_follow_task_events_reuses_shared_result_wait_without_timeout(

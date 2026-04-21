@@ -15,6 +15,7 @@ from ._namespaces import (
     SystemNamespace,
     TasksNamespace,
 )
+from ._prepared import PreparedSubmission
 from ._task import Task
 
 
@@ -56,13 +57,22 @@ class WeftClient:
         payload: Any = None,
         **overrides: Any,
     ) -> Task:
-        receipt = submission.submit(
+        return self.prepare(taskspec, payload=payload, **overrides).submit()
+
+    def prepare(
+        self,
+        taskspec: Any,
+        *,
+        payload: Any = None,
+        **overrides: Any,
+    ) -> PreparedSubmission:
+        request = submission.prepare(
             self.context,
             taskspec,
             payload=payload,
             **overrides,
         )
-        return Task(self, receipt.tid)
+        return PreparedSubmission(self, request)
 
     def submit_spec(
         self,
@@ -71,13 +81,22 @@ class WeftClient:
         payload: Any = None,
         **overrides: Any,
     ) -> Task:
-        receipt = submission.submit_spec(
+        return self.prepare_spec(reference, payload=payload, **overrides).submit()
+
+    def prepare_spec(
+        self,
+        reference: str | Path,
+        *,
+        payload: Any = None,
+        **overrides: Any,
+    ) -> PreparedSubmission:
+        request = submission.prepare_spec(
             self.context,
             reference,
             payload=payload,
             **overrides,
         )
-        return Task(self, receipt.tid)
+        return PreparedSubmission(self, request)
 
     def submit_pipeline(
         self,
@@ -86,13 +105,22 @@ class WeftClient:
         payload: Any = None,
         **overrides: Any,
     ) -> Task:
-        receipt = submission.submit_pipeline(
+        return self.prepare_pipeline(reference, payload=payload, **overrides).submit()
+
+    def prepare_pipeline(
+        self,
+        reference: str | Path,
+        *,
+        payload: Any = None,
+        **overrides: Any,
+    ) -> PreparedSubmission:
+        request = submission.prepare_pipeline(
             self.context,
             reference,
             payload=payload,
             **overrides,
         )
-        return Task(self, receipt.tid)
+        return PreparedSubmission(self, request)
 
     def submit_command(
         self,

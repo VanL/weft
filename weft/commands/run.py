@@ -1,8 +1,9 @@
-"""Shared `weft run` orchestration for CLI-facing execution modes.
+"""Shared `weft run` execution helpers.
 
-This module is shared below the Typer adapter, but it remains CLI-oriented:
-streaming and interactive paths emit directly to stdout/stderr. It is not yet
-the basis for a public programmatic `WeftClient.run()` surface.
+Non-interactive run modes expose structured `execute_run()` results and leave
+stdout/stderr rendering to the Typer adapter. Interactive prompt mode remains
+presentation-adjacent here because it owns prompt-toolkit callbacks and live
+stream display. This module is still not a public `WeftClient.run()` surface.
 
 Spec references:
 - docs/specifications/10-CLI_Interface.md [CLI-1.1.1]
@@ -109,22 +110,21 @@ def _echo(message: Any = "", *, err: bool = False, nl: bool = True) -> None:
 def _emit_manager_started(record: dict[str, Any]) -> None:
     """Emit the CLI-visible manager startup event for verbose runs."""
 
-    _echo(
-        json.dumps(
-            {
-                "event": "manager_started",
-                "manager_tid": record.get("tid"),
-                "pid": record.get("pid"),
-                "queues": {
-                    key: record.get(key)
-                    for key in ("requests", "outbox", "ctrl_in", "ctrl_out")
-                    if record.get(key)
-                },
-                "timestamp": record.get("timestamp"),
-            },
-            ensure_ascii=False,
-        )
-    )
+    _echo(json.dumps(_manager_started_payload(record), ensure_ascii=False))
+
+
+def _manager_started_payload(record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "event": "manager_started",
+        "manager_tid": record.get("tid"),
+        "pid": record.get("pid"),
+        "queues": {
+            key: record.get(key)
+            for key in ("requests", "outbox", "ctrl_in", "ctrl_out")
+            if record.get(key)
+        },
+        "timestamp": record.get("timestamp"),
+    }
 
 
 def _run_with_managed_execution(
@@ -134,6 +134,7 @@ def _run_with_managed_execution(
     verbose: bool,
     wait: bool,
     reuse_enabled: bool,
+    emit_verbose: bool = True,
     wait_for_completion: Callable[[str], tuple[str, Any, str | None]] | None = None,
     on_submitted: Callable[[str], None] | None = None,
 ) -> RunExecutionResult:
@@ -142,6 +143,7 @@ def _run_with_managed_execution(
     started_here = False
     process_handle: subprocess.Popen[bytes] | None = None
     failed = False
+    manager_started_payload: dict[str, Any] | None = None
 
     try:
         tid_int = submit()
@@ -150,14 +152,19 @@ def _run_with_managed_execution(
             submitted_tid=tid_int,
             verbose=verbose,
         )
-        if started_here and verbose and manager_record is not None:
+        if emit_verbose and started_here and verbose and manager_record is not None:
             _emit_manager_started(manager_record)
+        if started_here and manager_record is not None:
+            manager_started_payload = _manager_started_payload(manager_record)
         tid = str(tid_int)
         if on_submitted is not None:
             on_submitted(tid)
 
         if not wait:
-            return RunExecutionResult(tid=tid)
+            return RunExecutionResult(
+                tid=tid,
+                manager_started_payload=manager_started_payload,
+            )
 
         if wait_for_completion is None:  # pragma: no cover - caller contract guard
             raise RuntimeError("wait_for_completion is required when wait=True")
@@ -168,6 +175,7 @@ def _run_with_managed_execution(
             status=status,
             result_value=result_value,
             error_message=error_message,
+            manager_started_payload=manager_started_payload,
         )
     except Exception:
         failed = True
@@ -786,6 +794,78 @@ def _initial_work_payload(
     return None
 
 
+def render_run_execution_result(
+    execution: RunExecutionResult,
+    *,
+    wait: bool,
+    json_output: bool,
+    verbose: bool,
+    emit: Callable[..., None] = _echo,
+) -> int:
+    """Render one structured run result for CLI output."""
+
+    if verbose and execution.manager_started_payload is not None:
+        emit(json.dumps(execution.manager_started_payload, ensure_ascii=False))
+    if verbose and execution.submitted_payload is not None:
+        emit(json.dumps(execution.submitted_payload, indent=2))
+
+    if execution.submission_error is not None:
+        emit(execution.submission_error, err=True)
+        return 1
+
+    tid = execution.tid
+    if not wait:
+        if json_output:
+            emit(json.dumps({"tid": tid, "status": "queued"}, ensure_ascii=False))
+        else:
+            emit(tid)
+        return 0
+
+    status = execution.status
+    result_value = execution.result_value
+    error_message = execution.error_message
+
+    if status == "completed":
+        if json_output:
+            emit(
+                json.dumps(
+                    {
+                        "tid": tid,
+                        "status": status,
+                        "result": result_value,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        else:
+            if isinstance(result_value, (dict, list)):
+                emit(json.dumps(result_value, ensure_ascii=False))
+            elif result_value not in (None, ""):
+                emit(str(result_value))
+        return 0
+
+    display_error = error_message
+    if status == "cancelled":
+        display_error = "Task cancelled"
+    elif status == "killed":
+        display_error = "Task killed"
+
+    if json_output:
+        emit(
+            json.dumps(
+                {
+                    "tid": tid,
+                    "status": status,
+                    "error": display_error,
+                },
+                ensure_ascii=False,
+            )
+        )
+    else:
+        emit(f"{execution.error_prefix}: {display_error}", err=True)
+    return 124 if status == "timeout" else 1
+
+
 def _build_spec_work_payload(
     *,
     taskspec: TaskSpec,
@@ -891,7 +971,7 @@ def _materialize_parameterized_spec(
     return materialized, remaining_tokens
 
 
-def _run_inline(
+def _execute_inline(
     *,
     command: Sequence[str],
     function_target: str | None,
@@ -910,7 +990,7 @@ def _run_inline(
     json_output: bool,
     verbose: bool,
     autostart_enabled: bool,
-) -> int:
+) -> RunExecutionResult:
     target_type = "command" if command else "function"
     if target_type == "command" and not command:
         raise RunUsageError("Provide a command to execute or use --function")
@@ -971,20 +1051,6 @@ def _run_inline(
     )
     reuse_enabled = bool(context.config.get("WEFT_MANAGER_REUSE_ENABLED", True))
 
-    def _emit_verbose_submission(tid: str) -> None:
-        if not verbose:
-            return
-        _echo(
-            json.dumps(
-                {
-                    "tid": tid,
-                    "task": task_name,
-                    "db": context.broker_display_target,
-                },
-                indent=2,
-            )
-        )
-
     def _wait_for_inline_completion(tid: str) -> tuple[str, Any, str | None]:
         resolved_payload = resolve_taskspec_payload(
             taskspec.model_dump(mode="json"),
@@ -1039,72 +1105,73 @@ def _run_inline(
             verbose=verbose,
             wait=wait,
             reuse_enabled=reuse_enabled,
+            emit_verbose=False,
             wait_for_completion=_wait_for_inline_completion if wait else None,
-            on_submitted=_emit_verbose_submission,
         )
     except Exception as exc:
-        _echo(f"Error submitting task: {exc}", err=True)
-        return 1
-
-    tid = execution.tid
-    if not wait:
-        if json_output:
-            _echo(
-                json.dumps(
-                    {"tid": tid, "status": "queued"},
-                    ensure_ascii=False,
-                )
-            )
-        else:
-            _echo(tid)
-        return 0
-
-    status = execution.status
-    result_value = execution.result_value
-    error_message = execution.error_message
-
-    if status == "completed":
-        if json_output:
-            _echo(
-                json.dumps(
-                    {
-                        "tid": tid,
-                        "status": status,
-                        "result": result_value,
-                    },
-                    ensure_ascii=False,
-                )
-            )
-        else:
-            if isinstance(result_value, (dict, list)):
-                _echo(json.dumps(result_value, ensure_ascii=False))
-            elif result_value not in (None, ""):
-                _echo(str(result_value))
-        return 0
-
-    display_error = error_message
-    if status == "cancelled":
-        display_error = "Task cancelled"
-    elif status == "killed":
-        display_error = "Task killed"
-
-    if json_output:
-        _echo(
-            json.dumps(
-                {
-                    "tid": tid,
-                    "status": status,
-                    "error": display_error,
-                },
-                ensure_ascii=False,
-            )
+        return RunExecutionResult(
+            tid="",
+            submission_error=f"Error submitting task: {exc}",
         )
-    else:
-        _echo(f"Error executing task: {display_error}", err=True)
-    return 124 if status == "timeout" else 1
+
+    return replace(
+        execution,
+        submitted_payload={
+            "tid": execution.tid,
+            "task": task_name,
+            "db": context.broker_display_target,
+        },
+    )
 
 
-def _run_spec_via_manager(
+def _run_inline(
+    *,
+    command: Sequence[str],
+    function_target: str | None,
+    args: Sequence[str],
+    kwargs: Sequence[str],
+    env: Sequence[str],
+    name: str | None,
+    interactive: bool,
+    stream_output: bool | None,
+    timeout: float | None,
+    memory: int | None,
+    cpu: int | None,
+    tags: Sequence[str],
+    context_dir: Path | None,
+    wait: bool,
+    json_output: bool,
+    verbose: bool,
+    autostart_enabled: bool,
+) -> int:
+    execution = _execute_inline(
+        command=command,
+        function_target=function_target,
+        args=args,
+        kwargs=kwargs,
+        env=env,
+        name=name,
+        interactive=interactive,
+        stream_output=stream_output,
+        timeout=timeout,
+        memory=memory,
+        cpu=cpu,
+        tags=tags,
+        context_dir=context_dir,
+        wait=wait,
+        json_output=json_output,
+        verbose=verbose,
+        autostart_enabled=autostart_enabled,
+    )
+    return render_run_execution_result(
+        execution,
+        wait=wait,
+        json_output=json_output,
+        verbose=verbose,
+    )
+
+
+def _execute_spec_via_manager(
     spec_ref: str | Path,
     *,
     name: str | None = None,
@@ -1115,7 +1182,7 @@ def _run_spec_via_manager(
     json_output: bool,
     autostart_enabled: bool,
     persistent_override: bool | None,
-) -> int:
+) -> RunExecutionResult:
     spec = _load_taskspec_reference(spec_ref, context_dir=context_dir)
     bundle_root = spec.get_bundle_root()
     spec_payload = spec.model_dump(mode="json")
@@ -1175,65 +1242,57 @@ def _run_spec_via_manager(
             verbose=verbose,
             wait=wait,
             reuse_enabled=reuse_enabled,
+            emit_verbose=False,
             wait_for_completion=_wait_for_spec_completion if wait else None,
         )
     except Exception as exc:
-        _echo(f"Error submitting TaskSpec: {exc}", err=True)
-        return 1
-
-    tid = execution.tid
-    if not wait:
-        if json_output:
-            _echo(
-                json.dumps(
-                    {"tid": tid, "status": "queued"},
-                    ensure_ascii=False,
-                )
-            )
-        else:
-            _echo(tid)
-        return 0
-
-    status = execution.status
-    result_value = execution.result_value
-    error_message = execution.error_message
-
-    if status == "completed":
-        if json_output:
-            _echo(
-                json.dumps(
-                    {
-                        "tid": tid,
-                        "status": status,
-                        "result": result_value,
-                    },
-                    ensure_ascii=False,
-                )
-            )
-        else:
-            if isinstance(result_value, (dict, list)):
-                _echo(json.dumps(result_value, ensure_ascii=False))
-            elif result_value not in (None, ""):
-                _echo(str(result_value))
-        return 0
-
-    if json_output:
-        _echo(
-            json.dumps(
-                {
-                    "tid": tid,
-                    "status": status,
-                    "error": error_message,
-                },
-                ensure_ascii=False,
-            )
+        return RunExecutionResult(
+            tid="",
+            submission_error=f"Error submitting TaskSpec: {exc}",
         )
-    else:
-        _echo(f"Error executing task: {error_message}", err=True)
-    return 124 if status == "timeout" else 1
+
+    return replace(
+        execution,
+        submitted_payload={
+            "tid": execution.tid,
+            "task": spec.name,
+            "db": context.broker_display_target,
+        },
+    )
 
 
-def _run_pipeline(
+def _run_spec_via_manager(
+    spec_ref: str | Path,
+    *,
+    name: str | None = None,
+    context_dir: Path | None = None,
+    run_input_tokens: Sequence[str] = (),
+    verbose: bool,
+    wait: bool,
+    json_output: bool,
+    autostart_enabled: bool,
+    persistent_override: bool | None,
+) -> int:
+    execution = _execute_spec_via_manager(
+        spec_ref,
+        name=name,
+        context_dir=context_dir,
+        run_input_tokens=run_input_tokens,
+        verbose=verbose,
+        wait=wait,
+        json_output=json_output,
+        autostart_enabled=autostart_enabled,
+        persistent_override=persistent_override,
+    )
+    return render_run_execution_result(
+        execution,
+        wait=wait,
+        json_output=json_output,
+        verbose=verbose,
+    )
+
+
+def _execute_pipeline(
     pipeline: str | Path,
     *,
     name: str | None,
@@ -1243,7 +1302,7 @@ def _run_pipeline(
     json_output: bool,
     verbose: bool,
     autostart_enabled: bool,
-) -> int:
+) -> RunExecutionResult:
     context = build_context(spec_context=context_dir, autostart=autostart_enabled)
     pipeline_spec, source_ref = _load_pipeline_spec(pipeline, context_dir=context_dir)
     stdin_data = _read_piped_stdin(context)
@@ -1285,20 +1344,6 @@ def _run_pipeline(
 
     reuse_enabled = bool(context.config.get("WEFT_MANAGER_REUSE_ENABLED", True))
 
-    def _emit_pipeline_submission(tid: str) -> None:
-        if not verbose:
-            return
-        _echo(
-            json.dumps(
-                {
-                    "tid": tid,
-                    "pipeline": compiled.runtime.pipeline_name,
-                    "db": context.broker_display_target,
-                },
-                indent=2,
-            )
-        )
-
     execution = _run_with_managed_execution(
         context=context,
         submit=lambda: _enqueue_taskspec(
@@ -1311,6 +1356,7 @@ def _run_pipeline(
         verbose=verbose,
         wait=wait,
         reuse_enabled=reuse_enabled,
+        emit_verbose=False,
         wait_for_completion=(
             (
                 lambda _tid: _wait_for_task_completion(
@@ -1321,59 +1367,46 @@ def _run_pipeline(
             if wait
             else None
         ),
-        on_submitted=_emit_pipeline_submission,
     )
 
-    tid = execution.tid
-    if not wait:
-        if json_output:
-            _echo(
-                json.dumps(
-                    {"tid": tid, "status": "queued"},
-                    ensure_ascii=False,
-                )
-            )
-        else:
-            _echo(tid)
-        return 0
+    return replace(
+        execution,
+        error_prefix="Pipeline failed",
+        submitted_payload={
+            "tid": execution.tid,
+            "pipeline": compiled.runtime.pipeline_name,
+            "db": context.broker_display_target,
+        },
+    )
 
-    status = execution.status
-    result_value = execution.result_value
-    error_message = execution.error_message
 
-    if status == "completed":
-        if json_output:
-            _echo(
-                json.dumps(
-                    {
-                        "tid": tid,
-                        "status": status,
-                        "result": result_value,
-                    },
-                    ensure_ascii=False,
-                )
-            )
-        else:
-            if isinstance(result_value, (dict, list)):
-                _echo(json.dumps(result_value, ensure_ascii=False))
-            elif result_value not in (None, ""):
-                _echo(str(result_value))
-        return 0
-
-    if json_output:
-        _echo(
-            json.dumps(
-                {
-                    "tid": tid,
-                    "status": status,
-                    "error": error_message,
-                },
-                ensure_ascii=False,
-            )
-        )
-    else:
-        _echo(f"Pipeline failed: {error_message}", err=True)
-    return 124 if status == "timeout" else 1
+def _run_pipeline(
+    pipeline: str | Path,
+    *,
+    name: str | None,
+    pipeline_input: str | None,
+    context_dir: Path | None,
+    wait: bool,
+    json_output: bool,
+    verbose: bool,
+    autostart_enabled: bool,
+) -> int:
+    execution = _execute_pipeline(
+        pipeline,
+        name=name,
+        pipeline_input=pipeline_input,
+        context_dir=context_dir,
+        wait=wait,
+        json_output=json_output,
+        verbose=verbose,
+        autostart_enabled=autostart_enabled,
+    )
+    return render_run_execution_result(
+        execution,
+        wait=wait,
+        json_output=json_output,
+        verbose=verbose,
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -1381,7 +1414,7 @@ def _run_pipeline(
 # -----------------------------------------------------------------------------
 
 
-def cmd_run(
+def execute_run(
     command: Sequence[str],
     *,
     spec_run_args: Sequence[str],
@@ -1406,8 +1439,8 @@ def cmd_run(
     monitor: bool,
     persistent_override: bool | None,
     autostart_enabled: bool,
-) -> int:
-    """Execute a command, function, task spec, or pipeline.
+) -> RunExecutionResult:
+    """Execute a command, function, task spec, or pipeline without rendering.
 
     Four execution modes (mutually exclusive):
 
@@ -1442,7 +1475,7 @@ def cmd_run(
             raise RunUsageError("--monitor is not supported with pipelines.")
         if persistent_override is not None:
             raise RunUsageError("--continuous/--once is not supported with pipelines.")
-        return _run_pipeline(
+        return _execute_pipeline(
             pipeline,
             name=name,
             pipeline_input=pipeline_input,
@@ -1463,7 +1496,7 @@ def cmd_run(
             )
         if monitor:
             raise RunUsageError("--monitor is not yet supported with the Manager.")
-        return _run_spec_via_manager(
+        return _execute_spec_via_manager(
             spec,
             name=name,
             context_dir=context_dir,
@@ -1496,7 +1529,7 @@ def cmd_run(
             "input, use a command that does not begin with '--'."
         )
 
-    return _run_inline(
+    return _execute_inline(
         command=command,
         function_target=function,
         args=args,
@@ -1517,6 +1550,18 @@ def cmd_run(
     )
 
 
+def cmd_run(command: Sequence[str], **kwargs: Any) -> int:
+    """Compatibility renderer for callers that still use the command module."""
+
+    execution = execute_run(command, **kwargs)
+    return render_run_execution_result(
+        execution,
+        wait=bool(kwargs["wait"]),
+        json_output=bool(kwargs["json_output"]),
+        verbose=bool(kwargs["verbose"]),
+    )
+
+
 __all__ = [
     "RunResolutionError",
     "RunUsageError",
@@ -1525,6 +1570,9 @@ __all__ = [
     "_delete_spawn_request",
     "_enqueue_taskspec",
     "_ensure_manager",
+    "_execute_inline",
+    "_execute_pipeline",
+    "_execute_spec_via_manager",
     "_generate_tid",
     "_run_inline",
     "_run_pipeline",
@@ -1533,5 +1581,7 @@ __all__ = [
     "_start_manager",
     "_wait_for_task_completion",
     "cmd_run",
+    "execute_run",
+    "render_run_execution_result",
     "render_spec_aware_run_help",
 ]

@@ -35,6 +35,8 @@ from weft._constants import (
     INTERNAL_RUNTIME_TASK_CLASS_PIPELINE,
     INTERNAL_RUNTIME_TASK_CLASS_PIPELINE_EDGE,
     MANAGER_CHILD_EXIT_POLL_INTERVAL,
+    MANAGER_DISPATCH_RECOVERY_MAX_ATTEMPTS,
+    MANAGER_SPAWN_FENCE_RECOVERY_EXHAUSTED_EVENT,
     MANAGER_SPAWN_FENCE_SUSPENDED_EVENT,
     MANAGER_SPAWN_FENCED_REQUEUED_EVENT,
     MANAGER_SPAWN_FENCED_STRANDED_EVENT,
@@ -66,7 +68,7 @@ from .pipelines import (
 )
 from .spec_store import resolve_named_spec_from_root
 from .tasks import Consumer
-from .tasks.base import BaseTask, QueueMessageContext
+from .tasks.base import BaseTask, QueueMessageContext, TaskControlPolicy
 from .tasks.multiqueue_watcher import QueueMode
 from .taskspec import (
     ReservedPolicy,
@@ -114,6 +116,7 @@ class DispatchSuspension:
     message_id: int
     recovery_pending: bool
     leader_tid: str | None = None
+    recovery_attempts: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,6 +135,14 @@ class Manager(BaseTask):
 
     Spec: [MA-0], [MA-1], [MF-6], [MF-7]
     """
+
+    control_policy = TaskControlPolicy(
+        stop="drain-children",
+        kill="immediate",
+        reserved_policy="base",
+        ack="immediate-draining",
+        terminal_state="drain-completion",
+    )
 
     def __init__(
         self,
@@ -602,6 +613,11 @@ class Manager(BaseTask):
             )
             if requeued:
                 self._dispatch_suspension = None
+            else:
+                self._record_dispatch_recovery_failure(
+                    suspension,
+                    ownership=ownership,
+                )
             return DispatchSuspensionRefresh(ownership=ownership, halt_turn=True)
 
         self._dispatch_suspension = DispatchSuspension(
@@ -610,6 +626,7 @@ class Manager(BaseTask):
             message_id=suspension.message_id,
             recovery_pending=suspension.recovery_pending,
             leader_tid=ownership.leader_tid,
+            recovery_attempts=suspension.recovery_attempts,
         )
 
         if suspension.recovery_pending and ownership.state == "other":
@@ -620,6 +637,7 @@ class Manager(BaseTask):
                     message_id=suspension.message_id,
                     recovery_pending=False,
                     leader_tid=ownership.leader_tid,
+                    recovery_attempts=suspension.recovery_attempts,
                 )
             else:
                 requeued = self._requeue_reserved_spawn_request(
@@ -632,6 +650,12 @@ class Manager(BaseTask):
                         message_id=suspension.message_id,
                         recovery_pending=False,
                         leader_tid=ownership.leader_tid,
+                        recovery_attempts=suspension.recovery_attempts,
+                    )
+                else:
+                    self._record_dispatch_recovery_failure(
+                        suspension,
+                        ownership=ownership,
                     )
 
         return DispatchSuspensionRefresh(ownership=ownership)
@@ -646,6 +670,54 @@ class Manager(BaseTask):
     def _dispatch_recovery_pending(self) -> bool:
         suspension = self._dispatch_suspension
         return bool(suspension is not None and suspension.recovery_pending)
+
+    def _record_dispatch_recovery_failure(
+        self,
+        suspension: DispatchSuspension,
+        *,
+        ownership: DispatchOwnership,
+    ) -> None:
+        """Record one failed exact requeue attempt for fenced reserved work.
+
+        Spec: [MF-6]
+        """
+
+        attempts = suspension.recovery_attempts + 1
+        leader_tid = ownership.leader_tid or suspension.leader_tid
+        if attempts >= MANAGER_DISPATCH_RECOVERY_MAX_ATTEMPTS:
+            self._report_state_change(
+                event=MANAGER_SPAWN_FENCE_RECOVERY_EXHAUSTED_EVENT,
+                child_tid=suspension.child_tid,
+                leader_tid=leader_tid,
+                reserved_queue=self._queue_names["reserved"],
+                message_id=suspension.message_id,
+                ownership_state=ownership.state,
+                attempts=attempts,
+            )
+            if ownership.state == "self":
+                self._dispatch_suspension = None
+                return
+            self._dispatch_suspension = DispatchSuspension(
+                ownership_state=ownership.state,
+                child_tid=suspension.child_tid,
+                message_id=suspension.message_id,
+                recovery_pending=False,
+                leader_tid=leader_tid,
+                recovery_attempts=attempts,
+            )
+            return
+
+        ownership_state = (
+            "other" if ownership.state == "other" else suspension.ownership_state
+        )
+        self._dispatch_suspension = DispatchSuspension(
+            ownership_state=ownership_state,
+            child_tid=suspension.child_tid,
+            message_id=suspension.message_id,
+            recovery_pending=True,
+            leader_tid=leader_tid,
+            recovery_attempts=attempts,
+        )
 
     def _reserved_spawn_request_missing(self, *, message_id: int) -> bool:
         try:
@@ -1144,6 +1216,12 @@ class Manager(BaseTask):
                 reserved_queue=reserved_queue,
                 message_id=message_id,
             )
+            if not requeued:
+                assert self._dispatch_suspension is not None
+                self._record_dispatch_recovery_failure(
+                    self._dispatch_suspension,
+                    ownership=ownership,
+                )
             if requeued:
                 self._maybe_yield_leadership(force=True)
             return False

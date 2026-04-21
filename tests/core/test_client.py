@@ -8,7 +8,19 @@ from pathlib import Path
 import pytest
 
 from tests.helpers.weft_harness import WeftTestHarness
-from weft.client import Task, TaskEvent, TaskResult, TaskSnapshot, WeftClient
+from weft.client import (
+    ControlRejected,
+    InvalidTID,
+    PreparedSubmission,
+    SpecNotFound,
+    Task,
+    TaskEvent,
+    TaskNotFound,
+    TaskResult,
+    TaskSnapshot,
+    WeftClient,
+    WeftError,
+)
 from weft.core.taskspec import TaskSpec
 
 pytestmark = [pytest.mark.shared]
@@ -43,11 +55,17 @@ def _function_taskspec(
 
 
 def test_public_names_are_importable() -> None:
+    assert ControlRejected is not None
+    assert InvalidTID is not None
+    assert PreparedSubmission is not None
+    assert SpecNotFound is not None
     assert Task is not None
     assert TaskEvent is not None
+    assert TaskNotFound is not None
     assert TaskResult is not None
     assert TaskSnapshot is not None
     assert WeftClient is not None
+    assert WeftError is not None
 
 
 def test_submitted_task_is_not_public() -> None:
@@ -84,6 +102,24 @@ def test_submit_returns_task_with_completed_result() -> None:
         assert result.value == "hello!"
         assert task.tid.isdigit()
         assert len(task.tid) == 19
+
+
+def test_prepare_snapshots_payload_before_submission() -> None:
+    with WeftTestHarness() as harness:
+        client = WeftClient(path=harness.root)
+        payload = {"value": "before"}
+        prepared = client.prepare(
+            _function_taskspec(harness.root),
+            payload=payload,
+        )
+        payload["value"] = "after"
+
+        task = prepared.submit()
+        result = task.result(timeout=30.0)
+
+        assert prepared.name == "client-task"
+        assert result.status == "completed"
+        assert result.value == "{'value': 'before'}"
 
 
 def test_submit_command_returns_task_with_completed_result() -> None:
@@ -173,6 +209,19 @@ def test_task_follow_ends_with_result_event() -> None:
 
         assert events[-1].event_type == "result"
         assert events[-1].payload["status"] == "completed"
+
+
+def test_task_realtime_events_expose_browser_event_contract() -> None:
+    with WeftTestHarness() as harness:
+        client = WeftClient(path=harness.root)
+        task = client.submit_command(["echo", "done"])
+        events = list(task.realtime_events())
+
+        event_types = [event.event_type for event in events]
+        assert "snapshot" in event_types
+        assert "state" in event_types
+        assert "result" in event_types
+        assert event_types[-1] == "end"
 
 
 def test_system_and_manager_namespaces_expose_shared_runtime_state() -> None:

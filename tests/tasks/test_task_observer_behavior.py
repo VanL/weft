@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from weft._constants import (
     CONTROL_STOP,
     QUEUE_CTRL_IN_SUFFIX,
@@ -118,12 +120,16 @@ def test_monitor_stop_command(broker_env) -> None:
     db_path, make_queue = broker_env
     spec = make_observer_spec("1761013000000000300")
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
+    ctrl_out = make_queue(spec.io.control["ctrl_out"])
     ctrl_in.write(CONTROL_STOP)
 
     monitor = Monitor(db_path, spec, observer=lambda msg, ts: None)
     monitor._drain_queue()
 
     assert monitor.should_stop is True
+    response = json.loads(ctrl_out.read_one())
+    assert response["command"] == "STOP"
+    assert response["status"] == "ack"
 
 
 def test_sampling_observer_interval(broker_env, monkeypatch) -> None:

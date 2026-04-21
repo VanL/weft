@@ -45,6 +45,12 @@ uv add 'weft[docker]'
 # Install macOS sandbox runner support
 uv add 'weft[macos-sandbox]'
 
+# Install Django integration support
+uv add 'weft[django]'
+
+# Install Django integration plus Channels/WebSocket realtime support
+uv add 'weft[django-channels]'
+
 # Install all first-party optional backends and runners
 uv add 'weft[all]'
 ```
@@ -56,13 +62,16 @@ variables; the extra only makes the Postgres backend available.
 Runner extras work the same way: `weft[docker]` adds the Docker runner plugin
 plus the Docker SDK dependency, `weft[macos-sandbox]` adds the macOS sandbox
 runner plugin, and `weft[django]` adds the first-party Django integration
-package. The first-party Docker runner is currently supported on Linux and
-macOS only. `weft[all]` installs the current first-party optional backends,
-runner plugins, and framework integrations together. Runner selection still
-happens per TaskSpec through `spec.runner`. The current Docker runner owns
-normal command tasks and the Docker-backed one-shot `provider_cli` agent lane
-for providers with explicit image recipes. The current shipped image-recipe set
-is `claude_code`, `codex`, `gemini`, `opencode`, and `qwen`.
+package. `weft[django-channels]` adds that Django integration plus the optional
+Channels/WebSocket realtime transport. The first-party Docker runner is
+currently supported on Linux and macOS only. `weft[all]` installs the current
+first-party optional backends, runner plugins, and framework integrations
+together; it does not pull nested framework transport extras such as Channels.
+Runner selection still happens per TaskSpec through `spec.runner`. The current
+Docker runner owns normal command tasks and the Docker-backed one-shot
+`provider_cli` agent lane for providers with explicit image recipes. The
+current shipped image-recipe set is `claude_code`, `codex`, `gemini`,
+`opencode`, and `qwen`.
 
 ## Quick Start
 
@@ -117,7 +126,8 @@ For a guided walkthrough, see [Your First Weft Task](docs/tutorials/first-task.m
 
 `weft.client` is the public Python surface over the same shared command layer
 the CLI uses. The basic pattern is `submit(...) -> Task`, then inspect or wait
-through the task handle.
+through the task handle. The package ships as typed Python (`py.typed`) and
+re-exports the public exception surface for library integrations.
 
 ```python
 from weft.client import WeftClient
@@ -137,6 +147,15 @@ Stored specs and pipelines use the same reference grammar as
 ```python
 task = client.submit_spec("probe-agents")
 pipeline = client.submit_pipeline("etl-job", payload={"batch": 7})
+```
+
+Use `prepare*` when an integration needs to validate and snapshot work before a
+later commit point. Preparation does not enqueue work; `submit()` does:
+
+```python
+prepared = client.prepare_spec("report-job", payload={"report_id": 123})
+# later, after the host app commits its own durable state
+task = prepared.submit()
 ```
 
 Use namespaces when you want the broader control surface:

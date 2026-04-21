@@ -22,6 +22,21 @@ class SubmittedTaskReceipt:
 
 
 @dataclass(frozen=True, slots=True)
+class PreparedSubmissionRequest:
+    """Validated, immutable-enough queue submission request.
+
+    The `taskspec` field intentionally stays typed as `Any` so the shared
+    command type module does not import core TaskSpec models.
+    """
+
+    name: str
+    taskspec: Any
+    payload: Any | None
+    seed_start_envelope: bool = True
+    allow_internal_runtime: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class TaskSnapshot:
     """Public current-state view for one task."""
 
@@ -75,6 +90,10 @@ class RunExecutionResult:
     status: str | None = None
     result_value: Any | None = None
     error_message: str | None = None
+    submission_error: str | None = None
+    error_prefix: str = "Error executing task"
+    submitted_payload: dict[str, Any] | None = None
+    manager_started_payload: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)

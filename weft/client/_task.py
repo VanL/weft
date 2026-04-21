@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass
+from typing import Any
 
 from weft.commands import events
 from weft.commands import result as result_cmd
@@ -36,6 +37,19 @@ class Task:
             yield from events.iter_task_events(self._context, self.tid, follow=True)
             return
         yield from events.iter_task_events(self._context, self.tid, follow=False)
+
+    def realtime_events(
+        self,
+        *,
+        follow: bool = True,
+        cancel_event: Any | None = None,
+    ) -> Iterator[TaskEvent]:
+        yield from events.iter_task_realtime_events(
+            self._context,
+            self.tid,
+            follow=follow,
+            cancel_event=cancel_event,
+        )
 
     def follow(self) -> Iterator[TaskEvent]:
         yield from events.follow_task_events(self._context, self.tid)

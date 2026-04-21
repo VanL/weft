@@ -191,6 +191,76 @@ def test_run_monitored_subprocess_emits_live_chunks_before_exit() -> None:
     assert stderr_chunks[-1] == ("", True)
 
 
+def test_run_monitored_subprocess_ignores_late_limit_after_process_exit() -> None:
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import subprocess, sys; "
+                "print('ok', flush=True); "
+                "subprocess.Popen("
+                "[sys.executable, '-c', 'import time; time.sleep(0.3)'], "
+                "stdout=sys.stdout, stderr=sys.stderr)"
+            ),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+
+    class LateViolationMonitor:
+        def __init__(self) -> None:
+            self.late_checks = 0
+            self.stopped = False
+
+        def start(self, pid: int) -> None:
+            del pid
+
+        def check_limits(self) -> tuple[bool, str | None]:
+            if process.poll() is None:
+                return True, None
+            self.late_checks += 1
+            return False, "late limit after process exit"
+
+        def last_metrics(self) -> ResourceMetrics | None:
+            return ResourceMetrics(memory_mb=1.0)
+
+        def snapshot(self) -> ResourceMetrics:
+            return ResourceMetrics(memory_mb=1.0)
+
+        def stop(self) -> None:
+            self.stopped = True
+
+    monitor = LateViolationMonitor()
+
+    outcome = run_monitored_subprocess(
+        process=process,
+        stdin_data=None,
+        timeout=5.0,
+        limits=None,
+        monitor_class=None,
+        monitor_interval=0.05,
+        monitor=monitor,
+        db_path=None,
+        config=None,
+        runtime_handle=RunnerHandle(runner_name="host", runtime_id="late-limit"),
+        cancel_requested=None,
+        on_worker_started=None,
+        on_runtime_handle_started=None,
+        stop_runtime=lambda: None,
+        kill_runtime=lambda: None,
+    )
+
+    assert outcome.status == "ok"
+    assert outcome.value == "ok"
+    assert monitor.late_checks == 0
+    assert monitor.stopped is True
+
+
 def _write_descendant_scripts(tmp_path: Path) -> tuple[Path, Path]:
     child_script = tmp_path / "child_sleep.py"
     child_script.write_text(

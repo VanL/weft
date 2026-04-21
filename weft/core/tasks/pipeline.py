@@ -35,7 +35,7 @@ from weft.core.pipelines import (
 from weft.core.spawn_requests import submit_spawn_request
 from weft.core.taskspec import ReservedPolicy, TaskSpec
 
-from .base import BaseTask
+from .base import BaseTask, TaskControlPolicy
 from .multiqueue_watcher import QueueMessageContext
 
 logger = logging.getLogger(__name__)
@@ -230,6 +230,14 @@ class PipelineEdgeTask(BaseTask):
 
 class PipelineTask(BaseTask):
     """Internal orchestrator task for a compiled first-class linear pipeline."""
+
+    control_policy = TaskControlPolicy(
+        stop="broadcast",
+        kill="broadcast",
+        reserved_policy="not-applicable",
+        ack="immediate-after-broadcast",
+        terminal_state="immediate",
+    )
 
     def __init__(
         self,

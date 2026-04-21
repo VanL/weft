@@ -23,7 +23,7 @@ from weft.core.targets import decode_work_message, serialize_result
 from weft.core.taskspec import ReservedPolicy, TaskSpec
 from weft.helpers import kill_process_tree, terminate_process_tree
 
-from .base import BaseTask
+from .base import BaseTask, TaskControlPolicy
 from .interactive import InteractiveTaskMixin
 from .multiqueue_watcher import QueueMessageContext, QueueMode
 from .runner import RunnerOutcome, TaskRunner
@@ -34,6 +34,14 @@ logger = logging.getLogger(__name__)
 
 class Consumer(BaseTask, InteractiveTaskMixin):
     """Concrete task that consumes inbox messages and executes targets (Spec: [CC-2.3], [MF-2], [RM-5.1])."""
+
+    control_policy = TaskControlPolicy(
+        stop="deferred-while-active",
+        kill="deferred-while-active",
+        reserved_policy="main-thread-after-runner-unwinds",
+        ack="post-unwind-for-active-control",
+        terminal_state="post-unwind-for-active-control",
+    )
 
     def __init__(
         self,
@@ -1053,6 +1061,14 @@ class SelectiveConsumer(BaseTask):
 class Monitor(BaseTask):
     """Forward messages to a downstream queue while observing them (Spec: [CC-2.3], [MF-5])."""
 
+    control_policy = TaskControlPolicy(
+        stop="local-cancel",
+        kill="local-kill",
+        reserved_policy="not-applicable",
+        ack="immediate",
+        terminal_state="immediate",
+    )
+
     def __init__(
         self,
         db: Path | str | Any,
@@ -1101,24 +1117,22 @@ class Monitor(BaseTask):
         Spec: [CC-2.4], [MF-3]
         """
         if command == CONTROL_STOP:
-            self.should_stop = True
-            self.taskspec.mark_cancelled(reason="STOP command received")
-            self._report_state_change(
-                event="control_stop", message_id=context.timestamp
+            self._handle_stop_request(
+                reason="STOP command received",
+                event="control_stop",
+                message_id=context.timestamp,
+                apply_reserved_policy=False,
             )
-            self._update_process_title("cancelled")
-            if self._stop_event:
-                self._stop_event.set()
+            self._send_control_response("STOP", "ack")
             return True
         if command == CONTROL_KILL:
-            self.should_stop = True
-            self.taskspec.mark_killed(reason="KILL command received")
-            self._report_state_change(
-                event="control_kill", message_id=context.timestamp
+            self._handle_kill_request(
+                reason="KILL command received",
+                event="control_kill",
+                message_id=context.timestamp,
+                apply_reserved_policy=False,
             )
-            self._update_process_title("killed")
-            if self._stop_event:
-                self._stop_event.set()
+            self._send_control_response("KILL", "ack")
             return True
         return False
 

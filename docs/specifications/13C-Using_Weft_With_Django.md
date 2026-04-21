@@ -97,6 +97,9 @@ Decision:
 - import package: `weft_django`
 - PyPI package: `weft-django`
 - optional convenience extra on the main package: `weft[django]`
+- optional Channels transport extras:
+  `weft-django[channels]`, `weft-django[realtime]`, and
+  `weft[django-channels]`
 
 Rationale:
 
@@ -200,8 +203,11 @@ with these stable entry points:
 
 - `WeftClient.from_context(...)`
 - `WeftClient.submit(...)`
+- `WeftClient.prepare(...)`
 - `WeftClient.submit_spec(...)`
+- `WeftClient.prepare_spec(...)`
 - `WeftClient.submit_pipeline(...)`
+- `WeftClient.prepare_pipeline(...)`
 - `WeftClient.submit_command(...)`
 - `WeftClient.task(tid)`
 - `WeftClient.tasks.*`
@@ -216,9 +222,17 @@ Submission methods should return a `Task` handle whose stable minimum surface is
 - `snapshot()`
 - `result(timeout=None)`
 - `events(...)`
+- `realtime_events(follow=True)`
 - `follow()`
 - `stop()`
 - `kill()`
+
+`prepare(...)`, `prepare_spec(...)`, and `prepare_pipeline(...)` should return
+a `PreparedSubmission` handle. Preparation resolves references, normalizes
+TaskSpecs, validates submit overrides, and snapshots JSON-compatible payloads.
+It must not write to `weft.spawn.requests` or start a manager. The handle's
+`submit() -> Task` method performs the same queue-backed submission as the
+ordinary `submit*` methods.
 
 The client should internally reuse the same context resolution, spawn
 submission, and result-wait paths that the CLI uses today. It should not invent
@@ -237,6 +251,7 @@ Reference-resolution rule:
 Weft should expose stable client-facing data objects:
 
 - `Task`
+- `PreparedSubmission`
 - `TaskSnapshot`
 - `TaskResult`
 - `TaskEvent`
@@ -244,13 +259,29 @@ Weft should expose stable client-facing data objects:
 Minimum fields:
 
 - `Task`: `tid`
+- `PreparedSubmission`: `name`, `submit()`
 - `TaskSnapshot`: `tid`, `name`, `status`, `return_code`, `started_at`,
   `completed_at`, `error`, `runtime_handle`, `metadata`
 - `TaskResult`: `tid`, `status`, `value`, `stdout`, `stderr`, `error`
 - `TaskEvent`: `tid`, `event_type`, `timestamp`, `payload`
 
+The client package should also re-export the typed public exception surface
+needed by integrations:
+
+- `WeftError`
+- `InvalidTID`
+- `TaskNotFound`
+- `ControlRejected`
+- `SpecNotFound`
+- `ManagerNotRunning`
+- `ManagerStartFailed`
+
+The `weft` package should ship a PEP 561 `py.typed` marker so downstream type
+checkers treat `weft.client` as typed.
+
 The Django package should depend on this client API only. It should not import
-`submit_spawn_request()` or other low-level internals directly.
+`submit_spawn_request()`, `weft.commands.submission`, `Consumer`, or other
+low-level internals directly.
 
 ## Django App Contract [DJ-3]
 
@@ -470,7 +501,7 @@ Initial work payload shape:
 {
   "payload": {
     "task_name": "billing.send_invoice",
-    "tid": "1837025672140161024",
+    "tid": null,
     "call": {
       "args": [123],
       "kwargs": {"force": false}
@@ -491,9 +522,10 @@ Wrapper-configuration rule:
   `spec.keyword_args`
 - integration-owned wrapper configuration belongs in the structured work
   envelope, leaving user kwargs untouched
-- the duplicated `tid` field in the work envelope is for application-side log
-  correlation only; the worker's authoritative task identity remains the Weft
-  task TID already known to the consumer runtime
+- the optional `tid` field in the work envelope is a non-authoritative
+  application correlation hint and may be `null`
+- the authoritative task identity is the Weft task TID assigned by the durable
+  submission path and visible through the returned `WeftSubmission`
 
 ### Pipeline composition scope [DJ-6.3]
 
@@ -589,7 +621,8 @@ Decorated task objects should expose:
 
 - `enqueue(*args, **kwargs) -> WeftSubmission`
 - `enqueue_on_commit(*args, **kwargs) -> WeftDeferredSubmission`
-- `as_taskspec_for_call(*args, _overrides=None, **kwargs) -> TaskSpec`
+- `as_taskspec_for_call(*args, _overrides=None, **kwargs) -> dict`
+  representing a validated TaskSpec payload
 
 Canonical name:
 
@@ -613,12 +646,12 @@ names.
 The integration should expose first-class helpers for native Weft work launched
 from Django code:
 
-- `weft_django.submit_taskspec(taskspec, *, work_payload=None, **overrides)`
-- `weft_django.submit_taskspec_on_commit(taskspec, *, work_payload=None, **overrides)`
-- `weft_django.submit_spec_reference(reference, *, input=None, **overrides)`
-- `weft_django.submit_spec_reference_on_commit(reference, *, input=None, **overrides)`
-- `weft_django.submit_pipeline_reference(reference, *, input=None, **overrides)`
-- `weft_django.submit_pipeline_reference_on_commit(reference, *, input=None, **overrides)`
+- `weft_django.submit_taskspec(taskspec, *, payload=None, **overrides)`
+- `weft_django.submit_taskspec_on_commit(taskspec, *, payload=None, **overrides)`
+- `weft_django.submit_spec_reference(reference, *, payload=None, **overrides)`
+- `weft_django.submit_spec_reference_on_commit(reference, *, payload=None, **overrides)`
+- `weft_django.submit_pipeline_reference(reference, *, payload=None, **overrides)`
+- `weft_django.submit_pipeline_reference_on_commit(reference, *, payload=None, **overrides)`
 
 Native-submission rule:
 
@@ -626,6 +659,8 @@ Native-submission rule:
   supplied TaskSpec or resolved spec reference
 - they exist so Django code can submit native Weft agent tasks, bundle-backed
   tasks, and pipelines without ad hoc glue
+- all native helpers use `payload=...`; `work_payload=...` and `input=...` are
+  intentionally not part of the v1 API
 
 ### Generic Module-Level Helpers [DJ-8.3]
 
@@ -648,10 +683,19 @@ The integration should also expose:
 
 Per-call submission kwargs should support:
 
+- `name`
+- `description`
+- `tags`
 - `metadata`
 - `timeout`
 - `wait`
 - `stream_output`
+- `env`
+- `working_dir`
+- `memory_mb`
+- `cpu_percent`
+- `runner`
+- `runner_options`
 
 Unsupported v1 per-call features:
 
@@ -674,6 +718,22 @@ Deferred-submit rule:
 There is no submitted task yet while the outer transaction is still open, so a
 wait contract would be misleading.
 
+Deferred validation rule:
+
+- every `*_on_commit` helper must resolve spec references, normalize TaskSpecs,
+  validate submit overrides, and snapshot the JSON-compatible payload before
+  registering `transaction.on_commit()`
+- invalid references, invalid TaskSpecs, unknown overrides, and unserializable
+  payloads must raise locally before the database transaction commits
+- the `on_commit` callback should only submit the already prepared work to Weft
+
+Snapshot rule:
+
+- mutable args, kwargs, decorated-task envelopes, and native payload objects are
+  captured at helper-call time
+- later mutation of those Python objects must not change the work submitted at
+  transaction commit
+
 ## Transaction Hooks [DJ-9]
 
 Transaction-aware enqueue is required.
@@ -687,6 +747,8 @@ Behavior:
 - inside an active transaction, submission is deferred until commit
 - outside a transaction, submission happens immediately
 - rollback prevents enqueue
+- validation and payload snapshotting happen before the callback is registered,
+  so bad Weft submissions do not commit app rows and then fail after commit
 
 This is the default-safe ORM integration point and should be the strongly
 recommended surface for tasks that depend on freshly written database state.
@@ -719,6 +781,13 @@ Submissions should return a lightweight handle with:
 
 This is the Django analogue of Celery's `AsyncResult`, but backed by the new
 stable Weft Python client rather than a second result backend.
+
+Handle semantics:
+
+- `status()` returns the current public status string, or `None` when no
+  snapshot is visible yet
+- `wait(timeout=None)` returns the same structured `TaskResult` object as
+  `result(timeout=None)`
 
 ### Result semantics [DJ-10.2]
 
@@ -860,7 +929,8 @@ WebSocket support should be optional and require Django Channels.
 
 Enablement:
 
-- `channels` installed
+- `channels` installed directly or through `weft-django[channels]`,
+  `weft-django[realtime]`, or `weft[django-channels]`
 - `WEFT_DJANGO["REALTIME"]["TRANSPORT"] = "channels"`
 
 Default consumer route:
@@ -875,6 +945,14 @@ WebSocket exists for:
   interaction
 
 WebSocket is not required for the normal result path.
+
+Lifecycle rule:
+
+- the Channels consumer must return from `connect()` after accepting the socket
+  and starting a cancellable stream task
+- it must cancel the Weft follow iterator on disconnect
+- it must not run the whole `follow=True` iterator synchronously inside
+  `connect()`
 
 ### Realtime payload contract [DJ-12.3]
 
@@ -1053,25 +1131,33 @@ Recommended rules for app authors:
 If the package performs explicit validation before submission, it should reject
 obviously unserializable args and kwargs with a clear local error.
 
+The `weft-django` package should ship a PEP 561 `py.typed` marker so downstream
+type checkers treat the integration surface as typed.
+
 ## Testing Strategy [DJ-17]
 
-The integration should support both realistic broker-backed tests and an
-explicit inline mode for narrow unit tests.
+The integration should support realistic broker-backed tests. It should not
+ship an eager or inline execution mode in v1.
 
 ### Test modes [DJ-17.1]
 
-Supported test modes:
+Supported test mode:
 
-- `broker`
-  - normal Weft path; preferred for integration tests
-- `inline`
-  - execute the task callable in-process after transaction hooks fire; useful
-    for unit tests
+- normal Weft broker-backed execution
 
-Inline mode must be opt-in through `WEFT_DJANGO["TEST_MODE"] = "inline"`.
+Non-goal:
 
-The default remains real Weft submission so tests do not silently diverge from
-real lifecycle behavior.
+- `WEFT_DJANGO["TEST_MODE"] = "inline"` or any Celery-style eager task mode
+
+Reason:
+
+- inline mode is not a production surface
+- inline mode creates a second execution path that can diverge from manager and
+  worker behavior
+- direct Python calls to the decorated function are enough for narrow unit
+  tests
+- broker-backed tests are required for transaction hooks, process boundaries,
+  streaming, native TaskSpecs, bundles, agents, and pipelines
 
 ### Broker-mode test guidance [DJ-17.2]
 
@@ -1088,21 +1174,25 @@ Rules:
   a test shape that actually commits, such as `TransactionTestCase` or the
   pytest-django equivalent
 
-This applies to both `manage.py test` and `pytest-django`. Inline mode is the
-cheap unit-test path. Broker mode is the correctness path.
+This applies to both `manage.py test` and `pytest-django`.
 
 ### Lane-Specific Test Expectations [DJ-17.3]
 
 Use test modes by lane:
 
-- decorated synchronous function tasks: inline mode is acceptable for narrow
-  unit tests
+- decorated synchronous function internals: call the Python function directly
+  for narrow unit tests
+- decorated task submission behavior: use broker-backed integration tests
 - native TaskSpecs, bundle-backed tasks, and native agent tasks: use broker-
   backed integration tests
 - streaming behavior and follow-style result inspection: use broker-backed
   integration tests
 - `on_commit` correctness: use broker-backed tests with real commits and real
   cross-process visibility
+- `on_commit` validation: assert invalid spec references and unknown overrides
+  fail before app rows commit
+- deferred payload capture: assert mutation after callback registration does
+  not change submitted work
 
 ## Rejected Alternatives [DJ-18]
 
@@ -1171,6 +1261,9 @@ Suggested install surfaces:
 
 - `uv add weft-django`
 - `uv add 'weft[django]'`
+- `uv add 'weft-django[channels]'`
+- `uv add 'weft-django[realtime]'`
+- `uv add 'weft[django-channels]'`
 
 Monorepo rule:
 
@@ -1184,7 +1277,9 @@ Once the package is split into a sibling repo:
 
 ## Backlinks
 
-- Active v1 reality-alignment plan:
+- Completed hardening plan:
+  [../plans/2026-04-21-weft-client-and-django-first-class-hardening-plan.md](../plans/2026-04-21-weft-client-and-django-first-class-hardening-plan.md)
+- Superseded v1 reality-alignment plan:
   [../plans/2026-04-20-weft-django-v1-reality-alignment-plan.md](../plans/2026-04-20-weft-django-v1-reality-alignment-plan.md)
 - Related implementation plan:
   [../plans/2026-04-20-weft-django-integration-implementation-plan.md](../plans/2026-04-20-weft-django-integration-implementation-plan.md)
