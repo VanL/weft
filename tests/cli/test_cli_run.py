@@ -28,7 +28,7 @@ from weft._constants import (
 )
 from weft.commands import manager as manager_cmd
 from weft.commands import tasks as task_cmd
-from weft.context import build_context
+from weft.context import WeftContext, build_context
 from weft.helpers import pid_is_live
 
 PROCESS_SCRIPT = Path(__file__).resolve().parents[1] / "tasks" / "process_target.py"
@@ -39,6 +39,20 @@ INTERACTIVE_SCRIPT = (
 
 def _write_json(path: Path, payload: dict[str, object]) -> None:
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _write_queue_message(
+    context: WeftContext,
+    name: str,
+    payload: str,
+    *,
+    persistent: bool = True,
+) -> None:
+    queue = context.queue(name, persistent=persistent)
+    try:
+        queue.write(payload)
+    finally:
+        queue.close()
 
 
 def _create_stored_task_spec(
@@ -647,10 +661,11 @@ def test_cli_run_rejects_oversized_piped_stdin(workdir, weft_harness) -> None:
 
 def test_cli_run_spec_path(workdir, weft_harness) -> None:
     context = build_context(spec_context=workdir)
-
-    inbox = context.queue("cli_spec.inbox", persistent=True)
-    outbox = context.queue("cli_spec.outbox", persistent=True)  # noqa: F841
-    inbox.write(json.dumps({"args": ["from-spec"]}))
+    _write_queue_message(
+        context,
+        "cli_spec.inbox",
+        json.dumps({"args": ["from-spec"]}),
+    )
 
     spec_path = workdir / "task.json"
     spec_payload = {
@@ -1377,8 +1392,7 @@ def test_cli_run_persistent_spec_no_wait_consumes_initial_piped_stdin(
 
 def test_cli_run_agent_spec_path(workdir, weft_harness) -> None:
     context = build_context(spec_context=workdir)
-    inbox = context.queue("cli_agent.inbox", persistent=True)
-    inbox.write("hello")
+    _write_queue_message(context, "cli_agent.inbox", "hello")
 
     spec_path = workdir / "agent_task.json"
     spec_payload = taskspec_fixtures.create_valid_agent_taskspec(
@@ -1411,8 +1425,7 @@ def test_cli_run_agent_spec_path(workdir, weft_harness) -> None:
 
 def test_cli_run_agent_spec_no_wait_and_result(workdir, weft_harness) -> None:
     context = build_context(spec_context=workdir)
-    inbox = context.queue("cli_agent_result.inbox", persistent=True)
-    inbox.write("hello")
+    _write_queue_message(context, "cli_agent_result.inbox", "hello")
 
     spec_path = workdir / "agent_result_task.json"
     spec_payload = taskspec_fixtures.create_valid_agent_taskspec(
@@ -1496,8 +1509,7 @@ def test_cli_run_persistent_agent_spec_continues_conversation(
     assert err == ""
     tid = out.strip()
 
-    inbox = context.queue("cli_persistent_agent.inbox", persistent=True)
-    inbox.write("hello")
+    _write_queue_message(context, "cli_persistent_agent.inbox", "hello")
 
     rc, out, err = run_cli(
         "result",
@@ -1514,7 +1526,7 @@ def test_cli_run_persistent_agent_spec_continues_conversation(
     assert first_payload["result"] == "text:hello"
     assert err == ""
 
-    inbox.write("__history__")
+    _write_queue_message(context, "cli_persistent_agent.inbox", "__history__")
 
     rc, out, err = run_cli(
         "result",
@@ -1719,8 +1731,11 @@ def test_cli_run_continuous_overrides_nonpersistent_spec(workdir, weft_harness) 
     assert err == ""
     tid = out.strip()
 
-    inbox = context.queue("continuous_override.inbox", persistent=True)
-    inbox.write(json.dumps({"args": ["one"]}))
+    _write_queue_message(
+        context,
+        "continuous_override.inbox",
+        json.dumps({"args": ["one"]}),
+    )
 
     rc, out, err = run_cli(
         "result",
@@ -1737,7 +1752,11 @@ def test_cli_run_continuous_overrides_nonpersistent_spec(workdir, weft_harness) 
     assert first_payload["result"] == "one"
     assert err == ""
 
-    inbox.write(json.dumps({"args": ["two"]}))
+    _write_queue_message(
+        context,
+        "continuous_override.inbox",
+        json.dumps({"args": ["two"]}),
+    )
 
     rc, out, err = run_cli(
         "result",
@@ -2107,37 +2126,40 @@ def test_cli_run_wait_returns_timeout_exit_code(workdir, weft_harness) -> None:
 def test_cli_run_prunes_stale_manager(workdir, weft_harness) -> None:
     context = weft_harness.context
     registry = context.queue(WEFT_MANAGERS_REGISTRY_QUEUE, persistent=False)
-    stale_pid = 999_999
-    registry.write(
-        json.dumps(
-            {
-                "tid": "1762000000000000000",
-                "name": "stale-manager",
-                "status": "active",
-                "pid": stale_pid,
-                "role": "manager",
-                "requests": WEFT_SPAWN_REQUESTS_QUEUE,
-            }
+    try:
+        stale_pid = 999_999
+        registry.write(
+            json.dumps(
+                {
+                    "tid": "1762000000000000000",
+                    "name": "stale-manager",
+                    "status": "active",
+                    "pid": stale_pid,
+                    "role": "manager",
+                    "requests": WEFT_SPAWN_REQUESTS_QUEUE,
+                }
+            )
         )
-    )
 
-    rc, out, err = run_cli(
-        "run",
-        "--function",
-        "tests.tasks.sample_targets:echo_payload",
-        "--arg",
-        "hello",
-        cwd=workdir,
-        harness=weft_harness,
-    )
+        rc, out, err = run_cli(
+            "run",
+            "--function",
+            "tests.tasks.sample_targets:echo_payload",
+            "--arg",
+            "hello",
+            cwd=workdir,
+            harness=weft_harness,
+        )
 
-    assert rc == 0
-    payloads = [
-        json.loads(item)
-        for item, _ in registry.peek_many(limit=100, with_timestamps=True)
-    ]
-    assert all(record.get("pid") != stale_pid for record in payloads)
-    assert any(record.get("role") == "manager" for record in payloads)
+        assert rc == 0
+        payloads = [
+            json.loads(item)
+            for item, _ in registry.peek_many(limit=100, with_timestamps=True)
+        ]
+        assert all(record.get("pid") != stale_pid for record in payloads)
+        assert any(record.get("role") == "manager" for record in payloads)
+    finally:
+        registry.close()
 
 
 def test_cli_run_parallel_no_wait_adopts_active_manager(workdir, weft_harness) -> None:
