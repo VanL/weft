@@ -53,7 +53,9 @@ def test_connection_count_uses_net_connections_when_available() -> None:
     assert PsutilResourceMonitor._connection_count(FakeProcess()) == 2
 
 
-def test_connection_count_does_not_use_deprecated_fallback_after_access_denied() -> None:
+def test_connection_count_does_not_use_deprecated_fallback_after_access_denied() -> (
+    None
+):
     psutil = resource_monitor.psutil
     if psutil is None:
         pytest.skip("psutil is unavailable")
