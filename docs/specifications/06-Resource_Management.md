@@ -123,6 +123,26 @@ Current responsibilities:
 - retain recent metrics so the task can publish peak or recent values
 - surface runner-specific stop/kill/describe hooks through the active plugin
 
+### Timeout Boundary [RM-5.2]
+
+`spec.timeout` is a work-execution timeout. It applies once the runner or
+persistent session is executing a concrete work item. It does not define every
+private startup, readiness, or teardown budget used inside the runtime.
+
+Current behavior:
+
+- one-shot command and function targets use `spec.timeout` to bound their
+  concrete execution work
+- persistent agent sessions use `spec.timeout` for each session `execute` call
+  after the private session worker is ready
+- persistent agent session startup uses a separate internal readiness timeout
+  for the private `ready` message, because import/plugin/provider startup and
+  work execution fail for different reasons
+
+Timeout terminal state and reserved-queue error policy still use the normal
+task lifecycle: when work execution exceeds `spec.timeout`, the task reports a
+timeout and applies `reserved_policy_on_error`.
+
 ## Error Handling
 
 ### Unified Reservation Pattern
