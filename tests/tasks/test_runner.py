@@ -656,6 +656,57 @@ def test_task_runner_agent_session_continues_conversation() -> None:
     assert second.value.aggregate_public_output() == "history:hello"
 
 
+def test_task_runner_agent_session_startup_uses_dedicated_ready_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plugin = tmp_path / "slow_llm_plugin.py"
+    plugin.write_text(
+        "\n".join(
+            [
+                "import time",
+                "import llm",
+                "from tests.fixtures.llm_test_models import DeterministicAgentModel",
+                "",
+                "time.sleep(0.35)",
+                "",
+                "@llm.hookimpl",
+                "def register_models(register):",
+                "    register(DeterministicAgentModel())",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    runner = TaskRunner(
+        target_type="agent",
+        tid="slow-ready",
+        function_target=None,
+        process_target=None,
+        agent={
+            "runtime": "llm",
+            "model": TEST_MODEL_ID,
+            "conversation_scope": "per_task",
+            "runtime_config": {
+                "plugin_modules": ["slow_llm_plugin"],
+            },
+        },
+        args=None,
+        kwargs=None,
+        env={},
+        working_dir=None,
+        timeout=0.1,
+        limits=None,
+        monitor_class=None,
+        monitor_interval=0.05,
+    )
+
+    session = runner.start_agent_session()
+    session.close()
+
+
 def test_task_runner_run_does_not_preflight_agent_runtime_per_invocation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

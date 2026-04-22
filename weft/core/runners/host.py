@@ -25,7 +25,10 @@ from typing import Any, TextIO, cast
 
 import weft.core.agents  # noqa: F401 - register built-in agent runtimes
 from simplebroker import BrokerTarget
-from weft._constants import ACTIVE_CONTROL_POLL_INTERVAL
+from weft._constants import (
+    ACTIVE_CONTROL_POLL_INTERVAL,
+    AGENT_SESSION_READY_TIMEOUT_SECONDS,
+)
 from weft.core.agents.runtime import (
     execute_agent_target,
     normalize_agent_work_item,
@@ -723,9 +726,12 @@ class HostTaskRunner:
             timeout=self._timeout,
             handle=_host_handle(process.pid),
         )
-        ready_timeout = self._timeout if self._timeout is not None else 5.0
+        ready_timeout = max(
+            AGENT_SESSION_READY_TIMEOUT_SECONDS,
+            self._timeout if self._timeout is not None else 0.0,
+        )
         try:
-            session.wait_ready(timeout=max(ready_timeout, 0.1))
+            session.wait_ready(timeout=ready_timeout)
         except Exception:
             session.close()
             raise

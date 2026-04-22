@@ -9,6 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from weft._constants import (
+    AGENT_SESSION_READY_TIMEOUT_SECONDS,
     COMMAND_SESSION_POST_TERMINATION_WAIT,
     COMMAND_SESSION_TERMINATION_TIMEOUT,
     CONTROL_PAUSE,
@@ -187,6 +188,7 @@ class TestConstants:
         assert SUBPROCESS_POLL_INTERVAL_FLOOR == 0.01
 
     def test_lifecycle_polling_and_timeout_constants(self) -> None:
+        assert AGENT_SESSION_READY_TIMEOUT_SECONDS == 10.0
         assert MANAGER_STARTUP_TIMEOUT_SECONDS == 10.0
         assert MANAGER_REGISTRY_POLL_INTERVAL == 0.1
         assert MANAGER_PID_LIVENESS_RECHECK_INTERVAL == 0.5
