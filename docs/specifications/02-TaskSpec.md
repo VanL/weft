@@ -129,7 +129,7 @@ schema validity.
       "options": {},                         // OPTIONAL. Runner-specific JSON-serializable options.
       "environment_profile_ref": null        // OPTIONAL. Runner environment profile callable ref.
     },
-    "timeout": 300.0 | null,                 // OPTIONAL. Timeout in seconds. null means no timeout.
+    "timeout": 300.0 | null,                 // OPTIONAL. Work-execution timeout in seconds. null means no work-execution timeout.
     
     "limits": {                              // OPTIONAL. Resource limits for task execution.
       "memory_mb": 1024 | null,              // OPTIONAL. Memory limit in MB (default 1024 MB). null means no limit.
@@ -256,7 +256,9 @@ _Per-field implementation status_:
 - `spec.parameterization`: Implemented. `ParameterizationSection` and `ParameterizationArgumentSection` in `weft/core/taskspec/model.py`; adapter parsing and materialization in `weft/core/taskspec/parameterization.py`; local `weft run --spec` integration in `weft/cli/run.py`.
 - `spec.run_input`: Implemented. `RunInputSection`, `RunInputArgumentSection`, and `RunInputStdinSection` in `weft/core/taskspec/model.py`; adapter parsing and invocation in `weft/core/taskspec/run_input.py`; local `weft run --spec` integration in `weft/cli/run.py`.
 - `spec.args`, `spec.keyword_args`: Implemented. Frozen after creation.
-- `spec.timeout`: Implemented. `SpecSection.timeout`.
+- `spec.timeout`: Implemented. `SpecSection.timeout`; enforced at the
+  work-execution boundary by runner/session code, not as a blanket budget for
+  private runtime startup readiness.
 - `spec.limits.*`: Implemented. `LimitsSection` — `memory_mb`, `cpu_percent`, `max_fds`, `max_connections`. Runtime enforcement in `ResourceMonitor` and `TaskSpec.check_limits()`.
 - `spec.env`, `spec.working_dir`: Implemented. Passed to runner in `Consumer.__init__()`.
 - `spec.weft_context`: Implemented. Resolved by Manager at spawn time via `resolve_taskspec_payload()`.
@@ -272,6 +274,27 @@ _Per-field implementation status_:
 - `io.*`: Implemented. `IOSection` — `inputs`, `outputs`, `control` with required-queue validation.
 - `state.*`: Implemented. `StateSection` — all fields including peaks, with consistency validation.
 - `metadata`: Implemented. Mutable dict, supports `update_metadata` control messages.
+
+### Timeout Scope [TS-1.5]
+
+`spec.timeout` bounds execution of a task work item after the runner has begun
+the concrete work. It is not a universal wall-clock budget for every private
+runtime setup step.
+
+Current consequences:
+
+- command and function tasks use `spec.timeout` as the runtime execution
+  timeout for the spawned work
+- persistent agent tasks use `spec.timeout` for session `execute` calls after
+  the private session worker has signaled readiness
+- persistent agent session startup waits for its private `ready` message using
+  an internal readiness budget described in
+  [13-Agent_Runtime.md](13-Agent_Runtime.md#persistent-session-boundary-ar-6)
+  rather than shortening startup readiness to a small per-work-item timeout
+
+If Weft later needs a total wall-clock budget from submission through startup,
+execution, and teardown, that should be a separate TaskSpec field or runtime
+policy. It should not be silently overloaded onto `spec.timeout`.
 
 ### State vs Metadata ownership [TS-1.4]
 
