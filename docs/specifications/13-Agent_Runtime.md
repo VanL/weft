@@ -366,6 +366,11 @@ task lifecycle in normal Weft code, but run the live model conversation in a
 dedicated subprocess. This subprocess is always created — there is no in-process
 fallback for `per_task` scope.
 
+Session worker startup waits for the private `ready` message with an internal
+readiness budget that is not shortened by a small per-work-item timeout. The
+TaskSpec timeout still applies to later session `execute` calls; startup and
+work execution have different timing failure modes.
+
 That parent/subprocess link uses a private JSON protocol. It is allowed to be
 explicit and versioned because it is **not** part of the public queue surface.
 

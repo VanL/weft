@@ -110,6 +110,9 @@ SPAWN_SUBMISSION_RECONCILIATION_TIMEOUT: Final[float] = 1.0
 STATUS_WATCH_MIN_INTERVAL: Final[float] = 0.1
 """Minimum poll interval for CLI status-watch loops to avoid broker-hot spins."""
 
+AGENT_SESSION_READY_TIMEOUT_SECONDS: Final[float] = 10.0
+"""Minimum startup-readiness budget for persistent agent session workers."""
+
 MANAGER_STARTUP_TIMEOUT_SECONDS: Final[float] = 10.0
 """Time budget for a detached manager to publish a stable active registry entry."""
 
