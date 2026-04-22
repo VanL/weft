@@ -310,7 +310,9 @@ def _wait_for_autostart_pipeline_result(
                     status_queue = make_queue(status_name)
 
         if status_queue is not None:
-            status_tail.extend(_decode_queue_payload(item) for item in drain(status_queue))
+            status_tail.extend(
+                _decode_queue_payload(item) for item in drain(status_queue)
+            )
             status_tail = status_tail[-8:]
 
         if outbox_queue is not None:
