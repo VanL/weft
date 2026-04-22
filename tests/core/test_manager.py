@@ -19,6 +19,7 @@ from weft._constants import (
     INTERNAL_RUNTIME_TASK_CLASS_KEY,
     INTERNAL_RUNTIME_TASK_CLASS_PIPELINE,
     INTERNAL_RUNTIME_TASK_CLASS_PIPELINE_EDGE,
+    PIPELINE_RUNTIME_METADATA_KEY,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MANAGER_CTRL_IN_QUEUE,
     WEFT_MANAGER_CTRL_OUT_QUEUE,
@@ -36,6 +37,8 @@ from weft.core.manager import (
 )
 from weft.core.tasks import Consumer, HeartbeatTask, PipelineEdgeTask, PipelineTask
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
+
+AUTOSTART_PIPELINE_RESULT_TIMEOUT = 30.0
 
 
 @pytest.fixture
@@ -249,6 +252,79 @@ def write_autostart_pipeline_fixture(
         encoding="utf-8",
     )
     return autostart_dir, manifest_path
+
+
+def _decode_queue_payload(raw: str) -> object:
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return raw
+
+
+def _pipeline_status_queue_name(child_taskspec: dict[str, object]) -> str | None:
+    metadata = child_taskspec.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+    runtime = metadata.get(PIPELINE_RUNTIME_METADATA_KEY)
+    if not isinstance(runtime, dict):
+        return None
+    queues = runtime.get("queues")
+    if not isinstance(queues, dict):
+        return None
+    status = queues.get("status")
+    return status if isinstance(status, str) and status else None
+
+
+def _wait_for_autostart_pipeline_result(
+    manager: Manager,
+    log_queue,
+    make_queue,
+    *,
+    source: str,
+    timeout: float = AUTOSTART_PIPELINE_RESULT_TIMEOUT,
+) -> tuple[dict[str, object], object]:
+    deadline = time.monotonic() + timeout
+    spawn_event: dict[str, object] | None = None
+    outbox_queue = None
+    status_queue = None
+    event_tail: list[dict[str, object]] = []
+    status_tail: list[object] = []
+
+    while time.monotonic() < deadline:
+        manager.process_once()
+        for item in drain(log_queue):
+            event = json.loads(item)
+            event_tail.append(event)
+            event_tail = event_tail[-12:]
+            if (
+                event.get("event") == "task_spawned"
+                and event.get("autostart_source") == source
+            ):
+                spawn_event = event
+                child_taskspec = event["child_taskspec"]
+                assert isinstance(child_taskspec, dict)
+                outbox_name = child_taskspec["io"]["outputs"]["outbox"]
+                outbox_queue = make_queue(outbox_name)
+                status_name = _pipeline_status_queue_name(child_taskspec)
+                if status_name is not None:
+                    status_queue = make_queue(status_name)
+
+        if status_queue is not None:
+            status_tail.extend(_decode_queue_payload(item) for item in drain(status_queue))
+            status_tail = status_tail[-8:]
+
+        if outbox_queue is not None:
+            raw = outbox_queue.read_one()
+            if raw is not None:
+                return spawn_event or {}, _decode_queue_payload(raw)
+
+        time.sleep(0.05)
+
+    raise AssertionError(
+        "Timed out waiting for autostart pipeline result "
+        f"after {timeout:.1f}s; spawn_event={spawn_event!r}; "
+        f"event_tail={event_tail!r}; status_tail={status_tail!r}"
+    )
 
 
 @pytest.fixture
@@ -2214,35 +2290,13 @@ def test_manager_autostart_pipeline_target_launches_pipeline_run(
     manager = Manager(db_path, spec, config=config)
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     source = str(manifest_path.resolve())
-    outbox_queue = None
-    spawn_event: dict[str, object] | None = None
-    result_payload = None
     try:
-        deadline = time.time() + 8.0
-        while time.time() < deadline and (
-            spawn_event is None or result_payload is None
-        ):
-            manager.process_once()
-            time.sleep(0.05)
-            for item in drain(log_queue):
-                event = json.loads(item)
-                if (
-                    event.get("event") == "task_spawned"
-                    and event.get("autostart_source") == source
-                ):
-                    spawn_event = event
-                    child_taskspec = event["child_taskspec"]
-                    outbox_name = child_taskspec["io"]["outputs"]["outbox"]
-                    outbox_queue = make_queue(outbox_name)
-            if outbox_queue is not None and result_payload is None:
-                raw = outbox_queue.read_one()
-                if raw is not None:
-                    try:
-                        result_payload = json.loads(raw)
-                    except json.JSONDecodeError:
-                        result_payload = raw
-
-        assert spawn_event is not None
+        spawn_event, result_payload = _wait_for_autostart_pipeline_result(
+            manager,
+            log_queue,
+            make_queue,
+            source=source,
+        )
         child_taskspec = spawn_event["child_taskspec"]
         assert child_taskspec["metadata"]["role"] == "pipeline"
         assert (
