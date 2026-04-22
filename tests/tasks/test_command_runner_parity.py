@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -34,6 +35,8 @@ pytestmark = [pytest.mark.shared]
 
 DOCKER_HELLO_IMAGE = "hello-world"
 DOCKER_PYTHON_IMAGE = "python:3.13-alpine"
+DOCKER_IMAGE_INSPECT_TIMEOUT = 5.0
+DOCKER_IMAGE_PULL_TIMEOUT = 120.0
 RUNNER_NAMES = ("host", "docker", "macos-sandbox")
 
 
@@ -118,6 +121,61 @@ def _skip_unavailable_runner(
         )
     except Exception as exc:
         pytest.skip(f"{runner_name} runner unavailable: {exc}")
+    if runner_name == "docker":
+        _ensure_docker_image_available(str(options["image"]))
+
+
+def _format_docker_setup_detail(stdout: str | None, stderr: str | None) -> str:
+    detail = (stderr or stdout or "").strip()
+    if not detail:
+        return ""
+    return detail[-500:]
+
+
+def _ensure_docker_image_available(image: str) -> None:
+    """Ensure Docker image setup happens before runner execution timing starts."""
+
+    try:
+        inspect = subprocess.run(
+            ["docker", "image", "inspect", image],
+            capture_output=True,
+            text=True,
+            timeout=DOCKER_IMAGE_INSPECT_TIMEOUT,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        pytest.skip(f"docker image {image!r} unavailable for test setup: {exc}")
+    if inspect.returncode == 0:
+        return
+
+    try:
+        pull = subprocess.run(
+            ["docker", "pull", image],
+            capture_output=True,
+            text=True,
+            timeout=DOCKER_IMAGE_PULL_TIMEOUT,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except subprocess.TimeoutExpired as exc:
+        detail = _format_docker_setup_detail(exc.stdout, exc.stderr)
+        message = (
+            f"docker image {image!r} was not available within "
+            f"{DOCKER_IMAGE_PULL_TIMEOUT:.0f}s"
+        )
+        if detail:
+            message = f"{message}: {detail}"
+        pytest.skip(message)
+    except OSError as exc:
+        pytest.skip(f"docker image {image!r} unavailable for test setup: {exc}")
+
+    if pull.returncode != 0:
+        detail = _format_docker_setup_detail(pull.stdout, pull.stderr)
+        message = f"docker image {image!r} unavailable for test setup"
+        if detail:
+            message = f"{message}: {detail}"
+        pytest.skip(message)
 
 
 def test_docker_runner_is_skipped_on_windows(
