@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from tests.helpers.test_backend import prepare_project_root
+from weft._constants import WEFT_TID_MAPPINGS_QUEUE
 from weft.commands import tasks as task_cmd
 from weft.context import build_context
 from weft.core import (
@@ -21,7 +22,7 @@ from weft.core import (
     launch_task_process,
 )
 from weft.core.tasks import Consumer
-from weft.helpers import kill_process_tree
+from weft.helpers import iter_queue_json_entries, kill_process_tree
 
 pytestmark = [pytest.mark.shared]
 
@@ -92,17 +93,25 @@ def _write_logged_pipeline_task(ctx, tid: str) -> None:
     )
 
 
-def _wait_for_worker_pid(parent_pid: int, timeout: float = 5.0) -> int | None:
-    psutil = pytest.importorskip("psutil")
+def _wait_for_registered_worker_pid(ctx, tid: str, timeout: float = 15.0) -> int | None:
     deadline = time.time() + timeout
+    mapping_queue = ctx.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
     while time.time() < deadline:
-        try:
-            parent = psutil.Process(parent_pid)
-        except psutil.Error:
-            return None
-        children = parent.children(recursive=True)
-        if children:
-            return children[0].pid
+        for payload, _timestamp in iter_queue_json_entries(mapping_queue):
+            if payload.get("full") != tid:
+                continue
+            managed_pids = payload.get("managed_pids")
+            if isinstance(managed_pids, list):
+                for pid in managed_pids:
+                    if isinstance(pid, int) and pid > 0:
+                        return pid
+            runtime_handle = payload.get("runtime_handle")
+            if isinstance(runtime_handle, dict):
+                host_pids = runtime_handle.get("host_pids")
+                if isinstance(host_pids, list):
+                    for pid in host_pids:
+                        if isinstance(pid, int) and pid > 0:
+                            return pid
         time.sleep(0.05)
     return None
 
@@ -143,7 +152,7 @@ def _launch_running_task(tmp_path) -> tuple[TaskSpec, BaseProcess, int]:
     )
     inbox = ctx.queue(spec.io.inputs["inbox"], persistent=True)
     inbox.write(json.dumps({"kwargs": {"duration": 5.0}}))
-    worker_pid = _wait_for_worker_pid(process.pid)
+    worker_pid = _wait_for_registered_worker_pid(ctx, spec.tid)
     assert worker_pid is not None
     return spec, process, worker_pid
 
