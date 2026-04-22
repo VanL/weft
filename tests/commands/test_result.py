@@ -297,6 +297,39 @@ def test_await_one_shot_result_accepts_prewritten_outbox_when_log_event_is_misse
     assert error is None
 
 
+def test_await_one_shot_result_accepts_single_primitive_outbox_when_log_event_is_missed(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    outbox_name = f"T{tid}.outbox"
+    outbox_queue = ctx.queue(outbox_name, persistent=True)
+    outbox_queue.write("hello")
+    monkeypatch.setattr(
+        result_wait,
+        "poll_log_events",
+        lambda log_queue, last_timestamp, target_tid: ([], last_timestamp),
+    )
+
+    try:
+        status, result, error = await_one_shot_result(
+            ctx,
+            tid,
+            outbox_name=outbox_name,
+            ctrl_out_name=f"T{tid}.ctrl_out",
+            timeout=RESULT_WAIT_TIMEOUT,
+            show_stderr=False,
+        )
+    finally:
+        outbox_queue.close()
+
+    assert status == "completed"
+    assert result == "hello"
+    assert error is None
+
+
 def test_await_one_shot_result_does_not_infer_completion_from_ambiguous_outbox(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
