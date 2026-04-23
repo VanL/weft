@@ -14,9 +14,9 @@ from typing import Any
 
 from simplebroker.commands import cmd_init as sb_cmd_init
 from weft._constants import (
-    BROKER_PROJECT_CONFIG_FILENAME,
     EXIT_ERROR,
     EXIT_SUCCESS,
+    WEFT_BROKER_PROJECT_CONFIG_FILENAME,
     load_config,
 )
 from weft.context import (
@@ -25,6 +25,23 @@ from weft.context import (
     resolve_context_broker_target,
     update_project_config,
 )
+
+
+def _project_config_path(root: Path, config: Mapping[str, Any]) -> Path:
+    """Return the configured SimpleBroker project config path for a Weft root."""
+
+    path_prefix = Path(str(config.get("BROKER_PROJECT_CONFIG_PATH", "")))
+    config_name = Path(
+        str(
+            config.get(
+                "BROKER_PROJECT_CONFIG_NAME",
+                WEFT_BROKER_PROJECT_CONFIG_FILENAME,
+            )
+        )
+    )
+    if path_prefix.is_absolute():
+        return path_prefix / config_name
+    return root / path_prefix / config_name
 
 
 def cmd_init(
@@ -49,7 +66,7 @@ def cmd_init(
     if (
         backend_name == "sqlite"
         and not config.get("BROKER_DEFAULT_DB_NAME")
-        and not (root / BROKER_PROJECT_CONFIG_FILENAME).is_file()
+        and not _project_config_path(root, config).is_file()
     ):
         if not quiet:
             print(

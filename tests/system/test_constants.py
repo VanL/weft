@@ -337,6 +337,8 @@ class TestLoadConfig:
             # Broker config should be complete and typed.
             assert config["BROKER_PROJECT_SCOPE"] is True
             assert config["BROKER_DEFAULT_DB_NAME"] == ".weft/broker.db"
+            assert config["BROKER_PROJECT_CONFIG_PATH"] == ".weft"
+            assert config["BROKER_PROJECT_CONFIG_NAME"] == "broker.toml"
             assert config["BROKER_AUTO_VACUUM"] == 1
             assert config["BROKER_AUTO_VACUUM_INTERVAL"] == 100
             assert isinstance(config["BROKER_AUTO_VACUUM_INTERVAL"], int)
@@ -399,6 +401,8 @@ class TestLoadConfig:
 
         assert config["WEFT_DIRECTORY_NAME"] == ".engram"
         assert config["BROKER_DEFAULT_DB_NAME"] == ".engram/broker.db"
+        assert config["BROKER_PROJECT_CONFIG_PATH"] == ".engram"
+        assert config["BROKER_PROJECT_CONFIG_NAME"] == "broker.toml"
 
     @pytest.mark.parametrize("value", ["", ".", "..", "foo/bar", "foo\\bar"])
     def test_weft_directory_name_env_rejects_invalid_values(self, value: str) -> None:
@@ -421,6 +425,23 @@ class TestLoadConfig:
 
         assert config["WEFT_DIRECTORY_NAME"] == ".engram"
         assert config["BROKER_DEFAULT_DB_NAME"] == ".custom/weft.db"
+        assert config["BROKER_PROJECT_CONFIG_PATH"] == ".engram"
+
+    def test_explicit_project_config_path_beats_directory_name_default(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "WEFT_DIRECTORY_NAME": ".engram",
+                "WEFT_PROJECT_CONFIG_PATH": ".custom",
+                "WEFT_PROJECT_CONFIG_NAME": "queues.toml",
+            },
+            clear=True,
+        ):
+            config = load_config()
+
+        assert config["WEFT_DIRECTORY_NAME"] == ".engram"
+        assert config["BROKER_PROJECT_CONFIG_PATH"] == ".custom"
+        assert config["BROKER_PROJECT_CONFIG_NAME"] == "queues.toml"
 
     def test_compile_config_recomputes_broker_defaults_for_weft_overrides(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
@@ -428,6 +449,7 @@ class TestLoadConfig:
 
         assert config["WEFT_DIRECTORY_NAME"] == ".engram"
         assert config["BROKER_DEFAULT_DB_NAME"] == ".engram/broker.db"
+        assert config["BROKER_PROJECT_CONFIG_PATH"] == ".engram"
 
     def test_compile_config_rejects_ambiguous_postgres_override_shapes(self) -> None:
         with (
@@ -540,6 +562,8 @@ class TestLoadConfig:
         broker_keys = {
             "BROKER_PROJECT_SCOPE",
             "BROKER_DEFAULT_DB_NAME",
+            "BROKER_PROJECT_CONFIG_PATH",
+            "BROKER_PROJECT_CONFIG_NAME",
             "BROKER_DEBUG",
             "BROKER_LOGGING_ENABLED",
             "BROKER_AUTO_VACUUM",
@@ -553,6 +577,8 @@ class TestLoadConfig:
         assert broker_keys.issubset(config.keys())
         assert config["BROKER_PROJECT_SCOPE"] is True
         assert config["BROKER_DEFAULT_DB_NAME"] == ".weft/broker.db"
+        assert config["BROKER_PROJECT_CONFIG_PATH"] == ".weft"
+        assert config["BROKER_PROJECT_CONFIG_NAME"] == "broker.toml"
         assert config["BROKER_DEBUG"] == config["WEFT_DEBUG"]
         assert config["BROKER_LOGGING_ENABLED"] == config["WEFT_LOGGING_ENABLED"]
         assert isinstance(config["BROKER_AUTO_VACUUM"], int)

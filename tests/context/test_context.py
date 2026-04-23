@@ -28,6 +28,8 @@ def _write_broker_project_config(
     backend: str,
     target: str,
     schema: str | None = None,
+    config_dir: str = ".weft",
+    config_name: str = "broker.toml",
 ) -> Path:
     lines = [
         "version = 1",
@@ -43,7 +45,8 @@ def _write_broker_project_config(
                 "",
             ]
         )
-    config_path = root / ".broker.toml"
+    config_path = root / config_dir / config_name
+    config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text("\n".join(lines), encoding="utf-8")
     return config_path
 
@@ -128,7 +131,7 @@ def test_build_context_explicit_autostart_override_beats_project_default(
 
 
 def test_build_context_discovers_existing_project(tmp_path: Path) -> None:
-    """Project databases are discovered via SimpleBroker's project scoping."""
+    """Project databases are discovered via Weft-scoped SimpleBroker config."""
     root = prepare_project_root(tmp_path)
     root_ctx = build_context(spec_context=root)
     nested_dir = tmp_path / "a" / "b" / "c"
@@ -189,6 +192,8 @@ def test_environment_translation(
     assert ctx.broker_config["BROKER_BUSY_TIMEOUT"] == 2500
     assert isinstance(ctx.broker_config["BROKER_BUSY_TIMEOUT"], int)
     assert ctx.broker_config["BROKER_PROJECT_SCOPE"] is True
+    assert ctx.broker_config["BROKER_PROJECT_CONFIG_PATH"] == ".weft"
+    assert ctx.broker_config["BROKER_PROJECT_CONFIG_NAME"] == "broker.toml"
     assert ctx.broker_config["BROKER_AUTO_VACUUM_INTERVAL"] == 100
     assert isinstance(ctx.broker_config["BROKER_AUTO_VACUUM_INTERVAL"], int)
 
@@ -250,6 +255,34 @@ def test_build_context_discovers_existing_project_with_custom_weft_directory_nam
     assert discovered_ctx.database_path == root_ctx.database_path
 
 
+def test_build_context_discovers_custom_weft_directory_project_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("WEFT_DIRECTORY_NAME", ".engram")
+
+    root = prepare_project_root(tmp_path / "custom-config-project")
+    _write_broker_project_config(
+        root,
+        backend="sqlite",
+        target="custom.db",
+        config_dir=".engram",
+    )
+    nested_dir = root / "a" / "b"
+    nested_dir.mkdir(parents=True)
+
+    original_cwd = Path.cwd()
+    try:
+        os.chdir(nested_dir)
+        ctx = build_context(create_database=False)
+    finally:
+        os.chdir(original_cwd)
+
+    assert ctx.root == root.resolve()
+    assert ctx.weft_dir == (root / ".engram").resolve()
+    assert ctx.database_path == (root / ".engram" / "custom.db").resolve()
+
+
 def test_project_config_recovers_from_corruption(tmp_path: Path) -> None:
     """A corrupt config file is replaced with a fresh default."""
     root = prepare_project_root(tmp_path)
@@ -280,7 +313,7 @@ def test_build_context_reports_weft_pg_install_hint_for_missing_plugin(
         build_context(spec_context=tmp_path)
 
 
-def test_build_context_uses_project_sqlite_target_when_broker_file_exists(
+def test_build_context_uses_weft_scoped_project_sqlite_target_when_config_exists(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -295,10 +328,12 @@ def test_build_context_uses_project_sqlite_target_when_broker_file_exists(
     ctx = build_context(spec_context=root, create_database=False)
 
     assert ctx.backend_name == "sqlite"
-    assert ctx.database_path == (root / ".custom" / "from-project.db").resolve()
+    assert (
+        ctx.database_path == (root / ".weft" / ".custom" / "from-project.db").resolve()
+    )
 
 
-def test_build_context_uses_project_postgres_target_when_broker_file_exists(
+def test_build_context_uses_weft_scoped_project_postgres_target_when_config_exists(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -325,7 +360,7 @@ def test_build_context_uses_project_postgres_target_when_broker_file_exists(
     assert ctx.broker_target.backend_options == {"schema": "toml_schema"}
 
 
-def test_build_context_discovery_uses_project_postgres_target_when_broker_file_exists(
+def test_build_context_discovery_uses_weft_scoped_project_postgres_target(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -358,3 +393,22 @@ def test_build_context_discovery_uses_project_postgres_target_when_broker_file_e
     assert ctx.backend_name == "postgres"
     assert ctx.broker_target.target == "postgresql://toml-user@toml-host/toml-db"
     assert ctx.broker_target.backend_options == {"schema": "toml_schema"}
+
+
+def test_build_context_ignores_root_simplebroker_config_when_weft_config_absent(
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path / "root-simplebroker-config")
+    _write_broker_project_config(
+        root,
+        backend="sqlite",
+        target="root-owned.db",
+        config_dir=".",
+        config_name=".broker.toml",
+    )
+
+    ctx = build_context(spec_context=root, create_database=False)
+
+    assert ctx.backend_name == "sqlite"
+    assert ctx.database_path == (root / ".weft" / "broker.db").resolve()
+    assert ctx.broker_target.config_path is None
