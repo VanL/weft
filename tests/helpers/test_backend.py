@@ -11,7 +11,7 @@ from pathlib import Path
 
 from simplebroker.ext import get_backend_plugin
 
-PROJECT_CONFIG_FILENAME = ".broker.toml"
+PROJECT_CONFIG_FILENAME = "broker.toml"
 POSTGRES_TEST_BACKEND = "postgres"
 _PREPARED_POSTGRES_ROOTS: set[tuple[str, str, str]] = set()
 
@@ -45,8 +45,21 @@ def postgres_schema_for_root(root: Path) -> str:
     return _postgres_schema_name(root)
 
 
-def _project_config_path(root: Path) -> Path:
-    return root / PROJECT_CONFIG_FILENAME
+def _env_value(env: Mapping[str, str] | None, name: str, default: str) -> str:
+    if env and name in env:
+        return env[name]
+    return os.environ.get(name, default)
+
+
+def _project_config_path(root: Path, *, env: Mapping[str, str] | None = None) -> Path:
+    weft_dir_name = _env_value(env, "WEFT_DIRECTORY_NAME", ".weft")
+    config_path = _env_value(env, "WEFT_PROJECT_CONFIG_PATH", weft_dir_name)
+    config_name = _env_value(env, "WEFT_PROJECT_CONFIG_NAME", PROJECT_CONFIG_FILENAME)
+    prefix = Path(config_path)
+    name = Path(config_name)
+    if prefix.is_absolute():
+        return prefix / name
+    return root / prefix / name
 
 
 def postgres_env_overrides_for_root(
@@ -72,10 +85,17 @@ def postgres_env_overrides_for_root(
     }
 
 
-def _write_postgres_project_config(root: Path, *, dsn: str, schema: str) -> Path:
+def _write_postgres_project_config(
+    root: Path,
+    *,
+    dsn: str,
+    schema: str,
+    env: Mapping[str, str] | None = None,
+) -> Path:
     """Write a per-root Postgres project config understood by SimpleBroker."""
 
-    config_path = _project_config_path(root)
+    config_path = _project_config_path(root, env=env)
+    config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(
         "\n".join(
             [
@@ -131,11 +151,11 @@ def prepare_project_root(
             "BROKER_TEST_BACKEND=postgres requires SIMPLEBROKER_PG_TEST_DSN"
         )
 
-    config_path = _project_config_path(resolved_root)
+    config_path = _project_config_path(resolved_root, env=env)
     schema = _load_postgres_schema(config_path)
     if schema is None:
         schema = _postgres_schema_name(resolved_root)
-        _write_postgres_project_config(resolved_root, dsn=dsn, schema=schema)
+        _write_postgres_project_config(resolved_root, dsn=dsn, schema=schema, env=env)
 
     cache_key = (str(resolved_root), dsn, schema)
     if cache_key in _PREPARED_POSTGRES_ROOTS:

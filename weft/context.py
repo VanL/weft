@@ -17,13 +17,14 @@ Key behaviours
   the context and reused when constructing `simplebroker.Queue` instances.
 * **Broker resolution** – When a task or CLI command does not specify
   `weft_context`, we consult SimpleBroker's public project-scoping API to
-  locate an existing broker target. Auto-discovery inherits SimpleBroker's
-  ordering: upward `.broker.toml`, then upward legacy sqlite discovery, then
+  locate an existing broker target. Weft passes SimpleBroker a configured
+  project-config location under the Weft metadata directory, so auto-discovery
+  checks `.weft/broker.toml` by default before legacy sqlite discovery and
   env-selected non-sqlite backend synthesis. If nothing is found we fall back
   to the current working directory and initialize a fresh default target there.
 * **Explicit overrides** – If `weft_context` *is* provided we treat it as the
   authoritative project root, expand the path, and ask SimpleBroker for the
-  default target rooted at that directory.
+  Weft-scoped target rooted at that directory.
 * **Ancillary structure** – Regardless of how the root is chosen we ensure the
   configured Weft metadata directory, its `outputs/` and `logs/` children, and
   a JSON metadata file exist. These directories belong to Weft and never
@@ -34,7 +35,7 @@ functions:
 
 ``build_context(spec_context=None, create_dirs=True, create_database=True)``
     Build a new :class:`WeftContext` using either the supplied context override
-    or the best project database discovered via SimpleBroker.
+    or the best Weft-scoped broker target discovered via SimpleBroker.
 
 ``get_context(spec_context=None)``
     Convenience wrapper that simply calls :func:`build_context` with default
@@ -54,7 +55,7 @@ import os
 import time
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -66,6 +67,7 @@ from simplebroker import (
     target_for_directory,
 )
 from weft._constants import (
+    BROKER_PROJECT_CONFIG_FILENAME,
     POSTGRES_BACKEND_INSTALL_HINT,
     POSTGRES_BACKEND_UNAVAILABLE,
     WEFT_AUTOSTART_DIRECTORY_NAME,
@@ -276,13 +278,13 @@ def resolve_context_broker_target(
 ) -> BrokerTarget:
     """Resolve the broker target for an explicit project root.
 
-    This delegates directly to SimpleBroker's explicit-root helper, which
-    applies the authoritative project-config resolution contract for
-    `.broker.toml`, env-selected backends, and SQLite fallback.
+    This delegates directly to SimpleBroker's explicit-root helper with
+    Weft's configured project-config path/name overrides.
     """
 
     resolved_root = Path(root).expanduser().resolve()
-    return target_for_directory(resolved_root, config=dict(config))
+    target = target_for_directory(resolved_root, config=dict(config))
+    return _with_project_root(target, resolved_root)
 
 
 def find_existing_weft_dir(
@@ -349,14 +351,53 @@ def _resolve_root_and_target(
     except RuntimeError as exc:
         raise normalize_backend_resolution_error(exc) from exc
     if discovered_target is not None:
-        root = discovered_target.project_root or start_dir
-        return root, discovered_target, True
+        root = _root_for_discovered_broker_target(
+            discovered_target,
+            start_dir=start_dir,
+            config=config,
+        )
+        return root, _with_project_root(discovered_target, root), True
 
     root = start_dir
     try:
         return root, resolve_context_broker_target(root, config=config), False
     except RuntimeError as exc:
         raise normalize_backend_resolution_error(exc) from exc
+
+
+def _with_project_root(target: BrokerTarget, root: Path) -> BrokerTarget:
+    """Return *target* with Weft's project root attached."""
+
+    if target.project_root == root:
+        return target
+    return replace(target, project_root=root)
+
+
+def _root_for_discovered_broker_target(
+    target: BrokerTarget,
+    *,
+    start_dir: Path,
+    config: Mapping[str, Any],
+) -> Path:
+    """Derive Weft's root from a SimpleBroker-discovered target."""
+
+    if target.config_path is None:
+        return target.project_root or start_dir
+
+    config_path_prefix = Path(str(config.get("BROKER_PROJECT_CONFIG_PATH", "")))
+    if config_path_prefix.is_absolute():
+        return target.project_root or start_dir
+
+    config_name = Path(
+        str(config.get("BROKER_PROJECT_CONFIG_NAME", BROKER_PROJECT_CONFIG_FILENAME))
+    )
+    relative_parent_parts = len(config_path_prefix.parts) + len(
+        config_name.parent.parts
+    )
+    root = target.config_path.parent
+    for _ in range(relative_parent_parts):
+        root = root.parent
+    return root
 
 
 def _ensure_database(

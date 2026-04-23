@@ -118,12 +118,13 @@ Current contract:
 
 ## Project Context and Directory Scoping
 
-Weft uses broker-scoped project discovery. The project root comes from an
-explicit context override or from SimpleBroker's upward project search.
-The Weft metadata directory is materialized at that resolved root for
+Weft uses SimpleBroker project discovery with Weft-specific scoping defaults.
+The project root comes from an explicit context override or from SimpleBroker's
+upward project search using Weft's configured project-config and sqlite target
+paths. The Weft metadata directory is materialized at that resolved root for
 Weft-owned artifacts. Its default name is `.weft/`, and `WEFT_DIRECTORY_NAME`
-may override that default. The metadata directory is not the broker-target
-source of truth.
+may override that default. The default Weft broker config is
+`.weft/broker.toml`.
 
 _Implementation mapping_: `weft/context.py` (`build_context`,
 `_resolve_root_and_target`, `WeftContext`), `weft/commands/init.py`
@@ -132,7 +133,8 @@ _Implementation mapping_: `weft/context.py` (`build_context`,
 Current discovery rules:
 
 1. start from the current working directory or explicit `--context`
-2. discover the enclosing project root using SimpleBroker project scoping
+2. discover the enclosing project root using SimpleBroker project scoping with
+   Weft's configured project-config path/name
 3. materialize Weft-owned directories under the configured Weft metadata
    directory when needed
 4. resolve the active broker target for that project
@@ -142,11 +144,12 @@ Current broker target precedence:
 1. choose the project root from explicit `--context` / `spec_context` or from
    SimpleBroker auto-discovery
 2. for an explicit root, delegate to `simplebroker.target_for_directory()`:
-   `root/.broker.toml` first, then env-selected non-sqlite backend synthesis,
-   then sqlite fallback rooted at that directory
+   the configured Weft-scoped broker config first, then env-selected
+   non-sqlite backend synthesis, then sqlite fallback rooted at that directory
 3. for auto-discovery, delegate to `simplebroker.resolve_broker_target()`:
-   upward `.broker.toml` first, then upward legacy sqlite discovery using the
-   configured default DB name, then env-selected non-sqlite backend synthesis
+   upward Weft-scoped broker config first, then upward legacy sqlite discovery
+   using the configured default DB name, then env-selected non-sqlite backend
+   synthesis
 4. if auto-discovery finds nothing, Weft falls back to explicit-root resolution
    at the current working directory
 
@@ -156,6 +159,9 @@ Current boundary notes:
   reused by Weft-owned context resolution
 - `WEFT_DIRECTORY_NAME` sets the Weft-owned metadata directory name before
   discovery; `.weft/` remains the default when it is unset
+- Weft maps the configured metadata-directory name onto SimpleBroker's
+  project-config discovery keys. By default the Weft broker config path is
+  `.weft/broker.toml`, not root `.broker.toml`
 - the metadata directory's `config.json` file is project metadata, not a broker
   target source; it may carry the project-local autostart default used by
   `build_context()`
@@ -172,6 +178,7 @@ Current project structure:
 ```text
 project-root/
 ├── .weft/              # default; WEFT_DIRECTORY_NAME may override
+│   ├── broker.toml        # optional Weft-scoped broker target config
 │   ├── config.json        # project metadata, including optional autostart
 │   ├── agents.json        # optional project-local agent settings
 │   ├── agent-health.json  # advisory agent-runtime observations

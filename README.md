@@ -391,6 +391,8 @@ For non-file-backed backends such as Postgres, the configured metadata
 directory still holds Weft metadata, logs, outputs, and autostart manifests,
 but the broker target is resolved through SimpleBroker project configuration
 rather than assuming an on-disk broker db under the default `.weft/` layout.
+Weft scopes that broker project configuration under the metadata directory by
+default: `.weft/broker.toml`.
 
 ### Selecting A Backend
 
@@ -398,7 +400,7 @@ SQLite remains the default. To use Postgres, install `weft[pg]` and then
 declare the backend through SimpleBroker project config or Weft environment
 variables.
 
-Project-local `.broker.toml`:
+Project-local `.weft/broker.toml`:
 
 ```toml
 version = 1
@@ -419,9 +421,11 @@ export WEFT_BACKEND_SCHEMA='weft'
 
 When Weft auto-discovers a project from a child directory, an existing local
 broker target still wins over ambient env backend selection. That means
-`.broker.toml` is authoritative, and legacy sqlite project discovery beats
-`WEFT_BACKEND=...` during upward discovery. Env-based backend selection is the
-fallback when no project-local broker target has already claimed the directory.
+`.weft/broker.toml` is authoritative, and legacy sqlite project discovery
+beats `WEFT_BACKEND=...` during upward discovery. Env-based backend selection
+is the fallback when no project-local broker target has already claimed the
+directory. A root `.broker.toml` belongs to standalone SimpleBroker and does
+not redirect Weft by default.
 
 If Postgres is selected without the plugin installed, Weft will fail with an
 install hint for `uv add 'weft[pg]'`.

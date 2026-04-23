@@ -441,6 +441,9 @@ WEFT_AGENT_HEALTH_FILENAME: Final[str] = "agent-health.json"
 BROKER_PROJECT_CONFIG_FILENAME: Final[str] = ".broker.toml"
 """Project-scoped broker configuration filename."""
 
+WEFT_BROKER_PROJECT_CONFIG_FILENAME: Final[str] = "broker.toml"
+"""Default broker project configuration filename under the Weft metadata directory."""
+
 STREAM_CHUNK_SIZE_BYTES: Final[int] = 512 * 1024
 """Chunk size used when splitting large task output into queue messages."""
 
@@ -679,6 +682,8 @@ SIMPLEBROKER_ENV_MAPPING: Final[dict[str, str]] = {
     "WEFT_BURST_SLEEP": "BROKER_BURST_SLEEP",
     "WEFT_DEFAULT_DB_LOCATION": "BROKER_DEFAULT_DB_LOCATION",
     "WEFT_DEFAULT_DB_NAME": "BROKER_DEFAULT_DB_NAME",
+    "WEFT_PROJECT_CONFIG_PATH": "BROKER_PROJECT_CONFIG_PATH",
+    "WEFT_PROJECT_CONFIG_NAME": "BROKER_PROJECT_CONFIG_NAME",
     "WEFT_PROJECT_SCOPE": "BROKER_PROJECT_SCOPE",
     "WEFT_BACKEND": "BROKER_BACKEND",
     "WEFT_BACKEND_HOST": "BROKER_BACKEND_HOST",
@@ -731,6 +736,8 @@ def _apply_weft_simplebroker_defaults(
         "BROKER_DEFAULT_DB_NAME",
         _default_broker_default_db_name(weft_directory_name),
     )
+    config.setdefault("BROKER_PROJECT_CONFIG_PATH", weft_directory_name)
+    config.setdefault("BROKER_PROJECT_CONFIG_NAME", WEFT_BROKER_PROJECT_CONFIG_FILENAME)
 
 
 def _resolve_weft_broker_config(
@@ -1050,6 +1057,12 @@ def compile_config(overrides: Mapping[str, Any] | None = None) -> dict[str, Any]
         and "BROKER_DEFAULT_DB_NAME" not in explicit_broker_overrides
     ):
         base_broker_config.pop("BROKER_DEFAULT_DB_NAME", None)
+    if (
+        "WEFT_DIRECTORY_NAME" in normalized_overrides
+        and "WEFT_PROJECT_CONFIG_PATH" not in normalized_overrides
+        and "BROKER_PROJECT_CONFIG_PATH" not in explicit_broker_overrides
+    ):
+        base_broker_config.pop("BROKER_PROJECT_CONFIG_PATH", None)
     resolved_config.update(
         _resolve_weft_broker_config(
             resolved_config,

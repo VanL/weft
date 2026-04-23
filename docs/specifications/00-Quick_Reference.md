@@ -111,9 +111,11 @@ Format rules and sanitization live in `01-Core_Components.md`.
 | `WEFT_AUTOSTART_TASKS` | Whether manager boot should consider autostart manifests under the active Weft metadata directory. |
 | `WEFT_DIRECTORY_NAME` | Name of the Weft metadata directory. Defaults to `.weft` and is used before project discovery. |
 | `WEFT_DEFAULT_DB_LOCATION` | Broker default database location for SimpleBroker project resolution. |
-| `WEFT_DEFAULT_DB_NAME` | Default sqlite broker path for explicit-root resolution and for legacy sqlite project auto-discovery when no `.broker.toml` owns the target. |
+| `WEFT_DEFAULT_DB_NAME` | Default sqlite broker path for explicit-root resolution and for legacy sqlite project auto-discovery when no Weft-scoped broker config owns the target. |
+| `WEFT_PROJECT_CONFIG_PATH` | Optional override for the SimpleBroker project-config directory used by Weft. Defaults to `WEFT_DIRECTORY_NAME`. |
+| `WEFT_PROJECT_CONFIG_NAME` | Optional override for the SimpleBroker project-config filename used by Weft. Defaults to `broker.toml`. |
 | `WEFT_PROJECT_SCOPE` | Whether SimpleBroker should search upward for a project-scoped target. |
-| `WEFT_BACKEND`, `WEFT_BACKEND_TARGET`, `WEFT_BACKEND_HOST`, `WEFT_BACKEND_PORT`, `WEFT_BACKEND_USER`, `WEFT_BACKEND_PASSWORD`, `WEFT_BACKEND_DATABASE`, `WEFT_BACKEND_SCHEMA` | Env-selected broker backend and connection details. They win for explicit-root resolution when no `.broker.toml` exists, but auto-discovery still prefers a project `.broker.toml` or an existing legacy sqlite project first. |
+| `WEFT_BACKEND`, `WEFT_BACKEND_TARGET`, `WEFT_BACKEND_HOST`, `WEFT_BACKEND_PORT`, `WEFT_BACKEND_USER`, `WEFT_BACKEND_PASSWORD`, `WEFT_BACKEND_DATABASE`, `WEFT_BACKEND_SCHEMA` | Env-selected broker backend and connection details. They win for explicit-root resolution when no Weft-scoped broker config exists, but auto-discovery still prefers a Weft-scoped broker config or an existing legacy sqlite project first. |
 
 ## Spec Breaking Notes
 

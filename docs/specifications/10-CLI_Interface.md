@@ -510,7 +510,8 @@ _Implementation mapping_: `weft/_constants.py` `load_config()`,
 Current configuration domains:
 
 - environment variables for Weft defaults and broker alias translation
-- `.broker.toml` for project-scoped broker target selection
+- Weft-scoped `broker.toml` under the configured Weft metadata directory
+  (default `.weft/broker.toml`) for project-scoped broker target selection
 - Weft project metadata and agent settings under the configured Weft metadata
   directory (default `.weft/`), including the optional project-local autostart
   default in its `config.json`
@@ -519,16 +520,18 @@ Current broker resolution precedence:
 
 1. determine the project root from explicit `--context` or auto-discovery
 2. explicit-root resolution uses `simplebroker.target_for_directory()`:
-   `.broker.toml` at that root, else env-selected non-sqlite backend, else
-   sqlite fallback rooted at that directory
+   the configured Weft-scoped broker config at that root, else env-selected
+   non-sqlite backend, else sqlite fallback rooted at that directory
 3. auto-discovery uses `simplebroker.resolve_broker_target()`:
-   upward `.broker.toml`, then upward legacy sqlite discovery using the
-   configured default DB name, then env-selected non-sqlite backend
+   upward Weft-scoped broker config, then upward legacy sqlite discovery using
+   the configured default DB name, then env-selected non-sqlite backend
 4. if auto-discovery finds nothing, Weft falls back to explicit-root resolution
    at the current working directory
 
 Current exclusions:
 
+- root `.broker.toml` is a standalone SimpleBroker project config and does not
+  participate in Weft's default project discovery
 - the Weft config file does not participate in broker target resolution, even
   when it carries the project-local autostart default
 - the Weft agent settings file does not participate in broker target resolution
