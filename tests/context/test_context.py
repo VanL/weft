@@ -395,10 +395,16 @@ def test_build_context_discovery_uses_weft_scoped_project_postgres_target(
     assert ctx.broker_target.backend_options == {"schema": "toml_schema"}
 
 
-def test_build_context_ignores_root_simplebroker_config_when_weft_config_absent(
+def test_build_context_ignores_root_simplebroker_config_without_weft_config(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    root = prepare_project_root(tmp_path / "root-simplebroker-config")
+    root = (tmp_path / "root-simplebroker-config").resolve()
+    root.mkdir(parents=True)
+    monkeypatch.delenv("WEFT_BACKEND", raising=False)
+    monkeypatch.delenv("WEFT_BACKEND_TARGET", raising=False)
+    monkeypatch.delenv("BROKER_BACKEND", raising=False)
+    monkeypatch.delenv("BROKER_BACKEND_TARGET", raising=False)
     _write_broker_project_config(
         root,
         backend="sqlite",
