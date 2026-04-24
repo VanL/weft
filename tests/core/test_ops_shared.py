@@ -226,6 +226,79 @@ def test_follow_task_events_passes_remaining_timeout_to_result_wait(
     assert events[-1].event_type == "result"
 
 
+def test_follow_task_events_uses_visible_result_after_event_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_iter(context, tid, *, follow=False, timeout=None):
+        assert follow is True
+        captured["iter_timeout"] = timeout
+        raise TimeoutError("event wait expired")
+        yield  # pragma: no cover - makes this a generator
+
+    def _fake_await(
+        context, tid, *, timeout=None, show_stderr=False, emit_stream=False
+    ):
+        captured["result_timeout"] = timeout
+        return TaskResult(
+            tid=tid,
+            status="completed",
+            value="done",
+            stdout="done\n",
+            stderr=None,
+            error=None,
+        )
+
+    monkeypatch.setattr(events_mod, "iter_task_events", _fake_iter)
+    monkeypatch.setattr(events_mod, "await_task_result", _fake_await)
+
+    events = list(
+        events_mod.follow_task_events(
+            object(),
+            "1776000000000000001",
+            timeout=0.0,
+        )
+    )
+
+    assert captured["iter_timeout"] == 0.0
+    assert captured["result_timeout"] == events_mod.WEFT_COMPLETED_RESULT_GRACE_SECONDS
+    assert events[-1].event_type == "result"
+    assert events[-1].payload["status"] == "completed"
+
+
+def test_follow_task_events_preserves_event_timeout_when_result_not_visible(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fake_iter(context, tid, *, follow=False, timeout=None):
+        raise TimeoutError("event wait expired")
+        yield  # pragma: no cover - makes this a generator
+
+    def _fake_await(
+        context, tid, *, timeout=None, show_stderr=False, emit_stream=False
+    ):
+        return TaskResult(
+            tid=tid,
+            status="timeout",
+            value=None,
+            stdout=None,
+            stderr=None,
+            error="not ready",
+        )
+
+    monkeypatch.setattr(events_mod, "iter_task_events", _fake_iter)
+    monkeypatch.setattr(events_mod, "await_task_result", _fake_await)
+
+    with pytest.raises(TimeoutError, match="event wait expired"):
+        list(
+            events_mod.follow_task_events(
+                object(),
+                "1776000000000000001",
+                timeout=0.0,
+            )
+        )
+
+
 def test_realtime_events_uses_terminal_state_seen_during_materialization(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
