@@ -280,6 +280,10 @@ runbook needs to become stricter.
   observation forward. Advancing the log cursor without preserving the terminal
   payload can skip the only completion signal and leave a completed task
   looking live forever.
+- `Task.follow()` has two observable surfaces: lifecycle events and the
+  synthetic final result event. If a bounded event wait expires, make a bounded
+  result-surface check before raising the event timeout. A missed terminal log
+  observation should not hide an already-visible final result.
 
 ## 2026-04-20 Result Materialization And Synthetic PIDs
 

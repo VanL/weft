@@ -227,26 +227,34 @@ def follow_task_events(
 
     normalized_tid = normalize_tid(tid)
     deadline = _deadline_from_timeout(timeout)
-    yield from iter_task_events(
-        context,
-        normalized_tid,
-        follow=True,
-        timeout=timeout,
-    )
+    event_timeout: TimeoutError | None = None
+    try:
+        yield from iter_task_events(
+            context,
+            normalized_tid,
+            follow=True,
+            timeout=timeout,
+        )
+    except TimeoutError as exc:
+        event_timeout = exc
 
     remaining = _remaining_timeout(deadline)
     if remaining is not None and remaining <= 0:
-        _raise_follow_timeout(
-            tid=normalized_tid,
-            operation="result",
-            timeout=timeout,
-        )
+        if event_timeout is None:
+            _raise_follow_timeout(
+                tid=normalized_tid,
+                operation="result",
+                timeout=timeout,
+            )
+        remaining = WEFT_COMPLETED_RESULT_GRACE_SECONDS
     result = await_task_result(
         context,
         normalized_tid,
         timeout=remaining,
     )
     if result.status == "timeout":
+        if event_timeout is not None:
+            raise event_timeout
         _raise_follow_timeout(
             tid=normalized_tid,
             operation="result",
