@@ -1295,6 +1295,9 @@ def test_manager_stranded_other_owner_exhausts_recovery_and_can_yield(
         return False
 
     monkeypatch.setattr(manager, "_requeue_reserved_spawn_request", _fail_requeue)
+    # This case starts after reservation; keep the periodic pre-turn yield out of
+    # the first turn so slower Windows runners do not bypass the fence path.
+    manager._last_leader_check_ns = time.time_ns()
 
     manager.process_once()
     assert reserved_queue.peek_one(exact_timestamp=message_id) is not None
