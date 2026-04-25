@@ -111,9 +111,14 @@ class MacOSSandboxRunner:
             kill_process_tree(process.pid or -1, timeout=0.2)
 
         runtime_handle = RunnerHandle(
-            runner_name="macos-sandbox",
-            runtime_id=str(process.pid),
-            host_pids=(process.pid,) if process.pid is not None else (),
+            runner="macos-sandbox",
+            kind="sandboxed-process",
+            id=str(process.pid),
+            control={"authority": "host-pid"},
+            observations={
+                "host_pids": [process.pid] if process.pid is not None else [],
+                "sandbox_profile": self._profile,
+            },
             metadata={"profile": self._profile},
         )
         return run_monitored_subprocess(
@@ -240,28 +245,30 @@ class MacOSSandboxRunnerPlugin:
         )
 
     def stop(self, handle: RunnerHandle, *, timeout: float = 2.0) -> bool:
-        if not handle.host_pids:
+        host_pids = handle.scoped_host_pids()
+        if not host_pids:
             return False
-        for pid in handle.host_pids:
+        for pid in host_pids:
             terminate_process_tree(pid, timeout=timeout, kill_after=False)
         return True
 
     def kill(self, handle: RunnerHandle, *, timeout: float = 2.0) -> bool:
-        if not handle.host_pids:
+        host_pids = handle.scoped_host_pids()
+        if not host_pids:
             return False
-        for pid in handle.host_pids:
+        for pid in host_pids:
             kill_process_tree(pid, timeout=timeout)
         return True
 
     def describe(self, handle: RunnerHandle) -> RunnerRuntimeDescription | None:
         state = "missing"
-        for pid in handle.host_pids:
+        for pid in handle.scoped_host_pids():
             if _pid_exists(pid):
                 state = "running"
                 break
         return RunnerRuntimeDescription(
-            runner_name="macos-sandbox",
-            runtime_id=handle.runtime_id,
+            runner="macos-sandbox",
+            id=handle.id,
             state=state,
             metadata=dict(handle.metadata),
         )

@@ -663,11 +663,6 @@ class BaseTask(MultiQueueWatcher, ABC):
             if self._waiting_on is not None:
                 payload["waiting_on"] = self._waiting_on
         payload.update(extra)
-        payload.setdefault("task_pid", self._task_pid)
-        payload.setdefault(
-            "caller_pid", self._caller_pid if self._caller_pid > 0 else None
-        )
-        payload.setdefault("managed_pids", self._all_managed_pids())
         payload.setdefault("runner", self._current_runner_name())
         payload.setdefault(
             "runtime_handle",
@@ -980,13 +975,21 @@ class BaseTask(MultiQueueWatcher, ABC):
             return
 
         merged_handle = handle
-        if handle.runner_name == "host" and self._managed_pids:
+        if (
+            handle.runner in {"host", "macos-sandbox"}
+            and handle.control.get("authority") == "host-pid"
+            and self._managed_pids
+        ):
+            observations = dict(handle.observations)
+            observations["host_pids"] = sorted(
+                set(handle.scoped_host_pids()).union(self._managed_pids)
+            )
             merged_handle = RunnerHandle(
-                runner_name=handle.runner_name,
-                runtime_id=handle.runtime_id,
-                host_pids=tuple(
-                    sorted(set(handle.host_pids).union(self._managed_pids))
-                ),
+                runner=handle.runner,
+                kind=handle.kind,
+                id=handle.id,
+                control=dict(handle.control),
+                observations=observations,
                 metadata=dict(handle.metadata),
             )
 
@@ -1001,10 +1004,6 @@ class BaseTask(MultiQueueWatcher, ABC):
         payload = {
             "short": self.tid_short,
             "full": self.tid,
-            "pid": self._task_pid,
-            "task_pid": self._task_pid,
-            "caller_pid": self._caller_pid if self._caller_pid > 0 else None,
-            "managed_pids": self._all_managed_pids(),
             "runner": self._current_runner_name(),
             "runtime_handle": (
                 runtime_handle.to_dict() if runtime_handle is not None else None
@@ -1390,10 +1389,6 @@ class BaseTask(MultiQueueWatcher, ABC):
         comparable_keys = {
             "short",
             "full",
-            "pid",
-            "task_pid",
-            "caller_pid",
-            "managed_pids",
             "runner",
             "runtime_handle",
             "name",
@@ -1408,12 +1403,12 @@ class BaseTask(MultiQueueWatcher, ABC):
     def _all_managed_pids(self) -> list[int]:
         runtime_pids: tuple[int, ...] = ()
         if self._runtime_handle is not None:
-            runtime_pids = self._runtime_handle.host_pids
+            runtime_pids = self._runtime_handle.scoped_host_pids()
         return sorted(set(self._managed_pids).union(runtime_pids))
 
     def _current_runner_name(self) -> str:
         if self._runtime_handle is not None:
-            return self._runtime_handle.runner_name
+            return self._runtime_handle.runner
         runner = getattr(self.taskspec.spec, "runner", None)
         name = getattr(runner, "name", None)
         if isinstance(name, str) and name.strip():
@@ -1421,14 +1416,23 @@ class BaseTask(MultiQueueWatcher, ABC):
         return "host"
 
     def _merge_runtime_handle_host_pid(self, pid: int) -> None:
-        if self._runtime_handle is None or self._runtime_handle.runner_name != "host":
+        if (
+            self._runtime_handle is None
+            or self._runtime_handle.control.get("authority") != "host-pid"
+        ):
             return
-        if pid in self._runtime_handle.host_pids:
+        if pid in self._runtime_handle.scoped_host_pids():
             return
+        observations = dict(self._runtime_handle.observations)
+        observations["host_pids"] = sorted(
+            set(self._runtime_handle.scoped_host_pids()).union({pid})
+        )
         self._runtime_handle = RunnerHandle(
-            runner_name=self._runtime_handle.runner_name,
-            runtime_id=self._runtime_handle.runtime_id,
-            host_pids=tuple(sorted(set(self._runtime_handle.host_pids).union({pid}))),
+            runner=self._runtime_handle.runner,
+            kind=self._runtime_handle.kind,
+            id=self._runtime_handle.id,
+            control=dict(self._runtime_handle.control),
+            observations=observations,
             metadata=dict(self._runtime_handle.metadata),
         )
 
@@ -1442,7 +1446,9 @@ class BaseTask(MultiQueueWatcher, ABC):
         if handle is None:
             return
         try:
-            plugin = require_runner_plugin(handle.runner_name)
+            if handle.control.get("authority") == "external-supervisor":
+                return
+            plugin = require_runner_plugin(handle.runner)
             if graceful:
                 plugin.stop(handle, timeout=timeout)
             else:

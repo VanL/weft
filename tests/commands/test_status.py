@@ -21,6 +21,29 @@ from weft.ext import RunnerRuntimeDescription
 pytestmark = [pytest.mark.shared]
 
 
+def _runtime_handle(
+    runner: str,
+    runtime_id: str,
+    *,
+    kind: str = "process",
+    authority: str = "host-pid",
+    host_pids: list[int] | None = None,
+    observations: dict[str, Any] | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    observed = dict(observations or {})
+    if host_pids is not None:
+        observed["host_pids"] = host_pids
+    return {
+        "runner": runner,
+        "kind": kind,
+        "id": runtime_id,
+        "control": {"authority": authority},
+        "observations": observed,
+        "metadata": metadata or {},
+    }
+
+
 class _FakeQueueChangeMonitor:
     def __init__(self, queues, *, config=None) -> None:
         del config
@@ -207,16 +230,15 @@ def test_cmd_status_json_includes_runner_runtime_details(
             {
                 "short": tid[-10:],
                 "full": tid,
-                "pid": 11111,
-                "task_pid": 11111,
-                "managed_pids": [],
                 "runner": "docker",
-                "runtime_handle": {
-                    "runner_name": "docker",
-                    "runtime_id": "container-123",
-                    "host_pids": [],
-                    "metadata": {"image": "python:3.13-alpine"},
-                },
+                "runtime_handle": _runtime_handle(
+                    "docker",
+                    "container-123",
+                    kind="container",
+                    authority="runner",
+                    observations={"container_id": "container-123"},
+                    metadata={"image": "python:3.13-alpine"},
+                ),
             }
         )
     )
@@ -224,8 +246,8 @@ def test_cmd_status_json_includes_runner_runtime_details(
     class FakeRunnerPlugin:
         def describe(self, handle: Any) -> RunnerRuntimeDescription | None:
             return RunnerRuntimeDescription(
-                runner_name=handle.runner_name,
-                runtime_id=handle.runtime_id,
+                runner=handle.runner,
+                id=handle.id,
                 state="running",
                 metadata={"image": "python:3.13-alpine", "cpu_percent": 0.5},
             )
@@ -247,10 +269,10 @@ def test_cmd_status_json_includes_runner_runtime_details(
     entry = data["tasks"][0]
     assert entry["tid"] == tid
     assert entry["runner"] == "docker"
-    assert entry["runtime_handle"]["runner_name"] == "docker"
-    assert entry["runtime_handle"]["runtime_id"] == "container-123"
-    assert entry["runtime"]["runner_name"] == "docker"
-    assert entry["runtime"]["runtime_id"] == "container-123"
+    assert entry["runtime_handle"]["runner"] == "docker"
+    assert entry["runtime_handle"]["id"] == "container-123"
+    assert entry["runtime"]["runner"] == "docker"
+    assert entry["runtime"]["id"] == "container-123"
     assert entry["runtime"]["state"] == "running"
     assert entry["runtime"]["metadata"]["image"] == "python:3.13-alpine"
     assert entry["metadata"]["owner"] == "tests"
@@ -280,10 +302,12 @@ def test_task_status_keeps_terminal_log_state_running_while_task_pid_is_alive(
             {
                 "short": tid[-10:],
                 "full": tid,
-                "pid": os.getpid(),
-                "task_pid": os.getpid(),
-                "managed_pids": [],
                 "runner": "host",
+                "runtime_handle": _runtime_handle(
+                    "host",
+                    str(os.getpid()),
+                    host_pids=[os.getpid()],
+                ),
             }
         )
     )
@@ -322,12 +346,14 @@ def test_task_status_treats_created_runtime_as_non_live_for_terminal_docker_task
                 "short": tid[-10:],
                 "full": tid,
                 "runner": "docker",
-                "runtime_handle": {
-                    "runner_name": "docker",
-                    "runtime_id": "container-123",
-                    "host_pids": [],
-                    "metadata": {"image": "python:3.13-alpine"},
-                },
+                "runtime_handle": _runtime_handle(
+                    "docker",
+                    "container-123",
+                    kind="container",
+                    authority="runner",
+                    observations={"container_id": "container-123"},
+                    metadata={"image": "python:3.13-alpine"},
+                ),
             }
         )
     )
@@ -335,8 +361,8 @@ def test_task_status_treats_created_runtime_as_non_live_for_terminal_docker_task
     class FakeRunnerPlugin:
         def describe(self, handle: Any) -> RunnerRuntimeDescription | None:
             return RunnerRuntimeDescription(
-                runner_name=handle.runner_name,
-                runtime_id=handle.runtime_id,
+                runner=handle.runner,
+                id=handle.id,
                 state="created",
                 metadata={"image": "python:3.13-alpine"},
             )
@@ -371,15 +397,12 @@ def test_task_status_uses_log_runtime_metadata_when_mapping_is_missing(
                 "event": "control_stop",
                 "status": "cancelled",
                 "tid": tid,
-                "task_pid": os.getpid(),
-                "pid": os.getpid(),
                 "runner": "host",
-                "runtime_handle": {
-                    "runner_name": "host",
-                    "runtime_id": "host-current",
-                    "host_pids": [os.getpid()],
-                    "metadata": {},
-                },
+                "runtime_handle": _runtime_handle(
+                    "host",
+                    "host-current",
+                    host_pids=[os.getpid()],
+                ),
                 "taskspec": {
                     "name": "log-only-live-consumer-task",
                     "spec": {"runner": {"name": "host", "options": {}}},
@@ -424,10 +447,12 @@ def test_task_status_surfaces_terminal_log_state_once_task_pid_is_gone(
             {
                 "short": tid[-10:],
                 "full": tid,
-                "pid": 999_999_999,
-                "task_pid": 999_999_999,
-                "managed_pids": [],
                 "runner": "host",
+                "runtime_handle": _runtime_handle(
+                    "host",
+                    "999999999",
+                    host_pids=[999_999_999],
+                ),
             }
         )
     )
@@ -461,10 +486,12 @@ def test_task_status_marks_dead_host_running_snapshot_failed(
             {
                 "short": tid[-10:],
                 "full": tid,
-                "pid": 999_999_998,
-                "task_pid": 999_999_998,
-                "managed_pids": [],
                 "runner": "host",
+                "runtime_handle": _runtime_handle(
+                    "host",
+                    "999999998",
+                    host_pids=[999_999_998],
+                ),
             }
         )
     )
@@ -499,10 +526,12 @@ def test_cmd_status_surfaces_dead_host_running_snapshot_as_failed_with_all(
             {
                 "short": tid[-10:],
                 "full": tid,
-                "pid": 999_999_997,
-                "task_pid": 999_999_997,
-                "managed_pids": [],
                 "runner": "host",
+                "runtime_handle": _runtime_handle(
+                    "host",
+                    "999999997",
+                    host_pids=[999_999_997],
+                ),
             }
         )
     )
@@ -834,16 +863,15 @@ def test_task_status_keeps_external_runner_terminal_when_runtime_is_missing(
             {
                 "short": tid[-10:],
                 "full": tid,
-                "pid": os.getpid(),
-                "task_pid": os.getpid(),
-                "managed_pids": [],
                 "runner": "docker",
-                "runtime_handle": {
-                    "runner_name": "docker",
-                    "runtime_id": "container-123",
-                    "host_pids": [],
-                    "metadata": {"image": "python:3.13-alpine"},
-                },
+                "runtime_handle": _runtime_handle(
+                    "docker",
+                    "container-123",
+                    kind="container",
+                    authority="runner",
+                    observations={"container_id": "container-123"},
+                    metadata={"image": "python:3.13-alpine"},
+                ),
             }
         )
     )
@@ -851,8 +879,8 @@ def test_task_status_keeps_external_runner_terminal_when_runtime_is_missing(
     class FakeRunnerPlugin:
         def describe(self, handle: Any) -> RunnerRuntimeDescription | None:
             return RunnerRuntimeDescription(
-                runner_name=handle.runner_name,
-                runtime_id=handle.runtime_id,
+                runner=handle.runner,
+                id=handle.id,
                 state="missing",
                 metadata={"image": "python:3.13-alpine"},
             )
@@ -902,16 +930,12 @@ def test_cmd_status_host_runtime_uses_zombie_safe_pid_liveness(
             {
                 "short": tid[-10:],
                 "full": tid,
-                "pid": 43210,
-                "task_pid": 43210,
-                "managed_pids": [43210],
                 "runner": "host",
-                "runtime_handle": {
-                    "runner_name": "host",
-                    "runtime_id": "43210",
-                    "host_pids": [43210],
-                    "metadata": {},
-                },
+                "runtime_handle": _runtime_handle(
+                    "host",
+                    "43210",
+                    host_pids=[43210],
+                ),
             }
         )
     )
@@ -927,8 +951,8 @@ def test_cmd_status_host_runtime_uses_zombie_safe_pid_liveness(
     data = json.loads(payload)
     assert len(data["tasks"]) == 1
     entry = data["tasks"][0]
-    assert entry["runtime_handle"]["runner_name"] == "host"
-    assert entry["runtime"]["runner_name"] == "host"
+    assert entry["runtime_handle"]["runner"] == "host"
+    assert entry["runtime"]["runner"] == "host"
     assert entry["runtime"]["state"] == "missing"
 
 

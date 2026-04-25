@@ -45,12 +45,14 @@ from weft._constants import (
     SPEC_TYPE_TASK,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MANAGER_LIFETIME_TIMEOUT,
+    WEFT_MANAGER_RUNTIME_HANDLE_JSON_ENV,
     WEFT_MANAGERS_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
     WORK_ENVELOPE_START,
     get_weft_directory_name,
 )
+from weft.ext import RunnerHandle
 from weft.helpers import (
     canonical_owner_tid,
     is_canonical_manager_record,
@@ -353,13 +355,14 @@ class Manager(BaseTask):
         """Publish an active record to the manager registry (Spec: [MA-1.4], [MF-7])."""
         registry_queue = self._queue(WEFT_MANAGERS_REGISTRY_QUEUE)
         timestamp = registry_queue.generate_timestamp()
+        runtime_handle = self._manager_runtime_handle()
 
         payload = {
             "tid": self.tid,
             "name": self.taskspec.name,
             "capabilities": self.taskspec.metadata.get("capabilities", []),
             "status": "active",
-            "pid": multiprocessing.current_process().pid,
+            "runtime_handle": runtime_handle.to_dict(),
             "timestamp": timestamp,
             "inbox": self._queue_names["inbox"],
             "requests": self._queue_names["inbox"],
@@ -416,7 +419,7 @@ class Manager(BaseTask):
             "name": self.taskspec.name,
             "capabilities": self.taskspec.metadata.get("capabilities", []),
             "status": "stopped",
-            "pid": multiprocessing.current_process().pid,
+            "runtime_handle": self._manager_runtime_handle().to_dict(),
             "timestamp": stopped_timestamp,
             "inbox": self._queue_names["inbox"],
             "requests": self._queue_names["inbox"],
@@ -440,6 +443,32 @@ class Manager(BaseTask):
 
         self._registry_message_id = None
         self._unregistered = True
+
+    def _manager_runtime_handle(self) -> RunnerHandle:
+        config = getattr(self, "_config", {})
+        raw_handle = config.get(WEFT_MANAGER_RUNTIME_HANDLE_JSON_ENV)
+        if isinstance(raw_handle, str) and raw_handle.strip():
+            try:
+                payload = json.loads(raw_handle)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"{WEFT_MANAGER_RUNTIME_HANDLE_JSON_ENV} must be JSON"
+                ) from exc
+            if not isinstance(payload, Mapping):
+                raise ValueError(
+                    f"{WEFT_MANAGER_RUNTIME_HANDLE_JSON_ENV} must be a JSON object"
+                )
+            return RunnerHandle.from_dict(payload)
+
+        pid = multiprocessing.current_process().pid
+        return RunnerHandle(
+            runner="host",
+            kind="process",
+            id=str(pid),
+            control={"authority": "host-pid"},
+            observations={"host_pids": [pid]},
+            metadata={},
+        )
 
     def _latest_registry_entry(
         self, queue: Queue, tid: str
@@ -473,7 +502,7 @@ class Manager(BaseTask):
         keys = {
             "tid",
             "status",
-            "pid",
+            "runtime_handle",
             "name",
             "capabilities",
             "inbox",
@@ -491,6 +520,21 @@ class Manager(BaseTask):
     @staticmethod
     def _pid_alive(pid: int | None) -> bool:
         return pid_is_live(pid)
+
+    @staticmethod
+    def _manager_record_is_live(record: Mapping[str, Any]) -> bool:
+        payload = record.get("runtime_handle")
+        if not isinstance(payload, Mapping):
+            return False
+        try:
+            handle = RunnerHandle.from_dict(payload)
+        except ValueError:
+            return False
+        if handle.control.get("authority") == "external-supervisor":
+            return True
+        if handle.control.get("authority") == "host-pid":
+            return any(pid_is_live(pid) for pid in handle.scoped_host_pids())
+        return True
 
     def _read_active_manager_records(self) -> dict[str, dict[str, Any]] | None:
         """Return the live canonical manager snapshot or ``None`` on read failure.
@@ -541,8 +585,7 @@ class Manager(BaseTask):
                 continue
             if not is_canonical_manager_record(record):
                 continue
-            pid = record.get("pid")
-            if not isinstance(pid, int) or not self._pid_alive(pid):
+            if not self._manager_record_is_live(record):
                 stale_timestamp = record.get("_timestamp")
                 if isinstance(stale_timestamp, int):
                     stale_timestamps.append(stale_timestamp)
@@ -1586,10 +1629,14 @@ class Manager(BaseTask):
         if latest_payload is None:
             return set()
 
-        managed = latest_payload.get("managed_pids")
-        if not isinstance(managed, list):
+        handle_payload = latest_payload.get("runtime_handle")
+        if not isinstance(handle_payload, Mapping):
             return set()
-        return {pid for pid in managed if isinstance(pid, int) and pid > 0}
+        try:
+            handle = RunnerHandle.from_dict(handle_payload)
+        except ValueError:
+            return set()
+        return set(handle.scoped_host_pids())
 
     def _enqueue_autostart_request(
         self, payload: dict[str, Any], inbox_message: Any

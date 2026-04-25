@@ -221,11 +221,15 @@ class DockerProviderCLIRunner:
                         interval=weft_constants.DOCKER_CONTAINER_LOOKUP_INTERVAL,
                     )
                     runtime_handle = RunnerHandle(
-                        runner_name="docker",
-                        runtime_id=container.name,
-                        metadata={
+                        runner="docker",
+                        kind="container",
+                        id=container.name,
+                        control={"authority": "runner"},
+                        observations={
                             "container_id": container.id,
                             "container_name": container.name,
+                        },
+                        metadata={
                             "image": image_result.image,
                             "provider": provider.name,
                             "agent_image_cache_key": image_result.cache_key,

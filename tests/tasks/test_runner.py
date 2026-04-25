@@ -19,6 +19,41 @@ from weft.core.taskspec import LimitsSection
 from weft.ext import RunnerCapabilities, RunnerHandle
 
 
+def test_runner_handle_round_trips_new_shape() -> None:
+    handle = RunnerHandle(
+        runner="host",
+        kind="process",
+        id="123",
+        control={"authority": "host-pid"},
+        observations={"host_pids": [123, 123, -1, "bad"]},
+        metadata={"label": "demo"},
+    )
+
+    payload = handle.to_dict()
+
+    assert payload == {
+        "runner": "host",
+        "kind": "process",
+        "id": "123",
+        "control": {"authority": "host-pid"},
+        "observations": {"host_pids": [123]},
+        "metadata": {"label": "demo"},
+    }
+    assert RunnerHandle.from_dict(payload) == handle
+
+
+def test_runner_handle_rejects_legacy_shape() -> None:
+    with pytest.raises(ValueError, match="legacy keys"):
+        RunnerHandle.from_dict(
+            {
+                "runner_name": "host",
+                "runtime_id": "123",
+                "host_pids": [123],
+                "metadata": {},
+            }
+        )
+
+
 def test_task_runner_executes_function_successfully():
     runner = TaskRunner(
         target_type="function",
@@ -79,7 +114,13 @@ def test_run_monitored_subprocess_uses_supplied_monitor(
             self.stopped = True
 
     monitor = FakeMonitor()
-    runtime_handle = RunnerHandle(runner_name="docker", runtime_id="container-123")
+    runtime_handle = RunnerHandle(
+        runner="docker",
+        kind="container",
+        id="container-123",
+        control={"authority": "runner"},
+        observations={"container_id": "container-123"},
+    )
     load_calls = 0
 
     def _unexpected_load(*args: object, **kwargs: object) -> object:
@@ -163,7 +204,13 @@ def test_run_monitored_subprocess_emits_live_chunks_before_exit() -> None:
             monitor=None,
             db_path=None,
             config=None,
-            runtime_handle=RunnerHandle(runner_name="host", runtime_id="live-stream"),
+            runtime_handle=RunnerHandle(
+                runner="host",
+                kind="process",
+                id="live-stream",
+                control={"authority": "host-pid"},
+                observations={},
+            ),
             cancel_requested=None,
             on_worker_started=None,
             on_runtime_handle_started=None,
@@ -247,7 +294,13 @@ def test_run_monitored_subprocess_ignores_late_limit_after_process_exit() -> Non
         monitor=monitor,
         db_path=None,
         config=None,
-        runtime_handle=RunnerHandle(runner_name="host", runtime_id="late-limit"),
+        runtime_handle=RunnerHandle(
+            runner="host",
+            kind="process",
+            id="late-limit",
+            control={"authority": "host-pid"},
+            observations={},
+        ),
         cancel_requested=None,
         on_worker_started=None,
         on_runtime_handle_started=None,

@@ -41,6 +41,7 @@ from weft._exceptions import ManagerStartFailed
 from weft.context import WeftContext
 from weft.core.spawn_requests import generate_spawn_request_timestamp
 from weft.core.taskspec import TaskSpec, resolve_taskspec_payload
+from weft.ext import RunnerHandle
 from weft.helpers import (
     is_canonical_manager_record,
     iter_queue_json_entries,
@@ -128,8 +129,8 @@ def _snapshot_registry(
                 continue
             record = _normalize_manager_record(data, timestamp=timestamp)
             if prune_stale and record.get("status") == "active":
-                pid = record.get("pid")
-                if isinstance(pid, int) and not _is_pid_alive(pid):
+                handle = _manager_handle_from_record(record)
+                if _manager_handle_is_stale(handle):
                     stale_timestamps.append(timestamp)
                     continue
             existing = snapshot.get(tid)
@@ -158,8 +159,8 @@ def _select_active_manager_from_snapshot(
             continue
         if record.get("status") != "active":
             continue
-        pid = record.get("pid")
-        if isinstance(pid, int) and _is_pid_alive(pid):
+        handle = _manager_handle_from_record(record)
+        if handle is not None and not _manager_handle_is_stale(handle):
             candidates.append(record)
     if not candidates:
         return None
@@ -185,10 +186,34 @@ def _registry_view(
 
 
 def _record_pid(record: dict[str, Any] | None) -> int | None:
+    handle = _manager_handle_from_record(record)
+    if handle is None or handle.control.get("authority") != "host-pid":
+        return None
+    pids = handle.scoped_host_pids()
+    return pids[0] if pids else None
+
+
+def _manager_handle_from_record(record: dict[str, Any] | None) -> RunnerHandle | None:
     if not isinstance(record, dict):
         return None
-    pid = record.get("pid")
-    return pid if isinstance(pid, int) else None
+    payload = record.get("runtime_handle")
+    if not isinstance(payload, dict):
+        return None
+    try:
+        return RunnerHandle.from_dict(payload)
+    except ValueError:
+        return None
+
+
+def _manager_handle_is_stale(handle: RunnerHandle | None) -> bool:
+    if handle is None:
+        return True
+    if handle.control.get("authority") == "external-supervisor":
+        return False
+    if handle.control.get("authority") == "host-pid":
+        host_pids = handle.scoped_host_pids()
+        return not host_pids or not any(_is_pid_alive(pid) for pid in host_pids)
+    return False
 
 
 def _manager_record(
@@ -235,8 +260,12 @@ def _lookup_manager_pid(context: WeftContext, tid: str) -> int | None:
     for data, timestamp in iter_queue_json_entries(queue):
         if data.get("full") != tid or timestamp < latest_timestamp:
             continue
-        pid = data.get("pid")
-        if isinstance(pid, int):
+        handle = _manager_handle_from_record(data)
+        pid = None
+        if handle is not None and handle.control.get("authority") == "host-pid":
+            pids = handle.scoped_host_pids()
+            pid = pids[0] if pids else None
+        if pid is not None:
             latest_timestamp = timestamp
             resolved_pid = pid
     return resolved_pid
@@ -738,7 +767,7 @@ def _start_manager(
                     if (
                         selected_record.get("status") == "active"
                         and is_canonical_manager_record(selected_record)
-                        and selected_record.get("pid") == launch.pid
+                        and _record_pid(selected_record) == launch.pid
                         and _is_pid_alive(launch.pid)
                     ):
                         try:
@@ -838,8 +867,7 @@ def _ensure_manager(
     """Guarantee a canonical active manager exists, starting one if necessary."""
     record = _select_active_manager(context)
     if record:
-        pid = record.get("pid")
-        if not (isinstance(pid, int) and _is_pid_alive(pid)):
+        if _manager_handle_is_stale(_manager_handle_from_record(record)):
             _snapshot_registry(context)
             record = _select_active_manager(context)
             if record is None:
@@ -856,7 +884,7 @@ def _serve_manager_foreground(context: WeftContext) -> tuple[int, str | None]:
     if existing is not None:
         return (
             1,
-            f"Manager {existing.get('tid')} already running (pid {existing.get('pid')})",
+            f"Manager {existing.get('tid')} already running",
         )
 
     invocation = _build_manager_runtime_invocation(
@@ -889,9 +917,8 @@ def _stop_manager(
 
     current = record or _manager_record(context, target_tid)
     if isinstance(current, dict):
-        pid = current.get("pid")
-        if current.get("status") == "stopped" and not _is_pid_alive(
-            pid if isinstance(pid, int) else None
+        if current.get("status") == "stopped" and _manager_handle_is_stale(
+            _manager_handle_from_record(current)
         ):
             return True, None
 

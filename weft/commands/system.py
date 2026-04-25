@@ -209,7 +209,7 @@ def _format_manager_summary(records: list[dict[str, Any]]) -> str:
         tid = record.get("tid", "?")
         status = record.get("status", "unknown")
         role = record.get("role", "manager")
-        pid = record.get("pid")
+        runtime_handle = record.get("runtime_handle")
         requests = record.get("requests", WEFT_SPAWN_REQUESTS_QUEUE)
         outbox = record.get("outbox", "")
         timestamp = _to_int(record.get("timestamp"))
@@ -223,7 +223,7 @@ def _format_manager_summary(records: list[dict[str, Any]]) -> str:
                 f"  - tid: {tid}",
                 f"    role: {role}",
                 f"    status: {status}",
-                f"    pid: {pid if pid is not None else 'n/a'}",
+                f"    runtime: {json.dumps(runtime_handle, sort_keys=True) if isinstance(runtime_handle, dict) else 'n/a'}",
                 f"    requests: {requests}",
                 f"    outbox: {outbox}",
                 f"    {ts_line}",
@@ -373,17 +373,18 @@ def _pid_alive(pid: int | None) -> bool:
 
 
 def _task_process_alive(mapping_entry: Mapping[str, Any] | None) -> bool:
-    if mapping_entry is None:
+    handle = _runtime_handle_from_mapping(mapping_entry or {})
+    if handle is None or handle.control.get("authority") != "host-pid":
         return False
-    pid = mapping_entry.get("task_pid") or mapping_entry.get("pid")
-    return _pid_alive(pid if isinstance(pid, int) else None)
+    return any(_pid_alive(pid) for pid in handle.scoped_host_pids())
 
 
 def _task_process_id(mapping_entry: Mapping[str, Any] | None) -> int | None:
-    if mapping_entry is None:
+    handle = _runtime_handle_from_mapping(mapping_entry or {})
+    if handle is None or handle.control.get("authority") != "host-pid":
         return None
-    pid = mapping_entry.get("task_pid") or mapping_entry.get("pid")
-    return pid if isinstance(pid, int) else None
+    host_pids = handle.scoped_host_pids()
+    return host_pids[0] if host_pids else None
 
 
 def _runtime_description_is_live(
@@ -448,7 +449,7 @@ def _runner_name_for_snapshot(
             return mapped_runner
         runtime_handle = _runtime_handle_from_mapping(mapping_entry)
         if runtime_handle is not None:
-            return runtime_handle.runner_name
+            return runtime_handle.runner
 
     spec = taskspec.get("spec")
     if not isinstance(spec, Mapping):
@@ -465,13 +466,23 @@ def _runner_name_for_snapshot(
 def _describe_runtime_handle(handle: RunnerHandle | None) -> dict[str, Any] | None:
     if handle is None:
         return None
+    if handle.control.get("authority") == "external-supervisor":
+        return {
+            "runner": handle.runner,
+            "id": handle.id,
+            "state": "unknown",
+            "metadata": {
+                **dict(handle.observations),
+                **dict(handle.metadata),
+            },
+        }
     try:
-        plugin = require_runner_plugin(handle.runner_name)
+        plugin = require_runner_plugin(handle.runner)
         runtime = plugin.describe(handle)
     except Exception as exc:  # pragma: no cover - defensive integration guard
         return {
-            "runner_name": handle.runner_name,
-            "runtime_id": handle.runtime_id,
+            "runner": handle.runner,
+            "id": handle.id,
             "state": "unknown",
             "metadata": {"describe_error": str(exc)},
         }
@@ -847,7 +858,11 @@ def _manager_snapshot(record: dict[str, Any]) -> ManagerSnapshot:
         tid=str(record.get("tid", "")),
         status=str(record.get("status", "unknown")),
         name=str(record.get("name", "")),
-        pid=record.get("pid") if isinstance(record.get("pid"), int) else None,
+        runtime_handle=(
+            dict(record["runtime_handle"])
+            if isinstance(record.get("runtime_handle"), dict)
+            else None
+        ),
         timestamp=(
             int(record["timestamp"])
             if isinstance(record.get("timestamp"), int | float | str)

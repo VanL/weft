@@ -555,7 +555,7 @@ def test_docker_runner_executes_hello_world_image(sandbox_profile: Path) -> None
     assert outcome.returncode == 0
     assert "Hello from Docker!" in (outcome.stdout or "")
     assert outcome.runtime_handle is not None
-    assert outcome.runtime_handle.runner_name == "docker"
+    assert outcome.runtime_handle.runner == "docker"
 
 
 def test_docker_runner_collects_metrics_and_classifies_memory_limit_violation(
@@ -710,7 +710,7 @@ def test_command_runners_execute_python_probe_equivalently(
     assert payload["env"] == f"marker-{runner_name}"
     assert payload["cwd"] == str(tmp_path.resolve())
     assert outcome.runtime_handle is not None
-    assert outcome.runtime_handle.runner_name == runner_name
+    assert outcome.runtime_handle.runner == runner_name
 
 
 @pytest.mark.parametrize("runner_name", RUNNER_NAMES)
@@ -809,10 +809,7 @@ def test_consumer_command_runners_share_basic_lifecycle(
         assert mappings
         latest = mappings[-1]
         assert latest["runner"] == runner_name
-        if runner_name == "host":
-            assert latest["runtime_handle"]["runner_name"] == "host"
-        else:
-            assert latest["runtime_handle"]["runner_name"] == runner_name
+        assert latest["runtime_handle"]["runner"] == runner_name
     finally:
         task.stop(join=False)
 
@@ -833,9 +830,9 @@ def test_running_command_runners_surface_runner_status(
         snapshot = _wait_for_running_snapshot(root, tid)
         assert snapshot.runner == runner_name
         assert snapshot.runtime_handle is not None
-        assert snapshot.runtime_handle["runner_name"] == runner_name
+        assert snapshot.runtime_handle["runner"] == runner_name
         assert snapshot.runtime is not None
-        assert snapshot.runtime["runner_name"] == runner_name
+        assert snapshot.runtime["runner"] == runner_name
         assert snapshot.runtime["state"] == "running"
         if runner_name == "docker":
             metadata = snapshot.runtime["metadata"]

@@ -25,6 +25,17 @@ def _write_log_event(context, payload: dict[str, Any]) -> None:
     queue.write(json.dumps(payload))
 
 
+def _host_runtime_handle(pid: int) -> dict[str, Any]:
+    return {
+        "runner": "host",
+        "kind": "process",
+        "id": str(pid),
+        "control": {"authority": "host-pid"},
+        "observations": {"host_pids": [pid]},
+        "metadata": {},
+    }
+
+
 def test_status_reports_no_managers(workdir) -> None:
     rc, out, err = run_cli("status", cwd=workdir)
 
@@ -42,7 +53,7 @@ def test_status_json_includes_manager_records(workdir) -> None:
         "tid": "1762000000000000999",
         "name": "cli-manager",
         "status": "active",
-        "pid": os.getpid(),
+        "runtime_handle": _host_runtime_handle(os.getpid()),
         "role": "manager",
         "requests": WEFT_SPAWN_REQUESTS_QUEUE,
         "timestamp": 1762000000000001999,
@@ -61,7 +72,7 @@ def test_status_json_includes_manager_records(workdir) -> None:
         assert any(item.get("tid") == record["tid"] for item in managers)
         entry = next(item for item in managers if item.get("tid") == record["tid"])
         assert entry["requests"] == WEFT_SPAWN_REQUESTS_QUEUE
-        assert entry["pid"] == record["pid"]
+        assert entry["runtime_handle"] == record["runtime_handle"]
         assert payload["tasks"] == []
     finally:
         registry.read_many(limit=100)
@@ -75,7 +86,7 @@ def test_status_json_includes_noncanonical_manager_records(workdir) -> None:
         "tid": "1762000000000000888",
         "name": "legacy-manager",
         "status": "active",
-        "pid": os.getpid(),
+        "runtime_handle": _host_runtime_handle(os.getpid()),
         "role": "manager",
         "requests": "custom.manager.requests",
         "timestamp": 1762000000000002888,
@@ -94,7 +105,7 @@ def test_status_json_includes_noncanonical_manager_records(workdir) -> None:
         assert any(item.get("tid") == record["tid"] for item in managers)
         entry = next(item for item in managers if item.get("tid") == record["tid"])
         assert entry["requests"] == "custom.manager.requests"
-        assert entry["pid"] == record["pid"]
+        assert entry["runtime_handle"] == record["runtime_handle"]
     finally:
         registry.read_many(limit=100)
 
@@ -203,8 +214,6 @@ def test_status_json_hides_dead_host_running_task_by_default(workdir) -> None:
             "tid": tid,
             "tid_short": tid[-10:],
             "timestamp": started,
-            "task_pid": 999_999_996,
-            "pid": 999_999_996,
             "taskspec": taskspec,
         },
     )
@@ -214,10 +223,8 @@ def test_status_json_hides_dead_host_running_task_by_default(workdir) -> None:
             {
                 "short": tid[-10:],
                 "full": tid,
-                "pid": 999_999_996,
-                "task_pid": 999_999_996,
-                "managed_pids": [],
                 "runner": "host",
+                "runtime_handle": _host_runtime_handle(999_999_996),
             }
         )
     )
@@ -259,8 +266,6 @@ def test_task_status_process_json_reports_dead_pid_liveness(workdir) -> None:
             "tid": tid,
             "tid_short": tid[-10:],
             "timestamp": started,
-            "task_pid": 999_999_995,
-            "pid": 999_999_995,
             "taskspec": taskspec,
         },
     )
@@ -270,10 +275,15 @@ def test_task_status_process_json_reports_dead_pid_liveness(workdir) -> None:
             {
                 "short": tid[-10:],
                 "full": tid,
-                "pid": 999_999_995,
-                "task_pid": 999_999_995,
-                "managed_pids": [999_999_994],
                 "runner": "host",
+                "runtime_handle": {
+                    "runner": "host",
+                    "kind": "process",
+                    "id": "999999995",
+                    "control": {"authority": "host-pid"},
+                    "observations": {"host_pids": [999_999_995, 999_999_994]},
+                    "metadata": {},
+                },
             }
         )
     )
@@ -285,9 +295,8 @@ def test_task_status_process_json_reports_dead_pid_liveness(workdir) -> None:
     payload = json.loads(out)
     assert payload["tid"] == tid
     assert payload["status"] == "failed"
-    assert payload["pid"] == 999_999_995
-    assert payload["pid_alive"] is False
-    assert payload["managed_pids"] == [999_999_994]
+    assert payload["host_pids"] == [999_999_994, 999_999_995]
+    assert payload["managed_pids"] == [999_999_994, 999_999_995]
     assert payload["live_managed_pids"] == []
 
 

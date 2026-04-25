@@ -488,6 +488,20 @@ runbook needs to become stricter.
   comes from post-unwind `ctrl_out` plus terminal task-log state, and from
   reducing manager registry history to the latest relevant live record.
 
+## 2026-04-24 Runtime Handle Authority
+
+- Runtime identity must carry its control authority with it. A host PID is only
+  actionable when a `runtime_handle` says `control.authority == "host-pid"` and
+  scopes that PID under `observations.host_pids`; container-local PID values
+  must not be treated as host process handles.
+- Manager registry records and task TID mappings should use the same
+  runtime-handle shape. If a supervised manager cannot expose a host-process
+  handle, publish an explicit external-supervisor handle instead of making
+  generic manager code inspect the supervisor.
+- Durable task logs can still replay old lifecycle facts, but runtime control
+  and liveness checks should reject invalid handle shapes. This keeps history
+  readable without reviving ambiguous control authority.
+
 ## 2026-04-08 Manager Role Identity
 
 - Manager identity has to stay consistent across every observability surface,

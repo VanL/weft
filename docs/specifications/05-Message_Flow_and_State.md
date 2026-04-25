@@ -322,9 +322,14 @@ Current rules:
 
 - detached bootstrap launches the real manager runtime through a short-lived
   detached wrapper rather than keeping it as a plain CLI child
-- detached bootstrap returns success only after the launched manager PID is
-  live and the canonical registry record for that same manager TID/PID is
-  visible
+- detached bootstrap returns success only after the launched host process is
+  live and the canonical registry record for that same manager TID contains a
+  matching `runtime_handle` with `control.authority == "host-pid"` and the
+  launched PID in `observations.host_pids`
+- supervised or containerized manager launches must provide an explicit
+  `WEFT_MANAGER_RUNTIME_HANDLE_JSON` value or use an external-supervisor
+  runtime handle; generic manager code must not inspect Docker or trust a
+  container-local PID as a host PID
 - detached-launcher acknowledgement and startup-stderr cleanup are best-effort
   post-proof steps; they may warn, but they do not downgrade a successfully
   proven manager start into submission failure
@@ -338,6 +343,9 @@ _Implementation mapping_: `weft/core/manager_runtime.py`,
 `weft/cli/run.py`, `weft/commands/manager.py`,
 `weft/commands/serve.py`, `weft/manager_detached_launcher.py`,
 `weft/manager_process.py`.
+
+Plan backlink:
+[`docs/plans/2026-04-24-runtime-handle-authority-migration-plan.md`](../plans/2026-04-24-runtime-handle-authority-migration-plan.md).
 
 ### 8. Failure Recovery Flow
 

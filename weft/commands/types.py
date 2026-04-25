@@ -183,7 +183,7 @@ class ManagerSnapshot:
     tid: str
     status: str
     name: str
-    pid: int | None
+    runtime_handle: dict[str, Any] | None
     timestamp: int | None
     role: str | None = None
     requests: str | None = None

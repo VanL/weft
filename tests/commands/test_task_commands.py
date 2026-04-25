@@ -22,6 +22,7 @@ from weft.core import (
     launch_task_process,
 )
 from weft.core.tasks import Consumer
+from weft.ext import RunnerHandle
 from weft.helpers import iter_queue_json_entries, kill_process_tree
 
 pytestmark = [pytest.mark.shared]
@@ -39,6 +40,29 @@ class _FakeQueueChangeMonitor:
 
     def close(self) -> None:
         return
+
+
+def _runtime_handle(
+    runner: str,
+    runtime_id: str,
+    *,
+    kind: str = "process",
+    authority: str = "host-pid",
+    host_pids: list[int] | None = None,
+    observations: dict[str, Any] | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    observed = dict(observations or {})
+    if host_pids is not None:
+        observed["host_pids"] = host_pids
+    return {
+        "runner": runner,
+        "kind": kind,
+        "id": runtime_id,
+        "control": {"authority": authority},
+        "observations": observed,
+        "metadata": metadata or {},
+    }
 
 
 def _make_taskspec(tid: str) -> TaskSpec:
@@ -100,18 +124,14 @@ def _wait_for_registered_worker_pid(ctx, tid: str, timeout: float = 15.0) -> int
         for payload, _timestamp in iter_queue_json_entries(mapping_queue):
             if payload.get("full") != tid:
                 continue
-            managed_pids = payload.get("managed_pids")
-            if isinstance(managed_pids, list):
-                for pid in managed_pids:
-                    if isinstance(pid, int) and pid > 0:
-                        return pid
             runtime_handle = payload.get("runtime_handle")
             if isinstance(runtime_handle, dict):
-                host_pids = runtime_handle.get("host_pids")
-                if isinstance(host_pids, list):
-                    for pid in host_pids:
-                        if isinstance(pid, int) and pid > 0:
-                            return pid
+                try:
+                    handle = RunnerHandle.from_dict(runtime_handle)
+                except (TypeError, ValueError):
+                    continue
+                for pid in handle.scoped_host_pids():
+                    return pid
         time.sleep(0.05)
     return None
 
@@ -264,17 +284,13 @@ def test_stop_tasks_uses_runner_handle_when_available(
             {
                 "short": tid[-6:],
                 "full": tid,
-                "pid": 11111,
-                "task_pid": 11111,
-                "caller_pid": 22222,
-                "managed_pids": [33333],
                 "runner": "fake",
-                "runtime_handle": {
-                    "runner_name": "fake",
-                    "runtime_id": "runtime-123",
-                    "host_pids": [33333],
-                    "metadata": {"scope": "test"},
-                },
+                "runtime_handle": _runtime_handle(
+                    "fake",
+                    "runtime-123",
+                    host_pids=[33333],
+                    metadata={"scope": "test"},
+                ),
                 "name": "task-func",
                 "hostname": "test-host",
             }
@@ -299,12 +315,12 @@ def test_stop_tasks_uses_runner_handle_when_available(
     assert calls == [
         (
             "stop",
-            {
-                "runner_name": "fake",
-                "runtime_id": "runtime-123",
-                "host_pids": [33333],
-                "metadata": {"scope": "test"},
-            },
+            _runtime_handle(
+                "fake",
+                "runtime-123",
+                host_pids=[33333],
+                metadata={"scope": "test"},
+            ),
             0.2,
         )
     ]
@@ -332,17 +348,13 @@ def test_stop_tasks_prefers_task_process_over_runner_handle(
             {
                 "short": tid[-6:],
                 "full": tid,
-                "pid": 11111,
-                "task_pid": 11111,
-                "caller_pid": 22222,
-                "managed_pids": [33333],
                 "runner": "fake",
-                "runtime_handle": {
-                    "runner_name": "fake",
-                    "runtime_id": "runtime-123",
-                    "host_pids": [33333],
-                    "metadata": {"scope": "test"},
-                },
+                "runtime_handle": _runtime_handle(
+                    "fake",
+                    "runtime-123",
+                    host_pids=[33333],
+                    metadata={"scope": "test"},
+                ),
                 "name": "task-func",
                 "hostname": "test-host",
             }
@@ -364,8 +376,19 @@ def test_stop_tasks_prefers_task_process_over_runner_handle(
     stopped = task_cmd.stop_tasks([tid], context_path=root)
 
     assert stopped == 1
-    assert terminate_calls == [(11111, 0.2, False), (11111, 0.2, False)]
-    assert plugin_calls == []
+    assert terminate_calls == []
+    assert plugin_calls == [
+        (
+            "stop",
+            _runtime_handle(
+                "fake",
+                "runtime-123",
+                host_pids=[33333],
+                metadata={"scope": "test"},
+            ),
+            0.2,
+        )
+    ]
     assert ctrl_queue.read_one() == "STOP"
 
 
@@ -388,17 +411,13 @@ def test_kill_tasks_uses_runner_handle_when_available(
             {
                 "short": tid[-6:],
                 "full": tid,
-                "pid": 11111,
-                "task_pid": 11111,
-                "caller_pid": 22222,
-                "managed_pids": [33333],
                 "runner": "fake",
-                "runtime_handle": {
-                    "runner_name": "fake",
-                    "runtime_id": "runtime-123",
-                    "host_pids": [33333],
-                    "metadata": {"scope": "test"},
-                },
+                "runtime_handle": _runtime_handle(
+                    "fake",
+                    "runtime-123",
+                    host_pids=[33333],
+                    metadata={"scope": "test"},
+                ),
                 "name": "task-func",
                 "hostname": "test-host",
             }
@@ -423,12 +442,12 @@ def test_kill_tasks_uses_runner_handle_when_available(
     assert calls == [
         (
             "kill",
-            {
-                "runner_name": "fake",
-                "runtime_id": "runtime-123",
-                "host_pids": [33333],
-                "metadata": {"scope": "test"},
-            },
+            _runtime_handle(
+                "fake",
+                "runtime-123",
+                host_pids=[33333],
+                metadata={"scope": "test"},
+            ),
             0.2,
         )
     ]
@@ -484,17 +503,15 @@ def test_stop_tasks_does_not_force_terminal_consumer_for_external_runner(
             {
                 "short": tid[-6:],
                 "full": tid,
-                "pid": 11111,
-                "task_pid": 11111,
-                "caller_pid": 22222,
-                "managed_pids": [],
                 "runner": "docker",
-                "runtime_handle": {
-                    "runner_name": "docker",
-                    "runtime_id": "runtime-123",
-                    "host_pids": [],
-                    "metadata": {"image": "python:3.13-alpine"},
-                },
+                "runtime_handle": _runtime_handle(
+                    "docker",
+                    "runtime-123",
+                    kind="container",
+                    authority="runner",
+                    observations={"container_id": "runtime-123"},
+                    metadata={"image": "python:3.13-alpine"},
+                ),
                 "name": "task-func",
                 "hostname": "test-host",
             }
@@ -517,15 +534,17 @@ def test_stop_tasks_does_not_force_terminal_consumer_for_external_runner(
             last_timestamp=time.time_ns(),
             duration_seconds=None,
             runner="docker",
-            runtime_handle={
-                "runner_name": "docker",
-                "runtime_id": "runtime-123",
-                "host_pids": [],
-                "metadata": {"image": "python:3.13-alpine"},
-            },
+            runtime_handle=_runtime_handle(
+                "docker",
+                "runtime-123",
+                kind="container",
+                authority="runner",
+                observations={"container_id": "runtime-123"},
+                metadata={"image": "python:3.13-alpine"},
+            ),
             runtime={
-                "runner_name": "docker",
-                "runtime_id": "runtime-123",
+                "runner": "docker",
+                "id": "runtime-123",
                 "state": "missing",
                 "metadata": {"image": "python:3.13-alpine"},
             },
@@ -559,10 +578,6 @@ def test_stop_tasks_does_not_force_stop_consumer_without_runner_handle(
             {
                 "short": tid[-6:],
                 "full": tid,
-                "pid": 11111,
-                "task_pid": 11111,
-                "caller_pid": 22222,
-                "managed_pids": [],
                 "runner": "host",
                 "runtime_handle": None,
                 "name": "task-func",
@@ -618,17 +633,15 @@ def test_kill_tasks_does_not_force_terminal_consumer_for_external_runner(
             {
                 "short": tid[-6:],
                 "full": tid,
-                "pid": 11111,
-                "task_pid": 11111,
-                "caller_pid": 22222,
-                "managed_pids": [],
                 "runner": "macos-sandbox",
-                "runtime_handle": {
-                    "runner_name": "macos-sandbox",
-                    "runtime_id": "runtime-123",
-                    "host_pids": [33333],
-                    "metadata": {"profile": "allow-default.sb"},
-                },
+                "runtime_handle": _runtime_handle(
+                    "macos-sandbox",
+                    "runtime-123",
+                    kind="sandboxed-process",
+                    host_pids=[33333],
+                    observations={"sandbox_profile": "allow-default.sb"},
+                    metadata={"profile": "allow-default.sb"},
+                ),
                 "name": "task-func",
                 "hostname": "test-host",
             }
@@ -651,15 +664,17 @@ def test_kill_tasks_does_not_force_terminal_consumer_for_external_runner(
             last_timestamp=time.time_ns(),
             duration_seconds=None,
             runner="macos-sandbox",
-            runtime_handle={
-                "runner_name": "macos-sandbox",
-                "runtime_id": "runtime-123",
-                "host_pids": [33333],
-                "metadata": {"profile": "allow-default.sb"},
-            },
+            runtime_handle=_runtime_handle(
+                "macos-sandbox",
+                "runtime-123",
+                kind="sandboxed-process",
+                host_pids=[33333],
+                observations={"sandbox_profile": "allow-default.sb"},
+                metadata={"profile": "allow-default.sb"},
+            ),
             runtime={
-                "runner_name": "macos-sandbox",
-                "runtime_id": "runtime-123",
+                "runner": "macos-sandbox",
+                "id": "runtime-123",
                 "state": "missing",
                 "metadata": {"profile": "allow-default.sb"},
             },

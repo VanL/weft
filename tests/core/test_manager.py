@@ -67,6 +67,17 @@ def pending_timestamps(queue) -> list[int]:
     return timestamps
 
 
+def _host_runtime_handle(pid: int) -> dict[str, object]:
+    return {
+        "runner": "host",
+        "kind": "process",
+        "id": str(pid),
+        "control": {"authority": "host-pid"},
+        "observations": {"host_pids": [pid]},
+        "metadata": {},
+    }
+
+
 def make_manager_spec(
     tid: str,
     inbox: str = WEFT_SPAWN_REQUESTS_QUEUE,
@@ -1712,7 +1723,7 @@ def test_manager_leadership_yields_to_canonical_lower_manager(
                 "tid": lower_tid,
                 "name": "manager",
                 "status": "active",
-                "pid": os.getpid(),
+                "runtime_handle": _host_runtime_handle(os.getpid()),
                 "timestamp": registry_queue.generate_timestamp(),
                 "inbox": WEFT_SPAWN_REQUESTS_QUEUE,
                 "requests": WEFT_SPAWN_REQUESTS_QUEUE,
