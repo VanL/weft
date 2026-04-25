@@ -56,6 +56,17 @@ from weft.helpers import iter_queue_json_entries
 pytestmark = [pytest.mark.shared]
 
 
+def _host_runtime_handle(pid: int) -> dict[str, Any]:
+    return {
+        "runner": "host",
+        "kind": "process",
+        "id": str(pid),
+        "control": {"authority": "host-pid"},
+        "observations": {"host_pids": [pid]},
+        "metadata": {},
+    }
+
+
 def _make_taskspec(tid: str) -> TaskSpec:
     return TaskSpec(
         tid=tid,
@@ -556,7 +567,7 @@ def test_start_manager_builds_detached_launch_from_shared_runtime_invocation(
             _registry_view(
                 active={
                     "tid": invocation.tid,
-                    "pid": fake_process.pid,
+                    "runtime_handle": _host_runtime_handle(fake_process.pid),
                     "status": "active",
                     "requests": WEFT_SPAWN_REQUESTS_QUEUE,
                     "role": "manager",
@@ -580,7 +591,7 @@ def test_start_manager_builds_detached_launch_from_shared_runtime_invocation(
     record, started_here, handle = _start_manager(ctx, verbose=False)
 
     assert record["tid"] == invocation.tid
-    assert record["pid"] == fake_process.pid
+    assert record["runtime_handle"] == _host_runtime_handle(fake_process.pid)
     assert started_here is True
     assert handle is None
     assert helper_calls == [(ctx, None)]
@@ -631,7 +642,7 @@ def test_start_manager_treats_post_proof_ack_failure_as_nonfatal(
             _registry_view(
                 active={
                     "tid": invocation.tid,
-                    "pid": fake_process.pid,
+                    "runtime_handle": _host_runtime_handle(fake_process.pid),
                     "status": "active",
                     "requests": WEFT_SPAWN_REQUESTS_QUEUE,
                     "role": "manager",
@@ -655,7 +666,7 @@ def test_start_manager_treats_post_proof_ack_failure_as_nonfatal(
     record, started_here, handle = _start_manager(ctx, verbose=False)
 
     assert record["tid"] == invocation.tid
-    assert record["pid"] == fake_process.pid
+    assert record["runtime_handle"] == _host_runtime_handle(fake_process.pid)
     assert started_here is True
     assert handle is None
     assert warnings
@@ -2058,9 +2069,27 @@ def test_stop_manager_waits_for_pid_exit_after_stopped_status(
 
     responses = iter(
         [
-            _registry_view(target={"tid": tid, "status": "active", "pid": 4321}),
-            _registry_view(target={"tid": tid, "status": "stopped", "pid": 4321}),
-            _registry_view(target={"tid": tid, "status": "stopped", "pid": 4321}),
+            _registry_view(
+                target={
+                    "tid": tid,
+                    "status": "active",
+                    "runtime_handle": _host_runtime_handle(4321),
+                }
+            ),
+            _registry_view(
+                target={
+                    "tid": tid,
+                    "status": "stopped",
+                    "runtime_handle": _host_runtime_handle(4321),
+                }
+            ),
+            _registry_view(
+                target={
+                    "tid": tid,
+                    "status": "stopped",
+                    "runtime_handle": _host_runtime_handle(4321),
+                }
+            ),
             _registry_view(),
         ]
     )

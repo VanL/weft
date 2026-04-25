@@ -17,6 +17,18 @@ from weft.commands import manager as manager_cmd
 from weft.commands import tasks as task_cmd
 
 
+def _host_runtime_handle(*pids: int) -> dict[str, Any]:
+    primary = next((pid for pid in pids if pid > 0), 0)
+    return {
+        "runner": "host",
+        "kind": "process",
+        "id": str(primary),
+        "control": {"authority": "host-pid"},
+        "observations": {"host_pids": list(pids)},
+        "metadata": {},
+    }
+
+
 @pytest.mark.sqlite_only
 def test_register_from_json_routes_manager_tids_to_worker_tracking() -> None:
     harness = WeftTestHarness()
@@ -357,9 +369,7 @@ def test_harness_stop_active_managers_does_not_fan_out_in_process_task_tid(
         harness._load_tid_mapping_payloads = lambda: [  # type: ignore[method-assign]
             {
                 "full": "1775630561555555555",
-                "pid": harness._self_pid,
-                "task_pid": harness._self_pid,
-                "managed_pids": [],
+                "runtime_handle": _host_runtime_handle(harness._self_pid),
             }
         ]
         monkeypatch.setattr(
@@ -565,16 +575,15 @@ def test_collect_pid_mappings_registers_discovered_task_tids() -> None:
         monkeypatch_payloads = [
             {
                 "full": "1775630560739303424",
-                "pid": 424242,
-                "managed_pids": [424243],
+                "runtime_handle": _host_runtime_handle(424242, 424243),
             },
             {
                 "full": "1775630560447778816",
-                "pid": 424244,
+                "runtime_handle": _host_runtime_handle(424244),
             },
             {
                 "full": "1775630560999999999",
-                "pid": 424245,
+                "runtime_handle": _host_runtime_handle(424245),
                 "role": "manager",
             },
         ]
@@ -601,15 +610,11 @@ def test_live_task_tids_ignore_manager_role_mappings() -> None:
         harness._load_tid_mapping_payloads = lambda: [  # type: ignore[method-assign]
             {
                 "full": "1775630560739303424",
-                "task_pid": 424242,
-                "pid": 424242,
-                "managed_pids": [],
+                "runtime_handle": _host_runtime_handle(424242),
             },
             {
                 "full": "1775630560999999999",
-                "task_pid": 424245,
-                "pid": 424245,
-                "managed_pids": [],
+                "runtime_handle": _host_runtime_handle(424245),
                 "role": "manager",
             },
         ]
@@ -691,9 +696,7 @@ def test_wait_for_completion_timeout_includes_tid_debug_snapshot(
                 json.dumps(
                     {
                         "full": tid,
-                        "pid": 424242,
-                        "task_pid": 424242,
-                        "managed_pids": [434343],
+                        "runtime_handle": _host_runtime_handle(424242, 434343),
                     }
                 )
             )
@@ -712,7 +715,7 @@ def test_wait_for_completion_timeout_includes_tid_debug_snapshot(
         assert "Task completion timeout snapshot:" in message
         assert f"  tid={tid}" in message
         assert "  latest_tid_mapping=" in message
-        assert '"managed_pids": [434343]' in message
+        assert '"host_pids": [424242, 434343]' in message
         assert "  outbox_present=False" in message
         assert "  live_candidate_pids=[424242]" in message
         assert "WeftTestHarness snapshot:" in message

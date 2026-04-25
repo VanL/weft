@@ -26,6 +26,7 @@ from weft.commands.dump import cmd_dump
 from weft.commands.load import cmd_load
 from weft.commands.result import cmd_result
 from weft.commands.validate_taskspec import cmd_validate_taskspec
+from weft.ext import RunnerHandle
 
 from .run import cmd_run, render_spec_aware_run_help
 
@@ -688,17 +689,20 @@ def task_status(
     if process:
         ctx = task_cmd._resolve_context(context_dir)
         mapping = task_cmd.mapping_for_tid(ctx, snapshot.tid) or {}
-        pid = mapping.get("pid") or mapping.get("task_pid")
-        managed_pids = mapping.get("managed_pids") or []
+        runtime_handle = mapping.get("runtime_handle")
+        managed_pids: list[int] = []
+        if isinstance(runtime_handle, dict):
+            try:
+                handle = RunnerHandle.from_dict(runtime_handle)
+                managed_pids = list(handle.scoped_host_pids())
+            except (TypeError, ValueError):
+                managed_pids = []
         live_managed_pids = [
             managed_pid
             for managed_pid in managed_pids
             if isinstance(managed_pid, int) and status_cmd._pid_alive(managed_pid)
         ]
-        status_payload["pid"] = pid
-        status_payload["pid_alive"] = (
-            status_cmd._pid_alive(pid) if isinstance(pid, int) else False
-        )
+        status_payload["host_pids"] = managed_pids
         status_payload["managed_pids"] = managed_pids
         status_payload["live_managed_pids"] = live_managed_pids
     if json_output:
@@ -713,14 +717,9 @@ def task_status(
     if snapshot.waiting_on:
         typer.echo(f"waiting_on: {snapshot.waiting_on}")
     if process:
-        pid = status_payload.get("pid")
         managed = status_payload.get("managed_pids")
-        pid_state = "live" if status_payload.get("pid_alive") else "dead"
         live_managed = status_payload.get("live_managed_pids")
-        typer.echo(
-            f"pid: {pid} ({pid_state}) managed_pids: {managed} "
-            f"live_managed_pids: {live_managed}"
-        )
+        typer.echo(f"host_pids: {managed} live_host_pids: {live_managed}")
 
 
 @task_app.command("stop")

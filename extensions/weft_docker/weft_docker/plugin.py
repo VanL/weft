@@ -624,19 +624,22 @@ class DockerRunnerPlugin:
 
     def stop(self, handle: RunnerHandle, *, timeout: float = 2.0) -> bool:
         with _docker_client() as client:
-            return _docker_stop(client, handle.runtime_id, timeout=timeout)
+            return _docker_stop(client, handle.id, timeout=timeout)
 
     def kill(self, handle: RunnerHandle, *, timeout: float = 2.0) -> bool:
         del timeout
         with _docker_client() as client:
-            return _docker_kill(client, handle.runtime_id)
+            return _docker_kill(client, handle.id)
 
     def describe(self, handle: RunnerHandle) -> RunnerRuntimeDescription | None:
         with _docker_client() as client:
             return _describe_runtime(
                 client,
-                runtime_id=handle.runtime_id,
-                base_metadata=dict(handle.metadata),
+                runtime_id=handle.id,
+                base_metadata={
+                    **dict(handle.observations),
+                    **dict(handle.metadata),
+                },
             )
 
 
@@ -710,9 +713,11 @@ def _handle_with_runtime_metadata(
     if description is not None:
         metadata.update(description.metadata)
     return RunnerHandle(
-        runner_name=handle.runner_name,
-        runtime_id=handle.runtime_id,
-        host_pids=handle.host_pids,
+        runner=handle.runner,
+        kind=handle.kind,
+        id=handle.id,
+        control=dict(handle.control),
+        observations=dict(handle.observations),
         metadata=metadata,
     )
 
@@ -730,10 +735,18 @@ def _runtime_handle_for_container(
         "image": image,
     }
     if container is not None:
-        metadata["container_id"] = container.id
+        container_id = container.id
+    else:
+        container_id = None
+    observations = {"container_name": container_name}
+    if container_id is not None:
+        observations["container_id"] = container_id
     return RunnerHandle(
-        runner_name="docker",
-        runtime_id=container_name,
+        runner="docker",
+        kind="container",
+        id=container_name,
+        control={"authority": "runner"},
+        observations=observations,
         metadata=metadata,
     )
 
@@ -753,8 +766,8 @@ def _describe_runtime(
     )
     if container is None:
         return RunnerRuntimeDescription(
-            runner_name="docker",
-            runtime_id=runtime_id,
+            runner="docker",
+            id=runtime_id,
             state="missing",
             metadata=metadata,
         )
@@ -798,8 +811,8 @@ def _describe_runtime(
     metadata.update(stats_metadata)
 
     return RunnerRuntimeDescription(
-        runner_name="docker",
-        runtime_id=runtime_id,
+        runner="docker",
+        id=runtime_id,
         state=state if isinstance(state, str) else "unknown",
         metadata=metadata,
     )

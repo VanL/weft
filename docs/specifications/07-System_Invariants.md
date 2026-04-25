@@ -74,9 +74,9 @@ _Implementation mapping_: `weft/core/tasks/consumer.py`,
 - **EXEC.1**: each work item is executed exactly once per successful reservation
   path
 - **EXEC.2**: timeout enforcement happens through the active runner loop
-- **EXEC.3**: task PID and caller PID appear in the initial mapping record,
-  while live `runtime_handle` and `managed_pids` data are only published after
-  a runner or session actually starts
+- **EXEC.3**: TID mappings do not publish top-level host PID fields. Runtime
+  identity is published through `runtime_handle`; scoped host PIDs, when
+  available, live under `runtime_handle.observations.host_pids`.
 - **EXEC.4**: return-code publication belongs to terminal execution outcomes
 
 ### Observability Invariants
@@ -96,6 +96,10 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
 - **OBS.8**: process titles stay within the allowed character vocabulary
 - **OBS.9**: endpoint names under `_weft.` are reserved for Weft-owned
   internal runtime services and are not claimable from public naming surfaces
+- **OBS.10**: durable task-log history may replay basic lifecycle status even
+  when an old or invalid runtime-handle payload is ignored. Runtime control and
+  liveness probes must reject invalid handle shapes instead of inferring
+  authority from legacy PID fields.
 
 ### Implementation Invariants
 

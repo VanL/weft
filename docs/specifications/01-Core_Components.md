@@ -265,10 +265,24 @@ Current rule:
 
 - control and observability must work through a durable runtime handle, not
   only through a host PID
+- the runtime handle JSON contract is exactly:
+  `runner`, `kind`, `id`, `control`, `observations`, `metadata`
+- `control.authority` defines who may act on the handle. `host-pid` means
+  `observations.host_pids` are scoped host PIDs; `runner` means the named
+  runner plugin owns control; `external-supervisor` means Weft records
+  identity but does not send direct runtime control.
+- legacy handle keys such as `runner_name`, `runtime_id`, and top-level
+  `host_pids` are invalid at runtime-contract boundaries
+- manager records use the same `runtime_handle` shape. Detached host launch
+  publishes a scoped host-process handle; supervised/container managers must
+  be given an explicit handle or use `external-supervisor`.
 
 _Implementation mapping_: `weft/ext.py` `RunnerHandle`; `weft/core/tasks/base.py`
 `register_runtime_handle()`; CLI status/control surfaces in
 `weft/commands/status.py` and `weft/commands/tasks.py`.
+
+Plan backlink:
+[`docs/plans/2026-04-24-runtime-handle-authority-migration-plan.md`](../plans/2026-04-24-runtime-handle-authority-migration-plan.md).
 
 Why this matters:
 

@@ -478,8 +478,8 @@ def test_command_runner_waits_for_container_to_leave_created_before_runtime_hand
         plugin,
         "_describe_runtime",
         lambda client, runtime_id, base_metadata: RunnerRuntimeDescription(
-            runner_name="docker",
-            runtime_id=runtime_id,
+            runner="docker",
+            id=runtime_id,
             state="running",
             metadata=dict(base_metadata),
         ),

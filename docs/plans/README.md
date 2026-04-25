@@ -3,7 +3,7 @@
 This directory holds non-normative implementation plans, roadmaps, and audit artifacts.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 73 tracked plan files in this directory.
+There are currently 75 tracked plan files in this directory.
 
 ## Status Taxonomy
 
@@ -38,6 +38,8 @@ There are currently 73 tracked plan files in this directory.
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
 | [`2026-04-21-run-boundary-dispatch-fence-control-contract-plan.md`](./2026-04-21-run-boundary-dispatch-fence-control-contract-plan.md) | Run Boundary, Dispatch Fence, And Control Contract Plan | `completed` | none |
+| [`2026-04-24-runtime-handle-authority-migration-plan.md`](./2026-04-24-runtime-handle-authority-migration-plan.md) | Runtime Handle Authority Migration Plan | `proposed` | none |
+| [`2026-04-24-manager-status-container-pid-liveness-plan.md`](./2026-04-24-manager-status-container-pid-liveness-plan.md) | Manager Status Container PID Liveness Plan | `proposed` | none |
 | [`2026-04-21-client-follow-hardening-plan.md`](./2026-04-21-client-follow-hardening-plan.md) | Client Follow Hardening Plan | `completed` | none |
 | [`2026-04-21-weft-client-and-django-first-class-hardening-plan.md`](./2026-04-21-weft-client-and-django-first-class-hardening-plan.md) | Weft Client And Django First-Class Hardening Plan | `completed` | none |
 | [`2026-04-20-weft-django-v1-reality-alignment-plan.md`](./2026-04-20-weft-django-v1-reality-alignment-plan.md) | Weft Django V1 Reality Alignment Plan | `completed` | ./2026-04-21-weft-client-and-django-first-class-hardening-plan.md |

@@ -81,9 +81,11 @@ def _host_handle(pid: int | None) -> RunnerHandle | None:
     if pid is None or pid <= 0:
         return None
     return RunnerHandle(
-        runner_name="host",
-        runtime_id=str(pid),
-        host_pids=(pid,),
+        runner="host",
+        kind="process",
+        id=str(pid),
+        control={"authority": "host-pid"},
+        observations={"host_pids": [pid]},
     )
 
 
@@ -800,7 +802,7 @@ class HostRunnerPlugin:
         )
 
     def stop(self, handle: RunnerHandle, *, timeout: float = 2.0) -> bool:
-        host_pids = handle.host_pids
+        host_pids = handle.scoped_host_pids()
         if not host_pids:
             return False
         for pid in host_pids:
@@ -808,7 +810,7 @@ class HostRunnerPlugin:
         return True
 
     def kill(self, handle: RunnerHandle, *, timeout: float = 2.0) -> bool:
-        host_pids = handle.host_pids
+        host_pids = handle.scoped_host_pids()
         if not host_pids:
             return False
         for pid in host_pids:
@@ -816,15 +818,16 @@ class HostRunnerPlugin:
         return True
 
     def describe(self, handle: RunnerHandle) -> RunnerRuntimeDescription | None:
-        primary_pid = handle.primary_pid
+        host_pids = handle.scoped_host_pids()
+        primary_pid = host_pids[0] if host_pids else None
         state = "missing"
         if primary_pid is not None and pid_is_live(primary_pid):
             state = "running"
         return RunnerRuntimeDescription(
-            runner_name="host",
-            runtime_id=handle.runtime_id,
+            runner="host",
+            id=handle.id,
             state=state,
-            metadata={"host_pids": list(handle.host_pids)},
+            metadata={"host_pids": list(host_pids)},
         )
 
 

@@ -19,6 +19,7 @@ from weft._constants import (
     WEFT_TID_MAPPINGS_QUEUE,
 )
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
+from weft.ext import RunnerHandle
 
 
 @pytest.fixture
@@ -91,10 +92,10 @@ def test_tid_mapping_written(broker_env, task_factory, unique_tid) -> None:
     assert data["name"] == "observability-task"
     assert data["runner"] == "host"
     assert data["runtime_handle"] is None
-    assert isinstance(data["pid"], int)
-    assert data["pid"] == data["task_pid"]
-    assert isinstance(data.get("caller_pid"), int)
-    assert data.get("managed_pids") == []
+    assert "pid" not in data
+    assert "task_pid" not in data
+    assert "caller_pid" not in data
+    assert "managed_pids" not in data
 
 
 def test_tid_mapping_includes_metadata_role(
@@ -136,10 +137,10 @@ def test_tid_mapping_records_worker_pid(broker_env, task_factory, unique_tid) ->
     runtime_handle = runtime_record["runtime_handle"]
     assert runtime_record["runner"] == "host"
     assert isinstance(runtime_handle, dict)
-    assert runtime_handle["runner_name"] == "host"
-    assert runtime_handle["runtime_id"]
-    assert runtime_handle["host_pids"]
-    assert runtime_record["managed_pids"] == runtime_handle["host_pids"]
+    assert runtime_handle["runner"] == "host"
+    assert runtime_handle["id"]
+    assert runtime_handle["observations"]["host_pids"]
+    assert "managed_pids" not in runtime_record
 
 
 def test_tid_mapping_deduplicates_identical_payloads(
@@ -162,10 +163,23 @@ def test_tid_mapping_deduplicates_identical_payloads(
     after_duplicate = _peek_payloads()
     assert len(after_duplicate) == 1
 
+    task.register_runtime_handle(
+        RunnerHandle(
+            runner="host",
+            kind="process",
+            id=str(task._task_pid),
+            control={"authority": "host-pid"},
+            observations={"host_pids": [task._task_pid]},
+        )
+    )
     task.register_managed_pid(99999)
     after_update = _peek_payloads()
-    assert len(after_update) == 2
-    assert any(99999 in payload.get("managed_pids", []) for payload in after_update)
+    assert len(after_update) == 3
+    assert any(
+        99999 in payload["runtime_handle"]["observations"].get("host_pids", [])
+        for payload in after_update
+        if isinstance(payload.get("runtime_handle"), dict)
+    )
 
     drain_queue(mapping_queue)
 
@@ -375,8 +389,6 @@ def test_poll_reporting_emits_periodic_events(
     def _fake_monotonic() -> float:
         return current_time
 
-    monkeypatch.setattr("weft.core.tasks.base.time.monotonic", _fake_monotonic)
-
     spec = build_function_spec(
         unique_tid,
         reporting_interval="poll",
@@ -385,26 +397,32 @@ def test_poll_reporting_emits_periodic_events(
     task = task_factory(spec)
     drain_queue(log_queue)  # discard task_initialized
 
-    task._last_poll_report_at = time.monotonic() - 0.1
-    task.process_once()
+    with monkeypatch.context() as scoped_monkeypatch:
+        scoped_monkeypatch.setattr(
+            "weft.core.tasks.base.time.monotonic",
+            _fake_monotonic,
+        )
 
-    records = [json.loads(msg) for msg in drain_queue(log_queue)]
-    assert len(records) == 1
-    poll_event = records[0]
-    assert poll_event["event"] == "poll_report"
-    assert poll_event["summary"]["status"] == task.taskspec.state.status
+        task._last_poll_report_at = time.monotonic() - 0.1
+        task.process_once()
 
-    # Next call without waiting should not emit another report
-    current_time += 0.01
-    task.process_once()
-    assert drain_queue(log_queue) == []
+        records = [json.loads(msg) for msg in drain_queue(log_queue)]
+        assert len(records) == 1
+        poll_event = records[0]
+        assert poll_event["event"] == "poll_report"
+        assert poll_event["summary"]["status"] == task.taskspec.state.status
 
-    # Advance timer and expect another poll report
-    current_time += 0.1
-    task.process_once()
-    records = [json.loads(msg) for msg in drain_queue(log_queue)]
-    assert len(records) == 1
-    assert records[0]["event"] == "poll_report"
+        # Next call without waiting should not emit another report
+        current_time += 0.01
+        task.process_once()
+        assert drain_queue(log_queue) == []
+
+        # Advance timer and expect another poll report
+        current_time += 0.1
+        task.process_once()
+        records = [json.loads(msg) for msg in drain_queue(log_queue)]
+        assert len(records) == 1
+        assert records[0]["event"] == "poll_report"
 
 
 def test_state_logging_respects_redaction(

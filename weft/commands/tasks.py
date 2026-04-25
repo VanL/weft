@@ -115,12 +115,7 @@ def task_tid(
     if pid is not None:
         entries = list(_read_tid_mapping_entries(ctx))
         for entry in reversed(entries):
-            entry_pid = entry.get("pid") or entry.get("task_pid")
-            if entry_pid == pid:
-                full = entry.get("full")
-                return full if isinstance(full, str) else None
-            managed = entry.get("managed_pids") or []
-            if isinstance(managed, list) and pid in managed:
+            if pid in _host_pids_from_mapping(entry):
                 full = entry.get("full")
                 return full if isinstance(full, str) else None
         return None
@@ -555,9 +550,11 @@ def _send_control(ctx: WeftContext, tid: str, command: str) -> None:
         queue.close()
 
 
-def _task_pid_from_mapping(entry: dict[str, Any]) -> int | None:
-    pid = entry.get("pid") or entry.get("task_pid")
-    return pid if isinstance(pid, int) else None
+def _host_pids_from_mapping(entry: dict[str, Any]) -> tuple[int, ...]:
+    handle = status_cmd._runtime_handle_from_mapping(entry)
+    if handle is None or handle.control.get("authority") != "host-pid":
+        return ()
+    return handle.scoped_host_pids()
 
 
 def _pid_exists(pid: int | None) -> bool:
@@ -696,16 +693,18 @@ def _stop_via_fallback(task_entry: dict[str, Any] | None) -> bool:
     if task_entry is None:
         return False
 
-    pid = _task_pid_from_mapping(task_entry)
-    if pid is not None and _pid_exists(pid):
-        terminate_process_tree(pid, timeout=0.2, kill_after=False)
-        return False
-
     handle = status_cmd._runtime_handle_from_mapping(task_entry)
     if handle is not None:
-        plugin = require_runner_plugin(handle.runner_name)
+        if handle.control.get("authority") == "external-supervisor":
+            return False
+        plugin = require_runner_plugin(handle.runner)
         plugin.stop(handle, timeout=0.2)
         return True
+
+    for pid in _host_pids_from_mapping(task_entry):
+        if _pid_exists(pid):
+            terminate_process_tree(pid, timeout=0.2, kill_after=False)
+            return False
 
     return False
 
@@ -713,23 +712,26 @@ def _stop_via_fallback(task_entry: dict[str, Any] | None) -> bool:
 def _kill_via_fallback(task_entry: dict[str, Any] | None) -> bool:
     if task_entry is None:
         return False
-    pid = _task_pid_from_mapping(task_entry)
-    if pid is not None and _pid_exists(pid):
-        sigusr1 = getattr(signal, "SIGUSR1", None)
-        if sigusr1 is not None:
-            try:
-                os.kill(pid, sigusr1)
-            except OSError:
-                pass
-        else:
-            kill_process_tree(pid, timeout=0.2)
-        return False
 
     handle = status_cmd._runtime_handle_from_mapping(task_entry)
     if handle is not None:
-        plugin = require_runner_plugin(handle.runner_name)
+        if handle.control.get("authority") == "external-supervisor":
+            return False
+        plugin = require_runner_plugin(handle.runner)
         plugin.kill(handle, timeout=0.2)
         return True
+
+    for pid in _host_pids_from_mapping(task_entry):
+        if _pid_exists(pid):
+            sigusr1 = getattr(signal, "SIGUSR1", None)
+            if sigusr1 is not None:
+                try:
+                    os.kill(pid, sigusr1)
+                except OSError:
+                    pass
+            else:
+                kill_process_tree(pid, timeout=0.2)
+            return False
 
     return False
 
@@ -739,12 +741,7 @@ def _force_kill_task_processes(task_entry: dict[str, Any] | None) -> bool:
         return False
 
     pids: list[int] = []
-    pid = _task_pid_from_mapping(task_entry)
-    if isinstance(pid, int):
-        pids.append(pid)
-    managed = task_entry.get("managed_pids")
-    if isinstance(managed, list):
-        pids.extend(item for item in managed if isinstance(item, int))
+    pids.extend(_host_pids_from_mapping(task_entry))
 
     task_killed = False
     for pid_value in set(pids):

@@ -16,6 +16,7 @@ import pytest
 from simplebroker import Queue
 from tests.helpers.test_backend import active_test_backend, prepare_cli_root
 from tests.helpers.weft_harness import WeftTestHarness
+from weft.ext import RunnerHandle
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CLI_SUBPROCESS_TIMEOUT = 60.0
@@ -472,14 +473,15 @@ def _register_from_json(
                 harness.register_manager_tid(tid)
             else:
                 harness.register_tid(tid)
-        pid = payload.get("pid")
-        if isinstance(pid, int):
-            harness.register_pid(pid, kind="owner")
-        managed = payload.get("managed_pids")
-        if isinstance(managed, list):
-            for value in managed:
-                if isinstance(value, int):
-                    harness.register_pid(value, kind="managed")
+        runtime_handle = payload.get("runtime_handle")
+        if isinstance(runtime_handle, dict):
+            try:
+                handle = RunnerHandle.from_dict(runtime_handle)
+            except (TypeError, ValueError):
+                handle = None
+            if handle is not None:
+                for pid in handle.scoped_host_pids():
+                    harness.register_pid(pid, kind="managed")
         caller = payload.get("caller_pid")
         if isinstance(caller, int):
             harness._mark_safe_pid(caller)

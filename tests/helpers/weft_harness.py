@@ -23,6 +23,7 @@ from weft._constants import (
 from weft.commands import manager as manager_cmd
 from weft.commands import tasks as task_cmd
 from weft.context import WeftContext, build_context
+from weft.ext import RunnerHandle
 from weft.helpers import iter_queue_json_entries, pid_is_live, terminate_process_tree
 
 DEFAULT_TASK_COMPLETION_TIMEOUT = 60.0
@@ -190,16 +191,7 @@ class WeftTestHarness:
             lines.append(
                 f"  latest_tid_mapping={self._format_debug_payload(latest_mapping)}"
             )
-            candidate_pids = []
-            for key in ("task_pid", "pid"):
-                value = latest_mapping.get(key)
-                if isinstance(value, int):
-                    candidate_pids.append(value)
-            managed = latest_mapping.get("managed_pids")
-            if isinstance(managed, list):
-                candidate_pids.extend(
-                    value for value in managed if isinstance(value, int)
-                )
+            candidate_pids = self._mapping_host_pids(latest_mapping)
 
         deduped_candidate_pids = sorted(set(candidate_pids))
         lines.append(f"  candidate_pids={deduped_candidate_pids}")
@@ -443,11 +435,19 @@ class WeftTestHarness:
         return None
 
     def _mapping_owner_pid(self, data: dict[str, object]) -> int | None:
-        for key in ("task_pid", "pid"):
-            value = data.get(key)
-            if isinstance(value, int):
-                return value
-        return None
+        host_pids = self._mapping_host_pids(data)
+        return host_pids[0] if host_pids else None
+
+    @staticmethod
+    def _mapping_host_pids(data: dict[str, object]) -> list[int]:
+        runtime_handle = data.get("runtime_handle")
+        if not isinstance(runtime_handle, dict):
+            return []
+        try:
+            handle = RunnerHandle.from_dict(runtime_handle)
+        except (TypeError, ValueError):
+            return []
+        return list(handle.scoped_host_pids())
 
     def _mapping_has_safe_owner(self, data: dict[str, object]) -> bool:
         owner_pid = self._mapping_owner_pid(data)
@@ -483,17 +483,7 @@ class WeftTestHarness:
             ):
                 continue
 
-            candidate_pids: list[int] = []
-            for key in ("task_pid", "pid"):
-                value = data.get(key)
-                if isinstance(value, int):
-                    candidate_pids.append(value)
-
-            managed = data.get("managed_pids")
-            if isinstance(managed, list):
-                candidate_pids.extend(
-                    value for value in managed if isinstance(value, int)
-                )
+            candidate_pids = self._mapping_host_pids(data)
 
             if any(
                 pid > 0 and not self._should_skip_pid(pid) and self._pid_alive(pid)
@@ -565,8 +555,7 @@ class WeftTestHarness:
         queue_name = (
             ctrl_in if isinstance(ctrl_in, str) and ctrl_in else f"T{tid}.ctrl_in"
         )
-        pid = record.get("pid")
-        if isinstance(pid, int):
+        for pid in self._mapping_host_pids(record):
             self.register_pid(pid, kind="owner")
         queue = Queue(
             queue_name,
@@ -720,20 +709,8 @@ class WeftTestHarness:
                 ):
                     self.register_tid(full_tid)
 
-            caller_pid = data.get("caller_pid")
-            if isinstance(caller_pid, int):
-                self._mark_safe_pid(caller_pid)
-
-            for key in ("task_pid", "pid"):
-                candidate = data.get(key)
-                if isinstance(candidate, int):
-                    self.register_pid(candidate, kind="owner")
-
-            managed = data.get("managed_pids")
-            if isinstance(managed, list):
-                for value in managed:
-                    if isinstance(value, int):
-                        self.register_pid(value, kind="managed")
+            for pid in self._mapping_host_pids(data):
+                self.register_pid(pid, kind="managed")
 
     def _terminate_registered_pids(self) -> None:
         for pid in list(self._registered_managed_pids):

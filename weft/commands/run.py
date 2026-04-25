@@ -117,7 +117,7 @@ def _manager_started_payload(record: dict[str, Any]) -> dict[str, Any]:
     return {
         "event": "manager_started",
         "manager_tid": record.get("tid"),
-        "pid": record.get("pid"),
+        "runtime_handle": record.get("runtime_handle"),
         "queues": {
             key: record.get(key)
             for key in ("requests", "outbox", "ctrl_in", "ctrl_out")

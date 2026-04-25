@@ -18,6 +18,17 @@ from weft.context import build_context
 pytestmark = [pytest.mark.shared]
 
 
+def _host_runtime_handle(pid: int) -> dict[str, object]:
+    return {
+        "runner": "host",
+        "kind": "process",
+        "id": str(pid),
+        "control": {"authority": "host-pid"},
+        "observations": {"host_pids": [pid]},
+        "metadata": {},
+    }
+
+
 def test_start_command_delegates_to_shared_bootstrap(tmp_path, monkeypatch):
     context_root = prepare_project_root(tmp_path / "proj")
     context = build_context(context_root)
@@ -30,7 +41,10 @@ def test_start_command_delegates_to_shared_bootstrap(tmp_path, monkeypatch):
         assert verbose is False
         calls.append("ensure")
         return (
-            {"tid": "1761000000000000000", "pid": 12345},
+            {
+                "tid": "1761000000000000000",
+                "runtime_handle": _host_runtime_handle(12345),
+            },
             True,
             None,
         )
@@ -40,7 +54,7 @@ def test_start_command_delegates_to_shared_bootstrap(tmp_path, monkeypatch):
     exit_code, message = manager_cmd.start_command(context_path=context_root)
 
     assert exit_code == 0
-    assert message == "Started manager 1761000000000000000 (pid 12345)"
+    assert message == "Started manager 1761000000000000000"
     assert calls == ["ensure"]
 
 
@@ -53,7 +67,10 @@ def test_start_command_reports_existing_manager(tmp_path, monkeypatch):
         manager_cmd,
         "_ensure_manager",
         lambda context_arg, *, verbose: (
-            {"tid": "1761000000000000001", "pid": 54321},
+            {
+                "tid": "1761000000000000001",
+                "runtime_handle": _host_runtime_handle(54321),
+            },
             False,
             None,
         ),
@@ -62,7 +79,7 @@ def test_start_command_reports_existing_manager(tmp_path, monkeypatch):
     exit_code, message = manager_cmd.start_command(context_path=context_root)
 
     assert exit_code == 0
-    assert message == "Manager 1761000000000000001 already running (pid 54321)"
+    assert message == "Manager 1761000000000000001 already running"
 
 
 def test_stop_command_delegates_to_shared_lifecycle_helper(tmp_path, monkeypatch):
@@ -204,6 +221,7 @@ def test_stop_command_uses_registry_control_queue(tmp_path):
             {
                 "tid": tid,
                 "status": "active",
+                "runtime_handle": _host_runtime_handle(os.getpid()),
                 "ctrl_in": f"manager.{tid}.ctrl_in",
             }
         )
@@ -367,7 +385,16 @@ def test_list_command_returns_table(tmp_path):
         persistent=False,
         config=context.config,
     )
-    registry_queue.write(json.dumps({"tid": "1", "status": "active", "name": "alpha"}))
+    registry_queue.write(
+        json.dumps(
+            {
+                "tid": "1",
+                "status": "active",
+                "name": "alpha",
+                "runtime_handle": _host_runtime_handle(os.getpid()),
+            }
+        )
+    )
 
     exit_code, payload = manager_cmd.list_command(
         json_output=False, context_path=context_root

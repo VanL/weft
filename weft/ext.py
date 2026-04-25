@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from simplebroker import BrokerTarget
@@ -28,59 +28,105 @@ class RunnerHandle:
     Spec: docs/specifications/01-Core_Components.md [CC-3.2]
     """
 
-    runner_name: str
-    runtime_id: str
-    host_pids: tuple[int, ...] = ()
+    runner: str
+    kind: Literal["process", "container", "sandboxed-process", "supervised-process"]
+    id: str
+    control: Mapping[str, Any] = field(default_factory=dict)
+    observations: Mapping[str, Any] = field(default_factory=dict)
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        runner_name = self.runner_name.strip()
-        runtime_id = self.runtime_id.strip()
-        if not runner_name:
-            raise ValueError("runner_name must be non-empty")
+        runner = self.runner.strip()
+        runtime_id = self.id.strip()
+        if not runner:
+            raise ValueError("runner must be non-empty")
+        if self.kind not in {
+            "process",
+            "container",
+            "sandboxed-process",
+            "supervised-process",
+        }:
+            raise ValueError(f"unsupported runtime kind {self.kind!r}")
         if not runtime_id:
-            raise ValueError("runtime_id must be non-empty")
-        normalized_pids = tuple(
-            sorted(
-                {int(pid) for pid in self.host_pids if isinstance(pid, int) and pid > 0}
+            raise ValueError("id must be non-empty")
+        if not isinstance(self.control, Mapping):
+            raise ValueError("runner handle control must be a mapping")
+        control = dict(self.control)
+        authority = control.get("authority")
+        if not isinstance(authority, str) or not authority.strip():
+            raise ValueError("runner handle control.authority must be non-empty")
+        control["authority"] = authority.strip()
+        if not isinstance(self.observations, Mapping):
+            raise ValueError("runner handle observations must be a mapping")
+        observations = dict(self.observations)
+        host_pids = observations.get("host_pids")
+        if host_pids is not None:
+            if not isinstance(host_pids, Sequence) or isinstance(
+                host_pids, (str, bytes)
+            ):
+                raise ValueError(
+                    "runner handle observations.host_pids must be a sequence"
+                )
+            observations["host_pids"] = sorted(
+                {int(pid) for pid in host_pids if isinstance(pid, int) and pid > 0}
             )
-        )
         metadata = dict(self.metadata)
-        object.__setattr__(self, "runner_name", runner_name)
-        object.__setattr__(self, "runtime_id", runtime_id)
-        object.__setattr__(self, "host_pids", normalized_pids)
+        object.__setattr__(self, "runner", runner)
+        object.__setattr__(self, "id", runtime_id)
+        object.__setattr__(self, "control", MappingProxyType(control))
+        object.__setattr__(self, "observations", MappingProxyType(observations))
         object.__setattr__(self, "metadata", MappingProxyType(metadata))
 
-    @property
-    def primary_pid(self) -> int | None:
-        return self.host_pids[0] if self.host_pids else None
+    def scoped_host_pids(self) -> tuple[int, ...]:
+        """Return host-scoped PIDs observed for this runtime."""
+        host_pids = self.observations.get("host_pids")
+        if not isinstance(host_pids, Sequence) or isinstance(host_pids, (str, bytes)):
+            return ()
+        return tuple(pid for pid in host_pids if isinstance(pid, int) and pid > 0)
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-friendly representation for queue payloads."""
         return {
-            "runner_name": self.runner_name,
-            "runtime_id": self.runtime_id,
-            "host_pids": list(self.host_pids),
+            "runner": self.runner,
+            "kind": self.kind,
+            "id": self.id,
+            "control": dict(self.control),
+            "observations": dict(self.observations),
             "metadata": dict(self.metadata),
         }
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> RunnerHandle:
         """Build a handle from persisted mapping payload data."""
-        runner_name = payload.get("runner_name")
-        runtime_id = payload.get("runtime_id")
-        host_pids = payload.get("host_pids") or ()
+        legacy_keys = {"runner_name", "runtime_id", "host_pids"}.intersection(payload)
+        if legacy_keys:
+            raise ValueError(
+                "runner handle uses legacy keys: " + ", ".join(sorted(legacy_keys))
+            )
+        runner = payload.get("runner")
+        kind = payload.get("kind")
+        runtime_id = payload.get("id")
+        control = payload.get("control") or {}
+        observations = payload.get("observations") or {}
         metadata = payload.get("metadata") or {}
-        if not isinstance(runner_name, str) or not isinstance(runtime_id, str):
-            raise ValueError("runner handle requires string runner_name and runtime_id")
-        if not isinstance(host_pids, Sequence) or isinstance(host_pids, (str, bytes)):
-            raise ValueError("runner handle host_pids must be a sequence")
+        if (
+            not isinstance(runner, str)
+            or not isinstance(kind, str)
+            or not isinstance(runtime_id, str)
+        ):
+            raise ValueError("runner handle requires string runner, kind, and id")
+        if not isinstance(control, Mapping):
+            raise ValueError("runner handle control must be a mapping")
+        if not isinstance(observations, Mapping):
+            raise ValueError("runner handle observations must be a mapping")
         if not isinstance(metadata, Mapping):
             raise ValueError("runner handle metadata must be a mapping")
         return cls(
-            runner_name=runner_name,
-            runtime_id=runtime_id,
-            host_pids=tuple(int(pid) for pid in host_pids if isinstance(pid, int)),
+            runner=runner,
+            kind=kind,  # type: ignore[arg-type]
+            id=runtime_id,
+            control=dict(control),
+            observations=dict(observations),
             metadata=dict(metadata),
         )
 
@@ -99,15 +145,15 @@ class RunnerCapabilities:
 class RunnerRuntimeDescription:
     """Inspectable runtime metadata for status and observability surfaces."""
 
-    runner_name: str
-    runtime_id: str
+    runner: str
+    id: str
     state: str | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "runner_name": self.runner_name,
-            "runtime_id": self.runtime_id,
+            "runner": self.runner,
+            "id": self.id,
             "state": self.state,
             "metadata": dict(self.metadata),
         }

@@ -29,6 +29,7 @@ from weft._constants import (
     WEFT_TID_MAPPINGS_QUEUE,
 )
 from weft.context import WeftContext
+from weft.ext import RunnerHandle
 from weft.helpers import canonical_owner_tid, iter_queue_json_entries, pid_is_live
 
 
@@ -279,12 +280,18 @@ def _record_owner_is_live(
     if mapping is None:
         return False
 
-    pid = mapping.get("task_pid")
-    if not isinstance(pid, int) or pid <= 0:
-        pid = mapping.get("pid") if isinstance(mapping.get("pid"), int) else None
-    if not isinstance(pid, int) or pid <= 0:
+    handle_payload = mapping.get("runtime_handle")
+    if handle_payload is None:
+        return True
+    if not isinstance(handle_payload, Mapping):
         return False
-    return pid_is_live(pid)
+    try:
+        handle = RunnerHandle.from_dict(handle_payload)
+    except (TypeError, ValueError):
+        return False
+    if handle.control.get("authority") != "host-pid":
+        return True
+    return any(pid_is_live(pid) for pid in handle.scoped_host_pids())
 
 
 def list_resolved_endpoints(

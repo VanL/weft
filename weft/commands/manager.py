@@ -46,7 +46,11 @@ def _manager_snapshot(record: dict[str, Any]) -> ManagerSnapshot:
         tid=str(record.get("tid", "")),
         status=str(record.get("status", "unknown")),
         name=str(record.get("name", "")),
-        pid=record.get("pid") if isinstance(record.get("pid"), int) else None,
+        runtime_handle=(
+            dict(record["runtime_handle"])
+            if isinstance(record.get("runtime_handle"), dict)
+            else None
+        ),
         timestamp=(
             int(record["timestamp"])
             if isinstance(record.get("timestamp"), int | float | str)
@@ -135,11 +139,10 @@ def start_command(*, context_path: Path | None = None) -> tuple[int, str | None]
     context = build_context(context_path)
     record, started_here, _process_handle = _ensure_manager(context, verbose=False)
     tid = cast(str, record.get("tid"))
-    pid = record.get("pid")
 
     if started_here:
-        return 0, f"Started manager {tid} (pid {pid})"
-    return 0, f"Manager {tid} already running (pid {pid})"
+        return 0, f"Started manager {tid}"
+    return 0, f"Manager {tid} already running"
 
 
 def stop_command(
@@ -215,9 +218,9 @@ def status_command(
         f"Name: {record.get('name', '')}",
         f"Status: {record.get('status', 'unknown')}",
     ]
-    pid = record.get("pid")
-    if pid is not None:
-        parts.append(f"PID: {pid}")
+    runtime_handle = record.get("runtime_handle")
+    if isinstance(runtime_handle, dict):
+        parts.append(f"Runtime: {json.dumps(runtime_handle, sort_keys=True)}")
     return 0, "\n".join(parts)
 
 

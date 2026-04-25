@@ -387,6 +387,9 @@ WEFT_MANAGER_LIFETIME_TIMEOUT: Final[float] = 600.0
 WEFT_MANAGER_REUSE_ENABLED: Final[bool] = True
 """Whether a Manager started by the CLI should remain running after a task completes."""
 
+WEFT_MANAGER_RUNTIME_HANDLE_JSON_ENV: Final[str] = "WEFT_MANAGER_RUNTIME_HANDLE_JSON"
+"""Optional JSON RunnerHandle for externally supervised manager processes."""
+
 WEFT_COMPLETED_RESULT_GRACE_SECONDS: Final[float] = 0.5
 """Time to keep polling an outbox after a completion event before assuming no result."""
 
@@ -919,6 +922,11 @@ def _load_weft_env_vars() -> dict[str, Any]:
             "WEFT_MANAGER_REUSE_ENABLED",
             default=WEFT_MANAGER_REUSE_ENABLED,
             parser=_parse_bool,
+        ),
+        "WEFT_MANAGER_RUNTIME_HANDLE_JSON": _load_weft_env_value(
+            WEFT_MANAGER_RUNTIME_HANDLE_JSON_ENV,
+            default=None,
+            parser=lambda value: value,
         ),
         "WEFT_AUTOSTART_TASKS": _load_weft_env_value(
             "WEFT_AUTOSTART_TASKS",

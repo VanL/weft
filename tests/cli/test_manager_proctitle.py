@@ -34,7 +34,7 @@ def test_manager_proctitle_updates_to_running(weft_harness: WeftTestHarness) -> 
     assert rc == 0, err
 
     # The output of run --verbose contains two JSON objects, one for the manager
-    # and one for the task. We need to parse them to get the manager's PID.
+    # and one for the task. We need to parse them to get the manager host PID.
     manager_pid = None
     for line in out.splitlines():
         if not line.strip():
@@ -42,7 +42,19 @@ def test_manager_proctitle_updates_to_running(weft_harness: WeftTestHarness) -> 
         try:
             data = json.loads(line)
             if isinstance(data, dict) and data.get("event") == "manager_started":
-                manager_pid = data.get("pid")
+                handle = data.get("runtime_handle")
+                observations = (
+                    handle.get("observations") if isinstance(handle, dict) else {}
+                )
+                host_pids = (
+                    observations.get("host_pids")
+                    if isinstance(observations, dict)
+                    else []
+                )
+                manager_pid = next(
+                    (pid for pid in host_pids if isinstance(pid, int) and pid > 0),
+                    None,
+                )
                 break
         except (json.JSONDecodeError, KeyError):
             continue

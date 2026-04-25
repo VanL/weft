@@ -93,11 +93,24 @@ def _active_canonical_manager_records(context) -> list[dict[str, Any]]:
             continue
         if record.get("status") != "active":
             continue
-        pid = record.get("pid")
+        pid = _host_pid_from_record(record)
         if isinstance(pid, int) and pid_is_live(pid):
             records.append(record)
     records.sort(key=lambda item: (int(item["tid"]), int(item["timestamp"])))
     return records
+
+
+def _host_pid_from_record(record: dict[str, Any]) -> int | None:
+    handle = record.get("runtime_handle")
+    if not isinstance(handle, dict):
+        return None
+    observations = handle.get("observations")
+    if not isinstance(observations, dict):
+        return None
+    host_pids = observations.get("host_pids")
+    if not isinstance(host_pids, list):
+        return None
+    return next((pid for pid in host_pids if isinstance(pid, int) and pid > 0), None)
 
 
 def _wait_for_active_canonical_manager(
