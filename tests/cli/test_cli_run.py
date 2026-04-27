@@ -958,6 +958,98 @@ def test_cli_run_spec_bundle_declared_args_shape_work_item(
     assert err == ""
 
 
+def test_cli_run_spec_builtin_arguments_payload_shapes_work_item(
+    workdir,
+    weft_harness,
+) -> None:
+    spec_path = workdir / "run-input-flat-payload.json"
+    _write_json(
+        spec_path,
+        {
+            "name": "run-input-flat-payload",
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:json_payload",
+                "run_input": {
+                    "adapter_ref": "weft.builtins.run_input:arguments_payload",
+                    "arguments": {
+                        "case_id": {
+                            "type": "string",
+                            "required": True,
+                        }
+                    },
+                },
+                "weft_context": str(workdir),
+                "reserved_policy_on_stop": "keep",
+                "reserved_policy_on_error": "keep",
+            },
+            "metadata": {},
+        },
+    )
+
+    rc, out, err = run_cli(
+        "run",
+        "--spec",
+        spec_path,
+        "--case-id",
+        "abc",
+        "--json",
+        cwd=workdir,
+        harness=weft_harness,
+    )
+
+    assert rc == 0
+    result_payload = json.loads(out)
+    assert result_payload["result"] == {"case_id": "abc"}
+    assert err == ""
+
+
+def test_cli_run_spec_builtin_keyword_arguments_payload_shapes_work_item(
+    workdir,
+    weft_harness,
+) -> None:
+    spec_path = workdir / "run-input-kwargs-payload.json"
+    _write_json(
+        spec_path,
+        {
+            "name": "run-input-kwargs-payload",
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:json_kwargs",
+                "run_input": {
+                    "adapter_ref": "weft.builtins.run_input:keyword_arguments_payload",
+                    "arguments": {
+                        "case_id": {
+                            "type": "string",
+                            "required": True,
+                        }
+                    },
+                },
+                "weft_context": str(workdir),
+                "reserved_policy_on_stop": "keep",
+                "reserved_policy_on_error": "keep",
+            },
+            "metadata": {},
+        },
+    )
+
+    rc, out, err = run_cli(
+        "run",
+        "--spec",
+        spec_path,
+        "--case-id",
+        "abc",
+        "--json",
+        cwd=workdir,
+        harness=weft_harness,
+    )
+
+    assert rc == 0
+    result_payload = json.loads(out)
+    assert result_payload["result"] == {"case_id": "abc"}
+    assert err == ""
+
+
 def test_cli_run_spec_bundle_declared_path_arg_normalizes_to_absolute_path(
     workdir,
     weft_harness,
