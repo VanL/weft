@@ -174,6 +174,10 @@ def _should_emit_eager_failure_traceback(report: pytest.TestReport) -> bool:
 
 
 def _preferred_test_python() -> Path:
+    current = Path(sys.executable)
+    if current.exists():
+        return current
+
     if os.name == "nt":
         candidate = REPO_ROOT / ".venv" / "Scripts" / "python.exe"
     else:
