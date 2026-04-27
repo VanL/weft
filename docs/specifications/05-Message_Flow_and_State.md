@@ -205,6 +205,10 @@ Current rules:
 - CLI status surfaces reconstruct task snapshots from that log plus the latest
   `weft.state.tid_mappings` entries and live runtime liveness where needed; they
   do not depend on a separate state database
+- host tasks that still look `running` or `spawning` in the durable log but
+  have no runtime proof are treated as stale after the configured status
+  liveness window, unless a live manager registry record still proves a manager
+  task is active
 - shared waiters use the same terminal-state interpretation for `weft run` and
   `weft result`
 - `weft result` and `weft run` share the same wait helper path: they watch the

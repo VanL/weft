@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from tests.helpers.test_backend import prepare_project_root
+from weft._constants import WEFT_MANAGERS_REGISTRY_QUEUE, WEFT_SPAWN_REQUESTS_QUEUE
 from weft.commands import system as status_cmd
 from weft.commands import tasks as task_cmd
 from weft.commands.status import cmd_status, collect_status
@@ -549,6 +550,96 @@ def test_cmd_status_surfaces_dead_host_running_snapshot_as_failed_with_all(
     assert len(tasks) == 1
     assert tasks[0]["tid"] == tid
     assert tasks[0]["status"] == "failed"
+
+
+def test_cmd_status_demotes_stale_runtime_less_running_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = "1844674407370955181"
+    started = time.time_ns()
+
+    monkeypatch.setattr(status_cmd, "STATUS_RUNTIMELESS_STALE_AFTER_SECONDS", -1.0)
+    _write_task_log_entry(
+        ctx=ctx,
+        tid=tid,
+        event="task_started",
+        status="running",
+        started_at=started,
+        completed_at=None,
+        name="stale-manager",
+    )
+
+    exit_code, payload = cmd_status(json_output=True, spec_context=root)
+
+    assert exit_code == 0
+    assert payload is not None
+    assert json.loads(payload)["tasks"] == []
+
+    exit_code, payload = cmd_status(
+        json_output=True,
+        include_terminal=True,
+        spec_context=root,
+    )
+
+    assert exit_code == 0
+    assert payload is not None
+    tasks = json.loads(payload)["tasks"]
+    assert len(tasks) == 1
+    assert tasks[0]["tid"] == tid
+    assert tasks[0]["status"] == "failed"
+
+
+def test_cmd_status_keeps_runtime_less_manager_running_when_registry_is_live(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = "1844674407370955182"
+    started = time.time_ns()
+
+    monkeypatch.setattr(status_cmd, "STATUS_RUNTIMELESS_STALE_AFTER_SECONDS", -1.0)
+    _write_task_log_entry(
+        ctx=ctx,
+        tid=tid,
+        event="task_started",
+        status="running",
+        started_at=started,
+        completed_at=None,
+        name="live-manager",
+    )
+    ctx.queue(WEFT_MANAGERS_REGISTRY_QUEUE, persistent=False).write(
+        json.dumps(
+            {
+                "tid": tid,
+                "name": "live-manager",
+                "status": "active",
+                "runtime_handle": _runtime_handle(
+                    "host",
+                    str(os.getpid()),
+                    host_pids=[os.getpid()],
+                ),
+                "role": "manager",
+                "requests": WEFT_SPAWN_REQUESTS_QUEUE,
+            }
+        )
+    )
+
+    exit_code, payload = cmd_status(
+        json_output=True,
+        include_terminal=True,
+        spec_context=root,
+    )
+
+    assert exit_code == 0
+    assert payload is not None
+    tasks = json.loads(payload)["tasks"]
+    assert len(tasks) == 1
+    assert tasks[0]["tid"] == tid
+    assert tasks[0]["status"] == "running"
 
 
 def test_status_snapshot_preserves_activity_from_latest_log_event(

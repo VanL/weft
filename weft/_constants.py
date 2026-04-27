@@ -384,6 +384,9 @@ MIN_CONNECTIONS_LIMIT: Final[int] = 0
 WEFT_MANAGER_LIFETIME_TIMEOUT: Final[float] = 600.0
 """Default idle-shutdown timeout for the Manager process (seconds)."""
 
+STATUS_RUNTIMELESS_STALE_AFTER_SECONDS: Final[float] = WEFT_MANAGER_LIFETIME_TIMEOUT * 2
+"""Age after which a running host task with no runtime proof is treated as stale."""
+
 WEFT_MANAGER_REUSE_ENABLED: Final[bool] = True
 """Whether a Manager started by the CLI should remain running after a task completes."""
 
