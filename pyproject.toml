@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "weft"
-version = "0.9.7"
+version = "0.9.8"
 description = "The durable task substrate for agent systems"
 readme = "README.md"
 requires-python = ">=3.12"
