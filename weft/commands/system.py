@@ -21,6 +21,7 @@ from typing import Any, cast
 from simplebroker import Queue
 from weft._constants import (
     NON_LIVE_RUNTIME_STATES,
+    STATUS_RUNTIMELESS_STALE_AFTER_SECONDS,
     STATUS_WATCH_MIN_INTERVAL,
     TASKSPEC_TID_SHORT_LENGTH,
     TERMINAL_TASK_STATUSES,
@@ -407,6 +408,9 @@ def _effective_public_status(
     runner_name: str | None,
     mapping_entry: Mapping[str, Any] | None,
     runtime_description: Mapping[str, Any] | None,
+    last_timestamp: int,
+    now_ns: int,
+    has_live_manager_record: bool = False,
 ) -> str:
     """Keep public terminal states aligned with live runtime liveness."""
 
@@ -415,6 +419,15 @@ def _effective_public_status(
     )
     runtime_live = _runtime_description_is_live(runtime_description)
     host_task_pid = _task_process_id(mapping_entry)
+    stale_without_runtime = (
+        status in {"spawning", "running"}
+        and not has_live_manager_record
+        and host_task_pid is None
+        and runtime_description is None
+        and last_timestamp > 0
+        and now_ns - last_timestamp
+        > int(STATUS_RUNTIMELESS_STALE_AFTER_SECONDS * 1_000_000_000)
+    )
 
     if status not in TERMINAL_TASK_STATUSES:
         if (
@@ -422,6 +435,12 @@ def _effective_public_status(
             and (not normalized_runner or normalized_runner == "host")
             and host_task_pid is not None
             and not _pid_alive(host_task_pid)
+        ):
+            return "failed"
+        if (
+            status in {"spawning", "running"}
+            and (not normalized_runner or normalized_runner == "host")
+            and stale_without_runtime
         ):
             return "failed"
         return status
@@ -504,6 +523,14 @@ def _collect_task_snapshots(
     now_ns = time.time_ns()
     records: dict[str, dict[str, Any]] = {}
     tid_mapping_entries = _latest_tid_mapping_entries(ctx)
+    try:
+        active_manager_tids = {
+            str(record["tid"])
+            for record in _collect_manager_records(ctx, include_stopped=False)
+            if record.get("status") == "active" and isinstance(record.get("tid"), str)
+        }
+    except Exception:  # pragma: no cover - defensive status reconciliation
+        active_manager_tids = set()
     log_queue = _queue(ctx, WEFT_GLOBAL_LOG_QUEUE)
     try:
         for payload, timestamp in _iter_log_events(log_queue):
@@ -633,6 +660,9 @@ def _collect_task_snapshots(
             runner_name=runner,
             mapping_entry=runtime_entry,
             runtime_description=runtime_description,
+            last_timestamp=int(record.get("last_timestamp") or 0),
+            now_ns=now_ns,
+            has_live_manager_record=tid in active_manager_tids,
         )
 
         started_at = record.get("started_at")

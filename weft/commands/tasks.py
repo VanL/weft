@@ -468,6 +468,8 @@ def _pipeline_task_snapshot(
             runner_name=runner,
             mapping_entry=mapping_entry,
             runtime_description=runtime,
+            last_timestamp=last_timestamp,
+            now_ns=now_ns,
         )
 
     activity = pipeline_status.get("activity")

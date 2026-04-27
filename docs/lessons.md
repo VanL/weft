@@ -285,6 +285,14 @@ runbook needs to become stricter.
   result-surface check before raising the event timeout. A missed terminal log
   observation should not hide an already-visible final result.
 
+## 2026-04-27 Runtime-Less Status Snapshots
+
+- Public status must not treat old non-terminal task-log entries as live solely
+  because runtime-only queues no longer contain a PID or runner handle. If the
+  live proof surface is absent, status needs an explicit staleness rule and a
+  separate live-manager registry exception so old manager task rows do not
+  survive after their registry records have been pruned.
+
 ## 2026-04-20 Result Materialization And Synthetic PIDs
 
 - `weft result` must not treat non-terminal task-log activity without a logged
