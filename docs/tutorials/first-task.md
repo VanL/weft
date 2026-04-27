@@ -104,7 +104,10 @@ Task specs are stored in `.weft/tasks/` and can be version-controlled.
 This example bakes `"weft"` into `spec.args`, so the stored spec runs as-is.
 If you want `weft run --spec my-greeter --name value` style inputs, declare
 `spec.parameterization` or `spec.run_input` in the TaskSpec. `--arg` is only
-for `weft run --function`.
+for `weft run --function`. When declared options should become the flat JSON
+work payload, use `weft.builtins.run_input:arguments_payload`; when the target
+function expects keyword arguments, use
+`weft.builtins.run_input:keyword_arguments_payload`.
 
 ## 7. Check task history
 

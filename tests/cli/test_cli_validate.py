@@ -432,6 +432,44 @@ def test_validate_taskspec_run_input_bundle_adapter(workdir) -> None:
     assert err == ""
 
 
+def test_validate_taskspec_run_input_builtin_adapter(workdir) -> None:
+    spec_path = workdir / "run_input_builtin.json"
+    write_taskspec(
+        spec_path,
+        {
+            "name": "run-input-builtin",
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:json_payload",
+                "run_input": {
+                    "adapter_ref": "weft.builtins.run_input:arguments_payload",
+                    "arguments": {
+                        "case_id": {
+                            "type": "string",
+                            "required": True,
+                        }
+                    },
+                },
+            },
+            "metadata": {},
+        },
+    )
+
+    rc, out, err = run_cli(
+        "spec",
+        "validate",
+        "--type",
+        "task",
+        spec_path,
+        cwd=workdir,
+    )
+
+    assert rc == 0
+    assert "TaskSpec is valid" in out
+    assert "weft.builtins.run_input:arguments_payload" in out
+    assert err == ""
+
+
 def test_validate_taskspec_run_input_missing_adapter_ref_fails(workdir) -> None:
     bundle_dir = workdir / "invalid_run_input_bundle"
     bundle_dir.mkdir(parents=True, exist_ok=True)

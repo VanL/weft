@@ -325,6 +325,20 @@ user or application writes it, it belongs in `metadata`.
   declare named long options plus optional stdin and point them at a Python
   adapter that returns the ordinary initial work payload before the spawn
   request is queued.
+- Weft ships small built-in run-input adapters for common payload shapes:
+  `weft.builtins.run_input:arguments_payload` returns declared arguments as a
+  flat JSON object, `weft.builtins.run_input:nonempty_arguments_payload` does
+  the same while rejecting blank string values,
+  `weft.builtins.run_input:keyword_arguments_payload` returns a function
+  `{"kwargs": ...}` envelope, and
+  `weft.builtins.run_input:nonempty_keyword_arguments_payload` combines the
+  kwargs envelope with blank-value rejection. A flat dict is delivered to
+  function targets as a positional payload; a `{"kwargs": ...}` envelope is
+  merged into function keyword arguments. The `nonempty_*` adapters only reject
+  blank strings. They do not validate UUIDs, dates, paths beyond declared
+  `type="path"` normalization, or any domain-specific identifier format.
+  Specs should still use a custom adapter when they need constants, lookups,
+  branching, or shape-specific business rules.
 
 Once the task is queued, the normal target-specific inbox contract applies.
 `metadata` remains caller-owned input inside that payload; Weft does not

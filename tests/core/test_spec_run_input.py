@@ -105,3 +105,57 @@ def test_invoke_run_input_adapter_rejects_non_json_serializable_payload(
             ),
             bundle_root=bundle_root,
         )
+
+
+def test_builtin_arguments_payload_returns_declared_arguments() -> None:
+    payload = invoke_run_input_adapter(
+        "weft.builtins.run_input:arguments_payload",
+        request=SpecRunInputRequest(
+            arguments={"case_id": "case-1", "episode_id": "episode-1"},
+            stdin_text=None,
+            context_root=None,
+            spec_name="enrich-case",
+        ),
+    )
+
+    assert payload == {"case_id": "case-1", "episode_id": "episode-1"}
+
+
+def test_builtin_nonempty_arguments_payload_rejects_blank_value() -> None:
+    with pytest.raises(ValueError, match="argument 'case_id' must not be empty"):
+        invoke_run_input_adapter(
+            "weft.builtins.run_input:nonempty_arguments_payload",
+            request=SpecRunInputRequest(
+                arguments={"case_id": " "},
+                stdin_text=None,
+                context_root=None,
+                spec_name="enrich-case",
+            ),
+        )
+
+
+def test_builtin_keyword_arguments_payload_returns_kwargs_envelope() -> None:
+    payload = invoke_run_input_adapter(
+        "weft.builtins.run_input:keyword_arguments_payload",
+        request=SpecRunInputRequest(
+            arguments={"case_id": "case-1"},
+            stdin_text=None,
+            context_root=None,
+            spec_name="enrich-case",
+        ),
+    )
+
+    assert payload == {"kwargs": {"case_id": "case-1"}}
+
+
+def test_builtin_nonempty_keyword_arguments_payload_rejects_blank_value() -> None:
+    with pytest.raises(ValueError, match="argument 'case_id' must not be empty"):
+        invoke_run_input_adapter(
+            "weft.builtins.run_input:nonempty_keyword_arguments_payload",
+            request=SpecRunInputRequest(
+                arguments={"case_id": ""},
+                stdin_text=None,
+                context_root=None,
+                spec_name="enrich-case",
+            ),
+        )

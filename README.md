@@ -564,7 +564,42 @@ weft spec validate --type task FILE [--load-runner] [--preflight]
 Stored specs are ordinary JSON files. If you want `weft run --spec ...` to
 accept extra spec-owned CLI options, declare `spec.parameterization` or
 `spec.run_input` in that TaskSpec. `--arg` and `--kw` are only for
-`weft run --function`.
+`weft run --function`. For simple manual TaskSpec inputs, use a built-in
+adapter such as `weft.builtins.run_input:arguments_payload` to copy declared
+options into a flat JSON work payload, or
+`weft.builtins.run_input:keyword_arguments_payload` to build a function
+`{"kwargs": ...}` envelope. The `nonempty_*` variants reject blank string
+values before queueing; they do not validate UUIDs, dates, or other
+domain-specific formats.
+
+Flat payload example:
+
+```json
+"run_input": {
+  "adapter_ref": "weft.builtins.run_input:nonempty_arguments_payload",
+  "arguments": {
+    "case_id": {
+      "type": "string",
+      "required": true,
+      "help": "Case ID to process"
+    }
+  }
+}
+```
+
+Kwargs-envelope example:
+
+```json
+"run_input": {
+  "adapter_ref": "weft.builtins.run_input:nonempty_keyword_arguments_payload",
+  "arguments": {
+    "case_id": {
+      "type": "string",
+      "required": true
+    }
+  }
+}
+```
 
 Use `weft spec validate --preflight` when you want an ahead-of-time
 availability check on the current machine. `weft run` does not do hidden

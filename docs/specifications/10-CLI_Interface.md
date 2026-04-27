@@ -165,6 +165,12 @@ Current spec-declared option support:
 - these declared options are submission-time CLI sugar only; they are resolved
   locally into the ordinary initial work payload after materialization and
   before the spawn request is queued
+- specs that only need declared options copied into the initial work payload
+  can use built-in adapters such as
+  `weft.builtins.run_input:arguments_payload` for a flat JSON object or
+  `weft.builtins.run_input:keyword_arguments_payload` for a function kwargs
+  envelope; `nonempty_*` variants reject blank string values before queueing
+  but do not perform domain-specific validation such as UUID or date parsing
 - declared options are long-option only: `--name value` or `--name=value`
 - declared option names come from identifier keys in the TaskSpec and
   normalize `_` to `-`
