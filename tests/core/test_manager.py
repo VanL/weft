@@ -2350,21 +2350,23 @@ def test_manager_autostart_pipeline_ensure_restarts(
     manager = Manager(db_path, spec, config=config)
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     source = str(manifest_path.resolve())
-    spawn_events: list[dict[str, object]] = []
     try:
-        deadline = time.time() + 8.0
-        while len(spawn_events) < 2 and time.time() < deadline:
-            manager.process_once()
-            time.sleep(0.05)
-            for item in drain(log_queue):
-                event = json.loads(item)
-                if (
-                    event.get("event") == "task_spawned"
-                    and event.get("autostart_source") == source
-                ):
-                    spawn_events.append(event)
+        first_spawn, first_result = _wait_for_autostart_pipeline_result(
+            manager,
+            log_queue,
+            make_queue,
+            source=source,
+        )
+        second_spawn, second_result = _wait_for_autostart_pipeline_result(
+            manager,
+            log_queue,
+            make_queue,
+            source=source,
+        )
 
-        assert len(spawn_events) == 2
+        assert first_spawn["child_tid"] != second_spawn["child_tid"]
+        assert first_result == "restart-me"
+        assert second_result == "restart-me"
         assert manager._autostart_state[source]["restarts"] == 1
     finally:
         manager.cleanup()
