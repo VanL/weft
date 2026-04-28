@@ -1,6 +1,6 @@
 # Spec-Aware `weft run --spec ... --help`
 
-Status: proposed
+Status: completed
 Source specs: see Source Documents below
 Superseded by: none
 

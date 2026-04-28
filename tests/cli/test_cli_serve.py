@@ -300,6 +300,9 @@ def test_serve_forces_no_idle_timeout(workdir, weft_harness: WeftTestHarness) ->
         record = _wait_for_active_canonical_manager(context, process=process)
         weft_harness.register_manager_tid(record["tid"])
 
+        # 4× the configured WEFT_MANAGER_LIFETIME_TIMEOUT (0.05s). Proves a
+        # negative — the manager does not exit while it has active work.
+        # The duration is the test invariant; do not shorten it.
         time.sleep(0.2)
         assert process.poll() is None
 

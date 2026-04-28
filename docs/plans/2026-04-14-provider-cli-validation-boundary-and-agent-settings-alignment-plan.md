@@ -1,6 +1,6 @@
 # Provider CLI Validation Boundary and Agent Settings Alignment Plan
 
-Status: proposed
+Status: completed
 Source specs: see Source Documents below
 Superseded by: none
 

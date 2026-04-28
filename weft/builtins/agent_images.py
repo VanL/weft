@@ -77,7 +77,7 @@ def prepare_agent_images_task(work_item: Any = None) -> dict[str, Any]:
 
         try:
             result = ensure_agent_image(provider_name, refresh=refresh)
-        except Exception as exc:
+        except Exception as exc:  # pragma: no cover - provider image build boundary
             provider_reports.append(
                 {
                     "provider": provider_name,

@@ -527,3 +527,40 @@ runbook needs to become stricter.
   pytest process as local-only, not as external task-control targets. In-process
   `task_factory` Consumers still publish `tid_mappings`; if cleanup fans out
   STOP/KILL for those TIDs, teardown can signal the test runner itself.
+
+## 2026-04-27 Test Sleep Hygiene
+
+- SimpleBroker has no blocking read-with-timeout API. `Queue.read_one()` and
+  `peek_one()` return `None` immediately when the queue is empty. Polling in
+  test wait helpers is necessary, not laziness. Do not replace polling loops
+  with "blocking reads" — the API does not exist.
+- `QueueWatcher` is the only blocking primitive in SimpleBroker, and it polls
+  internally (`burst → backoff → threading.Event.wait` chunks up to
+  `BROKER_MAX_INTERVAL=0.1s`). Moving test polling to a watcher adds thread
+  overhead and a teardown surface; it does not remove polling.
+- Several `tests/helpers/weft_harness.py` sleeps protect specific Windows
+  races (`f10d9d6` "Fix Windows preserve-database cleanup race"; `b23f8c5`
+  "Fix preserve cleanup and manager drain races"). Do not remove or shorten
+  them without reproducing the race they fixed under
+  `tests/test_harness_registration.py` on Windows.
+- The 17 inline polling sites in `tests/core/test_manager.py` were
+  deliberately tuned in `d810eec` "Address manager test settle time". They
+  drive a real `multiprocessing` consumer with per-test interleaving and
+  cannot be replaced with deterministic tick counts or a generic
+  `tick_manager_until` helper without losing context.
+- Consolidation of `_wait_for_*` helpers across test modules is only safe
+  when the source bodies are verbatim duplicates. Helpers that differ in
+  predicate, side effect (e.g. interleaved `manager.process_once()`),
+  iteration order (`reversed(events)`), or failure shape should stay local.
+  A local helper that names what the test is waiting for is more readable
+  than a generic shared one. On audit (2026-04-27), the 15 candidate
+  helpers cited in the test sleep hygiene plan all differed meaningfully —
+  local helpers are the right shape; no consolidation was needed.
+- Measured on 2026-04-27 (fast suite, `-m "not slow"`, N=23 calls from the
+  broker-heavy xdist worker): median iterations per `wait_for_completion`
+  call = 5; p90 = 12; p99 = 51; median wall-clock = 0.32 s; p99 = 3.76 s.
+  Aggregate suite-wide polling cost is small (~5 s across the run) but the
+  tail is long. The measurement is borderline per the plan's gate (median
+  ≥ 5 with long tail). Sample is thin — re-measure with `-m ""` before
+  acting. Exponential backoff in `wait_for_completion` is a candidate for
+  a follow-up plan, not justified on this sample alone.

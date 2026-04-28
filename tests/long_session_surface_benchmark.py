@@ -988,6 +988,8 @@ def _run_long_session(
     if set(statuses.values()) != {"completed"}:
         raise RuntimeError(f"unexpected terminal statuses: {statuses}")
 
+    # Tests the grace-period constant itself. The sleep duration is the
+    # product behavior under test; do not shorten it.
     time.sleep(WEFT_COMPLETED_RESULT_GRACE_SECONDS + 0.15)
 
     _rc, result_text = surface.result_all_json(workdir, env)

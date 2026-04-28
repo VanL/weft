@@ -1,6 +1,6 @@
 # Manager Status Container PID Liveness Plan
 
-Status: proposed
+Status: completed
 Source specs: see Source Documents below
 Superseded by: none
 
@@ -41,9 +41,6 @@ Related context:
 
 - [`docs/lessons.md`](../lessons.md) entries for `2026-04-08 Zombie PID
   Liveness` and `2026-04-09 Manager Bootstrap Unification`.
-- [`docs/plans/2026-04-13-runner-monitor-result-waiter-and-liveness-fixes-plan.md`](./2026-04-13-runner-monitor-result-waiter-and-liveness-fixes-plan.md)
-  is proposed prior art for status/runtime liveness bugs. Do not treat it as
-  fully landed behavior.
 - Observed incident in `/Users/van/Developer/mm`: `weft manager list --json`
   showed only manager `1777065168543608832`, while `weft status --json` showed
   stale manager task `1777065050392768512` as `running` because its terminal

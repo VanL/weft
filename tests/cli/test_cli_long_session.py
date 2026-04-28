@@ -337,6 +337,8 @@ def test_cli_long_session_produces_identical_transcript_across_backends(
     )
     assert set(statuses.values()) == {"completed"}
 
+    # Tests the grace-period constant itself. The sleep duration is the
+    # product behavior under test; do not shorten it.
     time.sleep(WEFT_COMPLETED_RESULT_GRACE_SECONDS + 0.15)
 
     rc, out, err = _run_session_cli(

@@ -83,11 +83,10 @@ Implementation work is tracked through the plan corpus in
 That index is intentionally lightweight:
 
 - specs still define behavior
-- plans describe proposed or historical implementation paths
-- the plan index records which plans are active, completed, roadmap-only, or
-  audit artifacts
-- supersession should be explicit in the indexed metadata rather than left to
-  grep and oral history
+- plans describe completed implementation paths for shipped behavior or current
+  repo tooling
+- the plan index is curated so superseded, roadmap-only, audit-only, and
+  unimplemented plans do not read like current project direction
 
 ## Related Documents
 

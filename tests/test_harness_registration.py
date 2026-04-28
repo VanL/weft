@@ -765,3 +765,23 @@ def test_cleanup_preserving_database_stops_workers_without_task_fanout(
         os.chdir(repo_cwd)
         harness._closed = True
         harness._tempdir.cleanup()
+
+
+@pytest.mark.sqlite_only
+def test_wait_for_completion_records_polling_stats() -> None:
+    """wait_for_completion records iteration count and duration per call.
+
+    Verifies polling-cost instrumentation. See docs/lessons.md
+    "2026-04-27 Test Sleep Hygiene".
+    """
+    with WeftTestHarness() as harness:
+        assert harness.report_completion_wait_stats() == []
+
+        with pytest.raises(TimeoutError):
+            harness.wait_for_completion("missing-tid", timeout=0.2)
+
+        stats = harness.report_completion_wait_stats()
+        assert len(stats) == 1
+        assert stats[0]["iterations"] >= 1.0
+        assert stats[0]["duration"] >= 0.2
+        assert stats[0]["duration"] < 5.0

@@ -1,6 +1,6 @@
 # Multi-Provider Docker `provider_cli` Expansion Plan
 
-Status: proposed
+Status: completed
 Source specs: see Source Documents below
 Superseded by: none
 

@@ -25,6 +25,7 @@ from weft._constants import (
 )
 from weft.core.resource_monitor import ResourceMetrics, load_resource_monitor
 from weft.ext import RunnerHandle
+from weft.helpers import safe_cancel
 
 if TYPE_CHECKING:
     from weft.core.runners.host import RunnerOutcome
@@ -140,7 +141,7 @@ def run_monitored_subprocess(
             closed=stderr_closed,
         )
 
-        if cancel_requested is not None and _cancel_requested(cancel_requested):
+        if safe_cancel(cancel_requested):
             _stop_process_runtime(
                 process, stop_runtime=stop_runtime, kill_runtime=kill_runtime
             )
@@ -412,7 +413,7 @@ def _write_process_input(
     finally:
         try:
             stdin.close()
-        except Exception:
+        except OSError:  # pragma: no cover - pipe close best effort
             pass
 
 
@@ -483,10 +484,3 @@ def _stop_monitor(
     metrics = monitor.last_metrics() or last_metrics
     monitor.stop()
     return metrics
-
-
-def _cancel_requested(callback: Callable[[], bool]) -> bool:
-    try:
-        return bool(callback())
-    except Exception:  # pragma: no cover - defensive
-        return False

@@ -1,6 +1,6 @@
 # System Builtins Command Plan
 
-Status: proposed
+Status: completed
 Source specs: see Source Documents below
 Superseded by: none
 
@@ -22,10 +22,9 @@ Source specs:
   [CLI-X0], [CLI-X1]
 - [`docs/specifications/04-SimpleBroker_Integration.md`](../specifications/04-SimpleBroker_Integration.md)
 
-Roadmap and related plans:
+Related plans:
 
 - [`docs/plans/2026-04-14-builtin-contract-and-doc-drift-reduction-plan.md`](./2026-04-14-builtin-contract-and-doc-drift-reduction-plan.md)
-- [`docs/plans/2026-04-14-weft-road-to-excellent-plan.md`](./2026-04-14-weft-road-to-excellent-plan.md)
 
 Repo guidance:
 

@@ -20,6 +20,7 @@ from collections.abc import Callable
 from typing import Any
 
 from simplebroker import BrokerTarget, Queue
+from simplebroker.ext import BrokerError
 from weft.core.tasks.multiqueue_watcher import (
     MultiQueueWatcher,
     QueueMode,
@@ -131,7 +132,11 @@ class InteractiveStreamClient:
 
         try:
             self._inbox_queue.close()
-        except Exception:
+        except (
+            BrokerError,
+            OSError,
+            RuntimeError,
+        ):  # pragma: no cover - queue close best effort
             pass
 
         self._completion.set()

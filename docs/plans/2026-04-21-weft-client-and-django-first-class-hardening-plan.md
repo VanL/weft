@@ -45,9 +45,6 @@ Related plans:
 
 - `docs/plans/2026-04-20-weft-client-pythonic-surface-and-path-unification-plan.md`
   landed the current `weft.client` package split and shared command-layer model.
-- `docs/plans/2026-04-20-weft-django-v1-reality-alignment-plan.md` landed the
-  current `weft_django` v1 alignment slice and is superseded by this hardening
-  plan for the remaining first-class-quality work.
 
 No current spec covers PEP 561 `py.typed` packaging explicitly. This plan
 requires a small spec/documentation update because package typing is part of the
@@ -262,7 +259,6 @@ Rationale:
    - `docs/specifications/13C-Using_Weft_With_Django.md`
    - `docs/plans/2026-04-21-weft-client-and-django-first-class-hardening-plan.md`
    - `docs/plans/README.md`
-   - `docs/plans/2026-04-20-weft-django-v1-reality-alignment-plan.md`
 
    Required edits:
 

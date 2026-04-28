@@ -11,6 +11,11 @@ from tests.helpers.test_backend import prepare_project_root
 from weft._constants import WEFT_GLOBAL_LOG_QUEUE
 from weft.commands import _result_wait as result_wait
 from weft.commands import result as result_cmd
+from weft.commands._streaming import (
+    collect_interactive_queue_output,
+    handle_ctrl_stream,
+    process_outbox_message,
+)
 from weft.commands.result import (
     _await_single_result,
     _load_taskspec_payload,
@@ -34,6 +39,62 @@ def _capture_stream_echo(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
     monkeypatch.setattr("weft.commands._streaming.typer.echo", _fake_echo)
     return rendered
+
+
+def test_handle_ctrl_stream_handles_malformed_base64(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rendered = _capture_stream_echo(monkeypatch)
+
+    handle_ctrl_stream(
+        json.dumps(
+            {
+                "type": "stream",
+                "stream": "stdout",
+                "encoding": "base64",
+                "data": "%%%not-base64%%%",
+            }
+        )
+    )
+
+    assert rendered == []
+
+
+def test_process_outbox_message_handles_malformed_base64() -> None:
+    stream_buffer: list[str] = []
+
+    final, value = process_outbox_message(
+        json.dumps(
+            {
+                "type": "stream",
+                "stream": "stdout",
+                "encoding": "base64",
+                "data": "%%%not-base64%%%",
+                "final": True,
+            }
+        ),
+        stream_buffer,
+        emit_stream=False,
+    )
+
+    assert final is True
+    assert value is not None
+    assert value.value == ""
+
+
+def test_collect_interactive_queue_output_handles_malformed_base64() -> None:
+    class _Queue:
+        def peek_generator(self):
+            yield json.dumps(
+                {
+                    "type": "stream",
+                    "stream": "stdout",
+                    "encoding": "base64",
+                    "data": "%%%not-base64%%%",
+                }
+            )
+
+    assert collect_interactive_queue_output(_Queue()) == ["%%%not-base64%%%"]
 
 
 def test_load_taskspec_payload_reads_full_log_history(tmp_path) -> None:

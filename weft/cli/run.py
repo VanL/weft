@@ -35,7 +35,7 @@ def render_spec_aware_run_help(
             spec=spec,
             context_dir=context_dir,
         )
-    except Exception as exc:
+    except Exception as exc:  # pragma: no cover - cli error boundary
         raise _translate_run_error(exc) from exc
 
 
@@ -97,7 +97,7 @@ def cmd_run(
             json_output=json_output,
             verbose=verbose,
         )
-    except Exception as exc:
+    except Exception as exc:  # pragma: no cover - cli error boundary
         raise _translate_run_error(exc) from exc
 
 

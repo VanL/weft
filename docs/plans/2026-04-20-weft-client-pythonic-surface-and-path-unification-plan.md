@@ -318,8 +318,7 @@ Source guidance:
 - `docs/agent-context/runbooks/review-loops-and-agent-bootstrap.md`
 
 Relevant existing plans:
-- `docs/plans/2026-04-20-weft-django-integration-implementation-plan.md`
-  (the plan that shipped the current `weft.client`)
+
 - `docs/plans/2026-04-09-manager-bootstrap-unification-plan.md`
 - `docs/plans/2026-04-14-spawn-request-reconciliation-plan.md`
 

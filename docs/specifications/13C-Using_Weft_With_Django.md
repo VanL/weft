@@ -1285,10 +1285,6 @@ Once the package is split into a sibling repo:
   [../plans/2026-04-21-client-follow-hardening-plan.md](../plans/2026-04-21-client-follow-hardening-plan.md)
 - Completed hardening plan:
   [../plans/2026-04-21-weft-client-and-django-first-class-hardening-plan.md](../plans/2026-04-21-weft-client-and-django-first-class-hardening-plan.md)
-- Superseded v1 reality-alignment plan:
-  [../plans/2026-04-20-weft-django-v1-reality-alignment-plan.md](../plans/2026-04-20-weft-django-v1-reality-alignment-plan.md)
-- Related implementation plan:
-  [../plans/2026-04-20-weft-django-integration-implementation-plan.md](../plans/2026-04-20-weft-django-integration-implementation-plan.md)
 - Core higher-level integration guidance:
   [13B-Using_Weft_In_Higher_Level_Systems.md](13B-Using_Weft_In_Higher_Level_Systems.md)
 - Current agent runtime contract:

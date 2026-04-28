@@ -57,6 +57,7 @@ class WeftTestHarness:
         self._closed = False
         self._self_pid = os.getpid()
         self._safe_pids = self._compute_safe_pid_set()
+        self._completion_wait_stats: list[dict[str, float]] = []
 
     # ------------------------------------------------------------------
     # Context management
@@ -266,63 +267,89 @@ class WeftTestHarness:
         tid: str,
         timeout: float = DEFAULT_TASK_COMPLETION_TIMEOUT,
     ) -> None:
-        log_queue = Queue(
-            WEFT_GLOBAL_LOG_QUEUE,
-            db_path=self.context.broker_target,
-            persistent=False,
-            config=self.context.broker_config,
-        )
-        deadline = time.time() + timeout
-        last_seen: int | None = None
+        iterations = 0
+        started_at = time.monotonic()
         try:
-            while time.time() < deadline:
-                next_last_seen = last_seen
-                for data, ts in iter_queue_json_entries(
-                    log_queue,
-                    since_timestamp=last_seen,
-                ):
-                    if last_seen is not None and ts <= last_seen:
-                        continue
-                    next_last_seen = ts
-                    if data.get("tid") != tid:
-                        continue
-                    event = data.get("event")
-                    if event == "work_completed":
-                        return
-                    if event in {
-                        "work_failed",
-                        "work_timeout",
-                        "work_limit_violation",
-                        "control_stop",
-                        "control_kill",
-                        "task_signal_stop",
-                        "task_signal_kill",
-                    }:
-                        raise RuntimeError(f"Task {tid} reported {event}")
-                last_seen = next_last_seen
-                time.sleep(0.05)
-        finally:
-            log_queue.close()
+            log_queue = Queue(
+                WEFT_GLOBAL_LOG_QUEUE,
+                db_path=self.context.broker_target,
+                persistent=False,
+                config=self.context.broker_config,
+            )
+            deadline = time.time() + timeout
+            last_seen: int | None = None
+            try:
+                while time.time() < deadline:
+                    iterations += 1
+                    next_last_seen = last_seen
+                    for data, ts in iter_queue_json_entries(
+                        log_queue,
+                        since_timestamp=last_seen,
+                    ):
+                        if last_seen is not None and ts <= last_seen:
+                            continue
+                        next_last_seen = ts
+                        if data.get("tid") != tid:
+                            continue
+                        event = data.get("event")
+                        if event == "work_completed":
+                            return
+                        if event in {
+                            "work_failed",
+                            "work_timeout",
+                            "work_limit_violation",
+                            "control_stop",
+                            "control_kill",
+                            "task_signal_stop",
+                            "task_signal_kill",
+                        }:
+                            raise RuntimeError(f"Task {tid} reported {event}")
+                    last_seen = next_last_seen
+                    # SimpleBroker has no blocking read-with-timeout API.
+                    # Polling iter_queue_json_entries is the only mechanism
+                    # short of a QueueWatcher (which polls internally). 50 ms
+                    # is the standard interval across test wait helpers.
+                    time.sleep(0.05)
+            finally:
+                log_queue.close()
 
-        # Fallback: inspect task outbox directly in case log events were missed.
-        outbox_name = f"T{tid}.{QUEUE_OUTBOX_SUFFIX}"
-        outbox_queue = Queue(
-            outbox_name,
-            db_path=self.context.broker_target,
-            persistent=True,
-            config=self.context.broker_config,
-        )
-        try:
-            message = outbox_queue.peek_one()
-            if message is not None:
-                return
-        finally:
-            outbox_queue.close()
+            # Fallback: inspect task outbox directly in case log events were missed.
+            outbox_name = f"T{tid}.{QUEUE_OUTBOX_SUFFIX}"
+            outbox_queue = Queue(
+                outbox_name,
+                db_path=self.context.broker_target,
+                persistent=True,
+                config=self.context.broker_config,
+            )
+            try:
+                message = outbox_queue.peek_one()
+                if message is not None:
+                    return
+            finally:
+                outbox_queue.close()
 
-        raise TimeoutError(
-            f"Timed out waiting for task {tid}\n"
-            f"{self.dump_completion_timeout_state(tid)}"
-        )
+            raise TimeoutError(
+                f"Timed out waiting for task {tid}\n"
+                f"{self.dump_completion_timeout_state(tid)}"
+            )
+        finally:
+            self._completion_wait_stats.append(
+                {
+                    "iterations": float(iterations),
+                    "duration": time.monotonic() - started_at,
+                }
+            )
+
+    def report_completion_wait_stats(self) -> list[dict[str, float]]:
+        """Return polling statistics from prior wait_for_completion calls.
+
+        Each entry has ``iterations`` (loop passes executed in the poll
+        loop) and ``duration`` (wall-clock seconds from call entry to
+        return or raise). Used to measure the polling cost of
+        SimpleBroker's no-blocking-read constraint. See docs/lessons.md
+        "2026-04-27 Test Sleep Hygiene".
+        """
+        return list(self._completion_wait_stats)
 
     # ------------------------------------------------------------------
     # Cleanup
@@ -617,6 +644,10 @@ class WeftTestHarness:
         if issued_task_stops or manager_records:
             self._collect_pid_mappings()
             self._wait_for_registered_pids_to_exit()
+            # Settlement window for Windows SQLite WAL/SHM handle release
+            # after the last live PID exits. Added in f10d9d6 ("Fix Windows
+            # preserve-database cleanup race"). Do not remove without
+            # reproducing under tests/test_harness_registration.py on Windows.
             time.sleep(0.1)
         if drain_registry:
             self._drain_registry_queue()
@@ -666,6 +697,9 @@ class WeftTestHarness:
             else:
                 quiescent_since = None
 
+            # SimpleBroker provides no blocking primitive for "all PIDs
+            # exited and DB files releasable"; psutil + filesystem checks
+            # must be polled. Same family as wait_for_completion.
             time.sleep(0.05)
 
         if last_live_task_tids:
@@ -738,6 +772,10 @@ class WeftTestHarness:
             live_pids = self._live_registered_pids()
             if not live_pids:
                 return []
+            # psutil has no event-based process-exit API. POSIX os.waitpid()
+            # only handles direct children, but the harness waits for
+            # arbitrary descendant PIDs registered by spawned managers.
+            # Polling is required.
             time.sleep(0.05)
         return self._live_registered_pids()
 
@@ -821,6 +859,8 @@ class WeftTestHarness:
             try:
                 path.unlink(missing_ok=True)
             except PermissionError:
+                # One-shot retry for Windows file-handle release. Same race
+                # family as f10d9d6 / b23f8c5. Bounded retry, not a poll.
                 time.sleep(0.05)
                 try:
                     path.unlink(missing_ok=True)
@@ -893,6 +933,8 @@ class WeftTestHarness:
                 }:
                     raise
                 last_error = exc
+                # Bounded 5-attempt retry for Windows ENOTEMPTY/EBUSY/EPERM
+                # during tempdir cleanup. Same race family as f10d9d6.
                 time.sleep(0.05)
         if last_error is not None:
             raise last_error

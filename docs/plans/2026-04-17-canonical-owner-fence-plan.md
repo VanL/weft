@@ -67,7 +67,6 @@ Related current plans:
 
 - [`docs/plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md`](./2026-04-16-runtime-endpoint-registry-boundary-plan.md) — completed endpoint-registry slice. Reuse its landed lowest-live-TID endpoint rule; do not redesign endpoint semantics here.
 - [`docs/plans/2026-04-09-manager-lifecycle-command-consolidation-plan.md`](./2026-04-09-manager-lifecycle-command-consolidation-plan.md) — broader manager control-plane cleanup. This plan only hardens the late dispatch race and shared ownership seam.
-- [`docs/plans/2026-04-16-review-findings-remediation-plan.md`](./2026-04-16-review-findings-remediation-plan.md) — recently completed manager/runtime hardening slice. Read it before changing manager queue-handling rules again.
 - [`docs/plans/2026-04-14-spawn-request-reconciliation-plan.md`](./2026-04-14-spawn-request-reconciliation-plan.md) — current submission-reconciliation contract. This plan may add a runtime-owned pre-launch requeue path, but it must not blur CLI/operator manual-recovery rules or `task_spawn_rejected` semantics.
 
 Repo guidance:

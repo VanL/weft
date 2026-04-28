@@ -1,6 +1,6 @@
 # Builtin Contract And Doc Drift Reduction Plan
 
-Status: proposed
+Status: completed
 Source specs: see Source Documents below
 Superseded by: none
 
@@ -28,9 +28,8 @@ Current public behavior:
 
 - [`README.md`](../../README.md)
 
-Roadmap and related plans:
+Related plans:
 
-- [`docs/plans/2026-04-14-weft-road-to-excellent-plan.md`](./2026-04-14-weft-road-to-excellent-plan.md)
 - [`docs/plans/2026-04-14-builtin-taskspecs-and-spec-resolution-plan.md`](./2026-04-14-builtin-taskspecs-and-spec-resolution-plan.md)
 - [`docs/plans/2026-04-14-provider-cli-validation-boundary-and-agent-settings-alignment-plan.md`](./2026-04-14-provider-cli-validation-boundary-and-agent-settings-alignment-plan.md)
 

@@ -1,6 +1,6 @@
 # Result Stream Implementation Plan
 
-Status: proposed
+Status: completed
 Source specs: see Source Documents below
 Superseded by: none
 
@@ -46,7 +46,6 @@ Repo guidance:
 Relevant current context:
 
 - [`docs/lessons.md`](../lessons.md)
-- [`docs/plans/2026-04-13-runner-monitor-result-waiter-and-liveness-fixes-plan.md`](./2026-04-13-runner-monitor-result-waiter-and-liveness-fixes-plan.md)
 
 ## Context and Key Files
 

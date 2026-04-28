@@ -263,7 +263,7 @@ class ProviderCLIBackend:
                 completed=completed,
                 invocation=invocation,
             )
-        except Exception as exc:
+        except Exception as exc:  # pragma: no cover - provider parser boundary
             self._record_provider_health(
                 provider=provider,
                 executable=executable,

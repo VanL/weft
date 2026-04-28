@@ -64,4 +64,3 @@ Boundary:
 - [`docs/plans/2026-04-09-weft-serve-supervised-manager-plan.md`](../plans/2026-04-09-weft-serve-supervised-manager-plan.md)
 - [`docs/plans/2026-04-13-detached-manager-bootstrap-hardening-plan.md`](../plans/2026-04-13-detached-manager-bootstrap-hardening-plan.md)
 - [`docs/plans/2026-04-13-manager-bootstrap-readiness-and-cleanup-test-plan.md`](../plans/2026-04-13-manager-bootstrap-readiness-and-cleanup-test-plan.md)
-- [`docs/plans/2026-04-14-weft-road-to-excellent-plan.md`](../plans/2026-04-14-weft-road-to-excellent-plan.md)

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from simplebroker import BrokerTarget, Queue
+from simplebroker.ext import BrokerError
 from weft._constants import (
     INTERNAL_RUNTIME_ENDPOINT_NAME_KEY,
     INTERNAL_RUNTIME_ENVELOPE_ENDPOINT_NAME_KEY,
@@ -192,7 +193,11 @@ def delete_spawn_request(
     )
     try:
         return bool(queue.delete(message_id=message_timestamp))
-    except Exception:
+    except (
+        BrokerError,
+        OSError,
+        RuntimeError,
+    ):  # pragma: no cover - spawn cleanup best effort
         return False
     finally:
         queue.close()

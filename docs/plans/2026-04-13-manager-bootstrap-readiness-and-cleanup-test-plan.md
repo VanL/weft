@@ -1,6 +1,6 @@
 # Manager Bootstrap Readiness And Cleanup Test Plan
 
-Status: proposed
+Status: completed
 Source specs: see Source Documents below
 Superseded by: none
 
@@ -33,7 +33,6 @@ Repo guidance:
 Related plans:
 
 - [`docs/plans/2026-04-13-detached-manager-bootstrap-hardening-plan.md`](./2026-04-13-detached-manager-bootstrap-hardening-plan.md)
-- [`docs/plans/2026-04-08-task-lifecycle-stop-drain-findings.md`](./2026-04-08-task-lifecycle-stop-drain-findings.md)
 
 ## Context and Key Files
 

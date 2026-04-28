@@ -34,6 +34,7 @@ from weft.helpers import (  # noqa: D401 - module already documented
     pid_is_live,
     reload_config,
     resolve_cli_command,
+    safe_cancel,
     send_log,
     write_file_atomically,
     write_json_atomically,
@@ -46,6 +47,16 @@ def _reset_config() -> Any:
     reload_config()
     yield
     reload_config()
+
+
+def test_safe_cancel_handles_missing_truthy_and_raising_callbacks() -> None:
+    assert safe_cancel(None) is False
+    assert safe_cancel(lambda: True) is True
+
+    def _raise() -> bool:
+        raise RuntimeError("bad cancel hook")
+
+    assert safe_cancel(_raise) is False
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX only")

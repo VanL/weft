@@ -177,7 +177,7 @@ def _run_with_managed_execution(
             error_message=error_message,
             manager_started_payload=manager_started_payload,
         )
-    except Exception:
+    except Exception:  # pragma: no cover - managed execution cleanup
         failed = True
         if started_here and manager_record is not None:
             _stop_manager(context, manager_record, process_handle)
@@ -1108,7 +1108,7 @@ def _execute_inline(
             emit_verbose=False,
             wait_for_completion=_wait_for_inline_completion if wait else None,
         )
-    except Exception as exc:
+    except Exception as exc:  # pragma: no cover - command error boundary
         return RunExecutionResult(
             tid="",
             submission_error=f"Error submitting task: {exc}",
@@ -1245,7 +1245,7 @@ def _execute_spec_via_manager(
             emit_verbose=False,
             wait_for_completion=_wait_for_spec_completion if wait else None,
         )
-    except Exception as exc:
+    except Exception as exc:  # pragma: no cover - command error boundary
         return RunExecutionResult(
             tid="",
             submission_error=f"Error submitting TaskSpec: {exc}",

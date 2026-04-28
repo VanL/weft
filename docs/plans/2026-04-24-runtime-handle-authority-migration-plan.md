@@ -1,6 +1,6 @@
 # Runtime Handle Authority Migration Plan
 
-Status: proposed
+Status: completed
 Source specs: see Source Documents below
 Superseded by: none
 
@@ -48,9 +48,6 @@ Related plans:
   is the narrow incident fix. This plan supersets the underlying model change,
   but does not supersede the narrow plan unless this migration is implemented
   first.
-- [`docs/plans/2026-04-13-runner-monitor-result-waiter-and-liveness-fixes-plan.md`](./2026-04-13-runner-monitor-result-waiter-and-liveness-fixes-plan.md)
-  is proposed prior art for runner liveness problems. Do not treat it as
-  landed behavior.
 - [`docs/lessons.md`](../lessons.md) entries for zombie PID liveness and
   manager bootstrap unification.
 

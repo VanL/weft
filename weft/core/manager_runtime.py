@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 from simplebroker import Queue, serialize_broker_target
+from simplebroker.ext import BrokerError
 from weft._constants import (
     MANAGER_COMPETING_STARTUP_GRACE_SECONDS,
     MANAGER_LAUNCHER_SIGNAL_ABORT,
@@ -141,7 +142,11 @@ def _snapshot_registry(
         for ts in stale_timestamps:
             try:
                 registry_queue.delete(message_id=ts)
-            except Exception:
+            except (
+                BrokerError,
+                OSError,
+                RuntimeError,
+            ):  # pragma: no cover - stale prune best effort
                 pass
     finally:
         if owns_queue:
@@ -853,7 +858,7 @@ def _terminate_manager_process(
     except subprocess.TimeoutExpired:  # pragma: no cover - defensive
         try:
             process.kill()
-        except Exception:
+        except Exception:  # pragma: no cover - process may have exited
             return
         try:
             process.wait(timeout=timeout)
@@ -924,7 +929,11 @@ def _stop_manager(
 
     try:
         _send_stop(context, target_tid, record=current)
-    except Exception:
+    except (
+        BrokerError,
+        OSError,
+        RuntimeError,
+    ):  # pragma: no cover - control queue best effort
         return False, "failed to send STOP to manager"
 
     if current is None and stop_if_absent and process is None:

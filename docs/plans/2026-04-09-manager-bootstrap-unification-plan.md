@@ -1,6 +1,6 @@
 # Manager Bootstrap Unification Plan
 
-Status: proposed
+Status: completed
 Source specs: see Source Documents below
 Superseded by: none
 
@@ -32,7 +32,6 @@ Repo guidance:
 Relevant existing context:
 
 - [`docs/lessons.md`](../lessons.md)
-- [`docs/plans/2026-04-08-task-lifecycle-stop-drain-audit-plan.md`](./2026-04-08-task-lifecycle-stop-drain-audit-plan.md)
 
 ## Context and Key Files
 

@@ -81,6 +81,8 @@ def wait_for_terminal_statuses(
                     remaining.discard(str(tid))
             last_seen = next_last_seen
             if remaining:
+                # Same polling pattern as WeftTestHarness.wait_for_completion;
+                # SimpleBroker has no blocking read-with-timeout API.
                 time.sleep(0.05)
     finally:
         log_queue.close()

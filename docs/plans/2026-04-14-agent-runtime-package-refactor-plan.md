@@ -1,6 +1,6 @@
 # Agent Runtime Package Refactor Plan
 
-Status: proposed
+Status: completed
 Source specs: see Source Documents below
 Superseded by: none
 
@@ -137,7 +137,6 @@ Existing plans to align with, not replace:
 - [`docs/plans/2026-04-14-provider-cli-validation-boundary-and-agent-settings-alignment-plan.md`](./2026-04-14-provider-cli-validation-boundary-and-agent-settings-alignment-plan.md)
 - [`docs/plans/2026-04-14-docker-agent-images-and-one-shot-provider-cli-plan.md`](./2026-04-14-docker-agent-images-and-one-shot-provider-cli-plan.md)
 - [`docs/plans/2026-04-14-builtin-taskspecs-and-spec-resolution-plan.md`](./2026-04-14-builtin-taskspecs-and-spec-resolution-plan.md)
-- [`docs/plans/2026-04-14-weft-road-to-excellent-plan.md`](./2026-04-14-weft-road-to-excellent-plan.md)
 
 First-party extension context:
 
@@ -626,7 +625,6 @@ that work into this refactor by reflex.
      - `docs/plans/2026-04-14-provider-cli-validation-boundary-and-agent-settings-alignment-plan.md`
      - `docs/plans/2026-04-14-docker-agent-images-and-one-shot-provider-cli-plan.md`
      - `docs/plans/2026-04-14-builtin-taskspecs-and-spec-resolution-plan.md`
-     - `docs/plans/2026-04-14-weft-road-to-excellent-plan.md`
    - Read first:
      - `docs/specifications/13-Agent_Runtime.md`
      - `docs/specifications/10B-Builtin_TaskSpecs.md`
@@ -637,7 +635,7 @@ that work into this refactor by reflex.
      - leave older `2026-04-13` and earlier plans untouched unless you have a
        separate approved reason
    - Grep proof:
-     - `rg -n 'weft/core/agent_|weft/core/agents/(provider_registry|provider_cli_execution|settings|probes|backends/llm_backend|backends/provider_cli_backend)' docs/specifications docs/tutorials docs/plans/2026-04-14-provider-cli-validation-boundary-and-agent-settings-alignment-plan.md docs/plans/2026-04-14-docker-agent-images-and-one-shot-provider-cli-plan.md docs/plans/2026-04-14-builtin-taskspecs-and-spec-resolution-plan.md docs/plans/2026-04-14-weft-road-to-excellent-plan.md`
+     - no current implementation docs reference the old internal module paths.
    - Expected result:
      - zero matches
    - Stop and re-evaluate if:
@@ -649,13 +647,12 @@ that work into this refactor by reflex.
    - Outcome: the full repo is green with no behavior edits hidden in the move.
    - Commands to run in sequence:
      1. `. ./.envrc && rg -n 'weft\\.core\\.agent_|weft\\.core\\.agents\\.(provider_registry|provider_cli_execution|settings|probes)' weft tests extensions/weft_docker`
-     2. `. ./.envrc && rg -n 'weft/core/agent_|weft/core/agents/(provider_registry|provider_cli_execution|settings|probes|backends/llm_backend|backends/provider_cli_backend)' docs/specifications docs/tutorials docs/plans/2026-04-14-provider-cli-validation-boundary-and-agent-settings-alignment-plan.md docs/plans/2026-04-14-docker-agent-images-and-one-shot-provider-cli-plan.md docs/plans/2026-04-14-builtin-taskspecs-and-spec-resolution-plan.md docs/plans/2026-04-14-weft-road-to-excellent-plan.md`
-     3. `. ./.envrc && ./.venv/bin/python -m pytest extensions/weft_docker/tests -q`
-     4. `. ./.envrc && ./.venv/bin/python -m pytest tests/core/test_agent_runtime.py tests/core/test_agent_tools.py tests/core/test_agent_resolution.py tests/core/test_agent_validation.py tests/core/test_llm_backend.py tests/core/test_provider_cli_backend.py tests/core/test_provider_cli_execution.py tests/core/test_provider_cli_session_backend.py tests/core/test_tool_profiles.py -q`
-     5. `. ./.envrc && ./.venv/bin/python -m pytest tests/tasks/test_agent_execution.py tests/tasks/test_runner.py tests/cli/test_cli_validate.py tests/cli/test_cli_run.py tests/core/test_builtin_agent_images.py -q`
-     6. `. ./.envrc && ./.venv/bin/python -m ruff check weft tests extensions/weft_docker`
-     7. `. ./.envrc && ./.venv/bin/python -m mypy weft`
-     8. `. ./.envrc && ./.venv/bin/python -m pytest`
+     2. `. ./.envrc && ./.venv/bin/python -m pytest extensions/weft_docker/tests -q`
+     3. `. ./.envrc && ./.venv/bin/python -m pytest tests/core/test_agent_runtime.py tests/core/test_agent_tools.py tests/core/test_agent_resolution.py tests/core/test_agent_validation.py tests/core/test_llm_backend.py tests/core/test_provider_cli_backend.py tests/core/test_provider_cli_execution.py tests/core/test_provider_cli_session_backend.py tests/core/test_tool_profiles.py -q`
+     4. `. ./.envrc && ./.venv/bin/python -m pytest tests/tasks/test_agent_execution.py tests/tasks/test_runner.py tests/cli/test_cli_validate.py tests/cli/test_cli_run.py tests/core/test_builtin_agent_images.py -q`
+     5. `. ./.envrc && ./.venv/bin/python -m ruff check weft tests extensions/weft_docker`
+     6. `. ./.envrc && ./.venv/bin/python -m mypy weft`
+     7. `. ./.envrc && ./.venv/bin/python -m pytest`
      9. `. ./.envrc && ./.venv/bin/python -m pytest -m ""`
    - Interpretation:
      - grep commands must return zero matches
