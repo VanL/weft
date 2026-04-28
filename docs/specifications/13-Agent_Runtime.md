@@ -14,6 +14,26 @@ does not turn Weft into a general agent harness. Runtime-specific knowledge is
 acceptable when it directly serves execution, isolation, observability, or
 clear failure. Ecosystem management belongs above this layer.
 
+## Boundary Decision [AR-0.0]
+
+Current decision: the agent runtime is a core Weft capability, not incidental
+extension glue.
+
+Weft therefore keeps the generic agent TaskSpec schema, the `llm` runtime
+adapter, the host-backed `provider_cli` adapter, and the shipped provider
+runtime descriptors in the core package when they directly serve task
+execution, isolation, observability, or clear failure. Docker-backed provider
+execution remains runner-specific: the Docker extension owns container
+execution and image-building mechanics, while core owns the normalized
+provider descriptor contract that lets an agent task stay on the durable
+spine.
+
+This decision does not expand Weft into provider lifecycle ownership. Weft
+does not own provider account setup, login flows, token lifecycle management,
+hidden provider health caches, approval-policy engines, or product-layer
+agent orchestration. Those belong in systems built on top of Weft or in
+explicit first-party extensions with their own contracts.
+
 ## Design Context [AR-0]
 
 Weft started from queues and processes, not from prompts and chat state. The
@@ -680,7 +700,6 @@ This slice does not attempt to:
 - [`docs/plans/2026-04-14-provider-cli-validation-boundary-and-agent-settings-alignment-plan.md`](../plans/2026-04-14-provider-cli-validation-boundary-and-agent-settings-alignment-plan.md)
 - [`docs/plans/2026-04-14-docker-agent-images-and-one-shot-provider-cli-plan.md`](../plans/2026-04-14-docker-agent-images-and-one-shot-provider-cli-plan.md)
 - [`docs/plans/2026-04-14-provider-cli-container-runtime-descriptor-plan.md`](../plans/2026-04-14-provider-cli-container-runtime-descriptor-plan.md)
-- [`docs/plans/2026-04-14-weft-road-to-excellent-plan.md`](../plans/2026-04-14-weft-road-to-excellent-plan.md)
 - [`docs/plans/2026-04-15-spec-run-input-adapter-and-declared-args-plan.md`](../plans/2026-04-15-spec-run-input-adapter-and-declared-args-plan.md)
 - [`docs/plans/2026-04-15-multi-provider-docker-provider-cli-expansion-plan.md`](../plans/2026-04-15-multi-provider-docker-provider-cli-expansion-plan.md)
 

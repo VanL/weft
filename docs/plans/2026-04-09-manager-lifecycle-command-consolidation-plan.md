@@ -1,6 +1,6 @@
 # Manager Lifecycle Command Consolidation Plan
 
-Status: proposed
+Status: completed
 Source specs: see Source Documents below
 Superseded by: none
 
@@ -36,7 +36,6 @@ Repo guidance:
 Relevant existing context:
 
 - [`docs/plans/2026-04-09-manager-bootstrap-unification-plan.md`](./2026-04-09-manager-bootstrap-unification-plan.md)
-- [`docs/plans/2026-04-08-task-lifecycle-stop-drain-audit-plan.md`](./2026-04-08-task-lifecycle-stop-drain-audit-plan.md)
 - [`docs/lessons.md`](../lessons.md)
 
 ## Context and Key Files

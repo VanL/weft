@@ -34,6 +34,18 @@ or `ruff` are installed globally.
 ./.venv/bin/ruff check weft
 ```
 
+## Coverage Policy
+
+Patch coverage is the main signal for new code. Keep it higher than the
+legacy project-wide baseline so changed lines must carry meaningful tests.
+Project coverage should only be raised after defensive exception arms and
+backend-specific paths are classified; otherwise the gate measures noise.
+
+Broad `except Exception` arms should be rare and explicit. If one remains
+because it protects a process boundary, CLI boundary, plugin hook, or
+best-effort cleanup path, mark it with `# pragma: no cover - <reason>`.
+If no precise reason fits, narrow the catch or add a regression test instead.
+
 ## Harness Selection
 
 Use the narrowest real harness that still proves the behavior:

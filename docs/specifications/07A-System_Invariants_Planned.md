@@ -52,4 +52,3 @@ not in this planned companion.
 ## Related Plans
 
 - [`docs/plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md`](../plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md)
-- [`docs/plans/2026-04-07-spec-plan-code-traceability-plan.md`](../plans/2026-04-07-spec-plan-code-traceability-plan.md)

@@ -66,7 +66,7 @@ def _spec_dir_from_root(spec_root: Path, spec_type: str) -> Path:
 def _read_json(path: Path) -> dict[str, Any]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception as exc:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"Failed to read JSON from {path}: {exc}") from exc
     if not isinstance(payload, dict):
         raise ValueError(f"Spec file {path} must contain a JSON object")

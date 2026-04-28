@@ -9,8 +9,9 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, NoReturn, cast
 
+from simplebroker.ext import BrokerError
 from weft._constants import (
     CONTROL_KILL,
     CONTROL_STOP,
@@ -115,7 +116,11 @@ class Consumer(BaseTask, InteractiveTaskMixin):
                         require_unclaimed=True,
                         with_timestamps=False,
                     )
-                except Exception:
+                except (
+                    BrokerError,
+                    OSError,
+                    RuntimeError,
+                ):  # pragma: no cover - broker requeue best effort
                     logger.debug(
                         "Failed to requeue message %s while paused",
                         timestamp,
@@ -502,7 +507,11 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         if timestamp is not None:
             try:
                 self._get_reserved_queue().delete(message_id=timestamp)
-            except Exception:
+            except (
+                BrokerError,
+                OSError,
+                RuntimeError,
+            ):  # pragma: no cover - broker ack best effort
                 logger.debug(
                     "Failed to acknowledge reserved message %s",
                     timestamp,
@@ -611,7 +620,11 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             serialized = json.loads(json.dumps(payload, default=str))
             if isinstance(serialized, dict):
                 return serialized
-        except Exception:  # pragma: no cover - defensive
+        except (
+            TypeError,
+            ValueError,
+            OverflowError,
+        ):  # pragma: no cover - non-serializable agent payload
             logger.debug("Failed to serialize agent execution payload", exc_info=True)
         return {
             "runtime": result.runtime,
@@ -619,6 +632,48 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             "output_mode": result.output_mode,
             "status": result.status,
         }
+
+    def _raise_already_terminal(self, exc: BaseException) -> NoReturn:
+        """Raise after minimal cleanup when state is already terminal."""
+        self._end_streaming_session()
+        self.should_stop = True
+        if self._stop_event:
+            self._stop_event.set()
+        raise exc
+
+    def _finalize_terminal_outcome(
+        self,
+        *,
+        title_state: str,
+        title_detail: str | None,
+        event: str,
+        pipeline_status: str,
+        timestamp: int | None,
+        metrics_payload: dict[str, Any] | None,
+        exc: BaseException,
+    ) -> NoReturn:
+        """Run standard terminal cleanup after the caller marks state."""
+        self._clear_activity()
+        if title_detail is None:
+            self._update_process_title(title_state)
+        else:
+            self._update_process_title(title_state, title_detail)
+        self._report_state_change(
+            event=event,
+            message_id=timestamp,
+            error=str(exc),
+            metrics=metrics_payload,
+        )
+        self._emit_pipeline_terminal_event(
+            status=pipeline_status,
+            error=self.taskspec.state.error,
+        )
+        self._apply_reserved_policy_on_error(timestamp)
+        self._end_streaming_session()
+        self.should_stop = True
+        if self._stop_event:
+            self._stop_event.set()
+        raise exc
 
     def _ensure_outcome_ok(
         self,
@@ -636,104 +691,65 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         if outcome.status == "timeout":
             timeout_exc = TimeoutError(outcome.error or "Target timeout")
             self.taskspec.mark_timeout(error=str(timeout_exc))
-            self._clear_activity()
-            self._update_process_title("timeout")
-            self._report_state_change(
+            self._finalize_terminal_outcome(
+                title_state="timeout",
+                title_detail=None,
                 event="work_timeout",
-                message_id=timestamp,
-                error=str(timeout_exc),
-                metrics=metrics_payload,
+                pipeline_status="timeout",
+                timestamp=timestamp,
+                metrics_payload=metrics_payload,
+                exc=timeout_exc,
             )
-            self._emit_pipeline_terminal_event(
-                status="timeout",
-                error=self.taskspec.state.error,
-            )
-            self._apply_reserved_policy_on_error(timestamp)
-            self._end_streaming_session()
-            self.should_stop = True
-            if self._stop_event:
-                self._stop_event.set()
-            raise timeout_exc
 
         if outcome.status == "limit":
             limit_exc = RuntimeError(outcome.error or "Resource limits exceeded")
             # Spec: docs/specifications/06-Resource_Management.md#error-categories
             self.taskspec.mark_killed(reason=str(limit_exc))
-            self._clear_activity()
-            self._update_process_title("killed", "limit")
-            self._report_state_change(
+            self._finalize_terminal_outcome(
+                title_state="killed",
+                title_detail="limit",
                 event="work_limit_violation",
-                message_id=timestamp,
-                error=str(limit_exc),
-                metrics=metrics_payload,
+                pipeline_status="killed",
+                timestamp=timestamp,
+                metrics_payload=metrics_payload,
+                exc=limit_exc,
             )
-            self._emit_pipeline_terminal_event(
-                status="killed",
-                error=self.taskspec.state.error,
-            )
-            self._apply_reserved_policy_on_error(timestamp)
-            self._end_streaming_session()
-            self.should_stop = True
-            if self._stop_event:
-                self._stop_event.set()
-            raise limit_exc
 
         if outcome.status == "error":
             self._finalize_deferred_active_control()
             if self.taskspec.state.status == "cancelled":
-                self._end_streaming_session()
-                self.should_stop = True
-                if self._stop_event:
-                    self._stop_event.set()
-                raise RuntimeError(
-                    self.taskspec.state.error or "Target execution cancelled"
+                self._raise_already_terminal(
+                    RuntimeError(
+                        self.taskspec.state.error or "Target execution cancelled"
+                    )
                 )
             if self.taskspec.state.status == "killed":
-                self._end_streaming_session()
-                self.should_stop = True
-                if self._stop_event:
-                    self._stop_event.set()
-                raise RuntimeError(
-                    self.taskspec.state.error or "Target execution killed"
+                self._raise_already_terminal(
+                    RuntimeError(self.taskspec.state.error or "Target execution killed")
                 )
             error_exc = RuntimeError(outcome.error or "Target execution failed")
             self.taskspec.mark_failed(error=str(error_exc))
-            self._clear_activity()
-            self._update_process_title("failed")
-            self._report_state_change(
+            self._finalize_terminal_outcome(
+                title_state="failed",
+                title_detail=None,
                 event="work_failed",
-                message_id=timestamp,
-                error=str(error_exc),
-                metrics=metrics_payload,
+                pipeline_status="failed",
+                timestamp=timestamp,
+                metrics_payload=metrics_payload,
+                exc=error_exc,
             )
-            self._emit_pipeline_terminal_event(
-                status="failed",
-                error=self.taskspec.state.error,
-            )
-            self._apply_reserved_policy_on_error(timestamp)
-            self._end_streaming_session()
-            self.should_stop = True
-            if self._stop_event:
-                self._stop_event.set()
-            raise error_exc
 
         if outcome.status == "cancelled":
             self._finalize_deferred_active_control()
             if self.taskspec.state.status == "killed":
-                self._end_streaming_session()
-                self.should_stop = True
-                if self._stop_event:
-                    self._stop_event.set()
-                raise RuntimeError(
-                    self.taskspec.state.error or "Target execution killed"
+                self._raise_already_terminal(
+                    RuntimeError(self.taskspec.state.error or "Target execution killed")
                 )
             if self.taskspec.state.status == "cancelled":
-                self._end_streaming_session()
-                self.should_stop = True
-                if self._stop_event:
-                    self._stop_event.set()
-                raise RuntimeError(
-                    self.taskspec.state.error or "Target execution cancelled"
+                self._raise_already_terminal(
+                    RuntimeError(
+                        self.taskspec.state.error or "Target execution cancelled"
+                    )
                 )
             reason = outcome.error or "Target execution cancelled"
             self._handle_external_stop(reason)
@@ -921,7 +937,11 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         reserved_queue = self._get_reserved_queue()
         try:
             entries = reserved_queue.peek_many(limit=256, with_timestamps=True)
-        except Exception:
+        except (
+            BrokerError,
+            OSError,
+            RuntimeError,
+        ):  # pragma: no cover - broker purge best effort
             return
         if not entries:
             return
@@ -930,7 +950,11 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             if self._is_start_token(body):
                 try:
                     reserved_queue.delete(message_id=ts)
-                except Exception:
+                except (
+                    BrokerError,
+                    OSError,
+                    RuntimeError,
+                ):  # pragma: no cover - broker purge best effort
                     logger.debug(
                         "Failed to purge start token %s from reserved queue",
                         ts,
@@ -945,7 +969,11 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             queue = self._queue(queue_name)
             try:
                 entries = queue.peek_many(limit=256, with_timestamps=True)
-            except Exception:
+            except (
+                BrokerError,
+                OSError,
+                RuntimeError,
+            ):  # pragma: no cover - broker purge best effort
                 continue
             if not entries:
                 continue
@@ -954,7 +982,11 @@ class Consumer(BaseTask, InteractiveTaskMixin):
                 if self._is_stream_final_marker(body):
                     try:
                         queue.delete(message_id=ts)
-                    except Exception:
+                    except (
+                        BrokerError,
+                        OSError,
+                        RuntimeError,
+                    ):  # pragma: no cover - broker purge best effort
                         logger.debug(
                             "Failed to purge stream sentinel %s from %s",
                             ts,

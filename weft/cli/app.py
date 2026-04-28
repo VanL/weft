@@ -438,7 +438,7 @@ def spec_create(
             context_path=context_dir,
             force=force,
         )
-    except Exception as exc:
+    except Exception as exc:  # pragma: no cover - cli error boundary
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=2) from exc
     typer.echo(str(dest))
@@ -462,7 +462,7 @@ def spec_list(
     try:
         normalized = spec_cmd.normalize_spec_type(spec_type) if spec_type else None
         specs = spec_cmd.list_specs(spec_type=normalized, context_path=context_dir)
-    except Exception as exc:
+    except Exception as exc:  # pragma: no cover - cli error boundary
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=2) from exc
     if json_output:
@@ -496,7 +496,7 @@ def spec_show(
         _kind, _path, payload = spec_cmd.load_spec(
             name, spec_type=normalized, context_path=context_dir
         )
-    except Exception as exc:
+    except Exception as exc:  # pragma: no cover - cli error boundary
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=2) from exc
     typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -519,7 +519,7 @@ def spec_delete(
         path = spec_cmd.delete_spec(
             name, spec_type=normalized, context_path=context_dir
         )
-    except Exception as exc:
+    except Exception as exc:  # pragma: no cover - cli error boundary
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=2) from exc
     typer.echo(f"Deleted {path}")
@@ -553,7 +553,7 @@ def spec_validate(
             if spec_type
             else spec_cmd.infer_spec_type(file)
         )
-    except Exception as exc:
+    except Exception as exc:  # pragma: no cover - cli error boundary
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=2) from exc
     if normalized == spec_cmd.SPEC_TYPE_TASK:
@@ -589,7 +589,7 @@ def spec_generate(
     try:
         normalized = spec_cmd.normalize_spec_type(spec_type)
         payload = spec_cmd.generate_spec(normalized)
-    except Exception as exc:
+    except Exception as exc:  # pragma: no cover - cli error boundary
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=2) from exc
     typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))

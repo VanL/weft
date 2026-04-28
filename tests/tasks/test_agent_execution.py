@@ -20,6 +20,7 @@ from weft._constants import (
     QUEUE_RESERVED_SUFFIX,
     WEFT_GLOBAL_LOG_QUEUE,
 )
+from weft.core.agents.runtime import AgentExecutionResult
 from weft.core.tasks import Consumer
 from weft.core.tasks.runner import TaskRunner
 from weft.core.taskspec import (
@@ -33,6 +34,27 @@ from weft.core.taskspec import (
 
 pytestmark = [pytest.mark.xdist_group(name="weft_broker_serial")]
 _MODEL_PROVIDERS = frozenset({"claude_code", "codex", "gemini", "opencode", "qwen"})
+
+
+def test_consumer_agent_execution_payload_falls_back_on_circular_metadata() -> None:
+    metadata: dict[str, object] = {}
+    metadata["self"] = metadata
+    result = AgentExecutionResult(
+        runtime="llm",
+        model="test-model",
+        output_mode="text",
+        outputs=("hello",),
+        metadata=metadata,
+    )
+
+    payload = Consumer._build_agent_execution_payload(result)
+
+    assert payload == {
+        "runtime": "llm",
+        "model": "test-model",
+        "output_mode": "text",
+        "status": "completed",
+    }
 
 
 @pytest.fixture

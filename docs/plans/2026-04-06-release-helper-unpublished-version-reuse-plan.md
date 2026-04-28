@@ -1,6 +1,6 @@
 # Release Helper Unpublished Version Reuse Plan
 
-Status: proposed
+Status: completed
 Source specs: see Source Documents below
 Superseded by: none
 

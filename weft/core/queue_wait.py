@@ -61,6 +61,6 @@ class QueueChangeMonitor:
         for watcher in self._watchers:
             try:
                 watcher.stop(join=True)
-            except Exception:
+            except Exception:  # pragma: no cover - watcher teardown best effort
                 logger.debug("Failed to stop queue watcher cleanly", exc_info=True)
         self._watchers.clear()

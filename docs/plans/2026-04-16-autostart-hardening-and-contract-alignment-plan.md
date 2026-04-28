@@ -39,7 +39,6 @@ Related plans:
 
 - [`docs/plans/2026-04-14-config-precedence-and-parsing-alignment-plan.md`](./2026-04-14-config-precedence-and-parsing-alignment-plan.md)
 - [`docs/plans/2026-04-14-spawn-request-reconciliation-plan.md`](./2026-04-14-spawn-request-reconciliation-plan.md)
-- [`docs/plans/2026-04-15-maintainability-and-boundary-remediation-plan.md`](./2026-04-15-maintainability-and-boundary-remediation-plan.md)
 
 ## 3. Context and Key Files
 

@@ -18,6 +18,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
+from simplebroker.ext import BrokerError
 from weft._constants import (
     CONTROL_KILL,
     CONTROL_STOP,
@@ -126,7 +127,7 @@ class PipelineEdgeTask(BaseTask):
         self._set_activity("working")
         try:
             self._handoff_payload(timestamp)
-        except Exception as exc:
+        except Exception as exc:  # pragma: no cover - edge failure surface
             self._fail_edge(str(exc), timestamp)
             return
 
@@ -146,7 +147,11 @@ class PipelineEdgeTask(BaseTask):
             self._queue(self._runtime.events_queue).write(
                 json.dumps(checkpoint_payload, ensure_ascii=False)
             )
-        except Exception:
+        except (
+            BrokerError,
+            OSError,
+            RuntimeError,
+        ):  # pragma: no cover - checkpoint best effort
             logger.debug(
                 "Failed to emit edge checkpoint for %s",
                 self._runtime.edge_name,
@@ -184,7 +189,11 @@ class PipelineEdgeTask(BaseTask):
                 require_unclaimed=True,
                 with_timestamps=False,
             )
-        except Exception:
+        except (
+            BrokerError,
+            OSError,
+            RuntimeError,
+        ):  # pragma: no cover - broker requeue best effort
             logger.debug(
                 "Failed to requeue edge message %s while paused",
                 timestamp,
@@ -338,7 +347,7 @@ class PipelineTask(BaseTask):
                 submitted_ctrl_queues.append(self._submit_child_spawn(taskspec_payload))
             for taskspec_payload in self._runtime.edge_taskspecs:
                 submitted_ctrl_queues.append(self._submit_child_spawn(taskspec_payload))
-        except Exception as exc:
+        except Exception as exc:  # pragma: no cover - bootstrap failure surface
             self._broadcast_control(CONTROL_STOP, ctrl_queues=submitted_ctrl_queues)
             self._fail_pipeline(
                 f"Pipeline bootstrap failed: {exc}",
@@ -566,7 +575,11 @@ class PipelineTask(BaseTask):
             self._queue(self._runtime.queues.status).write(
                 json.dumps(payload, ensure_ascii=False)
             )
-        except Exception:
+        except (
+            BrokerError,
+            OSError,
+            RuntimeError,
+        ):  # pragma: no cover - snapshot best effort
             logger.debug("Failed to publish pipeline snapshot", exc_info=True)
 
     def _write_pipeline_registry_record(self) -> None:
@@ -620,7 +633,11 @@ class PipelineTask(BaseTask):
             return
         try:
             queue.delete(message_id=message_id)
-        except Exception:
+        except (
+            BrokerError,
+            OSError,
+            RuntimeError,
+        ):  # pragma: no cover - registry cleanup best effort
             logger.debug("Failed to delete pipeline registry record", exc_info=True)
 
     def _broadcast_control(
@@ -637,7 +654,11 @@ class PipelineTask(BaseTask):
                 continue
             try:
                 self._queue(queue_name).write(command)
-            except Exception:
+            except (
+                BrokerError,
+                OSError,
+                RuntimeError,
+            ):  # pragma: no cover - control broadcast best effort
                 logger.debug(
                     "Failed to send %s to %s", command, queue_name, exc_info=True
                 )

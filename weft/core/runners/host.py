@@ -54,7 +54,12 @@ from weft.ext import (
     RunnerPlugin,
     RunnerRuntimeDescription,
 )
-from weft.helpers import kill_process_tree, pid_is_live, terminate_process_tree
+from weft.helpers import (
+    kill_process_tree,
+    pid_is_live,
+    safe_cancel,
+    terminate_process_tree,
+)
 
 
 @dataclass(slots=True)
@@ -358,7 +363,7 @@ class HostTaskRunner:
         next_monitor_at = start_time + self._monitor_interval
 
         while process.is_alive():
-            if cancel_requested is not None and _cancel_requested(cancel_requested):
+            if safe_cancel(cancel_requested):
                 self._stop_process(process)
                 if monitor:
                     last_metrics = monitor.last_metrics()
@@ -436,7 +441,7 @@ class HostTaskRunner:
 
         process.join()
 
-        if cancel_requested is not None and _cancel_requested(cancel_requested):
+        if safe_cancel(cancel_requested):
             if monitor:
                 last_metrics = monitor.last_metrics()
                 monitor.stop()
@@ -734,7 +739,7 @@ class HostTaskRunner:
         )
         try:
             session.wait_ready(timeout=ready_timeout)
-        except Exception:
+        except Exception:  # pragma: no cover - session startup cleanup
             session.close()
             raise
         return session
@@ -836,10 +841,3 @@ _HOST_PLUGIN = HostRunnerPlugin()
 
 def get_runner_plugin() -> RunnerPlugin:
     return _HOST_PLUGIN
-
-
-def _cancel_requested(callback: Callable[[], bool]) -> bool:
-    try:
-        return bool(callback())
-    except Exception:  # pragma: no cover - defensive
-        return False

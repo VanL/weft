@@ -8,6 +8,7 @@ Spec references:
 from __future__ import annotations
 
 import base64
+import binascii
 import json
 import sys
 from dataclasses import dataclass
@@ -63,7 +64,11 @@ def handle_ctrl_stream(raw: str) -> None:
         try:
             chunk = base64.b64decode(data)
             text = chunk.decode("utf-8", errors="replace")
-        except Exception:
+        except (
+            binascii.Error,
+            ValueError,
+            UnicodeDecodeError,
+        ):  # pragma: no cover - malformed base64 envelope
             text = ""
     else:
         text = str(data)
@@ -95,7 +100,11 @@ def process_outbox_message(
             try:
                 chunk = base64.b64decode(data)
                 text = chunk.decode("utf-8", errors="replace")
-            except Exception:
+            except (
+                binascii.Error,
+                ValueError,
+                UnicodeDecodeError,
+            ):  # pragma: no cover - malformed base64 envelope
                 text = ""
         else:
             text = str(data)
@@ -191,7 +200,11 @@ def collect_interactive_queue_output(outbox_queue: Queue) -> list[str]:
                 try:
                     chunk_bytes = base64.b64decode(data)
                     collected.append(chunk_bytes.decode("utf-8", errors="replace"))
-                except Exception:
+                except (
+                    binascii.Error,
+                    ValueError,
+                    UnicodeDecodeError,
+                ):  # pragma: no cover - malformed base64 envelope
                     collected.append(str(data))
             else:
                 collected.append(str(data))

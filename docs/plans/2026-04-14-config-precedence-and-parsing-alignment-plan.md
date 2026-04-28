@@ -1,6 +1,6 @@
 # Config Precedence and Parsing Alignment Plan
 
-Status: proposed
+Status: completed
 Source specs: see Source Documents below
 Superseded by: none
 

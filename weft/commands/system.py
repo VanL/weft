@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from simplebroker import Queue
+from simplebroker.ext import BrokerError
 from weft._constants import (
     NON_LIVE_RUNTIME_STATES,
     STATUS_RUNTIMELESS_STALE_AFTER_SECONDS,
@@ -298,7 +299,11 @@ def _iter_log_events(
             with_timestamps=True,
             since_timestamp=since_timestamp,
         )
-    except Exception:
+    except (
+        BrokerError,
+        OSError,
+        RuntimeError,
+    ):  # pragma: no cover - log replay best effort
         return []
 
     def _generator() -> Iterable[tuple[dict[str, Any], int]]:

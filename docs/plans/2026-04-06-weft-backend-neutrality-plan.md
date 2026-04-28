@@ -1,6 +1,6 @@
 # Weft Backend Neutrality Plan
 
-Status: proposed
+Status: completed
 Source specs: see Source Documents below
 Superseded by: none
 

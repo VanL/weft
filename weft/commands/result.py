@@ -14,6 +14,7 @@ from fnmatch import fnmatchcase
 from typing import Any, cast
 
 from simplebroker import Queue
+from simplebroker.ext import BrokerError
 from weft._constants import (
     FAILURE_LIKE_TASK_STATUSES,
     QUEUE_CTRL_OUT_SUFFIX,
@@ -101,7 +102,11 @@ def _queue_exists(context: WeftContext, queue_name: str) -> bool:
     with context.broker() as db:
         try:
             queues = list(db.list_queues())
-        except Exception:
+        except (
+            BrokerError,
+            OSError,
+            RuntimeError,
+        ):  # pragma: no cover - queue probe best effort
             return False
     return any(name == queue_name for name, _count in queues)
 
@@ -116,7 +121,11 @@ def _queue_names_exist(context: WeftContext, *queue_names: str) -> bool:
     with context.broker() as db:
         try:
             queues = list(db.list_queues())
-        except Exception:
+        except (
+            BrokerError,
+            OSError,
+            RuntimeError,
+        ):  # pragma: no cover - queue probe best effort
             return False
     return any(name in wanted for name, _count in queues)
 
@@ -344,7 +353,7 @@ def _collect_all_results(
     with context.broker() as db:
         try:
             queue_stats = db.get_queue_stats()
-        except Exception as exc:
+        except Exception as exc:  # pragma: no cover - command error boundary
             return 1, f"weft: failed to enumerate queues: {exc}"
 
     outbox_names = [
@@ -704,7 +713,7 @@ def cmd_result(
 ) -> tuple[int, str | None]:
     try:
         context = build_context(spec_context=context_path)
-    except Exception as exc:
+    except Exception as exc:  # pragma: no cover - command error boundary
         return 1, f"weft: failed to resolve context: {exc}"
 
     if all_results:

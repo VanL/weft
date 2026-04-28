@@ -16,6 +16,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from simplebroker import Queue
+from simplebroker.ext import BrokerError
 from weft._constants import (
     CONTROL_KILL,
     CONTROL_STOP,
@@ -171,7 +172,11 @@ class InteractiveTaskMixin(ABC):
         if self.should_stop or self.taskspec.state.status in TERMINAL_TASK_STATUSES:
             try:
                 self._get_reserved_queue().delete(message_id=timestamp)
-            except Exception:
+            except (
+                BrokerError,
+                OSError,
+                RuntimeError,
+            ):  # pragma: no cover - broker ack best effort
                 logger.debug(
                     "Failed to drop stale interactive message %s",
                     timestamp,
@@ -199,7 +204,11 @@ class InteractiveTaskMixin(ABC):
 
         try:
             self._get_reserved_queue().delete(message_id=timestamp)
-        except Exception:
+        except (
+            BrokerError,
+            OSError,
+            RuntimeError,
+        ):  # pragma: no cover - broker ack best effort
             logger.debug(
                 "Failed to acknowledge interactive message %s", timestamp, exc_info=True
             )
@@ -442,7 +451,7 @@ class InteractiveTaskMixin(ABC):
         self._end_streaming_session()
         try:
             session.close()
-        except Exception:
+        except Exception:  # pragma: no cover - session teardown best effort
             logger.debug("Failed to close interactive session resources", exc_info=True)
 
     def _interactive_shutdown(self, *, reason: str | None = None) -> None:
@@ -452,7 +461,7 @@ class InteractiveTaskMixin(ABC):
         session = session_obj
         try:
             session.close_stdin()
-        except Exception:
+        except Exception:  # pragma: no cover - session teardown best effort
             logger.debug("Failed to close interactive stdin", exc_info=True)
         deadline = time.monotonic() + INTERACTIVE_STOP_GRACE_SECONDS
         while session.is_alive() and time.monotonic() < deadline:

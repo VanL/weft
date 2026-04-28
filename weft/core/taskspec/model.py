@@ -1958,6 +1958,3 @@ def validate_taskspec(json_str: str) -> tuple[bool, dict[str, Any]]:
             field_path = ".".join(str(x) for x in error["loc"]) if error["loc"] else ""
             errors[field_path] = error["msg"]
         return False, errors
-    except Exception as e:
-        # Handle other unexpected errors
-        return False, {"_json": str(e)}

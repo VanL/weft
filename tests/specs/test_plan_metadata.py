@@ -10,7 +10,9 @@ import pytest
 PLANS_DIR = Path(__file__).resolve().parents[2] / "docs" / "plans"
 README_PATH = PLANS_DIR / "README.md"
 ALLOWED_STATUSES = frozenset(
-    {"active", "proposed", "completed", "roadmap", "audit-log", "findings"}
+    {
+        "completed",
+    }
 )
 
 pytestmark = [pytest.mark.shared]

@@ -34,7 +34,7 @@ from weft.core.tasks.agent_session_protocol import (
     startup_error_message,
 )
 from weft.ext import RunnerHandle
-from weft.helpers import terminate_process_tree
+from weft.helpers import safe_cancel, terminate_process_tree
 
 
 class CommandSession:
@@ -247,7 +247,7 @@ class AgentSession:
         start_time = time.monotonic()
 
         while self.is_alive():
-            if cancel_requested is not None and _cancel_requested(cancel_requested):
+            if safe_cancel(cancel_requested):
                 self.terminate()
                 self.stop_monitor()
                 return SessionExecutionResult(
@@ -452,10 +452,3 @@ class InProcessCommandSession:
 
 
 __all__ = ["AgentSession", "InProcessCommandSession", "SessionExecutionResult"]
-
-
-def _cancel_requested(callback: Callable[[], bool]) -> bool:
-    try:
-        return bool(callback())
-    except Exception:  # pragma: no cover - defensive
-        return False

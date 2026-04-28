@@ -41,6 +41,19 @@ Current classification rule:
 - any remaining unaudited debt should stay module-scoped, explicit, and
   reviewable rather than becoming the default home for new tests
 
+Coverage policy:
+
+- patch coverage is the active regression gate for new work and should stay
+  materially higher than the legacy project baseline
+- project coverage remains at the historical floor until defensive exception
+  arms, generated paths, and backend-specific slow paths are classified well
+  enough for the number to be meaningful
+- after one release cycle with clean pragma/narrowing hygiene, raise project
+  coverage to the observed baseline minus a small stability buffer
+- broad defensive catches must either be tested, narrowed, or explicitly
+  marked `# pragma: no cover - <reason>` so coverage does not confuse
+  intentional process-boundary code with missing tests
+
 ## Current Coverage [TS-1]
 
 - `tests/cli/` covers subprocess CLI behavior and operator-visible output.

@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 from typing import Any, TextIO
 
+from simplebroker.ext import BrokerError
 from weft._constants import WEFT_STATE_QUEUE_PREFIX
 from weft.context import build_context
 
@@ -24,7 +25,11 @@ def _export_metadata(output: TextIO, db: Any) -> None:
         # Create single record with all meta data
         record = {"type": "meta", **meta_dict}
         output.write(json.dumps(record, ensure_ascii=False) + "\n")
-    except Exception:
+    except (
+        BrokerError,
+        OSError,
+        RuntimeError,
+    ):  # pragma: no cover - metadata probe best effort
         return
 
 
@@ -32,7 +37,11 @@ def _export_aliases(output: TextIO, db: Any) -> int:
     """Export all aliases from the database."""
     try:
         aliases = list(db.list_aliases())
-    except Exception:
+    except (
+        BrokerError,
+        OSError,
+        RuntimeError,
+    ):  # pragma: no cover - alias probe best effort
         # If aliases table doesn't exist or other error, return 0
         return 0
 
@@ -47,7 +56,11 @@ def _export_messages(output: TextIO, db: Any) -> tuple[int, int]:
     """Export all messages from all queues. Returns (queue_count, message_count)."""
     try:
         queues = list(db.list_queues())
-    except Exception:
+    except (
+        BrokerError,
+        OSError,
+        RuntimeError,
+    ):  # pragma: no cover - queue probe best effort
         return 0, 0
 
     total_messages = 0
@@ -71,7 +84,11 @@ def _export_messages(output: TextIO, db: Any) -> tuple[int, int]:
                     with_timestamps=True,
                 )
             )
-        except Exception:
+        except (
+            BrokerError,
+            OSError,
+            RuntimeError,
+        ):  # pragma: no cover - queue export best effort
             # Skip queues we can't read
             continue
 
@@ -105,7 +122,7 @@ def cmd_dump(
     """
     try:
         context = build_context(spec_context=context_path)
-    except Exception as exc:
+    except Exception as exc:  # pragma: no cover - command error boundary
         return 1, f"weft dump: failed to resolve context: {exc}"
 
     # Determine output path
@@ -119,7 +136,7 @@ def cmd_dump(
     # Ensure output directory exists
     try:
         output_path.parent.mkdir(parents=True, exist_ok=True)
-    except Exception as exc:
+    except OSError as exc:
         return 1, f"weft dump: failed to create output directory: {exc}"
 
     alias_count = 0
@@ -135,7 +152,7 @@ def cmd_dump(
                 alias_count = _export_aliases(f, db)
                 exported_queues, exported_messages = _export_messages(f, db)
 
-    except Exception as exc:
+    except Exception as exc:  # pragma: no cover - command error boundary
         return 1, f"weft dump: export failed: {exc}"
 
     # Success message

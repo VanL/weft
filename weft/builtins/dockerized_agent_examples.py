@@ -143,7 +143,7 @@ def _resolve_claude_code_example_auth_env(
     )
     try:
         token = reader().strip()
-    except Exception as exc:
+    except Exception as exc:  # pragma: no cover - keychain reader boundary
         raise ValueError(
             "dockerized-agent could not acquire Claude Code "
             "runtime auth from macOS Keychain. Set CLAUDE_CODE_OAUTH_TOKEN, "

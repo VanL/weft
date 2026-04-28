@@ -3,13 +3,14 @@
 This directory is the authoritative Weft spec set.
 
 Specs in `docs/specifications/` are normative. Plans in `docs/plans/` are not.
-Plans may reflect active work, partial implementation, superseded approaches,
-or pure roadmap material. Keep the specs up to date when reality changes.
+The curated plan corpus keeps completed implementation records for shipped
+behavior and current repo tooling. Keep the specs up to date when reality
+changes.
 
 The plan corpus is indexed in [`docs/plans/README.md`](../plans/README.md).
-That index is the current navigation layer for plan status, supersession, and
-active implementation slices. It does not change the rule above: specs remain
-authoritative for behavior.
+That index is the current navigation layer for retained implementation
+history. It does not change the rule above: specs remain authoritative for
+behavior.
 
 Do not infer status from filename alone. The document intro and section text
 decide whether a file is current contract, supporting reference, planned,
@@ -170,5 +171,3 @@ Weft is "SimpleBroker for processes":
 - history belongs in supporting docs or plans, not in behavior contracts
 
 ## Related Plans
-
-- [`docs/plans/2026-04-15-docs-audit-and-alignment-plan.md`](../plans/2026-04-15-docs-audit-and-alignment-plan.md)

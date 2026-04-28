@@ -6,6 +6,7 @@ import json
 
 import pytest
 
+from weft.core import taskspec as taskspec_pkg
 from weft.core.taskspec import (
     AgentSection,
     IOSection,
@@ -68,6 +69,22 @@ class TestValidation:
     def test_invalid_tid_format(self) -> None:
         with pytest.raises(ValueError):
             fixtures.create_minimal_taskspec(tid="not-a-timestamp")
+
+    def test_validate_taskspec_does_not_swallow_programmer_errors(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def _raise_programmer_error(*args: object, **kwargs: object) -> None:
+            raise RuntimeError("programmer error")
+
+        monkeypatch.setattr(
+            taskspec_pkg.TaskSpec,
+            "model_validate_json",
+            _raise_programmer_error,
+        )
+
+        with pytest.raises(RuntimeError, match="programmer error"):
+            validate_taskspec("{}")
 
     def test_missing_required_queue(self) -> None:
         with pytest.raises(ValueError):

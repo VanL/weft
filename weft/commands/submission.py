@@ -217,7 +217,7 @@ def ensure_manager_after_submission(
 
     try:
         return ensure_manager_impl(context, verbose=verbose)
-    except Exception as exc:
+    except Exception as exc:  # pragma: no cover - manager startup reconciliation
         startup_error = exc
 
     reconciliation = reconcile_submitted_spawn(context, submitted_tid_str)

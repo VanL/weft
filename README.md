@@ -16,19 +16,24 @@ $ weft status
 # shows current task, manager, and broker status
 ```
 
-Weft is a durable task runner for commands, functions, pipelines, and agents.
-The unifying idea is simple: everything is a Task. If work matters, Weft
-should be able to submit it durably, run it in a chosen runtime, observe it,
-control it, and compose it with other work.
+## What Weft Is (And Is Not)
+
+Weft is for durable, observable, isolated process execution with easy
+inter-process messaging. It uses processes as a natural concurrency primitive
+for commands, functions, pipelines, and agents. The unifying idea is simple:
+everything is a Task. If work matters, Weft should be able to submit it
+durably, run it in a chosen runtime, observe it, control it, and compose it
+with other work.
 
 Agent support is part of that core model, not a separate product layered on
 top. A dangerous agent running in a restricted container is still just a task
 with a different target and runner.
 
-Weft is the substrate for higher-level intelligence and orchestration, not the
-agent-management layer itself. It may know enough about important runtimes to
-make common execution paths work and to fail clearly, but it does not aim to
-own provider setup, login management, or hidden execution-time magic.
+Weft is explicitly a substrate for higher-level systems. It may know enough
+about important runtimes to make common execution paths work and to fail
+clearly, but policy and domain-specific knowledge belong above Weft. Weft may 
+grow richer pipeline shapes, but the boundary stays durable, observable, 
+isolated process execution and task-shaped composition.
 
 ## Installation
 
@@ -171,9 +176,12 @@ system = client.system.status()
 
 ## Builtin Task Helpers
 
-Weft ships a small set of read-only builtin TaskSpecs as explicit helpers.
-They are not a second command system and they do not change bare command
-execution.
+Weft ships a small set of packaged builtin TaskSpecs as explicit helpers. The
+packaged assets are read-only; individual helpers may still perform explicit,
+documented project mutations. For example, `probe-agents` can fill missing
+provider executable defaults in `.weft/agents.json` while preserving existing
+explicit settings. Builtins are not a second command system and they do not
+change bare command execution.
 
 Builtins are bundled examples of using Weft as a task runner. A builtin is an
 example task or pipeline that is useful enough that Weft ships it directly. In
@@ -272,8 +280,8 @@ near-duplicate fixed-provider builtins. The main caveats are:
   `spec.agent.model="openai/gpt-5"` when `--provider opencode` is selected
   without an explicit `--model`
 - the builtin defaults to `authority_class="general"` so it stays
-  representative; if you want a narrower read-only provider mode, copy it and set
-  `authority_class="bounded"` explicitly where the provider supports it
+  representative; if you want a narrower read-only provider mode, copy it and
+  set `authority_class="bounded"` explicitly where the provider supports it
 - when `claude_code` is selected, Weft first
   preserves explicit portable auth such as `CLAUDE_CODE_OAUTH_TOKEN`,
   `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, or a Linux
@@ -498,6 +506,26 @@ Persistent manager processes that:
 - Auto-terminate after idle timeout (default 600 seconds)
 - Launch autostart tasks on boot
 
+### Autostart Tasks
+
+Manifest files in `.weft/autostart/*.json` are launched when the manager
+starts. Autostart targets must reference stored task specs or pipelines; they
+do not embed inline TaskSpecs.
+
+```json
+{
+  "name": "queue-monitor",
+  "target": { "type": "task", "name": "queue-monitor" },
+  "policy": { "mode": "ensure" }
+}
+```
+
+Control autostart behavior with:
+
+- `weft init --no-autostart`
+- `weft run --no-autostart`
+- `WEFT_AUTOSTART_TASKS=false`
+
 ### Process Titles
 
 Tasks update their process title for observability:
@@ -668,150 +696,13 @@ weft queue alias remove ALIAS
 weft queue alias list [--target QUEUE]
 ```
 
-## Testing
-
-Weft now classifies backend coverage explicitly:
-
-- `shared`: backend-agnostic tests intended to pass on both SQLite and Postgres
-- `sqlite_only`: tests that intentionally validate SQLite or file-backed behavior
-
-For local development, do not assume `pytest`, `mypy`, or `ruff` are installed
-globally. This repo expects you to install the development extras once with
-`uv sync --all-extras` and then run checks through `uv run ...` so they use the
-project's pinned toolchain.
-
-The default local suite remains SQLite-first. To run the audited shared suite
-against Postgres, use [`bin/pytest-pg`](./bin/pytest-pg), which provisions a
-temporary Docker Postgres instance and installs `simplebroker-pg[dev]` into the
-test environment alongside the published `simplebroker` dependency declared by
-Weft.
-
-### Autostart Tasks
-
-Manifest files in `.weft/autostart/*.json` are automatically launched when the manager starts. Autostart targets must reference stored task specs or pipelines (no inline TaskSpecs).
-
-```bash
-# Save a task spec
-$ cat > .weft/tasks/queue-monitor.json <<EOF
-{
-  "name": "queue-monitor",
-  "spec": {
-    "type": "function",
-    "function_target": "monitoring.watch_queues",
-    "timeout": null
-  }
-}
-EOF
-
-# Create autostart manifest
-$ cat > .weft/autostart/monitor.json <<EOF
-{
-  "name": "queue-monitor",
-  "target": { "type": "task", "name": "queue-monitor" },
-  "policy": { "mode": "ensure" }
-}
-EOF
-
-# Next manager start will launch it automatically
-$ weft run echo "trigger manager"
-```
-
-Control autostart behavior:
-- `weft init --no-autostart` - Skip autostart directory creation
-- `weft run --no-autostart` - Skip launching autostart tasks
-- `WEFT_AUTOSTART_TASKS=false` - Disable via environment
-
-## TaskSpec Format
-
-Tasks are configured with JSON specifications:
-
-```json
-{
-  "name": "process-data",
-  "spec": {
-    "type": "command",
-    "process_target": "python",
-    "args": ["process.py"],
-    "timeout": 300,
-    "limits": {
-      "memory_mb": 512,
-      "cpu_percent": 75,
-      "max_fds": 100
-    },
-    "env": {"LOG_LEVEL": "debug"},
-    "stream_output": true,
-    "cleanup_on_exit": true
-  }
-}
-```
-
-**Spec fields:**
-- `type`: `"command"`, `"function"`, or `"agent"`
-- `process_target`: Command executable (for commands)
-- `function_target`: Module:function string (for functions)
-- `agent`: Static agent runtime config (for agent tasks)
-- `args`: Additional argv items (appended for commands, *args for functions)
-- `keyword_args`: Keyword args for function targets
-- `timeout`: Seconds (null for no timeout)
-- `limits`: Resource constraints
-- `env`: Environment variables
-- `stream_output`: Enable output streaming
-- `cleanup_on_exit`: Delete empty queues on completion (outbox retained until consumed)
-- `weft_context`: Runtime-expanded project context (set by Manager)
-
-**Runtime expansion:**
-- TaskSpec templates omit `tid`, `io`, `state`, and `spec.weft_context`.
-- The Manager expands these at spawn time. The spawn-request message ID becomes the task TID.
-
-## State Tracking
-
-All state changes are logged to `weft.log.tasks`:
-
-```json
-{
-  "event": "work_completed",
-  "tid": "1837025672140161024",
-  "tid_short": "0161024",
-  "status": "completed",
-  "timestamp": 1705329000123456789,
-  "taskspec": {...},
-  "task_pid": 12345,
-  "return_code": 0
-}
-```
-
-Events include:
-- `task_initialized` - Task startup
-- `work_started` - Processing begins
-- `work_completed` - Success
-- `work_failed` - Execution error
-- `work_timeout` - Timeout exceeded
-- `work_limit_violation` - Resource limit hit
-- `control_*` - Control message handling
-
-
-## Resource Monitoring
-
-Tasks track resource usage with psutil:
-
-```python
-# Resource limits in TaskSpec
-"limits": {
-  "memory_mb": 512,        # Max memory
-  "cpu_percent": 75,       # Max CPU (0-100)
-  "max_fds": 100,          # Max file descriptors
-  "max_connections": 50    # Max network connections
-}
-```
-
-Violations trigger `work_limit_violation` events and task termination.
-
 ## Exit Codes
 
 ```bash
 0   - Success
 1   - General error
 2   - Not found (task, queue, spec)
+3   - Import conflict, such as `weft system load` alias conflicts
 124 - Timeout
 ```
 
@@ -834,15 +725,13 @@ $ weft result <tid>
 ### Pipeline Processing
 
 ```bash
-# Task chain via queues
-$ weft run --spec extract.json    # Writes to "raw.data"
-$ weft run --spec transform.json  # Reads "raw.data", writes "clean.data"
-$ weft run --spec load.json       # Reads "clean.data"
+# Run a stored pipeline and wait for its final output
+$ weft run --pipeline etl-job --input '{"batch": 7}'
 
-# Or use queue operations directly
-$ weft queue write input.queue "data.csv"
-$ weft run --spec processor.json
-$ weft queue read output.queue
+# Submit a pipeline and collect the result later
+$ weft run --pipeline etl-job --no-wait
+$ weft task status <pipeline-tid>
+$ weft result <pipeline-tid>
 ```
 
 ### Persistent Watchers
@@ -887,40 +776,22 @@ $ weft run --memory 100 --cpu 25 ./memory-intensive.py
 $ weft run --timeout 60 --memory 500 ./task.sh
 ```
 
-## Architecture
+## Testing
 
-### Components
+Weft classifies backend coverage explicitly:
 
-- **TaskSpec**: Validated task configuration with partial immutability
-- **Manager**: Persistent manager process for task spawning
-- **Consumer**: Task executor with reservation pattern
-- **BaseTask**: Abstract base providing queue wiring and state tracking
-- **TaskRunner**: Multiprocess execution wrapper with timeout/monitoring
-- **ResourceMonitor**: psutil-based resource tracking and limit enforcement
+- `shared`: backend-agnostic tests intended to pass on both SQLite and Postgres
+- `sqlite_only`: tests that intentionally validate SQLite or file-backed behavior
 
-### Task Lifecycle
+For local development, do not assume `pytest`, `mypy`, or `ruff` are installed
+globally. This repo expects you to install the development extras once with
+`uv sync --all-extras` and then run checks through the repo-managed toolchain.
 
-```
-1. CLI: weft run COMMAND
-2. Manager auto-started if needed
-3. TaskSpec template created and validated
-4. Spawn request written to weft.spawn.requests (message ID becomes TID)
-5. Manager expands TaskSpec and spawns Consumer process
-6. Consumer reserves work from inbox
-7. TaskRunner executes in child process
-8. Output written to outbox
-9. State logged to weft.log.tasks
-10. CLI retrieves result
-```
-
-### Multiprocess Isolation
-
-Tasks execute in separate processes using `multiprocessing.spawn`:
-- Clean process environment
-- No inherited state from parent
-- Resource monitoring per process
-- Crash isolation
-- Timeout enforcement
+The default local suite remains SQLite-first. To run the audited shared suite
+against Postgres, use [`bin/pytest-pg`](./bin/pytest-pg), which provisions a
+temporary Docker Postgres instance and installs `simplebroker-pg[dev]` into the
+test environment alongside the published `simplebroker` dependency declared by
+Weft.
 
 ## Development
 

@@ -20,7 +20,7 @@ import shutil
 import sys
 import tempfile
 import time
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, cast
@@ -29,6 +29,7 @@ import psutil
 
 from simplebroker import Queue
 from simplebroker import commands as sb_commands
+from simplebroker.ext import BrokerError
 from weft._constants import WEFT_SPAWN_REQUESTS_QUEUE, load_config
 
 # Load configuration once at module level for efficiency
@@ -60,6 +61,16 @@ def stdin_is_tty(stream: Any | None = None) -> bool:
     try:
         return bool(candidate.isatty())
     except Exception:  # pragma: no cover - defensive for mocked stdin
+        return False
+
+
+def safe_cancel(callback: Callable[[], bool] | None) -> bool:
+    """Return True when an optional external cancel callback requests stop."""
+    if callback is None:
+        return False
+    try:
+        return bool(callback())
+    except Exception:  # pragma: no cover - external cancel hook is best effort
         return False
 
 
@@ -192,7 +203,11 @@ def iter_queue_entries(
             with_timestamps=True,
             since_timestamp=since_timestamp,
         )
-    except Exception:
+    except (
+        BrokerError,
+        OSError,
+        RuntimeError,
+    ):  # pragma: no cover - queue history best effort
         logger.debug("Failed to open queue generator for %s", queue, exc_info=True)
         return iter(())
 
@@ -700,7 +715,7 @@ def write_file_atomically(
                 f"Atomically wrote {'binary' if is_binary else 'text'} to {target_path}"
             )
 
-        except Exception:
+        except Exception:  # pragma: no cover - atomic cleanup before re-raise
             # Clean up temp file on error
             try:
                 os.unlink(temp_path)
@@ -708,7 +723,7 @@ def write_file_atomically(
                 pass  # Best effort cleanup
             raise
 
-    except Exception as e:
+    except Exception as e:  # pragma: no cover - atomic write fallback
         # Fallback to simple write if atomic approach fails
         # This maintains compatibility but loses race condition protection
         log_warning(

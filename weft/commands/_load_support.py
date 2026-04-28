@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TextIO
 
+from simplebroker.ext import BrokerError
 from weft._constants import (
     SQLITE_SNAPSHOT_SUFFIXES,
     SUPPORTED_IMPORT_SCHEMA_VERSIONS,
@@ -286,17 +287,29 @@ def _enrich_import_plan(plan: ImportPlan, context: WeftContext) -> None:
     with context.broker() as broker:
         try:
             existing_aliases = dict(broker.list_aliases())
-        except Exception:
+        except (
+            BrokerError,
+            OSError,
+            RuntimeError,
+        ):  # pragma: no cover - broker probe best effort
             existing_aliases = {}
 
         try:
             existing_queues = {name for name, _count in broker.list_queues()}
-        except Exception:
+        except (
+            BrokerError,
+            OSError,
+            RuntimeError,
+        ):  # pragma: no cover - broker probe best effort
             existing_queues = set()
 
         try:
             destination_meta = broker.get_meta()
-        except Exception:
+        except (
+            BrokerError,
+            OSError,
+            RuntimeError,
+        ):  # pragma: no cover - broker probe best effort
             destination_meta = {}
 
     source_schema = plan.report.metadata.get("schema_version")
@@ -351,13 +364,13 @@ def _execute_import(plan: ImportPlan, context: WeftContext) -> ImportReport:
             writes_started = True
             queue.write(message_record.body)
 
-    except Exception as exc:
+    except Exception as exc:  # pragma: no cover - rollback must run on any failure
         _close_import_queues(queue_cache)
 
         if snapshot is not None:
             try:
                 snapshot.restore()
-            except Exception as restore_exc:
+            except Exception as restore_exc:  # pragma: no cover - rollback failure
                 raise ImportError(
                     f"import failed and file-backed rollback failed: {exc}; restore failed: {restore_exc}"
                 ) from exc
@@ -460,7 +473,7 @@ def cmd_load(
 
     try:
         context = build_context(spec_context=context_path)
-    except Exception as exc:
+    except Exception as exc:  # pragma: no cover - command error boundary
         return 1, f"weft load: failed to resolve context: {exc}"
 
     if input_file is None:
@@ -476,7 +489,7 @@ def cmd_load(
     try:
         with open(input_path, encoding="utf-8") as handle:
             plan = _build_import_plan(handle, context)
-    except Exception as exc:
+    except Exception as exc:  # pragma: no cover - command error boundary
         return 1, f"weft load: import failed: {exc}"
 
     if plan.report.alias_conflicts:
@@ -489,7 +502,7 @@ def cmd_load(
         report = _execute_import(plan, context)
     except ImportError as exc:
         return 1, f"weft load: {exc}"
-    except Exception as exc:
+    except Exception as exc:  # pragma: no cover - command error boundary
         return 1, f"weft load: import failed: {exc}"
 
     return 0, report.format_completion()

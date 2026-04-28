@@ -1,6 +1,6 @@
 # Persistent Agent Runtime Implementation Plan
 
-Status: proposed
+Status: completed
 Source specs: see Source Documents below
 Superseded by: none
 
@@ -9,9 +9,8 @@ correcting the TaskSpec shape, supporting explicit `llm` arguments cleanly, and
 adding **persistent agent tasks with continuation** without duplicating
 lifecycle semantics inside `spec.agent`.
 
-This plan supersedes the previous prototype-oriented plan in
-[`docs/plans/2026-04-06-agent-runtime-implementation-plan.md`](./2026-04-06-agent-runtime-implementation-plan.md)
-for all work related to persistent agents.
+This plan superseded an earlier prototype-oriented agent-runtime plan that is
+no longer retained in the curated plan corpus.
 
 It is written for an engineer who is strong in Python but has **almost no
 context** for Weft, SimpleBroker, or the project’s architectural opinions.

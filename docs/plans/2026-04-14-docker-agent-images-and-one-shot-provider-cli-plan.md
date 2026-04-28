@@ -1,6 +1,6 @@
 # Docker Agent Images and One-Shot Provider CLI Plan
 
-Status: proposed
+Status: completed
 Source specs: see Source Documents below
 Superseded by: none
 

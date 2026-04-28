@@ -16,7 +16,7 @@ coverage:
     patch:
       default:
         # Target coverage for changed lines
-        target: 60%
+        target: 75%
         # Allow patch coverage to drop by up to 5% and still pass
         threshold: 5%
         base: auto

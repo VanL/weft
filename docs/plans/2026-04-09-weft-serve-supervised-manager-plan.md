@@ -1,6 +1,6 @@
 # `weft manager serve` Supervised Manager Plan
 
-Status: proposed
+Status: completed
 Source specs: see Source Documents below
 Superseded by: none
 

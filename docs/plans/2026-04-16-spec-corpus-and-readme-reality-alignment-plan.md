@@ -34,9 +34,6 @@ Local guidance:
 - `docs/agent-context/engineering-principles.md`
 - `docs/agent-context/runbooks/writing-plans.md`
 
-Related plans:
-- `docs/plans/2026-04-15-docs-audit-and-alignment-plan.md`
-
 ## 3. Context And Key Files
 
 Files to modify:
