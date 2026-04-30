@@ -316,7 +316,13 @@ def test_start_token_cleared_on_failure(broker_env, unique_tid: str) -> None:
     assert task.taskspec.state.status == "failed"
     assert reserved.peek_one() is None
     assert outbox.peek_one() is None
-    assert ctrl_out.peek_one() is None
+    terminal_raw = ctrl_out.peek_one()
+    assert terminal_raw is not None
+    terminal = json.loads(terminal_raw)
+    assert terminal["type"] == "terminal"
+    assert terminal["source"] == "task"
+    assert terminal["tid"] == unique_tid
+    assert terminal["status"] == "failed"
 
 
 def test_task_handles_stop_control_message(broker_env, unique_tid: str) -> None:
