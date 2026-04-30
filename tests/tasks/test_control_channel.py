@@ -40,7 +40,7 @@ def test_pause_resume_control_flow(broker_env, unique_tid):
 
     responses = [json.loads(msg) for msg in _read_all(ctrl_out)]
     all_responses = list(responses)
-    assert any(r["command"] == "PAUSE" and r["status"] == "ack" for r in responses)
+    assert any(r.get("command") == "PAUSE" and r["status"] == "ack" for r in responses)
 
     inbox.write(json.dumps({"payload": "work"}))
     task.process_once()
@@ -62,7 +62,7 @@ def test_pause_resume_control_flow(broker_env, unique_tid):
     all_responses.extend(json.loads(msg) for msg in _read_all(ctrl_out))
 
     assert any(
-        r["command"] == "RESUME" and r["status"] == "ack" for r in all_responses
+        r.get("command") == "RESUME" and r["status"] == "ack" for r in all_responses
     ), all_responses
     assert outbox.read_one() == "work"
 
@@ -79,7 +79,7 @@ def test_status_command_reports_state(broker_env, unique_tid):
     task.process_once()
 
     responses = [json.loads(msg) for msg in _read_all(ctrl_out)]
-    status_response = next(r for r in responses if r["command"] == "STATUS")
+    status_response = next(r for r in responses if r.get("command") == "STATUS")
     assert status_response["status"] == "ok"
     assert status_response["paused"] is False
     assert status_response["task_status"] == task.taskspec.state.status
@@ -100,7 +100,7 @@ def test_stop_command_sends_ack(broker_env, unique_tid):
     task.process_once()
 
     responses = [json.loads(msg) for msg in _read_all(ctrl_out)]
-    stop_response = next(r for r in responses if r["command"] == "STOP")
+    stop_response = next(r for r in responses if r.get("command") == "STOP")
     assert stop_response["status"] == "ack"
     assert task.should_stop is True
 
@@ -124,7 +124,7 @@ def test_late_stop_after_terminal_state_acks_without_state_regression(
     task.process_once()
 
     responses = [json.loads(msg) for msg in _read_all(ctrl_out)]
-    stop_response = next(r for r in responses if r["command"] == "STOP")
+    stop_response = next(r for r in responses if r.get("command") == "STOP")
     assert stop_response["status"] == "ack"
     assert task.taskspec.state.status == "completed"
     assert task.should_stop is True
@@ -160,7 +160,7 @@ def test_ping_control_command_returns_pong(broker_env, unique_tid):
     task.process_once()
 
     responses = [json.loads(msg) for msg in _read_all(ctrl_out)]
-    ping_response = next(r for r in responses if r["command"] == "PING")
+    ping_response = next(r for r in responses if r.get("command") == "PING")
     assert ping_response["status"] == "ok"
     assert ping_response["message"] == "PONG"
 

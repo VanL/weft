@@ -320,8 +320,8 @@ def test_interactive_control_commands_report_live_status(
         _spin(task, iterations=6)
 
         responses = [json.loads(msg) for msg in _drain(ctrl_out)]
-        status_response = next(r for r in responses if r["command"] == "STATUS")
-        ping_response = next(r for r in responses if r["command"] == "PING")
+        status_response = next(r for r in responses if r.get("command") == "STATUS")
+        ping_response = next(r for r in responses if r.get("command") == "PING")
 
         assert status_response["status"] == "ok"
         assert status_response["task_status"] == "running"

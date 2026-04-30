@@ -128,11 +128,12 @@ def test_monitor_stop_command(broker_env) -> None:
 
     assert monitor.should_stop is True
     responses = [json.loads(message) for message in ctrl_out.read_generator()]
-    response = next(item for item in responses if item["command"] == "STOP")
+    control_responses = [item for item in responses if item.get("type") != "terminal"]
+    terminal_responses = [item for item in responses if item.get("type") == "terminal"]
+    response = next(item for item in control_responses if item["command"] == "STOP")
     assert response["command"] == "STOP"
     assert response["status"] == "ack"
-    terminal = next(item for item in responses if item["command"] == "TERMINAL")
-    assert terminal["type"] == "terminal"
+    terminal = next(item for item in terminal_responses if item["tid"] == spec.tid)
     assert terminal["source"] == "task"
     assert terminal["status"] == "cancelled"
 

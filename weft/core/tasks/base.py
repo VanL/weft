@@ -718,7 +718,6 @@ class BaseTask(MultiQueueWatcher, ABC):
             return
         payload = {
             "type": "terminal",
-            "command": "TERMINAL",
             "source": source,
             "tid": self.tid,
             "status": self.taskspec.state.status,

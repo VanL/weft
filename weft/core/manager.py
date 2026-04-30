@@ -945,7 +945,6 @@ class Manager(BaseTask):
         exitcode = child.process.exitcode
         payload: dict[str, Any] = {
             "type": "terminal",
-            "command": "TERMINAL",
             "source": "manager",
             "tid": tid,
             "status": "failed",
