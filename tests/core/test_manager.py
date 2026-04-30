@@ -493,6 +493,66 @@ def test_manager_rejects_unknown_internal_task_class(manager_setup) -> None:
     assert any(event.get("event") == "task_spawn_rejected" for event in events)
 
 
+def test_manager_closes_seeded_child_inbox_queue(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _make_queue = manager_setup
+
+    class FakeSeedQueue:
+        instances: list[FakeSeedQueue] = []
+
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+            self.writes: list[str] = []
+            self.closed = False
+            FakeSeedQueue.instances.append(self)
+
+        def write(self, payload: str) -> None:
+            self.writes.append(payload)
+
+        def close(self) -> None:
+            self.closed = True
+
+    class FakeProcess:
+        pid = None
+        exitcode = 0
+
+        def is_alive(self) -> bool:
+            return False
+
+        def join(self, timeout: float | None = None) -> None:
+            del timeout
+
+    monkeypatch.setattr(manager_mod, "Queue", FakeSeedQueue)
+    monkeypatch.setattr(
+        manager_mod,
+        "launch_task_process",
+        lambda *args, **kwargs: FakeProcess(),
+    )
+
+    child_spec = TaskSpec(
+        tid=str(time.time_ns()),
+        name="seeded-child",
+        spec=SpecSection(
+            type="function",
+            function_target="tests.tasks.sample_targets:echo_payload",
+        ),
+        io=IOSection(
+            inputs={"inbox": "seeded.inbox"},
+            outputs={"outbox": "seeded.outbox"},
+            control={"ctrl_in": "seeded.ctrl_in", "ctrl_out": "seeded.ctrl_out"},
+        ),
+        state=StateSection(),
+        metadata={},
+    )
+
+    assert manager._launch_child_task(child_spec, {"args": ["payload"]}) is True
+    assert len(FakeSeedQueue.instances) == 1
+    assert FakeSeedQueue.instances[0].writes == [json.dumps({"args": ["payload"]})]
+    assert FakeSeedQueue.instances[0].closed is True
+
+
 def test_manager_registry_entries(manager_setup) -> None:
     manager, make_queue = manager_setup
     registry_queue = make_queue(WEFT_MANAGERS_REGISTRY_QUEUE)

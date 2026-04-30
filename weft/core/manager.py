@@ -274,13 +274,14 @@ class Manager(BaseTask):
                 if not isinstance(inbox_message, str)
                 else inbox_message
             )
+            inbox_queue = Queue(
+                inbox_name,
+                db_path=self._db_path,
+                persistent=True,
+                config=self._config,
+            )
             try:
-                Queue(
-                    inbox_name,
-                    db_path=self._db_path,
-                    persistent=True,
-                    config=self._config,
-                ).write(payload)
+                inbox_queue.write(payload)
             except (BrokerError, OSError, RuntimeError):
                 logger.debug(
                     "Failed to seed inbox %s for child %s",
@@ -288,6 +289,16 @@ class Manager(BaseTask):
                     child_spec.tid,
                     exc_info=True,
                 )
+            finally:
+                try:
+                    inbox_queue.close()
+                except (BrokerError, OSError, RuntimeError):
+                    logger.debug(
+                        "Failed to close seeded inbox %s for child %s",
+                        inbox_name,
+                        child_spec.tid,
+                        exc_info=True,
+                    )
 
         child_spec.metadata.setdefault("parent_tid", self.tid)
         if autostart_source:
@@ -1165,15 +1176,21 @@ class Manager(BaseTask):
         )
 
     def _send_stop_command(self, queue_name: str) -> None:
+        queue = Queue(
+            queue_name,
+            db_path=self._db_path,
+            persistent=False,
+            config=self._config,
+        )
         try:
-            Queue(
-                queue_name,
-                db_path=self._db_path,
-                persistent=False,
-                config=self._config,
-            ).write(CONTROL_STOP)
+            queue.write(CONTROL_STOP)
         except (BrokerError, OSError, RuntimeError):
             logger.debug("Failed to send STOP to %s", queue_name, exc_info=True)
+        finally:
+            try:
+                queue.close()
+            except (BrokerError, OSError, RuntimeError):
+                logger.debug("Failed to close STOP queue %s", queue_name, exc_info=True)
 
     def _drain_control_queue_first(self) -> None:
         """Handle pending manager control messages before new spawn work.
