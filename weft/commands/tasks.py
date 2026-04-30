@@ -27,6 +27,8 @@ from weft._constants import (
     QUEUE_CTRL_OUT_SUFFIX,
     QUEUE_OUTBOX_SUFFIX,
     TASKSPEC_TID_SHORT_LENGTH,
+    TASK_TERMINAL_ENVELOPE_SOURCES,
+    TERMINAL_ENVELOPE_TYPE,
     TERMINAL_TASK_STATUSES,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
@@ -46,9 +48,6 @@ from weft.helpers import (
 from . import system as status_cmd
 from ._streaming import aggregate_public_outputs, process_outbox_message
 from ._task_history import load_latest_taskspec_payload, pipeline_status_queue_name
-
-_TERMINAL_ENVELOPE_TYPE = "terminal"
-_TASK_TERMINAL_SOURCES = {"task", "manager"}
 
 
 def _resolve_context(context_path: str | os.PathLike[str] | None) -> WeftContext:
@@ -296,12 +295,12 @@ def _coerce_terminal_envelope(
         return None
     if not isinstance(payload, dict):
         return None
-    if payload.get("type") != _TERMINAL_ENVELOPE_TYPE:
+    if payload.get("type") != TERMINAL_ENVELOPE_TYPE:
         return None
     if payload.get("tid") != tid:
         return None
     source = payload.get("source")
-    if source not in _TASK_TERMINAL_SOURCES:
+    if source not in TASK_TERMINAL_ENVELOPE_SOURCES:
         return None
     status = payload.get("status")
     if not isinstance(status, str) or status not in TERMINAL_TASK_STATUSES:
