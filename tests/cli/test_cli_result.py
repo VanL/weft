@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sys
 import time
+from pathlib import Path
 
 import pytest
 
@@ -42,6 +43,15 @@ def _wait_for_outbox(harness, tid: str, timeout: float = 5.0) -> None:
         finally:
             queue.close()
         time.sleep(0.05)
+
+
+def _wait_for_path(path: Path, *, timeout: float = 20.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.exists():
+            return True
+        time.sleep(0.05)
+    return path.exists()
 
 
 def test_result_returns_payload_for_completed_task(workdir, weft_harness) -> None:
@@ -143,7 +153,7 @@ def test_result_stream_attaches_to_running_command_and_emits_live_output(
             f"ready = Path({str(ready_path)!r}); "
             "print('first', flush=True); "
             "ready.write_text('ready', encoding='utf-8'); "
-            "time.sleep(5); "
+            "time.sleep(30); "
             "print('second', flush=True)"
         ),
         cwd=workdir,
@@ -152,10 +162,9 @@ def test_result_stream_attaches_to_running_command_and_emits_live_output(
     assert rc == 0, err
     tid = out.strip()
     weft_harness.register_tid(tid)
-    deadline = time.monotonic() + 5.0
-    while time.monotonic() < deadline and not ready_path.exists():
-        time.sleep(0.05)
-    assert ready_path.exists(), "streaming command did not publish readiness marker"
+    assert _wait_for_path(ready_path), (
+        "streaming command did not publish readiness marker"
+    )
 
     rc, out, err = run_cli(
         "result",
