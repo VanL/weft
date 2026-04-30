@@ -127,9 +127,14 @@ def test_monitor_stop_command(broker_env) -> None:
     monitor._drain_queue()
 
     assert monitor.should_stop is True
-    response = json.loads(ctrl_out.read_one())
+    responses = [json.loads(message) for message in ctrl_out.read_generator()]
+    response = next(item for item in responses if item["command"] == "STOP")
     assert response["command"] == "STOP"
     assert response["status"] == "ack"
+    terminal = next(item for item in responses if item["command"] == "TERMINAL")
+    assert terminal["type"] == "terminal"
+    assert terminal["source"] == "task"
+    assert terminal["status"] == "cancelled"
 
 
 def test_sampling_observer_interval(broker_env, monkeypatch) -> None:
