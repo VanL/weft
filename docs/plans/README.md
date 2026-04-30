@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 56 tracked plan files in this directory.
+There are currently 58 tracked plan files in this directory.
 
 ## Curation Policy
 
@@ -20,6 +20,8 @@ There are currently 56 tracked plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-04-30-task-log-cursor-high-water-mark-plan.md`](./2026-04-30-task-log-cursor-high-water-mark-plan.md) | Task Log Cursor High-Water Mark Plan | `completed` | none |
+| [`2026-04-30-known-tid-terminal-snapshot-api-plan.md`](./2026-04-30-known-tid-terminal-snapshot-api-plan.md) | Known-TID Terminal Snapshot API Plan | `completed` | none |
 | [`2026-04-27-built-in-run-input-adapters-plan.md`](./2026-04-27-built-in-run-input-adapters-plan.md) | Built-In Run Input Adapters Plan | `completed` | none |
 | [`2026-04-24-runtime-handle-authority-migration-plan.md`](./2026-04-24-runtime-handle-authority-migration-plan.md) | Runtime Handle Authority Migration Plan | `completed` | none |
 | [`2026-04-24-manager-status-container-pid-liveness-plan.md`](./2026-04-24-manager-status-container-pid-liveness-plan.md) | Manager Status Container PID Liveness Plan | `completed` | none |

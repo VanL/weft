@@ -1,6 +1,6 @@
 # Task Log Cursor High-Water Mark Plan
 
-Status: proposed
+Status: completed
 Source specs: see Source Documents below
 Superseded by: none
 
