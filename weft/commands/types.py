@@ -73,6 +73,38 @@ class TaskResult:
 
 
 @dataclass(frozen=True, slots=True)
+class QueueAckTarget:
+    """Exact queue message target safe for post-commit acknowledgement."""
+
+    queue: str
+    message_id: int
+
+
+@dataclass(frozen=True, slots=True)
+class TaskTerminalSnapshot:
+    """Compact known-TID terminal/live observation.
+
+    This is a non-consuming reconciliation surface. Callers that want cleanup
+    must pass `ack_targets` to the explicit acknowledgement helper.
+
+    Spec: docs/specifications/13C-Using_Weft_With_Django.md [DJ-2.2]
+    """
+
+    tid: str
+    status: str
+    source: str
+    value: Any | None = None
+    stdout: str | None = None
+    stderr: str | None = None
+    error: str | None = None
+    return_code: int | None = None
+    terminal: bool = False
+    ack_targets: tuple[QueueAckTarget, ...] = ()
+    observed_at: int | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
 class TaskEvent:
     """Lifecycle or synthetic result event for one task."""
 

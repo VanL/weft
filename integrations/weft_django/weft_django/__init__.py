@@ -11,6 +11,7 @@ from weft_django.client import (
     get_client,
     kill,
     result,
+    snapshot,
     status,
     stop,
     submit_pipeline_reference,
@@ -19,6 +20,7 @@ from weft_django.client import (
     submit_spec_reference_on_commit,
     submit_taskspec,
     submit_taskspec_on_commit,
+    terminal_snapshot,
 )
 from weft_django.decorators import RegisteredWeftTask, weft_task
 
@@ -32,6 +34,7 @@ __all__ = [
     "get_client",
     "kill",
     "result",
+    "snapshot",
     "status",
     "stop",
     "submit_pipeline_reference",
@@ -40,5 +43,6 @@ __all__ = [
     "submit_spec_reference_on_commit",
     "submit_taskspec",
     "submit_taskspec_on_commit",
+    "terminal_snapshot",
     "weft_task",
 ]

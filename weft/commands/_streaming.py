@@ -165,21 +165,25 @@ def poll_log_events(
     last_timestamp: int | None,
     target_tid: str,
 ) -> tuple[list[tuple[dict[str, Any], int]], int | None]:
-    """Return new task-log events for ``target_tid`` since ``last_timestamp``."""
+    """Return target task-log events and the highest scanned log timestamp."""
     events: list[tuple[dict[str, Any], int]] = []
+    max_scanned_timestamp: int | None = None
     for data, timestamp in iter_queue_json_entries(
         log_queue,
         since_timestamp=last_timestamp,
     ):
         if last_timestamp is not None and timestamp <= last_timestamp:
             continue
+        if max_scanned_timestamp is None or timestamp > max_scanned_timestamp:
+            max_scanned_timestamp = timestamp
         if data.get("tid") != target_tid:
             continue
         events.append((data, timestamp))
 
-    if events:
-        last_timestamp = events[-1][1]
-    return events, last_timestamp
+    return (
+        events,
+        max_scanned_timestamp if max_scanned_timestamp is not None else last_timestamp,
+    )
 
 
 def collect_interactive_queue_output(outbox_queue: Queue) -> list[str]:

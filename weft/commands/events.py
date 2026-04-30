@@ -180,11 +180,14 @@ def iter_task_events(
     try:
         while True:
             saw_event = False
+            max_scanned_timestamp: int | None = None
             since_timestamp = None if last_timestamp is None else last_timestamp + 1
             for payload, timestamp in iter_queue_json_entries(
                 log_queue,
                 since_timestamp=since_timestamp,
             ):
+                if max_scanned_timestamp is None or timestamp > max_scanned_timestamp:
+                    max_scanned_timestamp = timestamp
                 if payload.get("tid") != normalized_tid:
                     continue
                 last_timestamp = timestamp
@@ -200,6 +203,8 @@ def iter_task_events(
                 if status in TERMINAL_TASK_STATUSES:
                     terminal_seen = True
 
+            if max_scanned_timestamp is not None:
+                last_timestamp = max_scanned_timestamp
             if terminal_seen or not follow:
                 return
             if _timed_out(deadline):

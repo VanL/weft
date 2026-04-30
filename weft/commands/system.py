@@ -158,6 +158,14 @@ class TaskSnapshot:
         return payload
 
 
+@dataclass(frozen=True, slots=True)
+class CollectedTaskSnapshot:
+    """Internal snapshot plus TaskSpec payload collected in the same replay."""
+
+    snapshot: TaskSnapshot
+    taskspec_payload: dict[str, Any] | None
+
+
 def _resolve_context(
     spec_context: str | os.PathLike[str] | None = None,
 ) -> WeftContext:
@@ -515,12 +523,13 @@ def _describe_runtime_handle(handle: RunnerHandle | None) -> dict[str, Any] | No
     return runtime.to_dict()
 
 
-def _collect_task_snapshots(
+def _collect_task_snapshot_records(
     ctx: WeftContext,
     *,
     include_terminal: bool,
     tid_filters: set[str] | None,
-) -> list[TaskSnapshot]:
+    since_timestamp: int | None = None,
+) -> list[CollectedTaskSnapshot]:
     """Reconstruct current task state from event-sourced log replay.
 
     Spec: [MF-5]
@@ -538,7 +547,10 @@ def _collect_task_snapshots(
         active_manager_tids = set()
     log_queue = _queue(ctx, WEFT_GLOBAL_LOG_QUEUE)
     try:
-        for payload, timestamp in _iter_log_events(log_queue):
+        for payload, timestamp in _iter_log_events(
+            log_queue,
+            since_timestamp=since_timestamp,
+        ):
             tid = payload.get("tid")
             if not isinstance(tid, str):
                 continue
@@ -642,7 +654,7 @@ def _collect_task_snapshots(
     finally:
         log_queue.close()
 
-    snapshots: list[TaskSnapshot] = []
+    records_out: list[CollectedTaskSnapshot] = []
     for tid, record in records.items():
         taskspec = record.get("taskspec")
         if not isinstance(taskspec, dict):
@@ -685,35 +697,91 @@ def _collect_task_snapshots(
             activity = None
             waiting_on = None
 
-        snapshots.append(
-            TaskSnapshot(
-                tid=tid,
-                tid_short=record["tid_short"],
-                name=str(record.get("name") or tid),
-                status=public_status,
-                event=str(record.get("event") or "unknown"),
-                activity=activity if isinstance(activity, str) else None,
-                waiting_on=waiting_on if isinstance(waiting_on, str) else None,
-                started_at=started_at if isinstance(started_at, int) else None,
-                completed_at=completed_at if isinstance(completed_at, int) else None,
-                last_timestamp=int(record.get("last_timestamp") or 0),
-                duration_seconds=duration,
-                runner=runner,
-                runtime_handle=runtime_handle.to_dict()
-                if runtime_handle is not None
-                else None,
-                runtime=runtime_description,
-                metadata=record["metadata"]
-                if isinstance(record.get("metadata"), dict)
-                else {},
-            )
+        snapshot = TaskSnapshot(
+            tid=tid,
+            tid_short=record["tid_short"],
+            name=str(record.get("name") or tid),
+            status=public_status,
+            event=str(record.get("event") or "unknown"),
+            activity=activity if isinstance(activity, str) else None,
+            waiting_on=waiting_on if isinstance(waiting_on, str) else None,
+            started_at=started_at if isinstance(started_at, int) else None,
+            completed_at=completed_at if isinstance(completed_at, int) else None,
+            last_timestamp=int(record.get("last_timestamp") or 0),
+            duration_seconds=duration,
+            runner=runner,
+            runtime_handle=runtime_handle.to_dict()
+            if runtime_handle is not None
+            else None,
+            runtime=runtime_description,
+            metadata=record["metadata"]
+            if isinstance(record.get("metadata"), dict)
+            else {},
+        )
+        records_out.append(
+            CollectedTaskSnapshot(snapshot=snapshot, taskspec_payload=taskspec)
         )
 
-    result = snapshots
+    result = records_out
     if not include_terminal:
-        result = [snap for snap in result if snap.status not in TERMINAL_TASK_STATUSES]
-    result.sort(key=lambda snap: (snap.status not in {"running", "spawning"}, snap.tid))
+        result = [
+            record
+            for record in result
+            if record.snapshot.status not in TERMINAL_TASK_STATUSES
+        ]
+    result.sort(
+        key=lambda record: (
+            record.snapshot.status not in {"running", "spawning"},
+            record.snapshot.tid,
+        )
+    )
     return result
+
+
+def _collect_task_snapshots(
+    ctx: WeftContext,
+    *,
+    include_terminal: bool,
+    tid_filters: set[str] | None,
+) -> list[TaskSnapshot]:
+    """Reconstruct current task state from one event-sourced log replay.
+
+    Spec: [MF-5]
+    """
+
+    return [
+        record.snapshot
+        for record in _collect_task_snapshot_records(
+            ctx,
+            include_terminal=include_terminal,
+            tid_filters=tid_filters,
+        )
+    ]
+
+
+def collect_known_tid_snapshot(
+    ctx: WeftContext,
+    tid: str,
+    *,
+    include_terminal: bool = True,
+) -> TaskSnapshot | None:
+    """Return one full-TID diagnostic snapshot using bounded task-log replay."""
+
+    if not tid.isdigit() or len(tid) != 19:
+        return None
+    records = _collect_task_snapshot_records(
+        ctx,
+        include_terminal=include_terminal,
+        tid_filters={tid, tid[-TASKSPEC_TID_SHORT_LENGTH:]},
+        since_timestamp=int(tid) - 1,
+    )
+    if not records and int(tid) > time.time_ns():
+        records = _collect_task_snapshot_records(
+            ctx,
+            include_terminal=include_terminal,
+            tid_filters={tid, tid[-TASKSPEC_TID_SHORT_LENGTH:]},
+        )
+    return records[0].snapshot if records else None
 
 
 def _format_task_summary(snapshots: Sequence[TaskSnapshot]) -> str:

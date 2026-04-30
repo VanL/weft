@@ -17,6 +17,7 @@ from weft.client import (
     TaskNotFound,
     TaskResult,
     TaskSnapshot,
+    TaskTerminalSnapshot,
     WeftClient,
 )
 from weft_django.conf import (
@@ -41,8 +42,11 @@ class WeftSubmission:
     def snapshot(self) -> TaskSnapshot | None:
         return self.task.snapshot()
 
+    def terminal_snapshot(self, timeout: float = 0.0) -> TaskTerminalSnapshot:
+        return self.task.terminal_snapshot(timeout=timeout)
+
     def status(self) -> str | None:
-        snapshot = self.snapshot()
+        snapshot = self.terminal_snapshot()
         if snapshot is None:
             return None
         return snapshot.status
@@ -113,7 +117,23 @@ class DjangoWeftClient:
     def task(self, tid: str, *, name: str | None = None) -> WeftSubmission:
         return WeftSubmission(self.core_client.task(tid), name=name or tid)
 
-    def status(self, tid: str) -> TaskSnapshot | None:
+    def status(self, tid: str) -> TaskTerminalSnapshot | None:
+        try:
+            return self.core_client.task(tid).terminal_snapshot()
+        except ValueError:
+            return None
+
+    def terminal_snapshot(
+        self,
+        tid: str,
+        timeout: float = 0.0,
+    ) -> TaskTerminalSnapshot | None:
+        try:
+            return self.core_client.task(tid).terminal_snapshot(timeout=timeout)
+        except ValueError:
+            return None
+
+    def snapshot(self, tid: str) -> TaskSnapshot | None:
         return self.core_client.task(tid).snapshot()
 
     def result(self, tid: str, timeout: float | None = None) -> TaskResult:
@@ -605,7 +625,24 @@ def enqueue_on_commit(
     )
 
 
-def status(tid: str) -> TaskSnapshot | None:
+def status(tid: str) -> TaskTerminalSnapshot | None:
+    try:
+        return get_core_client().task(tid).terminal_snapshot()
+    except ValueError:
+        return None
+
+
+def terminal_snapshot(
+    tid: str,
+    timeout: float = 0.0,
+) -> TaskTerminalSnapshot | None:
+    try:
+        return get_core_client().task(tid).terminal_snapshot(timeout=timeout)
+    except ValueError:
+        return None
+
+
+def snapshot(tid: str) -> TaskSnapshot | None:
     try:
         return get_core_client().task(tid).snapshot()
     except ValueError:

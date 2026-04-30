@@ -51,7 +51,10 @@ from fixture_project import request_id_provider
 from testapp.models import EventRecord
 from testapp.weft_tasks import echo_current_request_id, echo_task
 
+import weft_django
+import weft_django.client as weft_django_client
 from weft.client import SpecNotFound
+from weft.commands.types import TaskTerminalSnapshot
 from weft.core.taskspec import TaskSpec
 from weft_django import (
     WeftSubmission,
@@ -69,6 +72,8 @@ from weft_django.conf import (
     resolve_context_override,
 )
 from weft_django.registry import TaskRegistry, is_registered
+
+pytestmark = [pytest.mark.shared]
 
 call_command("migrate", run_syncdb=True, verbosity=0)
 
@@ -125,6 +130,39 @@ def _native_taskspec() -> TaskSpec:
         },
         context={"template": True, "auto_expand": False},
     )
+
+
+def test_status_uses_terminal_snapshot_not_diagnostic_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, bool] = {}
+
+    class FakeTask:
+        def terminal_snapshot(self, timeout: float = 0.0) -> TaskTerminalSnapshot:
+            observed["terminal_snapshot"] = True
+            assert timeout == 0.0
+            return TaskTerminalSnapshot(
+                tid="1770000000000000000",
+                status="completed",
+                source="outbox",
+                terminal=True,
+            )
+
+        def snapshot(self) -> object:
+            raise AssertionError("diagnostic snapshot should not be used")
+
+    class FakeClient:
+        def task(self, tid: str) -> FakeTask:
+            assert tid == "1770000000000000000"
+            return FakeTask()
+
+    monkeypatch.setattr(weft_django_client, "get_core_client", lambda: FakeClient())
+
+    snapshot = weft_django.status("1770000000000000000")
+
+    assert snapshot is not None
+    assert snapshot.status == "completed"
+    assert observed == {"terminal_snapshot": True}
 
 
 def _spec_reference_path(name: str = "native-reference") -> Path:

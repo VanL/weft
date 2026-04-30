@@ -320,6 +320,64 @@ def test_task_status_keeps_terminal_log_state_running_while_task_pid_is_alive(
     assert snapshot.status == "running"
 
 
+def test_task_snapshot_full_tid_uses_bounded_known_tid_helper(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    started = time.time_ns()
+    _write_task_log_entry(
+        ctx=ctx,
+        tid=tid,
+        event="task_started",
+        status="running",
+        started_at=started,
+        completed_at=None,
+        name="bounded-full-tid",
+    )
+
+    def fail_global_collector(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("full-TID snapshot used the unbounded collector")
+
+    monkeypatch.setattr(status_cmd, "_collect_task_snapshots", fail_global_collector)
+
+    snapshot = task_cmd.task_snapshot(tid, context=ctx)
+
+    assert snapshot is not None
+    assert snapshot.tid == tid
+    assert snapshot.name == "bounded-full-tid"
+
+
+def test_list_task_snapshots_reuses_collected_taskspec_payload(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    started = time.time_ns()
+    _write_task_log_entry(
+        ctx=ctx,
+        tid=tid,
+        event="task_started",
+        status="running",
+        started_at=started,
+        completed_at=None,
+        name="single-replay-list",
+    )
+
+    def fail_taskspec_reload(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("list re-read task history for TaskSpec payload")
+
+    monkeypatch.setattr(task_cmd, "load_latest_taskspec_payload", fail_taskspec_reload)
+
+    snapshots = task_cmd.list_task_snapshots(context=ctx, include_terminal=True)
+
+    assert [snapshot.tid for snapshot in snapshots] == [tid]
+
+
 def test_task_status_treats_created_runtime_as_non_live_for_terminal_docker_task(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

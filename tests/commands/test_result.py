@@ -10,10 +10,12 @@ import pytest
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import WEFT_GLOBAL_LOG_QUEUE
 from weft.commands import _result_wait as result_wait
+from weft.commands import events as events_cmd
 from weft.commands import result as result_cmd
 from weft.commands._streaming import (
     collect_interactive_queue_output,
     handle_ctrl_stream,
+    poll_log_events,
     process_outbox_message,
 )
 from weft.commands.result import (
@@ -23,10 +25,38 @@ from weft.commands.result import (
     cmd_result,
 )
 from weft.context import build_context
+from weft.helpers import iter_queue_json_entries
 
 pytestmark = [pytest.mark.shared]
 
 RESULT_WAIT_TIMEOUT = 2.0
+
+
+def _write_task_log_event(queue, tid: str, event: str, status: str) -> None:
+    queue.write(
+        json.dumps(
+            {
+                "tid": tid,
+                "event": event,
+                "status": status,
+                "taskspec": {
+                    "tid": tid,
+                    "name": f"task-{tid[-4:]}",
+                    "state": {"status": status},
+                    "metadata": {},
+                },
+            }
+        )
+    )
+
+
+def _log_timestamps_by_tid(queue) -> dict[str, list[int]]:
+    timestamps: dict[str, list[int]] = {}
+    for payload, timestamp in iter_queue_json_entries(queue):
+        tid = payload.get("tid")
+        if isinstance(tid, str):
+            timestamps.setdefault(tid, []).append(timestamp)
+    return timestamps
 
 
 def _capture_stream_echo(monkeypatch: pytest.MonkeyPatch) -> list[str]:
@@ -95,6 +125,141 @@ def test_collect_interactive_queue_output_handles_malformed_base64() -> None:
             )
 
     assert collect_interactive_queue_output(_Queue()) == ["%%%not-base64%%%"]
+
+
+def test_poll_log_events_advances_cursor_over_unrelated_events(tmp_path) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    log_queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
+    target_tid = str(time.time_ns())
+    unrelated_tid = str(int(target_tid) + 1)
+
+    _write_task_log_event(log_queue, target_tid, "task_started", "running")
+    _write_task_log_event(log_queue, unrelated_tid, "task_started", "running")
+    _write_task_log_event(log_queue, unrelated_tid, "work_completed", "completed")
+    timestamps = _log_timestamps_by_tid(log_queue)
+    target_timestamp = timestamps[target_tid][0]
+    highest_timestamp = max(
+        timestamp for values in timestamps.values() for timestamp in values
+    )
+
+    events, cursor = poll_log_events(log_queue, None, target_tid)
+
+    assert [payload["tid"] for payload, _timestamp in events] == [target_tid]
+    assert events[0][1] == target_timestamp
+    assert cursor == highest_timestamp
+
+    later_events, later_cursor = poll_log_events(log_queue, cursor, target_tid)
+
+    assert later_events == []
+    assert later_cursor == cursor
+
+
+def test_poll_log_events_advances_cursor_when_no_target_events(tmp_path) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    log_queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
+    target_tid = str(time.time_ns())
+    unrelated_tid = str(int(target_tid) + 1)
+
+    _write_task_log_event(log_queue, unrelated_tid, "task_started", "running")
+    _write_task_log_event(log_queue, unrelated_tid, "work_completed", "completed")
+    timestamps = _log_timestamps_by_tid(log_queue)
+    highest_timestamp = max(
+        timestamp for values in timestamps.values() for timestamp in values
+    )
+
+    events, cursor = poll_log_events(log_queue, None, target_tid)
+
+    assert events == []
+    assert cursor == highest_timestamp
+
+
+def test_iter_task_events_follow_advances_cursor_over_unrelated_events(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    log_queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
+    target_tid = str(time.time_ns())
+    unrelated_tid = str(int(target_tid) + 1)
+
+    _write_task_log_event(log_queue, target_tid, "task_started", "running")
+    _write_task_log_event(log_queue, unrelated_tid, "task_started", "running")
+    _write_task_log_event(log_queue, unrelated_tid, "work_completed", "completed")
+    timestamps = _log_timestamps_by_tid(log_queue)
+    highest_unrelated_timestamp = max(timestamps[unrelated_tid])
+
+    class _StopAfterSecondScan(Exception):
+        pass
+
+    class _NoSleepMonitor:
+        def __init__(self, queues, *, config=None) -> None:
+            del queues, config
+
+        def wait(self, timeout: float | None) -> bool:
+            del timeout
+            return False
+
+        def close(self) -> None:
+            return
+
+    real_iter = events_cmd.iter_queue_json_entries
+    since_timestamps: list[int | None] = []
+
+    def _recording_iter(queue, *, since_timestamp: int | None = None):
+        since_timestamps.append(since_timestamp)
+        real_generator = real_iter(queue, since_timestamp=since_timestamp)
+        if len(since_timestamps) != 2:
+            return real_generator
+
+        def _sentinel_generator():
+            raise _StopAfterSecondScan
+            yield  # pragma: no cover - keep this function a generator
+
+        return _sentinel_generator()
+
+    monkeypatch.setattr(events_cmd, "QueueChangeMonitor", _NoSleepMonitor)
+    monkeypatch.setattr(events_cmd, "iter_queue_json_entries", _recording_iter)
+
+    event_iter = events_cmd.iter_task_events(
+        ctx,
+        target_tid,
+        follow=True,
+        timeout=10.0,
+    )
+    try:
+        first_event = next(event_iter)
+        assert first_event.tid == target_tid
+        assert first_event.event_type == "task_started"
+        with pytest.raises(_StopAfterSecondScan):
+            next(event_iter)
+    finally:
+        event_iter.close()
+
+    assert since_timestamps[0] == int(target_tid)
+    assert since_timestamps[1] == highest_unrelated_timestamp + 1
+
+
+def test_iter_task_events_non_follow_yields_only_target_events(tmp_path) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    log_queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
+    target_tid = str(time.time_ns())
+    unrelated_tid = str(int(target_tid) + 1)
+
+    _write_task_log_event(log_queue, target_tid, "task_started", "running")
+    _write_task_log_event(log_queue, unrelated_tid, "task_started", "running")
+    _write_task_log_event(log_queue, target_tid, "work_completed", "completed")
+
+    events = list(events_cmd.iter_task_events(ctx, target_tid, follow=False))
+
+    assert [event.event_type for event in events] == [
+        "task_started",
+        "work_completed",
+    ]
+    assert {event.tid for event in events} == {target_tid}
 
 
 def test_load_taskspec_payload_reads_full_log_history(tmp_path) -> None:

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.9.10 - 2026-04-30
+
+### Changed
+- Optimized status lookup for known tids
+
 ## 0.9.5 - 2026-04-20
 
 ### Added

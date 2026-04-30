@@ -101,12 +101,24 @@ The control plane is explicit:
 - `ctrl_out` carries task-local replies and terminal notifications
 - `weft.log.tasks` remains the durable audit trail rather than the interactive
   reply channel
+- terminal task-local notifications must be typed JSON envelopes with
+  `type="terminal"`, `source="task"` or `source="manager"`, `tid`, `status`,
+  and `timestamp`; optional fields include `error` and `return_code`
+- readers must ignore ordinary control replies, stderr stream chunks, malformed
+  JSON, and other `ctrl_out` payloads when looking for terminal state
+- manager-authored terminal envelopes are supervisor observations for child
+  wrapper death only; they must be written to the child `ctrl_out` queue, never
+  to outbox, and only when task-owned terminal proof is not already visible
 - active STOP/KILL may delete the raw `ctrl_in` message as an internal
   handoff detail, but public acknowledgement remains the post-unwind
   `ctrl_out` reply plus the terminal task-log event on the main task thread
 
 _Implementation mapping_: `weft/core/tasks/base.py`,
-`weft/core/tasks/consumer.py`, `weft/commands/tasks.py`.
+`weft/core/tasks/consumer.py`, `weft/core/manager.py`,
+`weft/commands/tasks.py`.
+
+Implementation plan backlink:
+`docs/plans/2026-04-30-known-tid-terminal-snapshot-api-plan.md`.
 
 ### 3.1 Named Endpoint Discovery [MF-3.1]
 

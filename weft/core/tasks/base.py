@@ -708,6 +708,35 @@ class BaseTask(MultiQueueWatcher, ABC):
         except (BrokerError, OSError, RuntimeError):
             logger.debug("Failed to write control response %s", payload, exc_info=True)
 
+    def _send_terminal_envelope(self, *, source: str = "task") -> None:
+        """Publish task-local terminal observation on ctrl_out.
+
+        Spec: docs/specifications/05-Message_Flow_and_State.md [MF-3]
+        """
+
+        if self.taskspec.state.status not in TERMINAL_TASK_STATUSES:
+            return
+        payload = {
+            "type": "terminal",
+            "command": "TERMINAL",
+            "source": source,
+            "tid": self.tid,
+            "status": self.taskspec.state.status,
+            "timestamp": time.time_ns(),
+        }
+        if self.taskspec.state.error:
+            payload["error"] = self.taskspec.state.error
+        if self.taskspec.state.return_code is not None:
+            payload["return_code"] = self.taskspec.state.return_code
+        try:
+            self._ctrl_out_queue.write(json.dumps(payload))
+        except (BrokerError, OSError, RuntimeError):
+            logger.debug(
+                "Failed to write terminal ctrl_out envelope %s",
+                payload,
+                exc_info=True,
+            )
+
     def handle_termination_signal(self, signum: int) -> None:
         """Handle an external termination signal inside a task process."""
 
@@ -755,6 +784,7 @@ class BaseTask(MultiQueueWatcher, ABC):
             self.taskspec.mark_cancelled(reason=reason)
             self._clear_activity()
             self._report_state_change(event=event, message_id=message_id)
+            self._send_terminal_envelope()
             self._emit_pipeline_terminal_event(
                 status="cancelled",
                 error=self.taskspec.state.error,
@@ -788,6 +818,7 @@ class BaseTask(MultiQueueWatcher, ABC):
             self.taskspec.mark_killed(reason=reason)
             self._clear_activity()
             self._report_state_change(event=event, message_id=message_id)
+            self._send_terminal_envelope()
             self._emit_pipeline_terminal_event(
                 status="killed",
                 error=self.taskspec.state.error,

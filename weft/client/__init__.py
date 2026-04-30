@@ -19,7 +19,13 @@ from ._errors import (
 )
 from ._prepared import PreparedSubmission
 from ._task import Task
-from ._types import TaskEvent, TaskResult, TaskSnapshot
+from ._types import (
+    QueueAckTarget,
+    TaskEvent,
+    TaskResult,
+    TaskSnapshot,
+    TaskTerminalSnapshot,
+)
 
 __all__ = [
     "ControlRejected",
@@ -27,12 +33,14 @@ __all__ = [
     "ManagerNotRunning",
     "ManagerStartFailed",
     "PreparedSubmission",
+    "QueueAckTarget",
     "SpecNotFound",
     "Task",
     "TaskEvent",
     "TaskNotFound",
     "TaskResult",
     "TaskSnapshot",
+    "TaskTerminalSnapshot",
     "WeftClient",
     "WeftError",
 ]

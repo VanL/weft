@@ -18,6 +18,7 @@ from weft.client import (
     TaskNotFound,
     TaskResult,
     TaskSnapshot,
+    TaskTerminalSnapshot,
     WeftClient,
     WeftError,
 )
@@ -64,6 +65,7 @@ def test_public_names_are_importable() -> None:
     assert TaskNotFound is not None
     assert TaskResult is not None
     assert TaskSnapshot is not None
+    assert TaskTerminalSnapshot is not None
     assert WeftClient is not None
     assert WeftError is not None
 
@@ -102,6 +104,22 @@ def test_submit_returns_task_with_completed_result() -> None:
         assert result.value == "hello!"
         assert task.tid.isdigit()
         assert len(task.tid) == 19
+
+
+def test_task_terminal_snapshot_is_non_consuming() -> None:
+    with WeftTestHarness() as harness:
+        client = WeftClient(path=harness.root)
+        task = client.submit(
+            _function_taskspec(
+                harness.root,
+                args=["hello"],
+                kwargs={"suffix": "!"},
+            )
+        )
+        snapshot = task.terminal_snapshot(timeout=30.0)
+
+        assert snapshot.status == "completed"
+        assert task.result(timeout=30.0).value == "hello!"
 
 
 def test_prepare_snapshots_payload_before_submission() -> None:

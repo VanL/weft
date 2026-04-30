@@ -27,6 +27,7 @@ from weft.commands.types import (
     SystemStatusSnapshot,
     SystemTidyResult,
     TaskSnapshot,
+    TaskTerminalSnapshot,
 )
 
 from ._types import ClientContextHandle
@@ -71,6 +72,21 @@ class TasksNamespace:
             include_process=include_process,
             context=self.client.context,
         )
+
+    def terminal_snapshot(
+        self,
+        tid: str,
+        *,
+        timeout: float = 0.0,
+    ) -> TaskTerminalSnapshot:
+        return tasks.task_terminal_snapshot(
+            tid,
+            timeout=timeout,
+            context=self.client.context,
+        )
+
+    def ack_terminal_snapshot(self, snapshot: TaskTerminalSnapshot) -> bool:
+        return tasks.ack_terminal_snapshot(snapshot, context=self.client.context)
 
     def watch(
         self,

@@ -117,6 +117,79 @@ def _write_logged_pipeline_task(ctx, tid: str) -> None:
     )
 
 
+def test_terminal_snapshot_reads_outbox_without_consuming(tmp_path) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    outbox = ctx.queue(f"T{tid}.outbox", persistent=True)
+    outbox.write(json.dumps({"ok": True}))
+
+    snapshot = task_cmd.task_terminal_snapshot(tid, context=ctx)
+
+    assert snapshot.status == "completed"
+    assert snapshot.source == "outbox"
+    assert snapshot.value == {"ok": True}
+    assert snapshot.terminal is True
+    assert len(snapshot.ack_targets) == 1
+    assert outbox.peek_one() is not None
+
+
+def test_terminal_snapshot_reads_only_typed_terminal_ctrl_out(tmp_path) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    ctrl_out = ctx.queue(f"T{tid}.ctrl_out", persistent=False)
+    ctrl_out.write(json.dumps({"command": "PING", "status": "ok", "tid": tid}))
+    ctrl_out.write(json.dumps({"type": "stream", "stream": "stderr", "data": "x"}))
+    ctrl_out.write(
+        json.dumps(
+            {
+                "type": "terminal",
+                "source": "task",
+                "tid": tid,
+                "status": "failed",
+                "error": "boom",
+                "return_code": 1,
+            }
+        )
+    )
+
+    snapshot = task_cmd.task_terminal_snapshot(tid, context=ctx)
+
+    assert snapshot.status == "failed"
+    assert snapshot.source == "ctrl_out"
+    assert snapshot.error == "boom"
+    assert snapshot.return_code == 1
+    assert len(snapshot.ack_targets) == 1
+    assert ctrl_out.peek_many(limit=3)
+
+
+def test_ack_terminal_snapshot_deletes_exact_message_only(tmp_path) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    ctrl_out = ctx.queue(f"T{tid}.ctrl_out", persistent=False)
+    ctrl_out.write(json.dumps({"command": "PING", "status": "ok", "tid": tid}))
+    ctrl_out.write(
+        json.dumps(
+            {
+                "type": "terminal",
+                "source": "task",
+                "tid": tid,
+                "status": "failed",
+            }
+        )
+    )
+    ctrl_out.write(json.dumps({"command": "STATUS", "status": "ok", "tid": tid}))
+
+    snapshot = task_cmd.task_terminal_snapshot(tid, context=ctx)
+
+    assert task_cmd.ack_terminal_snapshot(snapshot, context=ctx) is True
+    remaining = ctrl_out.peek_many(limit=10)
+    assert len(remaining) == 2
+    assert all("terminal" not in message for message in remaining)
+
+
 def _wait_for_registered_worker_pid(ctx, tid: str, timeout: float = 15.0) -> int | None:
     deadline = time.time() + timeout
     mapping_queue = ctx.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)

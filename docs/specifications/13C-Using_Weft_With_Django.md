@@ -674,6 +674,8 @@ The integration should also expose:
 - `weft_django.enqueue(task, *args, **kwargs)`
 - `weft_django.enqueue_on_commit(task, *args, **kwargs)`
 - `weft_django.status(tid)`
+- `weft_django.terminal_snapshot(tid, timeout=0.0)`
+- `weft_django.snapshot(tid)`
 - `weft_django.result(tid, timeout=None)`
 - `weft_django.stop(tid)`
 - `weft_django.kill(tid)`
@@ -682,6 +684,22 @@ The integration should also expose:
 
 - a decorated task object
 - a registered task name string
+
+Known-TID status rule:
+
+- `weft_django.status(tid)` is a direct known-TID reconciliation helper. It
+  uses Weft's non-consuming terminal snapshot API and must not replay the
+  global task log from the beginning for a full TID.
+- `weft_django.status(tid)` returns an object with `.status`, but it does not
+  promise the full diagnostic `TaskSnapshot` field set.
+- callers that need diagnostic fields such as `name`, `metadata`, `runtime`,
+  `started_at`, or `completed_at` must call `weft_django.snapshot(tid)`.
+- `terminal_snapshot()` and `status()` are observation-only. Cleanup must use
+  explicit exact-message acknowledgement after the Django app commits its own
+  durable domain row.
+
+Implementation plan backlink:
+`docs/plans/2026-04-30-known-tid-terminal-snapshot-api-plan.md`.
 
 ### Submission Overrides [DJ-8.4]
 
@@ -776,7 +794,9 @@ Submissions should return a lightweight handle with:
 
 - `tid`
 - `name`
+- `terminal_snapshot(timeout=0.0)`
 - `status()`
+- `snapshot()`
 - `wait(timeout=None)`
 - `result(timeout=None)`
 - `stop()`
@@ -790,6 +810,9 @@ Handle semantics:
 
 - `status()` returns the current public status string, or `None` when no
   snapshot is visible yet
+- `snapshot()` returns the full diagnostic Weft `TaskSnapshot | None`
+- `terminal_snapshot()` returns the compact non-consuming known-TID terminal
+  snapshot used by reconciliation code
 - `wait(timeout=None)` returns the same structured `TaskResult` object as
   `result(timeout=None)`
 

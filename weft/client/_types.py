@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from weft.commands.types import TaskEvent, TaskResult, TaskSnapshot
+from weft.commands.types import (
+    QueueAckTarget,
+    TaskEvent,
+    TaskResult,
+    TaskSnapshot,
+    TaskTerminalSnapshot,
+)
 from weft.context import WeftContext
 
 
@@ -14,4 +20,11 @@ class ClientContextHandle(Protocol):
     context: WeftContext
 
 
-__all__ = ["ClientContextHandle", "TaskEvent", "TaskResult", "TaskSnapshot"]
+__all__ = [
+    "ClientContextHandle",
+    "QueueAckTarget",
+    "TaskEvent",
+    "TaskResult",
+    "TaskSnapshot",
+    "TaskTerminalSnapshot",
+]

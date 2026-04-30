@@ -13,7 +13,12 @@ from typing import Any
 from weft.commands import events
 from weft.commands import result as result_cmd
 from weft.commands import tasks as task_ops
-from weft.commands.types import TaskEvent, TaskResult, TaskSnapshot
+from weft.commands.types import (
+    TaskEvent,
+    TaskResult,
+    TaskSnapshot,
+    TaskTerminalSnapshot,
+)
 from weft.context import WeftContext
 
 from ._types import ClientContextHandle
@@ -28,6 +33,13 @@ class Task:
 
     def snapshot(self) -> TaskSnapshot | None:
         return task_ops.task_snapshot(self.tid, context=self._context)
+
+    def terminal_snapshot(self, timeout: float = 0.0) -> TaskTerminalSnapshot:
+        return task_ops.task_terminal_snapshot(
+            self.tid,
+            timeout=timeout,
+            context=self._context,
+        )
 
     def result(self, timeout: float | None = None) -> TaskResult:
         return result_cmd.await_task_result(self._context, self.tid, timeout=timeout)

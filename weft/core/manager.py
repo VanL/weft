@@ -41,8 +41,10 @@ from weft._constants import (
     MANAGER_SPAWN_FENCED_REQUEUED_EVENT,
     MANAGER_SPAWN_FENCED_STRANDED_EVENT,
     QUEUE_CTRL_IN_SUFFIX,
+    QUEUE_CTRL_OUT_SUFFIX,
     SPEC_TYPE_PIPELINE,
     SPEC_TYPE_TASK,
+    TERMINAL_TASK_STATUSES,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MANAGER_LIFETIME_TIMEOUT,
     WEFT_MANAGER_RUNTIME_HANDLE_JSON_ENV,
@@ -93,6 +95,7 @@ class ManagedChild:
     ctrl_queue: str | None
     persistent: bool = False
     autostart_source: str | None = None
+    ctrl_out_queue: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -310,10 +313,11 @@ class Manager(BaseTask):
         )
         assert child_spec.tid is not None
         self._child_processes[child_spec.tid] = ManagedChild(
-            process,
-            child_spec.io.control.get("ctrl_in"),
-            bool(getattr(child_spec.spec, "persistent", False)),
-            autostart_source,
+            process=process,
+            ctrl_queue=child_spec.io.control.get("ctrl_in"),
+            ctrl_out_queue=child_spec.io.control.get("ctrl_out"),
+            persistent=bool(getattr(child_spec.spec, "persistent", False)),
+            autostart_source=autostart_source,
         )
         self._last_activity_ns = time.time_ns()
 
@@ -885,12 +889,87 @@ class Manager(BaseTask):
         except (AssertionError, OSError, ValueError):  # pragma: no cover - defensive
             return True
 
+    def _child_terminal_proof_visible(self, tid: str, child: ManagedChild) -> bool:
+        ctrl_out_name = child.ctrl_out_queue or f"T{tid}.{QUEUE_CTRL_OUT_SUFFIX}"
+        ctrl_out = self._queue(ctrl_out_name)
+        try:
+            for entry in ctrl_out.peek_generator(with_timestamps=True):
+                body = entry[0] if isinstance(entry, tuple) else entry
+                try:
+                    payload = json.loads(str(body))
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                if (
+                    payload.get("type") == "terminal"
+                    and payload.get("tid") == tid
+                    and payload.get("source") == "task"
+                ):
+                    return True
+        except (BrokerError, OSError, RuntimeError):
+            logger.debug(
+                "Failed to inspect child ctrl_out for terminal proof",
+                exc_info=True,
+            )
+            return True
+
+        log_queue = self._queue(WEFT_GLOBAL_LOG_QUEUE)
+        try:
+            since_timestamp = int(tid) - 1 if tid.isdigit() else None
+            for payload, _timestamp in iter_queue_json_entries(
+                log_queue,
+                since_timestamp=since_timestamp,
+            ):
+                if payload.get("tid") != tid:
+                    continue
+                status = payload.get("status")
+                if isinstance(status, str) and status in TERMINAL_TASK_STATUSES:
+                    return True
+        except (BrokerError, OSError, RuntimeError):
+            logger.debug(
+                "Failed to inspect task log for child terminal proof",
+                exc_info=True,
+            )
+            return True
+        return False
+
+    def _write_manager_terminal_envelope(
+        self,
+        tid: str,
+        child: ManagedChild,
+    ) -> None:
+        if self._child_terminal_proof_visible(tid, child):
+            return
+        ctrl_out_name = child.ctrl_out_queue or f"T{tid}.{QUEUE_CTRL_OUT_SUFFIX}"
+        exitcode = child.process.exitcode
+        payload: dict[str, Any] = {
+            "type": "terminal",
+            "command": "TERMINAL",
+            "source": "manager",
+            "tid": tid,
+            "status": "failed",
+            "error": "Task wrapper exited before publishing terminal state",
+            "timestamp": time.time_ns(),
+        }
+        if exitcode is not None:
+            payload["return_code"] = int(exitcode)
+        try:
+            self._queue(ctrl_out_name).write(json.dumps(payload))
+        except (BrokerError, OSError, RuntimeError):
+            logger.debug(
+                "Failed to write manager terminal envelope for child %s",
+                tid,
+                exc_info=True,
+            )
+
     def _cleanup_children(self) -> None:
         autostart_child_exited = False
         child_exited = False
         for tid, child in list(self._child_processes.items()):
             if self._child_has_exited(child):
                 child_exited = True
+                self._write_manager_terminal_envelope(tid, child)
                 try:
                     # Dead children must never stall the manager control loop.
                     # Treat dead-child cleanup as a local reap only; descendant

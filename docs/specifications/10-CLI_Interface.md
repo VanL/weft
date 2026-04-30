@@ -311,6 +311,16 @@ Current behavior:
 `weft status` is the project-wide summary command. More specific inspection
 surfaces live under `weft task ...` and `weft result`.
 
+Known-TID client helpers are allowed to use a different performance path than
+`weft status`: for a full TID, the command/client layer should inspect
+task-local outbox, typed terminal `ctrl_out`, runtime mapping, and bounded
+task-log fallback instead of replaying the global task log from the beginning.
+This does not change project-wide `weft status`, which may still replay the
+global log once for a global view.
+
+Implementation plan backlink:
+`docs/plans/2026-04-30-known-tid-terminal-snapshot-api-plan.md`.
+
 ### `result` - Read task output [CLI-1.2]
 
 _Implementation mapping_: `weft/commands/result.py` `cmd_result()`,

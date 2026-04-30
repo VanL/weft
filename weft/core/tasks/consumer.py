@@ -664,6 +664,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             error=str(exc),
             metrics=metrics_payload,
         )
+        self._send_terminal_envelope()
         self._emit_pipeline_terminal_event(
             status=pipeline_status,
             error=self.taskspec.state.error,
