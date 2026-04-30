@@ -553,6 +553,66 @@ def test_manager_closes_seeded_child_inbox_queue(
     assert FakeSeedQueue.instances[0].closed is True
 
 
+def test_manager_terminal_envelope_does_not_cache_child_ctrl_out_queue(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _make_queue = manager_setup
+    child_tid = str(time.time_ns())
+    child_ctrl_out = f"T{child_tid}.ctrl_out"
+
+    class FakeTerminalQueue:
+        instances: list[FakeTerminalQueue] = []
+
+        def __init__(self, name: str, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+            self.name = name
+            self.writes: list[str] = []
+            self.closed = False
+            FakeTerminalQueue.instances.append(self)
+
+        def peek_generator(self, *, with_timestamps: bool = False):
+            del with_timestamps
+            return iter(())
+
+        def write(self, payload: str) -> None:
+            self.writes.append(payload)
+
+        def close(self) -> None:
+            self.closed = True
+
+    class FakeProcess:
+        pid = None
+        exitcode = 1
+
+        def is_alive(self) -> bool:
+            return False
+
+        def join(self, timeout: float | None = None) -> None:
+            del timeout
+
+    monkeypatch.setattr(manager_mod, "Queue", FakeTerminalQueue)
+    child = ManagedChild(
+        process=FakeProcess(),
+        ctrl_queue=None,
+        ctrl_out_queue=child_ctrl_out,
+    )
+
+    manager._write_manager_terminal_envelope(child_tid, child)
+
+    assert child_ctrl_out not in manager._queue_cache
+    assert [queue.name for queue in FakeTerminalQueue.instances] == [
+        child_ctrl_out,
+        child_ctrl_out,
+    ]
+    assert all(queue.closed for queue in FakeTerminalQueue.instances)
+    assert len(FakeTerminalQueue.instances[1].writes) == 1
+    payload = json.loads(FakeTerminalQueue.instances[1].writes[0])
+    assert payload["type"] == "terminal"
+    assert payload["source"] == "manager"
+    assert payload["tid"] == child_tid
+
+
 def test_manager_registry_entries(manager_setup) -> None:
     manager, make_queue = manager_setup
     registry_queue = make_queue(WEFT_MANAGERS_REGISTRY_QUEUE)

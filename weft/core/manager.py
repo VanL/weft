@@ -902,7 +902,12 @@ class Manager(BaseTask):
 
     def _child_terminal_proof_visible(self, tid: str, child: ManagedChild) -> bool:
         ctrl_out_name = child.ctrl_out_queue or f"T{tid}.{QUEUE_CTRL_OUT_SUFFIX}"
-        ctrl_out = self._queue(ctrl_out_name)
+        ctrl_out = Queue(
+            ctrl_out_name,
+            db_path=self._db_path,
+            persistent=False,
+            config=self._config,
+        )
         try:
             for entry in ctrl_out.peek_generator(with_timestamps=True):
                 body = entry[0] if isinstance(entry, tuple) else entry
@@ -924,6 +929,15 @@ class Manager(BaseTask):
                 exc_info=True,
             )
             return True
+        finally:
+            try:
+                ctrl_out.close()
+            except (BrokerError, OSError, RuntimeError):
+                logger.debug(
+                    "Failed to close child ctrl_out proof queue %s",
+                    ctrl_out_name,
+                    exc_info=True,
+                )
 
         log_queue = self._queue(WEFT_GLOBAL_LOG_QUEUE)
         try:
@@ -964,14 +978,29 @@ class Manager(BaseTask):
         }
         if exitcode is not None:
             payload["return_code"] = int(exitcode)
+        ctrl_out = Queue(
+            ctrl_out_name,
+            db_path=self._db_path,
+            persistent=False,
+            config=self._config,
+        )
         try:
-            self._queue(ctrl_out_name).write(json.dumps(payload))
+            ctrl_out.write(json.dumps(payload))
         except (BrokerError, OSError, RuntimeError):
             logger.debug(
                 "Failed to write manager terminal envelope for child %s",
                 tid,
                 exc_info=True,
             )
+        finally:
+            try:
+                ctrl_out.close()
+            except (BrokerError, OSError, RuntimeError):
+                logger.debug(
+                    "Failed to close manager terminal envelope queue %s",
+                    ctrl_out_name,
+                    exc_info=True,
+                )
 
     def _cleanup_children(self) -> None:
         autostart_child_exited = False
