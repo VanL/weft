@@ -70,7 +70,7 @@ jobs:
         env:
           EXPECTED_SHA: ${{ inputs.expected_tag_commit }}
           POLL_INTERVAL_SECONDS: "30"
-          MAX_WAIT_SECONDS: "2700"
+          MAX_WAIT_SECONDS: "5400"
         with:
           script: |
             const expectedSha = process.env.EXPECTED_SHA;

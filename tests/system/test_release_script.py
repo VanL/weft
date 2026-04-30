@@ -810,6 +810,7 @@ def test_release_workflows_require_green_test_workflow() -> None:
     assert 'workflow_id: "test.yml"' in release_workflow
     assert "head_sha: expectedSha" in release_workflow
     assert 'event: "push"' in release_workflow
+    assert 'MAX_WAIT_SECONDS: "5400"' in release_workflow
     assert "- verify-main-test-workflow" in release_workflow
 
 
