@@ -1327,7 +1327,7 @@ wheels = [
 
 [[package]]
 name = "weft"
-version = "0.9.10"
+version = "0.9.11"
 source = { editable = "." }
 dependencies = [
     { name = "llm" },
@@ -1407,7 +1407,7 @@ provides-extras = ["pg", "docker", "django", "django-channels", "macos-sandbox",
 
 [[package]]
 name = "weft-django"
-version = "0.9.6"
+version = "0.9.11"
 source = { editable = "integrations/weft_django" }
 dependencies = [
     { name = "django" },
@@ -1425,7 +1425,7 @@ requires-dist = [
     { name = "channels", marker = "extra == 'realtime'", specifier = ">=4.1,<5" },
     { name = "django", specifier = ">=4.2,<6" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
-    { name = "weft", specifier = ">=0.9.10" },
+    { name = "weft", specifier = ">=0.9.11" },
 ]
 provides-extras = ["channels", "realtime", "dev"]
 
