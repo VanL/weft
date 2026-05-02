@@ -617,6 +617,7 @@ def test_start_manager_treats_post_proof_ack_failure_as_nonfatal(
         launcher_process=fake_process,
     )
     warnings: list[str] = []
+    debug_messages: list[str] = []
 
     monkeypatch.setattr(
         "weft.core.manager_runtime._build_manager_runtime_invocation",
@@ -659,6 +660,10 @@ def test_start_manager_treats_post_proof_ack_failure_as_nonfatal(
         lambda message, *args, **kwargs: warnings.append(str(message)),
     )
     monkeypatch.setattr(
+        "weft.core.manager_runtime.logger.debug",
+        lambda message, *args, **kwargs: debug_messages.append(str(message)),
+    )
+    monkeypatch.setattr(
         "weft.core.manager_runtime.time.sleep",
         lambda seconds: None,
     )
@@ -669,7 +674,8 @@ def test_start_manager_treats_post_proof_ack_failure_as_nonfatal(
     assert record["runtime_handle"] == _host_runtime_handle(fake_process.pid)
     assert started_here is True
     assert handle is None
-    assert warnings
+    assert warnings == []
+    assert debug_messages
 
 
 def test_start_manager_surfaces_detached_launch_stderr_when_manager_exits_early(

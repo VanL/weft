@@ -97,7 +97,7 @@ jobs:
 
       - name: Run full SQLite suite
         run: |
-          pytest -v --tb=short -m "" --override-ini="addopts=-ra -q --strict-markers -n auto --dist loadgroup"
+          pytest -v --tb=short -m "" --override-ini="addopts=-ra -q --strict-markers -n auto --dist load"
 
   test-postgres:
     runs-on: ubuntu-latest

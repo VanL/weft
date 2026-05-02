@@ -121,6 +121,7 @@ def test_cli_long_session_produces_identical_transcript_across_backends(
     weft_harness: WeftTestHarness,
 ) -> None:
     env = session_env()
+    weft_harness.ensure_foreground_manager()
     command_script = workdir / "session_command.py"
     write_command_script(command_script)
 

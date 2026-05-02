@@ -1804,6 +1804,7 @@ class Manager(BaseTask):
         ):
             return
         self._autostart_last_scan_ns = now_ns
+        next_backoff_due_ns: int | None = None
 
         directory = self._autostart_dir
         if not directory:
@@ -1867,6 +1868,12 @@ class Manager(BaseTask):
                     continue
                 next_allowed = state.get("next_allowed_ns", 0)
                 if launched_once and next_allowed and now_ns < next_allowed:
+                    if isinstance(next_allowed, int):
+                        if (
+                            next_backoff_due_ns is None
+                            or next_allowed < next_backoff_due_ns
+                        ):
+                            next_backoff_due_ns = next_allowed
                     continue
             else:
                 logger.warning("Unknown autostart policy mode %s for %s", mode, source)
@@ -1896,6 +1903,12 @@ class Manager(BaseTask):
                     state["next_allowed_ns"] = now_ns + int(delay * 1_000_000_000)
                 else:
                     state["next_allowed_ns"] = 0
+
+        if next_backoff_due_ns is not None:
+            self._autostart_last_scan_ns = min(
+                self._autostart_last_scan_ns,
+                max(0, next_backoff_due_ns - self._autostart_scan_interval_ns),
+            )
 
     # ------------------------------------------------------------------
     # Cleanup

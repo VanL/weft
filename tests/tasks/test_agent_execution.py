@@ -32,7 +32,6 @@ from weft.core.taskspec import (
     TaskSpec,
 )
 
-pytestmark = [pytest.mark.xdist_group(name="weft_broker_serial")]
 _MODEL_PROVIDERS = frozenset({"claude_code", "codex", "gemini", "opencode", "qwen"})
 
 

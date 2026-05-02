@@ -152,7 +152,19 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         *,
         initial_transition: bool,
     ) -> Any:
-        outcome = self._run_task(work_item)
+        try:
+            outcome = self._run_task(work_item)
+        except Exception as exc:
+            self.taskspec.mark_failed(error=str(exc))
+            return self._finalize_terminal_outcome(
+                title_state="failed",
+                title_detail=None,
+                event="work_failed",
+                pipeline_status="failed",
+                timestamp=timestamp,
+                metrics_payload=None,
+                exc=exc,
+            )
         live_command_streaming = self._active_live_command_streaming
         metrics_payload = self._extract_metrics(outcome)
         agent_execution = self._build_agent_execution_payload(outcome.value)

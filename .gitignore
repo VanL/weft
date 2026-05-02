@@ -21,6 +21,7 @@ wheels/
 *.egg
 MANIFEST
 .weft/
+.broker*
 
 # Virtual environments
 venv/

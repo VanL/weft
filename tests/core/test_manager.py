@@ -7,7 +7,10 @@ import multiprocessing
 import os
 import signal
 import time
+from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -358,6 +361,38 @@ def wait_for_children(manager: Manager, timeout: float = 5.0) -> None:
     while manager._child_processes and time.monotonic() < deadline:
         manager._cleanup_children()
         time.sleep(0.05)
+
+
+def wait_for_log_event(
+    manager: Manager,
+    log_queue: Any,
+    predicate: Callable[[dict[str, object]], bool],
+    *,
+    timeout: float = 8.0,
+) -> dict[str, object]:
+    deadline = time.monotonic() + timeout
+    event_tail: list[dict[str, object]] = []
+    while time.monotonic() < deadline:
+        manager.process_once()
+        for item in drain(log_queue):
+            event = json.loads(item)
+            event_tail.append(event)
+            event_tail = event_tail[-10:]
+            if predicate(event):
+                return event
+        time.sleep(0.05)
+    child_snapshot = {
+        tid: {
+            "pid": child.process.pid,
+            "exitcode": child.process.exitcode,
+            "alive": child.process.is_alive(),
+        }
+        for tid, child in manager._child_processes.items()
+    }
+    raise AssertionError(
+        "Timed out waiting for matching task-log event; "
+        f"children={child_snapshot!r}; event_tail={event_tail!r}"
+    )
 
 
 def _process_running(pid: int) -> bool:
@@ -745,6 +780,8 @@ def test_manager_cleanup_terminates_worker_descendants(manager_setup) -> None:
     psutil = pytest.importorskip("psutil")
     manager, make_queue = manager_setup
     inbox_queue = make_queue(manager._queue_names["inbox"])
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    drain(log_queue)
 
     inbox_queue.write(
         json.dumps(
@@ -766,8 +803,16 @@ def test_manager_cleanup_terminates_worker_descendants(manager_setup) -> None:
 
     assert manager._child_processes, "child process should be running"
     child_tid, child_info = next(iter(manager._child_processes.items()))
+    wait_for_log_event(
+        manager,
+        log_queue,
+        lambda event: (
+            event.get("tid") == child_tid and event.get("event") == "work_started"
+        ),
+        timeout=10.0,
+    )
     worker_pid: int | None = None
-    deadline = time.time() + (20.0 if os.name == "nt" else 5.0)
+    deadline = time.time() + (20.0 if os.name == "nt" else 10.0)
     while time.time() < deadline and worker_pid is None:
         live_managed_pids = [
             pid
@@ -880,20 +925,14 @@ def test_manager_stop_command_drains_nonpersistent_children(manager_setup) -> No
     assert manager._child_processes, "child process should be running"
     _child_tid, child_info = next(iter(manager._child_processes.items()))
     assert child_info.process.is_alive()
-
-    child_started = False
-    deadline = time.time() + 8.0
-    while time.time() < deadline and not child_started:
-        manager.process_once()
-        time.sleep(0.05)
-        for item in drain(log_queue):
-            event = json.loads(item)
-            child_started = (
-                event.get("tid") == _child_tid and event.get("event") == "work_started"
-            )
-            if child_started:
-                break
-    assert child_started
+    wait_for_log_event(
+        manager,
+        log_queue,
+        lambda event: (
+            event.get("tid") == _child_tid and event.get("event") == "work_started"
+        ),
+        timeout=30.0 if os.name == "nt" else 20.0,
+    )
 
     ctrl_in_queue.write(CONTROL_STOP)
 
@@ -940,6 +979,14 @@ def test_manager_sigterm_drains_nonpersistent_children(manager_setup) -> None:
     assert manager._child_processes, "child process should be running"
     _child_tid, child_info = next(iter(manager._child_processes.items()))
     assert child_info.process.is_alive()
+    wait_for_log_event(
+        manager,
+        log_queue,
+        lambda event: (
+            event.get("tid") == _child_tid and event.get("event") == "work_started"
+        ),
+        timeout=30.0 if os.name == "nt" else 20.0,
+    )
 
     manager.handle_termination_signal(signal.SIGTERM)
 
@@ -1030,7 +1077,7 @@ def test_manager_stop_command_does_not_launch_new_children_after_stop(
 
     ctrl_in_queue.write(CONTROL_STOP)
 
-    deadline = time.time() + (8.0 if os.name == "nt" else 3.0)
+    deadline = time.time() + (20.0 if os.name == "nt" else 10.0)
     max_children_seen = len(manager._child_processes)
     while time.time() < deadline and not manager.should_stop:
         manager.process_once()
@@ -2090,32 +2137,43 @@ def test_manager_idle_timeout_waits_for_active_child_to_finish(
     manager = Manager(db_path, spec)
     try:
         inbox_queue = make_queue(manager._queue_names["inbox"])
+        log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+        drain(log_queue)
         inbox_queue.write(
             json.dumps(
                 {
                     "spec": {
                         "type": "function",
                         "function_target": "tests.tasks.sample_targets:simulate_work",
-                        "keyword_args": {"duration": 0.5},
+                        "keyword_args": {"duration": 1.0},
                     },
                 }
             )
         )
 
-        start = time.time()
-        while not manager._child_processes and time.time() - start < 2.0:
+        start = time.monotonic()
+        while not manager._child_processes and time.monotonic() - start < 2.0:
             manager.process_once()
             time.sleep(0.05)
         assert manager._child_processes
+        child_tid = next(iter(manager._child_processes))
+        wait_for_log_event(
+            manager,
+            log_queue,
+            lambda event: (
+                event.get("tid") == child_tid and event.get("event") == "work_started"
+            ),
+            timeout=30.0 if os.name == "nt" else 20.0,
+        )
 
-        start = time.time()
-        while time.time() - start < 0.35:
+        start = time.monotonic()
+        while time.monotonic() - start < 0.35:
             manager.process_once()
             time.sleep(0.05)
         assert manager.should_stop is False
         assert manager._child_processes
 
-        wait_for_children(manager, timeout=8.0 if os.name == "nt" else 3.0)
+        wait_for_children(manager, timeout=8.0 if os.name == "nt" else 5.0)
         assert not manager._child_processes
 
         start = time.time()
@@ -2339,19 +2397,37 @@ def test_manager_autostart_ensure_restarts(
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     drain(log_queue)
     try:
-        spawn_events: list[dict[str, object]] = []
-        deadline = time.time() + 8.0
-        while len(spawn_events) < 2 and time.time() < deadline:
-            manager.process_once()
-            time.sleep(0.05)
-            events = [json.loads(item) for item in drain(log_queue)]
-            spawn_events.extend(
-                event
-                for event in events
-                if event.get("event") == "task_spawned"
-                and event.get("autostart_source") == str(manifest_path.resolve())
-            )
-        assert len(spawn_events) >= 2
+        source = str(manifest_path.resolve())
+        first_spawn = wait_for_log_event(
+            manager,
+            log_queue,
+            lambda event: (
+                event.get("event") == "task_spawned"
+                and event.get("autostart_source") == source
+            ),
+        )
+        first_child_tid = first_spawn.get("child_tid")
+        assert isinstance(first_child_tid, str)
+        wait_for_log_event(
+            manager,
+            log_queue,
+            lambda event: (
+                event.get("tid") == first_child_tid
+                and event.get("event") == "work_completed"
+            ),
+            timeout=30.0 if os.name == "nt" else 20.0,
+        )
+        wait_for_children(manager, timeout=10.0)
+        assert not manager._child_processes
+        second_spawn = wait_for_log_event(
+            manager,
+            log_queue,
+            lambda event: (
+                event.get("event") == "task_spawned"
+                and event.get("autostart_source") == source
+            ),
+        )
+        assert first_spawn["child_tid"] != second_spawn["child_tid"]
     finally:
         manager.cleanup()
 
@@ -2615,37 +2691,33 @@ def test_manager_autostart_ensure_applies_backoff_to_restart_only(
     manager = Manager(db_path, spec, config=config)
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     source = str(manifest_path.resolve())
+    drain(log_queue)
     try:
-        initial_spawn_events = []
-        initial_deadline = time.time() + 2.0
-        while not initial_spawn_events and time.time() < initial_deadline:
-            manager.process_once()
-            time.sleep(0.05)
-            for item in drain(log_queue):
-                event = json.loads(item)
-                if (
-                    event.get("event") == "task_spawned"
-                    and event.get("autostart_source") == source
-                ):
-                    initial_spawn_events.append(event)
-        assert len(initial_spawn_events) == 1
+        first_spawn = wait_for_log_event(
+            manager,
+            log_queue,
+            lambda event: (
+                event.get("event") == "task_spawned"
+                and event.get("autostart_source") == source
+            ),
+            timeout=8.0,
+        )
+        first_child_tid = first_spawn.get("child_tid")
+        assert isinstance(first_child_tid, str)
+        wait_for_log_event(
+            manager,
+            log_queue,
+            lambda event: (
+                event.get("tid") == first_child_tid
+                and event.get("event") == "work_completed"
+            ),
+            timeout=30.0 if os.name == "nt" else 20.0,
+        )
+        wait_for_children(manager, timeout=20.0 if os.name == "nt" else 10.0)
+        assert not manager._child_processes
 
-        early_deadline = time.time() + 0.3
         restart_events = []
-        while time.time() < early_deadline:
-            manager.process_once()
-            time.sleep(0.05)
-            for item in drain(log_queue):
-                event = json.loads(item)
-                if (
-                    event.get("event") == "task_spawned"
-                    and event.get("autostart_source") == source
-                ):
-                    restart_events.append(event)
-
-        assert restart_events == []
-
-        deadline = time.time() + 2.0
+        deadline = time.time() + 8.0
         while not restart_events and time.time() < deadline:
             manager.process_once()
             time.sleep(0.05)
@@ -2658,6 +2730,70 @@ def test_manager_autostart_ensure_applies_backoff_to_restart_only(
                     restart_events.append(event)
 
         assert len(restart_events) == 1
+    finally:
+        manager.cleanup()
+
+
+def test_manager_autostart_backoff_rescan_uses_due_time(
+    tmp_path: Path,
+    broker_env,
+    unique_tid,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, _make_queue = broker_env
+    autostart_dir, manifest_path = write_autostart_fixture(
+        tmp_path,
+        task_name="restart-backoff-due",
+        manifest_name="restart-backoff-due",
+        mode="ensure",
+        max_restarts=1,
+        backoff_seconds=0.5,
+        duration=0.0,
+    )
+
+    config = load_config()
+    config["WEFT_AUTOSTART_TASKS"] = False
+    config["WEFT_AUTOSTART_DIR"] = str(autostart_dir)
+
+    spec = make_manager_spec(unique_tid, idle_timeout=1.5)
+    manager = Manager(db_path, spec, config=config)
+    manager._autostart_enabled = True
+    source = str(manifest_path.resolve())
+    enqueued: list[tuple[dict[str, object], object]] = []
+
+    now_ns = 1_000_000_000
+    fake_time = SimpleNamespace(
+        time=time.time,
+        time_ns=lambda: now_ns,
+        monotonic=time.monotonic,
+        sleep=time.sleep,
+    )
+    monkeypatch.setattr(manager_mod, "time", fake_time)
+
+    def enqueue(payload: dict[str, object], inbox_message: object) -> bool:
+        enqueued.append((payload, inbox_message))
+        return True
+
+    monkeypatch.setattr(manager, "_enqueue_autostart_request", enqueue)
+
+    try:
+        manager._tick_autostart(force=True)
+        assert len(enqueued) == 1
+        assert manager._autostart_state[source]["next_allowed_ns"] == 1_500_000_000
+        manager._autostart_last_scan_ns = 0
+
+        now_ns = 1_250_000_000
+        manager._tick_autostart()
+        assert len(enqueued) == 1
+
+        now_ns = 1_499_999_999
+        manager._tick_autostart()
+        assert len(enqueued) == 1
+
+        now_ns = 1_500_000_000
+        manager._tick_autostart()
+        assert len(enqueued) == 2
+        assert manager._autostart_state[source]["restarts"] == 1
     finally:
         manager.cleanup()
 
@@ -2687,55 +2823,50 @@ def test_manager_autostart_ensure_restarts_after_abrupt_child_kill(
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     source = str(manifest_path.resolve())
     try:
-        child_event: dict[str, object] | None = None
         spawn_events: list[dict[str, object]] = []
-        seen_events: list[dict[str, object]] = []
+        event_tail: list[dict[str, object]] = []
         child_tid: str | None = None
-        start = time.time()
-        while child_event is None and time.time() - start < 5.0:
+        start = time.monotonic()
+        while not spawn_events and time.monotonic() - start < 5.0:
             manager.process_once()
             time.sleep(0.05)
             for item in drain(log_queue):
                 event = json.loads(item)
-                seen_events.append(event)
+                event_tail.append(event)
+                event_tail = event_tail[-10:]
                 if (
                     event.get("event") == "task_spawned"
                     and event.get("autostart_source") == source
                 ):
                     spawn_events.append(event)
-                    child_tid = str(event.get("child_tid"))
-                if child_tid is not None:
-                    child_event = next(
-                        (
-                            candidate
-                            for candidate in seen_events
-                            if candidate.get("tid") == child_tid
-                        ),
-                        None,
-                    )
+                    event_child_tid = event.get("child_tid")
+                    if isinstance(event_child_tid, str):
+                        child_tid = event_child_tid
 
-        assert manager._child_processes
-        assert child_tid is not None
-        child = next(iter(manager._child_processes.values())).process
+        assert spawn_events, f"expected autostart spawn event; tail={event_tail!r}"
+        assert child_tid is not None, (
+            f"spawn event missing child tid: {spawn_events[-1]!r}"
+        )
+        assert child_tid in manager._child_processes
+        child = manager._child_processes[child_tid].process
         child_pid = child.pid
         assert isinstance(child_pid, int) and child_pid > 0
-        live_deadline = time.time() + 2.0
-        while not _process_running(child_pid) and time.time() < live_deadline:
+        live_deadline = time.monotonic() + 2.0
+        while not _process_running(child_pid) and time.monotonic() < live_deadline:
             time.sleep(0.05)
         assert _process_running(child_pid) is True
-        assert child_event is not None
         assert len(spawn_events) == 1
 
         child.kill()
         child.join(timeout=2.0)
 
-        kill_deadline = time.time() + 2.0
-        while _process_running(child_pid) and time.time() < kill_deadline:
+        kill_deadline = time.monotonic() + 2.0
+        while _process_running(child_pid) and time.monotonic() < kill_deadline:
             time.sleep(0.05)
         assert _process_running(child_pid) is False
 
-        restart_deadline = time.time() + 5.0
-        while len(spawn_events) < 2 and time.time() < restart_deadline:
+        restart_deadline = time.monotonic() + 5.0
+        while len(spawn_events) < 2 and time.monotonic() < restart_deadline:
             manager.process_once()
             time.sleep(0.05)
             for item in drain(log_queue):

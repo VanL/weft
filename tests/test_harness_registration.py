@@ -498,9 +498,10 @@ def test_harness_cleanup_preserve_database_extends_windows_release_budget(
     try:
         harness.__enter__()
         monkeypatch.setattr(harness, "_collect_pid_mappings", lambda: None)
+        monkeypatch.setattr(harness, "_cleanup_manager_records", lambda: {})
         monkeypatch.setattr(harness, "_live_task_tids_from_mappings", lambda: [])
         monkeypatch.setattr(harness, "_live_registered_pids", lambda: [])
-        monkeypatch.setattr(harness_mod.os, "name", "nt")
+        monkeypatch.setattr(harness_mod, "_is_windows", lambda: True)
 
         release_checks: list[float] = []
         clock = {"now": 0.0}

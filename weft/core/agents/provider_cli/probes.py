@@ -61,7 +61,7 @@ def _cached_opencode_run_support(executable: str) -> bool:
             timeout=PROVIDER_CLI_OPENCODE_RUN_PROBE_TIMEOUT_SECONDS,
             check=False,
         )
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
         return False
     combined_output = f"{probe.stdout or ''}\n{probe.stderr or ''}".lower()
     return probe.returncode == 0 and (

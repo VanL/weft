@@ -20,17 +20,6 @@ from weft.ext import RunnerHandle
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CLI_SUBPROCESS_TIMEOUT = 60.0
-_BROKER_HEAVY_FIXTURES = frozenset(
-    {
-        "weft_harness",
-        "workdir",
-        "broker_env",
-        "broker_target",
-        "queue_factory",
-        "task_factory",
-    }
-)
-_BROKER_HEAVY_GROUP = "weft_broker_serial"
 _PRIORITY_TEST_NODEIDS = (
     "tests/cli/test_cli_long_session.py::"
     "test_cli_long_session_produces_identical_transcript_across_backends",
@@ -508,23 +497,9 @@ def _register_from_json(
 
 @pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
-    """Group broker-heavy tests onto one xdist worker and classify backend scope.
-
-    These tests exercise the real SQLite-backed broker, spawn child processes,
-    and rely on teardown cleanup of live workers. Keeping them on one xdist
-    worker matches the containment pattern used in SimpleBroker for
-    concurrency-sensitive suites and avoids cross-worker teardown races.
-
-    The marker must be attached before pytest-xdist's own
-    ``pytest_collection_modifyitems`` hook runs, because xdist reads the
-    ``xdist_group`` marker there to rewrite node IDs for ``--dist loadgroup``.
-    """
+    """Classify backend scope for collected test modules."""
     for item in items:
         relative_path = item.path.relative_to(REPO_ROOT).as_posix()
-        fixture_names = set(getattr(item, "fixturenames", ()))
-        if fixture_names & _BROKER_HEAVY_FIXTURES:
-            item.add_marker(pytest.mark.xdist_group(name=_BROKER_HEAVY_GROUP))
-
         if item.get_closest_marker("shared") or item.get_closest_marker("sqlite_only"):
             continue
         if relative_path in _SHARED_MODULES:

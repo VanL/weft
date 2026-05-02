@@ -1279,7 +1279,6 @@ def test_result_reads_pipeline_outbox_by_pipeline_tid(tmp_path) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     tid = str(time.time_ns())
-    log_queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
     outbox_queue = ctx.queue(f"P{tid}.outbox", persistent=True)
     status_queue = ctx.queue(f"P{tid}.status", persistent=True)
 
@@ -1290,34 +1289,6 @@ def test_result_reads_pipeline_outbox_by_pipeline_tid(tmp_path) -> None:
                 "type": "pipeline_status",
                 "pipeline_tid": tid,
                 "status": "running",
-            }
-        )
-    )
-    log_queue.write(
-        json.dumps(
-            {
-                "tid": tid,
-                "status": "completed",
-                "event": "work_completed",
-                "taskspec": {
-                    "tid": tid,
-                    "name": "demo-pipeline",
-                    "io": {
-                        "outputs": {"outbox": f"P{tid}.outbox"},
-                        "control": {"ctrl_out": f"P{tid}.ctrl_out"},
-                    },
-                    "state": {
-                        "status": "completed",
-                        "started_at": time.time_ns() - 10,
-                        "completed_at": time.time_ns(),
-                    },
-                    "metadata": {
-                        "role": "pipeline",
-                        "_weft_pipeline_runtime": {
-                            "queues": {"status": f"P{tid}.status"},
-                        },
-                    },
-                },
             }
         )
     )

@@ -71,8 +71,13 @@ class LLMBackend:
         preflight: bool = False,
         bundle_root: str | None = None,
     ) -> None:
-        del preflight, bundle_root
-        self._resolve_model(agent)
+        del bundle_root
+        self._validate_agent(agent)
+        self._register_plugin_modules(agent.runtime_config.get("plugin_modules"))
+        if not agent.model:
+            raise ValueError("llm backend requires spec.agent.model")
+        if preflight:
+            llm.get_model(agent.model)
 
     def _resolve_model(self, agent: AgentSection) -> Any:
         self._validate_agent(agent)

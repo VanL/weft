@@ -95,15 +95,18 @@ Use the narrowest real harness that still proves the behavior:
 
 **Why it happens**
 
-Broker-heavy tests share real SQLite-backed resources and live subprocess
-cleanup. This repo groups tests using `weft_harness`, `broker_env`, `workdir`,
-or `task_factory` onto one xdist worker to avoid teardown races.
+Broker-heavy tests intentionally run under normal xdist scheduling so contention
+bugs are visible. Flakes usually mean a test leaked context, a harness fixture
+did not isolate its project root or broker target, or the implementation has a
+real concurrency bug.
 
 **What to do**
 
 - Use the existing fixtures instead of rolling your own isolated broker setup.
-- If a new broker-heavy fixture is introduced, ensure collection groups it the
-  same way `tests/conftest.py` does for the existing fixtures.
+- Do not add blanket xdist serialization for broker-heavy fixtures. Fix the
+  isolation leak or implementation race, and only use a narrow test-local
+  serialization marker if the test is explicitly about a shared external
+  resource that cannot be isolated.
 
 ### Pattern 2: Mocked Queues Hide the Real Bug
 

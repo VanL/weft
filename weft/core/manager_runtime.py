@@ -778,7 +778,38 @@ def _start_manager(
                         try:
                             _acknowledge_manager_launch_success(launch)
                         except RuntimeError as exc:
-                            logger.warning(
+                            settled_record = _await_manager_start_settlement(
+                                context,
+                                manager_tid=manager_tid,
+                                deadline=deadline,
+                            )
+                            if (
+                                settled_record is not None
+                                and settled_record.get("tid") != manager_tid
+                            ):
+                                _cleanup_startup_stderr(launch.stderr_path)
+                                return settled_record, False, None
+                            view_after_ack = _registry_view(
+                                context,
+                                target_tid=manager_tid,
+                                queue=registry_queue,
+                            )
+                            current_record = view_after_ack.target_record or (
+                                view_after_ack.active_manager
+                                if view_after_ack.active_manager is not None
+                                and view_after_ack.active_manager.get("tid")
+                                == manager_tid
+                                else None
+                            )
+                            if not (
+                                isinstance(current_record, dict)
+                                and current_record.get("status") == "active"
+                                and is_canonical_manager_record(current_record)
+                                and _record_pid(current_record) == launch.pid
+                                and _is_pid_alive(launch.pid)
+                            ):
+                                continue
+                            logger.debug(
                                 "Detached manager launch for %s succeeded before "
                                 "post-proof acknowledgement failed: %s",
                                 manager_tid,

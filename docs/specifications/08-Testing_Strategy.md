@@ -34,8 +34,9 @@ Current classification rule:
 - test modules should declare backend scope explicitly through `shared` or
   `sqlite_only`, either directly or through the central classification tables in
   `tests/conftest.py`
-- broker-heavy tests that use `weft_harness`, `broker_env`, `queue_factory`,
-  `task_factory`, or `workdir` are grouped onto one xdist worker
+- broker-heavy tests run under normal xdist scheduling; parallel contention is
+  part of the test signal, and isolation bugs should be fixed in the harness or
+  implementation instead of hidden through broad serialization
 - broad directory-level audit exemptions are temporary migration scaffolding
   and should disappear once a subtree has been reviewed
 - any remaining unaudited debt should stay module-scoped, explicit, and

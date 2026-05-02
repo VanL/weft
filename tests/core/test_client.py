@@ -90,6 +90,7 @@ def test_legacy_forwarders_are_removed() -> None:
 
 def test_submit_returns_task_with_completed_result() -> None:
     with WeftTestHarness() as harness:
+        harness.ensure_foreground_manager()
         client = WeftClient(path=harness.root)
         task = client.submit(
             _function_taskspec(
@@ -108,6 +109,7 @@ def test_submit_returns_task_with_completed_result() -> None:
 
 def test_task_terminal_snapshot_is_non_consuming() -> None:
     with WeftTestHarness() as harness:
+        harness.ensure_foreground_manager()
         client = WeftClient(path=harness.root)
         task = client.submit(
             _function_taskspec(
@@ -124,6 +126,7 @@ def test_task_terminal_snapshot_is_non_consuming() -> None:
 
 def test_prepare_snapshots_payload_before_submission() -> None:
     with WeftTestHarness() as harness:
+        harness.ensure_foreground_manager()
         client = WeftClient(path=harness.root)
         payload = {"value": "before"}
         prepared = client.prepare(
@@ -142,6 +145,7 @@ def test_prepare_snapshots_payload_before_submission() -> None:
 
 def test_submit_command_returns_task_with_completed_result() -> None:
     with WeftTestHarness() as harness:
+        harness.ensure_foreground_manager()
         client = WeftClient(path=harness.root)
         task = client.submit_command(["echo", "hello"])
         result = task.result(timeout=30.0)
@@ -152,6 +156,7 @@ def test_submit_command_returns_task_with_completed_result() -> None:
 
 def test_submit_spec_and_pipeline_references_return_tasks() -> None:
     with WeftTestHarness() as harness:
+        harness.ensure_foreground_manager()
         _write_json(
             harness.root / ".weft" / "tasks" / "stored-echo.json",
             {
@@ -192,6 +197,7 @@ def test_submit_spec_and_pipeline_references_return_tasks() -> None:
 
 def test_task_snapshot_and_tasks_namespace_status_agree() -> None:
     with WeftTestHarness() as harness:
+        harness.ensure_foreground_manager()
         client = WeftClient(path=harness.root)
         task = client.submit_command(["echo", "status"])
         result = task.result(timeout=30.0)
@@ -221,6 +227,7 @@ def test_queue_alias_roundtrip() -> None:
 
 def test_task_follow_ends_with_result_event() -> None:
     with WeftTestHarness() as harness:
+        harness.ensure_foreground_manager()
         client = WeftClient(path=harness.root)
         task = client.submit_command(["echo", "done"])
         events = list(task.follow(timeout=30.0))
@@ -231,6 +238,7 @@ def test_task_follow_ends_with_result_event() -> None:
 
 def test_task_realtime_events_expose_browser_event_contract() -> None:
     with WeftTestHarness() as harness:
+        harness.ensure_foreground_manager()
         client = WeftClient(path=harness.root)
         task = client.submit_command(["echo", "done"])
         events = list(task.realtime_events(timeout=30.0))
@@ -244,19 +252,20 @@ def test_task_realtime_events_expose_browser_event_contract() -> None:
 
 def test_system_and_manager_namespaces_expose_shared_runtime_state() -> None:
     with WeftTestHarness() as harness:
+        record = harness.ensure_foreground_manager()
         client = WeftClient(path=harness.root)
-        manager = client.managers.start()
+        manager_tid = str(record["tid"])
         status_snapshot = client.system.status()
-        manager_snapshot = client.managers.status(manager.tid)
-        client.managers.stop(manager.tid)
+        manager_snapshot = client.managers.status(manager_tid)
 
-        assert manager.tid
+        assert manager_tid
         assert manager_snapshot is not None
-        assert any(item.tid == manager.tid for item in status_snapshot.managers)
+        assert any(item.tid == manager_tid for item in status_snapshot.managers)
 
 
 def test_tasks_watch_yields_terminal_snapshot() -> None:
     with WeftTestHarness() as harness:
+        harness.ensure_foreground_manager()
         client = WeftClient(path=harness.root)
         task = client.submit_command(["echo", "watched"])
         snapshots = list(client.tasks.watch(task.tid, timeout=30.0))

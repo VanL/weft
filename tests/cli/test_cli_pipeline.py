@@ -13,6 +13,7 @@ def _write_json(path, payload) -> None:
 
 
 def test_pipeline_run_sequential(workdir, weft_harness) -> None:
+    weft_harness.ensure_foreground_manager()
     ctx = build_context(spec_context=workdir)
     tasks_dir = ctx.weft_dir / "tasks"
     tasks_dir.mkdir(parents=True, exist_ok=True)
@@ -73,6 +74,7 @@ def test_pipeline_run_sequential(workdir, weft_harness) -> None:
 def test_pipeline_run_reads_piped_stdin_when_input_omitted(
     workdir, weft_harness
 ) -> None:
+    weft_harness.ensure_foreground_manager()
     ctx = build_context(spec_context=workdir)
     tasks_dir = ctx.weft_dir / "tasks"
     tasks_dir.mkdir(parents=True, exist_ok=True)
@@ -133,6 +135,7 @@ def test_pipeline_run_reads_piped_stdin_when_input_omitted(
 def test_pipeline_run_stage_can_be_bundle_backed_task_spec(
     workdir, weft_harness
 ) -> None:
+    weft_harness.ensure_foreground_manager()
     ctx = build_context(spec_context=workdir)
     tasks_dir = ctx.weft_dir / "tasks"
     tasks_dir.mkdir(parents=True, exist_ok=True)
@@ -186,6 +189,7 @@ def test_pipeline_run_stage_can_be_bundle_backed_task_spec(
 
 
 def test_pipeline_run_no_wait_returns_pipeline_tid(workdir, weft_harness) -> None:
+    weft_harness.ensure_foreground_manager()
     ctx = build_context(spec_context=workdir)
     tasks_dir = ctx.weft_dir / "tasks"
     tasks_dir.mkdir(parents=True, exist_ok=True)
@@ -260,6 +264,7 @@ def test_pipeline_run_no_wait_returns_pipeline_tid(workdir, weft_harness) -> Non
 def test_pipeline_stage_failure_returns_nonzero_and_names_failing_stage(
     workdir, weft_harness
 ) -> None:
+    weft_harness.ensure_foreground_manager()
     ctx = build_context(spec_context=workdir)
     tasks_dir = ctx.weft_dir / "tasks"
     tasks_dir.mkdir(parents=True, exist_ok=True)

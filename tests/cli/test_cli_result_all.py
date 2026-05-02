@@ -11,6 +11,7 @@ from weft.commands import tasks as task_cmd
 
 
 def _submit_task(harness: WeftTestHarness, *run_args: str) -> str:
+    harness.ensure_foreground_manager()
     rc, out, err = run_cli(
         "run",
         "--no-wait",
@@ -95,7 +96,7 @@ def _wait_for_task_status(
     tid: str,
     *,
     status: str,
-    timeout: float = 5.0,
+    timeout: float = 20.0,
 ) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -170,6 +171,7 @@ def test_result_all_json_output(weft_harness: WeftTestHarness) -> None:
 
 def test_result_all_filters_running_tasks(weft_harness: WeftTestHarness) -> None:
     """Test that `weft result --all` does not include running/streaming tasks."""
+    weft_harness.ensure_foreground_manager()
     completed_tid = _submit_task(
         weft_harness,
         "--function",
@@ -184,6 +186,8 @@ def test_result_all_filters_running_tasks(weft_harness: WeftTestHarness) -> None
         weft_harness,
         "--function",
         "tests.tasks.sample_targets:streaming_echo",
+        "--kw",
+        "delay=15.0",
         "--stream-output",
     )
     _wait_for_task_status(weft_harness, streaming_tid, status="running")

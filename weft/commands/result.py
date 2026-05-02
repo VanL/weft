@@ -25,6 +25,7 @@ from weft._constants import (
 )
 from weft.commands.types import TaskResult
 from weft.context import WeftContext, build_context
+from weft.core.pipelines import pipeline_public_queues
 from weft.core.queue_wait import QueueChangeMonitor
 from weft.helpers import iter_queue_json_entries
 
@@ -92,6 +93,13 @@ def _queue_names_for_tid(
     if not ctrl_out:
         ctrl_out = f"{prefix}{QUEUE_CTRL_OUT_SUFFIX}"
     return outbox, ctrl_out
+
+
+def _pipeline_queue_names_for_tid(tid: str) -> tuple[str, str, str]:
+    """Return the canonical pipeline result, control, and status queues."""
+
+    queues = pipeline_public_queues(tid)
+    return queues.outbox, queues.ctrl_out, queues.status
 
 
 def _load_taskspec_payload(context: WeftContext, tid: str) -> dict[str, Any] | None:
@@ -199,6 +207,29 @@ def _await_result_materialization(
                     ctrl_out_name=ctrl_out_name,
                     log_last_timestamp=log_last_timestamp,
                 )
+
+            if taskspec_payload is None:
+                (
+                    pipeline_outbox_name,
+                    pipeline_ctrl_out_name,
+                    pipeline_status_name,
+                ) = _pipeline_queue_names_for_tid(tid)
+                if _queue_names_exist(
+                    context,
+                    pipeline_outbox_name,
+                    pipeline_ctrl_out_name,
+                    pipeline_status_name,
+                ) or _result_surface_has_activity(
+                    context,
+                    outbox_name=pipeline_outbox_name,
+                    ctrl_out_name=pipeline_ctrl_out_name,
+                ):
+                    return ResultMaterialization(
+                        taskspec_payload=None,
+                        outbox_name=pipeline_outbox_name,
+                        ctrl_out_name=pipeline_ctrl_out_name,
+                        log_last_timestamp=log_last_timestamp,
+                    )
 
             events, log_last_timestamp = poll_log_events(
                 log_queue,

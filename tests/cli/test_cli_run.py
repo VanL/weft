@@ -22,6 +22,7 @@ from tests.fixtures.provider_cli_fixture import (
 from tests.helpers.weft_harness import WeftTestHarness
 from tests.taskspec import fixtures as taskspec_fixtures
 from weft._constants import (
+    TERMINAL_TASK_STATUSES,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MANAGERS_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
@@ -29,6 +30,7 @@ from weft._constants import (
 from weft.commands import manager as manager_cmd
 from weft.commands import tasks as task_cmd
 from weft.context import WeftContext, build_context
+from weft.core.endpoints import resolve_endpoint
 from weft.helpers import pid_is_live
 
 PROCESS_SCRIPT = Path(__file__).resolve().parents[1] / "tasks" / "process_target.py"
@@ -53,6 +55,63 @@ def _write_queue_message(
         queue.write(payload)
     finally:
         queue.close()
+
+
+def _wait_for_endpoint_claim(
+    context: WeftContext,
+    *,
+    name: str,
+    tid: str,
+    timeout: float = 30.0,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout
+    last_resolved: dict[str, Any] | None = None
+    last_snapshot: Any | None = None
+    while time.monotonic() < deadline:
+        resolved = resolve_endpoint(context, name)
+        if resolved is not None:
+            last_resolved = resolved.to_dict()
+            if resolved.record.tid == tid:
+                return last_resolved
+
+        snapshot = task_cmd.task_status(tid, context_path=context.root)
+        if snapshot is not None:
+            last_snapshot = snapshot
+            if snapshot.status in TERMINAL_TASK_STATUSES:
+                raise AssertionError(
+                    "Endpoint owner reached a terminal state before claiming "
+                    f"{name!r}: snapshot={snapshot!r}; resolved={last_resolved!r}"
+                )
+        time.sleep(0.05)
+
+    raise AssertionError(
+        f"Timed out waiting for endpoint {name!r} to resolve to {tid}; "
+        f"last_resolved={last_resolved!r}; last_snapshot={last_snapshot!r}"
+    )
+
+
+def _wait_for_endpoint_release(
+    context: WeftContext,
+    *,
+    name: str,
+    tid: str,
+    timeout: float = 30.0,
+) -> None:
+    deadline = time.monotonic() + timeout
+    last_resolved: dict[str, Any] | None = None
+    last_snapshot: Any | None = None
+    while time.monotonic() < deadline:
+        resolved = resolve_endpoint(context, name)
+        if resolved is None:
+            return
+        last_resolved = resolved.to_dict()
+        last_snapshot = task_cmd.task_status(tid, context_path=context.root)
+        time.sleep(0.05)
+
+    raise AssertionError(
+        f"Timed out waiting for endpoint {name!r} to release; "
+        f"last_resolved={last_resolved!r}; last_snapshot={last_snapshot!r}"
+    )
 
 
 def _create_stored_task_spec(
@@ -349,7 +408,7 @@ def _wait_for_started_task_tid(
     harness,
     *,
     task_name: str,
-    timeout: float = 10.0,
+    timeout: float = 20.0,
 ) -> str:
     queue = harness.context.queue(
         WEFT_GLOBAL_LOG_QUEUE,
@@ -538,6 +597,7 @@ def test_cli_run_spec_name_resolves_stored_task_spec(workdir, weft_harness) -> N
 def test_cli_run_spec_name_resolves_builtin_probe_helper_and_writes_agent_settings(
     workdir: Path,
     weft_harness: WeftTestHarness,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider_wrappers = [
         (provider_name, write_provider_cli_wrapper(workdir, provider_name))
@@ -545,6 +605,8 @@ def test_cli_run_spec_name_resolves_builtin_probe_helper_and_writes_agent_settin
     ]
     env = os.environ.copy()
     env["PATH"] = os.pathsep.join([str(workdir), env.get("PATH", "")])
+    monkeypatch.setenv("PATH", env["PATH"])
+    weft_harness.ensure_foreground_manager()
 
     for _provider_name, wrapper in provider_wrappers:
         resolved = shutil.which(wrapper.name, path=env["PATH"])
@@ -835,6 +897,7 @@ def test_cli_run_spec_bundle_resolves_bundle_local_function_target(
 def test_cli_run_spec_bundle_passes_plain_json_object_stdin_to_function_target(
     workdir, weft_harness
 ) -> None:
+    weft_harness.ensure_foreground_manager()
     bundle_dir = workdir / "bundle-json-task"
     bundle_dir.mkdir(parents=True, exist_ok=True)
     (bundle_dir / "helper_module.py").write_text(
@@ -1640,6 +1703,7 @@ def test_cli_run_persistent_spec_name_claims_and_releases_endpoint(
     workdir: Path,
     weft_harness: WeftTestHarness,
 ) -> None:
+    weft_harness.ensure_foreground_manager()
     spec_path = workdir / "persistent_named_endpoint.json"
     spec_payload = {
         "name": "persistent-worker",
@@ -1668,24 +1732,24 @@ def test_cli_run_persistent_spec_name_claims_and_releases_endpoint(
     assert err == ""
     tid = out.strip()
 
-    deadline = time.time() + 10.0
-    resolved_payload: dict[str, Any] | None = None
-    while time.time() < deadline:
-        rc, out, err = run_cli(
-            "queue",
-            "resolve",
-            "mayor",
-            "--json",
-            cwd=workdir,
-            harness=weft_harness,
-        )
-        if rc == 0:
-            resolved_payload = json.loads(out)
-            break
-        time.sleep(0.05)
-
-    assert resolved_payload is not None
+    resolved_payload = _wait_for_endpoint_claim(
+        weft_harness.context,
+        name="mayor",
+        tid=tid,
+    )
     assert resolved_payload["tid"] == tid
+
+    rc, out, err = run_cli(
+        "queue",
+        "resolve",
+        "mayor",
+        "--json",
+        cwd=workdir,
+        harness=weft_harness,
+    )
+    assert rc == 0
+    assert json.loads(out)["tid"] == tid
+    assert err == ""
 
     snapshot = task_cmd.task_status(tid, context_path=workdir)
     assert snapshot is not None
@@ -1701,19 +1765,18 @@ def test_cli_run_persistent_spec_name_claims_and_releases_endpoint(
     assert rc == 0
     assert err == ""
 
-    deadline = time.time() + 10.0
-    while time.time() < deadline:
-        rc, out, err = run_cli(
-            "queue",
-            "resolve",
-            "mayor",
-            cwd=workdir,
-            harness=weft_harness,
-        )
-        if rc == 2:
-            break
-        time.sleep(0.05)
-
+    _wait_for_endpoint_release(
+        weft_harness.context,
+        name="mayor",
+        tid=tid,
+    )
+    rc, out, err = run_cli(
+        "queue",
+        "resolve",
+        "mayor",
+        cwd=workdir,
+        harness=weft_harness,
+    )
     assert rc == 2
     assert out == ""
     assert "No active endpoint named 'mayor'" in err
@@ -1867,6 +1930,7 @@ def test_cli_run_continuous_overrides_nonpersistent_spec(workdir, weft_harness) 
 
 
 def test_cli_run_interactive_command_streams(workdir, weft_harness) -> None:
+    weft_harness.ensure_foreground_manager()
     rc, out, err = run_cli(
         "run",
         "--interactive",
@@ -2124,6 +2188,7 @@ def test_cli_run_no_wait_survives_short_manager_lifetime(workdir, weft_harness) 
 def test_harness_wait_for_completion_reports_cancelled_task(
     workdir, weft_harness
 ) -> None:
+    weft_harness.ensure_foreground_manager()
     rc, out, err = run_cli(
         "run",
         "--function",
@@ -2159,6 +2224,7 @@ def test_harness_wait_for_completion_reports_cancelled_task(
 
 
 def test_cli_run_wait_reports_cancelled_task(workdir, weft_harness) -> None:
+    weft_harness.ensure_foreground_manager()
     run_timeout = 30.0 if sys.platform == "win32" else 15.0
     result_timeout = 35.0 if sys.platform == "win32" else 20.0
 
@@ -2197,6 +2263,7 @@ def test_cli_run_wait_reports_cancelled_task(workdir, weft_harness) -> None:
 
 
 def test_cli_run_wait_returns_timeout_exit_code(workdir, weft_harness) -> None:
+    weft_harness.ensure_foreground_manager()
     rc, out, err = run_cli(
         "run",
         "--timeout",
@@ -2216,6 +2283,7 @@ def test_cli_run_wait_returns_timeout_exit_code(workdir, weft_harness) -> None:
 
 
 def test_cli_run_prunes_stale_manager(workdir, weft_harness) -> None:
+    weft_harness.ensure_foreground_manager()
     context = weft_harness.context
     registry = context.queue(WEFT_MANAGERS_REGISTRY_QUEUE, persistent=False)
     try:

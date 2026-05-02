@@ -19,6 +19,7 @@ from urllib import parse as urllib_parse
 from urllib import request as urllib_request
 
 PROJECT_ROOT: Final[Path] = Path(__file__).resolve().parents[1]
+PROJECT_VENV_PATH: Final[Path] = PROJECT_ROOT / ".venv"
 PYPROJECT_PATH: Final[Path] = PROJECT_ROOT / "pyproject.toml"
 CONSTANTS_PATH: Final[Path] = PROJECT_ROOT / "weft" / "_constants.py"
 DOCKER_EXTENSION_DIR: Final[Path] = PROJECT_ROOT / "extensions" / "weft_docker"
@@ -70,7 +71,7 @@ BASE_PRECHECK_COMMANDS: Final[tuple[tuple[str, ...], ...]] = (
         "--tb=short",
         "-m",
         "",
-        "--override-ini=addopts=-ra -q --strict-markers -n auto --dist loadgroup",
+        "--override-ini=addopts=-ra -q --strict-markers -n auto --dist load",
     ),
     (
         "uv",
@@ -519,13 +520,16 @@ def _merge_command_env(
     env_overrides: dict[str, str] | None,
     *,
     base_env: dict[str, str] | None = None,
-) -> dict[str, str] | None:
+) -> dict[str, str]:
     """Merge per-command environment overrides onto the current environment."""
 
-    if not env_overrides:
-        return None
-
     merged = os.environ.copy() if base_env is None else base_env.copy()
+    merged["UV_PROJECT_ENVIRONMENT"] = str(PROJECT_VENV_PATH)
+    if merged.get("VIRTUAL_ENV") != str(PROJECT_VENV_PATH):
+        merged.pop("VIRTUAL_ENV", None)
+    if not env_overrides:
+        return merged
+
     for key, value in env_overrides.items():
         if key == "PYTEST_ADDOPTS":
             existing = merged.get(key, "").strip()

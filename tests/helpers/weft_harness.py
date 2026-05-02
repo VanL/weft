@@ -5,6 +5,7 @@ import gc
 import json
 import os
 import tempfile
+import threading
 import time
 from pathlib import Path
 from types import TracebackType
@@ -17,14 +18,22 @@ from weft._constants import (
     CONTROL_STOP,
     QUEUE_OUTBOX_SUFFIX,
     WEFT_GLOBAL_LOG_QUEUE,
+    WEFT_MANAGER_RUNTIME_HANDLE_JSON_ENV,
     WEFT_MANAGERS_REGISTRY_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
 )
 from weft.commands import manager as manager_cmd
 from weft.commands import tasks as task_cmd
 from weft.context import WeftContext, build_context
+from weft.core.manager import Manager
+from weft.core.manager_runtime import build_manager_spec, generate_tid
 from weft.ext import RunnerHandle
-from weft.helpers import iter_queue_json_entries, pid_is_live, terminate_process_tree
+from weft.helpers import (
+    is_canonical_manager_record,
+    iter_queue_json_entries,
+    pid_is_live,
+    terminate_process_tree,
+)
 
 DEFAULT_TASK_COMPLETION_TIMEOUT = 60.0
 TERMINAL_TASK_EVENTS = {
@@ -35,6 +44,10 @@ TERMINAL_TASK_EVENTS = {
     "task_signal_stop",
     "task_signal_kill",
 }
+
+
+def _is_windows() -> bool:
+    return os.name == "nt"
 
 
 class WeftTestHarness:
@@ -54,6 +67,9 @@ class WeftTestHarness:
         self._registered_managed_pids: set[int] = set()
         self._registered_tids: set[str] = set()
         self._registered_manager_tids: set[str] = set()
+        self._inline_managers: list[
+            tuple[Manager, threading.Thread, threading.Event]
+        ] = []
         self._closed = False
         self._self_pid = os.getpid()
         self._safe_pids = self._compute_safe_pid_set()
@@ -120,6 +136,74 @@ class WeftTestHarness:
 
     def registered_manager_tids(self) -> set[str]:
         return set(self._registered_manager_tids)
+
+    def ensure_foreground_manager(self, *, timeout: float = 10.0) -> dict[str, object]:
+        """Start an in-process manager for tests that are not about bootstrap."""
+
+        records = self._list_active_manager_records()
+        if records:
+            record = records[0]
+            tid = record.get("tid")
+            if isinstance(tid, str):
+                self.register_manager_tid(tid)
+            return record
+
+        context = self.context
+        manager_tid = generate_tid(context)
+        spec = build_manager_spec(
+            context,
+            manager_tid,
+            idle_timeout_override=0.0,
+        )
+        manager_runtime_handle = RunnerHandle(
+            runner="host",
+            kind="supervised-process",
+            id=str(os.getpid()),
+            control={"authority": "external-supervisor"},
+            observations={"host_pids": [os.getpid()]},
+            metadata={"supervisor": "weft-test-harness"},
+        )
+        manager_config = dict(context.config)
+        manager_config[WEFT_MANAGER_RUNTIME_HANDLE_JSON_ENV] = json.dumps(
+            manager_runtime_handle.to_dict()
+        )
+        manager = Manager(context.broker_target, spec, config=manager_config)
+        stop_event = threading.Event()
+
+        def _serve_inline_manager() -> None:
+            try:
+                while not stop_event.is_set() and not manager.should_stop:
+                    manager.process_once()
+                    time.sleep(0.01)
+            finally:
+                manager.cleanup()
+
+        thread = threading.Thread(
+            target=_serve_inline_manager,
+            name=f"weft-test-manager-{manager_tid}",
+            daemon=True,
+        )
+        thread.start()
+        self._inline_managers.append((manager, thread, stop_event))
+        self.register_manager_tid(manager_tid)
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            records = self._list_active_manager_records()
+            if records:
+                record = records[0]
+                tid = record.get("tid")
+                if isinstance(tid, str):
+                    self.register_manager_tid(tid)
+                return record
+            if not thread.is_alive():
+                raise AssertionError(
+                    "Inline manager exited before becoming active: "
+                    f"status={manager.taskspec.state.status!r}"
+                )
+            time.sleep(0.05)
+
+        raise AssertionError("Timed out waiting for inline manager readiness")
 
     @staticmethod
     def _format_debug_payload(payload: object) -> str:
@@ -360,6 +444,7 @@ class WeftTestHarness:
 
         try:
             if preserve_database:
+                self._stop_inline_managers()
                 self._cleanup_preserving_database()
                 return
 
@@ -368,6 +453,7 @@ class WeftTestHarness:
                 drain_registry=True,
                 stop_tasks=True,
             )
+            self._stop_inline_managers()
             self._collect_pid_mappings()
             self._wait_for_registered_pids_to_exit()
             if not preserve_database:
@@ -384,6 +470,15 @@ class WeftTestHarness:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+    def _stop_inline_managers(self) -> None:
+        for manager, thread, stop_event in self._inline_managers:
+            stop_event.set()
+            manager.should_stop = True
+            thread.join(timeout=2.0)
+            if thread.is_alive():
+                manager.cleanup()
+        self._inline_managers.clear()
+
     def _patch_environment(self) -> None:
         overrides = {
             "WEFT_TEST_MODE": "1",
@@ -544,26 +639,35 @@ class WeftTestHarness:
         return sorted(set(candidate_tids))
 
     def _list_active_manager_records(self) -> list[dict[str, object]]:
-        context_path = self.context.root
-        exit_code, payload = manager_cmd.list_command(
-            json_output=True,
-            context_path=context_path,
+        queue = Queue(
+            WEFT_MANAGERS_REGISTRY_QUEUE,
+            db_path=self.context.broker_target,
+            persistent=False,
+            config=self.context.broker_config,
         )
-        if exit_code != 0 or not payload:
-            return []
-
+        latest: dict[str, tuple[dict[str, object], int]] = {}
         try:
-            records = json.loads(payload)
-        except json.JSONDecodeError:
-            return []
+            for payload, timestamp in iter_queue_json_entries(queue):
+                tid = payload.get("tid")
+                if not isinstance(tid, str):
+                    continue
+                record = dict(payload)
+                previous = latest.get(tid)
+                if previous is None or previous[1] < timestamp:
+                    latest[tid] = (record, timestamp)
+        finally:
+            queue.close()
 
         active_records: list[dict[str, object]] = []
-        for record in records:
-            if not isinstance(record, dict):
+        for record, _timestamp in latest.values():
+            if not is_canonical_manager_record(record):
                 continue
             if record.get("status") != "active":
                 continue
+            if not any(pid_is_live(pid) for pid in self._mapping_host_pids(record)):
+                continue
             active_records.append(record)
+        active_records.sort(key=lambda item: int(str(item.get("tid", "0"))))
         return active_records
 
     def _cleanup_manager_records(self) -> dict[str, dict[str, object]]:
@@ -654,7 +758,7 @@ class WeftTestHarness:
 
     def _cleanup_preserving_database(self) -> None:
         wait_budget = max(6.0, min(self._manager_timeout, 10.0))
-        if os.name == "nt":
+        if _is_windows():
             # Windows can keep SQLite WAL/SHM handles around after the last
             # live PID exits, especially under CI load.
             wait_budget = max(wait_budget, 30.0)
@@ -669,10 +773,11 @@ class WeftTestHarness:
         while time.time() < deadline:
             self._collect_pid_mappings()
 
-            for tid in sorted(self._registered_manager_tids):
+            manager_records = self._cleanup_manager_records()
+            for tid, record in sorted(manager_records.items()):
                 if tid in issued_worker_stops:
                     continue
-                self._send_manager_stop(tid, record={"tid": tid})
+                self._send_manager_stop(tid, record=record)
                 issued_worker_stops.add(tid)
 
             last_live_task_tids = self._live_task_tids_from_mappings()

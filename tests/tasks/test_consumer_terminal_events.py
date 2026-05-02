@@ -12,10 +12,7 @@ from weft._constants import WEFT_GLOBAL_LOG_QUEUE
 from weft.core.tasks import Consumer
 from weft.core.tasks.runner import RunnerOutcome
 
-pytestmark = [
-    pytest.mark.shared,
-    pytest.mark.xdist_group(name="weft_broker_serial"),
-]
+pytestmark = [pytest.mark.shared]
 
 
 def _terminal_events(db_path: str, tid: str) -> list[str]:

@@ -216,7 +216,6 @@ class BaseTask(MultiQueueWatcher, ABC):
         self._endpoint_registration_name: str | None = None
         self._endpoint_registration_metadata: dict[str, Any] | None = None
         self._endpoint_registration_message_id: int | None = None
-        self._claim_configured_runtime_endpoint()
         self._streaming_session_info: dict[str, Any] | None = None
         self._streaming_session_message_id: int | None = None
 
@@ -230,6 +229,7 @@ class BaseTask(MultiQueueWatcher, ABC):
         if self.enable_process_title:
             self._update_process_title("init")
         self._register_tid_mapping()
+        self._claim_configured_runtime_endpoint()
         self._report_state_change(event="task_initialized")
 
     # ------------------------------------------------------------------

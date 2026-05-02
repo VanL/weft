@@ -68,6 +68,7 @@ def test_run_adapter_routes_manager_recovery_through_shared_submission(
 
 def test_client_submission_and_shared_result_wait_match() -> None:
     with WeftTestHarness() as harness:
+        harness.ensure_foreground_manager()
         client = WeftClient(path=harness.root)
         task = client.submit_command(["echo", "hello"])
         result = result_mod.await_task_result(client.context, task.tid, timeout=30.0)

@@ -54,6 +54,7 @@ def test_runner_handle_rejects_legacy_shape() -> None:
         )
 
 
+@pytest.mark.timeout(30)
 def test_task_runner_executes_function_successfully():
     runner = TaskRunner(
         target_type="function",
@@ -65,7 +66,7 @@ def test_task_runner_executes_function_successfully():
         kwargs={"suffix": "!"},
         env={},
         working_dir=None,
-        timeout=5.0,
+        timeout=None,
         limits=None,
         monitor_class=None,
         monitor_interval=0.1,

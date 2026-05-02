@@ -606,9 +606,8 @@ def test_build_precheck_commands_cover_release_gate_and_quality_gates() -> None:
     assert "-m" in sqlite_command
     marker_index = sqlite_command.index("-m")
     assert sqlite_command[marker_index + 1] == ""
-    assert (
-        "--override-ini=addopts=-ra -q --strict-markers -n auto --dist loadgroup"
-        in sqlite_command
+    assert "--override-ini=addopts=-ra -q --strict-markers -n auto --dist load" in (
+        sqlite_command
     )
     assert postgres_command == (
         "uv",
@@ -771,8 +770,25 @@ def test_merge_command_env_appends_pytest_addopts() -> None:
 
     assert merged is not None
     assert merged["PATH"] == "/tmp/bin"
+    assert merged["UV_PROJECT_ENVIRONMENT"] == str(release.PROJECT_VENV_PATH)
     assert merged["PYTEST_ADDOPTS"] == "--lf -x --maxfail=1"
     assert merged["WEFT_EAGER_FAILURE_TRACEBACK"] == "1"
+
+
+def test_merge_command_env_drops_non_project_virtualenv() -> None:
+    """Release helper commands should not inherit an unrelated active venv."""
+
+    release = _load_release_module()
+    merged = release._merge_command_env(
+        None,
+        base_env={
+            "PATH": "/tmp/bin",
+            "VIRTUAL_ENV": "/tmp/unrelated-venv",
+        },
+    )
+
+    assert merged["UV_PROJECT_ENVIRONMENT"] == str(release.PROJECT_VENV_PATH)
+    assert "VIRTUAL_ENV" not in merged
 
 
 def test_run_command_dry_run_shows_env_prefix_and_cwd(

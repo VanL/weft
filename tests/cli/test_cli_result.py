@@ -141,6 +141,7 @@ def test_result_stream_attaches_to_running_command_and_emits_live_output(
     weft_harness,
 ) -> None:
     ready_path = workdir / "result-stream-ready.txt"
+    release_path = workdir / "result-stream-release.txt"
     rc, out, err = run_cli(
         "run",
         "--no-wait",
@@ -149,12 +150,16 @@ def test_result_stream_attaches_to_running_command_and_emits_live_output(
         sys.executable,
         "-c",
         (
-            "from pathlib import Path; import time; "
-            f"ready = Path({str(ready_path)!r}); "
-            "print('first', flush=True); "
-            "ready.write_text('ready', encoding='utf-8'); "
-            "time.sleep(30); "
-            "print('second', flush=True)"
+            "from pathlib import Path\n"
+            "import time\n"
+            f"ready = Path({str(ready_path)!r})\n"
+            f"release = Path({str(release_path)!r})\n"
+            "print('first', flush=True)\n"
+            "ready.write_text('ready', encoding='utf-8')\n"
+            "deadline = time.monotonic() + 120\n"
+            "while not release.exists() and time.monotonic() < deadline:\n"
+            "    time.sleep(0.05)\n"
+            "print('second', flush=True)\n"
         ),
         cwd=workdir,
         harness=weft_harness,
@@ -166,20 +171,23 @@ def test_result_stream_attaches_to_running_command_and_emits_live_output(
         "streaming command did not publish readiness marker"
     )
 
-    rc, out, err = run_cli(
-        "result",
-        tid,
-        "--stream",
-        "--timeout",
-        "1",
-        cwd=workdir,
-        harness=weft_harness,
-    )
+    try:
+        rc, out, err = run_cli(
+            "result",
+            tid,
+            "--stream",
+            "--timeout",
+            "1",
+            cwd=workdir,
+            harness=weft_harness,
+        )
 
-    assert rc == 124
-    assert out == "first"
-    assert "Timed out after" in err
-    assert f"waiting for task {tid}" in err
+        assert rc == 124
+        assert out == "first"
+        assert "Timed out after" in err
+        assert f"waiting for task {tid}" in err
+    finally:
+        release_path.write_text("release", encoding="utf-8")
     weft_harness.wait_for_completion(tid)
 
 

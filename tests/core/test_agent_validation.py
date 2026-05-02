@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,7 @@ from tests.fixtures.provider_cli_fixture import (
     write_provider_cli_wrapper,
 )
 from tests.taskspec.fixtures import create_valid_provider_cli_agent_taskspec
+from weft.core.agents.provider_cli import probes
 from weft.core.agents.provider_cli.registry import list_provider_cli_providers
 from weft.core.agents.validation import (
     validate_taskspec_agent_runtime,
@@ -131,6 +133,24 @@ def test_validate_agent_runtime_preflight_does_not_check_opencode_run_support(
     validate_taskspec_agent_runtime(payload, load_runtime=True, preflight=True)
 
     monkeypatch.delenv("PROVIDER_CLI_FIXTURE_OPENCODE_NO_RUN", raising=False)
+
+
+def test_opencode_run_support_probe_timeout_is_reported_as_unsupported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probes._cached_opencode_run_support.cache_clear()
+
+    def timeout_probe(*args: object, **kwargs: object) -> subprocess.CompletedProcess:
+        del args, kwargs
+        raise subprocess.TimeoutExpired(["opencode", "run", "--help"], 2.0)
+
+    monkeypatch.setattr(subprocess, "run", timeout_probe)
+
+    try:
+        with pytest.raises(RuntimeError, match="does not support 'run'"):
+            probes.ensure_opencode_run_support("opencode")
+    finally:
+        probes._cached_opencode_run_support.cache_clear()
 
 
 def test_validate_agent_runtime_preflight_uses_project_agent_settings_for_executable(

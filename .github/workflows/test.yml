@@ -36,7 +36,7 @@ jobs:
 
     - name: Run tests with pytest
       run: |
-        pytest -v --tb=short -m "not slow" --override-ini="addopts=-ra -q --strict-markers"
+        pytest -v --tb=short -m "not slow" --override-ini="addopts=-ra -q --strict-markers -n auto --dist load"
 
     - name: Test CLI installation
       run: |
@@ -171,7 +171,7 @@ jobs:
 
     - name: Run tests with coverage
       run: |
-        pytest --cov=weft --cov-report=term-missing --cov-report=html --cov-report=xml -m "not slow" --override-ini="addopts=-ra -q --strict-markers"
+        pytest --cov=weft --cov-report=term-missing --cov-report=html --cov-report=xml -m "not slow" --override-ini="addopts=-ra -q --strict-markers -n auto --dist load"
 
     - name: Upload coverage reports
       uses: codecov/codecov-action@57e3a136b779b570ffcdbf80b3bdc90e7fab3de2 # v6.0.0
