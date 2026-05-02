@@ -436,6 +436,86 @@ def test_await_single_result_reads_outbox_after_completion_event(
     assert error is None
 
 
+def test_await_single_result_returns_visible_one_shot_result_at_deadline(
+    tmp_path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    outbox_name = f"T{tid}.outbox"
+    outbox_queue = ctx.queue(outbox_name, persistent=True)
+
+    try:
+        outbox_queue.write("ready")
+
+        status, result, error = _await_single_result(
+            ctx,
+            tid,
+            timeout=0.01,
+            show_stderr=False,
+            taskspec_payload=None,
+            outbox_name=outbox_name,
+            ctrl_out_name=f"T{tid}.ctrl_out",
+        )
+    finally:
+        outbox_queue.close()
+
+    assert status == "completed"
+    assert result == "ready"
+    assert error is None
+
+
+def test_await_single_result_zero_timeout_does_not_wait_on_partial_stream(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    outbox_name = f"T{tid}.outbox"
+    outbox_queue = ctx.queue(outbox_name, persistent=True)
+
+    class _NoWaitMonitor:
+        def __init__(self, _queues, *, config=None) -> None:
+            del config
+
+        def wait(self, timeout: float | None) -> bool:
+            raise AssertionError(f"unexpected wait with timeout={timeout!r}")
+
+        def close(self) -> None:
+            return
+
+    monkeypatch.setattr(result_wait, "QueueChangeMonitor", _NoWaitMonitor)
+    try:
+        outbox_queue.write(
+            json.dumps(
+                {
+                    "type": "stream",
+                    "stream": "stdout",
+                    "data": "first\n",
+                    "final": False,
+                }
+            )
+        )
+
+        status, result, error = _await_single_result(
+            ctx,
+            tid,
+            timeout=0.0,
+            show_stderr=False,
+            emit_stream=False,
+            taskspec_payload=None,
+            outbox_name=outbox_name,
+            ctrl_out_name=f"T{tid}.ctrl_out",
+        )
+    finally:
+        outbox_queue.close()
+
+    assert status == "timeout"
+    assert result is None
+    assert error == f"Timed out after 0.0 seconds waiting for task {tid}"
+
+
 def test_await_one_shot_result_reads_outbox_after_completion_event(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,

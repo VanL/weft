@@ -1489,6 +1489,7 @@ def test_cli_run_spec_path_reads_piped_stdin_into_command(
 def test_cli_run_persistent_spec_no_wait_consumes_initial_piped_stdin(
     workdir, weft_harness
 ) -> None:
+    weft_harness.ensure_foreground_manager()
     spec_path = workdir / "persistent_stdin_spec.json"
     spec_payload = {
         "tid": "1760000000000000103",

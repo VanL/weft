@@ -176,8 +176,8 @@ def _await_result_materialization(
     """
 
     deadline = None
-    if timeout is not None and timeout > 0:
-        deadline = time.monotonic() + timeout
+    if timeout is not None:
+        deadline = time.monotonic() + max(0.0, timeout)
     poll_interval = effective_result_surface_wait_interval(timeout)
     log_queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
     monitor = QueueChangeMonitor([log_queue], config=context.config)
@@ -493,8 +493,8 @@ def _await_single_result(
         status = initial_terminal_status
 
     deadline = None
-    if timeout is not None and timeout > 0:
-        deadline = time.monotonic() + timeout
+    if timeout is not None:
+        deadline = time.monotonic() + max(0.0, timeout)
     poll_interval = effective_result_surface_wait_interval(timeout)
 
     try:

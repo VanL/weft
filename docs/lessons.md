@@ -258,6 +258,14 @@ runbook needs to become stricter.
   running-task readiness boundary first. `weft run --no-wait` still pays
   manager bootstrap before returning the TID, so submission-to-timeout wall
   clock assumptions flake under slower Windows or xdist-heavy runners.
+- A visible one-shot outbox result must win over the caller timeout if the
+  timeout expires during the quiet-result grace window. The grace window is for
+  collecting near-simultaneous output, not for converting an already-readable
+  result into a timeout on slower CI.
+- Normal `WeftTestHarness.cleanup()` needs the same Windows database
+  releasability gate as `preserve_database=True`. Removing files and then
+  relying on tempdir cleanup is not deterministic when recently exited broker
+  users still hold SQLite handles.
 - Manager shutdown must snapshot the children it intends to terminate before
   graceful waits can reap them from `_child_processes`. Otherwise an exited
   task process can disappear from the in-memory map before manager-owned

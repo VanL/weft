@@ -458,6 +458,7 @@ class WeftTestHarness:
             self._wait_for_registered_pids_to_exit()
             if not preserve_database:
                 self._terminate_registered_pids()
+                self._wait_for_database_files_releasable()
                 self._remove_database_files()
                 cleanup_prepared_roots(self.root)
         finally:
@@ -972,6 +973,29 @@ class WeftTestHarness:
                 except PermissionError:
                     pass
 
+    def _wait_for_database_files_releasable(
+        self, *, timeout: float | None = None
+    ) -> bool:
+        """Wait briefly for broker files to become releasable before deletion."""
+
+        if self._context is None:
+            return True
+
+        wait_budget = min(self._manager_timeout, 5.0) if timeout is None else timeout
+        if _is_windows():
+            # The same Windows handle-release lag applies to ordinary harness
+            # teardown. Without this probe, tempdir cleanup can race recently
+            # exited broker users and surface as WinError 32.
+            wait_budget = max(wait_budget, 30.0)
+
+        deadline = time.time() + wait_budget
+        while True:
+            if self._database_files_releasable():
+                return True
+            if time.time() >= deadline:
+                return False
+            time.sleep(0.05)
+
     def _database_candidate_paths(self) -> list[Path]:
         if self._context is None:
             return []
@@ -1032,6 +1056,7 @@ class WeftTestHarness:
                 return
             except OSError as exc:
                 if exc.errno not in {
+                    errno.EACCES,
                     errno.ENOTEMPTY,
                     errno.EBUSY,
                     errno.EPERM,

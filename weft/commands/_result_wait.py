@@ -136,8 +136,8 @@ def await_one_shot_result(
         status = initial_terminal_status
 
     deadline = None
-    if timeout is not None and timeout > 0:
-        deadline = time.monotonic() + timeout
+    if timeout is not None:
+        deadline = time.monotonic() + max(0.0, timeout)
     poll_interval = effective_result_surface_wait_interval(timeout)
 
     try:
@@ -223,6 +223,7 @@ def await_one_shot_result(
             if (
                 completed_at is None
                 and single_result_seen_at is not None
+                and not stream_buffer
                 and time.monotonic() - single_result_seen_at
                 >= WEFT_COMPLETED_RESULT_GRACE_SECONDS
             ):
@@ -231,6 +232,14 @@ def await_one_shot_result(
                 break
 
             if deadline is not None and time.monotonic() >= deadline:
+                if (
+                    single_result_seen_at is not None
+                    and result_values
+                    and not stream_buffer
+                ):
+                    result_value = aggregate_public_outputs(result_values)
+                    status = "completed"
+                    break
                 status = "timeout"
                 error_message = (
                     f"Timed out after {timeout} seconds waiting for task {tid}"

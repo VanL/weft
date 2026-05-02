@@ -180,6 +180,72 @@ def test_harness_cleanup_retries_transient_tempdir_not_empty(
 
 
 @pytest.mark.sqlite_only
+def test_harness_cleanup_waits_for_database_release_before_tempdir_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = WeftTestHarness()
+    original_tempdir = harness._tempdir
+    repo_cwd = os.getcwd()
+    actions: list[str] = []
+
+    try:
+        harness.__enter__()
+        monkeypatch.setattr(harness, "_stop_active_managers", lambda **kwargs: None)
+        monkeypatch.setattr(harness, "_stop_inline_managers", lambda: None)
+        monkeypatch.setattr(harness, "_collect_pid_mappings", lambda: None)
+        monkeypatch.setattr(
+            harness,
+            "_wait_for_registered_pids_to_exit",
+            lambda timeout=None: [],
+        )
+        monkeypatch.setattr(harness, "_terminate_registered_pids", lambda: None)
+        monkeypatch.setattr(
+            harness,
+            "_remove_database_files",
+            lambda: actions.append("remove"),
+        )
+        monkeypatch.setattr(
+            harness,
+            "_cleanup_tempdir",
+            lambda: actions.append("tempdir"),
+        )
+        monkeypatch.setattr(
+            harness_mod,
+            "cleanup_prepared_roots",
+            lambda root: actions.append("roots"),
+        )
+        monkeypatch.setattr(harness_mod, "_is_windows", lambda: True)
+
+        release_states = iter([False, False, True])
+
+        def fake_database_files_releasable() -> bool:
+            actions.append("check")
+            return next(release_states)
+
+        clock = {"now": 0.0}
+
+        def fake_time() -> float:
+            return clock["now"]
+
+        def fake_sleep(seconds: float) -> None:
+            clock["now"] += seconds
+
+        monkeypatch.setattr(
+            harness, "_database_files_releasable", fake_database_files_releasable
+        )
+        monkeypatch.setattr(harness_mod.time, "time", fake_time)
+        monkeypatch.setattr(harness_mod.time, "sleep", fake_sleep)
+
+        harness.cleanup()
+
+        assert actions == ["check", "check", "check", "remove", "roots", "tempdir"]
+    finally:
+        os.chdir(repo_cwd)
+        harness._closed = True
+        original_tempdir.cleanup()
+
+
+@pytest.mark.sqlite_only
 def test_harness_stop_active_managers_stops_registered_task_and_manager_tids(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
