@@ -572,3 +572,9 @@ runbook needs to become stricter.
   ≥ 5 with long tail). Sample is thin — re-measure with `-m ""` before
   acting. Exponential backoff in `wait_for_completion` is a candidate for
   a follow-up plan, not justified on this sample alone.
+- On Windows, an open SQLite handle is a hard tempdir deletion blocker. Harness
+  cleanup cannot assume test-local `WeftClient`, `Task`, or `Queue` objects have
+  died before `__exit__`; the test frame may still hold them. Before probing or
+  deleting the harness DB, close live SimpleBroker queues bound to that DB. If a
+  bounded cleanup still cannot release the file, preserve the tempdir instead of
+  turning cleanup lag into a behavioral test failure.

@@ -96,7 +96,10 @@ class WeftTestHarness:
         self.cleanup()
 
     def __del__(self) -> None:  # noqa: D401
-        self.cleanup()
+        try:
+            self.cleanup()
+        except Exception:
+            pass
 
     @property
     def context(self) -> WeftContext:
@@ -458,15 +461,18 @@ class WeftTestHarness:
             self._wait_for_registered_pids_to_exit()
             if not preserve_database:
                 self._terminate_registered_pids()
+                self._close_live_database_queues()
                 self._wait_for_database_files_releasable()
                 self._remove_database_files()
                 cleanup_prepared_roots(self.root)
         finally:
             self._restore_cwd()
             self._restore_environment()
-            if not preserve_database:
-                self._cleanup_tempdir()
-            self._closed = True
+            try:
+                if not preserve_database:
+                    self._cleanup_tempdir()
+            finally:
+                self._closed = True
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -973,6 +979,38 @@ class WeftTestHarness:
                 except PermissionError:
                     pass
 
+    def _close_live_database_queues(self) -> None:
+        """Close in-process SimpleBroker queues bound to this harness DB."""
+
+        if self._context is None or self.context.database_path is None:
+            return
+
+        gc.collect()
+        target_path = self._normalized_database_path(self.context.database_path)
+        for obj in gc.get_objects():
+            if not isinstance(obj, Queue):
+                continue
+            if not self._queue_targets_database(obj, target_path):
+                continue
+            try:
+                obj.close()
+            except Exception:  # pragma: no cover - cleanup best effort
+                pass
+        gc.collect()
+
+    @staticmethod
+    def _normalized_database_path(path: Path | str) -> str:
+        return os.path.normcase(os.path.abspath(os.fspath(path)))
+
+    def _queue_targets_database(self, queue: Queue, database_path: str) -> bool:
+        target = queue.db_target
+        target_path = getattr(target, "target_path", None)
+        if target_path is None:
+            target_path = getattr(target, "target", target)
+        if target_path is None:
+            return False
+        return self._normalized_database_path(target_path) == database_path
+
     def _wait_for_database_files_releasable(
         self, *, timeout: float | None = None
     ) -> bool:
@@ -1067,7 +1105,30 @@ class WeftTestHarness:
                 # during tempdir cleanup. Same race family as f10d9d6.
                 time.sleep(0.05)
         if last_error is not None:
+            if self._is_locked_database_cleanup_error(last_error):
+                self._detach_tempdir_finalizer()
+                return
             raise last_error
+
+    def _is_locked_database_cleanup_error(self, exc: OSError) -> bool:
+        if not _is_windows() or self._context is None:
+            return False
+
+        filename = getattr(exc, "filename", None)
+        if filename is None:
+            return False
+
+        locked_path = self._normalized_database_path(filename)
+        database_paths = {
+            self._normalized_database_path(path)
+            for path in self._database_candidate_paths()
+        }
+        return locked_path in database_paths
+
+    def _detach_tempdir_finalizer(self) -> None:
+        finalizer = getattr(self._tempdir, "_finalizer", None)
+        if finalizer is not None:
+            finalizer.detach()
 
 
 __all__ = ["WeftTestHarness"]

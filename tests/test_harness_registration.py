@@ -246,6 +246,95 @@ def test_harness_cleanup_waits_for_database_release_before_tempdir_cleanup(
 
 
 @pytest.mark.sqlite_only
+def test_harness_cleanup_closes_live_queues_before_database_probe() -> None:
+    harness = WeftTestHarness()
+    repo_cwd = os.getcwd()
+    queue: Queue | None = None
+    try:
+        harness.__enter__()
+        queue = Queue(
+            "cleanup.live.queue",
+            db_path=harness.context.broker_target,
+            persistent=True,
+            config=harness.context.broker_config,
+        )
+        queue.write("open")
+
+        assert queue.conn is not None
+
+        harness._close_live_database_queues()
+
+        assert len(queue.conn._connection_registry) == 0
+        assert not hasattr(queue.conn._thread_local, "db")
+    finally:
+        os.chdir(repo_cwd)
+        if queue is not None:
+            queue.close()
+        harness.cleanup()
+
+
+@pytest.mark.sqlite_only
+def test_harness_cleanup_preserves_windows_tempdir_when_database_stays_locked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = WeftTestHarness()
+    original_tempdir = harness._tempdir
+    repo_cwd = os.getcwd()
+    calls: list[str] = []
+
+    class _FinalizerStub:
+        def detach(self) -> None:
+            calls.append("detach")
+
+    class _TempdirStub:
+        _finalizer = _FinalizerStub()
+
+        def cleanup(self) -> None:
+            error = PermissionError(
+                errno.EACCES,
+                "locked",
+                os.fspath(harness.context.database_path),
+            )
+            raise error
+
+    try:
+        harness.__enter__()
+        monkeypatch.setattr(harness, "_stop_active_managers", lambda **kwargs: None)
+        monkeypatch.setattr(harness, "_stop_inline_managers", lambda: None)
+        monkeypatch.setattr(harness, "_collect_pid_mappings", lambda: None)
+        monkeypatch.setattr(
+            harness,
+            "_wait_for_registered_pids_to_exit",
+            lambda timeout=None: [],
+        )
+        monkeypatch.setattr(harness, "_terminate_registered_pids", lambda: None)
+        monkeypatch.setattr(harness, "_close_live_database_queues", lambda: None)
+        monkeypatch.setattr(
+            harness,
+            "_wait_for_database_files_releasable",
+            lambda: False,
+        )
+        monkeypatch.setattr(harness, "_remove_database_files", lambda: None)
+        monkeypatch.setattr(
+            harness_mod,
+            "cleanup_prepared_roots",
+            lambda root: None,
+        )
+        monkeypatch.setattr(harness_mod, "_is_windows", lambda: True)
+        harness._tempdir = cast(Any, _TempdirStub())
+
+        harness.cleanup()
+
+        assert calls == ["detach"]
+        assert harness._closed is True
+    finally:
+        os.chdir(repo_cwd)
+        harness._closed = True
+        harness._tempdir = original_tempdir
+        original_tempdir.cleanup()
+
+
+@pytest.mark.sqlite_only
 def test_harness_stop_active_managers_stops_registered_task_and_manager_tids(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
