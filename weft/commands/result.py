@@ -547,11 +547,7 @@ def _await_single_result(
                         boundary_timestamp = completion_timestamp
                         boundary_seen_at = time.monotonic()
                         break
-                if (
-                    boundary_timestamp is None
-                    and pending_completion_timestamps
-                    and initial_result_surface_had_activity
-                ):
+                if boundary_timestamp is None and pending_completion_timestamps:
                     boundary_timestamp = (
                         _latest_visible_outbox_timestamp(outbox_queue)
                         or first_pending_timestamp
