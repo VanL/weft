@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 61 tracked plan files in this directory.
+There are currently 62 tracked plan files in this directory.
 
 ## Curation Policy
 
@@ -22,6 +22,7 @@ There are currently 61 tracked plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-05-06-task-evidence-reconciliation-model-plan.md`](./2026-05-06-task-evidence-reconciliation-model-plan.md) | Task Evidence Reconciliation Model Plan | `draft` | none |
 | [`2026-05-06-status-coherence-and-stale-pid-liveness-plan.md`](./2026-05-06-status-coherence-and-stale-pid-liveness-plan.md) | Status Coherence And Stale PID Liveness Plan | `draft` | none |
 | [`2026-05-06-lifecycle-reconciliation-architecture-plan.md`](./2026-05-06-lifecycle-reconciliation-architecture-plan.md) | Lifecycle Reconciliation Architecture Plan | `draft` | none |
 | [`2026-05-05-simplebroker-multiqueue-waiter-integration-plan.md`](./2026-05-05-simplebroker-multiqueue-waiter-integration-plan.md) | SimpleBroker Multi-Queue Waiter Integration | `completed` | none |

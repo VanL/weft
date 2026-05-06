@@ -358,6 +358,9 @@ TERMINAL_ENVELOPE_TYPE: Final[str] = "terminal"
 TASK_TERMINAL_ENVELOPE_SOURCES: Final[frozenset[str]] = frozenset({"task", "manager"})
 """Accepted terminal ctrl_out envelope authors."""
 
+WRAPPER_LOST_ERROR: Final[str] = "Task wrapper exited before publishing terminal state"
+"""Manager-authored terminal error when a child exits before terminal publication."""
+
 FAILURE_LIKE_TASK_STATUSES: Final[frozenset[str]] = frozenset(
     {"failed", "timeout", "cancelled", "killed"}
 )

@@ -43,21 +43,21 @@ pg = [
     "simplebroker-pg>=1.1.1",
 ]
 docker = [
-    "weft-docker>=0.6.1",
+    "weft-docker>=0.9.16",
 ]
 django = [
-    "weft-django>=0.9.11",
+    "weft-django>=0.9.16",
 ]
 django-channels = [
-    "weft-django[channels]>=0.9.11",
+    "weft-django[channels]>=0.9.16",
 ]
 macos-sandbox = [
     "weft-macos-sandbox>=0.5.1",
 ]
 all = [
     "simplebroker-pg>=1.1.1",
-    "weft-docker>=0.6.1",
-    "weft-django>=0.9.11",
+    "weft-docker>=0.9.16",
+    "weft-django>=0.9.16",
     "weft-macos-sandbox>=0.5.1",
 ]
 dev = [

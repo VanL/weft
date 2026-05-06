@@ -106,6 +106,8 @@ The control plane is explicit:
   and `timestamp`; optional fields include `error` and `return_code`
 - readers must ignore ordinary control replies, stderr stream chunks, malformed
   JSON, and other `ctrl_out` payloads when looking for terminal state
+- the shared task-evidence reader may use a typed terminal `ctrl_out` envelope
+  as terminal observation proof when task-log terminal proof is missing
 - manager-authored terminal envelopes are supervisor observations for child
   wrapper death only; they must be written to the child `ctrl_out` queue, never
   to outbox, and only when task-owned terminal proof is not already visible
@@ -115,10 +117,12 @@ The control plane is explicit:
 
 _Implementation mapping_: `weft/core/tasks/base.py`,
 `weft/core/tasks/consumer.py`, `weft/core/manager.py`,
-`weft/commands/tasks.py`.
+`weft/commands/task_evidence.py`, `weft/commands/tasks.py`.
 
-Implementation plan backlink:
-`docs/plans/2026-04-30-known-tid-terminal-snapshot-api-plan.md`.
+Implementation plan backlinks:
+
+- `docs/plans/2026-04-30-known-tid-terminal-snapshot-api-plan.md`
+- `docs/plans/2026-05-06-task-evidence-reconciliation-model-plan.md`
 
 ### 3.1 Named Endpoint Discovery [MF-3.1]
 
@@ -220,6 +224,16 @@ Current rules:
 - terminal task-log lifecycle proof wins for public `status`; runtime liveness
   disagreement may be exposed through `reconciliation` diagnostics, but it must
   not rewrite a terminal task back to `running`
+- shared task evidence classification lives in
+  `weft/commands/task_evidence.py`; status, task inspection, known-TID terminal
+  snapshots, and result helpers reuse that interpretation instead of each
+  inventing their own priority rules
+- when task-log terminal proof is missing, a typed terminal `ctrl_out` envelope
+  may classify the task as terminal, including `wrapper_lost` for
+  manager-authored wrapper-exit envelopes
+- for one-shot non-persistent tasks, a final unambiguous outbox result may be
+  classified as `result_without_terminal`; persistent, interactive, streaming,
+  partial, or ambiguous outbox traffic does not prove task completion
 - status surfaces must not emit `status="running"` with `completed_at` set
 - host tasks that still look `running` or `spawning` in the durable log but
   have no runtime proof are treated as stale after the configured status
@@ -243,6 +257,7 @@ _Implementation mapping_: `weft/core/tasks/base.py` `_report_state_change`;
 `weft/commands/status.py` and `weft/commands/system.py` log replay and snapshot
 collection;
 `weft/commands/result.py` materialization and completion waits;
+`weft/commands/task_evidence.py`;
 `weft/commands/_result_wait.py`;
 `weft/commands/_task_history.py`;
 `weft/commands/_streaming.py`.
@@ -544,6 +559,7 @@ management live in the companion doc:
 
 - [`docs/plans/2026-05-06-lifecycle-reconciliation-architecture-plan.md`](../plans/2026-05-06-lifecycle-reconciliation-architecture-plan.md)
 - [`docs/plans/2026-05-06-status-coherence-and-stale-pid-liveness-plan.md`](../plans/2026-05-06-status-coherence-and-stale-pid-liveness-plan.md)
+- [`docs/plans/2026-05-06-task-evidence-reconciliation-model-plan.md`](../plans/2026-05-06-task-evidence-reconciliation-model-plan.md)
 - [`docs/plans/2026-04-14-spawn-request-reconciliation-plan.md`](../plans/2026-04-14-spawn-request-reconciliation-plan.md)
 - [`docs/plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md`](../plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md)
 - [`docs/plans/2026-04-09-manager-bootstrap-unification-plan.md`](../plans/2026-04-09-manager-bootstrap-unification-plan.md)

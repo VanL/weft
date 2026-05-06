@@ -664,8 +664,7 @@ def _apply_terminal_state(
     limits: Any | None,
 ) -> RunnerOutcome:
     metadata = dict(final_description.metadata) if final_description is not None else {}
-    oom_killed = bool(metadata.get("oom_killed"))
-    if not oom_killed:
+    if not _is_memory_limit_violation(outcome, metadata=metadata, limits=limits):
         if outcome.metrics is None:
             outcome.metrics = _metrics_from_runtime_metadata(metadata)
         return outcome
@@ -681,6 +680,30 @@ def _apply_terminal_state(
     if outcome.metrics is None:
         outcome.metrics = _metrics_from_runtime_metadata(metadata)
     return outcome
+
+
+def _is_memory_limit_violation(
+    outcome: RunnerOutcome,
+    *,
+    metadata: Mapping[str, Any],
+    limits: Any | None,
+) -> bool:
+    if bool(metadata.get("oom_killed")):
+        return True
+
+    if _limit_int(limits, "memory_mb") is None or outcome.status != "error":
+        return False
+
+    exit_code = metadata.get("exit_code")
+    if outcome.returncode in {137, -9} or exit_code in {137, -9}:
+        return True
+
+    error_text = " ".join(
+        text
+        for text in (outcome.error, outcome.stderr)
+        if isinstance(text, str) and text
+    ).lower()
+    return "memoryerror" in error_text or "cannot allocate memory" in error_text
 
 
 def _metrics_from_runtime_metadata(

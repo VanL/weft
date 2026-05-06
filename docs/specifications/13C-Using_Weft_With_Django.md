@@ -690,6 +690,9 @@ Known-TID status rule:
 - `weft_django.status(tid)` is a direct known-TID reconciliation helper. It
   uses Weft's non-consuming terminal snapshot API and must not replay the
   global task log from the beginning for a full TID.
+- known-TID terminal snapshots may include task-evidence classification
+  metadata such as `terminal_log`, `terminal_ctrl_out`, `wrapper_lost`,
+  `result_without_terminal`, `live`, or `unknown`
 - `weft_django.status(tid)` returns an object with `.status`, but it does not
   promise the full diagnostic `TaskSnapshot` field set.
 - callers that need diagnostic fields such as `name`, `metadata`, `runtime`,
@@ -698,8 +701,10 @@ Known-TID status rule:
   explicit exact-message acknowledgement after the Django app commits its own
   durable domain row.
 
-Implementation plan backlink:
-`docs/plans/2026-04-30-known-tid-terminal-snapshot-api-plan.md`.
+Implementation plan backlinks:
+
+- `docs/plans/2026-04-30-known-tid-terminal-snapshot-api-plan.md`
+- `docs/plans/2026-05-06-task-evidence-reconciliation-model-plan.md`
 
 ### Submission Overrides [DJ-8.4]
 

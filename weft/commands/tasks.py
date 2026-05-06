@@ -24,19 +24,14 @@ from weft._constants import (
     CONTROL_SURFACE_WAIT_INTERVAL,
     CONTROL_SURFACE_WAIT_TIMEOUT,
     QUEUE_CTRL_IN_SUFFIX,
-    QUEUE_CTRL_OUT_SUFFIX,
-    QUEUE_OUTBOX_SUFFIX,
-    TASK_TERMINAL_ENVELOPE_SOURCES,
     TASKSPEC_TID_SHORT_LENGTH,
-    TERMINAL_ENVELOPE_TYPE,
-    TERMINAL_TASK_STATUSES,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
 )
 from weft._exceptions import ControlRejected, TaskNotFound
 from weft._runner_plugins import require_runner_plugin
-from weft.commands.types import QueueAckTarget, TaskTerminalSnapshot
 from weft.commands.types import TaskSnapshot as PublicTaskSnapshot
+from weft.commands.types import TaskTerminalSnapshot
 from weft.context import WeftContext, build_context
 from weft.core.queue_wait import QueueChangeMonitor
 from weft.helpers import (
@@ -46,7 +41,7 @@ from weft.helpers import (
 )
 
 from . import system as status_cmd
-from ._streaming import aggregate_public_outputs, process_outbox_message
+from . import task_evidence
 from ._task_history import load_latest_taskspec_payload, pipeline_status_queue_name
 
 
@@ -183,49 +178,18 @@ def _state_from_taskspec(taskspec_payload: dict[str, Any] | None) -> dict[str, A
 
 
 def _task_is_persistent_payload(taskspec_payload: dict[str, Any] | None) -> bool:
-    if not isinstance(taskspec_payload, dict):
-        return False
-    spec = taskspec_payload.get("spec")
-    if not isinstance(spec, dict):
-        return False
-    return bool(spec.get("persistent"))
+    return task_evidence.task_is_persistent_payload(taskspec_payload)
 
 
 def _queue_names_for_tid(
     tid: str,
     taskspec_payload: dict[str, Any] | None,
 ) -> tuple[str, str]:
-    outbox = None
-    ctrl_out = None
-    if isinstance(taskspec_payload, dict):
-        io_section = taskspec_payload.get("io")
-        if isinstance(io_section, dict):
-            outputs = io_section.get("outputs")
-            control = io_section.get("control")
-            if isinstance(outputs, dict):
-                outbox_candidate = outputs.get("outbox")
-                if isinstance(outbox_candidate, str) and outbox_candidate:
-                    outbox = outbox_candidate
-            if isinstance(control, dict):
-                ctrl_out_candidate = control.get("ctrl_out")
-                if isinstance(ctrl_out_candidate, str) and ctrl_out_candidate:
-                    ctrl_out = ctrl_out_candidate
-    prefix = f"T{tid}."
-    return (
-        outbox or f"{prefix}{QUEUE_OUTBOX_SUFFIX}",
-        ctrl_out or f"{prefix}{QUEUE_CTRL_OUT_SUFFIX}",
-    )
+    return task_evidence.queue_names_for_tid(tid, taskspec_payload)
 
 
 def _split_stdio(value: Any) -> tuple[str | None, str | None]:
-    if not isinstance(value, dict):
-        return None, None
-    stdout = value.get("stdout")
-    stderr = value.get("stderr")
-    return (
-        stdout if isinstance(stdout, str) else None,
-        stderr if isinstance(stderr, str) else None,
-    )
+    return task_evidence.split_stdio(value)
 
 
 def _peek_final_outbox_snapshot(
@@ -235,53 +199,15 @@ def _peek_final_outbox_snapshot(
     outbox_name: str,
     taskspec_payload: dict[str, Any] | None,
 ) -> TaskTerminalSnapshot | None:
-    if _task_is_persistent_payload(taskspec_payload):
-        return None
-    queue = ctx.queue(outbox_name, persistent=True)
-    stream_buffer: list[str] = []
-    values: list[Any] = []
-    ack_targets: list[QueueAckTarget] = []
-    observed_at: int | None = None
-    saw_partial = False
-    try:
-        for item in queue.peek_generator(with_timestamps=True):
-            if not isinstance(item, tuple) or len(item) != 2:
-                continue
-            body, timestamp = item
-            final, decoded = process_outbox_message(
-                str(body),
-                stream_buffer,
-                emit_stream=False,
-            )
-            if not final:
-                saw_partial = True
-                continue
-            if decoded is None:
-                continue
-            values.append(decoded.value)
-            timestamp_int = int(timestamp)
-            ack_targets.append(
-                QueueAckTarget(queue=outbox_name, message_id=timestamp_int)
-            )
-            observed_at = timestamp_int
-    finally:
-        queue.close()
-
-    if not values or saw_partial:
-        return None
-    value = aggregate_public_outputs(values)
-    stdout, stderr = _split_stdio(value)
-    return TaskTerminalSnapshot(
+    evidence = task_evidence.peek_final_outbox_evidence(
+        ctx,
         tid=tid,
-        status="completed",
-        source="outbox",
-        value=value,
-        stdout=stdout,
-        stderr=stderr,
-        terminal=True,
-        ack_targets=tuple(ack_targets),
-        observed_at=observed_at,
+        outbox_name=outbox_name,
+        taskspec_payload=taskspec_payload,
     )
+    if evidence is None:
+        return None
+    return task_evidence.terminal_snapshot_from_evidence(evidence)
 
 
 def _coerce_terminal_envelope(
@@ -290,22 +216,9 @@ def _coerce_terminal_envelope(
     tid: str,
 ) -> dict[str, Any] | None:
     try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError:
+        return task_evidence.coerce_terminal_envelope(raw, tid=tid)
+    except TypeError:
         return None
-    if not isinstance(payload, dict):
-        return None
-    if payload.get("type") != TERMINAL_ENVELOPE_TYPE:
-        return None
-    if payload.get("tid") != tid:
-        return None
-    source = payload.get("source")
-    if source not in TASK_TERMINAL_ENVELOPE_SOURCES:
-        return None
-    status = payload.get("status")
-    if not isinstance(status, str) or status not in TERMINAL_TASK_STATUSES:
-        return None
-    return payload
 
 
 def _peek_terminal_ctrl_out_snapshot(
@@ -314,38 +227,14 @@ def _peek_terminal_ctrl_out_snapshot(
     tid: str,
     ctrl_out_name: str,
 ) -> TaskTerminalSnapshot | None:
-    queue = ctx.queue(ctrl_out_name, persistent=False)
-    latest: tuple[dict[str, Any], int] | None = None
-    try:
-        for item in queue.peek_generator(with_timestamps=True):
-            if not isinstance(item, tuple) or len(item) != 2:
-                continue
-            body, timestamp = item
-            payload = _coerce_terminal_envelope(str(body), tid=tid)
-            if payload is None:
-                continue
-            timestamp_int = int(timestamp)
-            if latest is None or latest[1] <= timestamp_int:
-                latest = (payload, timestamp_int)
-    finally:
-        queue.close()
-
-    if latest is None:
-        return None
-    payload, timestamp = latest
-    error = payload.get("error")
-    return_code = payload.get("return_code")
-    return TaskTerminalSnapshot(
+    evidence = task_evidence.peek_terminal_ctrl_out_evidence(
+        ctx,
         tid=tid,
-        status=str(payload["status"]),
-        source="ctrl_out",
-        error=error if isinstance(error, str) else None,
-        return_code=return_code if isinstance(return_code, int) else None,
-        terminal=True,
-        ack_targets=(QueueAckTarget(queue=ctrl_out_name, message_id=timestamp),),
-        observed_at=timestamp,
-        metadata={"terminal_source": str(payload.get("source"))},
+        ctrl_out_name=ctrl_out_name,
     )
+    if evidence is None:
+        return None
+    return task_evidence.terminal_snapshot_from_evidence(evidence)
 
 
 def _public_snapshot(
@@ -364,10 +253,22 @@ def _public_snapshot(
         event=status_snapshot.event,
         activity=status_snapshot.activity,
         waiting_on=status_snapshot.waiting_on,
-        return_code=return_code if isinstance(return_code, int) else None,
+        return_code=(
+            status_snapshot.return_code
+            if isinstance(status_snapshot.return_code, int)
+            else return_code
+            if isinstance(return_code, int)
+            else None
+        ),
         started_at=status_snapshot.started_at,
         completed_at=status_snapshot.completed_at,
-        error=error if isinstance(error, str) and error else None,
+        error=(
+            status_snapshot.error
+            if isinstance(status_snapshot.error, str) and status_snapshot.error
+            else error
+            if isinstance(error, str) and error
+            else None
+        ),
         last_timestamp=status_snapshot.last_timestamp,
         duration_seconds=status_snapshot.duration_seconds,
         runner=status_snapshot.runner,
@@ -415,26 +316,13 @@ def _runtime_snapshot_from_mapping(
     tid: str,
     mapping_entry: dict[str, Any] | None,
 ) -> TaskTerminalSnapshot | None:
-    if not isinstance(mapping_entry, dict):
+    evidence = task_evidence.runtime_evidence(
+        tid=tid,
+        mapping_entry=mapping_entry,
+    )
+    if evidence is None:
         return None
-    runtime_handle = status_cmd._runtime_handle_from_mapping(mapping_entry)
-    runtime_description = status_cmd._describe_runtime_handle(runtime_handle)
-    if status_cmd._task_process_alive(
-        mapping_entry
-    ) or status_cmd._runtime_description_is_live(runtime_description):
-        return TaskTerminalSnapshot(
-            tid=tid,
-            status="running",
-            source="runtime",
-            terminal=False,
-            metadata={
-                "runtime_handle": runtime_handle.to_dict()
-                if runtime_handle is not None
-                else None,
-                "runtime": runtime_description,
-            },
-        )
-    return None
+    return task_evidence.terminal_snapshot_from_evidence(evidence)
 
 
 def _bounded_log_terminal_snapshot(
@@ -442,46 +330,16 @@ def _bounded_log_terminal_snapshot(
     *,
     tid: str,
 ) -> tuple[TaskTerminalSnapshot | None, bool, int | None]:
-    log_queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
-    latest_terminal: TaskTerminalSnapshot | None = None
-    prior_live = False
-    latest_prior_live_at: int | None = None
-    try:
-        since_timestamp = int(tid) - 1 if tid.isdigit() else None
-        for payload, timestamp in status_cmd._iter_log_events(
-            log_queue,
-            since_timestamp=since_timestamp,
-        ):
-            if payload.get("tid") != tid:
-                continue
-            status = payload.get("status")
-            if isinstance(status, str) and status in {"spawning", "running"}:
-                prior_live = True
-                latest_prior_live_at = int(timestamp)
-            if not isinstance(status, str) or status not in TERMINAL_TASK_STATUSES:
-                continue
-            error = payload.get("error")
-            taskspec = payload.get("taskspec")
-            state = taskspec.get("state") if isinstance(taskspec, dict) else None
-            if not isinstance(error, str) and isinstance(state, dict):
-                state_error = state.get("error")
-                if isinstance(state_error, str):
-                    error = state_error
-            return_code = None
-            if isinstance(state, dict) and isinstance(state.get("return_code"), int):
-                return_code = state["return_code"]
-            latest_terminal = TaskTerminalSnapshot(
-                tid=tid,
-                status=status,
-                source="log_fallback",
-                error=error if isinstance(error, str) else None,
-                return_code=return_code,
-                terminal=True,
-                observed_at=int(timestamp),
-            )
-        return latest_terminal, prior_live, latest_prior_live_at
-    finally:
-        log_queue.close()
+    evidence, prior_live, prior_live_at = task_evidence.bounded_log_terminal_evidence(
+        ctx,
+        tid=tid,
+    )
+    snapshot = (
+        task_evidence.terminal_snapshot_from_evidence(evidence)
+        if evidence is not None
+        else None
+    )
+    return snapshot, prior_live, prior_live_at
 
 
 def _stale_observer_snapshot(
@@ -490,20 +348,14 @@ def _stale_observer_snapshot(
     prior_live: bool,
     prior_live_at: int | None,
 ) -> TaskTerminalSnapshot | None:
-    if not prior_live or prior_live_at is None:
-        return None
-    age_ns = time.time_ns() - prior_live_at
-    stale_ns = int(status_cmd.STATUS_RUNTIMELESS_STALE_AFTER_SECONDS * 1_000_000_000)
-    if age_ns <= stale_ns:
-        return TaskTerminalSnapshot(tid=tid, status="pending", source="observer")
-    return TaskTerminalSnapshot(
+    evidence = task_evidence.stale_observer_evidence(
         tid=tid,
-        status="failed",
-        source="observer",
-        error="Task is not live and no terminal task-local state is visible",
-        terminal=True,
-        observed_at=time.time_ns(),
+        prior_live=prior_live,
+        prior_live_at=prior_live_at,
     )
+    if evidence is None:
+        return None
+    return task_evidence.terminal_snapshot_from_evidence(evidence)
 
 
 def task_terminal_snapshot(
@@ -534,59 +386,19 @@ def task_terminal_snapshot(
     deadline = time.monotonic() + timeout if timeout > 0 else None
     while True:
         taskspec_payload = _load_taskspec_payload_bounded(ctx, full_tid)
-        outbox_name, ctrl_out_name = _queue_names_for_tid(full_tid, taskspec_payload)
-
-        outbox_snapshot = _peek_final_outbox_snapshot(
-            ctx,
-            tid=full_tid,
-            outbox_name=outbox_name,
-            taskspec_payload=taskspec_payload,
-        )
-        if outbox_snapshot is not None:
-            return outbox_snapshot
-
-        ctrl_snapshot = _peek_terminal_ctrl_out_snapshot(
-            ctx,
-            tid=full_tid,
-            ctrl_out_name=ctrl_out_name,
-        )
-        if ctrl_snapshot is not None:
-            return ctrl_snapshot
-
         mapping_entry = mapping_for_tid(ctx, full_tid)
-        runtime_snapshot = _runtime_snapshot_from_mapping(full_tid, mapping_entry)
-        if runtime_snapshot is not None:
-            if deadline is not None:
-                time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
-                continue
-            return runtime_snapshot
-
-        log_snapshot, log_prior_live, log_prior_live_at = (
-            _bounded_log_terminal_snapshot(
-                ctx,
-                tid=full_tid,
-            )
-        )
-        if log_snapshot is not None:
-            return log_snapshot
-
-        prior_live = log_prior_live or _mapping_has_prior_live_proof(mapping_entry)
-        prior_live_at = log_prior_live_at
-        mapping_timestamp = (
-            mapping_entry.get("timestamp") if isinstance(mapping_entry, dict) else None
-        )
-        if isinstance(mapping_timestamp, int):
-            prior_live_at = max(prior_live_at or 0, mapping_timestamp)
-        observer_snapshot = _stale_observer_snapshot(
+        evidence = task_evidence.known_tid_evidence(
+            ctx,
             tid=full_tid,
-            prior_live=prior_live,
-            prior_live_at=prior_live_at,
+            taskspec_payload=taskspec_payload,
+            mapping_entry=mapping_entry,
         )
-        if observer_snapshot is not None:
-            if observer_snapshot.status == "pending" and deadline is not None:
+        if evidence is not None:
+            snapshot = task_evidence.terminal_snapshot_from_evidence(evidence)
+            if snapshot.status in {"running", "pending"} and deadline is not None:
                 time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
                 continue
-            return observer_snapshot
+            return snapshot
 
         if deadline is None or time.monotonic() >= deadline:
             return TaskTerminalSnapshot(

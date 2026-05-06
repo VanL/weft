@@ -12,7 +12,6 @@ from typing import Any
 
 from weft._constants import (
     RESULT_SURFACE_WAIT_INTERVAL,
-    TERMINAL_TASK_STATUSES,
     WEFT_COMPLETED_RESULT_GRACE_SECONDS,
     WEFT_GLOBAL_LOG_QUEUE,
 )
@@ -25,6 +24,10 @@ from ._streaming import (
     drain_available_outbox_values,
     handle_ctrl_stream,
     poll_log_events,
+)
+from .task_evidence import (
+    terminal_error_message,
+    terminal_status_from_event,
 )
 
 
@@ -42,43 +45,6 @@ def append_public_value(
         values.append(value.get("stderr") or "")
         return
     values.append(value)
-
-
-def terminal_status_from_event(payload: dict[str, Any]) -> str | None:
-    """Return the public terminal status represented by a log event."""
-    if payload.get("event") == "task_activity":
-        return None
-    status = payload.get("status")
-    if not isinstance(status, str):
-        taskspec = payload.get("taskspec")
-        if isinstance(taskspec, dict):
-            state = taskspec.get("state")
-            if isinstance(state, dict):
-                state_status = state.get("status")
-                if isinstance(state_status, str):
-                    status = state_status
-    if status in TERMINAL_TASK_STATUSES:
-        return status
-    return None
-
-
-def terminal_error_message(payload: dict[str, Any], status: str) -> str | None:
-    """Return the best available public error string for a terminal event."""
-    error = payload.get("error")
-    if isinstance(error, str) and error:
-        return error
-    taskspec = payload.get("taskspec")
-    if isinstance(taskspec, dict):
-        state = taskspec.get("state")
-        if isinstance(state, dict):
-            state_error = state.get("error")
-            if isinstance(state_error, str) and state_error:
-                return state_error
-    if status == "cancelled":
-        return "task cancelled"
-    if status == "killed":
-        return "task killed"
-    return None
 
 
 def effective_result_surface_wait_interval(timeout: float | None) -> float:

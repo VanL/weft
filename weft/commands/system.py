@@ -54,6 +54,7 @@ from weft.helpers import (
     pid_is_live,
 )
 
+from . import task_evidence
 from ._dump_support import cmd_dump
 from ._load_support import cmd_load
 from ._tidy_support import cmd_tidy
@@ -137,6 +138,8 @@ class TaskSnapshot:
     metadata: dict[str, Any]
     pipeline_status: dict[str, Any] | None = None
     reconciliation: dict[str, Any] | None = None
+    return_code: int | None = None
+    error: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload = {
@@ -149,6 +152,8 @@ class TaskSnapshot:
             "waiting_on": self.waiting_on,
             "started_at": self.started_at,
             "completed_at": self.completed_at,
+            "return_code": self.return_code,
+            "error": self.error,
             "last_timestamp": self.last_timestamp,
             "duration_seconds": self.duration_seconds,
             "runner": self.runner,
@@ -676,6 +681,8 @@ def _collect_task_snapshot_records(
                     "waiting_on": None,
                     "started_at": None,
                     "completed_at": None,
+                    "return_code": None,
+                    "error": None,
                     "last_timestamp": timestamp,
                     "taskspec": None,
                     "metadata": {},
@@ -735,12 +742,23 @@ def _collect_task_snapshot_records(
                 record["event"] = event
             started_at = state.get("started_at")
             completed_at = state.get("completed_at")
+            return_code = state.get("return_code")
+            state_error = state.get("error")
+            payload_error = payload.get("error")
             metadata = taskspec.get("metadata") or {}
             record["name"] = str(name)
             record["status"] = str(status)
             record["started_at"] = started_at if isinstance(started_at, int) else None
             record["completed_at"] = (
                 completed_at if isinstance(completed_at, int) else None
+            )
+            record["return_code"] = return_code if isinstance(return_code, int) else None
+            record["error"] = (
+                payload_error
+                if isinstance(payload_error, str) and payload_error
+                else state_error
+                if isinstance(state_error, str) and state_error
+                else None
             )
             record["taskspec"] = taskspec
             record["metadata"] = metadata if isinstance(metadata, dict) else {}
@@ -787,15 +805,40 @@ def _collect_task_snapshot_records(
             now_ns=now_ns,
             has_live_manager_record=tid in active_manager_tids,
         )
+        local_evidence: task_evidence.TaskEvidenceSnapshot | None = None
+        if public_status not in TERMINAL_TASK_STATUSES:
+            local_evidence = task_evidence.task_local_terminal_evidence(
+                ctx,
+                tid=tid,
+                taskspec_payload=taskspec,
+            )
+            if local_evidence is not None and local_evidence.terminal:
+                public_status = local_evidence.status
         reconciliation = _reconciliation_diagnostic(
             lifecycle_status=public_status,
             status_reason=status_reason if isinstance(status_reason, str) else None,
             runtime_handle=runtime_handle,
             runtime_description=runtime_description,
         )
+        if local_evidence is not None and local_evidence.reconciliation is not None:
+            reconciliation = local_evidence.reconciliation
 
         started_at = record.get("started_at")
         completed_at = record.get("completed_at")
+        return_code = record.get("return_code")
+        error = record.get("error")
+        if local_evidence is not None:
+            if local_evidence.return_code is not None:
+                return_code = local_evidence.return_code
+            if local_evidence.error is not None:
+                error = local_evidence.error
+            if not isinstance(completed_at, int) and local_evidence.observed_at is not None:
+                completed_at = local_evidence.observed_at
+            if local_evidence.observed_at is not None:
+                record["last_timestamp"] = max(
+                    int(record.get("last_timestamp") or 0),
+                    local_evidence.observed_at,
+                )
         if isinstance(started_at, int) and not isinstance(completed_at, int):
             duration = max(0.0, (now_ns - started_at) / 1_000_000_000)
         elif isinstance(started_at, int) and isinstance(completed_at, int):
@@ -819,6 +862,8 @@ def _collect_task_snapshot_records(
             waiting_on=waiting_on if isinstance(waiting_on, str) else None,
             started_at=started_at if isinstance(started_at, int) else None,
             completed_at=completed_at if isinstance(completed_at, int) else None,
+            return_code=return_code if isinstance(return_code, int) else None,
+            error=error if isinstance(error, str) else None,
             last_timestamp=int(record.get("last_timestamp") or 0),
             duration_seconds=duration,
             runner=runner,
@@ -1115,7 +1160,6 @@ def _public_task_snapshot(snapshot: TaskSnapshot) -> PublicTaskSnapshot:
             if isinstance(payload.get("waiting_on"), str)
             else None
         ),
-        return_code=None,
         started_at=payload["started_at"]
         if isinstance(payload.get("started_at"), int)
         else None,
@@ -1124,7 +1168,12 @@ def _public_task_snapshot(snapshot: TaskSnapshot) -> PublicTaskSnapshot:
             if isinstance(payload.get("completed_at"), int)
             else None
         ),
-        error=None,
+        return_code=(
+            payload["return_code"]
+            if isinstance(payload.get("return_code"), int)
+            else None
+        ),
+        error=payload["error"] if isinstance(payload.get("error"), str) else None,
         last_timestamp=(
             payload["last_timestamp"]
             if isinstance(payload.get("last_timestamp"), int)
