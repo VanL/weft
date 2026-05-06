@@ -50,7 +50,6 @@ from weft.helpers import (
     pid_is_live,
     terminate_process_tree,
 )
-from weft.manager_process import run_manager_process
 
 from .queue_wait import QueueChangeMonitor
 
@@ -901,6 +900,17 @@ def _start_manager(
         _cleanup_startup_stderr(launch.stderr_path)
         return competing_record, False, None
 
+    settled_record = _await_manager_start_settlement(
+        context,
+        manager_tid=manager_tid,
+        deadline=time.monotonic() + MANAGER_COMPETING_STARTUP_GRACE_SECONDS,
+    )
+    if settled_record is not None:
+        _send_launcher_signal(launch.launcher_process, MANAGER_LAUNCHER_SIGNAL_ABORT)
+        _communicate_launcher(launch.launcher_process, timeout=1.0)
+        _cleanup_startup_stderr(launch.stderr_path)
+        return settled_record, False, None
+
     _fail_manager_start(
         launch=launch,
         message="Failed to start Manager process; no stable canonical registry entry appeared.",
@@ -946,6 +956,23 @@ def _ensure_manager(
     return _start_manager(context, verbose=verbose)
 
 
+def _run_manager_process_foreground(
+    invocation: _ManagerRuntimeInvocation,
+    context: WeftContext,
+) -> None:
+    """Run a foreground manager without importing the CLI module at import time."""
+
+    from weft.manager_process import run_manager_process
+
+    run_manager_process(
+        invocation.task_cls_path,
+        context.broker_target,
+        invocation.spec,
+        context.config,
+        MANAGER_POLL_INTERVAL,
+    )
+
+
 def _serve_manager_foreground(context: WeftContext) -> tuple[int, str | None]:
     """Run the canonical manager in the current process for supervisor use."""
 
@@ -962,13 +989,7 @@ def _serve_manager_foreground(context: WeftContext) -> tuple[int, str | None]:
     )
     if isinstance(invocation.spec, TaskSpec):
         invocation.spec.metadata["foreground_serve"] = True
-    run_manager_process(
-        invocation.task_cls_path,
-        context.broker_target,
-        invocation.spec,
-        context.config,
-        MANAGER_POLL_INTERVAL,
-    )
+    _run_manager_process_foreground(invocation, context)
     return 0, None
 
 

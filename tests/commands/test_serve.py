@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 
 from tests.helpers.test_backend import prepare_project_root
-from weft._constants import MANAGER_POLL_INTERVAL
 from weft.context import build_context
 from weft.core import manager_runtime as core_manager_runtime
 
@@ -70,7 +69,7 @@ def test_serve_foreground_uses_shared_runtime_invocation_helper(
         spec=object(),
     )
     helper_calls: list[tuple[object, object]] = []
-    run_calls: list[tuple[object, object, object, object, object]] = []
+    run_calls: list[tuple[object, object]] = []
 
     monkeypatch.setattr(
         core_manager_runtime,
@@ -82,14 +81,8 @@ def test_serve_foreground_uses_shared_runtime_invocation_helper(
         helper_calls.append((context_arg, idle_timeout_override))
         return invocation
 
-    def _fake_run_manager_process(
-        task_cls_path,
-        broker_target,
-        spec,
-        config,
-        poll_interval,
-    ):
-        run_calls.append((task_cls_path, broker_target, spec, config, poll_interval))
+    def _fake_run_manager_process_foreground(invocation_arg, context_arg):
+        run_calls.append((invocation_arg, context_arg))
 
     monkeypatch.setattr(
         core_manager_runtime,
@@ -98,8 +91,8 @@ def test_serve_foreground_uses_shared_runtime_invocation_helper(
     )
     monkeypatch.setattr(
         core_manager_runtime,
-        "run_manager_process",
-        _fake_run_manager_process,
+        "_run_manager_process_foreground",
+        _fake_run_manager_process_foreground,
     )
 
     exit_code, message = core_manager_runtime.serve_manager_foreground(context)
@@ -107,12 +100,4 @@ def test_serve_foreground_uses_shared_runtime_invocation_helper(
     assert exit_code == 0
     assert message is None
     assert helper_calls == [(context, 0.0)]
-    assert run_calls == [
-        (
-            invocation.task_cls_path,
-            context.broker_target,
-            invocation.spec,
-            context.config,
-            MANAGER_POLL_INTERVAL,
-        )
-    ]
+    assert run_calls == [(invocation, context)]

@@ -516,6 +516,87 @@ def test_start_manager_adopts_competing_manager_after_losing_pid_exits(
     assert cleaned_paths == [launch.stderr_path]
 
 
+def test_start_manager_adopts_competing_manager_after_startup_timeout_settles(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    fake_process = _FakePopen(poll_results=[None, None, None])
+    competing_record = {
+        "tid": "1775619800000000000",
+        "pid": 31337,
+        "status": "active",
+        "requests": WEFT_SPAWN_REQUESTS_QUEUE,
+        "role": "manager",
+    }
+    launch = core_manager_runtime.DetachedManagerLaunch(
+        pid=4242,
+        stderr_path=root / ".weft" / "logs" / "manager-startup" / "manager.stderr",
+        launcher_process=fake_process,
+    )
+    cleaned_paths: list[Path] = []
+    settlement_calls: list[str] = []
+
+    monkeypatch.setattr(
+        "weft.core.manager_runtime._build_manager_runtime_invocation",
+        lambda context: core_manager_runtime.ManagerRuntimeInvocation(
+            task_cls_path="weft.core.manager.Manager",
+            tid="9" * 19,
+            spec=_FakeManagerSpec(),
+        ),
+    )
+    monkeypatch.setattr(
+        "weft.core.manager_runtime._launch_detached_manager",
+        lambda context, invocation: launch,
+    )
+    monkeypatch.setattr(
+        "weft.core.manager_runtime.QueueChangeMonitor",
+        _FakeQueueChangeMonitor,
+    )
+    monkeypatch.setattr(
+        "weft.core.manager_runtime._registry_view",
+        lambda context, *, target_tid=None, prune_stale=True, queue=None: (
+            _registry_view()
+        ),
+    )
+
+    def _settle(context, *, manager_tid, deadline):
+        del context, deadline
+        settlement_calls.append(manager_tid)
+        return competing_record
+
+    monkeypatch.setattr(
+        "weft.core.manager_runtime._await_manager_start_settlement",
+        _settle,
+    )
+    monkeypatch.setattr(
+        "weft.core.manager_runtime._is_pid_alive",
+        lambda pid: True,
+    )
+    monotonic_values = iter([0.0, 0.0, 11.0, 11.0])
+    monkeypatch.setattr(
+        "weft.core.manager_runtime.time.monotonic",
+        lambda: next(monotonic_values, 11.0),
+    )
+    monkeypatch.setattr(
+        "weft.core.manager_runtime.time.sleep",
+        lambda seconds: None,
+    )
+    monkeypatch.setattr(
+        "weft.core.manager_runtime._cleanup_startup_stderr",
+        lambda path: cleaned_paths.append(path),
+    )
+
+    record, started_here, handle = _start_manager(ctx, verbose=False)
+
+    assert record == competing_record
+    assert started_here is False
+    assert handle is None
+    assert settlement_calls == ["9" * 19]
+    assert cleaned_paths == [launch.stderr_path]
+
+
 def test_start_manager_builds_detached_launch_from_shared_runtime_invocation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
