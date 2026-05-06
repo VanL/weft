@@ -21,12 +21,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-_CGROUP_RUNTIME_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("podman", ("libpod", "podman")),
-    ("docker", ("docker",)),
-    ("kubernetes", ("kubepods",)),
-    ("containerd", ("containerd", "cri-containerd", "cri-")),
-)
+from weft._constants import CONTAINER_CGROUP_RUNTIME_PATTERNS
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,7 +162,7 @@ def _detect_from_cgroups(
             text = path.read_text(encoding="utf-8", errors="replace").lower()
         except OSError:
             continue
-        for runtime, patterns in _CGROUP_RUNTIME_PATTERNS:
+        for runtime, patterns in CONTAINER_CGROUP_RUNTIME_PATTERNS:
             if any(pattern in text for pattern in patterns):
                 return ContainerRuntimeDetection(
                     runtime=runtime,

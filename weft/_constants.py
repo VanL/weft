@@ -637,6 +637,14 @@ DOCKER_CONTAINER_LOOKUP_TIMEOUT: Final[float] = 2.0
 DOCKER_CONTAINER_LOOKUP_INTERVAL: Final[float] = 0.05
 """Polling interval while waiting for Docker container state visibility."""
 
+CONTAINER_CGROUP_RUNTIME_PATTERNS: Final[tuple[tuple[str, tuple[str, ...]], ...]] = (
+    ("podman", ("libpod", "podman")),
+    ("docker", ("docker",)),
+    ("kubernetes", ("kubepods",)),
+    ("containerd", ("containerd", "cri-containerd", "cri-")),
+)
+"""Runtime markers used when detecting containerized manager processes."""
+
 BUILTIN_PLATFORM_DISPLAY_NAMES: Final[dict[str, str]] = {
     "linux": "Linux",
     "darwin": "macOS",
