@@ -23,6 +23,8 @@ def run_manager_process(
     spec: TaskSpec,
     config: dict[str, Any] | None,
     poll_interval: float,
+    *,
+    hard_exit_on_return: bool = False,
 ) -> None:
     """Run a manager through the shared task-process entry path."""
 
@@ -32,7 +34,7 @@ def run_manager_process(
         spec.model_dump_json(),
         config,
         poll_interval,
-        True,
+        hard_exit_on_return,
     )
 
 
@@ -70,6 +72,7 @@ def main(argv: list[str] | None = None) -> int:
         spec,
         config,
         poll_interval,
+        hard_exit_on_return=True,
     )
     return 0
 

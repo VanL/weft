@@ -21,6 +21,7 @@ from weft._constants import (
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_STREAMING_SESSIONS_QUEUE,
 )
+from weft.core import launcher as launcher_module
 from weft.core.launcher import _task_process_entry
 from weft.core.runners import RunnerOutcome
 from weft.core.tasks import Consumer
@@ -481,6 +482,38 @@ def test_task_process_entry_does_not_wait_after_terminal_turn(
 
     assert _launcher_process_calls == 1
     assert _launcher_wait_calls == []
+
+
+def test_task_process_entry_uses_normal_return_for_windows_hard_exit(
+    broker_env,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    global _launcher_process_calls
+    db_path, _make_queue = broker_env
+    _launcher_wait_calls.clear()
+    _launcher_process_calls = 0
+    spec = make_function_taskspec(
+        unique_tid,
+        "tests.tasks.sample_targets:echo_payload",
+    )
+
+    def _unexpected_exit(_status: int) -> None:
+        raise AssertionError("Windows task-process entries must not use os._exit")
+
+    monkeypatch.setattr(launcher_module.os, "name", "nt")
+    monkeypatch.setattr(launcher_module.os, "_exit", _unexpected_exit)
+
+    _task_process_entry(
+        f"{LauncherTerminalTask.__module__}.{LauncherTerminalTask.__qualname__}",
+        db_path,
+        spec.model_dump_json(),
+        None,
+        0.125,
+        True,
+    )
+
+    assert _launcher_process_calls == 1
 
 
 def test_task_ignores_unknown_control_message(broker_env, unique_tid: str) -> None:
