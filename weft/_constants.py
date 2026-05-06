@@ -340,6 +340,18 @@ TERMINAL_TASK_STATUSES: Final[frozenset[str]] = frozenset(
 )
 """Statuses that represent terminal task lifecycle states."""
 
+TERMINAL_TASK_EVENTS: Final[Mapping[str, str]] = {
+    "control_stop": "cancelled",
+    "task_signal_stop": "cancelled",
+    "control_kill": "killed",
+    "task_signal_kill": "killed",
+    "work_failed": "failed",
+    "work_timeout": "timeout",
+    "work_limit_violation": "failed",
+    "work_completed": "completed",
+}
+"""Task-log events that prove terminal lifecycle status when completion is set."""
+
 TERMINAL_ENVELOPE_TYPE: Final[str] = "terminal"
 """Typed ctrl_out envelope marker for task-local terminal observations."""
 

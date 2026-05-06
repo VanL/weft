@@ -600,3 +600,13 @@ runbook needs to become stricter.
   publish an `external-supervisor` handle than to publish an in-namespace
   `host-pid` handle. Auto-detection is only a conservative fallback; production
   supervisors should still inject explicit runtime identity when they can.
+
+## 2026-05-06 Status Reanimation Boundary
+
+- Public status reconstruction must not use runtime liveness to move terminal
+  lifecycle state back to `running`. A live or apparently live runtime handle
+  can explain a conflict through `reconciliation` metadata, but
+  `weft.log.tasks` terminal proof remains the public lifecycle status.
+- Weak host PID evidence (`observations.host_pids` without process creation
+  identity) is especially unsafe for old task rows. PID reuse or namespace
+  changes can make an unrelated host process look like the original task.

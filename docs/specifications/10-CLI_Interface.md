@@ -307,6 +307,11 @@ Current behavior:
 - can emit JSON
 - uses task-log replay plus manager/task registry queues rather than a separate
   state database
+- JSON task snapshots may include an additive `reconciliation` object when
+  lifecycle evidence and runtime liveness disagree; the public `status` remains
+  one of the normal lifecycle states
+- JSON task snapshots must not report `status="running"` with `completed_at`
+  set
 
 `weft status` is the project-wide summary command. More specific inspection
 surfaces live under `weft task ...` and `weft result`.
@@ -318,8 +323,10 @@ task-log fallback instead of replaying the global task log from the beginning.
 This does not change project-wide `weft status`, which may still replay the
 global log once for a global view.
 
-Implementation plan backlink:
-`docs/plans/2026-04-30-known-tid-terminal-snapshot-api-plan.md`.
+Implementation plan backlinks:
+
+- `docs/plans/2026-05-06-status-coherence-and-stale-pid-liveness-plan.md`
+- `docs/plans/2026-04-30-known-tid-terminal-snapshot-api-plan.md`
 
 ### `result` - Read task output [CLI-1.2]
 
@@ -350,6 +357,9 @@ Current behavior:
   emit JSON
 - `weft task status TID` shows one task, optionally with process information,
   JSON output, or live watch updates
+- `weft task status TID --json` uses the same additive `reconciliation`
+  diagnostic object as `weft status --json` when runtime evidence conflicts
+  with lifecycle evidence
 - `weft task tid` resolves short TIDs, PID lookups, or reverse lookups via the
   TID-mapping queue
 - `weft task stop` and `weft task kill` can act on one task, all active tasks,
@@ -600,6 +610,8 @@ flags, and future queue or control ergonomics live in the companion doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-05-06-lifecycle-reconciliation-architecture-plan.md`](../plans/2026-05-06-lifecycle-reconciliation-architecture-plan.md)
+- [`docs/plans/2026-05-06-status-coherence-and-stale-pid-liveness-plan.md`](../plans/2026-05-06-status-coherence-and-stale-pid-liveness-plan.md)
 - [`docs/plans/2026-04-14-config-precedence-and-parsing-alignment-plan.md`](../plans/2026-04-14-config-precedence-and-parsing-alignment-plan.md)
 - [`docs/plans/2026-04-14-spawn-request-reconciliation-plan.md`](../plans/2026-04-14-spawn-request-reconciliation-plan.md)
 - [`docs/plans/2026-04-13-result-stream-implementation-plan.md`](../plans/2026-04-13-result-stream-implementation-plan.md)

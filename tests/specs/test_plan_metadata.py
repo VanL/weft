@@ -12,6 +12,7 @@ README_PATH = PLANS_DIR / "README.md"
 ALLOWED_STATUSES = frozenset(
     {
         "completed",
+        "draft",
     }
 )
 

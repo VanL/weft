@@ -217,6 +217,10 @@ Current rules:
 - CLI status surfaces reconstruct task snapshots from that log plus the latest
   `weft.state.tid_mappings` entries and live runtime liveness where needed; they
   do not depend on a separate state database
+- terminal task-log lifecycle proof wins for public `status`; runtime liveness
+  disagreement may be exposed through `reconciliation` diagnostics, but it must
+  not rewrite a terminal task back to `running`
+- status surfaces must not emit `status="running"` with `completed_at` set
 - host tasks that still look `running` or `spawning` in the durable log but
   have no runtime proof are treated as stale after the configured status
   liveness window, unless a live manager registry record still proves a manager
@@ -236,7 +240,8 @@ Current rules:
   shared completion wait
 
 _Implementation mapping_: `weft/core/tasks/base.py` `_report_state_change`;
-`weft/commands/status.py` log replay and snapshot collection;
+`weft/commands/status.py` and `weft/commands/system.py` log replay and snapshot
+collection;
 `weft/commands/result.py` materialization and completion waits;
 `weft/commands/_result_wait.py`;
 `weft/commands/_task_history.py`;
@@ -537,6 +542,8 @@ management live in the companion doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-05-06-lifecycle-reconciliation-architecture-plan.md`](../plans/2026-05-06-lifecycle-reconciliation-architecture-plan.md)
+- [`docs/plans/2026-05-06-status-coherence-and-stale-pid-liveness-plan.md`](../plans/2026-05-06-status-coherence-and-stale-pid-liveness-plan.md)
 - [`docs/plans/2026-04-14-spawn-request-reconciliation-plan.md`](../plans/2026-04-14-spawn-request-reconciliation-plan.md)
 - [`docs/plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md`](../plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md)
 - [`docs/plans/2026-04-09-manager-bootstrap-unification-plan.md`](../plans/2026-04-09-manager-bootstrap-unification-plan.md)

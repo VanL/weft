@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 59 tracked plan files in this directory.
+There are currently 61 tracked plan files in this directory.
 
 ## Curation Policy
 
@@ -15,11 +15,15 @@ There are currently 59 tracked plan files in this directory.
 ## Status Taxonomy
 
 - `completed`: the planned slice landed and still describes current behavior or tooling.
+- `draft`: the plan is an active implementation slice or meta-plan that has
+  not landed yet.
 
 ## Index
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-05-06-status-coherence-and-stale-pid-liveness-plan.md`](./2026-05-06-status-coherence-and-stale-pid-liveness-plan.md) | Status Coherence And Stale PID Liveness Plan | `draft` | none |
+| [`2026-05-06-lifecycle-reconciliation-architecture-plan.md`](./2026-05-06-lifecycle-reconciliation-architecture-plan.md) | Lifecycle Reconciliation Architecture Plan | `draft` | none |
 | [`2026-05-05-simplebroker-multiqueue-waiter-integration-plan.md`](./2026-05-05-simplebroker-multiqueue-waiter-integration-plan.md) | SimpleBroker Multi-Queue Waiter Integration | `completed` | none |
 | [`2026-04-30-task-log-cursor-high-water-mark-plan.md`](./2026-04-30-task-log-cursor-high-water-mark-plan.md) | Task Log Cursor High-Water Mark Plan | `completed` | none |
 | [`2026-04-30-known-tid-terminal-snapshot-api-plan.md`](./2026-04-30-known-tid-terminal-snapshot-api-plan.md) | Known-TID Terminal Snapshot API Plan | `completed` | none |

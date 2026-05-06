@@ -375,6 +375,11 @@ def _public_snapshot(
         runtime=status_snapshot.runtime,
         metadata=dict(status_snapshot.metadata),
         pipeline_status=status_snapshot.pipeline_status,
+        reconciliation=(
+            dict(status_snapshot.reconciliation)
+            if isinstance(status_snapshot.reconciliation, dict)
+            else None
+        ),
     )
 
 

@@ -71,7 +71,10 @@ def _write_task_log_entry(
     completed_at: int | None,
     name: str = "task",
     runner_name: str = "host",
+    state_status: str | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> None:
+    state_status = state_status or status
     log_queue = ctx.queue("weft.log.tasks", persistent=False)
     log_queue.write(
         json.dumps(
@@ -83,11 +86,11 @@ def _write_task_log_entry(
                     "name": name,
                     "spec": {"runner": {"name": runner_name, "options": {}}},
                     "state": {
-                        "status": status,
+                        "status": state_status,
                         "started_at": started_at,
                         "completed_at": completed_at,
                     },
-                    "metadata": {},
+                    "metadata": metadata or {},
                 },
             }
         )
@@ -279,7 +282,220 @@ def test_cmd_status_json_includes_runner_runtime_details(
     assert entry["metadata"]["owner"] == "tests"
 
 
-def test_task_status_keeps_terminal_log_state_running_while_task_pid_is_alive(
+def test_terminal_log_status_wins_over_weak_live_host_pid(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = "1844674407370955191"
+    started = 1_762_000_000_000_000_000
+    completed = started + 1_000_000_000
+    mapping_queue = ctx.queue("weft.state.tid_mappings", persistent=False)
+
+    _write_task_log_entry(
+        ctx=ctx,
+        tid=tid,
+        event="work_failed",
+        status="failed",
+        started_at=started,
+        completed_at=completed,
+        name="weak-live-pid-terminal",
+    )
+    mapping_queue.write(
+        json.dumps(
+            {
+                "short": tid[-10:],
+                "full": tid,
+                "runner": "host",
+                "runtime_handle": _runtime_handle(
+                    "host",
+                    "100",
+                    host_pids=[100],
+                ),
+            }
+        )
+    )
+    monkeypatch.setattr(
+        status_cmd,
+        "handle_has_live_host_process",
+        lambda handle: True,
+    )
+
+    snapshot = task_cmd.task_status(tid, context_path=root)
+
+    assert snapshot is not None
+    assert snapshot.status == "failed"
+    assert snapshot.completed_at == completed
+    assert snapshot.reconciliation is not None
+    assert snapshot.reconciliation["classification"] == "runtime_conflict"
+    assert (
+        snapshot.reconciliation["reason"]
+        == "weak_host_pid_ignored_for_terminal_lifecycle"
+    )
+
+    exit_code, payload = cmd_status(
+        json_output=True,
+        include_terminal=True,
+        spec_context=root,
+    )
+
+    assert exit_code == 0
+    assert payload is not None
+    tasks = json.loads(payload)["tasks"]
+    assert len(tasks) == 1
+    assert tasks[0]["status"] == "failed"
+    assert tasks[0]["completed_at"] == completed
+    assert tasks[0]["reconciliation"]["classification"] == "runtime_conflict"
+
+    exit_code, payload = cmd_status(json_output=True, spec_context=root)
+
+    assert exit_code == 0
+    assert payload is not None
+    assert json.loads(payload)["tasks"] == []
+
+
+@pytest.mark.parametrize(
+    ("event", "expected_status"),
+    [
+        ("control_stop", "cancelled"),
+        ("task_signal_stop", "cancelled"),
+        ("control_kill", "killed"),
+        ("task_signal_kill", "killed"),
+        ("work_failed", "failed"),
+        ("work_timeout", "timeout"),
+        ("work_completed", "completed"),
+    ],
+)
+def test_terminal_event_reconciles_stale_running_status_payload(
+    tmp_path: Path,
+    event: str,
+    expected_status: str,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(1_844_674_407_370_955_200 + len(event))
+    started = 1_762_000_000_000_000_000
+    completed = started + 1_000_000_000
+
+    _write_task_log_entry(
+        ctx=ctx,
+        tid=tid,
+        event=event,
+        status="running",
+        state_status="running",
+        started_at=started,
+        completed_at=completed,
+        name=f"stale-{event}",
+    )
+
+    snapshot = task_cmd.task_status(tid, context_path=root)
+
+    assert snapshot is not None
+    assert snapshot.event == event
+    assert snapshot.status == expected_status
+    assert snapshot.completed_at == completed
+    assert snapshot.activity is None
+    assert snapshot.waiting_on is None
+    assert snapshot.reconciliation is not None
+    assert snapshot.reconciliation["classification"] == "stale_status_payload"
+    assert (
+        snapshot.reconciliation["reason"]
+        == "contradictory_terminal_event_status"
+    )
+
+
+def test_status_preserves_active_manager_while_terminal_manager_row_stays_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    old_tid = "1844674407370955192"
+    active_tid = "1844674407370955193"
+    started = 1_762_000_000_000_000_000
+    completed = started + 1_000_000_000
+
+    ctx.queue(WEFT_MANAGERS_REGISTRY_QUEUE, persistent=False).write(
+        json.dumps(
+            {
+                "tid": active_tid,
+                "name": "manager",
+                "status": "active",
+                "runtime_handle": _runtime_handle(
+                    "manager-supervisor",
+                    "supervisor-active",
+                    kind="supervised-process",
+                    authority="external-supervisor",
+                ),
+                "role": "manager",
+                "requests": WEFT_SPAWN_REQUESTS_QUEUE,
+            }
+        )
+    )
+    _write_task_log_entry(
+        ctx=ctx,
+        tid=active_tid,
+        event="task_started",
+        status="running",
+        started_at=started,
+        completed_at=None,
+        name="active-manager",
+        metadata={"role": "manager"},
+    )
+    _write_task_log_entry(
+        ctx=ctx,
+        tid=old_tid,
+        event="task_signal_stop",
+        status="running",
+        state_status="running",
+        started_at=started,
+        completed_at=completed,
+        name="old-manager",
+        metadata={"role": "manager"},
+    )
+    ctx.queue("weft.state.tid_mappings", persistent=False).write(
+        json.dumps(
+            {
+                "short": old_tid[-10:],
+                "full": old_tid,
+                "runner": "host",
+                "runtime_handle": _runtime_handle(
+                    "host",
+                    "100",
+                    host_pids=[100],
+                ),
+            }
+        )
+    )
+    monkeypatch.setattr(
+        status_cmd,
+        "handle_has_live_host_process",
+        lambda handle: True,
+    )
+
+    exit_code, payload = cmd_status(
+        json_output=True,
+        include_terminal=True,
+        spec_context=root,
+    )
+
+    assert exit_code == 0
+    assert payload is not None
+    data = json.loads(payload)
+    assert [(manager["tid"], manager["status"]) for manager in data["managers"]] == [
+        (active_tid, "active")
+    ]
+    tasks = {task["tid"]: task for task in data["tasks"]}
+    assert tasks[active_tid]["status"] == "running"
+    assert tasks[old_tid]["status"] == "cancelled"
+    assert all(
+        not (task["status"] == "running" and task["completed_at"] is not None)
+        for task in tasks.values()
+    )
+
+
+def test_task_status_keeps_terminal_log_state_when_task_pid_is_alive(
     tmp_path: Path,
 ) -> None:
     root = prepare_project_root(tmp_path)
@@ -317,7 +533,13 @@ def test_task_status_keeps_terminal_log_state_running_while_task_pid_is_alive(
 
     assert snapshot is not None
     assert snapshot.event == "control_stop"
-    assert snapshot.status == "running"
+    assert snapshot.status == "cancelled"
+    assert snapshot.reconciliation is not None
+    assert snapshot.reconciliation["classification"] == "runtime_conflict"
+    assert (
+        snapshot.reconciliation["reason"]
+        == "weak_host_pid_ignored_for_terminal_lifecycle"
+    )
 
 
 def test_task_snapshot_full_tid_uses_bounded_known_tid_helper(
@@ -479,7 +701,13 @@ def test_task_status_uses_log_runtime_metadata_when_mapping_is_missing(
     snapshot = task_cmd.task_status(tid, context_path=root)
 
     assert snapshot is not None
-    assert snapshot.status == "running"
+    assert snapshot.status == "cancelled"
+    assert snapshot.reconciliation is not None
+    assert snapshot.reconciliation["classification"] == "runtime_conflict"
+    assert (
+        snapshot.reconciliation["reason"]
+        == "weak_host_pid_ignored_for_terminal_lifecycle"
+    )
 
 
 def test_task_status_surfaces_terminal_log_state_once_task_pid_is_gone(

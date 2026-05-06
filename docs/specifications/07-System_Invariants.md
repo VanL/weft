@@ -35,6 +35,9 @@ _Implementation mapping_: `weft/core/taskspec/model.py` state validators and
 - **STATE.3**: running state requires `started_at`
 - **STATE.4**: terminal states require `completed_at` once execution has started
 - **STATE.5**: `completed_at` is later than `started_at` when both exist
+- **STATE.6**: public snapshots must not present non-terminal status with
+  terminal timestamps; runtime conflicts are diagnostics, not lifecycle
+  back-transitions
 
 ### Queue Invariants
 
@@ -100,6 +103,8 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
   when an old or invalid runtime-handle payload is ignored. Runtime control and
   liveness probes must reject invalid handle shapes instead of inferring
   authority from legacy PID fields.
+- **OBS.11**: live runtime evidence may explain a conflict, but public status
+  reconstruction must not use it to reanimate terminal lifecycle state.
 
 ### Implementation Invariants
 
@@ -218,6 +223,8 @@ doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-05-06-lifecycle-reconciliation-architecture-plan.md`](../plans/2026-05-06-lifecycle-reconciliation-architecture-plan.md)
+- [`docs/plans/2026-05-06-status-coherence-and-stale-pid-liveness-plan.md`](../plans/2026-05-06-status-coherence-and-stale-pid-liveness-plan.md)
 - [`docs/plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md`](../plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md)
 - [`docs/plans/2026-04-17-canonical-owner-fence-plan.md`](../plans/2026-04-17-canonical-owner-fence-plan.md)
 

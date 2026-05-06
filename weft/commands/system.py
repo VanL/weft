@@ -25,6 +25,7 @@ from weft._constants import (
     STATUS_RUNTIMELESS_STALE_AFTER_SECONDS,
     STATUS_WATCH_MIN_INTERVAL,
     TASKSPEC_TID_SHORT_LENGTH,
+    TERMINAL_TASK_EVENTS,
     TERMINAL_TASK_STATUSES,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
@@ -135,6 +136,7 @@ class TaskSnapshot:
     runtime: dict[str, Any] | None
     metadata: dict[str, Any]
     pipeline_status: dict[str, Any] | None = None
+    reconciliation: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload = {
@@ -156,6 +158,8 @@ class TaskSnapshot:
         }
         if self.pipeline_status is not None:
             payload["pipeline_status"] = self.pipeline_status
+        if self.reconciliation is not None:
+            payload["reconciliation"] = self.reconciliation
         return payload
 
 
@@ -416,6 +420,35 @@ def _runtime_description_is_live(
     return normalized not in NON_LIVE_RUNTIME_STATES
 
 
+def _runtime_evidence_details(
+    *,
+    handle: RunnerHandle | None,
+    runtime_description: Mapping[str, Any] | None,
+) -> tuple[bool, str, str]:
+    """Return live/evidence/strength details for reconciliation diagnostics."""
+
+    if handle is None:
+        return False, "none", "unknown"
+
+    authority = handle.control.get("authority")
+    if authority == "host-pid":
+        live = handle_has_live_host_process(handle)
+        has_identity = any(
+            create_time is not None
+            for _pid, create_time in handle.scoped_host_processes()
+        )
+        return live, "host-pid", "strong" if has_identity else "weak"
+    if authority == "runner":
+        return _runtime_description_is_live(runtime_description), "runner", "strong"
+    if authority == "external-supervisor":
+        return (
+            _runtime_description_is_live(runtime_description),
+            "external-supervisor",
+            "unknown",
+        )
+    return _runtime_description_is_live(runtime_description), "none", "unknown"
+
+
 def _effective_public_status(
     status: str,
     *,
@@ -426,12 +459,11 @@ def _effective_public_status(
     now_ns: int,
     has_live_manager_record: bool = False,
 ) -> str:
-    """Keep public terminal states aligned with live runtime liveness."""
+    """Keep public state coherent with lifecycle and runtime liveness."""
 
     normalized_runner = (
         runner_name.strip().lower() if isinstance(runner_name, str) else ""
     )
-    runtime_live = _runtime_description_is_live(runtime_description)
     host_task_pid = _task_process_id(mapping_entry)
     stale_without_runtime = (
         status in {"spawning", "running"}
@@ -459,19 +491,85 @@ def _effective_public_status(
             return "failed"
         return status
 
-    if normalized_runner and normalized_runner != "host":
-        if runtime_live:
-            return "running"
-        return status
-
-    if status == "completed":
-        return status
-
-    if _task_process_alive(mapping_entry):
-        return "running"
-    if runtime_live:
-        return "running"
     return status
+
+
+def _reconcile_lifecycle_status(
+    payload: Mapping[str, Any],
+    state: Mapping[str, Any],
+) -> tuple[str, str | None]:
+    """Choose lifecycle status from one task-log payload before liveness checks."""
+
+    payload_status = payload.get("status")
+    if isinstance(payload_status, str) and payload_status in TERMINAL_TASK_STATUSES:
+        return payload_status, None
+
+    state_status = state.get("status")
+    if isinstance(state_status, str) and state_status in TERMINAL_TASK_STATUSES:
+        return state_status, None
+
+    completed_at = state.get("completed_at")
+    event = payload.get("event")
+    if (
+        isinstance(completed_at, int)
+        and isinstance(event, str)
+        and event in TERMINAL_TASK_EVENTS
+    ):
+        return TERMINAL_TASK_EVENTS[event], "contradictory_terminal_event_status"
+
+    if isinstance(payload_status, str) and payload_status:
+        return payload_status, None
+    if isinstance(state_status, str) and state_status:
+        return state_status, None
+    return "created", None
+
+
+def _reconciliation_diagnostic(
+    *,
+    lifecycle_status: str,
+    status_reason: str | None,
+    runtime_handle: RunnerHandle | None,
+    runtime_description: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Build optional public reconciliation metadata for status conflicts."""
+
+    if lifecycle_status not in TERMINAL_TASK_STATUSES:
+        return None
+
+    runtime_live, runtime_evidence, runtime_strength = _runtime_evidence_details(
+        handle=runtime_handle,
+        runtime_description=runtime_description,
+    )
+
+    if status_reason == "contradictory_terminal_event_status":
+        diagnostic: dict[str, Any] = {
+            "classification": "runtime_conflict"
+            if runtime_live
+            else "stale_status_payload",
+            "reason": status_reason,
+            "lifecycle_status": lifecycle_status,
+            "runtime_evidence": runtime_evidence,
+            "runtime_evidence_strength": runtime_strength,
+        }
+        if runtime_live:
+            diagnostic["runtime_status"] = "running"
+        return diagnostic
+
+    if not runtime_live:
+        return None
+
+    if runtime_evidence == "host-pid" and runtime_strength == "weak":
+        reason = "weak_host_pid_ignored_for_terminal_lifecycle"
+    else:
+        reason = "terminal_lifecycle_with_live_runtime"
+    return {
+        "classification": "runtime_conflict",
+        "reason": reason,
+        "lifecycle_status": lifecycle_status,
+        "runtime_status": "running",
+        "runtime_evidence": runtime_evidence,
+        "runtime_evidence_strength": runtime_strength,
+    }
 
 
 def _runner_name_for_snapshot(
@@ -582,6 +680,7 @@ def _collect_task_snapshot_records(
                     "taskspec": None,
                     "metadata": {},
                     "event_payload": None,
+                    "status_reason": None,
                 },
             )
             event = payload.get("event", "unknown")
@@ -623,8 +722,9 @@ def _collect_task_snapshot_records(
                 continue
 
             name = taskspec.get("name") or payload.get("name") or tid
-            state = taskspec.get("state") or {}
-            status = payload.get("status") or state.get("status") or "created"
+            state_raw = taskspec.get("state") or {}
+            state = state_raw if isinstance(state_raw, Mapping) else {}
+            status, status_reason = _reconcile_lifecycle_status(payload, state)
             incoming_terminal = (
                 isinstance(status, str) and status in TERMINAL_TASK_STATUSES
             )
@@ -645,6 +745,7 @@ def _collect_task_snapshot_records(
             record["taskspec"] = taskspec
             record["metadata"] = metadata if isinstance(metadata, dict) else {}
             record["event_payload"] = dict(payload)
+            record["status_reason"] = status_reason
             if record["status"] in TERMINAL_TASK_STATUSES:
                 record["activity"] = None
                 record["waiting_on"] = None
@@ -676,6 +777,7 @@ def _collect_task_snapshot_records(
             mapping_entry=runtime_entry,
         )
         runtime_description = _describe_runtime_handle(runtime_handle)
+        status_reason = record.get("status_reason")
         public_status = _effective_public_status(
             str(record.get("status") or "created"),
             runner_name=runner,
@@ -684,6 +786,12 @@ def _collect_task_snapshot_records(
             last_timestamp=int(record.get("last_timestamp") or 0),
             now_ns=now_ns,
             has_live_manager_record=tid in active_manager_tids,
+        )
+        reconciliation = _reconciliation_diagnostic(
+            lifecycle_status=public_status,
+            status_reason=status_reason if isinstance(status_reason, str) else None,
+            runtime_handle=runtime_handle,
+            runtime_description=runtime_description,
         )
 
         started_at = record.get("started_at")
@@ -721,6 +829,7 @@ def _collect_task_snapshot_records(
             metadata=record["metadata"]
             if isinstance(record.get("metadata"), dict)
             else {},
+            reconciliation=reconciliation,
         )
         records_out.append(
             CollectedTaskSnapshot(snapshot=snapshot, taskspec_payload=taskspec)
@@ -1045,6 +1154,11 @@ def _public_task_snapshot(snapshot: TaskSnapshot) -> PublicTaskSnapshot:
         pipeline_status=(
             dict(payload["pipeline_status"])
             if isinstance(payload.get("pipeline_status"), dict)
+            else None
+        ),
+        reconciliation=(
+            dict(payload["reconciliation"])
+            if isinstance(payload.get("reconciliation"), dict)
             else None
         ),
     )
