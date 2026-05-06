@@ -714,6 +714,32 @@ def test_manager_liveness_rejects_stale_external_supervisor_record(
     assert Manager._manager_record_is_live(record) is False
 
 
+def test_manager_liveness_rejects_host_pid_identity_mismatch(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr("weft.helpers.process_create_time", lambda pid: 222.0)
+    record = {
+        "tid": "1761000000000000011",
+        "status": "active",
+        "runtime_handle": {
+            "runner": "host",
+            "kind": "process",
+            "id": "1",
+            "control": {"authority": "host-pid"},
+            "observations": {
+                "host_pids": [1],
+                "host_processes": [{"pid": 1, "create_time": 111.0}],
+            },
+            "metadata": {},
+        },
+        "_timestamp": time.time_ns(),
+        "role": "manager",
+        "requests": WEFT_SPAWN_REQUESTS_QUEUE,
+    }
+
+    assert Manager._manager_record_is_live(record) is False
+
+
 def test_manager_unregister_registry_broker_error_is_best_effort(
     unique_tid: str,
 ) -> None:

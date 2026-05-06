@@ -31,6 +31,7 @@ from simplebroker import Queue
 from simplebroker import commands as sb_commands
 from simplebroker.ext import BrokerError
 from weft._constants import WEFT_SPAWN_REQUESTS_QUEUE, load_config
+from weft.ext import RunnerHandle
 
 # Load configuration once at module level for efficiency
 _config = load_config()
@@ -96,6 +97,24 @@ def pid_matches_create_time(pid: int, create_time: float | None) -> bool:
     if current_create_time is None:
         return False
     return math.isclose(current_create_time, create_time, rel_tol=0.0, abs_tol=0.001)
+
+
+def live_host_processes_from_handle(
+    handle: RunnerHandle,
+) -> tuple[tuple[int, float | None], ...]:
+    """Return host processes from a runtime handle that still match their identity."""
+
+    return tuple(
+        (pid, create_time)
+        for pid, create_time in handle.scoped_host_processes()
+        if pid_matches_create_time(pid, create_time)
+    )
+
+
+def handle_has_live_host_process(handle: RunnerHandle) -> bool:
+    """Return whether a runtime handle has at least one live scoped host process."""
+
+    return bool(live_host_processes_from_handle(handle))
 
 
 def resolve_broker_max_message_size(config: Mapping[str, Any]) -> int:

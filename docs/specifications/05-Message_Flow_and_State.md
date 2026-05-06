@@ -350,6 +350,10 @@ Current rules:
   truth: the manager refreshes its active registry record periodically, and
   lifecycle readers treat an expired external-supervisor heartbeat as stale
   unless the handle includes live scoped host PIDs
+- host-pid manager records require scoped host-process identity, not just raw
+  PID existence; if `observations.host_processes` includes process creation
+  times, PID liveness checks must reject records whose current process identity
+  does not match the recorded one
 - detached-launcher acknowledgement and startup-stderr cleanup are best-effort
   post-proof steps; they may warn, but they do not downgrade a successfully
   proven manager start into submission failure

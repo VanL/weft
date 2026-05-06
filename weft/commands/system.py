@@ -48,6 +48,7 @@ from weft.ext import RunnerHandle
 from weft.helpers import (
     format_byte_size,
     format_timestamp_ns_relative,
+    handle_has_live_host_process,
     iter_queue_json_entries,
     pid_is_live,
 )
@@ -390,7 +391,7 @@ def _task_process_alive(mapping_entry: Mapping[str, Any] | None) -> bool:
     handle = _runtime_handle_from_mapping(mapping_entry or {})
     if handle is None or handle.control.get("authority") != "host-pid":
         return False
-    return any(_pid_alive(pid) for pid in handle.scoped_host_pids())
+    return handle_has_live_host_process(handle)
 
 
 def _task_process_id(mapping_entry: Mapping[str, Any] | None) -> int | None:

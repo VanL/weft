@@ -77,11 +77,13 @@ Key responsibilities implemented in `weft/core/manager.py`:
    callers reduce to the latest relevant record per TID, prune dead or expired
    active records, and then filter to canonical live managers before treating
    the result as the active-manager view. Host-managed records use scoped host
-   PID liveness. Externally supervised records use host PID liveness when the
-   supervisor supplied scoped host PIDs, otherwise their registry heartbeat age
-   is the generic liveness boundary. Canonical ownership is lowest-live-TID
-   among canonical claimants for `weft.spawn.requests`. Manager dispatch keeps
-   four runtime-owned outcomes distinct:
+   process identity: a PID is live only when it still matches the recorded
+   process creation time when that identity is available. Externally supervised
+   records use the same scoped host-process check when the supervisor supplied
+   scoped host PIDs, otherwise their registry heartbeat age is the generic
+   liveness boundary. Canonical ownership is lowest-live-TID among canonical
+   claimants for `weft.spawn.requests`. Manager dispatch keeps four
+   runtime-owned outcomes distinct:
    `self`, `other`, `none`, and `unknown`.
 5. **Idle timeout** – Managers honour the `idle_timeout` metadata field first.
    When that metadata is absent they fall back to

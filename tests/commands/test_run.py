@@ -2145,6 +2145,66 @@ def test_list_manager_records_prunes_dead_active_and_preserves_stopped_history(
     assert [entry["tid"] for entry in entries] == [stopped_tid]
 
 
+def test_list_manager_records_prunes_host_pid_identity_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    registry = ctx.queue(WEFT_MANAGERS_REGISTRY_QUEUE, persistent=False)
+    stale_tid = "17756224000000000045"
+
+    monkeypatch.setattr("weft.helpers.process_create_time", lambda pid: 222.0)
+    try:
+        registry.write(
+            json.dumps(
+                {
+                    "tid": stale_tid,
+                    "name": "stale-container-manager",
+                    "status": "active",
+                    "runtime_handle": {
+                        "runner": "host",
+                        "kind": "process",
+                        "id": "1",
+                        "control": {"authority": "host-pid"},
+                        "observations": {
+                            "host_pids": [1],
+                            "host_processes": [{"pid": 1, "create_time": 111.0}],
+                        },
+                        "metadata": {},
+                    },
+                    "timestamp": registry.generate_timestamp(),
+                    "requests": WEFT_SPAWN_REQUESTS_QUEUE,
+                    "ctrl_in": f"T{stale_tid}.ctrl_in",
+                    "ctrl_out": f"T{stale_tid}.ctrl_out",
+                    "outbox": "weft.manager.outbox",
+                    "role": "manager",
+                }
+            )
+        )
+    finally:
+        registry.close()
+
+    assert (
+        core_manager_runtime.list_manager_records(
+            ctx,
+            include_stopped=True,
+            canonical_only=False,
+        )
+        == []
+    )
+
+    registry_reader = ctx.queue(WEFT_MANAGERS_REGISTRY_QUEUE, persistent=False)
+    try:
+        entries = [
+            payload for payload, _timestamp in iter_queue_json_entries(registry_reader)
+        ]
+    finally:
+        registry_reader.close()
+
+    assert entries == []
+
+
 def test_stop_manager_waits_for_pid_exit_after_stopped_status(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

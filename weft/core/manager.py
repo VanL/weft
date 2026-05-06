@@ -59,6 +59,7 @@ from weft._constants import (
 from weft.ext import RunnerHandle
 from weft.helpers import (
     canonical_owner_tid,
+    handle_has_live_host_process,
     is_canonical_manager_record,
     iter_queue_json_entries,
     pid_is_live,
@@ -582,9 +583,8 @@ class Manager(BaseTask):
         except ValueError:
             return False
         if handle.control.get("authority") == "external-supervisor":
-            host_pids = handle.scoped_host_pids()
-            if host_pids:
-                return any(pid_is_live(pid) for pid in host_pids)
+            if handle.scoped_host_processes():
+                return handle_has_live_host_process(handle)
             timestamp = record.get("_timestamp")
             if not isinstance(timestamp, int):
                 return True
@@ -593,7 +593,7 @@ class Manager(BaseTask):
             )
             return time.time_ns() - timestamp <= stale_after_ns
         if handle.control.get("authority") == "host-pid":
-            return any(pid_is_live(pid) for pid in handle.scoped_host_pids())
+            return handle_has_live_host_process(handle)
         return True
 
     def _read_active_manager_records(self) -> dict[str, dict[str, Any]] | None:

@@ -14,6 +14,7 @@ from tests.helpers.test_backend import prepare_project_root
 from weft._constants import WEFT_MANAGERS_REGISTRY_QUEUE
 from weft.commands import manager as manager_cmd
 from weft.context import build_context
+from weft.helpers import iter_queue_json_entries
 
 pytestmark = [pytest.mark.shared]
 
@@ -474,6 +475,79 @@ def test_stop_command_force_ignores_registry_only_pid_without_mapping(
 
     assert exit_code == 0
     assert message is None
+
+
+def test_stop_command_force_replaces_active_registry_record(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    context_root = prepare_project_root(tmp_path / "ctx")
+    context = build_context(context_root)
+    tid = "1761000000000000010"
+    kill_pid = 8765
+
+    registry_queue = Queue(
+        WEFT_MANAGERS_REGISTRY_QUEUE,
+        db_path=context.broker_target,
+        persistent=False,
+        config=context.config,
+    )
+    try:
+        registry_queue.write(
+            json.dumps(
+                {
+                    "tid": tid,
+                    "status": "active",
+                    "name": "manager",
+                    "runtime_handle": _host_runtime_handle(kill_pid),
+                    "role": "manager",
+                    "requests": "weft.spawn.requests",
+                    "ctrl_in": f"T{tid}.ctrl_in",
+                    "ctrl_out": f"T{tid}.ctrl_out",
+                    "outbox": "weft.manager.outbox",
+                }
+            )
+        )
+    finally:
+        registry_queue.close()
+
+    monkeypatch.setattr(
+        "weft.core.manager_runtime._lookup_manager_pid",
+        lambda *args, **kwargs: kill_pid,
+    )
+    monkeypatch.setattr(
+        "weft.core.manager_runtime._is_pid_alive",
+        lambda pid: pid == kill_pid,
+    )
+    monkeypatch.setattr(
+        "weft.core.manager_runtime.terminate_process_tree",
+        lambda *args, **kwargs: {kill_pid},
+    )
+
+    exit_code, message = manager_cmd.stop_command(
+        tid=tid,
+        force=True,
+        timeout=0.0,
+        context_path=context_root,
+    )
+
+    assert exit_code == 0
+    assert message is None
+
+    reader = Queue(
+        WEFT_MANAGERS_REGISTRY_QUEUE,
+        db_path=context.broker_target,
+        persistent=False,
+        config=context.config,
+    )
+    try:
+        records = [payload for payload, _timestamp in iter_queue_json_entries(reader)]
+    finally:
+        reader.close()
+
+    assert len(records) == 1
+    assert records[0]["tid"] == tid
+    assert records[0]["status"] == "stopped"
 
 
 def test_list_command_returns_table(tmp_path):

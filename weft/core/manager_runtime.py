@@ -48,6 +48,7 @@ from weft.helpers import (
     is_canonical_manager_record,
     iter_queue_json_entries,
     pid_is_live,
+    pid_matches_create_time,
     terminate_process_tree,
 )
 
@@ -192,8 +193,8 @@ def _record_pid(record: dict[str, Any] | None) -> int | None:
     handle = _manager_handle_from_record(record)
     if handle is None or handle.control.get("authority") != "host-pid":
         return None
-    pids = handle.scoped_host_pids()
-    return pids[0] if pids else None
+    live_processes = _live_host_processes_from_handle(handle)
+    return live_processes[0][0] if live_processes else None
 
 
 def _manager_handle_from_record(record: dict[str, Any] | None) -> RunnerHandle | None:
@@ -208,14 +209,31 @@ def _manager_handle_from_record(record: dict[str, Any] | None) -> RunnerHandle |
         return None
 
 
+def _live_host_processes_from_handle(
+    handle: RunnerHandle,
+) -> tuple[tuple[int, float | None], ...]:
+    return tuple(
+        (pid, create_time)
+        for pid, create_time in handle.scoped_host_processes()
+        if (
+            pid_matches_create_time(pid, create_time)
+            if create_time is not None
+            else _is_pid_alive(pid)
+        )
+    )
+
+
+def _manager_handle_has_live_host_process(handle: RunnerHandle) -> bool:
+    return bool(_live_host_processes_from_handle(handle))
+
+
 def _manager_handle_is_stale(handle: RunnerHandle | None) -> bool:
     if handle is None:
         return True
     if handle.control.get("authority") == "external-supervisor":
         return False
     if handle.control.get("authority") == "host-pid":
-        host_pids = handle.scoped_host_pids()
-        return not host_pids or not any(_is_pid_alive(pid) for pid in host_pids)
+        return not _manager_handle_has_live_host_process(handle)
     return False
 
 
@@ -226,9 +244,8 @@ def _manager_record_is_stale(record: dict[str, Any] | None) -> bool:
     if handle.control.get("authority") != "external-supervisor":
         return _manager_handle_is_stale(handle)
 
-    host_pids = handle.scoped_host_pids()
-    if host_pids:
-        return not any(_is_pid_alive(pid) for pid in host_pids)
+    if handle.scoped_host_processes():
+        return not _manager_handle_has_live_host_process(handle)
 
     timestamp = _manager_record_timestamp(record)
     if timestamp is None:
@@ -297,8 +314,8 @@ def _lookup_manager_pid(context: WeftContext, tid: str) -> int | None:
         handle = _manager_handle_from_record(data)
         pid = None
         if handle is not None and handle.control.get("authority") == "host-pid":
-            pids = handle.scoped_host_pids()
-            pid = pids[0] if pids else None
+            live_processes = _live_host_processes_from_handle(handle)
+            pid = live_processes[0][0] if live_processes else None
         if pid is not None:
             latest_timestamp = timestamp
             resolved_pid = pid
@@ -321,6 +338,92 @@ def _send_stop(
         queue.write("STOP")
     finally:
         queue.close()
+
+
+def _mark_manager_stopped(
+    context: WeftContext,
+    tid: str,
+    *,
+    record: dict[str, Any] | None,
+) -> bool:
+    """Replace a manager registry row with stopped state after external control."""
+
+    registry_queue = _registry_queue(context)
+    try:
+        latest_record = record
+        delete_timestamps: list[int] = []
+        for data, timestamp in iter_queue_json_entries(registry_queue):
+            if data.get("tid") != tid:
+                continue
+            delete_timestamps.append(timestamp)
+            if latest_record is None:
+                latest_record = _normalize_manager_record(data, timestamp=timestamp)
+                continue
+            existing_ts = _manager_record_timestamp(latest_record) or -1
+            if existing_ts < timestamp:
+                latest_record = _normalize_manager_record(data, timestamp=timestamp)
+
+        for timestamp in delete_timestamps:
+            try:
+                registry_queue.delete(message_id=timestamp)
+            except (
+                BrokerError,
+                OSError,
+                RuntimeError,
+            ):  # pragma: no cover - registry cleanup best effort
+                logger.debug(
+                    "Failed to prune manager registry entry for %s",
+                    tid,
+                    exc_info=True,
+                )
+
+        stopped_timestamp = registry_queue.generate_timestamp()
+        payload = {
+            "tid": tid,
+            "name": "manager",
+            "capabilities": [],
+            "status": "stopped",
+            "timestamp": stopped_timestamp,
+            "requests": WEFT_SPAWN_REQUESTS_QUEUE,
+            "ctrl_in": _manager_ctrl_queue_name(tid, latest_record),
+            "ctrl_out": f"T{tid}.{QUEUE_CTRL_OUT_SUFFIX}",
+            "outbox": WEFT_MANAGER_OUTBOX_QUEUE,
+            "role": "manager",
+        }
+        if isinstance(latest_record, dict):
+            for key in (
+                "name",
+                "capabilities",
+                "runtime_handle",
+                "inbox",
+                "requests",
+                "ctrl_in",
+                "ctrl_out",
+                "outbox",
+                "role",
+            ):
+                value = latest_record.get(key)
+                if value is not None:
+                    payload[key] = value
+
+        payload["status"] = "stopped"
+        payload["timestamp"] = stopped_timestamp
+        try:
+            registry_queue.write(json.dumps(payload))
+        except (
+            BrokerError,
+            OSError,
+            RuntimeError,
+        ):  # pragma: no cover - registry write failure is surfaced to caller
+            logger.debug(
+                "Failed to record stopped manager state for %s",
+                tid,
+                exc_info=True,
+            )
+            return False
+        return True
+    finally:
+        registry_queue.close()
 
 
 def _build_manager_spec(
@@ -1045,21 +1148,29 @@ def _stop_manager(
             try:
                 terminate_process_tree(kill_pid, timeout=timeout)
             except (ProcessLookupError, OSError):
-                return True, None
+                if _mark_manager_stopped(context, target_tid, record=current):
+                    return True, None
+                return False, f"Manager {target_tid} stopped but registry update failed"
             except PermissionError:
                 return False, f"Permission denied sending SIGTERM to PID {kill_pid}"
-            return True, None
+            if _mark_manager_stopped(context, target_tid, record=current):
+                return True, None
+            return False, f"Manager {target_tid} stopped but registry update failed"
 
         if process is not None and process.poll() is None:
             try:
                 process.terminate()
             except Exception:  # pragma: no cover - defensive
-                return True, None
+                if _mark_manager_stopped(context, target_tid, record=current):
+                    return True, None
+                return False, f"Manager {target_tid} stopped but registry update failed"
             try:
                 process.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
                 return False, f"Manager {target_tid} did not stop within {timeout:.1f}s"
-            return True, None
+            if _mark_manager_stopped(context, target_tid, record=current):
+                return True, None
+            return False, f"Manager {target_tid} stopped but registry update failed"
         if _external_supervisor_record_is_live(current):
             return (
                 False,

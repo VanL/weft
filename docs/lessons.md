@@ -590,3 +590,8 @@ runbook needs to become stricter.
   supervised manager when no host PID or process handle is available. Either
   the manager must publish a stopped record, the supervisor must stop it, or
   the heartbeat must expire and be pruned.
+- A host-pid manager record must prove host-process identity, not just PID
+  existence. Docker makes the failure obvious because every replacement
+  container can have a live PID `1`, so manager liveness readers must compare
+  recorded process creation time when it is present before accepting the PID as
+  the same runtime.
