@@ -1115,6 +1115,33 @@ def test_manager_sigterm_drains_nonpersistent_children(manager_setup) -> None:
     assert not any(event.get("event") == "task_signal_kill" for event in events)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX signals required")
+def test_foreground_serve_sigterm_uses_async_drain_path(manager_setup) -> None:
+    """Foreground serve SIGTERM must not run child teardown in the signal handler."""
+
+    manager, _make_queue = manager_setup
+    manager.taskspec.metadata["foreground_serve"] = True
+    terminate_called = False
+    original_terminate_children = manager._terminate_children
+
+    def fail_if_signal_handler_terminates_children() -> None:
+        nonlocal terminate_called
+        terminate_called = True
+        raise AssertionError("signal handler must not synchronously terminate children")
+
+    try:
+        manager._terminate_children = fail_if_signal_handler_terminates_children  # type: ignore[method-assign]
+
+        manager.handle_termination_signal(signal.SIGTERM)
+
+        assert terminate_called is False
+        assert manager._draining is True
+        assert manager.should_stop is False
+        assert manager.taskspec.state.status == "running"
+    finally:
+        manager._terminate_children = original_terminate_children  # type: ignore[method-assign]
+
+
 @pytest.mark.skipif(
     os.name == "nt" or getattr(signal, "SIGUSR1", None) is None,
     reason="SIGUSR1 not available",

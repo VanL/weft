@@ -191,10 +191,7 @@ def test_one_shot_outbox_without_terminal_log_classifies_completed(
         assert task_status is not None
         assert task_status.status == "completed"
         assert task_status.reconciliation is not None
-        assert (
-            task_status.reconciliation["classification"]
-            == "result_without_terminal"
-        )
+        assert task_status.reconciliation["classification"] == "result_without_terminal"
 
         exit_code, payload = status_cmd.cmd_status(
             json_output=True,

@@ -752,7 +752,9 @@ def _collect_task_snapshot_records(
             record["completed_at"] = (
                 completed_at if isinstance(completed_at, int) else None
             )
-            record["return_code"] = return_code if isinstance(return_code, int) else None
+            record["return_code"] = (
+                return_code if isinstance(return_code, int) else None
+            )
             record["error"] = (
                 payload_error
                 if isinstance(payload_error, str) and payload_error
@@ -832,7 +834,10 @@ def _collect_task_snapshot_records(
                 return_code = local_evidence.return_code
             if local_evidence.error is not None:
                 error = local_evidence.error
-            if not isinstance(completed_at, int) and local_evidence.observed_at is not None:
+            if (
+                not isinstance(completed_at, int)
+                and local_evidence.observed_at is not None
+            ):
                 completed_at = local_evidence.observed_at
             if local_evidence.observed_at is not None:
                 record["last_timestamp"] = max(

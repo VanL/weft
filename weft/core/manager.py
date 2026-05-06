@@ -1257,8 +1257,6 @@ class Manager(BaseTask):
             super().handle_termination_signal(signum)
             return
 
-        foreground_serve = self.taskspec.metadata.get("foreground_serve") is True
-
         if self._external_stop_handled:
             return
         self._external_stop_handled = True
@@ -1274,9 +1272,6 @@ class Manager(BaseTask):
             event=None,
             completion_event="task_signal_stop",
         )
-        if foreground_serve:
-            self._terminate_children()
-            self._finish_graceful_shutdown()
 
     def _send_stop_command(self, queue_name: str) -> None:
         queue = Queue(
