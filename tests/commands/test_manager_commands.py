@@ -29,6 +29,17 @@ def _host_runtime_handle(pid: int) -> dict[str, object]:
     }
 
 
+def _external_supervisor_runtime_handle() -> dict[str, object]:
+    return {
+        "runner": "manager-supervisor",
+        "kind": "supervised-process",
+        "id": "container:weft-manager-1",
+        "control": {"authority": "external-supervisor"},
+        "observations": {"container_pid": 1, "container_name": "weft-manager-1"},
+        "metadata": {},
+    }
+
+
 def test_start_command_delegates_to_shared_bootstrap(tmp_path, monkeypatch):
     context_root = prepare_project_root(tmp_path / "proj")
     context = build_context(context_root)
@@ -328,6 +339,95 @@ def test_list_command_omits_stale_active_manager(tmp_path) -> None:
 
     assert exit_code == 0
     assert tid not in {record["tid"] for record in json.loads(payload)}
+
+
+def test_list_command_omits_stale_external_supervisor_manager(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    context_root = prepare_project_root(tmp_path / "ctx")
+    context = build_context(context_root)
+    tid = "1761000000000000008"
+
+    monkeypatch.setattr(
+        "weft.core.manager_runtime.MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS",
+        -1.0,
+    )
+    registry_queue = Queue(
+        WEFT_MANAGERS_REGISTRY_QUEUE,
+        db_path=context.broker_target,
+        persistent=False,
+        config=context.config,
+    )
+    registry_queue.write(
+        json.dumps(
+            {
+                "tid": tid,
+                "status": "active",
+                "name": "stale-supervised-manager",
+                "runtime_handle": _external_supervisor_runtime_handle(),
+                "role": "manager",
+                "requests": "weft.spawn.requests",
+                "ctrl_in": f"T{tid}.ctrl_in",
+                "ctrl_out": f"T{tid}.ctrl_out",
+                "outbox": "weft.manager.outbox",
+            }
+        )
+    )
+
+    exit_code, payload = manager_cmd.list_command(
+        json_output=True, context_path=context_root
+    )
+
+    assert exit_code == 0
+    assert tid not in {record["tid"] for record in json.loads(payload)}
+
+
+def test_stop_command_force_reports_fresh_external_supervisor_without_host_pid(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    context_root = prepare_project_root(tmp_path / "ctx")
+    context = build_context(context_root)
+    tid = "1761000000000000009"
+
+    monkeypatch.setattr(
+        "weft.core.manager_runtime.MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS",
+        60.0,
+    )
+    registry_queue = Queue(
+        WEFT_MANAGERS_REGISTRY_QUEUE,
+        db_path=context.broker_target,
+        persistent=False,
+        config=context.config,
+    )
+    registry_queue.write(
+        json.dumps(
+            {
+                "tid": tid,
+                "status": "active",
+                "name": "fresh-supervised-manager",
+                "runtime_handle": _external_supervisor_runtime_handle(),
+                "role": "manager",
+                "requests": "weft.spawn.requests",
+                "ctrl_in": f"T{tid}.ctrl_in",
+                "ctrl_out": f"T{tid}.ctrl_out",
+                "outbox": "weft.manager.outbox",
+            }
+        )
+    )
+
+    exit_code, message = manager_cmd.stop_command(
+        tid=tid,
+        force=True,
+        timeout=0.0,
+        context_path=context_root,
+    )
+
+    assert exit_code == 1
+    assert message is not None
+    assert "externally supervised" in message
+    assert "no host PID" in message
 
 
 def test_stop_command_force_ignores_registry_only_pid_without_mapping(

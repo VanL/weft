@@ -17,10 +17,6 @@ import pytest
 pytestmark = [pytest.mark.sqlite_only]
 
 
-@pytest.mark.skipif(
-    sys.platform == "darwin",
-    reason="Reproduces on Linux CI; local macOS uses a different SQLite/runtime path",
-)
 def test_stop_exits_process_before_reporting_clean_cancel(tmp_path: Path) -> None:
     """STOP must not leave the launched task process alive after cancellation."""
 

@@ -21,6 +21,7 @@ See also:
 - [`docs/plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md`](../plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md)
 - [`docs/plans/2026-04-17-canonical-owner-fence-plan.md`](../plans/2026-04-17-canonical-owner-fence-plan.md)
 - [`docs/plans/2026-04-17-heartbeat-service-plan.md`](../plans/2026-04-17-heartbeat-service-plan.md)
+- [`docs/plans/2026-05-05-simplebroker-multiqueue-waiter-integration-plan.md`](../plans/2026-05-05-simplebroker-multiqueue-waiter-integration-plan.md)
 
 ## 1. TaskSpec (`weft/core/taskspec/model.py`) [CC-1]
 
@@ -73,6 +74,8 @@ Current role:
 
 - monitor multiple queues on one resolved broker target
 - support `READ`, `PEEK`, and reserve-oriented processing semantics
+- own a backend-neutral wait seam that uses SimpleBroker's multi-queue
+  activity waiter when available and falls back to polling otherwise
 - expose a small scheduling primitive that higher-level tasks reuse
 
 Why this exists:

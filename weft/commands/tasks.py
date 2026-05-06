@@ -981,7 +981,7 @@ def _send_control(ctx: WeftContext, tid: str, command: str) -> None:
     Spec: [MF-3]
     """
     ctrl_in = _ctrl_in_for_tid(ctx, tid)
-    queue = ctx.queue(ctrl_in, persistent=False)
+    queue = ctx.queue(ctrl_in, persistent=True)
     try:
         queue.write(command)
     finally:
@@ -1217,6 +1217,9 @@ def stop_tasks(
             task_entry = _latest_task_entry(ctx, lookup, full, task_entry)
             handled_by_runner = _stop_via_fallback(task_entry)
             task_entry, snapshot = _await_control_surface(ctx, full)
+        elif snapshot.status == "cancelled":
+            task_entry = _latest_task_entry(ctx, lookup, full, task_entry)
+            handled_by_runner = _stop_via_fallback(task_entry)
 
         if snapshot is None or snapshot.status not in status_cmd.TERMINAL_TASK_STATUSES:
             if not handled_by_runner:

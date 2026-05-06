@@ -71,13 +71,17 @@ Key responsibilities implemented in `weft/core/manager.py`:
    child starts processing.
 4. **Registry heartbeat** – Managers publish an `active` record to
    `weft.state.managers` on startup (including queue names, PID, role, and
-   capabilities) and replace it with a `stopped` record during shutdown. The
-   active record is pruned when the manager exits cleanly. The registry is
-   read as a live queue: callers reduce to the latest relevant record per TID,
-   prune dead active records, and then filter to canonical live managers
-   before treating the result as the active-manager view. Canonical ownership
-   is lowest-live-TID among canonical claimants for `weft.spawn.requests`.
-   Manager dispatch keeps four runtime-owned outcomes distinct:
+   capabilities), refresh that active record periodically while healthy, and
+   replace it with a `stopped` record during shutdown. The active record is
+   pruned when the manager exits cleanly. The registry is read as a live queue:
+   callers reduce to the latest relevant record per TID, prune dead or expired
+   active records, and then filter to canonical live managers before treating
+   the result as the active-manager view. Host-managed records use scoped host
+   PID liveness. Externally supervised records use host PID liveness when the
+   supervisor supplied scoped host PIDs, otherwise their registry heartbeat age
+   is the generic liveness boundary. Canonical ownership is lowest-live-TID
+   among canonical claimants for `weft.spawn.requests`. Manager dispatch keeps
+   four runtime-owned outcomes distinct:
    `self`, `other`, `none`, and `unknown`.
 5. **Idle timeout** – Managers honour the `idle_timeout` metadata field first.
    When that metadata is absent they fall back to

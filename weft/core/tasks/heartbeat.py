@@ -115,24 +115,8 @@ class HeartbeatTask(BaseTask):
             )
         )
         self._empty_since_monotonic: float | None = time.monotonic()
-        self._activity_waiters: list[Any] = []
         self._activate_waiter()
         self._set_activity("waiting", waiting_on=self._queue_names["inbox"])
-
-        for queue_name in (self._queue_names["inbox"], self._queue_names["ctrl_in"]):
-            try:
-                waiter = self._queue(queue_name).create_activity_waiter(
-                    stop_event=self._stop_event
-                )
-            except (BrokerError, OSError, RuntimeError):
-                logger.debug(
-                    "Heartbeat activity waiter unavailable for %s",
-                    queue_name,
-                    exc_info=True,
-                )
-                continue
-            if waiter is not None:
-                self._activity_waiters.append(waiter)
 
     def _activate_waiter(self) -> None:
         if self.taskspec.state.status != "created":
@@ -156,15 +140,6 @@ class HeartbeatTask(BaseTask):
                 self._handle_reserved_message
             ),
         }
-
-    def cleanup(self) -> None:
-        for waiter in self._activity_waiters:
-            try:
-                waiter.close()
-            except Exception:  # pragma: no cover - defensive
-                logger.debug("Failed to close heartbeat activity waiter", exc_info=True)
-        self._activity_waiters.clear()
-        super().cleanup()
 
     def process_once(self) -> None:
         if self.should_stop:
@@ -483,18 +458,7 @@ class HeartbeatTask(BaseTask):
             if remaining <= 0:
                 return
             chunk = min(remaining, 1.0)
-            waiters = list(self._activity_waiters)
-            if waiters:
-                waiter_chunk = chunk / float(len(waiters))
-                for waiter in waiters:
-                    if waiter.wait(waiter_chunk):
-                        return
-                continue
-            if self._stop_event is not None:
-                if self._stop_event.wait(timeout=chunk):
-                    return
-                continue
-            time.sleep(chunk)
+            self.wait_for_activity(timeout=chunk)
 
 
 __all__ = ["HeartbeatTask"]

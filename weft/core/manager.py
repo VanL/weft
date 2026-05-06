@@ -36,6 +36,8 @@ from weft._constants import (
     INTERNAL_RUNTIME_TASK_CLASS_PIPELINE_EDGE,
     MANAGER_CHILD_EXIT_POLL_INTERVAL,
     MANAGER_DISPATCH_RECOVERY_MAX_ATTEMPTS,
+    MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS,
+    MANAGER_REGISTRY_HEARTBEAT_INTERVAL_SECONDS,
     MANAGER_SPAWN_FENCE_RECOVERY_EXHAUSTED_EVENT,
     MANAGER_SPAWN_FENCE_SUSPENDED_EVENT,
     MANAGER_SPAWN_FENCED_REQUEUED_EVENT,
@@ -176,6 +178,8 @@ class Manager(BaseTask):
         self._draining = False
         self._drain_reason: str | None = None
         self._drain_completion_event = "manager_stop_drained"
+        self._drain_signaled_children: set[str] = set()
+        self._drain_signal_started_ns: dict[str, int] = {}
         self._dispatch_suspension: DispatchSuspension | None = None
         self._autostart_enabled = bool(self._config.get("WEFT_AUTOSTART_TASKS", True))
         autostart_dir = self._config.get("WEFT_AUTOSTART_DIR")
@@ -189,6 +193,7 @@ class Manager(BaseTask):
         self._broker_activity_queue: Queue | None = None
         self._broker_probe_interval_ns = 1_000_000_000  # probe at most once per second
         self._last_broker_probe_ns = 0
+        self._last_registry_heartbeat_ns = 0
         try:
             # Reuse any connected queue so watcher-driven updates also refresh last_ts.
             self._broker_activity_queue = self._get_connected_queue()
@@ -371,6 +376,7 @@ class Manager(BaseTask):
         registry_queue = self._queue(WEFT_MANAGERS_REGISTRY_QUEUE)
         timestamp = registry_queue.generate_timestamp()
         runtime_handle = self._manager_runtime_handle()
+        previous_message_id = self._registry_message_id
 
         payload = {
             "tid": self.tid,
@@ -397,6 +403,28 @@ class Manager(BaseTask):
                 self._registry_message_id = latest[1] if latest else None
             else:
                 self._registry_message_id = message_id
+            self._last_registry_heartbeat_ns = time.time_ns()
+            if (
+                previous_message_id is not None
+                and self._registry_message_id is not None
+                and previous_message_id != self._registry_message_id
+            ):
+                try:
+                    registry_queue.delete(message_id=previous_message_id)
+                except (BrokerError, OSError, RuntimeError):
+                    logger.debug(
+                        "Failed to prune previous manager registry heartbeat",
+                        exc_info=True,
+                    )
+
+    def _refresh_manager_registration(self) -> None:
+        if self._unregistered or self.should_stop:
+            return
+        now_ns = time.time_ns()
+        interval_ns = int(MANAGER_REGISTRY_HEARTBEAT_INTERVAL_SECONDS * 1_000_000_000)
+        if now_ns - self._last_registry_heartbeat_ns < interval_ns:
+            return
+        self._register_manager()
 
     def _unregister_manager(self) -> None:
         """Replace active record with stopped record on shutdown (Spec: [MA-1.4])."""
@@ -406,14 +434,14 @@ class Manager(BaseTask):
         stopped_timestamp = registry_queue.generate_timestamp()
 
         deletion_performed = False
-        try:
-            if self._registry_message_id is not None:
+        if self._registry_message_id is not None:
+            try:
                 registry_queue.delete(message_id=self._registry_message_id)
                 deletion_performed = True
-        except (BrokerError, OSError, RuntimeError):
-            logger.debug("Failed to prune active registry entry", exc_info=True)
-        finally:
-            self._registry_message_id = None
+            except (BrokerError, OSError, RuntimeError):
+                logger.debug("Failed to prune active registry entry", exc_info=True)
+            finally:
+                self._registry_message_id = None
 
         if not deletion_performed:
             latest = self._latest_registry_entry(registry_queue, self.tid)
@@ -546,7 +574,16 @@ class Manager(BaseTask):
         except ValueError:
             return False
         if handle.control.get("authority") == "external-supervisor":
-            return True
+            host_pids = handle.scoped_host_pids()
+            if host_pids:
+                return any(pid_is_live(pid) for pid in host_pids)
+            timestamp = record.get("_timestamp")
+            if not isinstance(timestamp, int):
+                return True
+            stale_after_ns = int(
+                MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS * 1_000_000_000
+            )
+            return time.time_ns() - timestamp <= stale_after_ns
         if handle.control.get("authority") == "host-pid":
             return any(pid_is_live(pid) for pid in handle.scoped_host_pids())
         return True
@@ -1109,8 +1146,17 @@ class Manager(BaseTask):
         """Best-effort STOP broadcast to currently tracked child tasks."""
 
         for tid, child in list(self._child_processes.items()):
+            if tid in self._drain_signaled_children:
+                started_ns = self._drain_signal_started_ns.get(tid, time.time_ns())
+                if time.time_ns() - started_ns > 2_000_000_000:
+                    pid = child.process.pid
+                    if isinstance(pid, int) and pid > 0:
+                        terminate_process_tree(pid, timeout=0.2)
+                continue
             ctrl_queue = child.ctrl_queue or f"T{tid}.{QUEUE_CTRL_IN_SUFFIX}"
             self._send_stop_command(ctrl_queue)
+            self._drain_signaled_children.add(tid)
+            self._drain_signal_started_ns[tid] = time.time_ns()
 
     def _begin_graceful_shutdown(self, *, message_id: int | None) -> None:
         self._begin_shutdown_drain(
@@ -1132,6 +1178,8 @@ class Manager(BaseTask):
             return
 
         self._draining = True
+        self._drain_signaled_children.clear()
+        self._drain_signal_started_ns.clear()
         self._drain_reason = reason
         self._drain_completion_event = completion_event
         if event is not None:
@@ -1188,6 +1236,8 @@ class Manager(BaseTask):
             super().handle_termination_signal(signum)
             return
 
+        foreground_serve = self.taskspec.metadata.get("foreground_serve") is True
+
         if self._external_stop_handled:
             return
         self._external_stop_handled = True
@@ -1203,12 +1253,16 @@ class Manager(BaseTask):
             event=None,
             completion_event="task_signal_stop",
         )
+        if foreground_serve:
+            self._terminate_children()
+            if not self._child_processes:
+                self._finish_graceful_shutdown()
 
     def _send_stop_command(self, queue_name: str) -> None:
         queue = Queue(
             queue_name,
             db_path=self._db_path,
-            persistent=False,
+            persistent=True,
             config=self._config,
         )
         try:
@@ -1919,6 +1973,7 @@ class Manager(BaseTask):
         super().cleanup()
 
     def process_once(self) -> None:
+        self._refresh_manager_registration()
         if self._draining:
             # Finish an in-flight drain before reevaluating leadership. Otherwise a
             # slow turn can re-enter the yield path and skip the corresponding

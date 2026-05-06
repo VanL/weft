@@ -346,6 +346,10 @@ Current rules:
   `WEFT_MANAGER_RUNTIME_HANDLE_JSON` value or use an external-supervisor
   runtime handle; generic manager code must not inspect Docker or trust a
   container-local PID as a host PID
+- external-supervisor manager records are still live records, not permanent
+  truth: the manager refreshes its active registry record periodically, and
+  lifecycle readers treat an expired external-supervisor heartbeat as stale
+  unless the handle includes live scoped host PIDs
 - detached-launcher acknowledgement and startup-stderr cleanup are best-effort
   post-proof steps; they may warn, but they do not downgrade a successfully
   proven manager start into submission failure

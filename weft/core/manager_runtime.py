@@ -21,6 +21,7 @@ from simplebroker import Queue, serialize_broker_target
 from simplebroker.ext import BrokerError
 from weft._constants import (
     MANAGER_COMPETING_STARTUP_GRACE_SECONDS,
+    MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS,
     MANAGER_LAUNCHER_SIGNAL_ABORT,
     MANAGER_LAUNCHER_SIGNAL_SUCCESS,
     MANAGER_PID_LIVENESS_RECHECK_INTERVAL,
@@ -130,8 +131,7 @@ def _snapshot_registry(
                 continue
             record = _normalize_manager_record(data, timestamp=timestamp)
             if prune_stale and record.get("status") == "active":
-                handle = _manager_handle_from_record(record)
-                if _manager_handle_is_stale(handle):
+                if _manager_record_is_stale(record):
                     stale_timestamps.append(timestamp)
                     continue
             existing = snapshot.get(tid)
@@ -164,8 +164,7 @@ def _select_active_manager_from_snapshot(
             continue
         if record.get("status") != "active":
             continue
-        handle = _manager_handle_from_record(record)
-        if handle is not None and not _manager_handle_is_stale(handle):
+        if not _manager_record_is_stale(record):
             candidates.append(record)
     if not candidates:
         return None
@@ -219,6 +218,37 @@ def _manager_handle_is_stale(handle: RunnerHandle | None) -> bool:
         host_pids = handle.scoped_host_pids()
         return not host_pids or not any(_is_pid_alive(pid) for pid in host_pids)
     return False
+
+
+def _manager_record_is_stale(record: dict[str, Any] | None) -> bool:
+    handle = _manager_handle_from_record(record)
+    if handle is None:
+        return True
+    if handle.control.get("authority") != "external-supervisor":
+        return _manager_handle_is_stale(handle)
+
+    host_pids = handle.scoped_host_pids()
+    if host_pids:
+        return not any(_is_pid_alive(pid) for pid in host_pids)
+
+    timestamp = _manager_record_timestamp(record)
+    if timestamp is None:
+        return False
+    stale_after_ns = int(
+        MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS * 1_000_000_000
+    )
+    return time.time_ns() - timestamp > stale_after_ns
+
+
+def _manager_record_timestamp(record: dict[str, Any] | None) -> int | None:
+    if not isinstance(record, dict):
+        return None
+    value = record.get("timestamp")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None
 
 
 def _manager_record(
@@ -287,8 +317,11 @@ def _manager_ctrl_queue_name(tid: str, record: dict[str, Any] | None = None) -> 
 def _send_stop(
     context: WeftContext, tid: str, *, record: dict[str, Any] | None
 ) -> None:
-    queue = context.queue(_manager_ctrl_queue_name(tid, record), persistent=False)
-    queue.write("STOP")
+    queue = context.queue(_manager_ctrl_queue_name(tid, record), persistent=True)
+    try:
+        queue.write("STOP")
+    finally:
+        queue.close()
 
 
 def _build_manager_spec(
@@ -903,7 +936,7 @@ def _ensure_manager(
     """Guarantee a canonical active manager exists, starting one if necessary."""
     record = _select_active_manager(context)
     if record:
-        if _manager_handle_is_stale(_manager_handle_from_record(record)):
+        if _manager_record_is_stale(record):
             _snapshot_registry(context)
             record = _select_active_manager(context)
             if record is None:
@@ -927,6 +960,8 @@ def _serve_manager_foreground(context: WeftContext) -> tuple[int, str | None]:
         context,
         idle_timeout_override=0.0,
     )
+    if isinstance(invocation.spec, TaskSpec):
+        invocation.spec.metadata["foreground_serve"] = True
     run_manager_process(
         invocation.task_cls_path,
         context.broker_target,
@@ -1004,9 +1039,24 @@ def _stop_manager(
             except subprocess.TimeoutExpired:
                 return False, f"Manager {target_tid} did not stop within {timeout:.1f}s"
             return True, None
+        if _external_supervisor_record_is_live(current):
+            return (
+                False,
+                f"Manager {target_tid} is externally supervised and did not stop; "
+                "no host PID is available for --force",
+            )
         return True, None
 
     return False, f"Manager {target_tid} did not stop within {timeout:.1f}s"
+
+
+def _external_supervisor_record_is_live(record: dict[str, Any] | None) -> bool:
+    handle = _manager_handle_from_record(record)
+    return (
+        handle is not None
+        and handle.control.get("authority") == "external-supervisor"
+        and not _manager_record_is_stale(record)
+    )
 
 
 ManagerRuntimeInvocation = _ManagerRuntimeInvocation

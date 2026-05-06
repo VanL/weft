@@ -228,36 +228,48 @@ def test_duplicate_heartbeat_services_converge_by_loser_exit(tmp_path: Path) -> 
         high_task.cleanup()
 
 
-def test_heartbeat_wait_fallback_uses_bounded_stop_event_sleep(tmp_path: Path) -> None:
+def test_heartbeat_wait_uses_bounded_activity_seam(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     context = build_context(spec_context=tmp_path)
     tid = str(time.time_ns())
     task = HeartbeatTask(context.broker_target, make_heartbeat_taskspec(tid, tmp_path))
+    wait_calls: list[float | None] = []
 
-    class FakeEvent:
-        def __init__(self) -> None:
-            self.calls: list[float] = []
-            self._set = False
+    def fake_wait_for_activity(timeout: float | None) -> None:
+        wait_calls.append(timeout)
+        task.should_stop = True
 
-        def is_set(self) -> bool:
-            return self._set
-
-        def set(self) -> None:
-            self._set = True
-
-        def wait(self, timeout: float | None = None) -> bool:
-            self.calls.append(0.0 if timeout is None else timeout)
-            return False
-
-    fake_event = FakeEvent()
-    pending_checks = iter([False, True])
-    task._activity_waiters = []
-    task._stop_event = fake_event  # type: ignore[assignment]
-    task._has_pending_runtime_input = lambda: next(pending_checks)  # type: ignore[method-assign]
+    monkeypatch.setattr(task, "wait_for_activity", fake_wait_for_activity)
+    monkeypatch.setattr(task, "_has_pending_runtime_input", lambda: False)
 
     try:
         task._wait_for_activity(timeout=0.25)
-        assert fake_event.calls
-        assert fake_event.calls[0] == pytest.approx(0.25, rel=0.2)
+        assert wait_calls
+        assert wait_calls[0] == pytest.approx(0.25, rel=0.01)
+    finally:
+        task.stop(join=False)
+        task.cleanup()
+
+
+def test_heartbeat_pending_input_returns_before_activity_wait(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = build_context(spec_context=tmp_path)
+    tid = str(time.time_ns())
+    task = HeartbeatTask(context.broker_target, make_heartbeat_taskspec(tid, tmp_path))
+    wait_calls: list[float | None] = []
+
+    monkeypatch.setattr(
+        task, "wait_for_activity", lambda timeout: wait_calls.append(timeout)
+    )
+    monkeypatch.setattr(task, "_has_pending_runtime_input", lambda: True)
+
+    try:
+        task._wait_for_activity(timeout=0.25)
+        assert wait_calls == []
     finally:
         task.stop(join=False)
         task.cleanup()

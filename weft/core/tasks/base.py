@@ -286,8 +286,6 @@ class BaseTask(MultiQueueWatcher, ABC):
 
         managed = self.get_queue(name)
         if managed is not None:
-            if hasattr(managed, "set_stop_event"):
-                managed.set_stop_event(self._stop_event)
             self._queue_cache[name] = managed
         else:
             queue_obj = Queue(
@@ -296,8 +294,6 @@ class BaseTask(MultiQueueWatcher, ABC):
                 persistent=True,
                 config=self._config,
             )
-            if hasattr(queue_obj, "set_stop_event"):
-                queue_obj.set_stop_event(self._stop_event)
             self._queue_cache[name] = queue_obj
             self._owned_queue_names.add(name)
 
@@ -364,6 +360,7 @@ class BaseTask(MultiQueueWatcher, ABC):
 
         Spec: [CC-2.5], [SB-0.1]
         """
+        self._reset_multi_activity_waiter()
         self.unregister_endpoint_name()
         self._end_streaming_session()
         seen_queue_ids: set[int] = set()
@@ -387,8 +384,22 @@ class BaseTask(MultiQueueWatcher, ABC):
 
         Spec: [CC-2.5]
         """
-        super().stop(join=join, timeout=timeout)
-        self.cleanup()
+        thread_ref = getattr(self, "_thread", None)
+        thread = thread_ref() if thread_ref is not None else None
+        cleanup_before_stop = (
+            thread is None
+            or not thread.is_alive()
+            or thread == threading.current_thread()
+        )
+
+        try:
+            if cleanup_before_stop:
+                self.cleanup()
+        finally:
+            super().stop(join=join, timeout=timeout)
+
+        if not cleanup_before_stop:
+            self.cleanup()
 
     def __del__(self) -> None:  # pragma: no cover - best effort cleanup
         with contextlib.suppress(Exception):
@@ -425,7 +436,7 @@ class BaseTask(MultiQueueWatcher, ABC):
             if max_iterations is not None and iterations >= max_iterations:
                 break
             if poll_interval > 0:
-                time.sleep(poll_interval)
+                self.wait_for_activity(timeout=poll_interval)
 
     def process_once(self) -> None:
         """Process a single scheduling round across all queues.
@@ -1008,11 +1019,13 @@ class BaseTask(MultiQueueWatcher, ABC):
         if (
             handle.runner in {"host", "macos-sandbox"}
             and handle.control.get("authority") == "host-pid"
-            and self._managed_pids
         ):
             observations = dict(handle.observations)
             observations["host_pids"] = sorted(
-                set(handle.scoped_host_pids()).union(self._managed_pids)
+                set(handle.scoped_host_pids()).union(
+                    self._managed_pids,
+                    {self._task_pid},
+                )
             )
             merged_handle = RunnerHandle(
                 runner=handle.runner,

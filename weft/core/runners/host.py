@@ -811,7 +811,7 @@ class HostRunnerPlugin:
         if not host_pids:
             return False
         for pid in host_pids:
-            terminate_process_tree(pid, timeout=timeout, kill_after=False)
+            terminate_process_tree(pid, timeout=timeout)
         return True
 
     def kill(self, handle: RunnerHandle, *, timeout: float = 2.0) -> bool:

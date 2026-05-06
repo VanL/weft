@@ -104,6 +104,12 @@ CONTROL_SURFACE_WAIT_INTERVAL: Final[float] = 0.05
 RESULT_SURFACE_WAIT_INTERVAL: Final[float] = 0.1
 """Maximum interval between CLI result-surface rescans when watcher wakeups are missed."""
 
+QUEUE_CHANGE_MONITOR_WAITER_TIMEOUT_SECONDS: Final[float] = 1.0
+"""Bounded wait chunk for multi-queue CLI activity monitors."""
+
+QUEUE_CHANGE_MONITOR_JOIN_TIMEOUT_SECONDS: Final[float] = 2.0
+"""Maximum time to join a CLI queue-change monitor thread during close."""
+
 SPAWN_SUBMISSION_RECONCILIATION_TIMEOUT: Final[float] = 1.0
 """Default time budget for classifying a submitted spawn request via durable state."""
 
@@ -118,6 +124,12 @@ MANAGER_STARTUP_TIMEOUT_SECONDS: Final[float] = 10.0
 
 MANAGER_REGISTRY_POLL_INTERVAL: Final[float] = 0.1
 """Polling interval while observing manager registry state during startup/shutdown."""
+
+MANAGER_REGISTRY_HEARTBEAT_INTERVAL_SECONDS: Final[float] = 30.0
+"""Interval for managers to refresh active registry records."""
+
+MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS: Final[float] = 300.0
+"""Age after which external-supervisor manager registry records are stale."""
 
 MANAGER_PID_LIVENESS_RECHECK_INTERVAL: Final[float] = 0.5
 """Throttle for repeated PID-liveness probes during stop-if-absent manager waits."""

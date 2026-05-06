@@ -561,7 +561,7 @@ def _run_interactive_session(
             status_holder["error"] = event.get("error") or "Task killed"
 
     def _send_interactive_control(command: str) -> None:
-        ctrl_queue = context.queue(ctrl_in_name, persistent=False)
+        ctrl_queue = context.queue(ctrl_in_name, persistent=True)
         try:
             ctrl_queue.write(command)
         finally:

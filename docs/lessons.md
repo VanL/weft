@@ -578,3 +578,15 @@ runbook needs to become stricter.
   deleting the harness DB, close live SimpleBroker queues bound to that DB. If a
   bounded cleanup still cannot release the file, preserve the tempdir instead of
   turning cleanup lag into a behavioral test failure.
+
+## 2026-05-04 External Supervisor Manager Liveness
+
+- `control.authority="external-supervisor"` must not mean "live forever."
+  Generic Weft code still must not inspect Docker, podman, Kubernetes, or
+  supervisor APIs, but it needs a generic liveness boundary. Use scoped
+  `observations.host_pids` when the supervisor can provide them; otherwise use
+  the manager registry heartbeat age.
+- `weft manager stop --force` must not claim success for a fresh externally
+  supervised manager when no host PID or process handle is available. Either
+  the manager must publish a stopped record, the supervisor must stop it, or
+  the heartbeat must expire and be pruned.

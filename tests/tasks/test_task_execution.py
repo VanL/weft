@@ -21,6 +21,7 @@ from weft._constants import (
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_STREAMING_SESSIONS_QUEUE,
 )
+from weft.core.launcher import _task_process_entry
 from weft.core.runners import RunnerOutcome
 from weft.core.tasks import Consumer
 from weft.core.tasks.base import BaseTask
@@ -33,6 +34,46 @@ from weft.core.taskspec import (
 )
 
 PROCESS_SCRIPT = str((Path(__file__).resolve().parent / "process_target.py").resolve())
+_launcher_wait_calls: list[float | None] = []
+_launcher_process_calls = 0
+
+
+class LauncherWaitTask:
+    def __init__(
+        self,
+        _db_path: object,
+        taskspec: TaskSpec,
+        *,
+        config: dict[str, object] | None = None,
+    ) -> None:
+        del config
+        self.taskspec = taskspec
+        self.should_stop = False
+        self.process_calls = 0
+        self.taskspec.mark_started(pid=0)
+        self.taskspec.mark_running(pid=0)
+
+    def process_once(self) -> None:
+        global _launcher_process_calls
+        self.process_calls += 1
+        _launcher_process_calls = self.process_calls
+        if self.process_calls >= 2:
+            self.taskspec.mark_completed(return_code=0)
+
+    def wait_for_activity(self, timeout: float | None) -> None:
+        _launcher_wait_calls.append(timeout)
+
+    def stop(self, *, join: bool = True) -> None:
+        del join
+        self.should_stop = True
+
+
+class LauncherTerminalTask(LauncherWaitTask):
+    def process_once(self) -> None:
+        global _launcher_process_calls
+        self.process_calls += 1
+        _launcher_process_calls = self.process_calls
+        self.taskspec.mark_completed(return_code=0)
 
 
 def drain_queue(queue) -> list[str]:
@@ -366,6 +407,80 @@ def test_task_run_until_stopped_honors_pending_stop_control(
     assert outbox.read_one() is None
     assert task.should_stop is True
     assert task.taskspec.state.status == "cancelled"
+
+
+def test_task_run_until_stopped_waits_through_activity_seam(
+    broker_env,
+    unique_tid: str,
+    monkeypatch,
+) -> None:
+    db_path, _make_queue = broker_env
+    spec = make_function_taskspec(
+        unique_tid,
+        "tests.tasks.sample_targets:echo_payload",
+    )
+    task = Consumer(db_path, spec)
+    wait_calls: list[float | None] = []
+
+    def fake_wait(timeout: float | None) -> None:
+        wait_calls.append(timeout)
+        task.should_stop = True
+
+    monkeypatch.setattr(task, "wait_for_activity", fake_wait)
+
+    task.run_until_stopped(poll_interval=0.25, max_iterations=5)
+
+    assert wait_calls == [0.25]
+
+
+def test_task_process_entry_waits_through_activity_seam(
+    broker_env,
+    unique_tid: str,
+) -> None:
+    global _launcher_process_calls
+    db_path, _make_queue = broker_env
+    _launcher_wait_calls.clear()
+    _launcher_process_calls = 0
+    spec = make_function_taskspec(
+        unique_tid,
+        "tests.tasks.sample_targets:echo_payload",
+    )
+
+    _task_process_entry(
+        f"{LauncherWaitTask.__module__}.{LauncherWaitTask.__qualname__}",
+        db_path,
+        spec.model_dump_json(),
+        None,
+        0.125,
+    )
+
+    assert _launcher_process_calls == 2
+    assert _launcher_wait_calls == [0.125]
+
+
+def test_task_process_entry_does_not_wait_after_terminal_turn(
+    broker_env,
+    unique_tid: str,
+) -> None:
+    global _launcher_process_calls
+    db_path, _make_queue = broker_env
+    _launcher_wait_calls.clear()
+    _launcher_process_calls = 0
+    spec = make_function_taskspec(
+        unique_tid,
+        "tests.tasks.sample_targets:echo_payload",
+    )
+
+    _task_process_entry(
+        f"{LauncherTerminalTask.__module__}.{LauncherTerminalTask.__qualname__}",
+        db_path,
+        spec.model_dump_json(),
+        None,
+        0.125,
+    )
+
+    assert _launcher_process_calls == 1
+    assert _launcher_wait_calls == []
 
 
 def test_task_ignores_unknown_control_message(broker_env, unique_tid: str) -> None:

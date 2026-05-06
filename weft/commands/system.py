@@ -463,6 +463,9 @@ def _effective_public_status(
             return "running"
         return status
 
+    if status == "completed":
+        return status
+
     if _task_process_alive(mapping_entry):
         return "running"
     if runtime_live:

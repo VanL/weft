@@ -16,16 +16,19 @@ from __future__ import annotations
 import itertools
 import logging
 import threading
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, cast
 
-from simplebroker import BrokerTarget, Queue
+from simplebroker import BrokerTarget, Queue, create_activity_waiter_for_queues
+from simplebroker.ext import BrokerError
 from simplebroker.watcher import (
     BaseWatcher,
     PollingStrategy,
+    _StopLoop,
     default_error_handler,
 )
 from weft._constants import load_config
@@ -75,6 +78,12 @@ def _resolve_db_target(
     if isinstance(db, (str, Path)):
         return str(db)
     return fallback
+
+
+def _detach_queue_stop_event(queue: Queue) -> None:
+    """Keep queue connections usable after the watcher stop event is set."""
+    if hasattr(queue, "set_stop_event"):
+        queue.set_stop_event(None)
 
 
 class MultiQueueWatcher(BaseWatcher):
@@ -149,6 +158,7 @@ class MultiQueueWatcher(BaseWatcher):
             polling_strategy=polling_strategy,
             config=self._config,
         )
+        _detach_queue_stop_event(initial_queue)
 
         self._db_path = initial_queue.db_target
 
@@ -181,8 +191,7 @@ class MultiQueueWatcher(BaseWatcher):
                 )
             )
 
-            if hasattr(queue_obj, "set_stop_event"):
-                queue_obj.set_stop_event(self._stop_event)
+            _detach_queue_stop_event(queue_obj)
 
             error_handler_obj = raw_config.get("error_handler")
             if error_handler_obj is not None and not callable(error_handler_obj):
@@ -227,6 +236,9 @@ class MultiQueueWatcher(BaseWatcher):
         self._active_queues: list[str] = []
         self._queue_iterator: itertools.cycle[str] = itertools.cycle([])
         self._check_counter = 0
+        self._queue_generation = 0
+        self._multi_activity_waiter: Any | None = None
+        self._multi_activity_waiter_generation: int | None = None
 
         logger.debug(
             "MultiQueueWatcher initialized with queues: %s",
@@ -275,8 +287,7 @@ class MultiQueueWatcher(BaseWatcher):
             config=self._config,
         )
 
-        if hasattr(queue_obj, "set_stop_event"):
-            queue_obj.set_stop_event(self._stop_event)
+        _detach_queue_stop_event(queue_obj)
 
         self._queues[queue_name] = QueueRuntimeConfig(
             name=queue_name,
@@ -286,6 +297,8 @@ class MultiQueueWatcher(BaseWatcher):
             error_handler=error_handler or self._default_error_handler,
             reserved_queue_name=reserved_queue,
         )
+        self._queue_generation += 1
+        self._reset_multi_activity_waiter()
 
     def remove_queue(self, queue_name: str) -> None:
         """Remove a queue from the watcher.
@@ -302,6 +315,8 @@ class MultiQueueWatcher(BaseWatcher):
                 if self._active_queues
                 else itertools.cycle([])
             )
+        self._queue_generation += 1
+        self._reset_multi_activity_waiter()
 
     def get_queue(self, queue_name: str) -> Queue | None:
         """Return the managed Queue instance for *queue_name* if present.
@@ -314,27 +329,174 @@ class MultiQueueWatcher(BaseWatcher):
     # ------------------------------------------------------------------ #
     # Internal helpers                                                   #
     # ------------------------------------------------------------------ #
+    def _activity_wait_queues(self) -> list[Queue]:
+        """Return queues watched by the multi-queue activity waiter."""
+        return [config.queue for config in self._queues.values()]
+
+    def _reset_multi_activity_waiter(self) -> None:
+        """Close the caller-owned multi-queue waiter if one is active."""
+        waiter = self._multi_activity_waiter
+        self._multi_activity_waiter = None
+        self._multi_activity_waiter_generation = None
+        if waiter is None:
+            return
+
+        if getattr(self._strategy, "_activity_waiter", None) is waiter:
+            self._strategy._activity_waiter = None
+
+        try:
+            cast(Any, waiter).close()
+        except (BrokerError, OSError, RuntimeError):
+            logger.debug("Failed to close multi-queue activity waiter", exc_info=True)
+
+    def _ensure_multi_activity_waiter(self) -> Any | None:
+        """Create or return the SimpleBroker multi-queue activity waiter."""
+        if self._multi_activity_waiter_generation == self._queue_generation:
+            return self._multi_activity_waiter
+
+        self._reset_multi_activity_waiter()
+        try:
+            self._multi_activity_waiter = create_activity_waiter_for_queues(
+                self._activity_wait_queues(),
+                stop_event=self._stop_event,
+            )
+        except (BrokerError, OSError, RuntimeError, TypeError, ValueError):
+            logger.debug(
+                "Multi-queue activity waiter unavailable; falling back to polling",
+                exc_info=True,
+            )
+            self._multi_activity_waiter = None
+        self._multi_activity_waiter_generation = self._queue_generation
+        return self._multi_activity_waiter
+
+    def _start_strategy_for_configured_queues(self) -> None:
+        """Start the polling strategy with a multi-queue activity waiter."""
+        queue = self._get_queue_for_data_version()
+
+        def data_version_getter(q: Queue = queue) -> int | None:
+            return q.get_data_version()
+
+        try:
+            queue.refresh_last_ts()
+        except (BrokerError, OSError, RuntimeError):
+            logger.debug("Initial last_ts refresh failed", exc_info=True)
+
+        def on_data_version_change(q: Queue = queue) -> None:
+            q.refresh_last_ts()
+
+        self._strategy.start(
+            data_version_getter,
+            on_data_version_change=on_data_version_change,
+            activity_waiter=self._ensure_multi_activity_waiter(),
+        )
+
+    def wait_for_activity(self, timeout: float | None) -> None:
+        """Wait for possible queue activity without consuming messages.
+
+        Native waiters are hints only. Callers must still use the ordinary
+        pending/drain path after this method returns.
+
+        Spec: [CC-2.1], [SB-0.4]
+        """
+        if timeout is None or timeout <= 0:
+            if self._has_pending_messages():
+                return
+            return
+
+        waiter = self._ensure_multi_activity_waiter()
+        if waiter is not None:
+            if self._has_pending_messages():
+                return
+            try:
+                waiter.wait(timeout)
+                return
+            except (BrokerError, OSError, RuntimeError, TypeError, ValueError):
+                logger.debug(
+                    "Multi-queue activity waiter failed; falling back to polling",
+                    exc_info=True,
+                )
+                self._reset_multi_activity_waiter()
+
+        self._stop_event.wait(timeout)
+
+    def stop(self, *, join: bool = True, timeout: float = 2.0) -> None:
+        """Stop the watcher and close its multi-queue activity waiter."""
+        self._reset_multi_activity_waiter()
+        super().stop(join=join, timeout=timeout)
+
+    def _run_with_retries(self, max_retries: int = 3) -> None:
+        """Run with SimpleBroker retry semantics and a multi-queue waiter."""
+        retry_count = 0
+        start_time = time.monotonic()
+
+        while retry_count < max_retries:
+            self._check_retry_timeout(start_time, retry_count)
+
+            try:
+                # SimpleBroker 3.3.2 has no protected waiter factory hook, so
+                # this is the narrow override that swaps in the multi-queue API.
+                if hasattr(self._strategy, "start"):
+                    self._start_strategy_for_configured_queues()
+
+                self._in_initial_drain = True
+                try:
+                    self._drain_queue()
+                finally:
+                    self._in_initial_drain = False
+
+                self._process_messages()
+                break
+            except _StopLoop:
+                break
+            except KeyboardInterrupt:
+                raise
+            except Exception as exc:
+                retry_count += 1
+                if not self._handle_retry(exc, retry_count, max_retries):
+                    break
+
     def _has_pending_messages(self) -> bool:
         """Return ``True`` when any configured queue still has pending messages.
 
         Spec: [CC-2.1]
         """
-        return any(config.queue.has_pending() for config in self._queues.values())
+        return any(
+            self._queue_has_pending(config.queue) for config in self._queues.values()
+        )
+
+    def _queue_has_pending(self, queue: Queue) -> bool:
+        """Return pending state without querying stopped queue connections."""
+        if self._stop_event.is_set():
+            return False
+        try:
+            return queue.has_pending()
+        except BrokerError:
+            if self._stop_event.is_set():
+                return False
+            raise
 
     def _update_active_queues(self) -> None:
         """Refresh the round-robin iterator with queues that still have work pending.
 
         Spec: [CC-2.1]
         """
+        if self._stop_event.is_set():
+            self._active_queues = []
+            self._queue_iterator = itertools.cycle([])
+            return
+
         still_active: list[str] = [
             name
             for name in self._active_queues
-            if self._queues[name].queue.has_pending()
+            if self._queue_has_pending(self._queues[name].queue)
         ]
 
-        if self._check_counter % self._check_interval == 0:
+        should_probe_all = bool(
+            getattr(self, "_pending_messages_precheck_confirmed", False)
+        ) or (self._check_counter % self._check_interval == 0)
+        if should_probe_all:
             for name, config in self._queues.items():
-                if name not in still_active and config.queue.has_pending():
+                if name not in still_active and self._queue_has_pending(config.queue):
                     still_active.append(name)
 
         if set(still_active) != set(self._active_queues):
@@ -404,6 +566,9 @@ class MultiQueueWatcher(BaseWatcher):
         inactive_candidates: set[str] = set()
 
         for _ in range(len(self._active_queues)):
+            if self._stop_event.is_set():
+                break
+
             try:
                 queue_name = next(self._queue_iterator)
             except StopIteration:
@@ -439,7 +604,11 @@ class MultiQueueWatcher(BaseWatcher):
                 self._handler = original_handler
                 self._error_handler = original_error_handler
 
-            if not config.queue.has_pending():
+            if self._stop_event.is_set():
+                inactive_candidates.add(queue_name)
+                break
+
+            if not self._queue_has_pending(config.queue):
                 inactive_candidates.add(queue_name)
 
         if messages_processed > 0:

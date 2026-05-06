@@ -78,7 +78,7 @@ file-backed SQLite path.
 
 _Implementation mapping_: `weft/context.py` (`build_context`,
 `_resolve_root_and_target`, `WeftContext`), `weft/commands/load.py`,
-`weft/core/tasks/multiqueue_watcher.py`.
+`weft/core/tasks/multiqueue_watcher.py`, `weft/core/queue_wait.py`.
 
 Current behavior:
 
@@ -87,6 +87,9 @@ Current behavior:
 - file-backed and non-file-backed backends share the same normal runtime path
 - `MultiQueueWatcher` shares one resolved target across its queues instead of
   constructing per-operation SQLite-only handles
+- `MultiQueueWatcher` and `QueueChangeMonitor` call
+  `simplebroker.create_activity_waiter_for_queues(...)` for queue fan-in waits
+  and treat `None` as the portable polling fallback
 - queue and status command helpers also honor `WEFT_CONTEXT` as an explicit
   project-root override before they fall back to discovery
 
@@ -241,9 +244,9 @@ Current contract:
 - command and helper code that already has a `WeftContext` should construct
   queues through `WeftContext.queue()` rather than open-coding `Queue(...)`
 - CLI wait surfaces that already know which queues they are waiting on should
-  reuse SimpleBroker's queue-native waiting path (for example `QueueWatcher`
-  and backend-native activity waiters when available) rather than layering
-  Weft-owned sleep loops on top of queue peeks
+  reuse SimpleBroker's queue-native waiting path (for example multi-queue
+  activity waiters and `QueueWatcher` fallback) rather than layering Weft-owned
+  sleep loops on top of queue peeks
 - direct `Queue(...)` construction in command-layer code is reserved for
   explicit low-level edges that do not carry a `WeftContext`, such as the
   interactive queue client that owns its own task-local inbox lifecycle
@@ -307,6 +310,7 @@ connection-pooling designs are tracked in the companion doc:
 - [`docs/plans/2026-04-14-config-precedence-and-parsing-alignment-plan.md`](../plans/2026-04-14-config-precedence-and-parsing-alignment-plan.md)
 - [`docs/plans/2026-04-14-provider-cli-validation-boundary-and-agent-settings-alignment-plan.md`](../plans/2026-04-14-provider-cli-validation-boundary-and-agent-settings-alignment-plan.md)
 - [`docs/plans/2026-04-14-builtin-taskspecs-and-spec-resolution-plan.md`](../plans/2026-04-14-builtin-taskspecs-and-spec-resolution-plan.md)
+- [`docs/plans/2026-05-05-simplebroker-multiqueue-waiter-integration-plan.md`](../plans/2026-05-05-simplebroker-multiqueue-waiter-integration-plan.md)
 
 ## Related Documents
 

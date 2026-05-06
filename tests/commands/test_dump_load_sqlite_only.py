@@ -7,7 +7,6 @@ from pathlib import Path
 
 import pytest
 
-import simplebroker.db as simplebroker_db
 from weft.commands.load import cmd_load
 from weft.context import WeftContext, build_context
 
@@ -45,7 +44,7 @@ def test_cmd_load_rolls_back_sqlite_snapshot_on_apply_failure(
 ) -> None:
     """File-backed sqlite imports should restore pre-import state after a write failure."""
 
-    monkeypatch.setattr(simplebroker_db, "MAX_MESSAGE_SIZE", 32)
+    monkeypatch.setenv("BROKER_MAX_MESSAGE_SIZE", "32")
     ctx = build_context(spec_context=tmp_path)
     before_aliases, before_queues = _snapshot_broker_state(ctx)
 

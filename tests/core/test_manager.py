@@ -81,6 +81,17 @@ def _host_runtime_handle(pid: int) -> dict[str, object]:
     }
 
 
+def _external_supervisor_runtime_handle() -> dict[str, object]:
+    return {
+        "runner": "manager-supervisor",
+        "kind": "supervised-process",
+        "id": "container:weft-manager-1",
+        "control": {"authority": "external-supervisor"},
+        "observations": {"container_pid": 1, "container_name": "weft-manager-1"},
+        "metadata": {},
+    }
+
+
 def make_manager_spec(
     tid: str,
     inbox: str = WEFT_SPAWN_REQUESTS_QUEUE,
@@ -660,6 +671,47 @@ def test_manager_registry_entries(manager_setup) -> None:
     relevant = [entry for entry in entries if entry.get("tid") == manager.tid]
     assert len(relevant) == 1
     assert relevant[0]["status"] == "stopped"
+
+
+def test_manager_refreshes_active_registry_heartbeat(
+    manager_setup,
+    monkeypatch,
+) -> None:
+    manager, make_queue = manager_setup
+    registry_queue = make_queue(WEFT_MANAGERS_REGISTRY_QUEUE)
+    before = pending_timestamps(registry_queue)
+
+    monkeypatch.setattr(manager_mod, "MANAGER_REGISTRY_HEARTBEAT_INTERVAL_SECONDS", 0.0)
+    manager._refresh_manager_registration()
+
+    after = pending_timestamps(registry_queue)
+    entries = [json.loads(item) for item in drain(registry_queue)]
+    relevant = [entry for entry in entries if entry.get("tid") == manager.tid]
+    assert len(before) == 1
+    assert len(after) == 1
+    assert after != before
+    assert len(relevant) == 1
+    assert relevant[0]["status"] == "active"
+
+
+def test_manager_liveness_rejects_stale_external_supervisor_record(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        manager_mod,
+        "MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS",
+        -1.0,
+    )
+    record = {
+        "tid": "1761000000000000010",
+        "status": "active",
+        "runtime_handle": _external_supervisor_runtime_handle(),
+        "_timestamp": time.time_ns(),
+        "role": "manager",
+        "requests": WEFT_SPAWN_REQUESTS_QUEUE,
+    }
+
+    assert Manager._manager_record_is_live(record) is False
 
 
 def test_manager_unregister_registry_broker_error_is_best_effort(

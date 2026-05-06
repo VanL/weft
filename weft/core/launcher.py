@@ -9,6 +9,7 @@ from __future__ import annotations
 import importlib
 import json
 import multiprocessing
+import os
 import signal
 import sys
 import time
@@ -27,6 +28,34 @@ def _load_task_class(path: str) -> type[Any]:
     return cast(type[Any], getattr(module, class_name))
 
 
+def _backend_needs_process_hard_exit(db_path: BrokerTarget | str) -> bool:
+    """Return whether backend helper threads can keep a finished task alive."""
+    backend_name = getattr(db_path, "backend_name", None)
+    if isinstance(backend_name, str) and backend_name == "postgres":
+        return True
+    return str(db_path).startswith(("postgresql://", "postgres://"))
+
+
+def _is_foreground_serve_task(task: Any) -> bool:
+    taskspec = getattr(task, "taskspec", None)
+    metadata = getattr(taskspec, "metadata", None)
+    return isinstance(metadata, dict) and metadata.get("foreground_serve") is True
+
+
+def _parent_process_changed(initial_parent_pid: int) -> bool:
+    current_parent_pid = os.getppid()
+    return initial_parent_pid > 1 and current_parent_pid != initial_parent_pid
+
+
+def _request_parent_loss_shutdown(task: Any) -> None:
+    handler = getattr(task, "handle_termination_signal", None)
+    if callable(handler):
+        handler(signal.SIGTERM)
+        return
+    if hasattr(task, "should_stop"):
+        task.should_stop = True
+
+
 def _task_process_entry(
     task_cls_path: str,
     db_path: BrokerTarget | str,
@@ -38,20 +67,33 @@ def _task_process_entry(
     spec = TaskSpec.model_validate_json(spec_json)
     task = task_cls(db_path, spec, config=config)
     _install_signal_handlers(task)
+    initial_parent_pid = os.getppid()
+    stop_with_parent = _is_foreground_serve_task(task)
 
     try:
         while True:
+            if stop_with_parent and _parent_process_changed(initial_parent_pid):
+                _request_parent_loss_shutdown(task)
             task.process_once()
             status = task.taskspec.state.status
             if status in TERMINAL_TASK_STATUSES or task.should_stop:
                 break
-            time.sleep(poll_interval)
+            wait_for_activity = getattr(task, "wait_for_activity", None)
+            if callable(wait_for_activity):
+                wait_for_activity(timeout=poll_interval)
+            else:
+                time.sleep(poll_interval)
     finally:
         stop = getattr(task, "stop", None)
         if callable(stop):
             stop(join=False)
         else:
             task.cleanup()
+
+    if task.__class__.__module__.startswith(
+        "weft."
+    ) and _backend_needs_process_hard_exit(db_path):
+        os._exit(0)
 
 
 def launch_task_process(
