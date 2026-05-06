@@ -399,10 +399,7 @@ def test_terminal_event_reconciles_stale_running_status_payload(
     assert snapshot.waiting_on is None
     assert snapshot.reconciliation is not None
     assert snapshot.reconciliation["classification"] == "stale_status_payload"
-    assert (
-        snapshot.reconciliation["reason"]
-        == "contradictory_terminal_event_status"
-    )
+    assert snapshot.reconciliation["reason"] == "contradictory_terminal_event_status"
 
 
 def test_status_preserves_active_manager_while_terminal_manager_row_stays_terminal(
