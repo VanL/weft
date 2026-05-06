@@ -56,10 +56,10 @@ from weft._constants import (
     WORK_ENVELOPE_START,
     get_weft_directory_name,
 )
-from weft.core.container_detection import detect_container_runtime
 from weft.ext import RunnerHandle
 from weft.helpers import (
     canonical_owner_tid,
+    detect_container_runtime,
     handle_has_live_host_process,
     is_canonical_manager_record,
     iter_queue_json_entries,

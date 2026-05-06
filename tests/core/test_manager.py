@@ -32,7 +32,6 @@ from weft._constants import (
     WEFT_TID_MAPPINGS_QUEUE,
     load_config,
 )
-from weft.core.container_detection import ContainerRuntimeDetection
 from weft.core.manager import (
     DispatchOwnership,
     DispatchSuspension,
@@ -41,6 +40,7 @@ from weft.core.manager import (
 )
 from weft.core.tasks import Consumer, HeartbeatTask, PipelineEdgeTask, PipelineTask
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
+from weft.helpers import ContainerRuntimeDetection
 
 AUTOSTART_PIPELINE_RESULT_TIMEOUT = 30.0
 

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from weft.core.container_detection import detect_container_runtime
+from weft.helpers.container_detection import detect_container_runtime
 
 pytestmark = [pytest.mark.shared]
 

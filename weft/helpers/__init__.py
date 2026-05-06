@@ -33,6 +33,13 @@ from simplebroker.ext import BrokerError
 from weft._constants import WEFT_SPAWN_REQUESTS_QUEUE, load_config
 from weft.ext import RunnerHandle
 
+from .container_detection import (
+    ContainerRuntimeDetection as ContainerRuntimeDetection,
+)
+from .container_detection import (
+    detect_container_runtime as detect_container_runtime,
+)
+
 # Load configuration once at module level for efficiency
 _config = load_config()
 
