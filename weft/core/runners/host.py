@@ -327,44 +327,124 @@ class HostTaskRunner:
             args=(self._spec_data, work_item, result_queue),
             daemon=True,
         )
-        process.start()
-        worker_pid = process.pid
-        runtime_handle = _host_handle(worker_pid)
-        if on_worker_started is not None:
-            try:
-                on_worker_started(worker_pid)
-            except Exception:  # pragma: no cover - defensive
-                pass
-        if on_runtime_handle_started is not None and runtime_handle is not None:
-            try:
-                on_runtime_handle_started(runtime_handle)
-            except Exception:  # pragma: no cover - defensive
-                pass
+        try:
+            process.start()
+            worker_pid = process.pid
+            runtime_handle = _host_handle(worker_pid)
+            if on_worker_started is not None:
+                try:
+                    on_worker_started(worker_pid)
+                except Exception:  # pragma: no cover - defensive
+                    pass
+            if on_runtime_handle_started is not None and runtime_handle is not None:
+                try:
+                    on_runtime_handle_started(runtime_handle)
+                except Exception:  # pragma: no cover - defensive
+                    pass
 
-        monitor = None
-        last_metrics: ResourceMetrics | None = None
-        outcome: RunnerOutcome | None = None
-        if self._monitor_class:
-            monitor = load_resource_monitor(
-                self._monitor_class,
-                limits=self._limits,
-                polling_interval=self._monitor_interval,
-                db_path=self._db_path,
-                config=self._config,
-            )
-            try:
-                if worker_pid is None:
-                    raise RuntimeError("Worker process has no PID")
-                monitor.start(worker_pid)
-            except Exception:  # pragma: no cover
-                monitor = None
+            monitor = None
+            last_metrics: ResourceMetrics | None = None
+            outcome: RunnerOutcome | None = None
+            if self._monitor_class:
+                monitor = load_resource_monitor(
+                    self._monitor_class,
+                    limits=self._limits,
+                    polling_interval=self._monitor_interval,
+                    db_path=self._db_path,
+                    config=self._config,
+                )
+                try:
+                    if worker_pid is None:
+                        raise RuntimeError("Worker process has no PID")
+                    monitor.start(worker_pid)
+                except Exception:  # pragma: no cover
+                    with contextlib.suppress(Exception):
+                        monitor.stop()
+                    monitor = None
 
-        start_time = time.monotonic()
-        next_monitor_at = start_time + self._monitor_interval
+            start_time = time.monotonic()
+            next_monitor_at = start_time + self._monitor_interval
 
-        while process.is_alive():
+            while process.is_alive():
+                if safe_cancel(cancel_requested):
+                    self._stop_process(process)
+                    if monitor:
+                        last_metrics = monitor.last_metrics()
+                        monitor.stop()
+                    return RunnerOutcome(
+                        status="cancelled",
+                        value=None,
+                        error="Target execution cancelled",
+                        stdout=None,
+                        stderr=None,
+                        returncode=None,
+                        duration=time.monotonic() - start_time,
+                        metrics=last_metrics,
+                        worker_pid=worker_pid,
+                        runtime_handle=runtime_handle,
+                    )
+
+                elapsed = time.monotonic() - start_time
+                if self._timeout is not None and elapsed >= self._timeout:
+                    self._stop_process(process)
+                    if monitor:
+                        last_metrics = monitor.last_metrics()
+                        monitor.stop()
+                    return RunnerOutcome(
+                        status="timeout",
+                        value=None,
+                        error="Target execution timed out",
+                        stdout=None,
+                        stderr=None,
+                        returncode=None,
+                        duration=self._timeout,
+                        metrics=last_metrics,
+                        worker_pid=worker_pid,
+                        runtime_handle=runtime_handle,
+                    )
+
+                remaining: float | None = None
+                if self._timeout is not None:
+                    remaining = self._timeout - elapsed
+                    if remaining <= 0:
+                        continue
+                sleep_for = ACTIVE_CONTROL_POLL_INTERVAL
+                if remaining is not None:
+                    sleep_for = min(sleep_for, max(0.01, remaining))
+
+                try:
+                    outcome = result_queue.get(timeout=sleep_for)
+                    break
+                except queue.Empty:
+                    pass
+
+                if monitor and time.monotonic() >= next_monitor_at:
+                    try:
+                        ok, violation = monitor.check_limits()
+                    except Exception:  # pragma: no cover - process may have exited
+                        ok, violation = True, None
+                    last_metrics = monitor.last_metrics()
+                    next_monitor_at = time.monotonic() + self._monitor_interval
+                    if not ok:
+                        self._stop_process(process)
+                        last_metrics = monitor.last_metrics()
+                        monitor.stop()
+                        return RunnerOutcome(
+                            status="limit",
+                            value=None,
+                            error=violation,
+                            stdout=None,
+                            stderr=None,
+                            returncode=None,
+                            duration=time.monotonic() - start_time,
+                            metrics=last_metrics,
+                            worker_pid=worker_pid,
+                            runtime_handle=runtime_handle,
+                        )
+
+            process.join()
+
             if safe_cancel(cancel_requested):
-                self._stop_process(process)
                 if monitor:
                     last_metrics = monitor.last_metrics()
                     monitor.stop()
@@ -381,55 +461,23 @@ class HostTaskRunner:
                     runtime_handle=runtime_handle,
                 )
 
-            elapsed = time.monotonic() - start_time
-            if self._timeout is not None and elapsed >= self._timeout:
-                self._stop_process(process)
-                if monitor:
-                    last_metrics = monitor.last_metrics()
-                    monitor.stop()
-                return RunnerOutcome(
-                    status="timeout",
-                    value=None,
-                    error="Target execution timed out",
-                    stdout=None,
-                    stderr=None,
-                    returncode=None,
-                    duration=self._timeout,
-                    metrics=last_metrics,
-                    worker_pid=worker_pid,
-                    runtime_handle=runtime_handle,
-                )
-
-            remaining: float | None = None
-            if self._timeout is not None:
-                remaining = self._timeout - elapsed
-                if remaining <= 0:
-                    continue
-            sleep_for = ACTIVE_CONTROL_POLL_INTERVAL
-            if remaining is not None:
-                sleep_for = min(sleep_for, max(0.01, remaining))
-
-            try:
-                outcome = result_queue.get(timeout=sleep_for)
-                break
-            except queue.Empty:
-                pass
-
-            if monitor and time.monotonic() >= next_monitor_at:
-                try:
-                    ok, violation = monitor.check_limits()
-                except Exception:  # pragma: no cover - process may have exited
-                    ok, violation = True, None
+            if monitor:
                 last_metrics = monitor.last_metrics()
-                next_monitor_at = time.monotonic() + self._monitor_interval
-                if not ok:
-                    self._stop_process(process)
-                    last_metrics = monitor.last_metrics()
-                    monitor.stop()
+                if last_metrics is None:
+                    try:
+                        last_metrics = monitor.snapshot()
+                    except Exception:  # pragma: no cover
+                        last_metrics = None
+                monitor.stop()
+
+            if outcome is None:
+                try:
+                    outcome = result_queue.get_nowait()
+                except queue.Empty:
                     return RunnerOutcome(
-                        status="limit",
+                        status="error",
                         value=None,
-                        error=violation,
+                        error="Worker produced no result",
                         stdout=None,
                         stderr=None,
                         returncode=None,
@@ -439,55 +487,13 @@ class HostTaskRunner:
                         runtime_handle=runtime_handle,
                     )
 
-        process.join()
-
-        if safe_cancel(cancel_requested):
-            if monitor:
-                last_metrics = monitor.last_metrics()
-                monitor.stop()
-            return RunnerOutcome(
-                status="cancelled",
-                value=None,
-                error="Target execution cancelled",
-                stdout=None,
-                stderr=None,
-                returncode=None,
-                duration=time.monotonic() - start_time,
-                metrics=last_metrics,
-                worker_pid=worker_pid,
-                runtime_handle=runtime_handle,
-            )
-
-        if monitor:
-            last_metrics = monitor.last_metrics()
-            if last_metrics is None:
-                try:
-                    last_metrics = monitor.snapshot()
-                except Exception:  # pragma: no cover
-                    last_metrics = None
-            monitor.stop()
-
-        if outcome is None:
-            try:
-                outcome = result_queue.get_nowait()
-            except queue.Empty:
-                return RunnerOutcome(
-                    status="error",
-                    value=None,
-                    error="Worker produced no result",
-                    stdout=None,
-                    stderr=None,
-                    returncode=None,
-                    duration=time.monotonic() - start_time,
-                    metrics=last_metrics,
-                    worker_pid=worker_pid,
-                    runtime_handle=runtime_handle,
-                )
-
-        outcome.metrics = outcome.metrics or last_metrics
-        outcome.worker_pid = worker_pid
-        outcome.runtime_handle = outcome.runtime_handle or runtime_handle
-        return outcome
+            outcome.metrics = outcome.metrics or last_metrics
+            outcome.worker_pid = worker_pid
+            outcome.runtime_handle = outcome.runtime_handle or runtime_handle
+            return outcome
+        finally:
+            self._close_mp_queue(result_queue)
+            self._close_process_handle(process)
 
     def _run_command_with_hooks(
         self,
@@ -590,6 +596,28 @@ class HostTaskRunner:
         if process.is_alive():
             process.kill()
             process.join(timeout=timeout)
+
+    @staticmethod
+    def _close_mp_queue(mp_queue: MPQueue[Any]) -> None:
+        """Release multiprocessing Queue handles owned by this process."""
+
+        try:
+            mp_queue.close()
+        except Exception:  # pragma: no cover - defensive cleanup
+            pass
+        try:
+            mp_queue.join_thread()
+        except Exception:  # pragma: no cover - defensive cleanup
+            pass
+
+    @staticmethod
+    def _close_process_handle(process: BaseProcess) -> None:
+        """Release the OS handle held by a multiprocessing Process wrapper."""
+
+        try:
+            process.close()
+        except Exception:  # pragma: no cover - process may still be running
+            pass
 
     def start_session(self) -> CommandSession:
         """Start a line-oriented interactive command session for streaming IO."""

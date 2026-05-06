@@ -12,6 +12,7 @@ import multiprocessing
 import os
 import signal
 import sys
+import threading
 import time
 from multiprocessing.process import BaseProcess
 from typing import Any, cast
@@ -39,13 +40,57 @@ def _parent_process_changed(initial_parent_pid: int) -> bool:
     return initial_parent_pid > 1 and current_parent_pid != initial_parent_pid
 
 
+def _wake_task_stop_event(task: Any) -> None:
+    stop_event = getattr(task, "_stop_event", None)
+    if stop_event is not None and hasattr(stop_event, "set"):
+        stop_event.set()
+
+
 def _request_parent_loss_shutdown(task: Any) -> None:
     handler = getattr(task, "handle_termination_signal", None)
     if callable(handler):
         handler(signal.SIGTERM)
+        _wake_task_stop_event(task)
         return
     if hasattr(task, "should_stop"):
         task.should_stop = True
+    _wake_task_stop_event(task)
+
+
+def _start_parent_loss_watcher(
+    task: Any,
+    *,
+    initial_parent_pid: int,
+    poll_interval: float,
+) -> threading.Event:
+    parent_lost = threading.Event()
+    wake_interval = min(max(poll_interval, 0.05), 0.2)
+
+    def _watch_parent() -> None:
+        while not parent_lost.is_set():
+            if _parent_process_changed(initial_parent_pid):
+                parent_lost.set()
+                _wake_task_stop_event(task)
+                return
+            time.sleep(wake_interval)
+
+    threading.Thread(target=_watch_parent, daemon=True).start()
+    return parent_lost
+
+
+def _redirect_standard_streams_to_devnull() -> None:
+    """Prevent spawned task children from inheriting manager stdio pipes."""
+
+    devnull_fd = os.open(os.devnull, os.O_RDWR)
+    try:
+        for fd in (0, 1, 2):
+            try:
+                os.dup2(devnull_fd, fd)
+            except OSError:  # pragma: no cover - platform fd edge
+                continue
+    finally:
+        if devnull_fd > 2:
+            os.close(devnull_fd)
 
 
 def _task_process_entry(
@@ -55,17 +100,33 @@ def _task_process_entry(
     config: dict[str, Any] | None,
     poll_interval: float,
     hard_exit_on_return: bool = False,
+    detach_stdio: bool = False,
 ) -> None:
+    if detach_stdio:
+        _redirect_standard_streams_to_devnull()
+
     task_cls = _load_task_class(task_cls_path)
     spec = TaskSpec.model_validate_json(spec_json)
     task = task_cls(db_path, spec, config=config)
     _install_signal_handlers(task)
     initial_parent_pid = os.getppid()
     stop_with_parent = _is_foreground_serve_task(task)
+    parent_lost = (
+        _start_parent_loss_watcher(
+            task,
+            initial_parent_pid=initial_parent_pid,
+            poll_interval=poll_interval,
+        )
+        if stop_with_parent
+        else None
+    )
 
     try:
         while True:
-            if stop_with_parent and _parent_process_changed(initial_parent_pid):
+            if stop_with_parent and (
+                (parent_lost is not None and parent_lost.is_set())
+                or _parent_process_changed(initial_parent_pid)
+            ):
                 _request_parent_loss_shutdown(task)
             task.process_once()
             status = task.taskspec.state.status
@@ -117,6 +178,7 @@ def launch_task_process(
             config,
             poll_interval,
             True,
+            True,
         ),
         daemon=False,
     )
@@ -134,9 +196,11 @@ def _install_signal_handlers(task: Any) -> None:
         handler = getattr(task, "handle_termination_signal", None)
         if callable(handler):
             handler(signum)
+            _wake_task_stop_event(task)
             return
         if hasattr(task, "should_stop"):
             task.should_stop = True
+        _wake_task_stop_event(task)
 
     candidate_signals = [signal.SIGTERM, signal.SIGINT]
     sigusr1 = getattr(signal, "SIGUSR1", None)

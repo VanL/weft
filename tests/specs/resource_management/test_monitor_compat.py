@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from weft.core.resource_monitor import BaseResourceMonitor, ResourceMetrics
+from weft.core import resource_monitor as resource_monitor_module
+from weft.core.resource_monitor import (
+    BaseResourceMonitor,
+    PsutilResourceMonitor,
+    ResourceMetrics,
+)
 
 
 class LegacyMonitor(BaseResourceMonitor):
@@ -45,3 +50,27 @@ def test_legacy_monitor_methods_are_honored() -> None:
 
     monitor.stop_monitoring()
     assert monitor.stopped is True
+
+
+def test_psutil_monitor_stop_closes_metrics_queue(monkeypatch) -> None:
+    class FakeMetricsQueue:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    created: list[FakeMetricsQueue] = []
+
+    def _fake_queue(*args, **kwargs):
+        queue = FakeMetricsQueue(*args, **kwargs)
+        created.append(queue)
+        return queue
+
+    monkeypatch.setattr(resource_monitor_module, "Queue", _fake_queue)
+
+    monitor = PsutilResourceMonitor()
+    monitor.stop_monitoring()
+
+    assert created
+    assert created[0].closed is True

@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -22,7 +23,7 @@ from weft._constants import (
     WEFT_STREAMING_SESSIONS_QUEUE,
 )
 from weft.core import launcher as launcher_module
-from weft.core.launcher import _task_process_entry
+from weft.core.launcher import _request_parent_loss_shutdown, _task_process_entry
 from weft.core.runners import RunnerOutcome
 from weft.core.tasks import Consumer
 from weft.core.tasks.base import BaseTask
@@ -514,6 +515,23 @@ def test_task_process_entry_uses_normal_return_for_windows_hard_exit(
     )
 
     assert _launcher_process_calls == 1
+
+
+def test_parent_loss_shutdown_wakes_task_stop_event() -> None:
+    class ParentLossTask:
+        def __init__(self) -> None:
+            self._stop_event = threading.Event()
+            self.signals: list[int] = []
+
+        def handle_termination_signal(self, signum: int) -> None:
+            self.signals.append(signum)
+
+    task = ParentLossTask()
+
+    _request_parent_loss_shutdown(task)
+
+    assert task.signals
+    assert task._stop_event.is_set()
 
 
 def test_task_ignores_unknown_control_message(broker_env, unique_tid: str) -> None:

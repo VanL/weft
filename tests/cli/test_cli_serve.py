@@ -49,10 +49,12 @@ def _popen_cli(
 
     prepare_cli_root(args, cwd=cwd, env=env_vars)
 
-    if active_test_backend(env_vars) == "postgres":
-        cmd = ["uv", "run", "--active", "python", "-m", "weft.cli", *map(str, args)]
+    command_args = tuple(map(str, args))
+    foreground_serve = command_args[:2] == ("manager", "serve")
+    if active_test_backend(env_vars) == "postgres" and not foreground_serve:
+        cmd = ["uv", "run", "--active", "python", "-m", "weft.cli", *command_args]
     else:
-        cmd = [sys.executable, "-m", "weft.cli", *map(str, args)]
+        cmd = [sys.executable, "-m", "weft.cli", *command_args]
 
     return subprocess.Popen(
         cmd,

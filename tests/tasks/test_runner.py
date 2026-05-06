@@ -15,6 +15,7 @@ from weft.core.resource_monitor import ResourceMetrics
 from weft.core.runners import RunnerOutcome
 from weft.core.runners.subprocess_runner import run_monitored_subprocess
 from weft.core.tasks.runner import TaskRunner
+from weft.core.tasks.sessions import AgentSession
 from weft.core.taskspec import LimitsSection
 from weft.ext import RunnerCapabilities, RunnerHandle
 
@@ -77,6 +78,60 @@ def test_task_runner_executes_function_successfully():
     assert outcome.ok
     assert outcome.value == "hello!"
     assert outcome.error is None
+
+
+def test_agent_session_close_releases_multiprocessing_handles() -> None:
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.closed = False
+            self.join_calls: list[float | None] = []
+
+        @property
+        def pid(self) -> int:
+            return 123
+
+        def is_alive(self) -> bool:
+            return False
+
+        def join(self, timeout: float | None = None) -> None:
+            self.join_calls.append(timeout)
+
+        def close(self) -> None:
+            self.closed = True
+
+    class FakeQueue:
+        def __init__(self) -> None:
+            self.closed = False
+            self.joined = False
+
+        def close(self) -> None:
+            self.closed = True
+
+        def join_thread(self) -> None:
+            self.joined = True
+
+        def put(self, _payload: object) -> None:
+            raise AssertionError("closed sessions must not enqueue stop requests")
+
+    request_queue = FakeQueue()
+    response_queue = FakeQueue()
+    process = FakeProcess()
+    session = AgentSession(
+        process,  # type: ignore[arg-type]
+        request_queue,  # type: ignore[arg-type]
+        response_queue,  # type: ignore[arg-type]
+        monitor=None,
+        limits=None,
+        timeout=None,
+    )
+
+    session.close()
+
+    assert request_queue.closed is True
+    assert request_queue.joined is True
+    assert response_queue.closed is True
+    assert response_queue.joined is True
+    assert process.closed is True
 
 
 PROCESS_SCRIPT = str(Path(__file__).resolve().parent / "process_target.py")

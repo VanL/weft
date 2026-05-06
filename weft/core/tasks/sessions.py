@@ -336,6 +336,23 @@ class AgentSession:
             self._process.kill()
             self._process.join(timeout=0.5)
 
+    def _close_ipc_resources(self) -> None:
+        """Release multiprocessing handles owned by this session wrapper."""
+
+        for mp_queue in (self._request_queue, self._response_queue):
+            try:
+                mp_queue.close()
+            except Exception:  # pragma: no cover - defensive cleanup
+                pass
+            try:
+                mp_queue.join_thread()
+            except Exception:  # pragma: no cover - defensive cleanup
+                pass
+        try:
+            self._process.close()
+        except Exception:  # pragma: no cover - process may still be running
+            pass
+
     def poll_limits(self) -> tuple[bool, str | None]:
         if not self._monitor:
             return True, None
@@ -375,6 +392,7 @@ class AgentSession:
         if self.is_alive():
             self.terminate()
         self.stop_monitor()
+        self._close_ipc_resources()
 
 
 class InProcessCommandSession:

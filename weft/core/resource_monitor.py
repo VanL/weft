@@ -94,6 +94,18 @@ class BaseResourceMonitor(ABC):
         if config is not None:
             queue_kwargs["config"] = config
         self.metrics_queue = Queue("weft.metrics", **queue_kwargs)
+        self._metrics_queue_closed = False
+
+    def close(self) -> None:
+        """Release queue resources owned by the monitor."""
+
+        if self._metrics_queue_closed:
+            return
+        self._metrics_queue_closed = True
+        try:
+            self.metrics_queue.close()
+        except Exception:  # pragma: no cover - defensive cleanup
+            pass
 
     def start_monitoring(self, pid: int) -> None:
         """Begin monitoring the given process id (Spec: [RM-5.1])."""
@@ -109,7 +121,10 @@ class BaseResourceMonitor(ABC):
             raise NotImplementedError(
                 "Resource monitor must implement stop() or stop_monitoring()."
             )
-        self.stop()
+        try:
+            self.stop()
+        finally:
+            self.close()
 
     def get_current_metrics(self) -> ResourceMetrics:
         """Return the current resource utilisation snapshot (Spec: [RM-5.1])."""
@@ -190,6 +205,7 @@ class PsutilResourceMonitor(BaseResourceMonitor):
         self.history.clear()
         self._last_cpu_sample_at = None
         self._last_cpu_times.clear()
+        self.close()
 
     def _process_tree(self) -> list[PsutilProcess]:
         if psutil is None:

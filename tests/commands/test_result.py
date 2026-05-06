@@ -1105,6 +1105,53 @@ def test_await_single_result_reuses_materialized_batch_boundary_state(
     assert error is None
 
 
+def test_await_single_result_tolerates_materialized_boundary_timestamp_skew(
+    tmp_path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    outbox_queue = ctx.queue("skewed.custom.outbox", persistent=True)
+
+    taskspec_payload = {
+        "tid": tid,
+        "name": "skewed-custom-result",
+        "spec": {"type": "function", "persistent": True},
+        "io": {
+            "outputs": {"outbox": "skewed.custom.outbox"},
+            "control": {"ctrl_out": "skewed.custom.ctrl_out"},
+        },
+        "state": {"status": "running"},
+        "metadata": {},
+    }
+
+    outbox_queue.write("first")
+    outbox_queue.write("second")
+    outbox_item = outbox_queue.peek_one(with_timestamps=True)
+    assert isinstance(outbox_item, tuple)
+    _payload, outbox_timestamp = outbox_item
+
+    try:
+        status, result, error = _await_single_result(
+            ctx,
+            tid=tid,
+            timeout=RESULT_WAIT_TIMEOUT,
+            show_stderr=False,
+            taskspec_payload=taskspec_payload,
+            outbox_name="skewed.custom.outbox",
+            ctrl_out_name="skewed.custom.ctrl_out",
+            initial_log_last_timestamp=123,
+            initial_batch_boundary_timestamps=(int(outbox_timestamp) - 1,),
+            initial_result_surface_had_activity=True,
+        )
+    finally:
+        outbox_queue.close()
+
+    assert status == "completed"
+    assert result == ["first", "second"]
+    assert error is None
+
+
 def test_cmd_result_rejects_stream_json_combination(tmp_path) -> None:
     root = prepare_project_root(tmp_path)
 

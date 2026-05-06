@@ -1100,39 +1100,41 @@ class Manager(BaseTask):
             )
 
         for tid, child in list(children.items()):
-            if child.process.is_alive():
-                try:
-                    child.process.join(timeout=0.2)
-                except (
-                    AssertionError,
-                    OSError,
-                    ValueError,
-                ):  # pragma: no cover - defensive
-                    pass
-            if child.process.is_alive():
-                if child.process.pid is not None:
-                    terminate_process_tree(child.process.pid, timeout=0.5)
-                try:
-                    child.process.join(timeout=2.0)
-                except (
-                    AssertionError,
-                    OSError,
-                    ValueError,
-                ):  # pragma: no cover - defensive
-                    pass
+            try:
                 if child.process.is_alive():
                     try:
-                        child.process.kill()
-                    except OSError:  # pragma: no cover - defensive
+                        child.process.join(timeout=0.2)
+                    except (
+                        AssertionError,
+                        OSError,
+                        ValueError,
+                    ):  # pragma: no cover - defensive
                         pass
-                    else:
-                        child.process.join(timeout=1.0)
-            managed_pids.setdefault(tid, set()).update(
-                self._managed_pids_for_child(tid)
-            )
-            for pid in managed_pids[tid]:
-                terminate_process_tree(pid, timeout=0.2)
-            self._child_processes.pop(tid, None)
+                if child.process.is_alive():
+                    if child.process.pid is not None:
+                        terminate_process_tree(child.process.pid, timeout=0.5)
+                    try:
+                        child.process.join(timeout=2.0)
+                    except (
+                        AssertionError,
+                        OSError,
+                        ValueError,
+                    ):  # pragma: no cover - defensive
+                        pass
+                    if child.process.is_alive():
+                        try:
+                            child.process.kill()
+                        except OSError:  # pragma: no cover - defensive
+                            pass
+                        else:
+                            child.process.join(timeout=1.0)
+                managed_pids.setdefault(tid, set()).update(
+                    self._managed_pids_for_child(tid)
+                )
+                for pid in managed_pids[tid]:
+                    terminate_process_tree(pid, timeout=0.2)
+            finally:
+                self._child_processes.pop(tid, None)
 
     def _wait_for_children_to_exit(self, *, timeout: float) -> None:
         deadline = time.monotonic() + timeout
@@ -1255,8 +1257,7 @@ class Manager(BaseTask):
         )
         if foreground_serve:
             self._terminate_children()
-            if not self._child_processes:
-                self._finish_graceful_shutdown()
+            self._finish_graceful_shutdown()
 
     def _send_stop_command(self, queue_name: str) -> None:
         queue = Queue(

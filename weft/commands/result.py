@@ -63,6 +63,7 @@ class ResultMaterialization:
     terminal_event_payload: dict[str, Any] | None = None
     terminal_event_timestamp: int | None = None
     batch_boundary_timestamps: tuple[int, ...] = ()
+    result_surface_had_activity: bool = False
 
 
 def _normalize_tid(raw_tid: str) -> str:
@@ -206,6 +207,7 @@ def _await_result_materialization(
                     outbox_name=outbox_name,
                     ctrl_out_name=ctrl_out_name,
                     log_last_timestamp=log_last_timestamp,
+                    result_surface_had_activity=True,
                 )
 
             if taskspec_payload is None:
@@ -229,6 +231,7 @@ def _await_result_materialization(
                         outbox_name=pipeline_outbox_name,
                         ctrl_out_name=pipeline_ctrl_out_name,
                         log_last_timestamp=log_last_timestamp,
+                        result_surface_had_activity=True,
                     )
 
             events, log_last_timestamp = poll_log_events(
@@ -266,6 +269,11 @@ def _await_result_materialization(
                             tid,
                             event_taskspec,
                         )
+                        result_surface_had_activity = _result_surface_has_activity(
+                            context,
+                            outbox_name=outbox_name,
+                            ctrl_out_name=ctrl_out_name,
+                        )
                         return ResultMaterialization(
                             taskspec_payload=event_taskspec,
                             outbox_name=outbox_name,
@@ -276,6 +284,7 @@ def _await_result_materialization(
                             terminal_event_payload=terminal_payload,
                             terminal_event_timestamp=terminal_timestamp,
                             batch_boundary_timestamps=batch_boundary_timestamps,
+                            result_surface_had_activity=result_surface_had_activity,
                         )
                 if terminal_status is not None:
                     return ResultMaterialization(
@@ -288,6 +297,11 @@ def _await_result_materialization(
                         terminal_event_payload=terminal_payload,
                         terminal_event_timestamp=terminal_timestamp,
                         batch_boundary_timestamps=batch_boundary_timestamps,
+                        result_surface_had_activity=_result_surface_has_activity(
+                            context,
+                            outbox_name=outbox_name,
+                            ctrl_out_name=ctrl_out_name,
+                        ),
                     )
                 continue
 
@@ -373,6 +387,20 @@ def _drain_outbox_until_timestamp(
     return values
 
 
+def _latest_visible_outbox_timestamp(queue: Queue) -> int | None:
+    """Return the largest timestamp currently visible in an outbox queue."""
+
+    latest_timestamp: int | None = None
+    for entry in queue.peek_generator(with_timestamps=True):
+        if not isinstance(entry, tuple) or len(entry) != 2:
+            continue
+        _payload, timestamp = entry
+        timestamp_int = int(timestamp)
+        if latest_timestamp is None or timestamp_int > latest_timestamp:
+            latest_timestamp = timestamp_int
+    return latest_timestamp
+
+
 def _collect_all_results(
     context: WeftContext,
     *,
@@ -443,6 +471,7 @@ def _await_single_result(
     initial_terminal_status: str | None = None,
     initial_terminal_error_message: str | None = None,
     initial_batch_boundary_timestamps: tuple[int, ...] = (),
+    initial_result_surface_had_activity: bool = False,
 ) -> tuple[str, Any | None, str | None]:
     if taskspec_payload is None:
         taskspec_payload = _load_taskspec_payload(context, tid)
@@ -518,6 +547,16 @@ def _await_single_result(
                         boundary_timestamp = completion_timestamp
                         boundary_seen_at = time.monotonic()
                         break
+                if (
+                    boundary_timestamp is None
+                    and pending_completion_timestamps
+                    and initial_result_surface_had_activity
+                ):
+                    boundary_timestamp = (
+                        _latest_visible_outbox_timestamp(outbox_queue)
+                        or first_pending_timestamp
+                    )
+                    boundary_seen_at = time.monotonic()
 
             events: list[tuple[dict[str, Any], int]]
             events, log_last_timestamp = poll_log_events(
@@ -719,6 +758,7 @@ def await_task_result(
         initial_terminal_status=materialized.terminal_status,
         initial_terminal_error_message=materialized.terminal_error_message,
         initial_batch_boundary_timestamps=materialized.batch_boundary_timestamps,
+        initial_result_surface_had_activity=materialized.result_surface_had_activity,
     )
     stdout, stderr = _split_stdio(value)
     return TaskResult(
@@ -805,6 +845,7 @@ def cmd_result(
         initial_terminal_status=materialized.terminal_status,
         initial_terminal_error_message=materialized.terminal_error_message,
         initial_batch_boundary_timestamps=materialized.batch_boundary_timestamps,
+        initial_result_surface_had_activity=materialized.result_surface_had_activity,
     )
 
     if status == "completed":
