@@ -32,6 +32,7 @@ def run_manager_process(
         spec.model_dump_json(),
         config,
         poll_interval,
+        True,
     )
 
 

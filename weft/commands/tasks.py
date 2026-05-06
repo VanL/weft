@@ -1147,6 +1147,17 @@ def _stop_via_fallback(task_entry: dict[str, Any] | None) -> bool:
     return False
 
 
+def _stop_terminal_host_process(task_entry: dict[str, Any] | None) -> bool:
+    if task_entry is None:
+        return False
+
+    handle = status_cmd._runtime_handle_from_mapping(task_entry)
+    if handle is not None and handle.runner not in {"host", "macos-sandbox"}:
+        return False
+
+    return _stop_via_fallback(task_entry)
+
+
 def _kill_via_fallback(task_entry: dict[str, Any] | None) -> bool:
     if task_entry is None:
         return False
@@ -1219,7 +1230,7 @@ def stop_tasks(
             task_entry, snapshot = _await_control_surface(ctx, full)
         elif snapshot.status == "cancelled":
             task_entry = _latest_task_entry(ctx, lookup, full, task_entry)
-            handled_by_runner = _stop_via_fallback(task_entry)
+            handled_by_runner = _stop_terminal_host_process(task_entry)
 
         if snapshot is None or snapshot.status not in status_cmd.TERMINAL_TASK_STATUSES:
             if not handled_by_runner:

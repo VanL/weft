@@ -28,14 +28,6 @@ def _load_task_class(path: str) -> type[Any]:
     return cast(type[Any], getattr(module, class_name))
 
 
-def _backend_needs_process_hard_exit(db_path: BrokerTarget | str) -> bool:
-    """Return whether backend helper threads can keep a finished task alive."""
-    backend_name = getattr(db_path, "backend_name", None)
-    if isinstance(backend_name, str) and backend_name == "postgres":
-        return True
-    return str(db_path).startswith(("postgresql://", "postgres://"))
-
-
 def _is_foreground_serve_task(task: Any) -> bool:
     taskspec = getattr(task, "taskspec", None)
     metadata = getattr(taskspec, "metadata", None)
@@ -62,6 +54,7 @@ def _task_process_entry(
     spec_json: str,
     config: dict[str, Any] | None,
     poll_interval: float,
+    hard_exit_on_return: bool = False,
 ) -> None:
     task_cls = _load_task_class(task_cls_path)
     spec = TaskSpec.model_validate_json(spec_json)
@@ -90,9 +83,7 @@ def _task_process_entry(
         else:
             task.cleanup()
 
-    if task.__class__.__module__.startswith(
-        "weft."
-    ) and _backend_needs_process_hard_exit(db_path):
+    if hard_exit_on_return:
         os._exit(0)
 
 
@@ -125,6 +116,7 @@ def launch_task_process(
             ),
             config,
             poll_interval,
+            True,
         ),
         daemon=False,
     )
