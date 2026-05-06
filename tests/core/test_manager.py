@@ -32,6 +32,7 @@ from weft._constants import (
     WEFT_TID_MAPPINGS_QUEUE,
     load_config,
 )
+from weft.core.container_detection import ContainerRuntimeDetection
 from weft.core.manager import (
     DispatchOwnership,
     DispatchSuspension,
@@ -738,6 +739,34 @@ def test_manager_liveness_rejects_host_pid_identity_mismatch(
     }
 
     assert Manager._manager_record_is_live(record) is False
+
+
+def test_manager_runtime_handle_uses_external_supervisor_in_container(
+    manager_setup,
+    monkeypatch,
+) -> None:
+    manager, _make_queue = manager_setup
+    monkeypatch.setattr(
+        manager_mod,
+        "detect_container_runtime",
+        lambda: ContainerRuntimeDetection(
+            runtime="docker",
+            markers=("dockerenv",),
+            identifier="container123",
+        ),
+    )
+
+    handle = manager._manager_runtime_handle()
+
+    assert handle.runner == "manager-supervisor"
+    assert handle.kind == "supervised-process"
+    assert handle.id == "docker:container123"
+    assert handle.control == {"authority": "external-supervisor"}
+    assert handle.observations["container_runtime"] == "docker"
+    assert handle.observations["container_markers"] == ["dockerenv"]
+    assert handle.observations["container_id"] == "container123"
+    assert isinstance(handle.observations["container_pid"], int)
+    assert not handle.scoped_host_pids()
 
 
 def test_manager_unregister_registry_broker_error_is_best_effort(

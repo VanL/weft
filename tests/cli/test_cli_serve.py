@@ -95,11 +95,26 @@ def _active_canonical_manager_records(context) -> list[dict[str, Any]]:
             continue
         if record.get("status") != "active":
             continue
+        authority = _runtime_authority_from_record(record)
+        if authority == "external-supervisor":
+            records.append(record)
+            continue
         pid = _host_pid_from_record(record)
         if isinstance(pid, int) and pid_is_live(pid):
             records.append(record)
     records.sort(key=lambda item: (int(item["tid"]), int(item["timestamp"])))
     return records
+
+
+def _runtime_authority_from_record(record: dict[str, Any]) -> str | None:
+    handle = record.get("runtime_handle")
+    if not isinstance(handle, dict):
+        return None
+    control = handle.get("control")
+    if not isinstance(control, dict):
+        return None
+    authority = control.get("authority")
+    return authority if isinstance(authority, str) else None
 
 
 def _host_pid_from_record(record: dict[str, Any]) -> int | None:

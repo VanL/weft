@@ -980,10 +980,11 @@ Operational notes:
 
 - Put restart policy in the service manager, not in Weft.
 - When `weft manager serve` runs inside Docker or another PID namespace while
-  sharing a broker with future containers, provide
-  `WEFT_MANAGER_RUNTIME_HANDLE_JSON` with an `external-supervisor` runtime
-  handle. Container-local PIDs such as `1` are not host-scoped process
-  identities.
+  sharing a broker with future containers, Weft avoids registering
+  container-local PIDs such as `1` as host-scoped process identities when it can
+  detect the container. For production supervisors, prefer providing
+  `WEFT_MANAGER_RUNTIME_HANDLE_JSON` with an explicit `external-supervisor`
+  runtime handle.
 - `weft manager stop <tid>` still sends a graceful STOP, but an auto-restarting
   service manager may start the manager again unless the service itself is
   stopped.

@@ -67,6 +67,21 @@ def _host_runtime_handle(pid: int) -> dict[str, Any]:
     }
 
 
+def _external_supervisor_runtime_handle() -> dict[str, Any]:
+    return {
+        "runner": "manager-supervisor",
+        "kind": "supervised-process",
+        "id": "docker:container123",
+        "control": {"authority": "external-supervisor"},
+        "observations": {
+            "container_runtime": "docker",
+            "container_pid": 1,
+            "container_id": "container123",
+        },
+        "metadata": {},
+    }
+
+
 def _make_taskspec(tid: str) -> TaskSpec:
     return TaskSpec(
         tid=tid,
@@ -757,6 +772,23 @@ def test_start_manager_treats_post_proof_ack_failure_as_nonfatal(
     assert handle is None
     assert warnings == []
     assert debug_messages
+
+
+def test_manager_start_record_matches_external_supervisor_launch_pid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("weft.core.manager_runtime._is_pid_alive", lambda pid: True)
+
+    assert core_manager_runtime._manager_start_record_matches_launch(
+        {
+            "tid": "1775622400000000000",
+            "status": "active",
+            "runtime_handle": _external_supervisor_runtime_handle(),
+            "requests": WEFT_SPAWN_REQUESTS_QUEUE,
+            "role": "manager",
+        },
+        launch_pid=4321,
+    )
 
 
 def test_start_manager_surfaces_detached_launch_stderr_when_manager_exits_early(

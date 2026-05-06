@@ -56,6 +56,7 @@ from weft._constants import (
     WORK_ENVELOPE_START,
     get_weft_directory_name,
 )
+from weft.core.container_detection import detect_container_runtime
 from weft.ext import RunnerHandle
 from weft.helpers import (
     canonical_owner_tid,
@@ -508,6 +509,16 @@ class Manager(BaseTask):
         pid = multiprocessing.current_process().pid
         if pid is None:
             raise RuntimeError("Manager process has no PID")
+        container = detect_container_runtime()
+        if container is not None:
+            return RunnerHandle(
+                runner="manager-supervisor",
+                kind="supervised-process",
+                id=f"{container.runtime}:{container.identifier or 'unknown'}",
+                control={"authority": "external-supervisor"},
+                observations=container.observations(container_pid=pid),
+                metadata={},
+            )
         return RunnerHandle(
             runner="host",
             kind="process",

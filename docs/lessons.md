@@ -595,3 +595,8 @@ runbook needs to become stricter.
   container can have a live PID `1`, so manager liveness readers must compare
   recorded process creation time when it is present before accepting the PID as
   the same runtime.
+- If a manager process detects that it is running inside a container and no
+  explicit `WEFT_MANAGER_RUNTIME_HANDLE_JSON` was supplied, it is safer to
+  publish an `external-supervisor` handle than to publish an in-namespace
+  `host-pid` handle. Auto-detection is only a conservative fallback; production
+  supervisors should still inject explicit runtime identity when they can.

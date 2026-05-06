@@ -855,6 +855,27 @@ def _fail_manager_start(
     )
 
 
+def _manager_start_record_matches_launch(
+    record: dict[str, Any],
+    *,
+    launch_pid: int,
+) -> bool:
+    if (
+        record.get("status") != "active"
+        or not is_canonical_manager_record(record)
+        or not _is_pid_alive(launch_pid)
+    ):
+        return False
+    handle = _manager_handle_from_record(record)
+    if handle is None:
+        return False
+    if handle.control.get("authority") == "host-pid":
+        return _record_pid(record) == launch_pid
+    if handle.control.get("authority") == "external-supervisor":
+        return not _manager_record_is_stale(record)
+    return False
+
+
 def _acknowledge_manager_launch_success(launch: _DetachedManagerLaunch) -> None:
     sent, error = _send_launcher_signal(
         launch.launcher_process,
@@ -904,11 +925,9 @@ def _start_manager(
                 if selected_record.get("tid") != manager_tid:
                     competing_record = selected_record
                 else:
-                    if (
-                        selected_record.get("status") == "active"
-                        and is_canonical_manager_record(selected_record)
-                        and _record_pid(selected_record) == launch.pid
-                        and _is_pid_alive(launch.pid)
+                    if _manager_start_record_matches_launch(
+                        selected_record,
+                        launch_pid=launch.pid,
                     ):
                         try:
                             _acknowledge_manager_launch_success(launch)
@@ -938,10 +957,10 @@ def _start_manager(
                             )
                             if not (
                                 isinstance(current_record, dict)
-                                and current_record.get("status") == "active"
-                                and is_canonical_manager_record(current_record)
-                                and _record_pid(current_record) == launch.pid
-                                and _is_pid_alive(launch.pid)
+                                and _manager_start_record_matches_launch(
+                                    current_record,
+                                    launch_pid=launch.pid,
+                                )
                             ):
                                 continue
                             logger.debug(

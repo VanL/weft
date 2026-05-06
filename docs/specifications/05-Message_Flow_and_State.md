@@ -346,6 +346,10 @@ Current rules:
   `WEFT_MANAGER_RUNTIME_HANDLE_JSON` value or use an external-supervisor
   runtime handle; generic manager code must not inspect Docker or trust a
   container-local PID as a host PID
+- when no explicit manager runtime handle is supplied, manager startup may use
+  conservative local container detection markers such as `/.dockerenv`,
+  `/run/.containerenv`, Kubernetes environment, or cgroup hints to publish an
+  `external-supervisor` handle instead of an unsafe host-pid handle
 - external-supervisor manager records are still live records, not permanent
   truth: the manager refreshes its active registry record periodically, and
   lifecycle readers treat an expired external-supervisor heartbeat as stale
