@@ -16,6 +16,7 @@ def run_task(
     result: str = "done",
     output_size: int = 0,
     cpu_percent: float = 0.0,
+    cpu_seconds: float = 0.0,
     open_files: int = 0,
 ) -> str:
     """Simulate work for use as either a callable or subprocess target."""
@@ -60,9 +61,12 @@ def run_task(
         file_paths.append(tmp.name)
 
     end_time = time.time() + max(0.0, duration)
+    cpu_start = time.process_time()
     busy = max(0.0, cpu_percent)
     sleep_slice = 0.05
     while time.time() < end_time:
+        if cpu_seconds > 0 and time.process_time() - cpu_start >= cpu_seconds:
+            break
         if busy <= 0:
             time.sleep(max(0.0, end_time - time.time()))
             break
@@ -117,6 +121,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--result-json", action="store_true")
     parser.add_argument("--output-size", type=int, default=0)
     parser.add_argument("--cpu-percent", type=float, default=0.0)
+    parser.add_argument("--cpu-seconds", type=float, default=0.0)
     parser.add_argument("--fds", type=int, default=0)
     args = parser.parse_args(argv)
 
@@ -127,6 +132,7 @@ def main(argv: list[str] | None = None) -> int:
         result=args.result,
         output_size=args.output_size,
         cpu_percent=args.cpu_percent,
+        cpu_seconds=args.cpu_seconds,
         open_files=args.fds,
     )
 
