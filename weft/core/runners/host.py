@@ -57,6 +57,8 @@ from weft.ext import (
 from weft.helpers import (
     kill_process_tree,
     pid_is_live,
+    pid_matches_create_time,
+    process_create_time,
     safe_cancel,
     terminate_process_tree,
 )
@@ -85,13 +87,25 @@ class RunnerOutcome:
 def _host_handle(pid: int | None) -> RunnerHandle | None:
     if pid is None or pid <= 0:
         return None
+    create_time = process_create_time(pid)
     return RunnerHandle(
         runner="host",
         kind="process",
         id=str(pid),
         control={"authority": "host-pid"},
-        observations={"host_pids": [pid]},
+        observations={
+            "host_pids": [pid],
+            "host_processes": [{"pid": pid, "create_time": create_time}],
+        },
     )
+
+
+def _host_pid_matches(pid: int, create_time: float | None) -> bool:
+    """Return whether a host PID is still the observed process."""
+
+    if create_time is None:
+        return pid_is_live(pid)
+    return pid_matches_create_time(pid, create_time)
 
 
 def _worker_entry(
@@ -835,32 +849,38 @@ class HostRunnerPlugin:
         )
 
     def stop(self, handle: RunnerHandle, *, timeout: float = 2.0) -> bool:
-        host_pids = handle.scoped_host_pids()
-        if not host_pids:
+        host_processes = handle.scoped_host_processes()
+        if not host_processes:
             return False
-        for pid in host_pids:
+        for pid, create_time in host_processes:
+            if not _host_pid_matches(pid, create_time):
+                continue
             terminate_process_tree(pid, timeout=timeout)
         return True
 
     def kill(self, handle: RunnerHandle, *, timeout: float = 2.0) -> bool:
-        host_pids = handle.scoped_host_pids()
-        if not host_pids:
+        host_processes = handle.scoped_host_processes()
+        if not host_processes:
             return False
-        for pid in host_pids:
+        for pid, create_time in host_processes:
+            if not _host_pid_matches(pid, create_time):
+                continue
             kill_process_tree(pid, timeout=timeout)
         return True
 
     def describe(self, handle: RunnerHandle) -> RunnerRuntimeDescription | None:
-        host_pids = handle.scoped_host_pids()
-        primary_pid = host_pids[0] if host_pids else None
+        host_processes = handle.scoped_host_processes()
+        primary_pid = host_processes[0][0] if host_processes else None
         state = "missing"
-        if primary_pid is not None and pid_is_live(primary_pid):
+        if primary_pid is not None and any(
+            _host_pid_matches(pid, create_time) for pid, create_time in host_processes
+        ):
             state = "running"
         return RunnerRuntimeDescription(
             runner="host",
             id=handle.id,
             state=state,
-            metadata={"host_pids": list(host_pids)},
+            metadata={"host_pids": [pid for pid, _create_time in host_processes]},
         )
 
 

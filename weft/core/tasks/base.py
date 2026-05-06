@@ -74,6 +74,7 @@ from weft.ext import RunnerHandle
 from weft.helpers import (
     iter_queue_json_entries,
     kill_process_tree,
+    process_create_time,
     redact_taskspec_dump,
     terminate_process_tree,
 )
@@ -100,6 +101,19 @@ class TaskControlPolicy:
     reserved_policy: str
     ack: str
     terminal_state: str
+
+
+def _merge_host_process_observations(
+    existing_processes: tuple[tuple[int, float | None], ...],
+    host_pids: set[int],
+) -> list[dict[str, float | int | None]]:
+    """Preserve PID identities for host processes recorded in runtime handles."""
+
+    create_times = dict(existing_processes)
+    return [
+        {"pid": pid, "create_time": create_times.get(pid, process_create_time(pid))}
+        for pid in sorted(pid for pid in host_pids if pid > 0)
+    ]
 
 
 class BaseTask(MultiQueueWatcher, ABC):
@@ -1021,11 +1035,13 @@ class BaseTask(MultiQueueWatcher, ABC):
             and handle.control.get("authority") == "host-pid"
         ):
             observations = dict(handle.observations)
+            host_pids = set(handle.scoped_host_pids()).union(self._managed_pids)
             observations["host_pids"] = sorted(
-                set(handle.scoped_host_pids()).union(
-                    self._managed_pids,
-                    {self._task_pid},
-                )
+                host_pids,
+            )
+            observations["host_processes"] = _merge_host_process_observations(
+                handle.scoped_host_processes(),
+                host_pids,
             )
             merged_handle = RunnerHandle(
                 runner=handle.runner,
@@ -1467,8 +1483,11 @@ class BaseTask(MultiQueueWatcher, ABC):
         if pid in self._runtime_handle.scoped_host_pids():
             return
         observations = dict(self._runtime_handle.observations)
-        observations["host_pids"] = sorted(
-            set(self._runtime_handle.scoped_host_pids()).union({pid})
+        host_pids = set(self._runtime_handle.scoped_host_pids()).union({pid})
+        observations["host_pids"] = sorted(host_pids)
+        observations["host_processes"] = _merge_host_process_observations(
+            self._runtime_handle.scoped_host_processes(),
+            host_pids,
         )
         self._runtime_handle = RunnerHandle(
             runner=self._runtime_handle.runner,

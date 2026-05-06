@@ -74,6 +74,30 @@ def safe_cancel(callback: Callable[[], bool] | None) -> bool:
         return False
 
 
+def process_create_time(pid: int) -> float | None:
+    """Return the OS process creation time for *pid*, if it can be observed."""
+
+    if pid <= 0:
+        return None
+    try:
+        return float(psutil.Process(pid).create_time())
+    except psutil.Error:
+        return None
+
+
+def pid_matches_create_time(pid: int, create_time: float | None) -> bool:
+    """Return whether *pid* still refers to the originally observed process."""
+
+    if pid <= 0:
+        return False
+    if create_time is None:
+        return pid_is_live(pid)
+    current_create_time = process_create_time(pid)
+    if current_create_time is None:
+        return False
+    return math.isclose(current_create_time, create_time, rel_tol=0.0, abs_tol=0.001)
+
+
 def resolve_broker_max_message_size(config: Mapping[str, Any]) -> int:
     """Return the effective broker message-size limit for the active context."""
     raw_value = config.get("BROKER_MAX_MESSAGE_SIZE")

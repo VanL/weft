@@ -84,6 +84,34 @@ class RunnerHandle:
             return ()
         return tuple(pid for pid in host_pids if isinstance(pid, int) and pid > 0)
 
+    def scoped_host_processes(self) -> tuple[tuple[int, float | None], ...]:
+        """Return host PIDs with optional process creation-time identities."""
+
+        host_processes = self.observations.get("host_processes")
+        if isinstance(host_processes, Sequence) and not isinstance(
+            host_processes, (str, bytes)
+        ):
+            processes: list[tuple[int, float | None]] = []
+            seen: set[int] = set()
+            for item in host_processes:
+                if not isinstance(item, Mapping):
+                    continue
+                pid = item.get("pid")
+                if not isinstance(pid, int) or pid <= 0 or pid in seen:
+                    continue
+                raw_create_time = item.get("create_time")
+                create_time = (
+                    float(raw_create_time)
+                    if isinstance(raw_create_time, int | float)
+                    else None
+                )
+                processes.append((pid, create_time))
+                seen.add(pid)
+            if processes:
+                return tuple(sorted(processes))
+
+        return tuple((pid, None) for pid in self.scoped_host_pids())
+
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-friendly representation for queue payloads."""
         return {

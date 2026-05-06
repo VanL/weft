@@ -13,6 +13,7 @@ import pytest
 from tests.fixtures.llm_test_models import TEST_MODEL_ID
 from weft.core.resource_monitor import ResourceMetrics
 from weft.core.runners import RunnerOutcome
+from weft.core.runners import host as host_module
 from weft.core.runners.subprocess_runner import run_monitored_subprocess
 from weft.core.tasks.runner import TaskRunner
 from weft.core.tasks.sessions import AgentSession
@@ -41,6 +42,54 @@ def test_runner_handle_round_trips_new_shape() -> None:
         "metadata": {"label": "demo"},
     }
     assert RunnerHandle.from_dict(payload) == handle
+
+
+def test_runner_handle_exposes_host_process_identities() -> None:
+    handle = RunnerHandle(
+        runner="host",
+        kind="process",
+        id="123",
+        control={"authority": "host-pid"},
+        observations={
+            "host_pids": [999],
+            "host_processes": [
+                {"pid": 123, "create_time": 456.5},
+                {"pid": 123, "create_time": 999.0},
+                {"pid": -1, "create_time": 1.0},
+            ],
+        },
+    )
+
+    assert handle.scoped_host_pids() == (999,)
+    assert handle.scoped_host_processes() == ((123, 456.5),)
+
+
+def test_host_runner_plugin_skips_pid_identity_mismatch(monkeypatch) -> None:
+    handle = RunnerHandle(
+        runner="host",
+        kind="process",
+        id="123",
+        control={"authority": "host-pid"},
+        observations={
+            "host_pids": [123],
+            "host_processes": [{"pid": 123, "create_time": 456.5}],
+        },
+    )
+    terminated: list[int] = []
+
+    monkeypatch.setattr(
+        host_module,
+        "pid_matches_create_time",
+        lambda pid, create_time: False,
+    )
+    monkeypatch.setattr(
+        host_module,
+        "terminate_process_tree",
+        lambda pid, *, timeout: terminated.append(pid),
+    )
+
+    assert host_module.HostRunnerPlugin().stop(handle)
+    assert terminated == []
 
 
 def test_runner_handle_rejects_legacy_shape() -> None:

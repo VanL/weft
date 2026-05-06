@@ -32,6 +32,8 @@ from weft.helpers import (
     is_canonical_manager_record,
     iter_queue_json_entries,
     pid_is_live,
+    pid_matches_create_time,
+    process_create_time,
     terminate_process_tree,
 )
 
@@ -65,6 +67,7 @@ class WeftTestHarness:
         self._registered_pids: set[int] = set()
         self._registered_owner_pids: set[int] = set()
         self._registered_managed_pids: set[int] = set()
+        self._registered_pid_create_times: dict[int, float | None] = {}
         self._registered_tids: set[str] = set()
         self._registered_manager_tids: set[str] = set()
         self._inline_managers: list[
@@ -116,9 +119,13 @@ class WeftTestHarness:
         tid: str | None = None,
         *,
         kind: str = "owner",
+        create_time: float | None = None,
     ) -> None:
         if pid > 0 and not self._should_skip_pid(pid):
             self._registered_pids.add(pid)
+            self._registered_pid_create_times[pid] = (
+                process_create_time(pid) if create_time is None else create_time
+            )
             if kind == "managed":
                 self._registered_managed_pids.add(pid)
             else:
@@ -568,7 +575,9 @@ class WeftTestHarness:
         return host_pids[0] if host_pids else None
 
     @staticmethod
-    def _mapping_host_pids(data: dict[str, object]) -> list[int]:
+    def _mapping_host_processes(
+        data: dict[str, object],
+    ) -> list[tuple[int, float | None]]:
         runtime_handle = data.get("runtime_handle")
         if not isinstance(runtime_handle, dict):
             return []
@@ -576,11 +585,24 @@ class WeftTestHarness:
             handle = RunnerHandle.from_dict(runtime_handle)
         except (TypeError, ValueError):
             return []
-        return list(handle.scoped_host_pids())
+        return list(handle.scoped_host_processes())
+
+    @classmethod
+    def _mapping_host_pids(cls, data: dict[str, object]) -> list[int]:
+        return [pid for pid, _create_time in cls._mapping_host_processes(data)]
 
     def _mapping_has_safe_owner(self, data: dict[str, object]) -> bool:
         owner_pid = self._mapping_owner_pid(data)
         return isinstance(owner_pid, int) and self._should_skip_pid(owner_pid)
+
+    def _pid_matches_mapping_identity(
+        self,
+        pid: int,
+        create_time: float | None,
+    ) -> bool:
+        if create_time is None:
+            return self._pid_alive(pid)
+        return pid_matches_create_time(pid, create_time)
 
     def _latest_task_events(self) -> dict[str, str]:
         queue = Queue(
@@ -612,11 +634,13 @@ class WeftTestHarness:
             ):
                 continue
 
-            candidate_pids = self._mapping_host_pids(data)
+            candidate_processes = self._mapping_host_processes(data)
 
             if any(
-                pid > 0 and not self._should_skip_pid(pid) and self._pid_alive(pid)
-                for pid in candidate_pids
+                pid > 0
+                and not self._should_skip_pid(pid)
+                and self._pid_matches_mapping_identity(pid, create_time)
+                for pid, create_time in candidate_processes
             ):
                 live_tids.append(full_tid)
 
@@ -671,7 +695,10 @@ class WeftTestHarness:
                 continue
             if record.get("status") != "active":
                 continue
-            if not any(pid_is_live(pid) for pid in self._mapping_host_pids(record)):
+            if not any(
+                self._pid_matches_mapping_identity(pid, create_time)
+                for pid, create_time in self._mapping_host_processes(record)
+            ):
                 continue
             active_records.append(record)
         active_records.sort(key=lambda item: int(str(item.get("tid", "0"))))
@@ -693,8 +720,8 @@ class WeftTestHarness:
         queue_name = (
             ctrl_in if isinstance(ctrl_in, str) and ctrl_in else f"T{tid}.ctrl_in"
         )
-        for pid in self._mapping_host_pids(record):
-            self.register_pid(pid, kind="owner")
+        for pid, create_time in self._mapping_host_processes(record):
+            self.register_pid(pid, kind="owner", create_time=create_time)
         queue = Queue(
             queue_name,
             db_path=self.context.broker_target,
@@ -855,8 +882,8 @@ class WeftTestHarness:
                 ):
                     self.register_tid(full_tid)
 
-            for pid in self._mapping_host_pids(data):
-                self.register_pid(pid, kind="managed")
+            for pid, create_time in self._mapping_host_processes(data):
+                self.register_pid(pid, kind="managed", create_time=create_time)
 
     def _terminate_registered_pids(self) -> None:
         for pid in list(self._registered_managed_pids):
@@ -866,12 +893,17 @@ class WeftTestHarness:
         self._registered_owner_pids.clear()
         self._registered_managed_pids.clear()
         self._registered_pids.clear()
+        self._registered_pid_create_times.clear()
 
     def _live_registered_pids(self) -> list[int]:
         return [
             pid
             for pid in self._registered_pids
-            if not self._should_skip_pid(pid) and self._pid_alive(pid)
+            if not self._should_skip_pid(pid)
+            and self._pid_matches_mapping_identity(
+                pid,
+                self._registered_pid_create_times.get(pid),
+            )
         ]
 
     def _wait_for_registered_pids_to_exit(
@@ -895,6 +927,11 @@ class WeftTestHarness:
         if pid <= 0:
             return
         if not self._pid_alive(pid):
+            return
+        if not self._pid_matches_mapping_identity(
+            pid,
+            self._registered_pid_create_times.get(pid),
+        ):
             return
         try:
             terminated = terminate_process_tree(pid, timeout=self._manager_timeout)

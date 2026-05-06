@@ -62,6 +62,7 @@ from weft.helpers import (
     is_canonical_manager_record,
     iter_queue_json_entries,
     pid_is_live,
+    process_create_time,
     redact_taskspec_dump,
     terminate_process_tree,
 )
@@ -504,12 +505,19 @@ class Manager(BaseTask):
             return RunnerHandle.from_dict(payload)
 
         pid = multiprocessing.current_process().pid
+        if pid is None:
+            raise RuntimeError("Manager process has no PID")
         return RunnerHandle(
             runner="host",
             kind="process",
             id=str(pid),
             control={"authority": "host-pid"},
-            observations={"host_pids": [pid]},
+            observations={
+                "host_pids": [pid],
+                "host_processes": [
+                    {"pid": pid, "create_time": process_create_time(pid)}
+                ],
+            },
             metadata={},
         )
 
