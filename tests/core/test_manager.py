@@ -6,6 +6,7 @@ import json
 import multiprocessing
 import os
 import signal
+import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -416,6 +417,83 @@ def _process_running(pid: int) -> bool:
     except psutil.Error:
         return False
     return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
+
+
+def _write_descendant_process_scripts(tmp_path: Path) -> tuple[Path, Path]:
+    child_script = tmp_path / "manager_cleanup_child_sleep.py"
+    child_script.write_text(
+        """
+from __future__ import annotations
+
+import os
+import sys
+import time
+from pathlib import Path
+
+
+def main() -> None:
+    Path(sys.argv[1]).write_text(str(os.getpid()), encoding="utf-8")
+    time.sleep(60)
+
+
+if __name__ == "__main__":
+    main()
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    parent_script = tmp_path / "manager_cleanup_spawn_child.py"
+    parent_script.write_text(
+        """
+from __future__ import annotations
+
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+
+def main() -> None:
+    subprocess.Popen([sys.executable, sys.argv[1], sys.argv[2]])
+    deadline = time.time() + 10.0
+    while time.time() < deadline:
+        if Path(sys.argv[2]).exists():
+            break
+        time.sleep(0.01)
+    time.sleep(60)
+
+
+if __name__ == "__main__":
+    main()
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    return parent_script, child_script
+
+
+def _wait_for_pidfile(pidfile: Path, *, timeout: float = 10.0) -> int:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if pidfile.exists():
+            raw = pidfile.read_text(encoding="utf-8").strip()
+            if raw:
+                try:
+                    return int(raw)
+                except ValueError:
+                    pass
+        time.sleep(0.05)
+    raise AssertionError(f"Timed out waiting for pid file {pidfile}")
+
+
+def _wait_for_pid_exit(pid: int, *, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not _process_running(pid):
+            return True
+        time.sleep(0.05)
+    return False
 
 
 def test_manager_spawns_child(manager_setup) -> None:
@@ -950,21 +1028,30 @@ def test_manager_cleanup_sends_stop_to_children(manager_setup) -> None:
     assert not _process_running(child_info.process.pid)
 
 
-def test_manager_cleanup_terminates_worker_descendants(manager_setup) -> None:
+def test_manager_cleanup_terminates_worker_descendants(
+    manager_setup,
+    tmp_path: Path,
+) -> None:
     psutil = pytest.importorskip("psutil")
     manager, make_queue = manager_setup
     inbox_queue = make_queue(manager._queue_names["inbox"])
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     drain(log_queue)
+    parent_script, child_script = _write_descendant_process_scripts(tmp_path)
+    child_pidfile = tmp_path / "manager-cleanup-child.pid"
 
     inbox_queue.write(
         json.dumps(
             {
-                "name": "long-running",
+                "name": "long-running-command-with-descendant",
                 "spec": {
-                    "type": "function",
-                    "function_target": "tests.tasks.sample_targets:simulate_work",
-                    "keyword_args": {"duration": 5.0},
+                    "type": "command",
+                    "process_target": sys.executable,
+                    "args": [
+                        str(parent_script),
+                        str(child_script),
+                        str(child_pidfile),
+                    ],
                 },
             }
         )
@@ -985,44 +1072,33 @@ def test_manager_cleanup_terminates_worker_descendants(manager_setup) -> None:
         ),
         timeout=10.0,
     )
-    worker_pid: int | None = None
-    deadline = time.time() + (20.0 if os.name == "nt" else 10.0)
-    while time.time() < deadline and worker_pid is None:
-        live_managed_pids = [
-            pid
-            for pid in manager._managed_pids_for_child(child_tid)
-            if _process_running(pid)
-        ]
-        if live_managed_pids:
-            worker_pid = live_managed_pids[0]
-            break
-        try:
-            child_process = psutil.Process(child_info.process.pid)
-        except psutil.Error:
-            break
-        descendants = child_process.children(recursive=True)
-        live_descendants = [
-            process.pid for process in descendants if _process_running(process.pid)
-        ]
-        if live_descendants:
-            worker_pid = live_descendants[0]
-            break
-        time.sleep(0.05)
 
-    assert worker_pid is not None, f"expected worker descendant for {child_tid}"
+    worker_pid = _wait_for_pidfile(
+        child_pidfile,
+        timeout=20.0 if os.name == "nt" else 10.0,
+    )
+    assert _process_running(worker_pid), f"expected worker descendant for {child_tid}"
 
-    manager.cleanup()
+    try:
+        manager.cleanup()
 
-    deadline = time.time() + (20.0 if os.name == "nt" else 5.0)
-    while time.time() < deadline:
-        root_alive = _process_running(child_info.process.pid)
-        worker_alive = _process_running(worker_pid)
-        if not root_alive and not worker_alive:
-            break
-        time.sleep(0.05)
+        deadline = time.time() + (20.0 if os.name == "nt" else 5.0)
+        while time.time() < deadline:
+            root_alive = _process_running(child_info.process.pid)
+            worker_alive = _process_running(worker_pid)
+            if not root_alive and not worker_alive:
+                break
+            time.sleep(0.05)
 
-    assert not _process_running(child_info.process.pid)
-    assert not _process_running(worker_pid)
+        assert not _process_running(child_info.process.pid)
+        assert not _process_running(worker_pid)
+    finally:
+        if _process_running(worker_pid):
+            try:
+                psutil.Process(worker_pid).kill()
+            except psutil.Error:
+                pass
+            _wait_for_pid_exit(worker_pid, timeout=2.0)
 
 
 def test_manager_cleanup_terminates_reaped_child_managed_pids(
