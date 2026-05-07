@@ -1331,7 +1331,7 @@ wheels = [
 
 [[package]]
 name = "weft"
-version = "0.9.18"
+version = "0.9.19"
 source = { editable = "." }
 dependencies = [
     { name = "llm" },
@@ -1435,7 +1435,7 @@ provides-extras = ["channels", "realtime", "dev"]
 
 [[package]]
 name = "weft-docker"
-version = "0.9.18"
+version = "0.9.19"
 source = { editable = "extensions/weft_docker" }
 dependencies = [
     { name = "docker" },
