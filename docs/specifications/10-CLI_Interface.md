@@ -600,8 +600,9 @@ Related plan:
 _Implementation mapping_: `weft/commands/tidy.py` `cmd_tidy()`,
 `weft/commands/dump.py` `cmd_dump()`, `weft/commands/load.py` `cmd_load()`,
 `weft/commands/builtins.py` `cmd_system_builtins()`,
-`weft/commands/lifecycle_monitor.py` `run_lifecycle_monitor()`, registered
-in `weft/cli/app.py` under the `system` sub-app.
+`weft/commands/lifecycle_monitor.py` `run_lifecycle_monitor()`,
+`weft/commands/runtime_prune.py` `cmd_prune()`, registered in
+`weft/cli/app.py` under the `system` sub-app.
 
 Current subcommands:
 
@@ -610,6 +611,7 @@ Current subcommands:
 - `weft system builtins`
 - `weft system load`
 - `weft system lifecycle-monitor`
+- `weft system prune`
 
 Current behavior:
 
@@ -633,9 +635,25 @@ Current behavior:
 - lifecycle-monitor checkpoints under `.weft/state/lifecycle-monitor/` are
   operational cursors only and are not read by `status`, `task status`, or
   `result`
+- `system prune` scans supported runtime-only `weft.state.*`
+  queues and reports prune candidates. It defaults to `--dry-run`; `--apply`
+  is required for deletion.
+- `system prune --queue` accepts `tid-mappings`, `managers`,
+  `streaming`, `endpoints`, `pipelines`, or `all`, and rejects unknown values
+- `system prune --min-age` protects recent rows;
+  `--keep-recent-per-key` keeps newest rows for grouped runtime keys and must
+  be at least `1`
+- `system prune --json` emits one summary object; `--report PATH`
+  writes JSONL candidate records plus a final summary record
+- runtime-state pruning deletes exact message IDs only and must not touch
+  task-local queues, `weft.log.tasks`, spawn requests, or manager control
+  queues
 - file-backed sqlite contexts can use snapshot rollback on apply failure
 - non-file-backed backends report partial-apply risk if a failure happens after
   writes begin
+
+Implementation plan backlink:
+[`2026-05-07-runtime-state-pruning-plan.md`](../plans/2026-05-07-runtime-state-pruning-plan.md).
 
 ## Scope Boundary
 

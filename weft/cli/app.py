@@ -30,6 +30,7 @@ from weft.commands.lifecycle_monitor import (
 )
 from weft.commands.load import cmd_load
 from weft.commands.result import cmd_result
+from weft.commands.runtime_prune import cmd_prune
 from weft.commands.validate_taskspec import cmd_validate_taskspec
 from weft.ext import RunnerHandle
 
@@ -948,6 +949,72 @@ def lifecycle_monitor(
     if result.stderr:
         typer.echo(result.stderr, err=True)
     raise typer.Exit(code=result.exit_code)
+
+
+@system_app.command("prune")
+def prune(
+    context: Annotated[
+        Path | None,
+        typer.Option("--context", help="Run pruning against a specific project root"),
+    ] = None,
+    apply: Annotated[
+        bool,
+        typer.Option(
+            "--apply/--dry-run",
+            help="Delete selected runtime-state rows or only report candidates",
+        ),
+    ] = False,
+    queues: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--queue",
+            help=(
+                "Runtime queue group to scan: tid-mappings, managers, streaming, "
+                "endpoints, pipelines, or all. Repeatable."
+            ),
+        ),
+    ] = None,
+    min_age: Annotated[
+        float,
+        typer.Option("--min-age", help="Minimum row age in seconds before pruning"),
+    ] = 3600.0,
+    keep_recent_per_key: Annotated[
+        int,
+        typer.Option(
+            "--keep-recent-per-key",
+            help="Newest rows to preserve for each logical runtime-state key",
+        ),
+    ] = 1,
+    limit: Annotated[
+        int | None,
+        typer.Option("--limit", help="Maximum candidates to report or apply"),
+    ] = None,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Emit one JSON summary object"),
+    ] = False,
+    report: Annotated[
+        Path | None,
+        typer.Option("--report", help="Write a JSONL prune report"),
+    ] = None,
+) -> None:
+    """Prune stale runtime-only weft.state.* queue rows."""
+
+    exit_code, stdout, stderr = cmd_prune(
+        context=context,
+        apply=apply,
+        queues=queues,
+        min_age_seconds=min_age,
+        keep_recent_per_key=keep_recent_per_key,
+        limit=limit,
+        json_output=json_output,
+        report_path=report,
+    )
+    if stdout:
+        typer.echo(stdout)
+    if stderr:
+        typer.echo(stderr, err=True)
+    raise typer.Exit(code=exit_code)
 
 
 @app.command("status")

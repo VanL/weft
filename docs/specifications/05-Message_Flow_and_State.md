@@ -248,6 +248,11 @@ Current rules:
 - lifecycle-monitor archive records are observational output only in the
   current release. The monitor does not delete, reserve, move, prune, reap, or
   mark broker messages as cleanup candidates
+- `weft system prune` is a separate foreground maintenance
+  command for runtime-only `weft.state.*` soft state. It may report or delete
+  exact message IDs from supported runtime queues after conservative live/recent
+  checks. Its reports are operational evidence only; they do not become task
+  lifecycle truth and status/result reconstruction must not depend on them.
 - for read-only status reconstruction, terminal task-log lifecycle proof wins
   for public `status`; runtime liveness disagreement may be exposed through
   `reconciliation` diagnostics, but it must not rewrite a terminal task back to
@@ -309,9 +314,14 @@ collection;
 `weft/commands/result.py` materialization and completion waits;
 `weft/commands/task_evidence.py`;
 `weft/commands/lifecycle_monitor.py` archive summaries and checkpoints;
+`weft/commands/runtime_prune.py` explicit runtime-only prune reports and
+exact-message deletion;
 `weft/commands/_result_wait.py`;
 `weft/commands/_task_history.py`;
 `weft/commands/_streaming.py`.
+
+Implementation plan backlink:
+[`2026-05-07-runtime-state-pruning-plan.md`](../plans/2026-05-07-runtime-state-pruning-plan.md).
 
 ### 6. Manager Spawn Flow [MF-6]
 
@@ -585,8 +595,16 @@ Current rules:
 - queue creation is implicit on first write
 - task cleanup closes task-owned handles
 - `weft.state.managers`, `weft.state.tid_mappings`, `weft.state.streaming`,
-  and `weft.state.endpoints` are runtime-only bookkeeping queues; they may be
-  read for live reconciliation but are not durable application history
+  `weft.state.endpoints`, and `weft.state.pipelines` are runtime-only
+  bookkeeping queues; they may be read for live reconciliation but are not
+  durable application history
+- `weft system prune` defaults to dry-run and applies only with
+  `--apply`; apply mode deletes exact candidate message IDs only
+- runtime pruning must preserve recent rows, malformed or unknown-shape rows,
+  and rows whose live owner remains active or ambiguous under existing
+  liveness rules
+- runtime pruning must not delete from `weft.log.tasks`, `weft.spawn.requests`,
+  manager control queues, or task-local `T{tid}.*` queues
 - `weft system tidy` handles backend-native cleanup of empty queues and broker
   maintenance
 - there is no separate queue-lifecycle service in the current contract

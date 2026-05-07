@@ -22,7 +22,7 @@ There are currently 67 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
-| [`2026-05-07-runtime-state-pruning-plan.md`](./2026-05-07-runtime-state-pruning-plan.md) | Runtime State Pruning Plan | `draft` | none |
+| [`2026-05-07-runtime-state-pruning-plan.md`](./2026-05-07-runtime-state-pruning-plan.md) | Runtime State Pruning Plan | `implemented` | none |
 | [`2026-05-07-lifecycle-monitor-archive-sink-plan.md`](./2026-05-07-lifecycle-monitor-archive-sink-plan.md) | Lifecycle Monitor Archive Sink Plan | `completed` | none |
 | [`2026-05-07-result-evidence-and-superseded-manager-reconciliation-plan.md`](./2026-05-07-result-evidence-and-superseded-manager-reconciliation-plan.md) | Result Evidence And Superseded Manager Reconciliation Plan | `completed` | none |
 | [`2026-05-07-extended-ping-pong-state-probe-plan.md`](./2026-05-07-extended-ping-pong-state-probe-plan.md) | Extended PING/PONG State Probe Plan | `draft` | none |

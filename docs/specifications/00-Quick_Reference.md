@@ -43,6 +43,9 @@ Global queues:
 
 Notes:
 - `weft.state.*` queues are runtime state and are excluded from dumps by default.
+- `weft system prune` can explicitly dry-run or apply
+  conservative exact-message pruning for supported runtime-only `weft.state.*`
+  queues. It does not prune task-local queues or `weft.log.tasks`.
 - named endpoint records resolve stable project-local names to ordinary
   task-local queues.
 - Full queue behaviors are defined in `05-Message_Flow_and_State.md`.
@@ -52,7 +55,8 @@ _Implementation mapping_: `weft/_constants.py` (global queue constants),
 `weft/core/endpoints.py` (named endpoint resolution),
 `weft/core/manager.py` (manager registry), `weft/core/pipelines.py`
 (pipeline queue compilation), `weft/core/tasks/pipeline.py`
-(pipeline runtime queues).
+(pipeline runtime queues), `weft/commands/runtime_prune.py`
+(explicit runtime-state pruning).
 
 ## CLI Surface
 
@@ -65,7 +69,7 @@ Current top-level verbs and subcommands:
 | `weft manager` | `start`, `serve`, `stop`, `list`, `status` |
 | `weft spec` | `create`, `list`, `show`, `delete`, `validate`, `generate` |
 | `weft queue` | `read`, `write`, `peek`, `move`, `list`, `resolve`, `watch`, `delete`, `broadcast`, `alias add/list/remove` |
-| `weft system` | `tidy`, `dump`, `builtins`, `load`, `lifecycle-monitor` |
+| `weft system` | `tidy`, `dump`, `builtins`, `load`, `lifecycle-monitor`, `prune` |
 
 ## Operational Files
 

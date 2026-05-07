@@ -114,6 +114,16 @@ def _normalize_manager_record(
     return record
 
 
+def normalize_manager_registry_record(
+    payload: dict[str, Any],
+    *,
+    timestamp: int,
+) -> dict[str, Any]:
+    """Normalize one manager registry payload for command-layer readers."""
+
+    return _normalize_manager_record(payload, timestamp=timestamp)
+
+
 def _snapshot_registry(
     context: WeftContext,
     *,
@@ -254,6 +264,12 @@ def _manager_record_is_stale(record: dict[str, Any] | None) -> bool:
         MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS * 1_000_000_000
     )
     return time.time_ns() - timestamp > stale_after_ns
+
+
+def manager_registry_record_is_stale(record: dict[str, Any] | None) -> bool:
+    """Return whether a normalized manager registry row lacks live proof."""
+
+    return _manager_record_is_stale(record)
 
 
 def _manager_record_timestamp(record: dict[str, Any] | None) -> int | None:
@@ -1328,6 +1344,8 @@ __all__ = [
     "generate_tid",
     "list_manager_records",
     "manager_record",
+    "manager_registry_record_is_stale",
+    "normalize_manager_registry_record",
     "select_active_manager",
     "serve_manager_foreground",
     "start_manager",

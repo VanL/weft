@@ -1,6 +1,6 @@
 # Runtime State Pruning Plan
 
-Status: draft
+Status: implemented
 Source specs: see Source Documents below
 Superseded by: none
 
@@ -73,7 +73,7 @@ Spec delta required before implementation is done:
   runtime-state pruning and to keep it separate from task-local cleanup.
 - Update [OBS.13] or nearby invariant text to say runtime pruning output and
   deletion reports are operational, not lifecycle truth.
-- Update [CLI-6] with the new `weft system prune-runtime-state` command if
+- Update [CLI-6] with the new `weft system prune` command if
   that CLI surface lands.
 - Update `00-Quick_Reference.md` if the command should appear in the CLI table.
 - Add backlinks from touched spec sections to this plan.
@@ -161,7 +161,7 @@ This release should align pruning with that runtime-only contract.
 Implement an explicit foreground system command:
 
 ```bash
-weft system prune-runtime-state
+weft system prune
 ```
 
 The command should have three layers:
@@ -203,7 +203,7 @@ Counterargument:
 Add:
 
 ```bash
-weft system prune-runtime-state
+weft system prune
 ```
 
 Options:
@@ -488,7 +488,7 @@ Implementation files:
   - May import command-layer evidence helpers and core runtime helper functions.
   - Must not import CLI.
 - `weft/cli/app.py`
-  - Add `@system_app.command("prune-runtime-state")`.
+  - Add `@system_app.command("prune")`.
   - Keep wrapper thin.
 - `weft/_constants.py`
   - Add only constants needed to avoid repeated literals:
@@ -943,9 +943,9 @@ Files to touch:
 
 Test cases:
 
-- `weft system prune-runtime-state --dry-run --json --min-age 0` exits `0`
+- `weft system prune --dry-run --json --min-age 0` exits `0`
   and emits parseable JSON.
-- `weft system prune-runtime-state --apply --json --min-age 0 --queue tid-mappings`
+- `weft system prune --apply --json --min-age 0 --queue tid-mappings`
   deletes only candidate rows from `weft.state.tid_mappings`.
 - invalid `--queue nonsense` exits `1` with a clear error.
 - `--keep-recent-per-key 0` exits `1`.
@@ -966,7 +966,7 @@ Files to touch:
 
 Implementation:
 
-- Add `@system_app.command("prune-runtime-state")`.
+- Add `@system_app.command("prune")`.
 - Keep Typer wrapper thin:
   - parse options
   - call command-layer function
@@ -1057,7 +1057,7 @@ After release and deploy, validate on ops.
 3. Dry-run all runtime queues:
 
    ```bash
-   /opt/venv/bin/weft system prune-runtime-state --dry-run --json > /tmp/weft-runtime-prune-dry-run.json
+   /opt/venv/bin/weft system prune --dry-run --json > /tmp/weft-runtime-prune-dry-run.json
    ```
 
 4. Confirm:
@@ -1072,7 +1072,7 @@ After release and deploy, validate on ops.
 5. Apply a narrow first prune, starting with TID mapping duplicates:
 
    ```bash
-   /opt/venv/bin/weft system prune-runtime-state --apply --queue tid-mappings --json > /tmp/weft-runtime-prune-apply-tid-mappings.json
+   /opt/venv/bin/weft system prune --apply --queue tid-mappings --json > /tmp/weft-runtime-prune-apply-tid-mappings.json
    ```
 
 6. Capture post-run status and queue counts:

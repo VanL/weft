@@ -111,9 +111,10 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
   observation at its timestamp for explicit current-state probes. It is not a
   lifecycle mutation, and it must not use a second runner-specific inspection
   path outside the existing runner handle/plugin description contract.
-- **OBS.13**: lifecycle monitor archive files and checkpoints are operational
-  outputs only. They must not become task lifecycle truth, status authority,
-  result authority, or cleanup authority.
+- **OBS.13**: lifecycle monitor archive files, lifecycle monitor checkpoints,
+  and runtime-prune reports are operational outputs only. They must not become
+  task lifecycle truth, status authority, result authority, or cleanup
+  authority.
 - **OBS.14**: claimed outbox residue is recovery evidence, not decoded result
   evidence. Status/result readers may surface
   `claimed_result_without_terminal`, but they must not delete, unclaim, or
@@ -121,6 +122,10 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
 - **OBS.15**: manager task snapshots must not publish a non-active historical
   manager row as `running` when `weft.state.managers` has selected a different
   active manager.
+- **OBS.16**: explicit runtime-state pruning is limited to supported
+  runtime-only `weft.state.*` queues and exact message IDs. It must not prune
+  task-local queues, `weft.log.tasks`, spawn requests, or manager control
+  queues.
 
 ### Implementation Invariants
 

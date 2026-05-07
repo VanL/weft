@@ -250,6 +250,12 @@ def _latest_task_statuses(ctx: WeftContext) -> dict[str, str]:
         queue.close()
 
 
+def latest_task_statuses_for_endpoint_resolution(ctx: WeftContext) -> dict[str, str]:
+    """Return latest task statuses used by endpoint owner liveness checks."""
+
+    return _latest_task_statuses(ctx)
+
+
 def _latest_tid_mapping_entries(ctx: WeftContext) -> dict[str, dict[str, Any]]:
     queue = ctx.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
     try:
@@ -264,6 +270,14 @@ def _latest_tid_mapping_entries(ctx: WeftContext) -> dict[str, dict[str, Any]]:
         return {full: payload for full, (_message_id, payload) in latest.items()}
     finally:
         queue.close()
+
+
+def latest_tid_mapping_entries_for_endpoint_resolution(
+    ctx: WeftContext,
+) -> dict[str, dict[str, Any]]:
+    """Return latest TID mappings used by endpoint owner liveness checks."""
+
+    return _latest_tid_mapping_entries(ctx)
 
 
 def _record_owner_is_live(
@@ -292,6 +306,21 @@ def _record_owner_is_live(
     if handle.control.get("authority") != "host-pid":
         return True
     return any(pid_is_live(pid) for pid in handle.scoped_host_pids())
+
+
+def endpoint_record_owner_is_live(
+    record: EndpointRecord,
+    *,
+    task_statuses: Mapping[str, str],
+    tid_mappings: Mapping[str, Mapping[str, Any]],
+) -> bool:
+    """Return whether an endpoint record has live owner proof."""
+
+    return _record_owner_is_live(
+        record,
+        task_statuses=task_statuses,
+        tid_mappings=tid_mappings,
+    )
 
 
 def list_resolved_endpoints(
@@ -372,9 +401,12 @@ __all__ = [
     "EndpointRecord",
     "ResolvedEndpoint",
     "build_endpoint_record_payload",
+    "endpoint_record_owner_is_live",
     "endpoint_record_from_payload",
     "find_endpoint_registry_message",
     "is_reserved_internal_endpoint_name",
+    "latest_task_statuses_for_endpoint_resolution",
+    "latest_tid_mapping_entries_for_endpoint_resolution",
     "list_resolved_endpoints",
     "normalize_endpoint_name",
     "validate_endpoint_claim_name",

@@ -34,7 +34,7 @@ from simplebroker import resolve_config as resolve_broker_config
 # VERSION INFORMATION
 # ==============================================================================
 
-__version__: Final[str] = "0.9.18"
+__version__: Final[str] = "0.9.19"
 """Current version of Weft."""
 
 # ==============================================================================
@@ -224,6 +224,15 @@ LIFECYCLE_MONITOR_ARCHIVE_SUBDIR: Final[str] = "archive/tasks"
 
 LIFECYCLE_MONITOR_CHECKPOINT_PATH: Final[str] = "state/lifecycle-monitor/default.json"
 """Default lifecycle monitor checkpoint path under the Weft metadata directory."""
+
+RUNTIME_PRUNE_SCHEMA_VERSION: Final[int] = 1
+"""JSONL schema version for explicit runtime-state prune reports."""
+
+RUNTIME_PRUNE_DEFAULT_MIN_AGE_SECONDS: Final[float] = 3600.0
+"""Default minimum runtime-state row age before prune candidacy."""
+
+RUNTIME_PRUNE_DEFAULT_KEEP_RECENT_PER_KEY: Final[int] = 1
+"""Default newest runtime-state rows to preserve for each logical key."""
 
 LIFECYCLE_MONITOR_WEFT_ANOMALY_CLASSIFICATIONS: Final[frozenset[str]] = frozenset(
     {

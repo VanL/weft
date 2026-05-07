@@ -9,8 +9,9 @@ import pytest
 
 from tests.conftest import run_cli
 from tests.helpers.test_backend import prepare_project_root
-from weft._constants import WEFT_GLOBAL_LOG_QUEUE
+from weft._constants import WEFT_GLOBAL_LOG_QUEUE, WEFT_TID_MAPPINGS_QUEUE
 from weft.context import build_context
+from weft.helpers import iter_queue_json_entries
 
 pytestmark = [pytest.mark.shared]
 
@@ -31,6 +32,30 @@ def _write_task_log(context, payload: dict[str, object]) -> None:
 
 def _write_json(path: Path, payload: dict[str, object]) -> None:
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _write_queue_json(context, queue_name: str, payload: dict[str, object]) -> int:
+    queue = context.queue(queue_name, persistent=False)
+    try:
+        queue.write(json.dumps(payload))
+        latest: int | None = None
+        for row, message_id in iter_queue_json_entries(queue):
+            if row == payload:
+                latest = int(message_id)
+        assert latest is not None
+        return latest
+    finally:
+        queue.close()
+
+
+def _read_queue_ids(context, queue_name: str) -> set[int]:
+    queue = context.queue(queue_name, persistent=False)
+    try:
+        return {
+            int(message_id) for _payload, message_id in iter_queue_json_entries(queue)
+        }
+    finally:
+        queue.close()
 
 
 def test_system_builtins_lists_shipped_inventory(workdir) -> None:
@@ -108,6 +133,107 @@ def test_system_builtins_ignores_local_project_shadow(workdir) -> None:
     )
     assert rc == 0
     assert err == ""
+
+
+def test_system_prune_dry_run_json_deletes_nothing(workdir) -> None:
+    context = build_context(spec_context=workdir)
+    old_id = _write_queue_json(
+        context,
+        WEFT_TID_MAPPINGS_QUEUE,
+        {"short": "111", "full": "1770000000000000500"},
+    )
+    new_id = _write_queue_json(
+        context,
+        WEFT_TID_MAPPINGS_QUEUE,
+        {"short": "222", "full": "1770000000000000500"},
+    )
+
+    rc, out, err = run_cli(
+        "system",
+        "prune",
+        "--dry-run",
+        "--json",
+        "--min-age",
+        "0",
+        "--queue",
+        "tid-mappings",
+        "--context",
+        workdir,
+        cwd=workdir,
+    )
+
+    assert rc == 0
+    assert err == ""
+    payload = json.loads(out)
+    assert payload["dry_run"] is True
+    assert payload["candidates"] == 1
+    assert payload["classification_counts"] == {"superseded_tid_mapping": 1}
+    assert _read_queue_ids(context, WEFT_TID_MAPPINGS_QUEUE) >= {old_id, new_id}
+
+
+def test_system_prune_apply_deletes_candidate(workdir) -> None:
+    context = build_context(spec_context=workdir)
+    old_id = _write_queue_json(
+        context,
+        WEFT_TID_MAPPINGS_QUEUE,
+        {"short": "111", "full": "1770000000000000501"},
+    )
+    new_id = _write_queue_json(
+        context,
+        WEFT_TID_MAPPINGS_QUEUE,
+        {"short": "222", "full": "1770000000000000501"},
+    )
+
+    rc, out, err = run_cli(
+        "system",
+        "prune",
+        "--apply",
+        "--json",
+        "--min-age",
+        "0",
+        "--queue",
+        "tid-mappings",
+        "--context",
+        workdir,
+        cwd=workdir,
+    )
+
+    assert rc == 0
+    assert err == ""
+    payload = json.loads(out)
+    assert payload["dry_run"] is False
+    assert payload["deleted"] == 1
+    remaining_ids = _read_queue_ids(context, WEFT_TID_MAPPINGS_QUEUE)
+    assert old_id not in remaining_ids
+    assert new_id in remaining_ids
+
+
+def test_system_prune_rejects_invalid_options(workdir) -> None:
+    rc, _out, err = run_cli(
+        "system",
+        "prune",
+        "--queue",
+        "nonsense",
+        "--context",
+        workdir,
+        cwd=workdir,
+    )
+
+    assert rc == 1
+    assert "unknown runtime-state queue filter" in err
+
+    rc, _out, err = run_cli(
+        "system",
+        "prune",
+        "--keep-recent-per-key",
+        "0",
+        "--context",
+        workdir,
+        cwd=workdir,
+    )
+
+    assert rc == 1
+    assert "--keep-recent-per-key must be >= 1" in err
 
     rc, out, err = run_cli(
         "system",
