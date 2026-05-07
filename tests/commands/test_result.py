@@ -1277,6 +1277,58 @@ def test_await_single_result_tolerates_late_visible_boundary_timestamp_skew(
     assert error is None
 
 
+def test_await_single_result_tolerates_late_polled_boundary_timestamp_skew(
+    tmp_path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    log_queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
+    outbox_queue = ctx.queue("late-polled-skewed.custom.outbox", persistent=True)
+
+    taskspec_payload = {
+        "tid": tid,
+        "name": "late-polled-skewed-custom-result",
+        "spec": {"type": "function", "persistent": True},
+        "io": {
+            "outputs": {"outbox": "late-polled-skewed.custom.outbox"},
+            "control": {"ctrl_out": "late-polled-skewed.custom.ctrl_out"},
+        },
+        "state": {"status": "running"},
+        "metadata": {},
+    }
+
+    log_queue.write(
+        json.dumps(
+            {
+                "tid": tid,
+                "status": "running",
+                "event": "work_item_completed",
+                "taskspec": taskspec_payload,
+            }
+        )
+    )
+    outbox_queue.write("hello")
+
+    try:
+        status, result, error = _await_single_result(
+            ctx,
+            tid=tid,
+            timeout=RESULT_WAIT_TIMEOUT,
+            show_stderr=False,
+            taskspec_payload=taskspec_payload,
+            outbox_name="late-polled-skewed.custom.outbox",
+            ctrl_out_name="late-polled-skewed.custom.ctrl_out",
+        )
+    finally:
+        outbox_queue.close()
+        log_queue.close()
+
+    assert status == "completed"
+    assert result == "hello"
+    assert error is None
+
+
 def test_cmd_result_rejects_stream_json_combination(tmp_path) -> None:
     root = prepare_project_root(tmp_path)
 

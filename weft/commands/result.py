@@ -423,6 +423,22 @@ def _latest_visible_outbox_timestamp(queue: Queue) -> int | None:
     return latest_timestamp
 
 
+def _resolve_persistent_result_boundary(
+    outbox_queue: Queue,
+    *,
+    first_pending_timestamp: int,
+    completion_timestamps: list[int],
+) -> int | None:
+    """Return the outbox drain boundary for a persistent-task result batch."""
+
+    for completion_timestamp in completion_timestamps:
+        if completion_timestamp >= first_pending_timestamp:
+            return completion_timestamp
+    if not completion_timestamps:
+        return None
+    return _latest_visible_outbox_timestamp(outbox_queue) or first_pending_timestamp
+
+
 def _collect_all_results(
     context: WeftContext,
     *,
@@ -564,16 +580,12 @@ def _await_single_result(
                 and first_pending_timestamp is None
             ):
                 _payload, first_pending_timestamp = peeked
-                for completion_timestamp in pending_completion_timestamps:
-                    if completion_timestamp >= first_pending_timestamp:
-                        boundary_timestamp = completion_timestamp
-                        boundary_seen_at = time.monotonic()
-                        break
-                if boundary_timestamp is None and pending_completion_timestamps:
-                    boundary_timestamp = (
-                        _latest_visible_outbox_timestamp(outbox_queue)
-                        or first_pending_timestamp
-                    )
+                boundary_timestamp = _resolve_persistent_result_boundary(
+                    outbox_queue,
+                    first_pending_timestamp=first_pending_timestamp,
+                    completion_timestamps=pending_completion_timestamps,
+                )
+                if boundary_timestamp is not None:
                     boundary_seen_at = time.monotonic()
 
             events: list[tuple[dict[str, Any], int]]
@@ -590,11 +602,15 @@ def _await_single_result(
                     pending_completion_timestamps.append(_ts)
                     if (
                         first_pending_timestamp is not None
-                        and _ts >= first_pending_timestamp
                         and boundary_timestamp is None
                     ):
-                        boundary_timestamp = _ts
-                        boundary_seen_at = time.monotonic()
+                        boundary_timestamp = _resolve_persistent_result_boundary(
+                            outbox_queue,
+                            first_pending_timestamp=first_pending_timestamp,
+                            completion_timestamps=pending_completion_timestamps,
+                        )
+                        if boundary_timestamp is not None:
+                            boundary_seen_at = time.monotonic()
                     if event_payload.get("event") == "work_item_completed":
                         continue
                 event_status = terminal_status_from_event(event_payload)
