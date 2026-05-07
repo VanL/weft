@@ -9,6 +9,7 @@ import threading
 import time
 from pathlib import Path
 from types import TracebackType
+from typing import Final
 
 import psutil
 
@@ -46,6 +47,9 @@ TERMINAL_TASK_EVENTS = {
     "task_signal_stop",
     "task_signal_kill",
 }
+TEMP_DIR_CLEANUP_RETRY_SLEEP_SECONDS: Final[float] = 0.05
+TEMP_DIR_CLEANUP_MAX_ATTEMPTS: Final[int] = 5
+WINDOWS_TEMP_DIR_CLEANUP_TIMEOUT_SECONDS: Final[float] = 30.0
 
 
 def _is_windows() -> bool:
@@ -1123,7 +1127,14 @@ class WeftTestHarness:
 
     def _cleanup_tempdir(self) -> None:
         last_error: OSError | None = None
-        for _ in range(5):
+        attempts = 0
+        deadline = time.time() + (
+            WINDOWS_TEMP_DIR_CLEANUP_TIMEOUT_SECONDS
+            if _is_windows()
+            else TEMP_DIR_CLEANUP_RETRY_SLEEP_SECONDS * TEMP_DIR_CLEANUP_MAX_ATTEMPTS
+        )
+        while True:
+            attempts += 1
             gc.collect()
             try:
                 self._tempdir.cleanup()
@@ -1139,9 +1150,15 @@ class WeftTestHarness:
                 }:
                     raise
                 last_error = exc
-                # Bounded 5-attempt retry for Windows ENOTEMPTY/EBUSY/EPERM
-                # during tempdir cleanup. Same race family as f10d9d6.
-                time.sleep(0.05)
+                if (
+                    not _is_windows() and attempts >= TEMP_DIR_CLEANUP_MAX_ATTEMPTS
+                ) or (_is_windows() and time.time() >= deadline):
+                    break
+                # Bounded retry for Windows ENOTEMPTY/EBUSY/EPERM during
+                # tempdir cleanup. Same race family as f10d9d6, broadened
+                # after CI saw WinError 32 on a recently exited manager's
+                # startup stderr log.
+                time.sleep(TEMP_DIR_CLEANUP_RETRY_SLEEP_SECONDS)
         if last_error is not None:
             if self._is_locked_database_cleanup_error(last_error):
                 self._detach_tempdir_finalizer()

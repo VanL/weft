@@ -180,6 +180,62 @@ def test_harness_cleanup_retries_transient_tempdir_not_empty(
 
 
 @pytest.mark.sqlite_only
+def test_harness_cleanup_extends_windows_tempdir_retry_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = WeftTestHarness()
+    original_tempdir = harness._tempdir
+    repo_cwd = os.getcwd()
+
+    class _TempdirStub:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def cleanup(self) -> None:
+            self.calls += 1
+            if self.calls <= 7:
+                raise PermissionError(
+                    errno.EACCES,
+                    "locked",
+                    os.fspath(
+                        harness.root
+                        / ".weft"
+                        / "logs"
+                        / "manager-startup"
+                        / "manager-1778189222480474112.stderr.log"
+                    ),
+                )
+
+    stub = _TempdirStub()
+    clock = {"now": 0.0}
+    sleep_calls: list[float] = []
+
+    def fake_time() -> float:
+        return clock["now"]
+
+    def fake_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+        clock["now"] += seconds
+
+    try:
+        harness.__enter__()
+        monkeypatch.setattr(harness_mod, "_is_windows", lambda: True)
+        monkeypatch.setattr(harness_mod.time, "time", fake_time)
+        monkeypatch.setattr(harness_mod.time, "sleep", fake_sleep)
+        harness._tempdir = cast(Any, stub)
+
+        harness._cleanup_tempdir()
+
+        assert stub.calls == 8
+        assert sleep_calls == [0.05] * 7
+    finally:
+        os.chdir(repo_cwd)
+        harness._closed = True
+        harness._tempdir = original_tempdir
+        original_tempdir.cleanup()
+
+
+@pytest.mark.sqlite_only
 def test_harness_cleanup_waits_for_database_release_before_tempdir_cleanup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -290,10 +346,12 @@ def test_harness_cleanup_preserves_windows_tempdir_when_database_stays_locked(
         _finalizer = _FinalizerStub()
 
         def cleanup(self) -> None:
+            database_path = harness.context.database_path
+            assert database_path is not None
             error = PermissionError(
                 errno.EACCES,
                 "locked",
-                os.fspath(harness.context.database_path),
+                os.fspath(database_path),
             )
             raise error
 
@@ -728,7 +786,7 @@ def test_collect_pid_mappings_registers_discovered_task_tids() -> None:
     harness = WeftTestHarness()
     try:
         harness._registered_manager_tids.add("1775630560447778816")
-        monkeypatch_payloads = [
+        monkeypatch_payloads: list[dict[str, object]] = [
             {
                 "full": "1775630560739303424",
                 "runtime_handle": _host_runtime_handle(424242, 424243),
