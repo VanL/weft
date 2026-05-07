@@ -1,8 +1,8 @@
-"""Lifecycle monitor task primitive.
+"""Task monitor task primitive.
 
 This module provides the task-shaped non-consuming scanner used by the
-foreground lifecycle monitor command. Classification and archive writing stay
-in the command layer.
+foreground task monitor command. Classification and operational log writing
+stay in the command layer.
 
 Spec references:
 - docs/specifications/01-Core_Components.md [CC-2.1], [CC-2.3]
@@ -29,20 +29,20 @@ from weft.helpers import iter_queue_entries
 from .base import BaseTask
 from .multiqueue_watcher import QueueMessageContext
 
-LifecycleMonitorCallback = Callable[[str, str, int], None]
+TaskMonitorCallback = Callable[[str, str, int], None]
 
 
-def make_lifecycle_monitor_taskspec(tid: str | None = None) -> TaskSpec:
+def make_task_monitor_taskspec(tid: str | None = None) -> TaskSpec:
     """Create the private synthetic TaskSpec for a foreground monitor run."""
 
     monitor_tid = tid or str(time.time_ns())
     prefix = f"T{monitor_tid}"
     return TaskSpec(
         tid=monitor_tid,
-        name="lifecycle-monitor",
+        name="task-monitor",
         spec=SpecSection(
             type="function",
-            function_target="weft.core.tasks.lifecycle_monitor:noop_monitor_target",
+            function_target="weft.core.tasks.task_monitor:noop_task_monitor_target",
             enable_process_title=False,
         ),
         io=IOSection(
@@ -54,18 +54,18 @@ def make_lifecycle_monitor_taskspec(tid: str | None = None) -> TaskSpec:
             },
         ),
         state=StateSection(),
-        metadata={"internal": True, "weft_runtime": "lifecycle_monitor"},
+        metadata={"internal": True, "weft_runtime": "task_monitor"},
     )
 
 
-def noop_monitor_target() -> None:
+def noop_task_monitor_target() -> None:
     """No-op target used only to satisfy the private synthetic TaskSpec."""
 
 
-class LifecycleMonitorTask(BaseTask):
-    """Task-shaped non-consuming lifecycle log scanner.
+class TaskMonitorTask(BaseTask):
+    """Task-shaped non-consuming task-log scanner.
 
-    The command layer owns summary construction and archive/checkpoint writes.
+    The command layer owns summary construction and log/checkpoint writes.
     This class only provides queue wiring and a callback-oriented peek surface.
     """
 
@@ -73,12 +73,12 @@ class LifecycleMonitorTask(BaseTask):
         self,
         db: Path | str | Any,
         taskspec: TaskSpec,
-        observer: LifecycleMonitorCallback,
+        observer: TaskMonitorCallback,
         *,
         stop_event: threading.Event | None = None,
         config: Mapping[str, Any] | None = None,
     ) -> None:
-        self._lifecycle_observer = observer
+        self._task_observer = observer
         super().__init__(db=db, taskspec=taskspec, stop_event=stop_event, config=config)
 
     def _build_queue_configs(self) -> dict[str, dict[str, Any]]:
@@ -108,7 +108,7 @@ class LifecycleMonitorTask(BaseTask):
             queue,
             since_timestamp=since_timestamp,
         ):
-            self._lifecycle_observer(WEFT_GLOBAL_LOG_QUEUE, message, timestamp)
+            self._task_observer(WEFT_GLOBAL_LOG_QUEUE, message, timestamp)
             count += 1
             if limit is not None and count >= limit:
                 break
@@ -120,9 +120,9 @@ class LifecycleMonitorTask(BaseTask):
         timestamp: int,
         context: QueueMessageContext,
     ) -> None:
-        self._lifecycle_observer(context.queue_name, message, timestamp)
+        self._task_observer(context.queue_name, message, timestamp)
 
     def _cleanup_reserved_if_needed(self) -> None:
-        """Lifecycle monitors never create reserved messages."""
+        """Task monitors never create reserved messages."""
 
         return

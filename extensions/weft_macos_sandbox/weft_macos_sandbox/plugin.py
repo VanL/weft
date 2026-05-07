@@ -28,7 +28,12 @@ from weft.ext import (
     RunnerPlugin,
     RunnerRuntimeDescription,
 )
-from weft.helpers import kill_process_tree, terminate_process_tree
+from weft.helpers import (
+    kill_process_tree,
+    pid_matches_create_time,
+    process_create_time,
+    terminate_process_tree,
+)
 
 
 class MacOSSandboxRunner:
@@ -110,15 +115,21 @@ class MacOSSandboxRunner:
         def _kill_runtime() -> None:
             kill_process_tree(process.pid or -1, timeout=0.2)
 
+        observations: dict[str, Any] = {"sandbox_profile": self._profile}
+        if process.pid is not None:
+            observations["host_pids"] = [process.pid]
+            observations["host_processes"] = [
+                {
+                    "pid": process.pid,
+                    "create_time": process_create_time(process.pid),
+                }
+            ]
         runtime_handle = RunnerHandle(
             runner="macos-sandbox",
             kind="sandboxed-process",
             id=str(process.pid),
-            control={"authority": "host-pid"},
-            observations={
-                "host_pids": [process.pid] if process.pid is not None else [],
-                "sandbox_profile": self._profile,
-            },
+            control={"authority": "runner"},
+            observations=observations,
             metadata={"profile": self._profile},
         )
         return run_monitored_subprocess(
@@ -245,32 +256,44 @@ class MacOSSandboxRunnerPlugin:
         )
 
     def stop(self, handle: RunnerHandle, *, timeout: float = 2.0) -> bool:
-        host_pids = handle.scoped_host_pids()
-        if not host_pids:
+        host_processes = handle.scoped_host_processes()
+        if not host_processes:
             return False
-        for pid in host_pids:
+        stopped = False
+        for pid, create_time in host_processes:
+            if not _host_pid_matches(pid, create_time):
+                continue
             terminate_process_tree(pid, timeout=timeout, kill_after=False)
-        return True
+            stopped = True
+        return stopped
 
     def kill(self, handle: RunnerHandle, *, timeout: float = 2.0) -> bool:
-        host_pids = handle.scoped_host_pids()
-        if not host_pids:
+        host_processes = handle.scoped_host_processes()
+        if not host_processes:
             return False
-        for pid in host_pids:
+        killed = False
+        for pid, create_time in host_processes:
+            if not _host_pid_matches(pid, create_time):
+                continue
             kill_process_tree(pid, timeout=timeout)
-        return True
+            killed = True
+        return killed
 
     def describe(self, handle: RunnerHandle) -> RunnerRuntimeDescription | None:
+        metadata = {
+            **dict(handle.observations),
+            **dict(handle.metadata),
+        }
         state = "missing"
-        for pid in handle.scoped_host_pids():
-            if _pid_exists(pid):
+        for pid, create_time in handle.scoped_host_processes():
+            if _host_pid_matches(pid, create_time):
                 state = "running"
                 break
         return RunnerRuntimeDescription(
             runner="macos-sandbox",
             id=handle.id,
             state=state,
-            metadata=dict(handle.metadata),
+            metadata=metadata,
         )
 
 
@@ -287,11 +310,5 @@ def _require_mapping(value: object, *, name: str) -> Mapping[str, Any]:
     return value
 
 
-def _pid_exists(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        return False
-    return True
+def _host_pid_matches(pid: int, create_time: float | None) -> bool:
+    return pid_matches_create_time(pid, create_time)

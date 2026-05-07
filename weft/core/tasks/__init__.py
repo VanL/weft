@@ -12,11 +12,11 @@ from .consumer import Consumer, SelectiveConsumer
 from .debugger import Debugger
 from .heartbeat import HeartbeatTask
 from .interactive import InteractiveTaskMixin
-from .lifecycle_monitor import LifecycleMonitorTask
 from .monitor import Monitor
 from .multiqueue_watcher import MultiQueueWatcher
 from .observer import Observer, SamplingObserver
 from .pipeline import PipelineEdgeTask, PipelineTask
+from .task_monitor import TaskMonitorTask
 
 __all__ = [
     "BaseTask",
@@ -28,7 +28,7 @@ __all__ = [
     "Monitor",
     "Debugger",
     "HeartbeatTask",
-    "LifecycleMonitorTask",
+    "TaskMonitorTask",
     "MultiQueueWatcher",
     "PipelineTask",
     "PipelineEdgeTask",

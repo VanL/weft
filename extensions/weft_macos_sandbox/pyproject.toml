@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "weft-macos-sandbox"
-version = "0.5.1"
+version = "0.5.2"
 description = "macOS sandbox runner plugin for Weft"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -13,7 +13,7 @@ authors = [
     {name = "Van Lindberg", email = "van@modelmonster.ai"},
 ]
 dependencies = [
-    "weft>=0.6.4,<1",
+    "weft>=0.9.19,<1",
 ]
 
 [project.optional-dependencies]

@@ -71,10 +71,21 @@ def test_serve_foreground_uses_shared_runtime_invocation_helper(
     helper_calls: list[tuple[object, object]] = []
     run_calls: list[tuple[object, object]] = []
 
+    manager_selection_calls: list[tuple[object, bool, object]] = []
+
+    def _fake_select_active_manager(
+        context_arg,
+        *,
+        probe_stale=False,
+        probe_cache=None,
+    ):
+        manager_selection_calls.append((context_arg, probe_stale, probe_cache))
+        return None
+
     monkeypatch.setattr(
         core_manager_runtime,
         "_select_active_manager",
-        lambda context_arg: None,
+        _fake_select_active_manager,
     )
 
     def _fake_build_invocation(context_arg, *, idle_timeout_override=None):
@@ -99,5 +110,6 @@ def test_serve_foreground_uses_shared_runtime_invocation_helper(
 
     assert exit_code == 0
     assert message is None
+    assert manager_selection_calls == [(context, True, {})]
     assert helper_calls == [(context, 0.0)]
     assert run_calls == [(invocation, context)]

@@ -212,6 +212,41 @@ def test_build_context_uses_configured_weft_dir_when_broker_name_changes(
     assert ctx.weft_dir == (tmp_path / ".engram").resolve()
 
 
+def test_build_context_defaults_logs_dir_under_weft_dir(tmp_path: Path) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+
+    assert ctx.logs_dir == (root / ".weft" / "logs").resolve()
+    assert ctx.logs_dir.is_dir()
+
+
+def test_build_context_uses_relative_logs_dir_override(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("WEFT_LOGS_DIR", "var/weft-logs")
+    root = prepare_project_root(tmp_path)
+
+    ctx = build_context(spec_context=root)
+
+    assert ctx.logs_dir == (root / "var" / "weft-logs").resolve()
+    assert ctx.logs_dir.is_dir()
+
+
+def test_build_context_uses_absolute_logs_dir_override(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    log_root = tmp_path / "external-logs"
+    monkeypatch.setenv("WEFT_LOGS_DIR", str(log_root))
+    root = prepare_project_root(tmp_path / "project")
+
+    ctx = build_context(spec_context=root)
+
+    assert ctx.logs_dir == log_root.resolve()
+    assert ctx.logs_dir.is_dir()
+
+
 def test_build_context_accepts_supplied_config_override(tmp_path: Path) -> None:
     """Embedded callers may override the Weft metadata directory in-process."""
 

@@ -85,8 +85,8 @@ _Implementation mapping_: `weft/core/tasks/consumer.py`,
 ### Observability Invariants
 
 _Implementation mapping_: `weft/core/tasks/base.py`,
-`weft/core/tasks/lifecycle_monitor.py`, `weft/commands/status.py`,
-`weft/commands/lifecycle_monitor.py`, `weft/_constants.py`.
+`weft/core/tasks/task_monitor.py`, `weft/commands/status.py`,
+`weft/commands/task_monitor.py`, `weft/_constants.py`.
 
 - **OBS.1**: lifecycle changes are written to `weft.log.tasks`
 - **OBS.2**: Weft does not use a separate state database for task lifecycle
@@ -110,11 +110,14 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
 - **OBS.12**: a matched keyed PONG is an authoritative live task-local
   observation at its timestamp for explicit current-state probes. It is not a
   lifecycle mutation, and it must not use a second runner-specific inspection
-  path outside the existing runner handle/plugin description contract.
-- **OBS.13**: lifecycle monitor archive files, lifecycle monitor checkpoints,
-  and runtime-prune reports are operational outputs only. They must not become
-  task lifecycle truth, status authority, result authority, or cleanup
-  authority.
+  path outside the existing runner handle/plugin description contract. For
+  manager selection, a matched keyed PONG may rescue stale-looking canonical
+  registry evidence; an absent or unmatched PONG is not proof that takeover is
+  safe.
+- **OBS.13**: task monitor log files, task monitor checkpoints,
+  runtime-prune reports, and retention-prune reports/archives are operational
+  outputs only. They must not become task lifecycle truth, status authority,
+  result authority, or automatic cleanup authority.
 - **OBS.14**: claimed outbox residue is recovery evidence, not decoded result
   evidence. Status/result readers may surface
   `claimed_result_without_terminal`, but they must not delete, unclaim, or
@@ -126,6 +129,16 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
   runtime-only `weft.state.*` queues and exact message IDs. It must not prune
   task-local queues, `weft.log.tasks`, spawn requests, or manager control
   queues.
+- **OBS.17**: explicit retention pruning may delete selected task-local and
+  lifecycle-log rows only by exact message ID. Ordinary apply requires archive
+  records before deletion and preserves recovery-sensitive evidence such as
+  active/ambiguous tasks, claimed outbox residue, malformed/unknown-shape rows,
+  and inbox/reserved work unless the candidate class is safe for ordinary
+  deletion. `--force --apply` is a human override for those ordinary retention
+  protections, but it does not override explicit scope, dry-run/apply mode,
+  exact-message identity, or backend deletion capability.
+
+_Plan backlink_: [`docs/plans/2026-05-07-task-local-reaper-retention-policy-plan.md`](../plans/2026-05-07-task-local-reaper-retention-policy-plan.md).
 
 ### Implementation Invariants
 
@@ -168,7 +181,9 @@ _Implementation mapping_: `weft/core/manager.py`,
   graceful drain on normal termination signals
 - **MANAGER.8**: live canonical managers converge on one lowest-TID leader per
   context; non-leaders yield or drain once they no longer need to protect
-  persistent children
+  persistent children. Keyed PONG liveness may help decide which canonical
+  records are live, but it is not a lease, election vote, or substitute for
+  lowest-TID ownership reduction.
 - **MANAGER.9**: only positive `self` ownership authorizes child launch from a
   reserved spawn request; `none` and `unknown` are not launch authority
 - **MANAGER.10**: if a lower-TID canonical owner is positively proved after
@@ -230,11 +245,11 @@ Current invariant visibility comes from:
 - task-local control and output queues
 - process titles
 - CLI status/result/task inspection
-- foreground `weft system lifecycle-monitor` archive scans
+- foreground `weft system task-monitor` log scans
 - the test suite
 
 There is no separate invariant-monitor daemon in the current contract. The
-lifecycle monitor is a foreground, non-destructive system command.
+task monitor is a foreground, non-destructive system command.
 
 ## Scope Boundary
 
@@ -249,8 +264,9 @@ doc:
 - [`docs/plans/2026-05-06-lifecycle-reconciliation-architecture-plan.md`](../plans/2026-05-06-lifecycle-reconciliation-architecture-plan.md)
 - [`docs/plans/2026-05-06-status-coherence-and-stale-pid-liveness-plan.md`](../plans/2026-05-06-status-coherence-and-stale-pid-liveness-plan.md)
 - [`docs/plans/2026-05-06-terminal-publication-hardening-plan.md`](../plans/2026-05-06-terminal-publication-hardening-plan.md)
-- [`docs/plans/2026-05-07-lifecycle-monitor-archive-sink-plan.md`](../plans/2026-05-07-lifecycle-monitor-archive-sink-plan.md)
+- [`docs/plans/2026-05-07-task-monitor-archive-sink-plan.md`](../plans/2026-05-07-task-monitor-archive-sink-plan.md)
 - [`docs/plans/2026-05-07-result-evidence-and-superseded-manager-reconciliation-plan.md`](../plans/2026-05-07-result-evidence-and-superseded-manager-reconciliation-plan.md)
+- [`docs/plans/2026-05-07-manager-selection-ping-pong-liveness-plan.md`](../plans/2026-05-07-manager-selection-ping-pong-liveness-plan.md)
 - [`docs/plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md`](../plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md)
 - [`docs/plans/2026-04-17-canonical-owner-fence-plan.md`](../plans/2026-04-17-canonical-owner-fence-plan.md)
 

@@ -20,12 +20,14 @@ from typing import Any, NoReturn
 from simplebroker import Queue, serialize_broker_target
 from simplebroker.ext import BrokerError
 from weft._constants import (
+    CONTROL_SURFACE_WAIT_TIMEOUT,
     MANAGER_COMPETING_STARTUP_GRACE_SECONDS,
     MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS,
     MANAGER_LAUNCHER_SIGNAL_ABORT,
     MANAGER_LAUNCHER_SIGNAL_SUCCESS,
     MANAGER_PID_LIVENESS_RECHECK_INTERVAL,
     MANAGER_POLL_INTERVAL,
+    MANAGER_PONG_LIVE_AT_KEY,
     MANAGER_REGISTRY_POLL_INTERVAL,
     MANAGER_STARTUP_LOG_DIRNAME,
     MANAGER_STARTUP_TIMEOUT_SECONDS,
@@ -41,6 +43,7 @@ from weft._constants import (
 )
 from weft._exceptions import ManagerStartFailed
 from weft.context import WeftContext
+from weft.core.control_probe import send_keyed_ping_probe
 from weft.core.spawn_requests import generate_spawn_request_timestamp
 from weft.core.taskspec import TaskSpec, resolve_taskspec_payload
 from weft.ext import RunnerHandle
@@ -128,6 +131,8 @@ def _snapshot_registry(
     context: WeftContext,
     *,
     prune_stale: bool = True,
+    probe_stale: bool = False,
+    probe_cache: dict[str, int | None] | None = None,
     queue: Queue | None = None,
 ) -> dict[str, dict[str, Any]]:
     registry_queue = queue or _registry_queue(context)
@@ -142,8 +147,17 @@ def _snapshot_registry(
             record = _normalize_manager_record(data, timestamp=timestamp)
             if prune_stale and record.get("status") == "active":
                 if _manager_record_is_stale(record):
-                    stale_timestamps.append(timestamp)
-                    continue
+                    if not (
+                        probe_stale
+                        and is_canonical_manager_record(record)
+                        and _manager_record_has_matched_pong(
+                            context,
+                            record,
+                            probe_cache=probe_cache,
+                        )
+                    ):
+                        stale_timestamps.append(timestamp)
+                        continue
             existing = snapshot.get(tid)
             existing_ts = int(existing.get("timestamp", -1)) if existing else -1
             if existing is None or existing_ts < timestamp:
@@ -174,7 +188,9 @@ def _select_active_manager_from_snapshot(
             continue
         if record.get("status") != "active":
             continue
-        if not _manager_record_is_stale(record):
+        if not _manager_record_is_stale(record) or _manager_record_has_pong_live(
+            record
+        ):
             candidates.append(record)
     if not candidates:
         return None
@@ -189,9 +205,17 @@ def _registry_view(
     *,
     target_tid: str | None = None,
     prune_stale: bool = True,
+    probe_stale: bool = False,
+    probe_cache: dict[str, int | None] | None = None,
     queue: Queue | None = None,
 ) -> _ManagerRegistryView:
-    snapshot = _snapshot_registry(context, prune_stale=prune_stale, queue=queue)
+    snapshot = _snapshot_registry(
+        context,
+        prune_stale=prune_stale,
+        probe_stale=probe_stale,
+        probe_cache=probe_cache,
+        queue=queue,
+    )
     return _ManagerRegistryView(
         records=snapshot,
         active_manager=_select_active_manager_from_snapshot(snapshot),
@@ -266,6 +290,79 @@ def _manager_record_is_stale(record: dict[str, Any] | None) -> bool:
     return time.time_ns() - timestamp > stale_after_ns
 
 
+def _manager_record_has_pong_live(record: dict[str, Any] | None) -> bool:
+    if not isinstance(record, dict):
+        return False
+    return isinstance(record.get(MANAGER_PONG_LIVE_AT_KEY), int)
+
+
+def _manager_record_has_matched_pong(
+    context: WeftContext,
+    record: dict[str, Any],
+    *,
+    probe_cache: dict[str, int | None] | None,
+) -> bool:
+    tid_value = record.get("tid")
+    if not isinstance(tid_value, str) or not tid_value:
+        return False
+    tid = tid_value
+    if probe_cache is not None and tid in probe_cache:
+        observed_at = probe_cache[tid]
+        if observed_at is None:
+            return False
+        record[MANAGER_PONG_LIVE_AT_KEY] = observed_at
+        return True
+
+    ctrl_in_name = _manager_ctrl_queue_name(tid, record)
+    ctrl_out_name = _manager_ctrl_out_queue_name(tid, record)
+    result = send_keyed_ping_probe(
+        context,
+        tid=tid,
+        ctrl_in_name=ctrl_in_name,
+        ctrl_out_name=ctrl_out_name,
+        timeout=max(
+            0.0,
+            min(CONTROL_SURFACE_WAIT_TIMEOUT, MANAGER_COMPETING_STARTUP_GRACE_SECONDS),
+        ),
+    )
+    if result.matched is None or not _matched_pong_proves_manager_record(
+        result.matched.payload,
+        ctrl_in_name=ctrl_in_name,
+        ctrl_out_name=ctrl_out_name,
+    ):
+        if probe_cache is not None:
+            probe_cache[tid] = None
+        return False
+
+    observed_at = result.matched.observed_at
+    record[MANAGER_PONG_LIVE_AT_KEY] = observed_at
+    if probe_cache is not None:
+        probe_cache[tid] = observed_at
+    return True
+
+
+def _matched_pong_proves_manager_record(
+    payload: dict[str, Any],
+    *,
+    ctrl_in_name: str,
+    ctrl_out_name: str,
+) -> bool:
+    role = payload.get("role")
+    if role is not None and role != "manager":
+        return False
+    requests = payload.get("requests")
+    if requests is not None and requests != WEFT_SPAWN_REQUESTS_QUEUE:
+        return False
+    ctrl_in = payload.get("ctrl_in")
+    if ctrl_in is not None and ctrl_in != ctrl_in_name:
+        return False
+    ctrl_out = payload.get("ctrl_out")
+    if ctrl_out is not None and ctrl_out != ctrl_out_name:
+        return False
+    outbox = payload.get("outbox")
+    return outbox is None or outbox == WEFT_MANAGER_OUTBOX_QUEUE
+
+
 def manager_registry_record_is_stale(record: dict[str, Any] | None) -> bool:
     """Return whether a normalized manager registry row lacks live proof."""
 
@@ -312,8 +409,17 @@ def _list_manager_records(
     return records
 
 
-def _select_active_manager(context: WeftContext) -> dict[str, Any] | None:
-    return _registry_view(context).active_manager
+def _select_active_manager(
+    context: WeftContext,
+    *,
+    probe_stale: bool = False,
+    probe_cache: dict[str, int | None] | None = None,
+) -> dict[str, Any] | None:
+    return _registry_view(
+        context,
+        probe_stale=probe_stale,
+        probe_cache=probe_cache,
+    ).active_manager
 
 
 def _is_pid_alive(pid: int | None) -> bool:
@@ -344,6 +450,14 @@ def _manager_ctrl_queue_name(tid: str, record: dict[str, Any] | None = None) -> 
         if isinstance(ctrl_in, str) and ctrl_in:
             return ctrl_in
     return f"T{tid}.{QUEUE_CTRL_IN_SUFFIX}"
+
+
+def _manager_ctrl_out_queue_name(tid: str, record: dict[str, Any] | None = None) -> str:
+    if isinstance(record, dict):
+        ctrl_out = record.get("ctrl_out")
+        if isinstance(ctrl_out, str) and ctrl_out:
+            return ctrl_out
+    return f"T{tid}.{QUEUE_CTRL_OUT_SUFFIX}"
 
 
 def _send_stop(
@@ -754,6 +868,7 @@ def _await_manager_start_settlement(
         time.monotonic() + MANAGER_COMPETING_STARTUP_GRACE_SECONDS,
     )
     last_active: dict[str, Any] | None = None
+    probe_cache: dict[str, int | None] = {}
     registry_queue = _registry_queue(context)
     monitor = QueueChangeMonitor([registry_queue], config=context.config)
     try:
@@ -761,6 +876,8 @@ def _await_manager_start_settlement(
             view = _registry_view(
                 context,
                 target_tid=manager_tid,
+                probe_stale=True,
+                probe_cache=probe_cache,
                 queue=registry_queue,
             )
             last_active = view.active_manager
@@ -927,6 +1044,7 @@ def _start_manager(
 
     deadline = time.monotonic() + MANAGER_STARTUP_TIMEOUT_SECONDS
     competing_record: dict[str, Any] | None = None
+    probe_cache: dict[str, int | None] = {}
     registry_queue = _registry_queue(context)
     monitor = QueueChangeMonitor([registry_queue], config=context.config)
     try:
@@ -934,6 +1052,8 @@ def _start_manager(
             view = _registry_view(
                 context,
                 target_tid=manager_tid,
+                probe_stale=True,
+                probe_cache=probe_cache,
                 queue=registry_queue,
             )
             selected_record = view.active_manager
@@ -962,6 +1082,8 @@ def _start_manager(
                             view_after_ack = _registry_view(
                                 context,
                                 target_tid=manager_tid,
+                                probe_stale=True,
+                                probe_cache=probe_cache,
                                 queue=registry_queue,
                             )
                             current_record = view_after_ack.target_record or (
@@ -1082,15 +1204,14 @@ def _ensure_manager(
     context: WeftContext, *, verbose: bool
 ) -> tuple[dict[str, Any], bool, subprocess.Popen[Any] | None]:
     """Guarantee a canonical active manager exists, starting one if necessary."""
-    record = _select_active_manager(context)
+    probe_cache: dict[str, int | None] = {}
+    record = _select_active_manager(
+        context,
+        probe_stale=True,
+        probe_cache=probe_cache,
+    )
     if record:
-        if _manager_record_is_stale(record):
-            _snapshot_registry(context)
-            record = _select_active_manager(context)
-            if record is None:
-                return _start_manager(context, verbose=verbose)
-        if record:
-            return record, False, None
+        return record, False, None
     return _start_manager(context, verbose=verbose)
 
 
@@ -1114,7 +1235,7 @@ def _run_manager_process_foreground(
 def _serve_manager_foreground(context: WeftContext) -> tuple[int, str | None]:
     """Run the canonical manager in the current process for supervisor use."""
 
-    existing = _select_active_manager(context)
+    existing = _select_active_manager(context, probe_stale=True, probe_cache={})
     if existing is not None:
         return (
             1,

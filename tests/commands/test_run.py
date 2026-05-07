@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Iterator, Sequence
 from pathlib import Path
@@ -25,6 +26,7 @@ from weft._constants import (
     INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
     INTERNAL_RUNTIME_TASK_CLASS_KEY,
     WEFT_GLOBAL_LOG_QUEUE,
+    WEFT_MANAGER_OUTBOX_QUEUE,
     WEFT_MANAGERS_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
@@ -80,6 +82,111 @@ def _external_supervisor_runtime_handle() -> dict[str, Any]:
         },
         "metadata": {},
     }
+
+
+def _write_active_manager_registry_record(
+    ctx,
+    *,
+    tid: str,
+    runtime_handle: dict[str, Any],
+    requests: str = WEFT_SPAWN_REQUESTS_QUEUE,
+) -> None:
+    registry = ctx.queue(WEFT_MANAGERS_REGISTRY_QUEUE, persistent=False)
+    try:
+        registry.write(
+            json.dumps(
+                {
+                    "tid": tid,
+                    "name": "manager",
+                    "status": "active",
+                    "runtime_handle": runtime_handle,
+                    "timestamp": registry.generate_timestamp(),
+                    "requests": requests,
+                    "ctrl_in": f"T{tid}.ctrl_in",
+                    "ctrl_out": f"T{tid}.ctrl_out",
+                    "outbox": WEFT_MANAGER_OUTBOX_QUEUE,
+                    "role": "manager",
+                }
+            )
+        )
+    finally:
+        registry.close()
+
+
+def _select_active_manager_while_answering_probe(
+    ctx,
+    *,
+    tid: str,
+    pong_fields: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    result: dict[str, dict[str, Any] | None] = {}
+    errors: list[BaseException] = []
+
+    def _select() -> None:
+        try:
+            result["record"] = core_manager_runtime._select_active_manager(
+                ctx,
+                probe_stale=True,
+            )
+        except BaseException as exc:  # pragma: no cover - thread handoff
+            errors.append(exc)
+
+    thread = threading.Thread(target=_select)
+    thread.start()
+
+    ctrl_in_name = f"T{tid}.ctrl_in"
+    ctrl_out_name = f"T{tid}.ctrl_out"
+    ctrl_in = ctx.queue(ctrl_in_name, persistent=True)
+    ctrl_out = ctx.queue(ctrl_out_name, persistent=False)
+    try:
+        deadline = time.monotonic() + 2.0
+        while thread.is_alive() and time.monotonic() < deadline:
+            raw = ctrl_in.read_one()
+            if raw is None:
+                time.sleep(0.01)
+                continue
+            payload = json.loads(str(raw))
+            pong_payload = {
+                "command": "PING",
+                "status": "ok",
+                "message": "PONG",
+                "tid": tid,
+                "request_id": payload["request_id"],
+                "task_status": "running",
+                "role": "manager",
+                "requests": WEFT_SPAWN_REQUESTS_QUEUE,
+                "ctrl_in": ctrl_in_name,
+                "ctrl_out": ctrl_out_name,
+                "outbox": WEFT_MANAGER_OUTBOX_QUEUE,
+            }
+            if pong_fields is not None:
+                pong_payload.update(pong_fields)
+            ctrl_out.write(json.dumps(pong_payload))
+            break
+    finally:
+        ctrl_in.close()
+        ctrl_out.close()
+
+    thread.join(timeout=2.0)
+    assert not thread.is_alive(), "manager selection probe did not finish"
+    if errors:
+        raise errors[0]
+    return result.get("record")
+
+
+def _read_all_queue_messages(
+    ctx, queue_name: str, *, persistent: bool = False
+) -> list[str]:
+    queue = ctx.queue(queue_name, persistent=persistent)
+    messages: list[str] = []
+    try:
+        while True:
+            raw = queue.read_one()
+            if raw is None:
+                return messages
+            messages.append(str(raw))
+    finally:
+        queue.close()
 
 
 def _make_taskspec(tid: str) -> TaskSpec:
@@ -431,7 +538,7 @@ def test_start_manager_does_not_terminate_competing_startup_manager(
     records = iter([competing_record, competing_record])
     monkeypatch.setattr(
         "weft.core.manager_runtime._registry_view",
-        lambda context, *, target_tid=None, prune_stale=True, queue=None: (
+        lambda context, *, target_tid=None, prune_stale=True, probe_stale=False, probe_cache=None, queue=None: (
             _registry_view(
                 active=next(records),
             )
@@ -497,7 +604,7 @@ def test_start_manager_adopts_competing_manager_after_losing_pid_exits(
 
     monkeypatch.setattr(
         "weft.core.manager_runtime._registry_view",
-        lambda context, *, target_tid=None, prune_stale=True, queue=None: (
+        lambda context, *, target_tid=None, prune_stale=True, probe_stale=False, probe_cache=None, queue=None: (
             _registry_view()
         ),
     )
@@ -571,7 +678,7 @@ def test_start_manager_adopts_competing_manager_after_startup_timeout_settles(
     )
     monkeypatch.setattr(
         "weft.core.manager_runtime._registry_view",
-        lambda context, *, target_tid=None, prune_stale=True, queue=None: (
+        lambda context, *, target_tid=None, prune_stale=True, probe_stale=False, probe_cache=None, queue=None: (
             _registry_view()
         ),
     )
@@ -659,7 +766,7 @@ def test_start_manager_builds_detached_launch_from_shared_runtime_invocation(
     )
     monkeypatch.setattr(
         "weft.core.manager_runtime._registry_view",
-        lambda context, *, target_tid=None, prune_stale=True, queue=None: (
+        lambda context, *, target_tid=None, prune_stale=True, probe_stale=False, probe_cache=None, queue=None: (
             _registry_view(
                 active={
                     "tid": invocation.tid,
@@ -735,7 +842,7 @@ def test_start_manager_treats_post_proof_ack_failure_as_nonfatal(
     )
     monkeypatch.setattr(
         "weft.core.manager_runtime._registry_view",
-        lambda context, *, target_tid=None, prune_stale=True, queue=None: (
+        lambda context, *, target_tid=None, prune_stale=True, probe_stale=False, probe_cache=None, queue=None: (
             _registry_view(
                 active={
                     "tid": invocation.tid,
@@ -830,7 +937,7 @@ def test_start_manager_surfaces_detached_launch_stderr_when_manager_exits_early(
     )
     monkeypatch.setattr(
         "weft.core.manager_runtime._registry_view",
-        lambda context, *, target_tid=None, prune_stale=True, queue=None: (
+        lambda context, *, target_tid=None, prune_stale=True, probe_stale=False, probe_cache=None, queue=None: (
             _registry_view()
         ),
     )
@@ -2100,6 +2207,206 @@ def test_select_active_manager_ignores_noncanonical_request_queue(
         registry.close()
 
     assert _select_active_manager(ctx) is None
+
+
+def test_select_active_manager_uses_matched_pong_for_stale_supervised_record(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = "1775622400000000201"
+    monkeypatch.setattr(
+        "weft.core.manager_runtime.MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS",
+        -1.0,
+    )
+    _write_active_manager_registry_record(
+        ctx,
+        tid=tid,
+        runtime_handle=_external_supervisor_runtime_handle(),
+    )
+
+    record = _select_active_manager_while_answering_probe(ctx, tid=tid)
+
+    assert record is not None
+    assert record["tid"] == tid
+    assert record["_pong_live_at"] > 0
+
+
+def test_select_active_manager_rejects_non_manager_pong_for_stale_record(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = "1775622400000000205"
+    monkeypatch.setattr(
+        "weft.core.manager_runtime.MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS",
+        -1.0,
+    )
+    _write_active_manager_registry_record(
+        ctx,
+        tid=tid,
+        runtime_handle=_external_supervisor_runtime_handle(),
+    )
+
+    record = _select_active_manager_while_answering_probe(
+        ctx,
+        tid=tid,
+        pong_fields={"role": "consumer"},
+    )
+
+    assert record is None
+
+
+def test_select_active_manager_prunes_stale_record_without_pong(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = "1775622400000000206"
+    monkeypatch.setattr(
+        "weft.core.manager_runtime.MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS",
+        -1.0,
+    )
+    monkeypatch.setattr(
+        "weft.core.manager_runtime.MANAGER_COMPETING_STARTUP_GRACE_SECONDS",
+        0.01,
+    )
+    _write_active_manager_registry_record(
+        ctx,
+        tid=tid,
+        runtime_handle=_external_supervisor_runtime_handle(),
+    )
+
+    record = core_manager_runtime._select_active_manager(ctx, probe_stale=True)
+
+    assert record is None
+    assert len(_read_all_queue_messages(ctx, f"T{tid}.ctrl_in", persistent=True)) == 1
+
+
+def test_select_active_manager_lowest_tid_pong_beats_higher_hard_live_record(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    lower_tid = "1775622400000000207"
+    higher_tid = "1775622400000000208"
+    monkeypatch.setattr(
+        "weft.core.manager_runtime.MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS",
+        -1.0,
+    )
+    _write_active_manager_registry_record(
+        ctx,
+        tid=lower_tid,
+        runtime_handle=_external_supervisor_runtime_handle(),
+    )
+    _write_active_manager_registry_record(
+        ctx,
+        tid=higher_tid,
+        runtime_handle=_host_runtime_handle(os.getpid()),
+    )
+
+    record = _select_active_manager_while_answering_probe(ctx, tid=lower_tid)
+
+    assert record is not None
+    assert record["tid"] == lower_tid
+
+
+def test_select_active_manager_lower_hard_live_record_beats_higher_pong(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    lower_tid = "1775622400000000209"
+    higher_tid = "1775622400000000210"
+    monkeypatch.setattr(
+        "weft.core.manager_runtime.MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS",
+        -1.0,
+    )
+    _write_active_manager_registry_record(
+        ctx,
+        tid=lower_tid,
+        runtime_handle=_host_runtime_handle(os.getpid()),
+    )
+    _write_active_manager_registry_record(
+        ctx,
+        tid=higher_tid,
+        runtime_handle=_external_supervisor_runtime_handle(),
+    )
+
+    record = _select_active_manager_while_answering_probe(ctx, tid=higher_tid)
+
+    assert record is not None
+    assert record["tid"] == lower_tid
+
+
+def test_select_active_manager_does_not_probe_fresh_supervised_record(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = "1775622400000000202"
+    monkeypatch.setattr(
+        "weft.core.manager_runtime.MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS",
+        60.0,
+    )
+    _write_active_manager_registry_record(
+        ctx,
+        tid=tid,
+        runtime_handle=_external_supervisor_runtime_handle(),
+    )
+
+    record = core_manager_runtime._select_active_manager(ctx, probe_stale=True)
+
+    assert record is not None
+    assert record["tid"] == tid
+    assert _read_all_queue_messages(ctx, f"T{tid}.ctrl_in", persistent=True) == []
+
+
+def test_await_manager_start_settlement_probes_stale_record_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    stale_tid = "1775622400000000203"
+    new_tid = "1775622400000000204"
+    monkeypatch.setattr(
+        "weft.core.manager_runtime.MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS",
+        -1.0,
+    )
+    monkeypatch.setattr(
+        "weft.core.manager_runtime.MANAGER_COMPETING_STARTUP_GRACE_SECONDS",
+        0.01,
+    )
+    monkeypatch.setattr(
+        "weft.core.manager_runtime.MANAGER_REGISTRY_POLL_INTERVAL",
+        0.001,
+    )
+    _write_active_manager_registry_record(
+        ctx,
+        tid=stale_tid,
+        runtime_handle=_external_supervisor_runtime_handle(),
+    )
+
+    record = core_manager_runtime._await_manager_start_settlement(
+        ctx,
+        manager_tid=new_tid,
+        deadline=time.monotonic() + 0.05,
+    )
+
+    ping_messages = _read_all_queue_messages(
+        ctx,
+        f"T{stale_tid}.ctrl_in",
+        persistent=True,
+    )
+    assert record is None
+    assert len(ping_messages) == 1
 
 
 # This test validates pruning of active records whose PID has exited while keeping

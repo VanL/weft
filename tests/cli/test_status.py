@@ -306,3 +306,17 @@ def test_task_status_not_found(workdir) -> None:
     assert rc == 2
     assert out == ""
     assert "Task nonexistent not found" in err
+
+
+def test_task_status_rejects_removed_live_probe_option(workdir) -> None:
+    rc, out, err = run_cli(
+        "task",
+        "status",
+        "1778084345905438799",
+        "--probe" + "-live",
+        cwd=workdir,
+    )
+
+    assert rc != 0
+    assert out == ""
+    assert "probe-live" in err

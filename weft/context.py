@@ -204,7 +204,7 @@ def build_context(
     weft_dir_name = get_weft_directory_name(resolved_config)
     weft_dir = (root / weft_dir_name).resolve(strict=False)
     outputs_dir = weft_dir / "outputs"
-    logs_dir = weft_dir / "logs"
+    logs_dir = _resolve_logs_dir(root, weft_dir, resolved_config.get("WEFT_LOGS_DIR"))
     config_path = weft_dir / "config.json"
     autostart_dir = weft_dir / WEFT_AUTOSTART_DIRECTORY_NAME
     project_config = _load_project_config(config_path)
@@ -450,6 +450,17 @@ def _load_project_config(config_path: Path) -> dict[str, Any]:
 def _project_autostart_default(project_config: Mapping[str, Any]) -> bool | None:
     value = project_config.get("autostart")
     return value if isinstance(value, bool) else None
+
+
+def _resolve_logs_dir(root: Path, weft_dir: Path, value: Any) -> Path:
+    """Resolve the configured operational logs directory."""
+
+    if value is None or str(value).strip() == "":
+        return weft_dir / "logs"
+    raw = Path(str(value)).expanduser()
+    if raw.is_absolute():
+        return raw.resolve(strict=False)
+    return (root / raw).resolve(strict=False)
 
 
 def update_project_config(

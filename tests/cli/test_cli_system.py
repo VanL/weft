@@ -9,7 +9,11 @@ import pytest
 
 from tests.conftest import run_cli
 from tests.helpers.test_backend import prepare_project_root
-from weft._constants import WEFT_GLOBAL_LOG_QUEUE, WEFT_TID_MAPPINGS_QUEUE
+from weft._constants import (
+    RETENTION_PRUNE_CLASS_NONTERMINAL_TASK_LOG_SUPERSEDED,
+    WEFT_GLOBAL_LOG_QUEUE,
+    WEFT_TID_MAPPINGS_QUEUE,
+)
 from weft.context import build_context
 from weft.helpers import iter_queue_json_entries
 
@@ -82,6 +86,16 @@ def test_system_builtins_json_reports_builtin_metadata(workdir) -> None:
     )
 
     assert rc == 0
+    payload = json.loads(out)
+    builtin = next(item for item in payload if item["name"] == "probe-agents")
+    assert builtin["source"] == "builtin"
+    assert (
+        Path(builtin["path"])
+        .as_posix()
+        .endswith("weft/builtins/tasks/probe-agents.json")
+    )
+    assert builtin["description"].startswith("Probe known delegated provider CLIs")
+    assert err == ""
     payload = json.loads(out)
     builtin = next(item for item in payload if item["name"] == "probe-agents")
     assert builtin["type"] == "task"
@@ -243,16 +257,145 @@ def test_system_prune_rejects_invalid_options(workdir) -> None:
     )
 
     assert rc == 0
-    payload = json.loads(out)
-    builtin = next(item for item in payload if item["name"] == "probe-agents")
-    assert builtin["source"] == "builtin"
-    assert (
-        Path(builtin["path"])
-        .as_posix()
-        .endswith("weft/builtins/tasks/probe-agents.json")
+
+
+def test_system_prune_retention_dry_run_json(workdir) -> None:
+    context = build_context(spec_context=workdir)
+    _write_queue_json(
+        context,
+        WEFT_GLOBAL_LOG_QUEUE,
+        {"tid": "1770000000000000600", "status": "created"},
     )
-    assert builtin["description"].startswith("Probe known delegated provider CLIs")
+    _write_queue_json(
+        context,
+        WEFT_GLOBAL_LOG_QUEUE,
+        {"tid": "1770000000000000600", "status": "completed"},
+    )
+
+    rc, out, err = run_cli(
+        "system",
+        "prune",
+        "--family",
+        "task-log",
+        "--dry-run",
+        "--json",
+        "--min-age",
+        "0",
+        "--context",
+        workdir,
+        cwd=workdir,
+    )
+
+    assert rc == 0
     assert err == ""
+    payload = json.loads(out)
+    assert payload["family"] == "task-log"
+    assert payload["dry_run"] is True
+    assert payload["candidate_class_counts"] == {
+        RETENTION_PRUNE_CLASS_NONTERMINAL_TASK_LOG_SUPERSEDED: 1
+    }
+
+
+def test_system_prune_retention_apply_requires_archive_unless_force(workdir) -> None:
+    context = build_context(spec_context=workdir)
+    _write_queue_json(
+        context,
+        WEFT_GLOBAL_LOG_QUEUE,
+        {"tid": "1770000000000000601", "status": "created"},
+    )
+    _write_queue_json(
+        context,
+        WEFT_GLOBAL_LOG_QUEUE,
+        {"tid": "1770000000000000601", "status": "completed"},
+    )
+
+    rc, _out, err = run_cli(
+        "system",
+        "prune",
+        "--family",
+        "task-log",
+        "--apply",
+        "--json",
+        "--min-age",
+        "0",
+        "--context",
+        workdir,
+        cwd=workdir,
+    )
+
+    assert rc == 1
+    assert "--archive is required" in err
+
+    rc, out, err = run_cli(
+        "system",
+        "prune",
+        "--family",
+        "task-log",
+        "--apply",
+        "--force",
+        "--json",
+        "--min-age",
+        "0",
+        "--context",
+        workdir,
+        cwd=workdir,
+    )
+
+    assert rc == 0
+    assert err == ""
+    payload = json.loads(out)
+    assert payload["force"] is True
+    assert payload["deleted"] >= 1
+    assert payload["archived"] >= 1
+    assert list(
+        (build_context(spec_context=workdir).logs_dir / "retention-prune").glob(
+            "*.jsonl"
+        )
+    )
+
+
+def test_system_prune_rejects_invalid_retention_options(workdir) -> None:
+    rc, _out, err = run_cli(
+        "system",
+        "prune",
+        "--family",
+        "nonsense",
+        "--context",
+        workdir,
+        cwd=workdir,
+    )
+
+    assert rc == 1
+    assert "unknown prune family" in err
+
+    rc, _out, err = run_cli(
+        "system",
+        "prune",
+        "--family",
+        "task-local",
+        "--force",
+        "--context",
+        workdir,
+        cwd=workdir,
+    )
+
+    assert rc == 1
+    assert "--force requires --apply" in err
+
+    rc, _out, err = run_cli(
+        "system",
+        "prune",
+        "--family",
+        "runtime-state",
+        "--apply",
+        "--force",
+        "--context",
+        workdir,
+        cwd=workdir,
+    )
+
+    assert rc == 1
+    assert "--force is only supported for retention prune families" in err
 
 
 def test_system_dump_exports_messages(workdir) -> None:
@@ -367,7 +510,7 @@ def test_system_load_imports_dump(workdir) -> None:
         queue.close()
 
 
-def test_system_lifecycle_monitor_stdout_jsonl(workdir) -> None:
+def test_system_task_monitor_stdout_jsonl(workdir) -> None:
     context = build_context(spec_context=workdir)
     tid = "1778084345905438730"
     _write_task_log(
@@ -378,7 +521,7 @@ def test_system_lifecycle_monitor_stdout_jsonl(workdir) -> None:
             "tid": tid,
             "taskspec": {
                 "tid": tid,
-                "name": "cli-lifecycle",
+                "name": "cli-task-monitor",
                 "spec": {
                     "type": "function",
                     "function_target": "tests.tasks.sample_targets:echo_payload",
@@ -398,7 +541,7 @@ def test_system_lifecycle_monitor_stdout_jsonl(workdir) -> None:
 
     rc, out, err = run_cli(
         "system",
-        "lifecycle-monitor",
+        "task-monitor",
         "--once",
         "--sink",
         "stdout",
@@ -421,10 +564,10 @@ def test_system_lifecycle_monitor_stdout_jsonl(workdir) -> None:
     )
 
 
-def test_system_lifecycle_monitor_rejects_stdout_json(workdir) -> None:
+def test_system_task_monitor_rejects_stdout_json(workdir) -> None:
     rc, out, err = run_cli(
         "system",
-        "lifecycle-monitor",
+        "task-monitor",
         "--sink",
         "stdout",
         "--json",
@@ -438,7 +581,7 @@ def test_system_lifecycle_monitor_rejects_stdout_json(workdir) -> None:
     assert "cannot be combined" in err
 
 
-def test_system_lifecycle_monitor_disk_json_summary(workdir) -> None:
+def test_system_task_monitor_disk_json_summary(workdir) -> None:
     context = build_context(spec_context=workdir)
     tid = "1778084345905438731"
     _write_task_log(
@@ -449,7 +592,7 @@ def test_system_lifecycle_monitor_disk_json_summary(workdir) -> None:
             "tid": tid,
             "taskspec": {
                 "tid": tid,
-                "name": "cli-lifecycle-disk",
+                "name": "cli-task-monitor-disk",
                 "spec": {
                     "type": "function",
                     "function_target": "tests.tasks.sample_targets:echo_payload",
@@ -466,17 +609,17 @@ def test_system_lifecycle_monitor_disk_json_summary(workdir) -> None:
             },
         },
     )
-    archive_dir = workdir / "archive"
+    log_dir = workdir / "logs"
     checkpoint = workdir / "checkpoint.json"
 
     rc, out, err = run_cli(
         "system",
-        "lifecycle-monitor",
+        "task-monitor",
         "--once",
         "--sink",
         "disk",
-        "--archive-dir",
-        archive_dir,
+        "--log-dir",
+        log_dir,
         "--checkpoint",
         checkpoint,
         "--json",
@@ -492,4 +635,67 @@ def test_system_lifecycle_monitor_disk_json_summary(workdir) -> None:
     summary = json.loads(out)
     assert summary["summaries_emitted"] >= 1
     assert checkpoint.exists()
-    assert list(archive_dir.glob("*.jsonl"))
+    assert list(log_dir.glob("*.jsonl"))
+
+
+def test_system_task_monitor_uses_default_logs_dir(workdir) -> None:
+    context = build_context(spec_context=workdir)
+    tid = "1778084345905438732"
+    _write_task_log(
+        context,
+        {
+            "event": "work_completed",
+            "status": "completed",
+            "tid": tid,
+            "taskspec": {
+                "tid": tid,
+                "name": "cli-task-monitor-default-log-dir",
+                "spec": {
+                    "type": "function",
+                    "function_target": "tests.tasks.sample_targets:echo_payload",
+                    "runner": {"name": "host", "options": {}},
+                },
+                "state": {"status": "completed"},
+            },
+        },
+    )
+
+    rc, out, err = run_cli(
+        "system",
+        "task-monitor",
+        "--once",
+        "--sink",
+        "disk",
+        "--json",
+        "--no-checkpoint",
+        "--since",
+        "0",
+        "--context",
+        workdir,
+        cwd=workdir,
+    )
+
+    assert rc == 0
+    assert err == ""
+    summary = json.loads(out)
+    expected_dir = (workdir / ".weft" / "logs" / "task-monitor").resolve()
+    assert Path(summary["log_path"]).parent == expected_dir
+    assert list(expected_dir.glob("*.jsonl"))
+
+
+def test_system_task_monitor_rejects_removed_archive_dir_option(workdir) -> None:
+    rc, out, err = run_cli(
+        "system",
+        "task-monitor",
+        "--sink",
+        "disk",
+        "--archive" + "-dir",
+        workdir / "archive",
+        "--context",
+        workdir,
+        cwd=workdir,
+    )
+
+    assert rc != 0
+    assert out == ""
+    assert "archive-dir" in err

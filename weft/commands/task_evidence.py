@@ -9,14 +9,11 @@ from __future__ import annotations
 
 import json
 import time
-import uuid
 from dataclasses import dataclass, field, replace
 from typing import Any
 
 from simplebroker.ext import BrokerError
 from weft._constants import (
-    CONTROL_PING,
-    CONTROL_SURFACE_WAIT_INTERVAL,
     CONTROL_SURFACE_WAIT_TIMEOUT,
     QUEUE_CTRL_IN_SUFFIX,
     QUEUE_CTRL_OUT_SUFFIX,
@@ -36,6 +33,7 @@ from weft.commands._streaming import (
 )
 from weft.commands.types import QueueAckTarget, TaskTerminalSnapshot
 from weft.context import WeftContext
+from weft.core.control_probe import send_keyed_ping_probe
 from weft.ext import RunnerHandle
 from weft.helpers import handle_has_live_host_process, iter_queue_json_entries
 
@@ -346,36 +344,6 @@ def reconciliation_for_live_pong(
     return payload
 
 
-def coerce_pong_response(
-    raw: str,
-    *,
-    tid: str,
-    request_id: str,
-) -> dict[str, Any] | None:
-    """Return a matched structured PONG response or None."""
-
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(payload, dict):
-        return None
-    if str(payload.get("command", "")).strip().upper() != CONTROL_PING:
-        return None
-    if str(payload.get("status", "")).strip().lower() != "ok":
-        return None
-    if payload.get("message") != "PONG":
-        return None
-    if payload.get("request_id") != request_id:
-        return None
-    if payload.get("tid") != tid:
-        return None
-    task_status = payload.get("task_status")
-    if not isinstance(task_status, str) or not task_status:
-        return None
-    return payload
-
-
 def _live_pong_snapshot(
     payload: dict[str, Any],
     *,
@@ -411,7 +379,7 @@ def _live_pong_snapshot(
     return replace(snapshot, reconciliation=reconciliation_for_live_pong(snapshot))
 
 
-def probe_live_pong_evidence(
+def ping_pong_evidence(
     ctx: WeftContext,
     *,
     tid: str,
@@ -420,42 +388,23 @@ def probe_live_pong_evidence(
 ) -> TaskEvidenceSnapshot | None:
     """Send a keyed PING and return matching live PONG evidence if visible."""
 
-    request_id = uuid.uuid4().hex
     ctrl_in_name, ctrl_out_name = control_queue_names_for_tid(tid, taskspec_payload)
-    ctrl_in = ctx.queue(ctrl_in_name, persistent=True)
-    try:
-        ctrl_in.write(json.dumps({"command": CONTROL_PING, "request_id": request_id}))
-    finally:
-        ctrl_in.close()
-
-    deadline = time.monotonic() + max(0.0, timeout)
-    ctrl_out = ctx.queue(ctrl_out_name, persistent=False)
-    try:
-        while True:
-            for item in ctrl_out.peek_generator(with_timestamps=True):
-                if not isinstance(item, tuple) or len(item) != 2:
-                    continue
-                body, timestamp = item
-                payload = coerce_pong_response(
-                    str(body),
-                    tid=tid,
-                    request_id=request_id,
-                )
-                if payload is None:
-                    continue
-                return _live_pong_snapshot(
-                    payload,
-                    tid=tid,
-                    request_id=request_id,
-                    observed_at=int(timestamp),
-                    taskspec_payload=taskspec_payload,
-                )
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return None
-            time.sleep(min(CONTROL_SURFACE_WAIT_INTERVAL, remaining))
-    finally:
-        ctrl_out.close()
+    result = send_keyed_ping_probe(
+        ctx,
+        tid=tid,
+        ctrl_in_name=ctrl_in_name,
+        ctrl_out_name=ctrl_out_name,
+        timeout=timeout,
+    )
+    if result.matched is None:
+        return None
+    return _live_pong_snapshot(
+        result.matched.payload,
+        tid=tid,
+        request_id=result.matched.request_id,
+        observed_at=result.matched.observed_at,
+        taskspec_payload=taskspec_payload,
+    )
 
 
 def peek_terminal_ctrl_out_evidence(
@@ -856,7 +805,7 @@ def known_tid_evidence(
     tid: str,
     taskspec_payload: dict[str, Any] | None = None,
     mapping_entry: dict[str, Any] | None = None,
-    probe_live: bool = False,
+    ping: bool = False,
     probe_timeout: float = CONTROL_SURFACE_WAIT_TIMEOUT,
 ) -> TaskEvidenceSnapshot | None:
     """Return the best non-consuming evidence for a known full TID."""
@@ -909,10 +858,10 @@ def known_tid_evidence(
         else:
             read_only_snapshot = stale_snapshot
 
-    if not probe_live:
+    if not ping:
         return read_only_snapshot
 
-    pong_snapshot = probe_live_pong_evidence(
+    pong_snapshot = ping_pong_evidence(
         ctx,
         tid=tid,
         taskspec_payload=taskspec_payload,

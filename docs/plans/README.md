@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 67 plan files in this directory.
+There are currently 70 plan files in this directory.
 
 ## Curation Policy
 
@@ -22,9 +22,12 @@ There are currently 67 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-05-07-task-monitor-ping-logs-breaking-cleanup-plan.md`](./2026-05-07-task-monitor-ping-logs-breaking-cleanup-plan.md) | Task Monitor, Ping Flag, And Logs Directory Breaking Cleanup Plan | `completed` | none |
+| [`2026-05-07-task-local-reaper-retention-policy-plan.md`](./2026-05-07-task-local-reaper-retention-policy-plan.md) | Task Local Reaper And Retention Policy Plan | `completed` | none |
 | [`2026-05-07-runtime-state-pruning-plan.md`](./2026-05-07-runtime-state-pruning-plan.md) | Runtime State Pruning Plan | `completed` | none |
 | [`2026-05-07-lifecycle-monitor-archive-sink-plan.md`](./2026-05-07-lifecycle-monitor-archive-sink-plan.md) | Lifecycle Monitor Archive Sink Plan | `completed` | none |
 | [`2026-05-07-result-evidence-and-superseded-manager-reconciliation-plan.md`](./2026-05-07-result-evidence-and-superseded-manager-reconciliation-plan.md) | Result Evidence And Superseded Manager Reconciliation Plan | `completed` | none |
+| [`2026-05-07-manager-selection-ping-pong-liveness-plan.md`](./2026-05-07-manager-selection-ping-pong-liveness-plan.md) | Manager Selection PING/PONG Liveness Plan | `completed` | none |
 | [`2026-05-07-extended-ping-pong-state-probe-plan.md`](./2026-05-07-extended-ping-pong-state-probe-plan.md) | Extended PING/PONG State Probe Plan | `draft` | none |
 | [`2026-05-06-terminal-publication-hardening-plan.md`](./2026-05-06-terminal-publication-hardening-plan.md) | Terminal Publication And Wrapper-Loss Hardening Plan | `draft` | none |
 | [`2026-05-06-task-evidence-reconciliation-model-plan.md`](./2026-05-06-task-evidence-reconciliation-model-plan.md) | Task Evidence Reconciliation Model Plan | `draft` | none |

@@ -1411,7 +1411,7 @@ provides-extras = ["pg", "docker", "django", "django-channels", "macos-sandbox",
 
 [[package]]
 name = "weft-django"
-version = "0.9.19"
+version = "0.9.20"
 source = { editable = "integrations/weft_django" }
 dependencies = [
     { name = "django" },
@@ -1429,13 +1429,13 @@ requires-dist = [
     { name = "channels", marker = "extra == 'realtime'", specifier = ">=4.1,<5" },
     { name = "django", specifier = ">=4.2,<6" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
-    { name = "weft", specifier = ">=0.9.11" },
+    { name = "weft", specifier = ">=0.9.19" },
 ]
 provides-extras = ["channels", "realtime", "dev"]
 
 [[package]]
 name = "weft-docker"
-version = "0.9.19"
+version = "0.9.20"
 source = { editable = "extensions/weft_docker" }
 dependencies = [
     { name = "docker" },
@@ -1446,13 +1446,13 @@ dependencies = [
 requires-dist = [
     { name = "docker", specifier = ">=7.1.0,<8" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
-    { name = "weft", specifier = ">=0.6.4,<1" },
+    { name = "weft", specifier = ">=0.9.19,<1" },
 ]
 provides-extras = ["dev"]
 
 [[package]]
 name = "weft-macos-sandbox"
-version = "0.5.1"
+version = "0.5.2"
 source = { editable = "extensions/weft_macos_sandbox" }
 dependencies = [
     { name = "weft" },
@@ -1461,6 +1461,6 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
-    { name = "weft", specifier = ">=0.6.4,<1" },
+    { name = "weft", specifier = ">=0.9.19,<1" },
 ]
 provides-extras = ["dev"]

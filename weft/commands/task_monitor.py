@@ -1,8 +1,8 @@
-"""Foreground lifecycle monitor archive command.
+"""Foreground task monitor log command.
 
-The lifecycle monitor scans task-log evidence without consuming broker
-messages, emits compact JSONL archive records, and stores an operational
-checkpoint only after archive output succeeds.
+The task monitor scans task-log evidence without consuming broker messages,
+emits compact JSONL operational log records, and stores an operational
+checkpoint only after disk/stdout output succeeds.
 
 Spec references:
 - docs/specifications/01-Core_Components.md [CC-2.3]
@@ -26,31 +26,31 @@ from typing import Any, Literal
 
 from simplebroker.ext import BrokerError
 from weft._constants import (
-    LIFECYCLE_MONITOR_ARCHIVE_SUBDIR,
-    LIFECYCLE_MONITOR_CHECKPOINT_PATH,
-    LIFECYCLE_MONITOR_SCHEMA_VERSION,
-    LIFECYCLE_MONITOR_WEFT_ANOMALY_CLASSIFICATIONS,
+    TASK_MONITOR_CHECKPOINT_PATH,
+    TASK_MONITOR_LOG_SUBDIR,
+    TASK_MONITOR_SCHEMA_VERSION,
+    TASK_MONITOR_WEFT_ANOMALY_CLASSIFICATIONS,
     TASKSPEC_TID_SHORT_LENGTH,
 )
 from weft.commands import task_evidence
 from weft.context import WeftContext, build_context
-from weft.core.tasks.lifecycle_monitor import (
-    LifecycleMonitorTask,
-    make_lifecycle_monitor_taskspec,
+from weft.core.tasks.task_monitor import (
+    TaskMonitorTask,
+    make_task_monitor_taskspec,
 )
 
-ArchiveSinkName = Literal["stdout", "disk"]
+TaskMonitorSinkName = Literal["stdout", "disk"]
 
 
 @dataclass(frozen=True, slots=True)
-class LifecycleMonitorConfig:
-    """Configuration for one foreground lifecycle monitor invocation."""
+class TaskMonitorConfig:
+    """Configuration for one foreground task monitor invocation."""
 
     context_path: str | Path | None = None
     once: bool = True
     follow: bool = False
-    sink: ArchiveSinkName = "stdout"
-    archive_dir: Path | None = None
+    sink: TaskMonitorSinkName = "stdout"
+    log_dir: Path | None = None
     checkpoint_path: Path | None = None
     no_checkpoint: bool = False
     since_timestamp: int | None = None
@@ -60,8 +60,8 @@ class LifecycleMonitorConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class LifecycleMonitorCheckpoint:
-    """Operational cursor for lifecycle monitor task-log scans."""
+class TaskMonitorCheckpoint:
+    """Operational cursor for task monitor task-log scans."""
 
     schema_version: int
     monitor_name: str
@@ -70,13 +70,13 @@ class LifecycleMonitorCheckpoint:
 
 
 @dataclass(frozen=True, slots=True)
-class LifecycleMonitorResult:
+class TaskMonitorResult:
     """Command result returned to the CLI adapter."""
 
     exit_code: int
     stdout: str = ""
     stderr: str = ""
-    archive_path: Path | None = None
+    log_path: Path | None = None
     records_written: int = 0
     events_scanned: int = 0
     tids_seen: int = 0
@@ -84,7 +84,7 @@ class LifecycleMonitorResult:
     checkpoint_timestamp: int | None = None
 
     def summary_payload(self) -> dict[str, Any]:
-        """Return the final non-archive command summary."""
+        """Return the final command summary."""
 
         payload: dict[str, Any] = {
             "exit_code": self.exit_code,
@@ -94,8 +94,8 @@ class LifecycleMonitorResult:
             "summaries_emitted": self.summaries_emitted,
             "checkpoint_timestamp": self.checkpoint_timestamp,
         }
-        if self.archive_path is not None:
-            payload["archive_path"] = str(self.archive_path)
+        if self.log_path is not None:
+            payload["log_path"] = str(self.log_path)
         return payload
 
 
@@ -115,23 +115,23 @@ class ReducedTaskLog:
 
 
 @dataclass(frozen=True, slots=True)
-class TaskLifecycleSummary:
-    """Compact archive summary for one terminal or anomalous task."""
+class TaskMonitorSummary:
+    """Compact task-monitor summary for one terminal or anomalous task."""
 
     record: dict[str, Any]
 
 
 @dataclass(slots=True)
 class ScanResult:
-    """Reduced scan result before archive serialization."""
+    """Reduced scan result before task-monitor serialization."""
 
     reduced: dict[str, ReducedTaskLog] = field(default_factory=dict)
     events_scanned: int = 0
     last_task_log_timestamp: int | None = None
 
 
-class StdoutArchiveSink:
-    """Archive sink that buffers JSONL records for stdout."""
+class StdoutTaskMonitorSink:
+    """Task-monitor sink that buffers JSONL records for stdout."""
 
     def __init__(self) -> None:
         self._lines: list[str] = []
@@ -145,8 +145,8 @@ class StdoutArchiveSink:
         return "\n".join(self._lines) + "\n"
 
     @property
-    def archive_path(self) -> Path | None:
-        """Stdout has no archive path."""
+    def log_path(self) -> Path | None:
+        """Stdout has no log path."""
 
         return None
 
@@ -161,25 +161,25 @@ class StdoutArchiveSink:
         return count
 
 
-class DiskJsonlArchiveSink:
-    """Append-only date-partitioned JSONL archive sink."""
+class DiskJsonlTaskMonitorSink:
+    """Append-only date-partitioned JSONL task-monitor sink."""
 
-    def __init__(self, archive_dir: Path, *, run_date: str) -> None:
-        self._archive_dir = archive_dir
-        self._archive_path = archive_dir / f"{run_date}.jsonl"
+    def __init__(self, log_dir: Path, *, run_date: str) -> None:
+        self._log_dir = log_dir
+        self._log_path = log_dir / f"{run_date}.jsonl"
 
     @property
-    def archive_path(self) -> Path:
-        """Path receiving archive records."""
+    def log_path(self) -> Path:
+        """Path receiving task-monitor records."""
 
-        return self._archive_path
+        return self._log_path
 
     def write_records(self, records: Iterable[dict[str, Any]]) -> int:
-        """Append records to the date-partitioned archive file."""
+        """Append records to the date-partitioned task-monitor file."""
 
-        self._archive_dir.mkdir(parents=True, exist_ok=True)
+        self._log_dir.mkdir(parents=True, exist_ok=True)
         count = 0
-        with self._archive_path.open("a", encoding="utf-8") as handle:
+        with self._log_path.open("a", encoding="utf-8") as handle:
             for record in records:
                 handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True))
                 handle.write("\n")
@@ -188,53 +188,51 @@ class DiskJsonlArchiveSink:
         return count
 
 
-ArchiveSink = StdoutArchiveSink | DiskJsonlArchiveSink
+TaskMonitorSink = StdoutTaskMonitorSink | DiskJsonlTaskMonitorSink
 
 
-def default_archive_dir(ctx: WeftContext) -> Path:
-    """Return the default lifecycle monitor archive directory."""
+def default_log_dir(ctx: WeftContext) -> Path:
+    """Return the default task monitor log directory."""
 
-    return ctx.weft_dir / LIFECYCLE_MONITOR_ARCHIVE_SUBDIR
+    return ctx.logs_dir / TASK_MONITOR_LOG_SUBDIR
 
 
 def default_checkpoint_path(ctx: WeftContext) -> Path:
-    """Return the default lifecycle monitor checkpoint path."""
+    """Return the default task monitor checkpoint path."""
 
-    return ctx.weft_dir / LIFECYCLE_MONITOR_CHECKPOINT_PATH
+    return ctx.weft_dir / TASK_MONITOR_CHECKPOINT_PATH
 
 
 def _record_base(
     record_type: str, monitor_run_id: str, emitted_at: int
 ) -> dict[str, Any]:
     return {
-        "schema_version": LIFECYCLE_MONITOR_SCHEMA_VERSION,
+        "schema_version": TASK_MONITOR_SCHEMA_VERSION,
         "record_type": record_type,
         "monitor_run_id": monitor_run_id,
         "emitted_at": emitted_at,
     }
 
 
-def _load_checkpoint(
-    path: Path, monitor_name: str
-) -> LifecycleMonitorCheckpoint | None:
+def _load_checkpoint(path: Path, monitor_name: str) -> TaskMonitorCheckpoint | None:
     if not path.exists():
         return None
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError(f"Invalid lifecycle monitor checkpoint: {path}") from exc
+        raise ValueError(f"Invalid task monitor checkpoint: {path}") from exc
     if not isinstance(payload, dict):
-        raise ValueError(f"Invalid lifecycle monitor checkpoint: {path}")
+        raise ValueError(f"Invalid task monitor checkpoint: {path}")
     try:
         schema_version = int(payload["schema_version"])
         last_timestamp = int(payload["last_task_log_timestamp"])
     except (KeyError, TypeError, ValueError) as exc:
-        raise ValueError(f"Invalid lifecycle monitor checkpoint: {path}") from exc
+        raise ValueError(f"Invalid task monitor checkpoint: {path}") from exc
     name = payload.get("monitor_name")
-    if name != monitor_name or schema_version != LIFECYCLE_MONITOR_SCHEMA_VERSION:
-        raise ValueError(f"Invalid lifecycle monitor checkpoint: {path}")
+    if name != monitor_name or schema_version != TASK_MONITOR_SCHEMA_VERSION:
+        raise ValueError(f"Invalid task monitor checkpoint: {path}")
     updated_at = payload.get("updated_at")
-    return LifecycleMonitorCheckpoint(
+    return TaskMonitorCheckpoint(
         schema_version=schema_version,
         monitor_name=monitor_name,
         updated_at=int(updated_at) if isinstance(updated_at, int) else 0,
@@ -242,7 +240,7 @@ def _load_checkpoint(
     )
 
 
-def _write_checkpoint(path: Path, checkpoint: LifecycleMonitorCheckpoint) -> None:
+def _write_checkpoint(path: Path, checkpoint: TaskMonitorCheckpoint) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "schema_version": checkpoint.schema_version,
@@ -324,7 +322,7 @@ def _reduce_task_log(
     return result
 
 
-def _scan_with_lifecycle_task(
+def _scan_with_task_monitor(
     ctx: WeftContext,
     *,
     since_timestamp: int | None,
@@ -340,9 +338,9 @@ def _scan_with_lifecycle_task(
         if isinstance(payload, dict):
             entries.append((payload, timestamp))
 
-    monitor = LifecycleMonitorTask(
+    monitor = TaskMonitorTask(
         ctx.broker_target,
-        make_lifecycle_monitor_taskspec(),
+        make_task_monitor_taskspec(),
         observer=collect,
         config=ctx.config,
     )
@@ -373,7 +371,7 @@ def _best_evidence(
 
 
 def _failure_owner(snapshot: task_evidence.TaskEvidenceSnapshot) -> str | None:
-    if snapshot.classification in LIFECYCLE_MONITOR_WEFT_ANOMALY_CLASSIFICATIONS:
+    if snapshot.classification in TASK_MONITOR_WEFT_ANOMALY_CLASSIFICATIONS:
         return "weft_lifecycle"
     if snapshot.status == "completed":
         return None
@@ -382,7 +380,7 @@ def _failure_owner(snapshot: task_evidence.TaskEvidenceSnapshot) -> str | None:
     return None
 
 
-def _archive_classification(snapshot: task_evidence.TaskEvidenceSnapshot) -> str:
+def _monitor_classification(snapshot: task_evidence.TaskEvidenceSnapshot) -> str:
     if snapshot.classification == "terminal_log" and snapshot.status != "completed":
         return "domain_failure"
     return snapshot.classification
@@ -402,7 +400,7 @@ def _build_summary_record(
     monitor_run_id: str,
     emitted_at: int,
 ) -> dict[str, Any]:
-    classification = _archive_classification(snapshot)
+    classification = _monitor_classification(snapshot)
     observed_at = snapshot.observed_at or reduced.latest_timestamp
     source = snapshot.source
     event = snapshot.event
@@ -484,8 +482,8 @@ def _records_for_scan(
 
 
 def _resolve_since(
-    config: LifecycleMonitorConfig,
-    checkpoint: LifecycleMonitorCheckpoint | None,
+    config: TaskMonitorConfig,
+    checkpoint: TaskMonitorCheckpoint | None,
 ) -> int | None:
     if config.since_timestamp is not None:
         return config.since_timestamp
@@ -494,22 +492,22 @@ def _resolve_since(
     return None
 
 
-def run_lifecycle_monitor(config: LifecycleMonitorConfig) -> LifecycleMonitorResult:
-    """Run one foreground lifecycle monitor pass.
+def run_task_monitor(config: TaskMonitorConfig) -> TaskMonitorResult:
+    """Run one foreground task monitor pass.
 
     The first Release 4 implementation accepts `follow` for CLI shape but keeps
     command execution to a single pass unless a later slice expands it.
     """
 
     if config.sink not in {"stdout", "disk"}:
-        return LifecycleMonitorResult(1, stderr=f"Invalid sink: {config.sink}")
+        return TaskMonitorResult(1, stderr=f"Invalid sink: {config.sink}")
     if config.sink == "stdout" and config.json_output:
-        return LifecycleMonitorResult(
+        return TaskMonitorResult(
             1,
             stderr="--sink stdout and --json cannot be combined",
         )
     if config.limit is not None and config.limit < 0:
-        return LifecycleMonitorResult(1, stderr="--limit must be non-negative")
+        return TaskMonitorResult(1, stderr="--limit must be non-negative")
 
     try:
         ctx = build_context(spec_context=config.context_path)
@@ -520,7 +518,7 @@ def run_lifecycle_monitor(config: LifecycleMonitorConfig) -> LifecycleMonitorRes
             else _load_checkpoint(checkpoint_path, config.monitor_name)
         )
         since_timestamp = _resolve_since(config, checkpoint)
-        scan = _scan_with_lifecycle_task(
+        scan = _scan_with_task_monitor(
             ctx,
             since_timestamp=since_timestamp,
             limit=config.limit,
@@ -551,12 +549,12 @@ def run_lifecycle_monitor(config: LifecycleMonitorConfig) -> LifecycleMonitorRes
             checkpoint_timestamp=checkpoint_timestamp,
         )
 
-        sink: ArchiveSink
+        sink: TaskMonitorSink
         if config.sink == "stdout":
-            sink = StdoutArchiveSink()
+            sink = StdoutTaskMonitorSink()
         else:
-            sink = DiskJsonlArchiveSink(
-                config.archive_dir or default_archive_dir(ctx),
+            sink = DiskJsonlTaskMonitorSink(
+                config.log_dir or default_log_dir(ctx),
                 run_date=run_date,
             )
         records_written = sink.write_records(records)
@@ -564,8 +562,8 @@ def run_lifecycle_monitor(config: LifecycleMonitorConfig) -> LifecycleMonitorRes
         if not config.no_checkpoint and checkpoint_timestamp is not None:
             _write_checkpoint(
                 checkpoint_path,
-                LifecycleMonitorCheckpoint(
-                    schema_version=LIFECYCLE_MONITOR_SCHEMA_VERSION,
+                TaskMonitorCheckpoint(
+                    schema_version=TASK_MONITOR_SCHEMA_VERSION,
                     monitor_name=config.monitor_name,
                     updated_at=time.time_ns(),
                     last_task_log_timestamp=checkpoint_timestamp,
@@ -573,7 +571,7 @@ def run_lifecycle_monitor(config: LifecycleMonitorConfig) -> LifecycleMonitorRes
             )
 
         stdout = ""
-        if isinstance(sink, StdoutArchiveSink):
+        if isinstance(sink, StdoutTaskMonitorSink):
             stdout = sink.output
         elif config.json_output:
             stdout = json.dumps(
@@ -583,20 +581,19 @@ def run_lifecycle_monitor(config: LifecycleMonitorConfig) -> LifecycleMonitorRes
                     "tids_seen": len(scan.reduced),
                     "summaries_emitted": summaries,
                     "checkpoint_timestamp": checkpoint_timestamp,
-                    "archive_path": str(sink.archive_path),
+                    "log_path": str(sink.log_path),
                 },
                 ensure_ascii=False,
                 sort_keys=True,
             )
         else:
             stdout = (
-                f"Lifecycle monitor wrote {records_written} record(s) "
-                f"to {sink.archive_path}"
+                f"Task monitor wrote {records_written} record(s) to {sink.log_path}"
             )
-        return LifecycleMonitorResult(
+        return TaskMonitorResult(
             0,
             stdout=stdout,
-            archive_path=sink.archive_path,
+            log_path=sink.log_path,
             records_written=records_written,
             events_scanned=scan.events_scanned,
             tids_seen=len(scan.reduced),
@@ -604,4 +601,4 @@ def run_lifecycle_monitor(config: LifecycleMonitorConfig) -> LifecycleMonitorRes
             checkpoint_timestamp=checkpoint_timestamp,
         )
     except (ValueError, OSError, BrokerError, RuntimeError) as exc:
-        return LifecycleMonitorResult(1, stderr=str(exc))
+        return TaskMonitorResult(1, stderr=str(exc))

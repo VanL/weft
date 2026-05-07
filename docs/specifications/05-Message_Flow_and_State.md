@@ -107,6 +107,11 @@ The control plane is explicit:
   `activity`, optional `waiting_on`, and optional best-effort `runtime`
   details from the active runner; structured PING envelopes with `request_id`
   must echo the same `request_id` in the PONG
+- manager PONG responses include manager-selection fields when available:
+  `role="manager"`, `inbox`/`requests`, `ctrl_in`, `ctrl_out`, `outbox`, and
+  `weft_context`; selection code may use those fields to validate a matched
+  manager liveness proof, but missing PONGs remain absence of proof rather than
+  proof of death
 - runner-specific PONG `runtime` details must come from the existing runner
   handle/plugin description contract, such as Docker's
   `RunnerRuntimeDescription`; failure to collect those details must not
@@ -138,7 +143,8 @@ Implementation plan backlinks:
 - `docs/plans/2026-05-06-task-evidence-reconciliation-model-plan.md`
 - `docs/plans/2026-05-06-terminal-publication-hardening-plan.md`
 - `docs/plans/2026-05-07-extended-ping-pong-state-probe-plan.md`
-- `docs/plans/2026-05-07-lifecycle-monitor-archive-sink-plan.md`
+- `docs/plans/2026-05-07-task-monitor-archive-sink-plan.md`
+- `docs/plans/2026-05-07-manager-selection-ping-pong-liveness-plan.md`
 
 ### 3.1 Named Endpoint Discovery [MF-3.1]
 
@@ -229,7 +235,7 @@ Current flow:
 
 ```text
 Task lifecycle events -> weft.log.tasks -> status/result reconstruction
-Task lifecycle events -> weft.log.tasks -> lifecycle-monitor archive JSONL
+Task lifecycle events -> weft.log.tasks -> task-monitor JSONL logs
 ```
 
 Current rules:
@@ -238,21 +244,24 @@ Current rules:
 - CLI status surfaces reconstruct task snapshots from that log plus the latest
   `weft.state.tid_mappings` entries and live runtime liveness where needed; they
   do not depend on a separate state database
-- `weft system lifecycle-monitor` can scan `weft.log.tasks` without consuming
+- `weft system task-monitor` can scan `weft.log.tasks` without consuming
   broker messages and emit compact JSONL records to stdout or append-only disk
-  archive files under `.weft/archive/tasks/`
-- lifecycle-monitor checkpoints under `.weft/state/lifecycle-monitor/` are
+  log files under `.weft/logs/task-monitor/`
+- task-monitor checkpoints under `.weft/state/task-monitor/` are
   operational cursors only; deleting or corrupting them may affect duplicate
-  archive output, but it must not change task lifecycle truth, public status,
+  log output, but it must not change task lifecycle truth, public status,
   result materialization, or cleanup decisions
-- lifecycle-monitor archive records are observational output only in the
+- task-monitor log records are observational output only in the
   current release. The monitor does not delete, reserve, move, prune, reap, or
   mark broker messages as cleanup candidates
-- `weft system prune` is a separate foreground maintenance
-  command for runtime-only `weft.state.*` soft state. It may report or delete
-  exact message IDs from supported runtime queues after conservative live/recent
-  checks. Its reports are operational evidence only; they do not become task
-  lifecycle truth and status/result reconstruction must not depend on them.
+- `weft system prune` is a separate foreground maintenance command.
+  `--family runtime-state` reports or deletes exact message IDs from supported
+  `weft.state.*` queues after conservative live/recent checks.
+  `--family task-local`, `--family task-log`, and `--family retention` report
+  or delete task-local/lifecycle-log retention candidates through
+  archive-backed exact-message pruning. Prune reports and archives are
+  operational evidence only; they do not become task lifecycle truth and
+  status/result reconstruction must not depend on them.
 - for read-only status reconstruction, terminal task-log lifecycle proof wins
   for public `status`; runtime liveness disagreement may be exposed through
   `reconciliation` diagnostics, but it must not rewrite a terminal task back to
@@ -308,12 +317,12 @@ Current rules:
   shared completion wait
 
 _Implementation mapping_: `weft/core/tasks/base.py` `_report_state_change`;
-`weft/core/tasks/lifecycle_monitor.py` foreground monitor scan primitive;
+`weft/core/tasks/task_monitor.py` foreground monitor scan primitive;
 `weft/commands/status.py` and `weft/commands/system.py` log replay and snapshot
 collection;
 `weft/commands/result.py` materialization and completion waits;
 `weft/commands/task_evidence.py`;
-`weft/commands/lifecycle_monitor.py` archive summaries and checkpoints;
+`weft/commands/task_monitor.py` archive summaries and checkpoints;
 `weft/commands/runtime_prune.py` explicit runtime-only prune reports and
 exact-message deletion;
 `weft/commands/_result_wait.py`;
@@ -572,10 +581,18 @@ _Implementation mapping_: `weft/core/tasks/base.py` `_spill_large_output`,
 
 ### Cleanup Boundary
 
-Current cleanup is task-owned:
+Current cleanup is task-owned unless an operator explicitly invokes foreground
+system pruning:
 
 - task-owned cleanup may remove spilled output when `cleanup_on_exit` is enabled
 - there is no built-in age-based output sweeper in the current contract
+- `weft system prune --family task-log|task-local|retention` is an explicit
+  operator action, not a background sweeper. Ordinary apply mode requires an
+  archive artifact before deletion. Force apply mode is a human override for
+  ordinary retention protections, but it still deletes only selected exact
+  broker message IDs.
+
+_Implementation mapping_: `weft/commands/retention_prune.py`.
 
 ## Queue Management Patterns
 
@@ -603,8 +620,15 @@ Current rules:
 - runtime pruning must preserve recent rows, malformed or unknown-shape rows,
   and rows whose live owner remains active or ambiguous under existing
   liveness rules
-- runtime pruning must not delete from `weft.log.tasks`, `weft.spawn.requests`,
-  manager control queues, or task-local `T{tid}.*` queues
+- runtime-state pruning must not delete from `weft.log.tasks`,
+  `weft.spawn.requests`, manager control queues, or task-local `T{tid}.*`
+  queues
+- retention pruning may delete selected rows from `weft.log.tasks`,
+  `T{tid}.outbox`, `T{tid}.ctrl_out`, `T{tid}.ctrl_in`, `T{tid}.inbox`, and
+  `T{tid}.reserved`. Ordinary apply protects active/ambiguous task evidence,
+  claimed outbox residue, malformed/unknown-shape rows, and inbox/reserved work
+  unless the class is safe for ordinary deletion. `--force --apply` is the
+  explicit human override for those ordinary protections.
 - `weft system tidy` handles backend-native cleanup of empty queues and broker
   maintenance
 - there is no separate queue-lifecycle service in the current contract
@@ -630,7 +654,7 @@ management live in the companion doc:
 - [`docs/plans/2026-05-06-status-coherence-and-stale-pid-liveness-plan.md`](../plans/2026-05-06-status-coherence-and-stale-pid-liveness-plan.md)
 - [`docs/plans/2026-05-06-task-evidence-reconciliation-model-plan.md`](../plans/2026-05-06-task-evidence-reconciliation-model-plan.md)
 - [`docs/plans/2026-05-06-terminal-publication-hardening-plan.md`](../plans/2026-05-06-terminal-publication-hardening-plan.md)
-- [`docs/plans/2026-05-07-lifecycle-monitor-archive-sink-plan.md`](../plans/2026-05-07-lifecycle-monitor-archive-sink-plan.md)
+- [`docs/plans/2026-05-07-task-monitor-archive-sink-plan.md`](../plans/2026-05-07-task-monitor-archive-sink-plan.md)
 - [`docs/plans/2026-05-07-result-evidence-and-superseded-manager-reconciliation-plan.md`](../plans/2026-05-07-result-evidence-and-superseded-manager-reconciliation-plan.md)
 - [`docs/plans/2026-04-14-spawn-request-reconciliation-plan.md`](../plans/2026-04-14-spawn-request-reconciliation-plan.md)
 - [`docs/plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md`](../plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md)

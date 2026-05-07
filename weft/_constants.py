@@ -149,6 +149,9 @@ MANAGER_TASK_CLASS_PATH: Final[str] = "weft.core.manager.Manager"
 MANAGER_STARTUP_LOG_DIRNAME: Final[str] = "manager-startup"
 """Subdirectory under the Weft logs directory used for detached manager bootstrap stderr."""
 
+MANAGER_PONG_LIVE_AT_KEY: Final[str] = "_pong_live_at"
+"""Internal registry key recording the timestamp of a matched manager PONG."""
+
 MANAGER_LAUNCHER_SIGNAL_SUCCESS: Final[str] = "SUCCESS"
 """Parent-to-launcher signal indicating detached manager startup succeeded."""
 
@@ -216,14 +219,14 @@ QUEUE_RESERVED_SUFFIX: Final[str] = "reserved"
 WEFT_GLOBAL_LOG_QUEUE: Final[str] = "weft.log.tasks"
 """Global queue for task state changes and events."""
 
-LIFECYCLE_MONITOR_SCHEMA_VERSION: Final[int] = 1
-"""JSONL schema version for lifecycle monitor archive records."""
+TASK_MONITOR_SCHEMA_VERSION: Final[int] = 1
+"""JSONL schema version for task monitor operational records."""
 
-LIFECYCLE_MONITOR_ARCHIVE_SUBDIR: Final[str] = "archive/tasks"
-"""Subdirectory under the Weft context for lifecycle monitor disk archives."""
+TASK_MONITOR_LOG_SUBDIR: Final[str] = "task-monitor"
+"""Subdirectory under the configured logs directory for task monitor records."""
 
-LIFECYCLE_MONITOR_CHECKPOINT_PATH: Final[str] = "state/lifecycle-monitor/default.json"
-"""Default lifecycle monitor checkpoint path under the Weft metadata directory."""
+TASK_MONITOR_CHECKPOINT_PATH: Final[str] = "state/task-monitor/default.json"
+"""Default task monitor checkpoint path under the Weft metadata directory."""
 
 RUNTIME_PRUNE_SCHEMA_VERSION: Final[int] = 1
 """JSONL schema version for explicit runtime-state prune reports."""
@@ -260,7 +263,7 @@ RUNTIME_PRUNE_CLASS_UNSUPPORTED_PIPELINE: Final[str] = (
 )
 """Runtime-prune report-only classification for unsupported pipeline row shapes."""
 
-LIFECYCLE_MONITOR_WEFT_ANOMALY_CLASSIFICATIONS: Final[frozenset[str]] = frozenset(
+TASK_MONITOR_WEFT_ANOMALY_CLASSIFICATIONS: Final[frozenset[str]] = frozenset(
     {
         "wrapper_lost",
         "result_without_terminal",
@@ -270,7 +273,7 @@ LIFECYCLE_MONITOR_WEFT_ANOMALY_CLASSIFICATIONS: Final[frozenset[str]] = frozense
         "orphaned_inbox",
     }
 )
-"""Lifecycle monitor classifications owned by Weft lifecycle anomalies."""
+"""Task monitor classifications owned by Weft task anomalies."""
 
 WEFT_TID_MAPPINGS_QUEUE: Final[str] = "weft.state.tid_mappings"
 """Global queue for TID short->full mappings for process management."""
@@ -319,6 +322,100 @@ RUNTIME_PRUNE_REPORT_ONLY_CLASSIFICATIONS: Final[frozenset[str]] = frozenset(
     {RUNTIME_PRUNE_CLASS_UNSUPPORTED_PIPELINE}
 )
 """Runtime-prune classifications that must never be actively deleted."""
+
+RETENTION_PRUNE_SCHEMA_VERSION: Final[int] = 1
+"""JSONL schema version for task-local and task-log retention prune records."""
+
+RETENTION_PRUNE_DEFAULT_MIN_AGE_SECONDS: Final[float] = 604800.0
+"""Default minimum task-local retention row age before ordinary prune candidacy."""
+
+RETENTION_PRUNE_DEFAULT_KEEP_RECENT_PER_TASK: Final[int] = 1
+"""Default newest lifecycle-log rows to preserve for each task."""
+
+RETENTION_PRUNE_LOG_SUBDIR: Final[str] = "retention-prune"
+"""Default subdirectory under the configured logs directory for retention pruning."""
+
+RETENTION_PRUNE_CLASS_TERMINAL_CTRL_OUT_ARCHIVED: Final[str] = (
+    "terminal_ctrl_out_archived"
+)
+"""Retention class for terminal ctrl_out rows with retained terminal log proof."""
+
+RETENTION_PRUNE_CLASS_TERMINAL_CTRL_OUT_WITHOUT_LOG_REPORTED: Final[str] = (
+    "terminal_ctrl_out_without_log_reported"
+)
+"""Retention class for terminal ctrl_out rows that are the only visible terminal proof."""
+
+RETENTION_PRUNE_CLASS_TERMINAL_RESULT_OUTBOX_ARCHIVED: Final[str] = (
+    "terminal_result_outbox_archived"
+)
+"""Retention class for final one-shot outbox rows with independent terminal proof."""
+
+RETENTION_PRUNE_CLASS_RESULT_WITHOUT_TERMINAL_OUTBOX_REPORTED: Final[str] = (
+    "result_without_terminal_outbox_reported"
+)
+"""Retention class for final outbox rows that are the only visible terminal proof."""
+
+RETENTION_PRUNE_CLASS_TERMINAL_TASK_LOG_SUPERSEDED: Final[str] = (
+    "terminal_task_log_superseded"
+)
+"""Retention class for older terminal task-log rows with newer retained proof."""
+
+RETENTION_PRUNE_CLASS_NONTERMINAL_TASK_LOG_SUPERSEDED: Final[str] = (
+    "nonterminal_task_log_superseded"
+)
+"""Retention class for older nonterminal task-log rows with later terminal proof."""
+
+RETENTION_PRUNE_CLASS_OBSOLETE_CTRL_IN_CONTROL: Final[str] = "obsolete_ctrl_in_control"
+"""Retention class for stale task-local control input rows."""
+
+RETENTION_PRUNE_CLASS_OBSOLETE_INBOX_WORK: Final[str] = "obsolete_inbox_work"
+"""Retention class for obsolete task inbox work rows."""
+
+RETENTION_PRUNE_CLASS_OBSOLETE_RESERVED_WORK: Final[str] = "obsolete_reserved_work"
+"""Retention class for obsolete task reserved work rows."""
+
+RETENTION_PRUNE_CLASS_UNSUPPORTED_TASK_LOCAL_SHAPE: Final[str] = (
+    "unsupported_task_local_shape"
+)
+"""Retention class for task-local rows that normal mode cannot interpret safely."""
+
+RETENTION_PRUNE_CLASS_CLAIMED_OUTBOX_RESIDUE_FORCE: Final[str] = (
+    "claimed_outbox_residue_force"
+)
+"""Retention class for force-only claimed outbox residue cleanup."""
+
+RETENTION_PRUNE_SUPPORTED_FAMILIES: Final[frozenset[str]] = frozenset(
+    {"runtime-state", "task-local", "task-log", "retention", "all"}
+)
+"""Public `weft system prune --family` values."""
+
+RETENTION_PRUNE_SUPPORTED_CLASSES: Final[frozenset[str]] = frozenset(
+    {
+        RETENTION_PRUNE_CLASS_TERMINAL_CTRL_OUT_ARCHIVED,
+        RETENTION_PRUNE_CLASS_TERMINAL_CTRL_OUT_WITHOUT_LOG_REPORTED,
+        RETENTION_PRUNE_CLASS_TERMINAL_RESULT_OUTBOX_ARCHIVED,
+        RETENTION_PRUNE_CLASS_RESULT_WITHOUT_TERMINAL_OUTBOX_REPORTED,
+        RETENTION_PRUNE_CLASS_TERMINAL_TASK_LOG_SUPERSEDED,
+        RETENTION_PRUNE_CLASS_NONTERMINAL_TASK_LOG_SUPERSEDED,
+        RETENTION_PRUNE_CLASS_OBSOLETE_CTRL_IN_CONTROL,
+        RETENTION_PRUNE_CLASS_OBSOLETE_INBOX_WORK,
+        RETENTION_PRUNE_CLASS_OBSOLETE_RESERVED_WORK,
+        RETENTION_PRUNE_CLASS_UNSUPPORTED_TASK_LOCAL_SHAPE,
+        RETENTION_PRUNE_CLASS_CLAIMED_OUTBOX_RESIDUE_FORCE,
+    }
+)
+"""Retention candidate classes accepted by class filters."""
+
+RETENTION_PRUNE_REPORT_ONLY_CLASSES: Final[frozenset[str]] = frozenset(
+    {
+        RETENTION_PRUNE_CLASS_TERMINAL_CTRL_OUT_WITHOUT_LOG_REPORTED,
+        RETENTION_PRUNE_CLASS_RESULT_WITHOUT_TERMINAL_OUTBOX_REPORTED,
+        RETENTION_PRUNE_CLASS_OBSOLETE_INBOX_WORK,
+        RETENTION_PRUNE_CLASS_OBSOLETE_RESERVED_WORK,
+        RETENTION_PRUNE_CLASS_UNSUPPORTED_TASK_LOCAL_SHAPE,
+    }
+)
+"""Retention classes that ordinary apply reports but does not delete."""
 
 WEFT_SPAWN_REQUESTS_QUEUE: Final[str] = "weft.spawn.requests"
 """Global queue for manager-consumed task spawn requests."""
@@ -956,6 +1053,13 @@ def _parse_weft_directory_name(value: str) -> str:
     return name
 
 
+def _parse_weft_logs_dir(value: str) -> str | None:
+    """Parse the optional operational logs directory override."""
+
+    path = value.strip()
+    return path or None
+
+
 def _load_weft_env_value(
     name: str,
     *,
@@ -1031,6 +1135,11 @@ def _load_weft_env_vars() -> dict[str, Any]:
             default=False,
             parser=_parse_logging_enabled,
         ),
+        "WEFT_LOGS_DIR": _load_weft_env_value(
+            "WEFT_LOGS_DIR",
+            default=None,
+            parser=_parse_weft_logs_dir,
+        ),
         "WEFT_REDACT_TASKSPEC_FIELDS": _load_weft_env_value(
             "WEFT_REDACT_TASKSPEC_FIELDS",
             default="",
@@ -1095,6 +1204,12 @@ def _normalize_weft_override_value(name: str, value: Any) -> Any:
         if isinstance(value, bool):
             return value
         raise TypeError("WEFT_LOGGING_ENABLED override must be bool or str")
+    if name == "WEFT_LOGS_DIR":
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return _parse_weft_logs_dir(value)
+        raise TypeError("WEFT_LOGS_DIR override must be str or None")
     if name == "WEFT_REDACT_TASKSPEC_FIELDS":
         if isinstance(value, str):
             return value

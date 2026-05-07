@@ -333,6 +333,7 @@ class TestLoadConfig:
 
             # Weft project directory
             assert config["WEFT_DIRECTORY_NAME"] == WEFT_DIRECTORY_NAME_DEFAULT
+            assert config["WEFT_LOGS_DIR"] is None
 
             # Broker config should be complete and typed.
             assert config["BROKER_PROJECT_SCOPE"] is True
@@ -411,6 +412,18 @@ class TestLoadConfig:
             pytest.raises(ValueError, match="WEFT_DIRECTORY_NAME"),
         ):
             load_config()
+
+    def test_weft_logs_dir_env(self) -> None:
+        with patch.dict(os.environ, {"WEFT_LOGS_DIR": "var/weft-logs"}, clear=True):
+            config = load_config()
+
+        assert config["WEFT_LOGS_DIR"] == "var/weft-logs"
+
+    def test_weft_logs_dir_env_blanks_to_default(self) -> None:
+        with patch.dict(os.environ, {"WEFT_LOGS_DIR": "   "}, clear=True):
+            config = load_config()
+
+        assert config["WEFT_LOGS_DIR"] is None
 
     def test_explicit_default_db_name_beats_directory_name_default(self) -> None:
         with patch.dict(
@@ -554,6 +567,7 @@ class TestLoadConfig:
             "WEFT_LOGGING_ENABLED",
             "WEFT_REDACT_TASKSPEC_FIELDS",
             "WEFT_DIRECTORY_NAME",
+            "WEFT_LOGS_DIR",
             "WEFT_MANAGER_REUSE_ENABLED",
             "WEFT_MANAGER_LIFETIME_TIMEOUT",
             "WEFT_AUTOSTART_TASKS",
@@ -587,6 +601,7 @@ class TestLoadConfig:
         assert isinstance(config["BROKER_BACKEND_PORT"], int)
         assert config["WEFT_REDACT_TASKSPEC_FIELDS"] == ""
         assert config["WEFT_DIRECTORY_NAME"] == WEFT_DIRECTORY_NAME_DEFAULT
+        assert config["WEFT_LOGS_DIR"] is None
         assert config["WEFT_MANAGER_LIFETIME_TIMEOUT"] == WEFT_MANAGER_LIFETIME_TIMEOUT
         assert config["WEFT_MANAGER_REUSE_ENABLED"] == WEFT_MANAGER_REUSE_ENABLED
         assert config["WEFT_AUTOSTART_TASKS"] == WEFT_AUTOSTART_TASKS_DEFAULT

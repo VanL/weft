@@ -1,0 +1,361 @@
+"""Tests for task-local and task-log retention pruning."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from tests.helpers.test_backend import prepare_project_root
+from weft._constants import (
+    CONTROL_PING,
+    RETENTION_PRUNE_CLASS_NONTERMINAL_TASK_LOG_SUPERSEDED,
+    RETENTION_PRUNE_CLASS_OBSOLETE_INBOX_WORK,
+    RETENTION_PRUNE_CLASS_TERMINAL_CTRL_OUT_ARCHIVED,
+    RETENTION_PRUNE_CLASS_TERMINAL_CTRL_OUT_WITHOUT_LOG_REPORTED,
+    RETENTION_PRUNE_CLASS_TERMINAL_RESULT_OUTBOX_ARCHIVED,
+    RETENTION_PRUNE_CLASS_TERMINAL_TASK_LOG_SUPERSEDED,
+    TERMINAL_ENVELOPE_TYPE,
+    WEFT_GLOBAL_LOG_QUEUE,
+)
+from weft.commands.retention_prune import RetentionPruneConfig, run_retention_prune
+from weft.context import WeftContext, build_context
+from weft.helpers import iter_queue_entries
+
+pytestmark = [pytest.mark.shared]
+
+
+def _context(tmp_path: Path) -> WeftContext:
+    root = prepare_project_root(tmp_path)
+    return build_context(spec_context=root)
+
+
+def _write_raw(
+    ctx: WeftContext,
+    queue_name: str,
+    body: str,
+    *,
+    persistent: bool = False,
+) -> int:
+    queue = ctx.queue(queue_name, persistent=persistent)
+    try:
+        queue.write(body)
+        latest: int | None = None
+        for row, message_id in iter_queue_entries(queue):
+            if row == body:
+                latest = int(message_id)
+        assert latest is not None
+        return latest
+    finally:
+        queue.close()
+
+
+def _write_json(
+    ctx: WeftContext,
+    queue_name: str,
+    payload: dict[str, Any],
+    *,
+    persistent: bool = False,
+) -> int:
+    return _write_raw(ctx, queue_name, json.dumps(payload), persistent=persistent)
+
+
+def _read_ids(
+    ctx: WeftContext,
+    queue_name: str,
+    *,
+    persistent: bool = False,
+) -> set[int]:
+    queue = ctx.queue(queue_name, persistent=persistent)
+    try:
+        return {int(message_id) for _body, message_id in iter_queue_entries(queue)}
+    finally:
+        queue.close()
+
+
+def _read_json_records(path: Path) -> list[dict[str, Any]]:
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def test_task_log_dry_run_reports_superseded_rows_without_deleting(
+    tmp_path: Path,
+) -> None:
+    ctx = _context(tmp_path)
+    tid = "1770000000000001001"
+    created_id = _write_json(
+        ctx, WEFT_GLOBAL_LOG_QUEUE, {"tid": tid, "status": "created"}
+    )
+    terminal_id = _write_json(
+        ctx,
+        WEFT_GLOBAL_LOG_QUEUE,
+        {"tid": tid, "status": "completed"},
+    )
+    latest_terminal_id = _write_json(
+        ctx,
+        WEFT_GLOBAL_LOG_QUEUE,
+        {"tid": tid, "status": "completed", "event": "task_completed"},
+    )
+
+    result = run_retention_prune(
+        RetentionPruneConfig(
+            context_path=ctx.root,
+            family="task-log",
+            min_age_seconds=0,
+        )
+    )
+
+    assert result.exit_code == 0
+    assert {
+        (candidate.message_id, candidate.candidate_class)
+        for candidate in result.candidates
+    } == {
+        (created_id, RETENTION_PRUNE_CLASS_NONTERMINAL_TASK_LOG_SUPERSEDED),
+        (terminal_id, RETENTION_PRUNE_CLASS_TERMINAL_TASK_LOG_SUPERSEDED),
+    }
+    assert _read_ids(ctx, WEFT_GLOBAL_LOG_QUEUE) >= {
+        created_id,
+        terminal_id,
+        latest_terminal_id,
+    }
+
+
+def test_task_log_apply_requires_archive_and_deletes_exact_rows(
+    tmp_path: Path,
+) -> None:
+    ctx = _context(tmp_path)
+    archive = tmp_path / "archive.jsonl"
+    tid = "1770000000000001002"
+    old_id = _write_json(ctx, WEFT_GLOBAL_LOG_QUEUE, {"tid": tid, "status": "created"})
+    keep_id = _write_json(
+        ctx,
+        WEFT_GLOBAL_LOG_QUEUE,
+        {"tid": tid, "status": "completed"},
+    )
+
+    missing_archive = run_retention_prune(
+        RetentionPruneConfig(
+            context_path=ctx.root,
+            family="task-log",
+            apply=True,
+            min_age_seconds=0,
+        )
+    )
+    assert missing_archive.exit_code == 1
+    assert "--archive is required" in missing_archive.errors[0]
+
+    result = run_retention_prune(
+        RetentionPruneConfig(
+            context_path=ctx.root,
+            family="task-log",
+            apply=True,
+            archive_path=archive,
+            min_age_seconds=0,
+        )
+    )
+
+    assert result.exit_code == 0
+    assert result.deleted == 1
+    remaining = _read_ids(ctx, WEFT_GLOBAL_LOG_QUEUE)
+    assert old_id not in remaining
+    assert keep_id in remaining
+    archive_records = _read_json_records(archive)
+    assert archive_records[0]["message_id"] == old_id
+    assert archive_records[-1]["record_type"] == "retention_prune_completed"
+
+
+def test_ctrl_out_terminal_with_log_is_deleted_and_pong_is_preserved(
+    tmp_path: Path,
+) -> None:
+    ctx = _context(tmp_path)
+    archive = tmp_path / "archive.jsonl"
+    tid = "1770000000000001003"
+    _write_json(ctx, WEFT_GLOBAL_LOG_QUEUE, {"tid": tid, "status": "completed"})
+    terminal_id = _write_json(
+        ctx,
+        f"T{tid}.ctrl_out",
+        {
+            "type": TERMINAL_ENVELOPE_TYPE,
+            "tid": tid,
+            "source": "task",
+            "status": "completed",
+        },
+    )
+    pong_id = _write_raw(ctx, f"T{tid}.ctrl_out", "PONG")
+
+    result = run_retention_prune(
+        RetentionPruneConfig(
+            context_path=ctx.root,
+            family="task-local",
+            apply=True,
+            archive_path=archive,
+            min_age_seconds=0,
+        )
+    )
+
+    assert result.deleted == 1
+    assert result.candidates[0].candidate_class == (
+        RETENTION_PRUNE_CLASS_TERMINAL_CTRL_OUT_ARCHIVED
+    )
+    remaining = _read_ids(ctx, f"T{tid}.ctrl_out")
+    assert terminal_id not in remaining
+    assert pong_id in remaining
+
+
+def test_ctrl_out_without_log_is_report_only_unless_force(tmp_path: Path) -> None:
+    ctx = _context(tmp_path)
+    tid = "1770000000000001004"
+    terminal_id = _write_json(
+        ctx,
+        f"T{tid}.ctrl_out",
+        {
+            "type": TERMINAL_ENVELOPE_TYPE,
+            "tid": tid,
+            "source": "task",
+            "status": "completed",
+        },
+    )
+
+    ordinary = run_retention_prune(
+        RetentionPruneConfig(
+            context_path=ctx.root,
+            family="task-local",
+            task_filters=(tid,),
+            apply=True,
+            archive_path=tmp_path / "ordinary.jsonl",
+            min_age_seconds=0,
+        )
+    )
+    assert ordinary.deleted == 0
+    assert ordinary.candidates[0].candidate_class == (
+        RETENTION_PRUNE_CLASS_TERMINAL_CTRL_OUT_WITHOUT_LOG_REPORTED
+    )
+    assert terminal_id in _read_ids(ctx, f"T{tid}.ctrl_out")
+
+    forced = run_retention_prune(
+        RetentionPruneConfig(
+            context_path=ctx.root,
+            family="task-local",
+            task_filters=(tid,),
+            apply=True,
+            force=True,
+            min_age_seconds=0,
+        )
+    )
+
+    assert forced.exit_code == 0
+    assert forced.deleted == 1
+    assert terminal_id not in _read_ids(ctx, f"T{tid}.ctrl_out")
+    assert forced.warnings == ()
+    assert forced.archived >= 1
+    assert list((ctx.logs_dir / "retention-prune").glob("*.jsonl"))
+
+
+def test_outbox_final_result_with_terminal_log_is_deleted(tmp_path: Path) -> None:
+    ctx = _context(tmp_path)
+    archive = tmp_path / "archive.jsonl"
+    tid = "1770000000000001005"
+    _write_json(ctx, WEFT_GLOBAL_LOG_QUEUE, {"tid": tid, "status": "completed"})
+    result_id = _write_json(
+        ctx,
+        f"T{tid}.outbox",
+        {"stdout": "ok", "return_code": 0},
+        persistent=True,
+    )
+
+    result = run_retention_prune(
+        RetentionPruneConfig(
+            context_path=ctx.root,
+            family="task-local",
+            apply=True,
+            archive_path=archive,
+            min_age_seconds=0,
+        )
+    )
+
+    assert result.deleted == 1
+    assert result.candidates[0].candidate_class == (
+        RETENTION_PRUNE_CLASS_TERMINAL_RESULT_OUTBOX_ARCHIVED
+    )
+    assert result_id not in _read_ids(ctx, f"T{tid}.outbox", persistent=True)
+
+
+def test_inbox_work_is_report_only_but_force_deletes(tmp_path: Path) -> None:
+    ctx = _context(tmp_path)
+    tid = "1770000000000001006"
+    _write_json(ctx, WEFT_GLOBAL_LOG_QUEUE, {"tid": tid, "status": "completed"})
+    work_id = _write_json(ctx, f"T{tid}.inbox", {"work": True})
+
+    ordinary = run_retention_prune(
+        RetentionPruneConfig(
+            context_path=ctx.root,
+            family="task-local",
+            apply=True,
+            archive_path=tmp_path / "ordinary.jsonl",
+            min_age_seconds=0,
+        )
+    )
+
+    assert ordinary.deleted == 0
+    assert ordinary.candidates[0].candidate_class == (
+        RETENTION_PRUNE_CLASS_OBSOLETE_INBOX_WORK
+    )
+    assert work_id in _read_ids(ctx, f"T{tid}.inbox")
+
+    forced = run_retention_prune(
+        RetentionPruneConfig(
+            context_path=ctx.root,
+            family="task-local",
+            apply=True,
+            force=True,
+            min_age_seconds=0,
+        )
+    )
+
+    assert forced.deleted == 1
+    assert work_id not in _read_ids(ctx, f"T{tid}.inbox")
+    assert forced.warnings == ()
+    assert forced.archived >= 1
+    assert list((ctx.logs_dir / "retention-prune").glob("*.jsonl"))
+
+
+def test_force_without_apply_is_rejected(tmp_path: Path) -> None:
+    ctx = _context(tmp_path)
+
+    result = run_retention_prune(
+        RetentionPruneConfig(
+            context_path=ctx.root,
+            family="task-local",
+            force=True,
+        )
+    )
+
+    assert result.exit_code == 1
+    assert result.errors == ("--force requires --apply",)
+
+
+def test_force_deletes_active_ping_in_selected_scope(tmp_path: Path) -> None:
+    ctx = _context(tmp_path)
+    tid = "1770000000000001007"
+    _write_json(ctx, WEFT_GLOBAL_LOG_QUEUE, {"tid": tid, "status": "running"})
+    ping_id = _write_raw(ctx, f"T{tid}.ctrl_in", CONTROL_PING)
+
+    result = run_retention_prune(
+        RetentionPruneConfig(
+            context_path=ctx.root,
+            family="task-local",
+            task_filters=(tid,),
+            apply=True,
+            force=True,
+            min_age_seconds=0,
+        )
+    )
+
+    assert result.deleted == 1
+    assert ping_id not in _read_ids(ctx, f"T{tid}.ctrl_in")
+    assert result.candidates[0].overridden_protections == ("nonterminal_task",)

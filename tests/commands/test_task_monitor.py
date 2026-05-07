@@ -1,4 +1,4 @@
-"""Lifecycle monitor archive sink command tests."""
+"""Task monitor command tests."""
 
 from __future__ import annotations
 
@@ -10,11 +10,11 @@ from typing import Any
 import pytest
 
 from weft._constants import WEFT_GLOBAL_LOG_QUEUE
-from weft.commands.lifecycle_monitor import (
-    DiskJsonlArchiveSink,
-    LifecycleMonitorConfig,
-    StdoutArchiveSink,
-    run_lifecycle_monitor,
+from weft.commands.task_monitor import (
+    DiskJsonlTaskMonitorSink,
+    StdoutTaskMonitorSink,
+    TaskMonitorConfig,
+    run_task_monitor,
 )
 from weft.context import build_context
 
@@ -24,7 +24,7 @@ pytestmark = [pytest.mark.shared]
 def _taskspec_payload(
     tid: str,
     *,
-    name: str = "lifecycle-task",
+    name: str = "task-monitor-task",
     persistent: bool = False,
 ) -> dict[str, Any]:
     spec: dict[str, Any] = {
@@ -67,7 +67,7 @@ def _records(output: str) -> list[dict[str, Any]]:
 
 
 def test_disk_sink_appends_jsonl(tmp_path: Path) -> None:
-    sink = DiskJsonlArchiveSink(tmp_path, run_date="2026-05-07")
+    sink = DiskJsonlTaskMonitorSink(tmp_path, run_date="2026-05-07")
     sink.write_records(
         [
             {"schema_version": 1, "record_type": "task_summary", "tid": "1"},
@@ -81,7 +81,7 @@ def test_disk_sink_appends_jsonl(tmp_path: Path) -> None:
 
 
 def test_stdout_sink_writes_jsonl() -> None:
-    sink = StdoutArchiveSink()
+    sink = StdoutTaskMonitorSink()
     sink.write_records([{"schema_version": 1, "record_type": "monitor_run_started"}])
 
     assert _records(sink.output) == [
@@ -104,11 +104,11 @@ def test_monitor_checkpoint_advances_after_successful_sink_write(workdir) -> Non
     )
     checkpoint = workdir / "checkpoint.json"
 
-    result = run_lifecycle_monitor(
-        LifecycleMonitorConfig(
+    result = run_task_monitor(
+        TaskMonitorConfig(
             context_path=workdir,
             sink="disk",
-            archive_dir=workdir / "archive",
+            log_dir=workdir / "logs",
             checkpoint_path=checkpoint,
             no_checkpoint=False,
             since_timestamp=0,
@@ -135,12 +135,12 @@ def test_monitor_restart_does_not_duplicate_after_checkpoint(workdir) -> None:
             "taskspec": _taskspec_payload(tid),
         },
     )
-    archive_dir = workdir / "archive"
+    log_dir = workdir / "logs"
     checkpoint = workdir / "checkpoint.json"
-    config = LifecycleMonitorConfig(
+    config = TaskMonitorConfig(
         context_path=workdir,
         sink="disk",
-        archive_dir=archive_dir,
+        log_dir=log_dir,
         checkpoint_path=checkpoint,
         no_checkpoint=False,
         since_timestamp=0,
@@ -148,12 +148,12 @@ def test_monitor_restart_does_not_duplicate_after_checkpoint(workdir) -> None:
         json_output=False,
     )
 
-    first = run_lifecycle_monitor(config)
-    second = run_lifecycle_monitor(
-        LifecycleMonitorConfig(
+    first = run_task_monitor(config)
+    second = run_task_monitor(
+        TaskMonitorConfig(
             context_path=workdir,
             sink="disk",
-            archive_dir=archive_dir,
+            log_dir=log_dir,
             checkpoint_path=checkpoint,
             no_checkpoint=False,
             since_timestamp=None,
@@ -164,7 +164,7 @@ def test_monitor_restart_does_not_duplicate_after_checkpoint(workdir) -> None:
 
     assert first.exit_code == 0
     assert second.exit_code == 0
-    path = next(archive_dir.glob("*.jsonl"))
+    path = next(log_dir.glob("*.jsonl"))
     task_summaries = [
         record
         for record in _records(path.read_text(encoding="utf-8"))
@@ -185,11 +185,11 @@ def test_monitor_crash_window_duplicate_has_stable_summary_id(workdir) -> None:
             "taskspec": _taskspec_payload(tid),
         },
     )
-    archive_dir = workdir / "archive"
-    config = LifecycleMonitorConfig(
+    log_dir = workdir / "logs"
+    config = TaskMonitorConfig(
         context_path=workdir,
         sink="disk",
-        archive_dir=archive_dir,
+        log_dir=log_dir,
         checkpoint_path=workdir / "missing-checkpoint.json",
         no_checkpoint=True,
         since_timestamp=0,
@@ -197,10 +197,10 @@ def test_monitor_crash_window_duplicate_has_stable_summary_id(workdir) -> None:
         json_output=False,
     )
 
-    assert run_lifecycle_monitor(config).exit_code == 0
-    assert run_lifecycle_monitor(config).exit_code == 0
+    assert run_task_monitor(config).exit_code == 0
+    assert run_task_monitor(config).exit_code == 0
 
-    path = next(archive_dir.glob("*.jsonl"))
+    path = next(log_dir.glob("*.jsonl"))
     summary_ids = [
         record["summary_id"]
         for record in _records(path.read_text(encoding="utf-8"))
@@ -214,11 +214,11 @@ def test_corrupt_checkpoint_fails_clearly(workdir) -> None:
     checkpoint = workdir / "checkpoint.json"
     checkpoint.write_text("not-json", encoding="utf-8")
 
-    result = run_lifecycle_monitor(
-        LifecycleMonitorConfig(
+    result = run_task_monitor(
+        TaskMonitorConfig(
             context_path=workdir,
             sink="disk",
-            archive_dir=workdir / "archive",
+            log_dir=workdir / "logs",
             checkpoint_path=checkpoint,
             no_checkpoint=False,
             since_timestamp=None,
@@ -228,7 +228,7 @@ def test_corrupt_checkpoint_fails_clearly(workdir) -> None:
     )
 
     assert result.exit_code == 1
-    assert "Invalid lifecycle monitor checkpoint" in result.stderr
+    assert "Invalid task monitor checkpoint" in result.stderr
 
 
 def test_terminal_log_success_summary_uses_terminal_log(workdir) -> None:
@@ -253,8 +253,8 @@ def test_terminal_log_success_summary_uses_terminal_log(workdir) -> None:
         },
     )
 
-    result = run_lifecycle_monitor(
-        LifecycleMonitorConfig(
+    result = run_task_monitor(
+        TaskMonitorConfig(
             context_path=workdir,
             sink="stdout",
             no_checkpoint=True,
@@ -274,7 +274,7 @@ def test_terminal_log_success_summary_uses_terminal_log(workdir) -> None:
     assert summaries[0]["failure_owner"] is None
 
 
-def test_task_failure_without_lifecycle_anomaly_is_domain_failure(workdir) -> None:
+def test_task_failure_without_task_monitor_anomaly_is_domain_failure(workdir) -> None:
     ctx = build_context(spec_context=workdir)
     tid = "1778084345905438724"
     _write_log(
@@ -288,8 +288,8 @@ def test_task_failure_without_lifecycle_anomaly_is_domain_failure(workdir) -> No
         },
     )
 
-    result = run_lifecycle_monitor(
-        LifecycleMonitorConfig(
+    result = run_task_monitor(
+        TaskMonitorConfig(
             context_path=workdir,
             sink="stdout",
             no_checkpoint=True,
@@ -322,8 +322,8 @@ def test_active_task_emits_no_task_summary(workdir) -> None:
         },
     )
 
-    result = run_lifecycle_monitor(
-        LifecycleMonitorConfig(
+    result = run_task_monitor(
+        TaskMonitorConfig(
             context_path=workdir,
             sink="stdout",
             no_checkpoint=True,
@@ -382,8 +382,8 @@ def test_wrapper_lost_and_result_without_terminal_do_not_consume_queues(
         )
         outbox.write(json.dumps({"ok": True}))
 
-        result = run_lifecycle_monitor(
-            LifecycleMonitorConfig(
+        result = run_task_monitor(
+            TaskMonitorConfig(
                 context_path=workdir,
                 sink="stdout",
                 no_checkpoint=True,

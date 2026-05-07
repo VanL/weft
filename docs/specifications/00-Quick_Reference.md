@@ -43,9 +43,10 @@ Global queues:
 
 Notes:
 - `weft.state.*` queues are runtime state and are excluded from dumps by default.
-- `weft system prune` can explicitly dry-run or apply
-  conservative exact-message pruning for supported runtime-only `weft.state.*`
-  queues. It does not prune task-local queues or `weft.log.tasks`.
+- `weft system prune` can explicitly dry-run or apply exact-message pruning.
+  It defaults to runtime-only `weft.state.*` pruning. Retention families can
+  also prune selected `weft.log.tasks` and task-local `T{tid}.*` rows with
+  archive-backed ordinary apply or explicit human `--force`.
 - named endpoint records resolve stable project-local names to ordinary
   task-local queues.
 - Full queue behaviors are defined in `05-Message_Flow_and_State.md`.
@@ -56,7 +57,8 @@ _Implementation mapping_: `weft/_constants.py` (global queue constants),
 `weft/core/manager.py` (manager registry), `weft/core/pipelines.py`
 (pipeline queue compilation), `weft/core/tasks/pipeline.py`
 (pipeline runtime queues), `weft/commands/runtime_prune.py`
-(explicit runtime-state pruning).
+(explicit runtime-state pruning), `weft/commands/retention_prune.py`
+(explicit task-local and task-log retention pruning).
 
 ## CLI Surface
 
@@ -69,19 +71,20 @@ Current top-level verbs and subcommands:
 | `weft manager` | `start`, `serve`, `stop`, `list`, `status` |
 | `weft spec` | `create`, `list`, `show`, `delete`, `validate`, `generate` |
 | `weft queue` | `read`, `write`, `peek`, `move`, `list`, `resolve`, `watch`, `delete`, `broadcast`, `alias add/list/remove` |
-| `weft system` | `tidy`, `dump`, `builtins`, `load`, `lifecycle-monitor`, `prune` |
+| `weft system` | `tidy`, `dump`, `builtins`, `load`, `task-monitor`, `prune` |
 
 ## Operational Files
 
 | Path | Purpose |
 |------|---------|
-| `.weft/archive/tasks/YYYY-MM-DD.jsonl` | Append-only lifecycle monitor archive records for one UTC date |
-| `.weft/state/lifecycle-monitor/default.json` | Lifecycle monitor operational checkpoint cursor |
+| `.weft/logs/task-monitor/YYYY-MM-DD.jsonl` | Append-only task-monitor log records for one UTC date |
+| `.weft/logs/retention-prune/YYYY-MM-DD-retention-prune.jsonl` | Best-effort default archive for retention prune force runs without an explicit archive path |
+| `.weft/state/task-monitor/default.json` | Task monitor operational checkpoint cursor |
 
 Notes:
-- Lifecycle monitor archive files and checkpoints are operational outputs, not
-  lifecycle truth. Status and result commands reconstruct state from broker
-  evidence, not from these files.
+- Task monitor log files, retention prune archive files, reports, and
+  checkpoints are operational outputs, not lifecycle truth. Status and result
+  commands reconstruct state from broker evidence, not from these files.
 
 ## Task States
 
@@ -105,7 +108,7 @@ State transitions and rules live in `05-Message_Flow_and_State.md`.
 | `STOP` | Graceful shutdown (task cancels and reports) |
 | `KILL` | Force terminate the task |
 | `STATUS` | Emit current task-local status on `ctrl_out` |
-| `PING` | Health check; responds `PONG` with a live task-local status snapshot and echoes `request_id` for structured requests |
+| `PING` | Health check; responds `PONG` with a live task-local status snapshot, echoes `request_id` for structured requests, and includes manager-selection fields for Manager tasks |
 | `PAUSE` | Pause task processing |
 | `RESUME` | Resume a paused task |
 
@@ -126,6 +129,7 @@ Format rules and sanitization live in `01-Core_Components.md`.
 | `WEFT_MANAGER_REUSE_ENABLED` | Whether CLI-started managers stay alive after task completion. |
 | `WEFT_AUTOSTART_TASKS` | Whether manager boot should consider autostart manifests under the active Weft metadata directory. |
 | `WEFT_DIRECTORY_NAME` | Name of the Weft metadata directory. Defaults to `.weft` and is used before project discovery. |
+| `WEFT_LOGS_DIR` | Optional log-root override. Relative values resolve against the project root; absolute values are used directly. Defaults to `.weft/logs`. |
 | `WEFT_DEFAULT_DB_LOCATION` | Broker default database location for SimpleBroker project resolution. |
 | `WEFT_DEFAULT_DB_NAME` | Default sqlite broker path for explicit-root resolution and for legacy sqlite project auto-discovery when no Weft-scoped broker config owns the target. |
 | `WEFT_PROJECT_CONFIG_PATH` | Optional override for the SimpleBroker project-config directory used by Weft. Defaults to `WEFT_DIRECTORY_NAME`. |

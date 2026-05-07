@@ -36,6 +36,7 @@ always be rolled back from the public request queue.
 - [Canonical Owner Fence Plan](../plans/2026-04-17-canonical-owner-fence-plan.md) – Add a shared canonical-owner reduction helper and harden manager child dispatch with a final ownership fence before launch.
 - [Heartbeat Service Plan](../plans/2026-04-17-heartbeat-service-plan.md) – Add the built-in runtime heartbeat service, reserve its internal endpoint namespace, and reuse the canonical-owner fence in a long-lived interval emitter.
 - [Result Evidence And Superseded Manager Reconciliation Plan](../plans/2026-05-07-result-evidence-and-superseded-manager-reconciliation-plan.md) – Keep task-list/status read models aligned with selected active-manager registry truth.
+- [Manager Selection PING/PONG Liveness Plan](../plans/2026-05-07-manager-selection-ping-pong-liveness-plan.md) – Use keyed manager PONGs as bounded positive liveness evidence when startup or selection encounters stale-looking manager registry rows.
 - [Persistent Agent Runtime Implementation Plan](../plans/2026-04-06-persistent-agent-runtime-implementation-plan.md) – references Manager Architecture for long-lived agent sessions.
 - [TaskSpec Clean Design Plan](../plans/2026-04-06-taskspec-clean-design-plan.md) – references Manager Architecture for TaskSpec schema alignment.
 
@@ -82,8 +83,14 @@ Key responsibilities implemented in `weft/core/manager.py`:
    process creation time when that identity is available. Externally supervised
    records use the same scoped host-process check when the supervisor supplied
    scoped host PIDs, otherwise their registry heartbeat age is the generic
-   liveness boundary. Canonical ownership is lowest-live-TID among canonical
-   claimants for `weft.spawn.requests`. Manager dispatch keeps four
+   liveness boundary. When startup or manager selection sees an otherwise
+   canonical active manager row that is stale by PID/time evidence, it may send
+   one bounded keyed PING to that manager's task-local control queue. A matched
+   PONG from the same TID can rescue the row as positive liveness evidence for
+   selection; an absent, malformed, or non-matching PONG is not negative proof
+   and does not authorize unsafe takeover by itself. Canonical ownership is
+   lowest-live-TID among canonical claimants for `weft.spawn.requests`.
+   Manager dispatch keeps four
    runtime-owned outcomes distinct:
    `self`, `other`, `none`, and `unknown`.
    Task-list/status read models use the same selected active-manager view. A
@@ -111,7 +118,10 @@ Key responsibilities implemented in `weft/core/manager.py`:
 7. **Control channel** – In addition to STOP/STATUS, managers inherit the
   task control contract: `PING` replies with `PONG` plus a live task-local
   status snapshot on `ctrl_out`, echoing `request_id` for structured PING
-  envelopes.
+  envelopes. Manager PONG snapshots also include manager-selection fields
+  (`role`, `inbox`/`requests`, `ctrl_in`, `ctrl_out`, `outbox`, and
+  `weft_context` when available) so external selection code can validate the
+  responding task without importing command-layer helpers.
 
 _Implementation mapping_:
 - [MA-1.1] Spawn queue consumption — `Manager._handle_work_message`, `Manager._build_child_spec`.
@@ -120,7 +130,7 @@ _Implementation mapping_:
 - [MA-1.4] Registry heartbeat and leadership view — `Manager._register_manager`, `Manager._unregister_manager`, `Manager._atexit_unregister`, `Manager._read_active_manager_records`, `Manager._active_manager_records`, `Manager._leader_tid`, `Manager._evaluate_dispatch_ownership`, `Manager._refresh_dispatch_suspension`, `Manager._maybe_yield_leadership`, `weft/commands/system.py::_collect_task_snapshot_records`, plus `weft/helpers.py::is_canonical_manager_record` and `weft/helpers.py::canonical_owner_tid`.
 - [MA-1.5] Idle timeout — `Manager.process_once` (idle-timeout check), `Manager._read_broker_timestamp`, `Manager._update_idle_activity_from_broker`.
 - [MA-1.6] Autostart manifests — `Manager._tick_autostart`, `Manager._prune_autostart_state`, `Manager._build_autostart_spawn_payload`, `Manager._load_autostart_manifest`, `Manager._load_autostart_taskspec`, `Manager._load_autostart_pipeline`, `Manager._active_autostart_sources`, `Manager._enqueue_autostart_request`, `Manager._cleanup_children`, plus `weft/core/pipelines.py::compile_linear_pipeline` for stored pipeline targets.
-- [MA-1.7] Control channel — inherited from `BaseTask._handle_control_command` (`weft/core/tasks/base.py`); structured PING/PONG snapshots, STOP, STATUS, KILL handling.
+- [MA-1.7] Control channel — inherited from `BaseTask._handle_control_command` (`weft/core/tasks/base.py`) and extended by `Manager._control_snapshot_fields` (`weft/core/manager.py`); structured PING/PONG snapshots, STOP, STATUS, KILL handling.
 
 Current ownership-fence rules:
 
@@ -203,7 +213,7 @@ tracked child process trees before publishing its drained terminal event.
 `SIGUSR1` retains immediate kill semantics.
 
 _Implementation mapping_:
-- Shared manager lifecycle owner — `weft/core/manager_runtime.py` :: `_build_manager_runtime_invocation`, `_select_active_manager`, `_ensure_manager`, `_start_manager`, `_serve_manager_foreground`, `_list_manager_records`, `_manager_record`, `_stop_manager` (owns canonical manager bootstrap, foreground serve, normalized registry replay, and graceful/forced stop observation).
+- Shared manager lifecycle owner — `weft/core/manager_runtime.py` :: `_build_manager_runtime_invocation`, `_select_active_manager`, `_ensure_manager`, `_start_manager`, `_serve_manager_foreground`, `_list_manager_records`, `_manager_record`, `_stop_manager` plus `weft/core/control_probe.py` :: `send_keyed_ping_probe` (owns canonical manager bootstrap, foreground serve, normalized registry replay, bounded manager PONG liveness probes, and graceful/forced stop observation).
 - Command-side capability surface — `weft/commands/manager.py` and `weft/commands/serve.py` (thin manager-facing commands layered over the shared runtime helper).
 - Detached bootstrap launcher — `weft/manager_detached_launcher.py` :: `main` (short-lived wrapper that starts the real manager runtime in a detached session/process-group boundary and reports early launch status back to `_start_manager`).
 - Manager process launch — `weft/core/manager_runtime.py` :: `_start_manager` (builds manager TaskSpec, launches the detached wrapper, requires matching pid-plus-registry readiness before success, treats post-proof acknowledgement cleanup as best effort, and reports early bootstrap diagnostics on failure).

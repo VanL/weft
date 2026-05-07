@@ -101,7 +101,7 @@ def _probe_with_task(
 
     def probe() -> None:
         try:
-            result["evidence"] = task_evidence.probe_live_pong_evidence(
+            result["evidence"] = task_evidence.ping_pong_evidence(
                 ctx,
                 tid=tid,
                 taskspec_payload=taskspec,
@@ -428,7 +428,7 @@ def test_outbox_evidence_does_not_complete_persistent_or_ambiguous_tasks(
         partial_outbox.close()
 
 
-def test_probe_live_pong_ignores_unmatched_and_preserves_terminal_ctrl_out(
+def test_ping_pong_ignores_unmatched_and_preserves_terminal_ctrl_out(
     tmp_path,
 ) -> None:
     root = prepare_project_root(tmp_path)
@@ -497,7 +497,7 @@ def test_probe_live_pong_ignores_unmatched_and_preserves_terminal_ctrl_out(
         task.stop(join=False)
 
 
-def test_known_tid_probe_live_pong_updates_task_status(tmp_path) -> None:
+def test_known_tid_ping_pong_updates_task_status(tmp_path) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     tid = str(time.time_ns())
@@ -527,7 +527,7 @@ def test_known_tid_probe_live_pong_updates_task_status(tmp_path) -> None:
                 result["snapshot"] = task_cmd.task_status(
                     tid,
                     context_path=root,
-                    probe_live=True,
+                    ping=True,
                     probe_timeout=LIVE_PONG_PROBE_TIMEOUT,
                 )
             except BaseException as exc:  # pragma: no cover - thread handoff

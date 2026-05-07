@@ -23,14 +23,15 @@ from weft.commands import status as status_cmd
 from weft.commands import tasks as task_cmd
 from weft.commands.builtins import cmd_system_builtins
 from weft.commands.dump import cmd_dump
-from weft.commands.lifecycle_monitor import (
-    ArchiveSinkName,
-    LifecycleMonitorConfig,
-    run_lifecycle_monitor,
-)
 from weft.commands.load import cmd_load
 from weft.commands.result import cmd_result
+from weft.commands.retention_prune import cmd_retention_prune
 from weft.commands.runtime_prune import cmd_prune
+from weft.commands.task_monitor import (
+    TaskMonitorConfig,
+    TaskMonitorSinkName,
+    run_task_monitor,
+)
 from weft.commands.validate_taskspec import cmd_validate_taskspec
 from weft.ext import RunnerHandle
 
@@ -670,10 +671,10 @@ def task_status(
         bool,
         typer.Option("--json", help="Output as JSON"),
     ] = False,
-    probe_live: Annotated[
+    ping: Annotated[
         bool,
         typer.Option(
-            "--probe-live",
+            "--ping",
             help="Send a keyed PING and use the matched PONG as current-state proof",
         ),
     ] = False,
@@ -697,7 +698,7 @@ def task_status(
     snapshot = task_cmd.task_status(
         tid,
         context_path=context_dir,
-        probe_live=probe_live,
+        ping=ping,
     )
     if snapshot is None:
         typer.echo(f"Task {tid} not found", err=True)
@@ -884,32 +885,30 @@ def tidy(
     raise typer.Exit(code=exit_code)
 
 
-@system_app.command("lifecycle-monitor")
-def lifecycle_monitor(
+@system_app.command("task-monitor")
+def task_monitor(
     context: Annotated[
         Path | None,
-        typer.Option(
-            "--context", help="Run the lifecycle monitor against a project root"
-        ),
+        typer.Option("--context", help="Run the task monitor against a project root"),
     ] = None,
     once: Annotated[
         bool,
         typer.Option(
             "--once/--follow",
-            help="Scan once or follow for future lifecycle log entries",
+            help="Scan once or follow for future task-log entries",
         ),
     ] = True,
     sink: Annotated[
         str,
-        typer.Option("--sink", help="Archive sink: stdout or disk"),
+        typer.Option("--sink", help="Task monitor sink: stdout or disk"),
     ] = "stdout",
-    archive_dir: Annotated[
+    log_dir: Annotated[
         Path | None,
-        typer.Option("--archive-dir", help="Directory for disk JSONL archive files"),
+        typer.Option("--log-dir", help="Directory for disk JSONL task-monitor files"),
     ] = None,
     checkpoint: Annotated[
         Path | None,
-        typer.Option("--checkpoint", help="Lifecycle monitor checkpoint path"),
+        typer.Option("--checkpoint", help="Task monitor checkpoint path"),
     ] = None,
     no_checkpoint: Annotated[
         bool,
@@ -928,15 +927,15 @@ def lifecycle_monitor(
         typer.Option("--json", help="Emit final command summary as JSON for disk sink"),
     ] = False,
 ) -> None:
-    """Scan lifecycle evidence and emit non-destructive archive JSONL."""
+    """Scan task evidence and emit non-destructive JSONL."""
 
-    result = run_lifecycle_monitor(
-        LifecycleMonitorConfig(
+    result = run_task_monitor(
+        TaskMonitorConfig(
             context_path=context,
             once=once,
             follow=not once,
-            sink=cast(ArchiveSinkName, sink),
-            archive_dir=archive_dir,
+            sink=cast(TaskMonitorSinkName, sink),
+            log_dir=log_dir,
             checkpoint_path=checkpoint,
             no_checkpoint=no_checkpoint,
             since_timestamp=since,
@@ -961,7 +960,23 @@ def prune(
         bool,
         typer.Option(
             "--apply/--dry-run",
-            help="Delete selected runtime-state rows or only report candidates",
+            help="Delete selected prune candidates or only report candidates",
+        ),
+    ] = False,
+    family: Annotated[
+        str,
+        typer.Option(
+            "--family",
+            help=(
+                "Prune family: runtime-state, task-local, task-log, retention, or all"
+            ),
+        ),
+    ] = "runtime-state",
+    force: Annotated[
+        bool,
+        typer.Option(
+            "--force",
+            help="Enable aggressive retention cleanup in apply mode",
         ),
     ] = False,
     queues: Annotated[
@@ -985,6 +1000,28 @@ def prune(
             help="Newest rows to preserve for each logical runtime-state key",
         ),
     ] = 1,
+    keep_recent_per_task: Annotated[
+        int,
+        typer.Option(
+            "--keep-recent-per-task",
+            help="Newest lifecycle-log rows to preserve for each task",
+        ),
+    ] = 1,
+    tasks: Annotated[
+        list[str] | None,
+        typer.Option("--task", help="Task TID to include in retention pruning"),
+    ] = None,
+    retention_classes: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--retention-class",
+            help="Retention candidate class to include. Repeatable.",
+        ),
+    ] = None,
+    archive: Annotated[
+        Path | None,
+        typer.Option("--archive", help="Write retention prune archive JSONL"),
+    ] = None,
     limit: Annotated[
         int | None,
         typer.Option("--limit", help="Maximum candidates to report or apply"),
@@ -998,18 +1035,92 @@ def prune(
         typer.Option("--report", help="Write a JSONL prune report"),
     ] = None,
 ) -> None:
-    """Prune stale runtime-only weft.state.* queue rows."""
+    """Prune stale Weft broker rows."""
 
-    exit_code, stdout, stderr = cmd_prune(
-        context=context,
-        apply=apply,
-        queues=queues,
-        min_age_seconds=min_age,
-        keep_recent_per_key=keep_recent_per_key,
-        limit=limit,
-        json_output=json_output,
-        report_path=report,
-    )
+    normalized_family = family.strip()
+    if normalized_family == "runtime-state":
+        if force:
+            exit_code = 1
+            stdout = ""
+            stderr = "--force is only supported for retention prune families"
+        else:
+            exit_code, stdout, stderr = cmd_prune(
+                context=context,
+                apply=apply,
+                queues=queues,
+                min_age_seconds=min_age,
+                keep_recent_per_key=keep_recent_per_key,
+                limit=limit,
+                json_output=json_output,
+                report_path=report,
+            )
+    elif normalized_family in {"task-local", "task-log", "retention"}:
+        exit_code, stdout, stderr = cmd_retention_prune(
+            context=context,
+            family=normalized_family,
+            apply=apply,
+            force=force,
+            tasks=tasks,
+            retention_classes=retention_classes,
+            min_age_seconds=min_age,
+            keep_recent_per_task=keep_recent_per_task,
+            limit=limit,
+            json_output=json_output,
+            archive_path=archive,
+            report_path=report,
+        )
+    elif normalized_family == "all":
+        runtime_code, runtime_out, runtime_err = cmd_prune(
+            context=context,
+            apply=apply,
+            queues=queues,
+            min_age_seconds=min_age,
+            keep_recent_per_key=keep_recent_per_key,
+            limit=limit,
+            json_output=True,
+            report_path=None,
+        )
+        retention_code, retention_out, retention_err = cmd_retention_prune(
+            context=context,
+            family="retention",
+            apply=apply,
+            force=force,
+            tasks=tasks,
+            retention_classes=retention_classes,
+            min_age_seconds=min_age,
+            keep_recent_per_task=keep_recent_per_task,
+            limit=limit,
+            json_output=True,
+            archive_path=archive,
+            report_path=report,
+        )
+        exit_code = 1 if runtime_code or retention_code else 0
+        if json_output:
+            stdout = json.dumps(
+                {
+                    "runtime_state": json.loads(runtime_out),
+                    "retention": json.loads(retention_out),
+                },
+                sort_keys=True,
+            )
+        else:
+            stdout = "\n".join(
+                [
+                    "Runtime state:",
+                    runtime_out,
+                    "Retention:",
+                    retention_out,
+                ]
+            )
+        stderr = "\n".join(part for part in (runtime_err, retention_err) if part)
+    else:
+        exit_code = 1
+        stdout = ""
+        stderr = (
+            "unknown prune family: "
+            f"{normalized_family}; allowed: runtime-state, task-local, task-log, "
+            "retention, all"
+        )
     if stdout:
         typer.echo(stdout)
     if stderr:

@@ -250,6 +250,25 @@ class Manager(BaseTask):
         payload["role"] = "manager"
         return payload
 
+    def _control_snapshot_fields(self) -> dict[str, Any]:
+        """Include manager-selection fields in STATUS/PING control snapshots."""
+
+        payload = super()._control_snapshot_fields()
+        payload.update(
+            {
+                "role": "manager",
+                "inbox": self._queue_names["inbox"],
+                "requests": self._queue_names["inbox"],
+                "ctrl_in": self._queue_names["ctrl_in"],
+                "ctrl_out": self._queue_names["ctrl_out"],
+                "outbox": self._queue_names["outbox"],
+            }
+        )
+        weft_context = getattr(self.taskspec.spec, "weft_context", None)
+        if weft_context is not None:
+            payload["weft_context"] = str(weft_context)
+        return payload
+
     def _handle_control_command(
         self, request: ControlRequest, context: QueueMessageContext
     ) -> bool:

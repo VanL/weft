@@ -380,7 +380,7 @@ Current behavior:
   with lifecycle evidence, when a typed terminal `ctrl_out` envelope proves
   terminal state, or when one-shot outbox evidence is visible without terminal
   task-log publication
-- `weft task status TID --probe-live` sends a structured PING with a
+- `weft task status TID --ping` sends a structured PING with a
   `request_id`, waits for the matching PONG, and may return a `live_pong`
   reconciliation classification plus best-effort runner-specific `runtime`
   details, including Docker details from `RunnerRuntimeDescription` when the
@@ -600,8 +600,9 @@ Related plan:
 _Implementation mapping_: `weft/commands/tidy.py` `cmd_tidy()`,
 `weft/commands/dump.py` `cmd_dump()`, `weft/commands/load.py` `cmd_load()`,
 `weft/commands/builtins.py` `cmd_system_builtins()`,
-`weft/commands/lifecycle_monitor.py` `run_lifecycle_monitor()`,
-`weft/commands/runtime_prune.py` `cmd_prune()`, registered in
+`weft/commands/task_monitor.py` `run_task_monitor()`,
+`weft/commands/runtime_prune.py` `cmd_prune()`,
+`weft/commands/retention_prune.py` `cmd_retention_prune()`, registered in
 `weft/cli/app.py` under the `system` sub-app.
 
 Current subcommands:
@@ -610,7 +611,7 @@ Current subcommands:
 - `weft system dump`
 - `weft system builtins`
 - `weft system load`
-- `weft system lifecycle-monitor`
+- `weft system task-monitor`
 - `weft system prune`
 
 Current behavior:
@@ -626,28 +627,45 @@ Current behavior:
   `weft.state.*` queues
 - `system load` imports a dump and returns exit code `3` on alias conflicts
   before writes begin
-- `system lifecycle-monitor` scans `weft.log.tasks` without consuming broker
-  messages and emits JSONL archive records to stdout or append-only disk files
-  under `.weft/archive/tasks/YYYY-MM-DD.jsonl`
-- `system lifecycle-monitor --sink disk --json` emits a final command summary
+- `system task-monitor` scans `weft.log.tasks` without consuming broker
+  messages and emits JSONL log records to stdout or append-only disk files
+  under `.weft/logs/task-monitor/YYYY-MM-DD.jsonl`
+- `system task-monitor --sink disk --json` emits a final command summary
   on stdout; `--sink stdout --json` is rejected because stdout is reserved for
-  archive JSONL records in stdout-sink mode
-- lifecycle-monitor checkpoints under `.weft/state/lifecycle-monitor/` are
+  task-monitor JSONL records in stdout-sink mode
+- task-monitor checkpoints under `.weft/state/task-monitor/` are
   operational cursors only and are not read by `status`, `task status`, or
   `result`
-- `system prune` scans supported runtime-only `weft.state.*`
-  queues and reports prune candidates. It defaults to `--dry-run`; `--apply`
-  is required for deletion.
+- `system prune` scans selected prune families and reports candidates. It
+  defaults to `--family runtime-state` for backward compatibility and defaults
+  to `--dry-run`; `--apply` is required for deletion.
+- `system prune --family` accepts `runtime-state`, `task-local`, `task-log`,
+  `retention`, or `all`. `retention` means task-local plus task-log.
 - `system prune --queue` accepts `tid-mappings`, `managers`,
-  `streaming`, `endpoints`, `pipelines`, or `all`, and rejects unknown values
+  `streaming`, `endpoints`, `pipelines`, or `all` for runtime-state pruning,
+  and rejects unknown values
+- `system prune --task TID` filters retention pruning to one or more task IDs
+- `system prune --retention-class NAME` filters retention pruning to selected
+  candidate classes
 - `system prune --min-age` protects recent rows;
   `--keep-recent-per-key` keeps newest rows for grouped runtime keys and must
   be at least `1`
+- `system prune --keep-recent-per-task` keeps newest lifecycle-log rows for
+  each task in retention pruning and must be at least `1`
+- ordinary retention `--apply` requires `--archive PATH`; archive records are
+  written before exact-message deletion
+- `system prune --apply --force` is an explicit human override for retention
+  protections that are report-only in ordinary apply. Force does not override
+  selected family/task/class scope, exact-message deletion, dry-run/apply mode,
+  or backend delete failures. `--force` without `--apply` is rejected.
 - `system prune --json` emits one summary object; `--report PATH`
   writes JSONL candidate records plus a final summary record
 - runtime-state pruning deletes exact message IDs only and must not touch
   task-local queues, `weft.log.tasks`, spawn requests, or manager control
   queues
+- retention pruning deletes exact message IDs only from selected
+  `weft.log.tasks` and `T{tid}.*` task-local queues, according to the
+  evidence/candidate classes in `weft/commands/retention_prune.py`
 - file-backed sqlite contexts can use snapshot rollback on apply failure
 - non-file-backed backends report partial-apply risk if a failure happens after
   writes begin
@@ -668,7 +686,7 @@ flags, and future queue or control ergonomics live in the companion doc:
 - [`docs/plans/2026-05-06-status-coherence-and-stale-pid-liveness-plan.md`](../plans/2026-05-06-status-coherence-and-stale-pid-liveness-plan.md)
 - [`docs/plans/2026-05-06-task-evidence-reconciliation-model-plan.md`](../plans/2026-05-06-task-evidence-reconciliation-model-plan.md)
 - [`docs/plans/2026-05-06-terminal-publication-hardening-plan.md`](../plans/2026-05-06-terminal-publication-hardening-plan.md)
-- [`docs/plans/2026-05-07-lifecycle-monitor-archive-sink-plan.md`](../plans/2026-05-07-lifecycle-monitor-archive-sink-plan.md)
+- [`docs/plans/2026-05-07-task-monitor-archive-sink-plan.md`](../plans/2026-05-07-task-monitor-archive-sink-plan.md)
 - [`docs/plans/2026-05-07-result-evidence-and-superseded-manager-reconciliation-plan.md`](../plans/2026-05-07-result-evidence-and-superseded-manager-reconciliation-plan.md)
 - [`docs/plans/2026-04-14-config-precedence-and-parsing-alignment-plan.md`](../plans/2026-04-14-config-precedence-and-parsing-alignment-plan.md)
 - [`docs/plans/2026-04-14-spawn-request-reconciliation-plan.md`](../plans/2026-04-14-spawn-request-reconciliation-plan.md)

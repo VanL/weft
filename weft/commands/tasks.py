@@ -436,7 +436,7 @@ def task_status(
     tid: str,
     *,
     include_terminal: bool = True,
-    probe_live: bool = False,
+    ping: bool = False,
     probe_timeout: float = CONTROL_SURFACE_WAIT_TIMEOUT,
     context_path: str | os.PathLike[str] | None = None,
 ) -> status_cmd.TaskSnapshot | None:
@@ -462,7 +462,7 @@ def task_status(
         return _pipeline_task_snapshot(ctx, full_tid, pipeline_snapshot, base_snapshot)
     if pipeline_snapshot is not None and base_snapshot is not None:
         base_snapshot = replace(base_snapshot, pipeline_status=pipeline_snapshot)
-    if probe_live and full_tid.isdigit() and len(full_tid) == 19:
+    if ping and full_tid.isdigit() and len(full_tid) == 19:
         taskspec_payload = load_latest_taskspec_payload(ctx, full_tid)
         mapping_entry = mapping_for_tid(ctx, full_tid)
         evidence = task_evidence.known_tid_evidence(
@@ -470,7 +470,7 @@ def task_status(
             tid=full_tid,
             taskspec_payload=taskspec_payload,
             mapping_entry=mapping_entry,
-            probe_live=True,
+            ping=True,
             probe_timeout=probe_timeout,
         )
         if evidence is not None and evidence.classification == "live_pong":
