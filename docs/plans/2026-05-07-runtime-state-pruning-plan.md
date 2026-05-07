@@ -1,6 +1,6 @@
 # Runtime State Pruning Plan
 
-Status: implemented
+Status: completed
 Source specs: see Source Documents below
 Superseded by: none
 
