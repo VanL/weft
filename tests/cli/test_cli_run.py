@@ -114,6 +114,36 @@ def _wait_for_endpoint_release(
     )
 
 
+def _wait_for_task_waiting_on_input(
+    context: WeftContext,
+    *,
+    tid: str,
+    queue_name: str,
+    timeout: float = 30.0,
+) -> None:
+    deadline = time.monotonic() + timeout
+    last_snapshot: Any | None = None
+    while time.monotonic() < deadline:
+        snapshot = task_cmd.task_status(tid, context_path=context.root)
+        if snapshot is not None:
+            last_snapshot = snapshot
+            if snapshot.status == "running" or (
+                snapshot.activity == "waiting" and snapshot.waiting_on == queue_name
+            ):
+                return
+            if snapshot.status in TERMINAL_TASK_STATUSES:
+                raise AssertionError(
+                    "Task reached a terminal state before becoming ready for "
+                    f"input: tid={tid}; queue={queue_name!r}; snapshot={snapshot!r}"
+                )
+        time.sleep(0.05)
+
+    raise AssertionError(
+        f"Timed out waiting for task {tid} to wait on {queue_name!r}; "
+        f"last_snapshot={last_snapshot!r}"
+    )
+
+
 def _create_stored_task_spec(
     workdir: Path,
     *,
@@ -1634,6 +1664,7 @@ def test_cli_run_persistent_agent_spec_continues_conversation(
     workdir, weft_harness
 ) -> None:
     context = build_context(spec_context=workdir)
+    weft_harness.ensure_foreground_manager()
     spec_path = workdir / "persistent_agent.json"
     spec_payload = taskspec_fixtures.create_valid_agent_taskspec(
         tid="1760000000000000202",
@@ -1664,14 +1695,20 @@ def test_cli_run_persistent_agent_spec_continues_conversation(
     assert rc == 0
     assert err == ""
     tid = out.strip()
+    _wait_for_task_waiting_on_input(
+        context,
+        tid=tid,
+        queue_name="cli_persistent_agent.inbox",
+    )
 
     _write_queue_message(context, "cli_persistent_agent.inbox", "hello")
+    result_timeout = "20" if os.name == "nt" else "10"
 
     rc, out, err = run_cli(
         "result",
         tid,
         "--timeout",
-        "5",
+        result_timeout,
         "--json",
         cwd=workdir,
         harness=weft_harness,
@@ -1688,7 +1725,7 @@ def test_cli_run_persistent_agent_spec_continues_conversation(
         "result",
         tid,
         "--timeout",
-        "5",
+        result_timeout,
         "--json",
         cwd=workdir,
         harness=weft_harness,
