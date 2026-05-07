@@ -234,6 +234,32 @@ RUNTIME_PRUNE_DEFAULT_MIN_AGE_SECONDS: Final[float] = 3600.0
 RUNTIME_PRUNE_DEFAULT_KEEP_RECENT_PER_KEY: Final[int] = 1
 """Default newest runtime-state rows to preserve for each logical key."""
 
+RUNTIME_PRUNE_CLASS_SUPERSEDED_TID_MAPPING: Final[str] = "superseded_tid_mapping"
+"""Runtime-prune classification for older duplicate TID mapping rows."""
+
+RUNTIME_PRUNE_CLASS_STALE_MANAGER: Final[str] = "stale_manager_registry"
+"""Runtime-prune classification for stale active manager registry rows."""
+
+RUNTIME_PRUNE_CLASS_SUPERSEDED_MANAGER: Final[str] = "superseded_manager_registry"
+"""Runtime-prune classification for older duplicate manager registry rows."""
+
+RUNTIME_PRUNE_CLASS_STALE_STREAMING: Final[str] = "stale_streaming_session"
+"""Runtime-prune classification for stale streaming session markers."""
+
+RUNTIME_PRUNE_CLASS_STALE_ENDPOINT: Final[str] = "stale_endpoint_record"
+"""Runtime-prune classification for endpoint rows whose owner is not live."""
+
+RUNTIME_PRUNE_CLASS_SUPERSEDED_ENDPOINT: Final[str] = "superseded_endpoint_record"
+"""Runtime-prune classification for older duplicate endpoint rows."""
+
+RUNTIME_PRUNE_CLASS_STALE_PIPELINE: Final[str] = "stale_pipeline_record"
+"""Runtime-prune classification reserved for proven stale pipeline rows."""
+
+RUNTIME_PRUNE_CLASS_UNSUPPORTED_PIPELINE: Final[str] = (
+    "unsupported_pipeline_record_shape"
+)
+"""Runtime-prune report-only classification for unsupported pipeline row shapes."""
+
 LIFECYCLE_MONITOR_WEFT_ANOMALY_CLASSIFICATIONS: Final[frozenset[str]] = frozenset(
     {
         "wrapper_lost",
@@ -274,6 +300,25 @@ PIPELINE_STATUS_QUEUE_SUFFIX: Final[str] = "status"
 
 WEFT_STATE_QUEUE_PREFIX: Final[str] = "weft.state."
 """Prefix for runtime-only state queues excluded from system dumps."""
+
+RUNTIME_PRUNE_SUPPORTED_QUEUE_GROUPS: Final[Mapping[str, str]] = {
+    "tid-mappings": WEFT_TID_MAPPINGS_QUEUE,
+    "managers": WEFT_MANAGERS_REGISTRY_QUEUE,
+    "streaming": WEFT_STREAMING_SESSIONS_QUEUE,
+    "endpoints": WEFT_ENDPOINTS_REGISTRY_QUEUE,
+    "pipelines": WEFT_PIPELINES_STATE_QUEUE,
+}
+"""Runtime-state queue groups supported by explicit pruning."""
+
+RUNTIME_PRUNE_DEFAULT_QUEUE_GROUPS: Final[tuple[str, ...]] = tuple(
+    RUNTIME_PRUNE_SUPPORTED_QUEUE_GROUPS
+)
+"""Default runtime-state queue group scan order for explicit pruning."""
+
+RUNTIME_PRUNE_REPORT_ONLY_CLASSIFICATIONS: Final[frozenset[str]] = frozenset(
+    {RUNTIME_PRUNE_CLASS_UNSUPPORTED_PIPELINE}
+)
+"""Runtime-prune classifications that must never be actively deleted."""
 
 WEFT_SPAWN_REQUESTS_QUEUE: Final[str] = "weft.spawn.requests"
 """Global queue for manager-consumed task spawn requests."""

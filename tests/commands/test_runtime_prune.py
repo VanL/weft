@@ -9,6 +9,13 @@ import pytest
 
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import (
+    RUNTIME_PRUNE_CLASS_STALE_ENDPOINT,
+    RUNTIME_PRUNE_CLASS_STALE_MANAGER,
+    RUNTIME_PRUNE_CLASS_STALE_STREAMING,
+    RUNTIME_PRUNE_CLASS_SUPERSEDED_ENDPOINT,
+    RUNTIME_PRUNE_CLASS_SUPERSEDED_MANAGER,
+    RUNTIME_PRUNE_CLASS_SUPERSEDED_TID_MAPPING,
+    RUNTIME_PRUNE_CLASS_UNSUPPORTED_PIPELINE,
     WEFT_ENDPOINTS_REGISTRY_QUEUE,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MANAGERS_REGISTRY_QUEUE,
@@ -17,13 +24,6 @@ from weft._constants import (
     WEFT_TID_MAPPINGS_QUEUE,
 )
 from weft.commands.runtime_prune import (
-    CLASS_STALE_ENDPOINT,
-    CLASS_STALE_MANAGER,
-    CLASS_STALE_STREAMING,
-    CLASS_SUPERSEDED_ENDPOINT,
-    CLASS_SUPERSEDED_MANAGER,
-    CLASS_SUPERSEDED_TID_MAPPING,
-    CLASS_UNSUPPORTED_PIPELINE,
     RuntimePruneConfig,
     run_runtime_prune,
 )
@@ -93,7 +93,7 @@ def test_tid_mapping_dry_run_reports_older_duplicate_without_deleting(tmp_path) 
 
     assert result.exit_code == 0
     assert [(c.message_id, c.classification) for c in result.candidates] == [
-        (old_id, CLASS_SUPERSEDED_TID_MAPPING)
+        (old_id, RUNTIME_PRUNE_CLASS_SUPERSEDED_TID_MAPPING)
     ]
     rows = _read_rows(ctx, WEFT_TID_MAPPINGS_QUEUE)
     assert {message_id for _payload, message_id in rows} >= {old_id, new_id}
@@ -170,8 +170,8 @@ def test_manager_prune_reports_superseded_and_stale_active_rows(tmp_path) -> Non
         (candidate.message_id, candidate.classification)
         for candidate in result.candidates
     }
-    assert (old_stopped, CLASS_SUPERSEDED_MANAGER) in classifications
-    assert (stale_active, CLASS_STALE_MANAGER) in classifications
+    assert (old_stopped, RUNTIME_PRUNE_CLASS_SUPERSEDED_MANAGER) in classifications
+    assert (stale_active, RUNTIME_PRUNE_CLASS_STALE_MANAGER) in classifications
     assert all(candidate.message_id != live_active for candidate in result.candidates)
 
 
@@ -208,7 +208,7 @@ def test_streaming_prune_deletes_terminal_owner_marker_only(tmp_path) -> None:
     )
 
     assert [(c.message_id, c.classification) for c in result.candidates] == [
-        (stale_id, CLASS_STALE_STREAMING)
+        (stale_id, RUNTIME_PRUNE_CLASS_STALE_STREAMING)
     ]
     remaining_ids = {
         message_id
@@ -304,8 +304,8 @@ def test_endpoint_prune_preserves_live_duplicate_claimants(tmp_path) -> None:
         (candidate.message_id, candidate.classification)
         for candidate in result.candidates
     }
-    assert (old_id, CLASS_SUPERSEDED_ENDPOINT) in classifications
-    assert (stale_owner, CLASS_STALE_ENDPOINT) in classifications
+    assert (old_id, RUNTIME_PRUNE_CLASS_SUPERSEDED_ENDPOINT) in classifications
+    assert (stale_owner, RUNTIME_PRUNE_CLASS_STALE_ENDPOINT) in classifications
     assert all(
         candidate.message_id not in {live_a, live_b} for candidate in result.candidates
     )
@@ -330,7 +330,7 @@ def test_pipeline_rows_are_report_only_in_first_slice(tmp_path) -> None:
 
     assert [
         (c.message_id, c.classification, c.report_only) for c in result.candidates
-    ] == [(pipeline_id, CLASS_UNSUPPORTED_PIPELINE, True)]
+    ] == [(pipeline_id, RUNTIME_PRUNE_CLASS_UNSUPPORTED_PIPELINE, True)]
     assert result.deleted == 0
     remaining_ids = {
         message_id

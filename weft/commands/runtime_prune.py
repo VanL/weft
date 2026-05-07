@@ -25,9 +25,19 @@ from simplebroker.ext import BrokerError
 from weft._constants import (
     EXIT_ERROR,
     EXIT_SUCCESS,
+    RUNTIME_PRUNE_CLASS_STALE_ENDPOINT,
+    RUNTIME_PRUNE_CLASS_STALE_MANAGER,
+    RUNTIME_PRUNE_CLASS_STALE_STREAMING,
+    RUNTIME_PRUNE_CLASS_SUPERSEDED_ENDPOINT,
+    RUNTIME_PRUNE_CLASS_SUPERSEDED_MANAGER,
+    RUNTIME_PRUNE_CLASS_SUPERSEDED_TID_MAPPING,
+    RUNTIME_PRUNE_CLASS_UNSUPPORTED_PIPELINE,
     RUNTIME_PRUNE_DEFAULT_KEEP_RECENT_PER_KEY,
     RUNTIME_PRUNE_DEFAULT_MIN_AGE_SECONDS,
+    RUNTIME_PRUNE_DEFAULT_QUEUE_GROUPS,
+    RUNTIME_PRUNE_REPORT_ONLY_CLASSIFICATIONS,
     RUNTIME_PRUNE_SCHEMA_VERSION,
+    RUNTIME_PRUNE_SUPPORTED_QUEUE_GROUPS,
     TERMINAL_TASK_STATUSES,
     WEFT_ENDPOINTS_REGISTRY_QUEUE,
     WEFT_GLOBAL_LOG_QUEUE,
@@ -56,31 +66,6 @@ RuntimeQueueName = Literal[
     "endpoints",
     "pipelines",
 ]
-
-CLASS_SUPERSEDED_TID_MAPPING = "superseded_tid_mapping"
-CLASS_STALE_MANAGER = "stale_manager_registry"
-CLASS_SUPERSEDED_MANAGER = "superseded_manager_registry"
-CLASS_STALE_STREAMING = "stale_streaming_session"
-CLASS_STALE_ENDPOINT = "stale_endpoint_record"
-CLASS_SUPERSEDED_ENDPOINT = "superseded_endpoint_record"
-CLASS_STALE_PIPELINE = "stale_pipeline_record"
-CLASS_UNSUPPORTED_PIPELINE = "unsupported_pipeline_record_shape"
-
-SUPPORTED_QUEUE_GROUPS: Mapping[str, str] = {
-    "tid-mappings": WEFT_TID_MAPPINGS_QUEUE,
-    "managers": WEFT_MANAGERS_REGISTRY_QUEUE,
-    "streaming": WEFT_STREAMING_SESSIONS_QUEUE,
-    "endpoints": WEFT_ENDPOINTS_REGISTRY_QUEUE,
-    "pipelines": WEFT_PIPELINES_STATE_QUEUE,
-}
-DEFAULT_QUEUE_GROUPS: tuple[RuntimeQueueName, ...] = (
-    "tid-mappings",
-    "managers",
-    "streaming",
-    "endpoints",
-    "pipelines",
-)
-REPORT_ONLY_CLASSIFICATIONS = frozenset({CLASS_UNSUPPORTED_PIPELINE})
 
 
 @dataclass(frozen=True, slots=True)
@@ -296,7 +281,7 @@ def normalize_queue_filters(
     """Normalize CLI queue filters and reject unknown values."""
 
     if not values:
-        return DEFAULT_QUEUE_GROUPS
+        return cast(tuple[RuntimeQueueName, ...], RUNTIME_PRUNE_DEFAULT_QUEUE_GROUPS)
     normalized: list[str] = []
     for raw_value in values:
         for part in raw_value.split(","):
@@ -305,13 +290,17 @@ def normalize_queue_filters(
                 continue
             normalized.append(value)
     if not normalized or "all" in normalized:
-        return DEFAULT_QUEUE_GROUPS
+        return cast(tuple[RuntimeQueueName, ...], RUNTIME_PRUNE_DEFAULT_QUEUE_GROUPS)
 
     unknown = sorted(
-        {value for value in normalized if value not in SUPPORTED_QUEUE_GROUPS}
+        {
+            value
+            for value in normalized
+            if value not in RUNTIME_PRUNE_SUPPORTED_QUEUE_GROUPS
+        }
     )
     if unknown:
-        allowed = ", ".join([*SUPPORTED_QUEUE_GROUPS, "all"])
+        allowed = ", ".join([*RUNTIME_PRUNE_SUPPORTED_QUEUE_GROUPS, "all"])
         raise ValueError(
             f"unknown runtime-state queue filter: {', '.join(unknown)}; allowed: {allowed}"
         )
@@ -425,13 +414,13 @@ def _build_candidates(
             queue_candidates, scanned = builders[queue_group](ctx, config, now_ns)
         except (BrokerError, OSError, RuntimeError) as exc:
             errors.append(
-                f"failed to scan {SUPPORTED_QUEUE_GROUPS[queue_group]}: {exc}"
+                f"failed to scan {RUNTIME_PRUNE_SUPPORTED_QUEUE_GROUPS[queue_group]}: {exc}"
             )
             continue
         candidates.extend(queue_candidates)
         stats.append(
             RuntimeQueueScanStats(
-                queue=SUPPORTED_QUEUE_GROUPS[queue_group],
+                queue=RUNTIME_PRUNE_SUPPORTED_QUEUE_GROUPS[queue_group],
                 scanned=scanned,
                 candidates=len(queue_candidates),
             )
@@ -501,7 +490,8 @@ def _candidate(
         reason=reason,
         age_seconds=_age_seconds(message_id, now_ns),
         payload_excerpt=_payload_excerpt(payload),
-        report_only=report_only or classification in REPORT_ONLY_CLASSIFICATIONS,
+        report_only=report_only
+        or classification in RUNTIME_PRUNE_REPORT_ONLY_CLASSIFICATIONS,
     )
 
 
@@ -534,7 +524,7 @@ def _tid_mapping_candidates(
                     queue_group="tid-mappings",
                     message_id=message_id,
                     key=full,
-                    classification=CLASS_SUPERSEDED_TID_MAPPING,
+                    classification=RUNTIME_PRUNE_CLASS_SUPERSEDED_TID_MAPPING,
                     reason="older_than_min_age_and_not_latest_for_tid",
                     now_ns=now_ns,
                     payload=payload,
@@ -583,7 +573,7 @@ def _manager_candidates(
                         queue_group="managers",
                         message_id=message_id,
                         key=tid,
-                        classification=CLASS_STALE_MANAGER,
+                        classification=RUNTIME_PRUNE_CLASS_STALE_MANAGER,
                         reason="active_manager_runtime_handle_not_live",
                         now_ns=now_ns,
                         payload=payload,
@@ -598,7 +588,7 @@ def _manager_candidates(
                     queue_group="managers",
                     message_id=message_id,
                     key=tid,
-                    classification=CLASS_SUPERSEDED_MANAGER,
+                    classification=RUNTIME_PRUNE_CLASS_SUPERSEDED_MANAGER,
                     reason="older_than_min_age_and_not_latest_for_manager_tid",
                     now_ns=now_ns,
                     payload=payload,
@@ -672,7 +662,7 @@ def _streaming_candidates(
                     queue_group="streaming",
                     message_id=message_id,
                     key=key,
-                    classification=CLASS_STALE_STREAMING,
+                    classification=RUNTIME_PRUNE_CLASS_STALE_STREAMING,
                     reason=(
                         "owner_task_terminal"
                         if owner_terminal
@@ -721,7 +711,7 @@ def _endpoint_candidates(
                     queue_group="endpoints",
                     message_id=message_id,
                     key=f"{name}:{tid}",
-                    classification=CLASS_SUPERSEDED_ENDPOINT,
+                    classification=RUNTIME_PRUNE_CLASS_SUPERSEDED_ENDPOINT,
                     reason="older_than_min_age_and_not_latest_for_endpoint_owner",
                     now_ns=now_ns,
                     payload=payload,
@@ -747,7 +737,7 @@ def _endpoint_candidates(
                 queue_group="endpoints",
                 message_id=message_id,
                 key=record.name,
-                classification=CLASS_STALE_ENDPOINT,
+                classification=RUNTIME_PRUNE_CLASS_STALE_ENDPOINT,
                 reason="endpoint_owner_not_live",
                 now_ns=now_ns,
                 payload=payload,
@@ -775,7 +765,7 @@ def _pipeline_candidates(
                 queue_group="pipelines",
                 message_id=message_id,
                 key=key,
-                classification=CLASS_UNSUPPORTED_PIPELINE,
+                classification=RUNTIME_PRUNE_CLASS_UNSUPPORTED_PIPELINE,
                 reason="pipeline_runtime_shape_not_pruned_in_first_slice",
                 now_ns=now_ns,
                 payload=payload,
