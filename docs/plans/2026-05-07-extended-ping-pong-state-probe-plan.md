@@ -16,7 +16,9 @@ reconciliation may be weak.
 
 This is a contract change on the control plane. Keep it narrow: no new task
 states, no new queue names, no second control plane, no full TaskSpec dumps in
-PONG, and no project-wide active probing by default.
+PONG, and no project-wide active probing by default. Docker-specific runtime
+facts are in scope when the task is actually running under Docker and those
+facts come from the existing runner handle/plugin path.
 
 ## 2. Source Documents
 
@@ -58,6 +60,11 @@ Related plans:
 - [`docs/plans/2026-04-24-runtime-handle-authority-migration-plan.md`](./2026-04-24-runtime-handle-authority-migration-plan.md)
   defines why runtime handles, especially external-supervisor handles, cannot
   always be reduced to host PID truth.
+- Docker runner implementation:
+  `extensions/weft_docker/weft_docker/plugin.py` currently exposes
+  `DockerRunnerPlugin.describe()` and `_describe_runtime()`, including
+  container state, container ID/name, image, OOM flag, exit code, host PID,
+  timestamps, network mode, CPU, memory, pids, network IO, and block IO.
 
 Spec delta required before implementation is done:
 
@@ -89,6 +96,9 @@ Files to modify:
   - `BaseTask._handle_control_message()` currently uppercases the raw message
     string and passes only a command string to `_handle_control_command()`.
   - `_send_control_response()` already writes JSON responses to `ctrl_out`.
+  - `_runtime_handle` and `_current_runner_name()` are the task-owned bridge to
+    runner-specific observability. Reuse that bridge; do not reconstruct Docker
+    identity from TaskSpec or environment variables.
 - `weft/core/tasks/pipeline.py`
   - Overrides `_handle_control_command()` and currently special-cases `PING`
     and `STATUS`; keep pipeline-specific `STATUS` behavior, but reuse the
@@ -107,6 +117,11 @@ Files to modify:
   - Extend the shared evidence model with active PONG evidence. This is the
     correct DRY home for reconciliation classification, not `tasks.py` or
     `status.py` ad hoc code.
+- `extensions/weft_docker/weft_docker/plugin.py`
+  - Read this file for available Docker runtime metadata. Touch it only if the
+    existing `RunnerRuntimeDescription` lacks a needed safe field; do not add
+    PING-specific Docker logic here unless the generic runner description
+    contract needs it.
 - `weft/commands/tasks.py`
   - Existing task command surface. `_send_control()` currently writes raw
     string commands. Add a keyed PING helper here only if it remains a thin
@@ -145,6 +160,13 @@ Files to read before editing:
     `_send_control_response()`, `_report_state_change()`,
     `_current_runner_name()`, `_runtime_handle`, activity handling, and
     terminal-envelope publication.
+- `weft/ext.py`
+  - Read `RunnerHandle` and `RunnerRuntimeDescription`. PONG should use these
+    existing shapes for runner-specific facts rather than inventing a Docker
+    payload format from scratch.
+- `extensions/weft_docker/weft_docker/plugin.py`
+  - Read `DockerRunnerPlugin.describe()` and `_describe_runtime()`. These are
+    the existing source of Docker-specific observable facts.
 - `weft/core/tasks/pipeline.py`
   - Read `_handle_control_command()` and `_publish_pipeline_snapshot()`. The
     pipeline task has extra status output; do not flatten that away.
@@ -176,6 +198,10 @@ Comprehension checks before editing:
   matched PONG proves the task-local control owner was alive and reported its
   current state at the PONG timestamp, while host PID evidence may point at a
   wrapper, stale PID, external supervisor, or unknown runtime state.
+- Where should Docker-specific PONG facts come from? Answer: the task's
+  current `RunnerHandle` plus the Docker runner plugin's existing
+  `describe()`/`RunnerRuntimeDescription` path, not a new Docker inspection
+  path inside command/status code.
 - What must a PONG not do? Answer: it must not mutate task state, write a
   lifecycle event, publish a terminal envelope, or resurrect a task after newer
   terminal evidence.
@@ -254,8 +280,41 @@ Optional PONG fields:
 - `request_id`, only when present on the inbound command
 - `activity`, only when known
 - `waiting_on`, only when known
-- `runtime`, only as a small redacted summary if the implementation already
-  has that summary available without calling a slow external describe path
+- `runtime`, as a small redacted summary for the active runner when available
+  within the bounded PING handling budget
+
+For Docker tasks, `runtime` should include Docker-specific facts when the
+existing runner handle/plugin path can provide them safely:
+
+```json
+{
+  "runner": "docker",
+  "id": "weft-...",
+  "state": "running",
+  "metadata": {
+    "container_id": "...",
+    "container_name": "weft-...",
+    "image": "example:tag",
+    "status": "running",
+    "oom_killed": false,
+    "exit_code": 0,
+    "host_pid": 12345,
+    "started_at": "2026-05-07T00:00:00Z",
+    "network_mode": "bridge",
+    "cpu_percent": 1.23,
+    "memory_usage_mb": 42.0,
+    "memory_limit_mb": 512,
+    "pids": 7,
+    "network_io_bytes": {"rx": 1000, "tx": 2000},
+    "block_io_bytes": {"read": 4096, "write": 8192}
+  }
+}
+```
+
+Do not require every Docker field to be present. Docker can omit fields by
+platform, daemon version, container state, permission boundary, or stats
+availability. Missing Docker details should not make PING fail if the task can
+still return its core PONG snapshot.
 
 Do not include:
 
@@ -365,6 +424,13 @@ new queue, or periodic probe loop, stop. That is a materially different design.
 - Do not add a new abstraction layer such as a `ControlPlane` service. Use
   small helpers in existing owner modules.
 - Do not add active probing to project-wide status by default.
+- Runner-specific PONG facts must use the existing runner plugin/handle
+  contracts. For Docker, that means `RunnerHandle` plus
+  `DockerRunnerPlugin.describe()` / `RunnerRuntimeDescription`; no second
+  Docker SDK inspection path in command/status code.
+- Docker detail collection is best-effort. A Docker describe failure may add a
+  small diagnostic in `runtime.metadata`, but it must not suppress the core
+  PONG response if the task control loop is alive.
 - Do not use fixed-limit queue history reads for correctness-critical evidence.
   Use generator-based reads where the code scans append-only queues.
 - Do not mock SimpleBroker queues or task lifecycle when a real broker-backed
@@ -389,8 +455,9 @@ Out of scope:
 - Queue cleanup or PONG garbage collection.
 - Full task introspection over PING.
 - Public API redesign for all control messages.
-- Docker-specific status code in PONG. The task reports its local Weft state;
-  runner-specific deep inspection remains in runtime plugins.
+- New Docker-specific status code outside the runner plugin. Docker-specific
+  PONG details are in scope, but they must come through the existing runner
+  plugin description contract.
 
 ## 6. Bite-Sized Tasks
 
@@ -538,7 +605,18 @@ Implementation guidance:
   - `runner`
   - optional `activity`
   - optional `waiting_on`
+  - optional `runtime`
 - Reuse `_current_runner_name()` for `runner`.
+- For `runtime`, add a small helper such as `_control_runtime_summary()` that:
+  - returns `None` when no runtime handle is active
+  - calls the existing runner plugin `describe()` only when a runtime handle is
+    present and the plugin is available
+  - returns `RunnerRuntimeDescription.to_dict()` or a redacted subset of that
+    shape
+  - catches runner describe failures defensively and returns a small diagnostic
+    rather than failing PING
+- For Docker, this helper should surface the Docker plugin's existing runtime
+  metadata. Do not manually import the Docker SDK from `base.py`.
 - Let `_send_control_response()` remain the single writer to `ctrl_out`.
 - Update base PING to:
 
@@ -563,6 +641,12 @@ Implementation guidance:
 Tests to add/update:
 
 - Extend `test_status_command_reports_state` so STATUS includes `runner`.
+- Add a unit-level or broker-backed test for `_control_snapshot_fields()` via
+  public PONG output where a fake or simple registered runner plugin returns a
+  `RunnerRuntimeDescription`. Assert `runtime.runner`, `runtime.id`, and
+  `runtime.state` appear. Mocking the plugin boundary is acceptable here only
+  to avoid depending on a real Docker daemon in the core test suite; do not mock
+  the control queue.
 - Add or update a pipeline PING test if there is existing coverage for
   pipeline control responses; otherwise add a focused test only if the override
   would otherwise remain untested.
@@ -573,6 +657,8 @@ Stop and re-evaluate if:
 - Full TaskSpec payloads or runtime handles start entering PONG.
 - `PipelineTask` needs duplicate code for fields already available from
   `BaseTask`.
+- Docker support requires Docker SDK imports or container lookup logic outside
+  the Docker runner plugin.
 
 Per-task verification:
 
@@ -725,6 +811,11 @@ Tests to add/update:
 - Known-TID status with stale/unknown runtime evidence and a matched PONG
   returns public status from PONG and reconciliation classification
   `live_pong`.
+- Known-TID status with a matched Docker PONG preserves the PONG `runtime`
+  summary in evidence metadata or reconciliation output, depending on the final
+  public `TaskSnapshot` shape. The test should not require a real Docker daemon
+  unless the Docker extension suite already has an isolated Docker test
+  fixture.
 - Terminal log evidence newer than PONG remains terminal.
 - Matched PONG newer than visible terminal evidence returns PONG status with a
   conflict reconciliation reason.
@@ -811,6 +902,9 @@ Required edits:
 - `07-System_Invariants.md`: add or update an observability invariant only if
   implementation makes PONG precedence a durable invariant.
 - `10-CLI_Interface.md`: document any additive JSON fields or flags.
+- If Docker runtime details are exposed in public JSON snapshots, document that
+  the `runtime` object is best-effort and runner-specific, with Docker metadata
+  coming from `RunnerRuntimeDescription`.
 
 Stop and re-evaluate if:
 
@@ -907,6 +1001,10 @@ First-pass ambiguities found and fixed while writing this plan:
 - The active probe could accidentally consume terminal `ctrl_out` messages.
   The plan now requires non-consuming matching or exact-message ACK only for
   the matched PONG.
+- The first draft overcorrected by treating Docker-specific PONG data as out
+  of scope. That was wrong for the product goal: PONG is most useful when PID
+  reconciliation is weak, so Docker runtime facts should be included when they
+  come from the existing runner plugin description path.
 
 Second-pass review result:
 
@@ -914,7 +1012,9 @@ Second-pass review result:
   request ID, and current-state reconciliation through a bounded keyed active
   probe.
 - It does not require a materially different design such as heartbeat leases,
-  periodic scans, or Docker-specific runtime management.
+  periodic scans, or a second Docker-specific runtime management path. It does
+  include Docker-specific observability through the existing runner plugin
+  contract.
 - The riskiest unresolved product choice is whether `weft task status TID`
   should active-probe automatically or require an explicit flag/API parameter.
   The implementation should decide this before changing CLI behavior and then
