@@ -1411,7 +1411,7 @@ provides-extras = ["pg", "docker", "django", "django-channels", "macos-sandbox",
 
 [[package]]
 name = "weft-django"
-version = "0.9.18"
+version = "0.9.19"
 source = { editable = "integrations/weft_django" }
 dependencies = [
     { name = "django" },
