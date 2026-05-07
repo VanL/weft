@@ -196,6 +196,10 @@ runbook needs to become stricter.
   non-blocking outbox drain after the grace window before returning a completed
   result, or they will intermittently drop late-arriving outputs on slower
   platforms.
+- Foreground manager SIGTERM drain needs one overall deadline in addition to
+  per-child STOP retries. Release-load PG runs can leave a child slow enough
+  that the supervisor-facing `weft manager serve` process gets force-killed by
+  the test harness unless the manager itself escalates and exits cleanly.
 
 ## 2026-04-08 Zombie PID Liveness
 

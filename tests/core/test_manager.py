@@ -1209,6 +1209,54 @@ def test_foreground_serve_sigterm_uses_async_drain_path(manager_setup) -> None:
         manager._terminate_children = original_terminate_children  # type: ignore[method-assign]
 
 
+def test_manager_drain_timeout_force_finishes_stubborn_children(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, make_queue = manager_setup
+    ctrl_queue_name = "manager.stubborn-child.ctrl_in"
+    ctrl_queue = make_queue(ctrl_queue_name)
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    drain(log_queue)
+
+    class StubbornProcess:
+        pid = os.getpid()
+        exitcode = None
+
+        def is_alive(self) -> bool:
+            return True
+
+        def join(self, timeout: float | None = None) -> None:
+            return None
+
+    manager._child_processes["stubborn-child"] = ManagedChild(
+        process=StubbornProcess(),  # type: ignore[arg-type]
+        ctrl_queue=ctrl_queue_name,
+        persistent=False,
+    )
+    terminated = False
+
+    def finish_stubborn_child() -> None:
+        nonlocal terminated
+        terminated = True
+        manager._child_processes.clear()
+
+    monkeypatch.setattr(manager_mod, "MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS", 0.0)
+    monkeypatch.setattr(manager, "_terminate_children", finish_stubborn_child)
+
+    manager._begin_graceful_shutdown(message_id=None)
+    manager.process_once()
+
+    assert ctrl_queue.read_one() == CONTROL_STOP
+    assert terminated is True
+    assert manager.should_stop is True
+    assert manager.taskspec.state.status == "cancelled"
+
+    events = [json.loads(item) for item in drain(log_queue)]
+    assert any(event.get("event") == "control_stop" for event in events)
+    assert any(event.get("event") == "manager_stop_drained" for event in events)
+
+
 @pytest.mark.skipif(
     os.name == "nt" or getattr(signal, "SIGUSR1", None) is None,
     reason="SIGUSR1 not available",

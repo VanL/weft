@@ -38,6 +38,7 @@ from weft._constants import (
     MANAGER_DISPATCH_RECOVERY_MAX_ATTEMPTS,
     MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS,
     MANAGER_REGISTRY_HEARTBEAT_INTERVAL_SECONDS,
+    MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS,
     MANAGER_SPAWN_FENCE_RECOVERY_EXHAUSTED_EVENT,
     MANAGER_SPAWN_FENCE_SUSPENDED_EVENT,
     MANAGER_SPAWN_FENCED_REQUEUED_EVENT,
@@ -185,6 +186,7 @@ class Manager(BaseTask):
         self._drain_completion_event = "manager_stop_drained"
         self._drain_signaled_children: set[str] = set()
         self._drain_signal_started_ns: dict[str, int] = {}
+        self._drain_started_ns: int | None = None
         self._dispatch_suspension: DispatchSuspension | None = None
         self._autostart_enabled = bool(self._config.get("WEFT_AUTOSTART_TASKS", True))
         autostart_dir = self._config.get("WEFT_AUTOSTART_DIR")
@@ -1203,6 +1205,7 @@ class Manager(BaseTask):
         self._draining = True
         self._drain_signaled_children.clear()
         self._drain_signal_started_ns.clear()
+        self._drain_started_ns = time.time_ns()
         self._drain_reason = reason
         self._drain_completion_event = completion_event
         if event is not None:
@@ -1235,6 +1238,7 @@ class Manager(BaseTask):
             return
 
         self._draining = True
+        self._drain_started_ns = time.time_ns()
         self._drain_reason = f"Superseded by lower-TID manager {leader_tid}"
         self._drain_completion_event = "manager_leadership_drained"
         self._report_state_change(
@@ -1250,6 +1254,7 @@ class Manager(BaseTask):
             self.taskspec.mark_cancelled(reason=self._drain_reason)
             self._report_state_change(event=self._drain_completion_event)
             self._update_process_title("cancelled")
+        self._drain_started_ns = None
         self.should_stop = True
 
     def handle_termination_signal(self, signum: int) -> None:
@@ -1995,19 +2000,13 @@ class Manager(BaseTask):
             # Finish an in-flight drain before reevaluating leadership. Otherwise a
             # slow turn can re-enter the yield path and skip the corresponding
             # *_drained completion event once children are gone.
-            self._signal_children_to_stop()
-            self._cleanup_children()
-            if not self._child_processes:
-                self._finish_graceful_shutdown()
+            self._continue_shutdown_drain()
             return
         if self._maybe_yield_leadership():
             return
         self._drain_control_queue_first()
         if self._draining:
-            self._signal_children_to_stop()
-            self._cleanup_children()
-            if not self._child_processes:
-                self._finish_graceful_shutdown()
+            self._continue_shutdown_drain()
             return
         refresh = self._refresh_dispatch_suspension()
         ownership = refresh.ownership if refresh is not None else None
@@ -2025,10 +2024,7 @@ class Manager(BaseTask):
             return
         super().process_once()
         if self._draining:
-            self._signal_children_to_stop()
-            self._cleanup_children()
-            if not self._child_processes:
-                self._finish_graceful_shutdown()
+            self._continue_shutdown_drain()
             return
         if self._maybe_yield_leadership():
             return
@@ -2063,6 +2059,26 @@ class Manager(BaseTask):
                 self._report_state_change(event="manager_idle_shutdown")
                 self._idle_shutdown_logged = True
             self.should_stop = True
+
+    def _continue_shutdown_drain(self) -> None:
+        self._signal_children_to_stop()
+        self._cleanup_children()
+        if self._child_processes and self._shutdown_drain_timed_out():
+            logger.warning(
+                "Manager %s drain timed out with %s child task(s); terminating",
+                self.tid,
+                len(self._child_processes),
+            )
+            self._terminate_children()
+            self._cleanup_children()
+        if not self._child_processes:
+            self._finish_graceful_shutdown()
+
+    def _shutdown_drain_timed_out(self) -> bool:
+        if self._drain_started_ns is None:
+            return False
+        timeout_ns = int(MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS * 1_000_000_000)
+        return time.time_ns() - self._drain_started_ns >= timeout_ns
 
     def _atexit_unregister(self) -> None:
         try:

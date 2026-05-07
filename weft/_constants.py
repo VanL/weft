@@ -137,6 +137,9 @@ MANAGER_PID_LIVENESS_RECHECK_INTERVAL: Final[float] = 0.5
 MANAGER_CHILD_EXIT_POLL_INTERVAL: Final[float] = 0.05
 """Polling interval while the Manager waits for tracked child processes to exit."""
 
+MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS: Final[float] = 5.0
+"""Maximum time a Manager drain waits before forcefully reaping child processes."""
+
 MANAGER_COMPETING_STARTUP_GRACE_SECONDS: Final[float] = 0.5
 """Grace window for concurrent manager starts to yield to an existing winner."""
 

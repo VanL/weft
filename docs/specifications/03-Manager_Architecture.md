@@ -190,7 +190,10 @@ for `weft.spawn.requests`. Canonical records are the live `role="manager"`
 entries whose `requests` field points at `weft.spawn.requests`; leadership
 chooses the lowest-TID live canonical record. Manager records bound to another
 request queue do not participate in default-manager selection. External
-`SIGTERM` and `SIGINT` against a Manager enter the same drain path as STOP;
+`SIGTERM` and `SIGINT` against a Manager enter the same drain path as STOP. A
+manager drain has a bounded child-exit window; if child tasks do not exit after
+STOP is broadcast and the drain window expires, the Manager forcefully reaps
+tracked child process trees before publishing its drained terminal event.
 `SIGUSR1` retains immediate kill semantics.
 
 _Implementation mapping_:
