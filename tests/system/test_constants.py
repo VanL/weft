@@ -29,6 +29,7 @@ from weft._constants import (
     DEFAULT_TIMEOUT,
     EXIT_SUCCESS,
     FAILURE_LIKE_TASK_STATUSES,
+    HEARTBEAT_MIN_INTERVAL_SECONDS,
     INTERACTIVE_OUTPUT_DRAIN_POLL_INTERVAL,
     INTERACTIVE_OUTPUT_DRAIN_TIMEOUT,
     INTERACTIVE_STOP_COMPLETION_TIMEOUT,
@@ -70,6 +71,12 @@ from weft._constants import (
     WEFT_DIRECTORY_NAME_DEFAULT,
     WEFT_MANAGER_LIFETIME_TIMEOUT,
     WEFT_MANAGER_REUSE_ENABLED,
+    WEFT_TASK_MONITOR_BATCH_SIZE_DEFAULT,
+    WEFT_TASK_MONITOR_ENABLED_DEFAULT,
+    WEFT_TASK_MONITOR_INTERVAL_SECONDS_DEFAULT,
+    WEFT_TASK_MONITOR_LOG_SINK_DEFAULT,
+    WEFT_TASK_MONITOR_PROCESSOR_DEFAULT,
+    WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS_DEFAULT,
     __version__,
     compile_config,
     load_config,
@@ -334,6 +341,29 @@ class TestLoadConfig:
             # Weft project directory
             assert config["WEFT_DIRECTORY_NAME"] == WEFT_DIRECTORY_NAME_DEFAULT
             assert config["WEFT_LOGS_DIR"] is None
+            assert config["WEFT_TASK_MONITOR_ENABLED"] is (
+                WEFT_TASK_MONITOR_ENABLED_DEFAULT
+            )
+            assert (
+                config["WEFT_TASK_MONITOR_INTERVAL_SECONDS"]
+                == WEFT_TASK_MONITOR_INTERVAL_SECONDS_DEFAULT
+            )
+            assert (
+                config["WEFT_TASK_MONITOR_BATCH_SIZE"]
+                == WEFT_TASK_MONITOR_BATCH_SIZE_DEFAULT
+            )
+            assert (
+                config["WEFT_TASK_MONITOR_PROCESSOR"]
+                == WEFT_TASK_MONITOR_PROCESSOR_DEFAULT
+            )
+            assert (
+                config["WEFT_TASK_MONITOR_LOG_SINK"]
+                == WEFT_TASK_MONITOR_LOG_SINK_DEFAULT
+            )
+            assert (
+                config["WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS"]
+                == WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS_DEFAULT
+            )
 
             # Broker config should be complete and typed.
             assert config["BROKER_PROJECT_SCOPE"] is True
@@ -345,6 +375,59 @@ class TestLoadConfig:
             assert isinstance(config["BROKER_AUTO_VACUUM_INTERVAL"], int)
             assert config["BROKER_MAX_MESSAGE_SIZE"] > 0
             assert isinstance(config["BROKER_MAX_MESSAGE_SIZE"], int)
+
+    def test_task_monitor_config_normalization(self) -> None:
+        """Task-monitor env values normalize to runtime types."""
+
+        with patch.dict(
+            os.environ,
+            {
+                "WEFT_TASK_MONITOR_ENABLED": "0",
+                "WEFT_TASK_MONITOR_INTERVAL_SECONDS": str(
+                    HEARTBEAT_MIN_INTERVAL_SECONDS
+                ),
+                "WEFT_TASK_MONITOR_BATCH_SIZE": "42",
+                "WEFT_TASK_MONITOR_PROCESSOR": "tests.core.test_task_monitoring:noop",
+                "WEFT_TASK_MONITOR_LOG_SINK": "disk",
+                "WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS": "2.5",
+            },
+            clear=True,
+        ):
+            config = load_config()
+
+        assert config["WEFT_TASK_MONITOR_ENABLED"] is False
+        assert config["WEFT_TASK_MONITOR_INTERVAL_SECONDS"] == (
+            HEARTBEAT_MIN_INTERVAL_SECONDS
+        )
+        assert config["WEFT_TASK_MONITOR_BATCH_SIZE"] == 42
+        assert (
+            config["WEFT_TASK_MONITOR_PROCESSOR"]
+            == "tests.core.test_task_monitoring:noop"
+        )
+        assert config["WEFT_TASK_MONITOR_LOG_SINK"] == "disk"
+        assert config["WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS"] == 2.5
+
+    def test_task_monitor_interval_rejects_below_heartbeat_minimum(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "WEFT_TASK_MONITOR_INTERVAL_SECONDS": str(
+                    HEARTBEAT_MIN_INTERVAL_SECONDS - 1
+                )
+            },
+            clear=True,
+        ):
+            with pytest.raises(ValueError, match="WEFT_TASK_MONITOR_INTERVAL_SECONDS"):
+                load_config()
+
+    def test_task_monitor_batch_size_rejects_zero(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"WEFT_TASK_MONITOR_BATCH_SIZE": "0"},
+            clear=True,
+        ):
+            with pytest.raises(ValueError, match="WEFT_TASK_MONITOR_BATCH_SIZE"):
+                load_config()
 
     def test_debug_setting(self) -> None:
         """Test debug environment variable."""

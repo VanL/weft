@@ -117,7 +117,10 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
 - **OBS.13**: task monitor log files, task monitor checkpoints,
   runtime-prune reports, and retention-prune reports/archives are operational
   outputs only. They must not become task lifecycle truth, status authority,
-  result authority, or automatic cleanup authority.
+  result authority, or automatic cleanup authority. The manager-supervised
+  `TaskMonitorTask` added in phase 7 part 1 is also operational and
+  non-destructive; its processor results and checkpoints do not change public
+  lifecycle reconstruction.
 - **OBS.14**: claimed outbox residue is recovery evidence, not decoded result
   evidence. Status/result readers may surface
   `claimed_result_without_terminal`, but they must not delete, unclaim, or
@@ -246,10 +249,12 @@ Current invariant visibility comes from:
 - process titles
 - CLI status/result/task inspection
 - foreground `weft system task-monitor` log scans
+- manager-supervised `TaskMonitorTask` health via task-local `PING`/`STATUS`
 - the test suite
 
-There is no separate invariant-monitor daemon in the current contract. The
-task monitor is a foreground, non-destructive system command.
+There is now a manager-supervised `TaskMonitorTask` in addition to the
+foreground `weft system task-monitor` command. In the current contract it is
+non-destructive and operational only.
 
 ## Scope Boundary
 
@@ -264,9 +269,10 @@ doc:
 - [`docs/plans/2026-05-06-lifecycle-reconciliation-architecture-plan.md`](../plans/2026-05-06-lifecycle-reconciliation-architecture-plan.md)
 - [`docs/plans/2026-05-06-status-coherence-and-stale-pid-liveness-plan.md`](../plans/2026-05-06-status-coherence-and-stale-pid-liveness-plan.md)
 - [`docs/plans/2026-05-06-terminal-publication-hardening-plan.md`](../plans/2026-05-06-terminal-publication-hardening-plan.md)
-- [`docs/plans/2026-05-07-task-monitor-archive-sink-plan.md`](../plans/2026-05-07-task-monitor-archive-sink-plan.md)
+- [`docs/plans/2026-05-07-lifecycle-monitor-archive-sink-plan.md`](../plans/2026-05-07-lifecycle-monitor-archive-sink-plan.md)
 - [`docs/plans/2026-05-07-result-evidence-and-superseded-manager-reconciliation-plan.md`](../plans/2026-05-07-result-evidence-and-superseded-manager-reconciliation-plan.md)
 - [`docs/plans/2026-05-07-manager-selection-ping-pong-liveness-plan.md`](../plans/2026-05-07-manager-selection-ping-pong-liveness-plan.md)
+- [`docs/plans/2026-05-07-phase-7-task-monitor-supervision-and-cleanup-plan.md`](../plans/2026-05-07-phase-7-task-monitor-supervision-and-cleanup-plan.md)
 - [`docs/plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md`](../plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md)
 - [`docs/plans/2026-04-17-canonical-owner-fence-plan.md`](../plans/2026-04-17-canonical-owner-fence-plan.md)
 

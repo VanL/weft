@@ -27,6 +27,7 @@ from simplebroker import BrokerTarget, Queue
 from simplebroker.ext import BrokerError
 from weft._constants import (
     CONTROL_STOP,
+    DEFAULT_FUNCTION_TARGET,
     INTERNAL_RUNTIME_ENDPOINT_NAME_KEY,
     INTERNAL_RUNTIME_ENVELOPE_ENDPOINT_NAME_KEY,
     INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY,
@@ -34,6 +35,7 @@ from weft._constants import (
     INTERNAL_RUNTIME_TASK_CLASS_KEY,
     INTERNAL_RUNTIME_TASK_CLASS_PIPELINE,
     INTERNAL_RUNTIME_TASK_CLASS_PIPELINE_EDGE,
+    INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR,
     MANAGER_CHILD_EXIT_POLL_INTERVAL,
     MANAGER_DISPATCH_RECOVERY_MAX_ATTEMPTS,
     MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS,
@@ -54,6 +56,7 @@ from weft._constants import (
     WEFT_MANAGER_RUNTIME_HANDLE_JSON_ENV,
     WEFT_MANAGERS_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
+    WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS_DEFAULT,
     WEFT_TID_MAPPINGS_QUEUE,
     WORK_ENVELOPE_START,
     WRAPPER_LOST_ERROR,
@@ -104,6 +107,7 @@ class ManagedChild:
     persistent: bool = False
     autostart_source: str | None = None
     ctrl_out_queue: str | None = None
+    internal_role: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,6 +200,21 @@ class Manager(BaseTask):
         self._autostart_state: dict[str, dict[str, Any]] = {}
         self._autostart_last_scan_ns = 0
         self._autostart_scan_interval_ns = 1_000_000_000
+        self._task_monitor_enabled = bool(
+            self._config.get("WEFT_TASK_MONITOR_ENABLED", True)
+        )
+        self._task_monitor_tid: str | None = None
+        self._task_monitor_spawn_pending = False
+        self._task_monitor_next_start_allowed_ns = 0
+        self._task_monitor_restart_backoff_ns = int(
+            float(
+                self._config.get(
+                    "WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS",
+                    WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS_DEFAULT,
+                )
+            )
+            * 1_000_000_000
+        )
         self._leader_check_interval_ns = 100_000_000
         self._last_leader_check_ns = 0
         self._broker_activity_queue: Queue | None = None
@@ -217,6 +236,7 @@ class Manager(BaseTask):
         self.taskspec.mark_running(pid=multiprocessing.current_process().pid)
         self._update_process_title("running")
         self._report_state_change(event="task_started")
+        self._tick_task_monitor(force=True)
         if self._autostart_enabled:
             self._tick_autostart(force=True)
         atexit.register(self._atexit_unregister)
@@ -348,6 +368,10 @@ class Manager(BaseTask):
             )
             return False
 
+        internal_role = child_spec.metadata.get(INTERNAL_RUNTIME_TASK_CLASS_KEY)
+        if not isinstance(internal_role, str):
+            internal_role = None
+
         process = launch_task_process(
             task_cls,
             self._db_path,
@@ -361,7 +385,11 @@ class Manager(BaseTask):
             ctrl_out_queue=child_spec.io.control.get("ctrl_out"),
             persistent=bool(getattr(child_spec.spec, "persistent", False)),
             autostart_source=autostart_source,
+            internal_role=internal_role,
         )
+        if internal_role == INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR:
+            self._task_monitor_tid = child_spec.tid
+            self._task_monitor_spawn_pending = False
         self._last_activity_ns = time.time_ns()
 
         event_payload = {
@@ -393,11 +421,33 @@ class Manager(BaseTask):
             from .tasks.heartbeat import HeartbeatTask
 
             return HeartbeatTask
+        if runtime_class == INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR:
+            from .tasks.task_monitor import TaskMonitorTask
+
+            return TaskMonitorTask
         raise ValueError(f"unknown internal runtime task class '{runtime_class}'")
 
     # ------------------------------------------------------------------
     # Manager bookkeeping
     # ------------------------------------------------------------------
+    @staticmethod
+    def _child_is_supervision_only(child: ManagedChild) -> bool:
+        """Return whether a child is internal supervision rather than user work."""
+
+        return child.internal_role in {
+            INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
+            INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR,
+        }
+
+    def _user_work_children(self) -> dict[str, ManagedChild]:
+        """Return children that should block idle shutdown and leadership yield."""
+
+        return {
+            tid: child
+            for tid, child in self._child_processes.items()
+            if not self._child_is_supervision_only(child)
+        }
+
     def _register_manager(self) -> None:
         """Publish an active record to the manager registry (Spec: [MA-1.4], [MF-7])."""
         registry_queue = self._queue(WEFT_MANAGERS_REGISTRY_QUEUE)
@@ -930,7 +980,8 @@ class Manager(BaseTask):
             return False
 
         if self._child_processes:
-            if any(child.persistent for child in self._child_processes.values()):
+            user_children = self._user_work_children()
+            if any(child.persistent for child in user_children.values()):
                 return False
             self._begin_leadership_drain(leader_tid=leader_tid)
             return True
@@ -1106,6 +1157,12 @@ class Manager(BaseTask):
                     self._child_processes.pop(tid, None)
                 if child.autostart_source:
                     autostart_child_exited = True
+                if child.internal_role == INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR:
+                    self._task_monitor_tid = None
+                    self._task_monitor_spawn_pending = False
+                    self._task_monitor_next_start_allowed_ns = (
+                        time.time_ns() + self._task_monitor_restart_backoff_ns
+                    )
 
         if autostart_child_exited:
             # Re-evaluate ensure-style autostart manifests immediately after an
@@ -1661,6 +1718,90 @@ class Manager(BaseTask):
         return child_spec
 
     # ------------------------------------------------------------------
+    # Task monitor supervision
+    # ------------------------------------------------------------------
+    def _task_monitor_supervision_allowed(self) -> bool:
+        """Return whether this manager may supervise a task monitor."""
+
+        if not self._task_monitor_enabled:
+            return False
+        if self._queue_names["inbox"] != WEFT_SPAWN_REQUESTS_QUEUE:
+            return False
+        if self._draining or self.should_stop or self._dispatch_suspension is not None:
+            return False
+        return self._evaluate_dispatch_ownership().state == "self"
+
+    def _build_task_monitor_spawn_payload(self) -> dict[str, Any]:
+        """Build the manager-owned spawn envelope for the supervised monitor."""
+
+        spec_section: dict[str, Any] = {
+            "type": "function",
+            "function_target": DEFAULT_FUNCTION_TARGET,
+            "persistent": True,
+            "enable_process_title": False,
+        }
+        weft_context = getattr(self.taskspec.spec, "weft_context", None)
+        if weft_context is not None:
+            spec_section["weft_context"] = str(weft_context)
+
+        return {
+            "taskspec": {
+                "name": "task-monitor",
+                "spec": spec_section,
+                "metadata": {
+                    "internal": True,
+                    "role": "task_monitor",
+                },
+            },
+            "inbox_message": {
+                "type": "task_monitor_wakeup",
+                "reason": "manager_supervision",
+            },
+            INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY: (
+                INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR
+            ),
+        }
+
+    def _enqueue_task_monitor_request(self) -> bool:
+        """Enqueue one internal monitor spawn request on this manager inbox."""
+
+        payload = self._build_task_monitor_spawn_payload()
+        try:
+            self._queue(self._queue_names["inbox"]).write(
+                json.dumps(payload, ensure_ascii=False)
+            )
+        except (BrokerError, OSError, RuntimeError):
+            logger.warning(
+                "Failed to enqueue task-monitor spawn request", exc_info=True
+            )
+            return False
+        self._task_monitor_spawn_pending = True
+        return True
+
+    def _tick_task_monitor(self, *, force: bool = False) -> None:
+        """Ensure one supervised TaskMonitor child exists for the leader manager."""
+
+        if not self._task_monitor_supervision_allowed():
+            return
+        if (
+            self._task_monitor_tid is not None
+            and self._task_monitor_tid in self._child_processes
+        ):
+            return
+        if self._task_monitor_spawn_pending:
+            return
+
+        now_ns = time.time_ns()
+        if (
+            not force
+            and self._task_monitor_next_start_allowed_ns
+            and now_ns < self._task_monitor_next_start_allowed_ns
+        ):
+            return
+        if self._enqueue_task_monitor_request():
+            self._task_monitor_next_start_allowed_ns = 0
+
+    # ------------------------------------------------------------------
     # Autostart handling
     # ------------------------------------------------------------------
     def _autostart_root_dir(self) -> Path | None:
@@ -2069,7 +2210,7 @@ class Manager(BaseTask):
                 return
         if self._dispatch_suspension is not None:
             self._cleanup_children()
-            if self._child_processes:
+            if self._user_work_children():
                 self._last_activity_ns = max(self._last_activity_ns, time.time_ns())
                 self._idle_shutdown_logged = False
             return
@@ -2080,11 +2221,12 @@ class Manager(BaseTask):
         if self._maybe_yield_leadership():
             return
         self._cleanup_children()
+        self._tick_task_monitor()
         self._tick_autostart()
         self._update_idle_activity_from_broker()
         now_ns = time.time_ns()
         idle_timeout_ns = int(float(self._idle_timeout) * 1_000_000_000)
-        if self._child_processes:
+        if self._user_work_children():
             # Idle timeout applies only when the manager is actually idle. Active
             # child tasks are in-flight work, not inactivity.
             return

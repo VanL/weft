@@ -186,14 +186,13 @@ jobs:
         run: uv publish --trusted-publishing always dist/*
 
   github-release:
-    name: Sign and upload to GitHub Release
+    name: Upload to GitHub Release
     if: ${{ inputs.create_github_release }}
     needs:
       - publish-to-pypi
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      id-token: write
 
     steps:
       - name: Download all the dists
@@ -202,16 +201,11 @@ jobs:
           name: ${{ inputs.package_name }}-python-package-distributions
           path: dist/
 
-      - name: Sign the dists with Sigstore
-        uses: sigstore/gh-action-sigstore-python@04cffa1d795717b140764e8b640de88853c92acc # v3.3.0
-        with:
-          inputs: >-
-            ./dist/*.tar.gz
-            ./dist/*.whl
-
       - name: Create GitHub Release and upload artifacts
         uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
         with:
           generate_release_notes: true
           tag_name: ${{ inputs.tag_name }}
-          files: dist/*
+          files: |
+            dist/*.tar.gz
+            dist/*.whl

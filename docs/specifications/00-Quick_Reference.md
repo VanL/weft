@@ -128,6 +128,12 @@ Format rules and sanitization live in `01-Core_Components.md`.
 | `WEFT_MANAGER_LIFETIME_TIMEOUT` | Default manager idle timeout. Must parse as a non-negative float. |
 | `WEFT_MANAGER_REUSE_ENABLED` | Whether CLI-started managers stay alive after task completion. |
 | `WEFT_AUTOSTART_TASKS` | Whether manager boot should consider autostart manifests under the active Weft metadata directory. |
+| `WEFT_TASK_MONITOR_ENABLED` | Whether the canonical manager supervises the internal non-destructive `TaskMonitorTask`. Defaults to true. |
+| `WEFT_TASK_MONITOR_INTERVAL_SECONDS` | Heartbeat wake interval for the supervised task monitor. Must be at least the heartbeat minimum. |
+| `WEFT_TASK_MONITOR_BATCH_SIZE` | Maximum task-log rows scanned by one supervised monitor cycle. |
+| `WEFT_TASK_MONITOR_PROCESSOR` | Task-monitor processor name. Built-ins are `report_only`, `delete`, and `jsonl_then_delete`; destructive built-ins remain fail-closed until the cleanup phase lands. Custom values use `module:function`. |
+| `WEFT_TASK_MONITOR_LOG_SINK` | Operational output sink selector for monitor processors: `stdout`, `disk`, or `none`. |
+| `WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS` | Manager restart backoff after the supervised monitor exits. |
 | `WEFT_DIRECTORY_NAME` | Name of the Weft metadata directory. Defaults to `.weft` and is used before project discovery. |
 | `WEFT_LOGS_DIR` | Optional log-root override. Relative values resolve against the project root; absolute values are used directly. Defaults to `.weft/logs`. |
 | `WEFT_DEFAULT_DB_LOCATION` | Broker default database location for SimpleBroker project resolution. |

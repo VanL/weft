@@ -143,7 +143,7 @@ Implementation plan backlinks:
 - `docs/plans/2026-05-06-task-evidence-reconciliation-model-plan.md`
 - `docs/plans/2026-05-06-terminal-publication-hardening-plan.md`
 - `docs/plans/2026-05-07-extended-ping-pong-state-probe-plan.md`
-- `docs/plans/2026-05-07-task-monitor-archive-sink-plan.md`
+- `docs/plans/2026-05-07-lifecycle-monitor-archive-sink-plan.md`
 - `docs/plans/2026-05-07-manager-selection-ping-pong-liveness-plan.md`
 
 ### 3.1 Named Endpoint Discovery [MF-3.1]
@@ -211,6 +211,10 @@ Current rules:
   owner is positively visible
 - the heartbeat service is an interval emitter, not a scheduler: there is no
   cron syntax, wall-clock scheduling, timezone handling, or missed-run replay
+- the supervised `TaskMonitorTask` uses heartbeat registrations for periodic
+  wake messages to its own `T{tid}.inbox`; if registration is temporarily
+  unavailable, the monitor records operational health and falls back to its
+  bounded local interval
 
 _Implementation mapping_: `weft/core/heartbeat.py`;
 `weft/core/tasks/heartbeat.py`; `weft/core/endpoints.py`.
@@ -236,6 +240,7 @@ Current flow:
 ```text
 Task lifecycle events -> weft.log.tasks -> status/result reconstruction
 Task lifecycle events -> weft.log.tasks -> task-monitor JSONL logs
+TaskMonitor heartbeat wake -> T{monitor_tid}.inbox -> bounded processor cycle
 ```
 
 Current rules:
@@ -254,6 +259,12 @@ Current rules:
 - task-monitor log records are observational output only in the
   current release. The monitor does not delete, reserve, move, prune, reap, or
   mark broker messages as cleanup candidates
+- when enabled, the canonical manager supervises one internal
+  `TaskMonitorTask`. The supervised monitor reads the same task-log evidence by
+  generator/high-water cursor, builds non-destructive part-1 candidates such as
+  `task_log_tid_seen`, calls the configured processor, and advances its
+  operational checkpoint only after a successful processor result. The manager
+  owns only child supervision; it does not scan lifecycle queues.
 - `weft system prune` is a separate foreground maintenance command.
   `--family runtime-state` reports or deletes exact message IDs from supported
   `weft.state.*` queues after conservative live/recent checks.
@@ -317,7 +328,10 @@ Current rules:
   shared completion wait
 
 _Implementation mapping_: `weft/core/tasks/base.py` `_report_state_change`;
-`weft/core/tasks/task_monitor.py` foreground monitor scan primitive;
+`weft/core/tasks/task_monitor.py` foreground monitor scan primitive and
+supervised non-destructive monitor task;
+`weft/core/task_monitoring.py` task-monitor runtime config, candidate, and
+processor contract;
 `weft/commands/status.py` and `weft/commands/system.py` log replay and snapshot
 collection;
 `weft/commands/result.py` materialization and completion waits;
@@ -586,6 +600,8 @@ system pruning:
 
 - task-owned cleanup may remove spilled output when `cleanup_on_exit` is enabled
 - there is no built-in age-based output sweeper in the current contract
+- the supervised task monitor exists in the current contract, but phase 7
+  part 1 is report-only/non-destructive and performs no broker cleanup
 - `weft system prune --family task-log|task-local|retention` is an explicit
   operator action, not a background sweeper. Ordinary apply mode requires an
   archive artifact before deletion. Force apply mode is a human override for
@@ -631,7 +647,8 @@ Current rules:
   explicit human override for those ordinary protections.
 - `weft system tidy` handles backend-native cleanup of empty queues and broker
   maintenance
-- there is no separate queue-lifecycle service in the current contract
+- there is no autonomous destructive queue-lifecycle service in the current
+  contract
 
 ## Scope Boundary
 
@@ -654,8 +671,9 @@ management live in the companion doc:
 - [`docs/plans/2026-05-06-status-coherence-and-stale-pid-liveness-plan.md`](../plans/2026-05-06-status-coherence-and-stale-pid-liveness-plan.md)
 - [`docs/plans/2026-05-06-task-evidence-reconciliation-model-plan.md`](../plans/2026-05-06-task-evidence-reconciliation-model-plan.md)
 - [`docs/plans/2026-05-06-terminal-publication-hardening-plan.md`](../plans/2026-05-06-terminal-publication-hardening-plan.md)
-- [`docs/plans/2026-05-07-task-monitor-archive-sink-plan.md`](../plans/2026-05-07-task-monitor-archive-sink-plan.md)
+- [`docs/plans/2026-05-07-lifecycle-monitor-archive-sink-plan.md`](../plans/2026-05-07-lifecycle-monitor-archive-sink-plan.md)
 - [`docs/plans/2026-05-07-result-evidence-and-superseded-manager-reconciliation-plan.md`](../plans/2026-05-07-result-evidence-and-superseded-manager-reconciliation-plan.md)
+- [`docs/plans/2026-05-07-phase-7-task-monitor-supervision-and-cleanup-plan.md`](../plans/2026-05-07-phase-7-task-monitor-supervision-and-cleanup-plan.md)
 - [`docs/plans/2026-04-14-spawn-request-reconciliation-plan.md`](../plans/2026-04-14-spawn-request-reconciliation-plan.md)
 - [`docs/plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md`](../plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md)
 - [`docs/plans/2026-04-09-manager-bootstrap-unification-plan.md`](../plans/2026-04-09-manager-bootstrap-unification-plan.md)

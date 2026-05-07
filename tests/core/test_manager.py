@@ -19,10 +19,12 @@ import weft.core.manager as manager_mod
 from simplebroker.ext import BrokerError
 from weft._constants import (
     CONTROL_STOP,
+    INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY,
     INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
     INTERNAL_RUNTIME_TASK_CLASS_KEY,
     INTERNAL_RUNTIME_TASK_CLASS_PIPELINE,
     INTERNAL_RUNTIME_TASK_CLASS_PIPELINE_EDGE,
+    INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR,
     PIPELINE_RUNTIME_METADATA_KEY,
     TERMINAL_ENVELOPE_TYPE,
     WEFT_GLOBAL_LOG_QUEUE,
@@ -41,7 +43,13 @@ from weft.core.manager import (
     ManagedChild,
     Manager,
 )
-from weft.core.tasks import Consumer, HeartbeatTask, PipelineEdgeTask, PipelineTask
+from weft.core.tasks import (
+    Consumer,
+    HeartbeatTask,
+    PipelineEdgeTask,
+    PipelineTask,
+    TaskMonitorTask,
+)
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 from weft.helpers import ContainerRuntimeDetection
 
@@ -593,6 +601,24 @@ def test_manager_launches_pipeline_task_for_reserved_internal_class(
     )
     assert manager._resolve_child_task_class(heartbeat_spec) is HeartbeatTask
 
+    monitor_spec = TaskSpec.model_validate(
+        {
+            **child_spec.model_dump(mode="json"),
+            "name": "task-monitor-child",
+            "spec": {
+                "type": "function",
+                "function_target": "weft.tasks:noop",
+                "persistent": True,
+            },
+            "metadata": {
+                INTERNAL_RUNTIME_TASK_CLASS_KEY: (
+                    INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR
+                ),
+            },
+        }
+    )
+    assert manager._resolve_child_task_class(monitor_spec) is TaskMonitorTask
+
 
 def test_manager_rejects_unknown_internal_task_class(manager_setup) -> None:
     manager, make_queue = manager_setup
@@ -618,6 +644,186 @@ def test_manager_rejects_unknown_internal_task_class(manager_setup) -> None:
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     events = [json.loads(item) for item in drain(log_queue)]
     assert any(event.get("event") == "task_spawn_rejected" for event in events)
+
+
+def test_manager_enqueues_one_internal_task_monitor_spawn(
+    broker_env,
+    unique_tid,
+) -> None:
+    db_path, make_queue = broker_env
+    config = load_config({"WEFT_TASK_MONITOR_ENABLED": "1"})
+    spec = make_manager_spec(unique_tid, idle_timeout=0.0)
+
+    manager = Manager(db_path, spec, config=config)
+    try:
+        inbox_queue = make_queue(WEFT_SPAWN_REQUESTS_QUEUE)
+        payloads = [json.loads(item) for item in drain(inbox_queue)]
+    finally:
+        manager.cleanup()
+
+    monitor_payloads = [
+        payload
+        for payload in payloads
+        if payload.get(INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY)
+        == INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR
+    ]
+    assert len(monitor_payloads) == 1
+    monitor_payload = monitor_payloads[0]
+    assert monitor_payload["taskspec"]["name"] == "task-monitor"
+    assert (
+        INTERNAL_RUNTIME_TASK_CLASS_KEY not in monitor_payload["taskspec"]["metadata"]
+    )
+
+
+def test_manager_does_not_enqueue_task_monitor_when_disabled(
+    broker_env,
+    unique_tid,
+) -> None:
+    db_path, make_queue = broker_env
+    config = load_config({"WEFT_TASK_MONITOR_ENABLED": "0"})
+    spec = make_manager_spec(unique_tid, idle_timeout=0.0)
+
+    manager = Manager(db_path, spec, config=config)
+    try:
+        inbox_queue = make_queue(WEFT_SPAWN_REQUESTS_QUEUE)
+        assert drain(inbox_queue) == []
+    finally:
+        manager.cleanup()
+
+
+def test_task_monitor_spawn_payload_uses_manager_owned_envelope(
+    manager_setup,
+) -> None:
+    manager, _make_queue = manager_setup
+    payload = manager._build_task_monitor_spawn_payload()
+    child_spec = manager._build_child_spec(payload, int(time.time_ns()))
+
+    assert child_spec is not None
+    assert (
+        payload[INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY]
+        == INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR
+    )
+    assert INTERNAL_RUNTIME_TASK_CLASS_KEY not in payload["taskspec"]["metadata"]
+    assert (
+        child_spec.metadata[INTERNAL_RUNTIME_TASK_CLASS_KEY]
+        == INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR
+    )
+
+
+def test_manager_skips_task_monitor_when_not_dispatch_owner(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, make_queue = manager_setup
+    manager._task_monitor_enabled = True
+    manager._queue_names["inbox"] = WEFT_SPAWN_REQUESTS_QUEUE
+    monkeypatch.setattr(
+        manager,
+        "_evaluate_dispatch_ownership",
+        lambda: DispatchOwnership(state="other", leader_tid=str(int(manager.tid) - 1)),
+    )
+
+    manager._tick_task_monitor(force=True)
+
+    assert drain(make_queue(WEFT_SPAWN_REQUESTS_QUEUE)) == []
+
+
+def test_manager_restarts_dead_task_monitor_after_backoff(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _make_queue = manager_setup
+
+    class FakeProcess:
+        pid = None
+        exitcode = 1
+
+        def is_alive(self) -> bool:
+            return False
+
+        def join(self, timeout: float | None = None) -> None:
+            del timeout
+
+    manager._task_monitor_enabled = True
+    manager._queue_names["inbox"] = WEFT_SPAWN_REQUESTS_QUEUE
+    manager._task_monitor_tid = "monitor-child"
+    manager._task_monitor_restart_backoff_ns = 1_000_000_000
+    manager._child_processes["monitor-child"] = ManagedChild(
+        process=FakeProcess(),
+        ctrl_queue=None,
+        persistent=True,
+        internal_role=INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR,
+    )
+    monkeypatch.setattr(
+        manager,
+        "_evaluate_dispatch_ownership",
+        lambda: DispatchOwnership(state="self", leader_tid=manager.tid),
+    )
+    enqueued: list[bool] = []
+    monkeypatch.setattr(
+        manager,
+        "_enqueue_task_monitor_request",
+        lambda: enqueued.append(True) or True,
+    )
+
+    manager._cleanup_children()
+    manager._tick_task_monitor()
+
+    assert manager._task_monitor_tid is None
+    assert enqueued == []
+
+    manager._task_monitor_next_start_allowed_ns = 0
+    manager._tick_task_monitor()
+
+    assert enqueued == [True]
+
+
+def test_internal_task_monitor_child_does_not_block_idle_shutdown(
+    broker_env,
+    unique_tid,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, _make_queue = broker_env
+    spec = make_manager_spec(
+        unique_tid,
+        f"manager.{unique_tid}.inbox",
+        f"manager.{unique_tid}.ctrl_in",
+        f"manager.{unique_tid}.ctrl_out",
+        idle_timeout=0.01,
+    )
+    manager = Manager(db_path, spec)
+
+    class FakeProcess:
+        pid = None
+        exitcode = None
+
+        def is_alive(self) -> bool:
+            return True
+
+        def join(self, timeout: float | None = None) -> None:
+            del timeout
+
+    try:
+        manager._child_processes["monitor-child"] = ManagedChild(
+            process=FakeProcess(),
+            ctrl_queue=None,
+            persistent=True,
+            internal_role=INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR,
+        )
+        manager._last_activity_ns = time.time_ns() - 1_000_000_000
+        monkeypatch.setattr(
+            manager,
+            "_update_idle_activity_from_broker",
+            lambda *, force=False: None,
+        )
+
+        manager.process_once()
+
+        assert manager.should_stop is True
+        assert manager.taskspec.state.status == "completed"
+    finally:
+        manager._child_processes.clear()
+        manager.cleanup()
 
 
 def test_manager_closes_seeded_child_inbox_queue(

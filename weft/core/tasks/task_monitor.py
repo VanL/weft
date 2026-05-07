@@ -1,28 +1,49 @@
 """Task monitor task primitive.
 
 This module provides the task-shaped non-consuming scanner used by the
-foreground task monitor command. Classification and operational log writing
-stay in the command layer.
+foreground task monitor command and the manager-supervised non-destructive
+TaskMonitor service. Classification and destructive cleanup stay outside this
+part-1 runtime loop.
 
 Spec references:
 - docs/specifications/01-Core_Components.md [CC-2.1], [CC-2.3]
+- docs/specifications/03-Manager_Architecture.md [MA-1], [MA-3]
 - docs/specifications/05-Message_Flow_and_State.md [MF-5]
 """
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from simplebroker import BrokerTarget
+from simplebroker.ext import BrokerError
 from weft._constants import (
+    CONTROL_KILL,
+    CONTROL_STOP,
+    DEFAULT_FUNCTION_TARGET,
     QUEUE_CTRL_IN_SUFFIX,
     QUEUE_CTRL_OUT_SUFFIX,
+    QUEUE_INBOX_SUFFIX,
     QUEUE_OUTBOX_SUFFIX,
     WEFT_GLOBAL_LOG_QUEUE,
 )
+from weft.context import WeftContext, build_context
+from weft.core.heartbeat import cancel_heartbeat, upsert_heartbeat
+from weft.core.task_monitoring import (
+    TaskMonitorCandidate,
+    TaskMonitorProcessorRequest,
+    TaskMonitorProcessorResult,
+    TaskMonitorRuntimeConfig,
+    resolve_task_monitor_processor,
+    task_log_seen_candidate,
+)
+from weft.core.tasks.base import ControlRequest
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 from weft.helpers import iter_queue_entries
 
@@ -42,11 +63,12 @@ def make_task_monitor_taskspec(tid: str | None = None) -> TaskSpec:
         name="task-monitor",
         spec=SpecSection(
             type="function",
-            function_target="weft.core.tasks.task_monitor:noop_task_monitor_target",
+            function_target=DEFAULT_FUNCTION_TARGET,
+            persistent=True,
             enable_process_title=False,
         ),
         io=IOSection(
-            inputs={"inbox": WEFT_GLOBAL_LOG_QUEUE},
+            inputs={"inbox": f"{prefix}.{QUEUE_INBOX_SUFFIX}"},
             outputs={"outbox": f"{prefix}.{QUEUE_OUTBOX_SUFFIX}"},
             control={
                 "ctrl_in": f"{prefix}.{QUEUE_CTRL_IN_SUFFIX}",
@@ -63,33 +85,81 @@ def noop_task_monitor_target() -> None:
 
 
 class TaskMonitorTask(BaseTask):
-    """Task-shaped non-consuming task-log scanner.
+    """Task-shaped non-consuming task-log scanner and supervised monitor.
 
-    The command layer owns summary construction and log/checkpoint writes.
-    This class only provides queue wiring and a callback-oriented peek surface.
+    The foreground command still owns summary construction and
+    log/checkpoint writes via ``scan_once()``. The persistent task path wakes
+    on its own inbox, scans task-log history by generator/high-water reads,
+    and calls the configured processor without deleting broker evidence.
     """
 
     def __init__(
         self,
         db: Path | str | Any,
         taskspec: TaskSpec,
-        observer: TaskMonitorCallback,
+        observer: TaskMonitorCallback | None = None,
         *,
         stop_event: threading.Event | None = None,
         config: Mapping[str, Any] | None = None,
     ) -> None:
-        self._task_observer = observer
+        self._persistent_service = observer is None
+        self._task_observer = observer or self._ignore_task_log_entry
+        self._first_cycle_pending = True
+        self._wake_requested = False
+        self._last_checkpoint: int | None = None
+        self._last_cycle_at: int | None = None
+        self._last_candidates_seen = 0
+        self._last_processor_success: bool | None = None
+        self._last_error: str | None = None
+        self._last_processed = 0
+        self._last_deleted = 0
+        self._last_reported = 0
+        self._last_warnings: tuple[str, ...] = ()
+        self._last_errors: tuple[str, ...] = ()
+        self._heartbeat_registered = False
+        self._heartbeat_error: str | None = None
+        self._heartbeat_id = f"task-monitor:{taskspec.tid}"
+        self._next_cycle_due_monotonic = 0.0
         super().__init__(db=db, taskspec=taskspec, stop_event=stop_event, config=config)
+        self._monitor_config = TaskMonitorRuntimeConfig.from_config(self._config)
+        if self._persistent_service:
+            self._activate_monitor()
+
+    def _activate_monitor(self) -> None:
+        """Publish the running lifecycle for the persistent monitor service."""
+
+        if self.taskspec.state.status != "created":
+            return
+        self.taskspec.mark_started(pid=os.getpid())
+        self._report_state_change(event="task_spawning")
+        self.taskspec.mark_running(pid=os.getpid())
+        self._update_process_title("running")
+        self._report_state_change(event="task_started")
 
     def _build_queue_configs(self) -> dict[str, dict[str, Any]]:
-        """Configure task log and control queues in peek mode."""
+        """Configure task-local wake and control queues.
+
+        The persistent monitor does not watch ``weft.log.tasks`` directly; a
+        cycle scans that history by generator so task-log writes do not
+        repeatedly wake the monitor on the same row.
+        """
 
         return {
-            WEFT_GLOBAL_LOG_QUEUE: self._peek_queue_config(self._handle_work_message),
+            self._queue_names["inbox"]: self._read_queue_config(
+                self._handle_work_message
+            ),
             self._queue_names["ctrl_in"]: self._peek_queue_config(
                 self._handle_control_message
             ),
         }
+
+    @staticmethod
+    def _ignore_task_log_entry(
+        queue_name: str,
+        message: str,
+        timestamp: int,
+    ) -> None:
+        del queue_name, message, timestamp
 
     def scan_once(
         self,
@@ -114,13 +184,199 @@ class TaskMonitorTask(BaseTask):
                 break
         return count
 
+    def process_once(self) -> None:
+        """Run one persistent monitor scheduling turn.
+
+        Spec: [CC-2.3], [MF-5]
+        """
+
+        if self.should_stop:
+            return
+        if not self._monitor_config.enabled:
+            self._set_activity("disabled", waiting_on=None)
+            self._maybe_emit_poll_report()
+            return
+
+        self._ensure_heartbeat_registered()
+        self._drain_queue()
+        if self.should_stop:
+            self._maybe_emit_poll_report()
+            return
+
+        now_monotonic = time.monotonic()
+        should_run = (
+            self._first_cycle_pending
+            or self._wake_requested
+            or now_monotonic >= self._next_cycle_due_monotonic
+        )
+        if should_run:
+            self._first_cycle_pending = False
+            self._wake_requested = False
+            self._run_monitor_cycle()
+        else:
+            self._set_activity("waiting", waiting_on=self._queue_names["inbox"])
+        self._maybe_emit_poll_report()
+
     def _handle_work_message(
         self,
         message: str,
         timestamp: int,
         context: QueueMessageContext,
     ) -> None:
-        self._task_observer(context.queue_name, message, timestamp)
+        del message, timestamp, context
+        self._wake_requested = True
+
+    def _handle_control_command(
+        self,
+        request: ControlRequest,
+        context: QueueMessageContext,
+    ) -> bool:
+        if request.command in {CONTROL_STOP, CONTROL_KILL}:
+            self._cancel_heartbeat()
+        return super()._handle_control_command(request, context)
+
+    def _control_snapshot_fields(self) -> dict[str, Any]:
+        payload = super()._control_snapshot_fields()
+        payload.update(
+            {
+                "role": "task_monitor",
+                "processor": self._monitor_config.processor,
+                "mode": "persistent",
+                "interval_seconds": self._monitor_config.interval_seconds,
+                "batch_size": self._monitor_config.batch_size,
+                "log_sink": self._monitor_config.log_sink,
+                "last_cycle_at": self._last_cycle_at,
+                "last_checkpoint": self._last_checkpoint,
+                "last_candidates_seen": self._last_candidates_seen,
+                "last_processor_success": self._last_processor_success,
+                "last_error": self._last_error,
+                "last_processed": self._last_processed,
+                "last_deleted": self._last_deleted,
+                "last_reported": self._last_reported,
+                "last_warnings": list(self._last_warnings),
+                "last_errors": list(self._last_errors),
+            }
+        )
+        return payload
+
+    def _monitor_context(self) -> WeftContext:
+        spec_context = getattr(self.taskspec.spec, "weft_context", None)
+        ctx = build_context(spec_context=spec_context, config=self._config)
+        broker_target = self._db_path
+        if isinstance(broker_target, BrokerTarget):
+            return replace(
+                ctx,
+                broker_target=broker_target,
+                database_path=broker_target.target_path,
+                broker_config={
+                    key: value
+                    for key, value in self._config.items()
+                    if key.startswith("BROKER_")
+                },
+            )
+        return ctx
+
+    def _ensure_heartbeat_registered(self) -> None:
+        if self._heartbeat_registered:
+            return
+        try:
+            upsert_heartbeat(
+                self._monitor_context(),
+                heartbeat_id=self._heartbeat_id,
+                interval_seconds=self._monitor_config.interval_seconds,
+                destination_queue=self._queue_names["inbox"],
+                message={
+                    "type": "task_monitor_wakeup",
+                    "monitor_tid": self.tid,
+                },
+            )
+        except (BrokerError, OSError, RuntimeError, ValueError) as exc:
+            self._heartbeat_error = f"heartbeat registration failed: {exc}"
+            self._last_error = self._heartbeat_error
+            self._heartbeat_registered = False
+            return
+        self._heartbeat_error = None
+        self._heartbeat_registered = True
+
+    def _cancel_heartbeat(self) -> None:
+        if not self._heartbeat_registered:
+            return
+        try:
+            cancel_heartbeat(self._monitor_context(), heartbeat_id=self._heartbeat_id)
+        except (BrokerError, OSError, RuntimeError, ValueError):
+            return
+        finally:
+            self._heartbeat_registered = False
+
+    def _scan_task_log_candidates(
+        self,
+    ) -> tuple[tuple[TaskMonitorCandidate, ...], int | None, int]:
+        candidates: list[TaskMonitorCandidate] = []
+        last_timestamp: int | None = None
+        events_scanned = 0
+        queue = self._queue(WEFT_GLOBAL_LOG_QUEUE)
+        for message, timestamp in iter_queue_entries(
+            queue,
+            since_timestamp=self._last_checkpoint,
+        ):
+            if self._last_checkpoint is not None and timestamp <= self._last_checkpoint:
+                continue
+            self._task_observer(WEFT_GLOBAL_LOG_QUEUE, message, timestamp)
+            last_timestamp = max(last_timestamp or 0, timestamp)
+            events_scanned += 1
+            candidate = task_log_seen_candidate(
+                queue_name=WEFT_GLOBAL_LOG_QUEUE,
+                message=message,
+                message_id=timestamp,
+            )
+            if candidate is not None and candidate.tid != self.tid:
+                candidates.append(candidate)
+            if events_scanned >= self._monitor_config.batch_size:
+                break
+        return tuple(candidates), last_timestamp, events_scanned
+
+    def _run_monitor_cycle(self) -> None:
+        now_ns = time.time_ns()
+        self._set_activity("scanning", waiting_on=WEFT_GLOBAL_LOG_QUEUE)
+        candidates, last_timestamp, events_scanned = self._scan_task_log_candidates()
+        self._last_cycle_at = now_ns
+        self._last_candidates_seen = len(candidates)
+
+        request = TaskMonitorProcessorRequest(
+            context=self._monitor_context(),
+            config=self._monitor_config,
+            cycle_id=f"{self.tid}:{now_ns}",
+            monitor_tid=self.tid,
+            candidates=candidates,
+            now_ns=now_ns,
+        )
+        try:
+            processor = resolve_task_monitor_processor(self._monitor_config.processor)
+            result = processor(request)
+        except Exception as exc:  # pragma: no cover - custom processor boundary
+            result = TaskMonitorProcessorResult(success=False, errors=(str(exc),))
+
+        self._last_processor_success = result.success
+        self._last_processed = result.processed
+        self._last_deleted = result.deleted
+        self._last_reported = result.reported
+        self._last_warnings = result.warnings
+        self._last_errors = result.errors
+        if result.success:
+            if last_timestamp is not None:
+                self._last_checkpoint = last_timestamp
+            self._last_error = self._heartbeat_error
+        else:
+            self._last_error = "; ".join(result.errors) if result.errors else "failed"
+        self._next_cycle_due_monotonic = (
+            time.monotonic() + self._monitor_config.interval_seconds
+        )
+        self._set_activity(
+            "waiting",
+            waiting_on=self._queue_names["inbox"],
+        )
+        if events_scanned == 0 and result.success:
+            self._last_error = self._heartbeat_error
 
     def _cleanup_reserved_if_needed(self) -> None:
         """Task monitors never create reserved messages."""

@@ -23,7 +23,8 @@ See also:
 - [`docs/plans/2026-04-17-heartbeat-service-plan.md`](../plans/2026-04-17-heartbeat-service-plan.md)
 - [`docs/plans/2026-05-05-simplebroker-multiqueue-waiter-integration-plan.md`](../plans/2026-05-05-simplebroker-multiqueue-waiter-integration-plan.md)
 - [`docs/plans/2026-05-06-terminal-publication-hardening-plan.md`](../plans/2026-05-06-terminal-publication-hardening-plan.md)
-- [`docs/plans/2026-05-07-task-monitor-archive-sink-plan.md`](../plans/2026-05-07-task-monitor-archive-sink-plan.md)
+- [`docs/plans/2026-05-07-lifecycle-monitor-archive-sink-plan.md`](../plans/2026-05-07-lifecycle-monitor-archive-sink-plan.md)
+- [`docs/plans/2026-05-07-phase-7-task-monitor-supervision-and-cleanup-plan.md`](../plans/2026-05-07-phase-7-task-monitor-supervision-and-cleanup-plan.md)
 
 ## 1. TaskSpec (`weft/core/taskspec/model.py`) [CC-1]
 
@@ -129,9 +130,14 @@ Current task families:
 - `SelectiveConsumer`: conditionally consumes based on a selector
 - `Monitor`: forwards while observing
 - `SamplingObserver`: observer variant with interval-based sampling
-- `TaskMonitorTask`: foreground system-command primitive that scans
-  `weft.log.tasks` with generator-based peek semantics and does not consume,
-  reserve, move, or delete lifecycle messages
+- `TaskMonitorTask`: task-log monitor used both by the foreground
+  `weft system task-monitor` command and by the manager-supervised internal
+  monitor service. Its foreground `scan_once()` path scans `weft.log.tasks`
+  with generator-based peek semantics. Its persistent path wakes from its own
+  `T{tid}.inbox`, scans task-log history by high-water cursor, and calls the
+  configured task-monitor processor. The current supervised monitor is
+  non-destructive: it does not consume, reserve, move, or delete lifecycle
+  messages.
 - `PipelineTask`: internal orchestrator for first-class linear pipelines
 - `PipelineEdgeTask`: generated one-shot edge task for pipeline handoff
 - `HeartbeatTask`: internal runtime-owned interval emitter for runtime-scoped

@@ -228,6 +228,34 @@ TASK_MONITOR_LOG_SUBDIR: Final[str] = "task-monitor"
 TASK_MONITOR_CHECKPOINT_PATH: Final[str] = "state/task-monitor/default.json"
 """Default task monitor checkpoint path under the Weft metadata directory."""
 
+WEFT_TASK_MONITOR_ENABLED_DEFAULT: Final[bool] = True
+"""Default for manager supervision of the internal task monitor."""
+
+WEFT_TASK_MONITOR_INTERVAL_SECONDS_DEFAULT: Final[int] = 300
+"""Default heartbeat wake interval for the supervised task monitor."""
+
+WEFT_TASK_MONITOR_BATCH_SIZE_DEFAULT: Final[int] = 1000
+"""Default maximum task-log rows scanned by one supervised monitor cycle."""
+
+WEFT_TASK_MONITOR_PROCESSOR_DEFAULT: Final[str] = "report_only"
+"""Default processor for supervised task-monitor candidates."""
+
+WEFT_TASK_MONITOR_PROCESSOR_BUILTINS: Final[frozenset[str]] = frozenset(
+    {"report_only", "delete", "jsonl_then_delete"}
+)
+"""Built-in task-monitor processor names accepted by configuration."""
+
+WEFT_TASK_MONITOR_LOG_SINK_DEFAULT: Final[str] = "stdout"
+"""Default operational output sink selected for the supervised task monitor."""
+
+WEFT_TASK_MONITOR_LOG_SINKS: Final[frozenset[str]] = frozenset(
+    {"stdout", "disk", "none"}
+)
+"""Supported task-monitor operational output sink names."""
+
+WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS_DEFAULT: Final[float] = 60.0
+"""Default manager restart backoff for the supervised task monitor."""
+
 RUNTIME_PRUNE_SCHEMA_VERSION: Final[int] = 1
 """JSONL schema version for explicit runtime-state prune reports."""
 
@@ -454,6 +482,9 @@ INTERNAL_RUNTIME_TASK_CLASS_PIPELINE_EDGE: Final[str] = "pipeline_edge"
 
 INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT: Final[str] = "heartbeat"
 """Reserved internal runtime-owned class selector for HeartbeatTask."""
+
+INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR: Final[str] = "task_monitor"
+"""Reserved internal runtime-owned class selector for TaskMonitorTask."""
 
 INTERNAL_HEARTBEAT_ENDPOINT_NAME: Final[str] = "_weft.heartbeat"
 """Reserved runtime endpoint claimed by the built-in heartbeat service."""
@@ -1029,10 +1060,96 @@ def _parse_non_negative_float(value: str, *, name: str) -> float:
     return parsed
 
 
+def _parse_positive_float(value: str, *, name: str) -> float:
+    """Parse a positive float environment value."""
+
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a positive float, got {value!r}") from exc
+
+    if parsed <= 0:
+        raise ValueError(f"{name} must be a positive float, got {value!r}")
+
+    return parsed
+
+
+def _parse_positive_int(value: str, *, name: str) -> int:
+    """Parse a positive integer environment value."""
+
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a positive integer, got {value!r}") from exc
+
+    if parsed <= 0:
+        raise ValueError(f"{name} must be a positive integer, got {value!r}")
+
+    return parsed
+
+
 def _parse_manager_lifetime_timeout(value: str) -> float:
     """Parse the manager idle timeout environment variable."""
 
     return _parse_non_negative_float(value, name="WEFT_MANAGER_LIFETIME_TIMEOUT")
+
+
+def _parse_task_monitor_interval_seconds(value: str) -> int:
+    """Parse the task-monitor heartbeat interval environment variable."""
+
+    parsed = _parse_positive_int(value, name="WEFT_TASK_MONITOR_INTERVAL_SECONDS")
+    if parsed < HEARTBEAT_MIN_INTERVAL_SECONDS:
+        raise ValueError(
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS must be at least "
+            f"{HEARTBEAT_MIN_INTERVAL_SECONDS}, got {parsed}"
+        )
+    return parsed
+
+
+def _parse_task_monitor_batch_size(value: str) -> int:
+    """Parse the task-monitor batch size environment variable."""
+
+    return _parse_positive_int(value, name="WEFT_TASK_MONITOR_BATCH_SIZE")
+
+
+def _parse_task_monitor_processor(value: str) -> str:
+    """Parse the task-monitor processor name or dotted callable reference."""
+
+    parsed = value.strip()
+    if not parsed:
+        raise ValueError("WEFT_TASK_MONITOR_PROCESSOR must be non-empty")
+    if parsed in WEFT_TASK_MONITOR_PROCESSOR_BUILTINS:
+        return parsed
+    if ":" not in parsed:
+        raise ValueError(
+            "WEFT_TASK_MONITOR_PROCESSOR must be a built-in processor name "
+            "or a module:function reference"
+        )
+    module_name, function_name = parsed.split(":", 1)
+    if not module_name.strip() or not function_name.strip():
+        raise ValueError(
+            "WEFT_TASK_MONITOR_PROCESSOR module:function reference is malformed"
+        )
+    return parsed
+
+
+def _parse_task_monitor_log_sink(value: str) -> str:
+    """Parse the task-monitor operational output sink name."""
+
+    parsed = value.strip().lower()
+    if parsed not in WEFT_TASK_MONITOR_LOG_SINKS:
+        allowed = ", ".join(sorted(WEFT_TASK_MONITOR_LOG_SINKS))
+        raise ValueError(f"WEFT_TASK_MONITOR_LOG_SINK must be one of: {allowed}")
+    return parsed
+
+
+def _parse_task_monitor_restart_backoff_seconds(value: str) -> float:
+    """Parse the task-monitor restart backoff environment variable."""
+
+    return _parse_positive_float(
+        value,
+        name="WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS",
+    )
 
 
 def _parse_weft_directory_name(value: str) -> str:
@@ -1170,6 +1287,36 @@ def _load_weft_env_vars() -> dict[str, Any]:
             default=WEFT_AUTOSTART_TASKS_DEFAULT,
             parser=_parse_bool,
         ),
+        "WEFT_TASK_MONITOR_ENABLED": _load_weft_env_value(
+            "WEFT_TASK_MONITOR_ENABLED",
+            default=WEFT_TASK_MONITOR_ENABLED_DEFAULT,
+            parser=_parse_bool,
+        ),
+        "WEFT_TASK_MONITOR_INTERVAL_SECONDS": _load_weft_env_value(
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS",
+            default=WEFT_TASK_MONITOR_INTERVAL_SECONDS_DEFAULT,
+            parser=_parse_task_monitor_interval_seconds,
+        ),
+        "WEFT_TASK_MONITOR_BATCH_SIZE": _load_weft_env_value(
+            "WEFT_TASK_MONITOR_BATCH_SIZE",
+            default=WEFT_TASK_MONITOR_BATCH_SIZE_DEFAULT,
+            parser=_parse_task_monitor_batch_size,
+        ),
+        "WEFT_TASK_MONITOR_PROCESSOR": _load_weft_env_value(
+            "WEFT_TASK_MONITOR_PROCESSOR",
+            default=WEFT_TASK_MONITOR_PROCESSOR_DEFAULT,
+            parser=_parse_task_monitor_processor,
+        ),
+        "WEFT_TASK_MONITOR_LOG_SINK": _load_weft_env_value(
+            "WEFT_TASK_MONITOR_LOG_SINK",
+            default=WEFT_TASK_MONITOR_LOG_SINK_DEFAULT,
+            parser=_parse_task_monitor_log_sink,
+        ),
+        "WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS": _load_weft_env_value(
+            "WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS",
+            default=WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS_DEFAULT,
+            parser=_parse_task_monitor_restart_backoff_seconds,
+        ),
     }
     for weft_key in SIMPLEBROKER_ENV_MAPPING:
         if weft_key in env_vars:
@@ -1229,8 +1376,43 @@ def _normalize_weft_override_value(name: str, value: Any) -> Any:
         raise TypeError(
             "WEFT_MANAGER_LIFETIME_TIMEOUT override must be int, float, or str"
         )
-    if name in {"WEFT_MANAGER_REUSE_ENABLED", "WEFT_AUTOSTART_TASKS"}:
+    if name in {
+        "WEFT_MANAGER_REUSE_ENABLED",
+        "WEFT_AUTOSTART_TASKS",
+        "WEFT_TASK_MONITOR_ENABLED",
+    }:
         return _parse_bool(value) if isinstance(value, str) else bool(value)
+    if name == "WEFT_TASK_MONITOR_INTERVAL_SECONDS":
+        if isinstance(value, str):
+            return _parse_task_monitor_interval_seconds(value)
+        if isinstance(value, int):
+            return _parse_task_monitor_interval_seconds(str(value))
+        raise TypeError(
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS override must be int or str"
+        )
+    if name == "WEFT_TASK_MONITOR_BATCH_SIZE":
+        if isinstance(value, str):
+            return _parse_task_monitor_batch_size(value)
+        if isinstance(value, int):
+            return _parse_task_monitor_batch_size(str(value))
+        raise TypeError("WEFT_TASK_MONITOR_BATCH_SIZE override must be int or str")
+    if name == "WEFT_TASK_MONITOR_PROCESSOR":
+        if isinstance(value, str):
+            return _parse_task_monitor_processor(value)
+        raise TypeError("WEFT_TASK_MONITOR_PROCESSOR override must be str")
+    if name == "WEFT_TASK_MONITOR_LOG_SINK":
+        if isinstance(value, str):
+            return _parse_task_monitor_log_sink(value)
+        raise TypeError("WEFT_TASK_MONITOR_LOG_SINK override must be str")
+    if name == "WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS":
+        if isinstance(value, str):
+            return _parse_task_monitor_restart_backoff_seconds(value)
+        if isinstance(value, int | float):
+            return _parse_task_monitor_restart_backoff_seconds(str(float(value)))
+        raise TypeError(
+            "WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS override must be int, "
+            "float, or str"
+        )
     return value
 
 

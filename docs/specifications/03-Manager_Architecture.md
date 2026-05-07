@@ -39,6 +39,7 @@ always be rolled back from the public request queue.
 - [Manager Selection PING/PONG Liveness Plan](../plans/2026-05-07-manager-selection-ping-pong-liveness-plan.md) – Use keyed manager PONGs as bounded positive liveness evidence when startup or selection encounters stale-looking manager registry rows.
 - [Persistent Agent Runtime Implementation Plan](../plans/2026-04-06-persistent-agent-runtime-implementation-plan.md) – references Manager Architecture for long-lived agent sessions.
 - [TaskSpec Clean Design Plan](../plans/2026-04-06-taskspec-clean-design-plan.md) – references Manager Architecture for TaskSpec schema alignment.
+- [Phase 7 Task Monitor Supervision And Cleanup Plan](../plans/2026-05-07-phase-7-task-monitor-supervision-and-cleanup-plan.md) – proposes manager-supervised `TaskMonitor` lifecycle and safe autonomous cleanup slices.
 
 ## Conceptual Model: Everything is a Task [MA-0]
 
@@ -115,7 +116,16 @@ Key responsibilities implemented in `weft/core/manager.py`:
    manifest state indefinitely. Pipeline targets are compiled into the same
    first-class pipeline task used by `weft run --pipeline` before the manager
    enqueues the compiled top-level pipeline task on the spawn queue.
-7. **Control channel** – In addition to STOP/STATUS, managers inherit the
+7. **TaskMonitor supervision** – The canonical dispatch owner for
+   `weft.spawn.requests` supervises one internal `TaskMonitorTask` when
+   `WEFT_TASK_MONITOR_ENABLED` is true. The manager uses the same
+   dispatch-ownership/election view that gates child launches; non-leaders,
+   draining managers, and dispatch-suspended managers do not start or restart
+   the monitor. The manager enqueues the monitor through its own inbox using a
+   manager-owned internal runtime envelope, tracks the child as supervision
+   rather than user work, and applies bounded restart backoff after exit. The
+   manager does not scan `weft.log.tasks` or run monitor processors itself.
+8. **Control channel** – In addition to STOP/STATUS, managers inherit the
   task control contract: `PING` replies with `PONG` plus a live task-local
   status snapshot on `ctrl_out`, echoing `request_id` for structured PING
   envelopes. Manager PONG snapshots also include manager-selection fields
@@ -130,6 +140,7 @@ _Implementation mapping_:
 - [MA-1.4] Registry heartbeat and leadership view — `Manager._register_manager`, `Manager._unregister_manager`, `Manager._atexit_unregister`, `Manager._read_active_manager_records`, `Manager._active_manager_records`, `Manager._leader_tid`, `Manager._evaluate_dispatch_ownership`, `Manager._refresh_dispatch_suspension`, `Manager._maybe_yield_leadership`, `weft/commands/system.py::_collect_task_snapshot_records`, plus `weft/helpers.py::is_canonical_manager_record` and `weft/helpers.py::canonical_owner_tid`.
 - [MA-1.5] Idle timeout — `Manager.process_once` (idle-timeout check), `Manager._read_broker_timestamp`, `Manager._update_idle_activity_from_broker`.
 - [MA-1.6] Autostart manifests — `Manager._tick_autostart`, `Manager._prune_autostart_state`, `Manager._build_autostart_spawn_payload`, `Manager._load_autostart_manifest`, `Manager._load_autostart_taskspec`, `Manager._load_autostart_pipeline`, `Manager._active_autostart_sources`, `Manager._enqueue_autostart_request`, `Manager._cleanup_children`, plus `weft/core/pipelines.py::compile_linear_pipeline` for stored pipeline targets.
+- [MA-1.6a] TaskMonitor supervision — `Manager._tick_task_monitor`, `Manager._build_task_monitor_spawn_payload`, `Manager._enqueue_task_monitor_request`, `Manager._task_monitor_supervision_allowed`, `Manager._cleanup_children`, and `Manager._user_work_children`; runtime behavior lives in `weft/core/tasks/task_monitor.py` and processor contracts in `weft/core/task_monitoring.py`.
 - [MA-1.7] Control channel — inherited from `BaseTask._handle_control_command` (`weft/core/tasks/base.py`) and extended by `Manager._control_snapshot_fields` (`weft/core/manager.py`); structured PING/PONG snapshots, STOP, STATUS, KILL handling.
 
 Current ownership-fence rules:
