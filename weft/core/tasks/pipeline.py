@@ -21,6 +21,8 @@ from pydantic import BaseModel, ConfigDict
 from simplebroker.ext import BrokerError
 from weft._constants import (
     CONTROL_KILL,
+    CONTROL_PING,
+    CONTROL_STATUS,
     CONTROL_STOP,
     FAILURE_LIKE_TASK_STATUSES,
     PIPELINE_EDGE_RUNTIME_METADATA_KEY,
@@ -36,7 +38,7 @@ from weft.core.pipelines import (
 from weft.core.spawn_requests import submit_spawn_request
 from weft.core.taskspec import ReservedPolicy, TaskSpec
 
-from .base import BaseTask, TaskControlPolicy
+from .base import BaseTask, ControlRequest, TaskControlPolicy
 from .multiqueue_watcher import QueueMessageContext
 
 logger = logging.getLogger(__name__)
@@ -706,17 +708,22 @@ class PipelineTask(BaseTask):
             self._stop_event.set()
 
     def _handle_control_command(
-        self, command: str, context: QueueMessageContext
+        self, request: ControlRequest, context: QueueMessageContext
     ) -> bool:
-        if command == "PING":
-            self._send_control_response("PING", "ok", message="PONG")
+        command = request.command
+        if command == CONTROL_PING:
+            self._send_control_response(
+                CONTROL_PING,
+                "ok",
+                **self._control_response_extras(request, message="PONG"),
+            )
             return True
-        if command == "STATUS":
+        if command == CONTROL_STATUS:
             self._publish_pipeline_snapshot()
             self._send_control_response(
-                "STATUS",
+                CONTROL_STATUS,
                 "ok",
-                task_status=self.taskspec.state.status,
+                **self._control_response_extras(request),
                 status_queue=self._runtime.queues.status,
             )
             return True
@@ -744,4 +751,4 @@ class PipelineTask(BaseTask):
             self._delete_pipeline_registry_record()
             self._send_control_response("KILL", "ack")
             return True
-        return super()._handle_control_command(command, context)
+        return super()._handle_control_command(request, context)

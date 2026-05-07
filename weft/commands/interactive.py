@@ -167,6 +167,7 @@ class InteractiveStreamClient:
         command: str,
         *,
         status: str | None = None,
+        request_id: str | None = None,
         timeout: float | None = None,
     ) -> dict[str, Any] | None:
         """Block until a matching control response is observed."""
@@ -183,6 +184,11 @@ class InteractiveStreamClient:
                         continue
                     response_status = str(response.get("status", "")).strip().lower()
                     if target_status is not None and response_status != target_status:
+                        continue
+                    if (
+                        request_id is not None
+                        and response.get("request_id") != request_id
+                    ):
                         continue
                     return dict(response)
 

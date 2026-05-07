@@ -997,6 +997,78 @@ def test_cmd_status_keeps_runtime_less_manager_running_when_registry_is_live(
     assert tasks[0]["status"] == "running"
 
 
+def test_cmd_status_marks_superseded_manager_record_failed(
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    old_tid = "1844674407370955183"
+    active_tid = "1844674407370955184"
+    started = time.time_ns()
+
+    _write_task_log_entry(
+        ctx=ctx,
+        tid=old_tid,
+        event="task_started",
+        status="running",
+        started_at=started,
+        completed_at=None,
+        name="old-manager",
+        metadata={"role": "manager"},
+    )
+    _write_task_log_entry(
+        ctx=ctx,
+        tid=active_tid,
+        event="task_started",
+        status="running",
+        started_at=started,
+        completed_at=None,
+        name="active-manager",
+        metadata={"role": "manager"},
+    )
+    ctx.queue(WEFT_MANAGERS_REGISTRY_QUEUE, persistent=False).write(
+        json.dumps(
+            {
+                "tid": active_tid,
+                "name": "active-manager",
+                "status": "active",
+                "runtime_handle": _runtime_handle(
+                    "host",
+                    str(os.getpid()),
+                    host_pids=[os.getpid()],
+                ),
+                "role": "manager",
+                "requests": WEFT_SPAWN_REQUESTS_QUEUE,
+            }
+        )
+    )
+
+    exit_code, payload = cmd_status(json_output=True, spec_context=root)
+
+    assert exit_code == 0
+    assert payload is not None
+    default_tasks = json.loads(payload)["tasks"]
+    assert [task["tid"] for task in default_tasks] == [active_tid]
+    assert default_tasks[0]["status"] == "running"
+
+    exit_code, payload = cmd_status(
+        json_output=True,
+        include_terminal=True,
+        spec_context=root,
+    )
+
+    assert exit_code == 0
+    assert payload is not None
+    tasks = {task["tid"]: task for task in json.loads(payload)["tasks"]}
+    assert tasks[active_tid]["status"] == "running"
+    assert tasks[old_tid]["status"] == "failed"
+    assert tasks[old_tid]["completed_at"] is None
+    assert tasks[old_tid]["reconciliation"]["classification"] == (
+        "superseded_manager_record"
+    )
+    assert tasks[old_tid]["reconciliation"]["active_manager_tid"] == active_tid
+
+
 def test_status_snapshot_preserves_activity_from_latest_log_event(
     tmp_path: Path,
 ) -> None:

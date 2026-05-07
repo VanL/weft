@@ -97,10 +97,20 @@ Controller -> T{tid}.ctrl_in -> Task -> T{tid}.ctrl_out
 
 The control plane is explicit:
 
-- `ctrl_in` receives commands such as `STOP`, `STATUS`, and `PING`
+- `ctrl_in` receives raw commands such as `STOP`, `STATUS`, and `PING`, plus
+  structured JSON command envelopes for keyed `PING`/`STATUS` style probes
 - `ctrl_out` carries task-local replies and terminal notifications
 - `weft.log.tasks` remains the durable audit trail rather than the interactive
   reply channel
+- `PING` replies with a JSON `PONG` control response containing `tid`,
+  `timestamp`, `task_status`, `paused`, `should_stop`, `runner`, optional
+  `activity`, optional `waiting_on`, and optional best-effort `runtime`
+  details from the active runner; structured PING envelopes with `request_id`
+  must echo the same `request_id` in the PONG
+- runner-specific PONG `runtime` details must come from the existing runner
+  handle/plugin description contract, such as Docker's
+  `RunnerRuntimeDescription`; failure to collect those details must not
+  suppress the core PONG response
 - terminal task-local notifications must be typed JSON envelopes with
   `type="terminal"`, `source="task"` or `source="manager"`, `tid`, `status`,
   and `timestamp`; optional fields include `error` and `return_code`
@@ -127,6 +137,7 @@ Implementation plan backlinks:
 - `docs/plans/2026-04-30-known-tid-terminal-snapshot-api-plan.md`
 - `docs/plans/2026-05-06-task-evidence-reconciliation-model-plan.md`
 - `docs/plans/2026-05-06-terminal-publication-hardening-plan.md`
+- `docs/plans/2026-05-07-extended-ping-pong-state-probe-plan.md`
 - `docs/plans/2026-05-07-lifecycle-monitor-archive-sink-plan.md`
 
 ### 3.1 Named Endpoint Discovery [MF-3.1]
@@ -218,6 +229,7 @@ Current flow:
 
 ```text
 Task lifecycle events -> weft.log.tasks -> status/result reconstruction
+Task lifecycle events -> weft.log.tasks -> lifecycle-monitor archive JSONL
 ```
 
 Current rules:
@@ -226,13 +238,32 @@ Current rules:
 - CLI status surfaces reconstruct task snapshots from that log plus the latest
   `weft.state.tid_mappings` entries and live runtime liveness where needed; they
   do not depend on a separate state database
-- terminal task-log lifecycle proof wins for public `status`; runtime liveness
-  disagreement may be exposed through `reconciliation` diagnostics, but it must
-  not rewrite a terminal task back to `running`
+- `weft system lifecycle-monitor` can scan `weft.log.tasks` without consuming
+  broker messages and emit compact JSONL records to stdout or append-only disk
+  archive files under `.weft/archive/tasks/`
+- lifecycle-monitor checkpoints under `.weft/state/lifecycle-monitor/` are
+  operational cursors only; deleting or corrupting them may affect duplicate
+  archive output, but it must not change task lifecycle truth, public status,
+  result materialization, or cleanup decisions
+- lifecycle-monitor archive records are observational output only in the
+  current release. The monitor does not delete, reserve, move, prune, reap, or
+  mark broker messages as cleanup candidates
+- for read-only status reconstruction, terminal task-log lifecycle proof wins
+  for public `status`; runtime liveness disagreement may be exposed through
+  `reconciliation` diagnostics, but it must not rewrite a terminal task back to
+  `running`
 - shared task evidence classification lives in
   `weft/commands/task_evidence.py`; status, task inspection, known-TID terminal
   snapshots, and result helpers reuse that interpretation instead of each
   inventing their own priority rules
+- shared task evidence priority is: terminal task-log lifecycle proof, typed
+  terminal `ctrl_out`, readable final one-shot outbox, live runtime evidence,
+  then stale observer fallback
+- a matched keyed PONG is authoritative live task-local evidence at its
+  timestamp for explicit known-TID current-state probes; reconciliation compares
+  task-log lifecycle events, typed terminal `ctrl_out` envelopes, and matched
+  PONGs by timestamp when possible, while equal or unordered terminal evidence
+  remains preferred over PONG
 - when task-log terminal proof is missing, a typed terminal `ctrl_out` envelope
   may classify the task as terminal, including `wrapper_lost` for
   manager-authored wrapper-exit envelopes
@@ -244,11 +275,19 @@ Current rules:
   partial, or ambiguous outbox traffic does not prove task completion, and
   `result_without_terminal` remains a diagnostic fallback for historical rows
   or unavoidable crash windows rather than the normal success proof
+- claimed outbox residue is not decoded result evidence. When no readable
+  result remains and stale observer fallback would otherwise produce a generic
+  failure, status/result surfaces may classify the row as
+  `claimed_result_without_terminal`; this is a recovery diagnostic, not proof
+  that the result value is readable
 - status surfaces must not emit `status="running"` with `completed_at` set
 - host tasks that still look `running` or `spawning` in the durable log but
   have no runtime proof are treated as stale after the configured status
   liveness window, unless a live manager registry record still proves a manager
   task is active
+- manager task snapshots must respect the selected active manager from
+  `weft.state.managers`; a historical non-terminal manager task row must not be
+  published as `running` when a different active manager has been selected
 - shared waiters use the same terminal-state interpretation for `weft run` and
   `weft result`
 - `weft result` and `weft run` share the same wait helper path: they watch the
@@ -264,10 +303,12 @@ Current rules:
   shared completion wait
 
 _Implementation mapping_: `weft/core/tasks/base.py` `_report_state_change`;
+`weft/core/tasks/lifecycle_monitor.py` foreground monitor scan primitive;
 `weft/commands/status.py` and `weft/commands/system.py` log replay and snapshot
 collection;
 `weft/commands/result.py` materialization and completion waits;
 `weft/commands/task_evidence.py`;
+`weft/commands/lifecycle_monitor.py` archive summaries and checkpoints;
 `weft/commands/_result_wait.py`;
 `weft/commands/_task_history.py`;
 `weft/commands/_streaming.py`.
@@ -572,6 +613,7 @@ management live in the companion doc:
 - [`docs/plans/2026-05-06-task-evidence-reconciliation-model-plan.md`](../plans/2026-05-06-task-evidence-reconciliation-model-plan.md)
 - [`docs/plans/2026-05-06-terminal-publication-hardening-plan.md`](../plans/2026-05-06-terminal-publication-hardening-plan.md)
 - [`docs/plans/2026-05-07-lifecycle-monitor-archive-sink-plan.md`](../plans/2026-05-07-lifecycle-monitor-archive-sink-plan.md)
+- [`docs/plans/2026-05-07-result-evidence-and-superseded-manager-reconciliation-plan.md`](../plans/2026-05-07-result-evidence-and-superseded-manager-reconciliation-plan.md)
 - [`docs/plans/2026-04-14-spawn-request-reconciliation-plan.md`](../plans/2026-04-14-spawn-request-reconciliation-plan.md)
 - [`docs/plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md`](../plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md)
 - [`docs/plans/2026-04-09-manager-bootstrap-unification-plan.md`](../plans/2026-04-09-manager-bootstrap-unification-plan.md)

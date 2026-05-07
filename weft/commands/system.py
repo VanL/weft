@@ -33,7 +33,7 @@ from weft._constants import (
 )
 from weft._runner_plugins import require_runner_plugin
 from weft.builtins import builtin_task_catalog
-from weft.commands.manager import _list_manager_records
+from weft.commands.manager import _list_manager_records, _select_active_manager
 from weft.commands.types import (
     ManagerSnapshot,
     SystemLoadResult,
@@ -577,6 +577,27 @@ def _reconciliation_diagnostic(
     }
 
 
+def _superseded_manager_reconciliation(
+    *,
+    active_manager_tid: str,
+) -> dict[str, Any]:
+    """Build reconciliation metadata for a non-active manager task row."""
+
+    return {
+        "classification": "superseded_manager_record",
+        "reason": "different_active_manager_selected",
+        "lifecycle_status": "failed",
+        "active_manager_tid": active_manager_tid,
+    }
+
+
+def _is_manager_task_payload(taskspec: Mapping[str, Any]) -> bool:
+    """Return whether a TaskSpec payload describes a manager task."""
+
+    metadata = taskspec.get("metadata")
+    return isinstance(metadata, Mapping) and metadata.get("role") == "manager"
+
+
 def _runner_name_for_snapshot(
     *,
     taskspec: Mapping[str, Any],
@@ -645,13 +666,16 @@ def _collect_task_snapshot_records(
     records: dict[str, dict[str, Any]] = {}
     tid_mapping_entries = _latest_tid_mapping_entries(ctx)
     try:
-        active_manager_tids = {
-            str(record["tid"])
-            for record in _collect_manager_records(ctx, include_stopped=False)
-            if record.get("status") == "active" and isinstance(record.get("tid"), str)
-        }
+        selected_manager = _select_active_manager(ctx)
+        selected_active_manager_tid = (
+            str(selected_manager["tid"])
+            if isinstance(selected_manager, Mapping)
+            and isinstance(selected_manager.get("tid"), str)
+            and selected_manager.get("status") == "active"
+            else None
+        )
     except Exception:  # pragma: no cover - defensive status reconciliation
-        active_manager_tids = set()
+        selected_active_manager_tid = None
     log_queue = _queue(ctx, WEFT_GLOBAL_LOG_QUEUE)
     try:
         for payload, timestamp in _iter_log_events(
@@ -798,24 +822,26 @@ def _collect_task_snapshot_records(
         )
         runtime_description = _describe_runtime_handle(runtime_handle)
         status_reason = record.get("status_reason")
-        public_status = _effective_public_status(
-            str(record.get("status") or "created"),
-            runner_name=runner,
-            mapping_entry=runtime_entry,
-            runtime_description=runtime_description,
-            last_timestamp=int(record.get("last_timestamp") or 0),
-            now_ns=now_ns,
-            has_live_manager_record=tid in active_manager_tids,
-        )
+        lifecycle_status = str(record.get("status") or "created")
         local_evidence: task_evidence.TaskEvidenceSnapshot | None = None
-        if public_status not in TERMINAL_TASK_STATUSES:
+        if lifecycle_status not in TERMINAL_TASK_STATUSES:
             local_evidence = task_evidence.task_local_terminal_evidence(
                 ctx,
                 tid=tid,
                 taskspec_payload=taskspec,
             )
-            if local_evidence is not None and local_evidence.terminal:
-                public_status = local_evidence.status
+        if local_evidence is not None and local_evidence.terminal:
+            public_status = local_evidence.status
+        else:
+            public_status = _effective_public_status(
+                lifecycle_status,
+                runner_name=runner,
+                mapping_entry=runtime_entry,
+                runtime_description=runtime_description,
+                last_timestamp=int(record.get("last_timestamp") or 0),
+                now_ns=now_ns,
+                has_live_manager_record=tid == selected_active_manager_tid,
+            )
         reconciliation = _reconciliation_diagnostic(
             lifecycle_status=public_status,
             status_reason=status_reason if isinstance(status_reason, str) else None,
@@ -824,6 +850,34 @@ def _collect_task_snapshot_records(
         )
         if local_evidence is not None and local_evidence.reconciliation is not None:
             reconciliation = local_evidence.reconciliation
+        elif (
+            lifecycle_status not in TERMINAL_TASK_STATUSES and public_status == "failed"
+        ):
+            outbox_name, _ctrl_out_name = task_evidence.queue_names_for_tid(
+                tid,
+                taskspec,
+            )
+            claimed_evidence = task_evidence.claimed_outbox_result_evidence(
+                ctx,
+                tid=tid,
+                outbox_name=outbox_name,
+                taskspec_payload=taskspec,
+            )
+            if claimed_evidence is not None:
+                local_evidence = claimed_evidence
+                reconciliation = claimed_evidence.reconciliation
+
+        if (
+            lifecycle_status not in TERMINAL_TASK_STATUSES
+            and (local_evidence is None or not local_evidence.terminal)
+            and _is_manager_task_payload(taskspec)
+            and selected_active_manager_tid is not None
+            and tid != selected_active_manager_tid
+        ):
+            public_status = "failed"
+            reconciliation = _superseded_manager_reconciliation(
+                active_manager_tid=selected_active_manager_tid,
+            )
 
         started_at = record.get("started_at")
         completed_at = record.get("completed_at")
@@ -837,6 +891,7 @@ def _collect_task_snapshot_records(
             if (
                 not isinstance(completed_at, int)
                 and local_evidence.observed_at is not None
+                and local_evidence.classification != "claimed_result_without_terminal"
             ):
                 completed_at = local_evidence.observed_at
             if local_evidence.observed_at is not None:

@@ -1,6 +1,6 @@
 # Lifecycle Monitor Archive Sink Plan
 
-Status: draft
+Status: completed
 Source specs: see Source Documents below
 Superseded by: none
 
@@ -150,18 +150,41 @@ loop and command-layer summarization.
 Concrete shape:
 
 - `LifecycleMonitorTask` or equivalent lives under `weft/core/tasks/`.
-  It is a small `BaseTask`/`Observer`-style class that peeks selected queues
-  and invokes an injected callback. It does not archive, classify, delete, or
-  import command modules.
+  It is a small `BaseTask`-backed class that uses `MultiQueueWatcher` directly
+  with `QueueMode.PEEK` and invokes an injected callback. Use `Observer` as a
+  behavioral reference only; do not subclass `Observer` unless the existing
+  callback contract is first extended to include queue names without weakening
+  its current task-local behavior. The lifecycle monitor callback must receive
+  `(queue_name, message, timestamp)`. It does not archive, classify, delete,
+  or import command modules.
+  If `BaseTask` requires a `TaskSpec`, the command-layer runner should create a
+  private synthetic monitor spec at construction time. Do not add monitor
+  configuration fields to public `TaskSpec` in this release.
 - `weft.commands.lifecycle_monitor` owns the monitor runner, summary builder,
   checkpoint store, archive sinks, and public command function.
-  This command-layer module may reuse `weft.commands.task_evidence`.
+  This command-layer module may reuse `weft.commands.task_evidence`, but it
+  must call evidence helpers in read-only mode. If it uses
+  `known_tid_evidence()` after the extended PING/PONG work, it must pass
+  `probe_live=False` or the equivalent setting. The Release 4 monitor must not
+  send PING, STATUS, STOP, or any other control message as part of scanning.
 - `weft/cli/app.py` exposes `weft system lifecycle-monitor`.
 - The default command mode is one foreground pass in dry-run/report mode.
   Follow mode is allowed if it remains non-destructive and interrupt-safe.
 - Checkpoints live under the Weft project context and are operational hints
   only. Deleting the checkpoint may duplicate archive records, but it must not
   change lifecycle truth or task status.
+
+Locked implementation choices for this plan:
+
+- Ordinary active tasks do not emit per-task `task_summary` records in Release
+  4. Count them in `monitor_run_completed` aggregates instead.
+- Terminal task-log success uses `classification="terminal_log"` and
+  `failure_owner=null`.
+- Terminal task-log failure without a Weft lifecycle anomaly uses
+  `classification="domain_failure"` and
+  `failure_owner="task_or_runner"`.
+- Disk sink output appends to date-partitioned JSONL files named
+  `{archive_dir}/YYYY-MM-DD.jsonl`, using the monitor run's UTC date.
 
 Why not a manager-autostart service yet:
 
@@ -205,6 +228,9 @@ Recommended first-slice options:
 - `--archive-dir PATH`
   - Default: `{context}/{WEFT_DIRECTORY_NAME}/archive/tasks`.
   - Applies only to `--sink disk`.
+  - The disk sink appends records to `{archive-dir}/YYYY-MM-DD.jsonl`, where
+    the date is the monitor run's UTC date. Do not create one file per task or
+    one file per record.
 - `--checkpoint PATH`
   - Default: `{context}/{WEFT_DIRECTORY_NAME}/state/lifecycle-monitor/default.json`.
 - `--no-checkpoint`
@@ -333,6 +359,9 @@ Rules:
 - It never hides evidence from `weft status`.
 - It is written only after archive/stdout output for the processed batch
   succeeds.
+- For stdout sink, "succeeds" means all JSONL records were written and flushed
+  without an exception. Stdout is not a durable archive; operators who need a
+  restart-safe archive should use `--sink disk`.
 - If a process crashes after archive write but before checkpoint write,
   duplicate summary records are acceptable on restart. Each summary must carry
   a stable `summary_id` so downstream tools can dedupe.
@@ -351,6 +380,9 @@ Implementation files:
   - It should configure `WEFT_GLOBAL_LOG_QUEUE` in peek mode and handle its
     own `ctrl_in` for STOP if the task wrapper uses task-local control.
   - It should call an injected callback with `(queue_name, message, timestamp)`.
+  - It should be built directly on `BaseTask` plus `MultiQueueWatcher`, not on
+    `Observer`, unless `Observer` has first been given a queue-name-aware
+    callback without changing existing observer behavior.
   - It should not classify evidence or write archive records.
 - `weft/core/tasks/__init__.py`
   - Re-export the new task class if it is public within core task primitives.
@@ -460,9 +492,14 @@ Comprehension checks before coding:
 - May `weft status` depend on the monitor? Answer: no.
 - May the monitor import `weft.commands.task_evidence` from core task code?
   Answer: no.
+- May the monitor send PING/PONG probes during scanning? Answer: no. It may
+  reuse PING-aware evidence helpers only with active probing disabled, such as
+  `probe_live=False`.
 - Is `Monitor` in `weft/core/tasks/monitor.py` the right base class? Answer:
   no, because it reserves and forwards messages.
-- Is `Observer` closer? Answer: yes, because it peeks.
+- Is `Observer` closer? Answer: yes as a behavioral reference, because it
+  peeks. It is not the preferred superclass for this release because its
+  callback does not expose queue names.
 - Can Release 4 delete stale task-local messages? Answer: no.
 - Should every `work_failed` be labeled a definite domain failure? Answer: no.
   It is a task-or-runner terminal outcome unless a Weft lifecycle anomaly is
@@ -545,10 +582,16 @@ Files to touch:
 Implementation:
 
 - Build a small class, suggested name `LifecycleMonitorTask`.
-- Base it on `BaseTask` directly or an `Observer`-style helper.
+- Base it on `BaseTask` directly and use `MultiQueueWatcher` with
+  `QueueMode.PEEK`. Treat `Observer` as example code for non-consuming
+  behavior, not as the superclass for this release.
 - Configure `WEFT_GLOBAL_LOG_QUEUE` in `QueueMode.PEEK`.
 - Configure task-local `ctrl_in` in peek mode if STOP support is useful.
 - Invoke an injected callback with queue name, message, and timestamp.
+- If inheriting `BaseTask` requires a `TaskSpec`, create a private synthetic
+  monitor spec in the command-layer runner. Keep it internal to this command;
+  do not persist it as user task configuration and do not add monitor fields to
+  `TaskSpec`.
 - Do not create a reserved queue.
 - Do not write archive records in this core class.
 - Do not import `weft.commands.*`.
@@ -636,6 +679,9 @@ Implementation:
   - `StdoutArchiveSink`
   - `DiskJsonlArchiveSink`
 - Use append mode for disk JSONL.
+- For disk sink, resolve the target file as `{archive_dir}/YYYY-MM-DD.jsonl`
+  using the monitor run's UTC date. Append all records for that run to that
+  file.
 - Ensure parent directories are created for disk sink and checkpoint.
 - Flush disk sink before checkpoint write.
 - Write checkpoint atomically enough for local files:
@@ -685,18 +731,16 @@ Test cases with real broker queues:
 4. Task failure without lifecycle anomaly:
    - Write terminal `work_failed` log event with a task error.
    - Run monitor once.
-   - Assert summary classification is `domain_failure` or
-     `terminal_log` with `failure_owner="task_or_runner"`, depending on the
-     final schema decision.
+   - Assert summary classification is `domain_failure` with
+     `failure_owner="task_or_runner"`.
    - Assert `cleanup_candidate` is `false`.
 
 5. Active task:
    - Write `work_started` only.
    - Run monitor once.
-   - Assert either no task summary is emitted, or an explicit non-terminal
-     summary has `cleanup_candidate=false`.
-   - Pick one behavior and document it. Prefer no per-task summary for active
-     tasks plus aggregate run counts.
+   - Assert no per-task `task_summary` is emitted for that TID.
+   - Assert the active TID is represented only in aggregate counts in
+     `monitor_run_completed`.
 
 Do not:
 
@@ -728,8 +772,11 @@ Implementation:
 - Keep memory bounded to one reduced record per seen TID, not one raw record
   per task-log message.
 - For each eligible TID, call shared evidence logic:
-  - `task_evidence.known_tid_evidence()` if it fits
+  - `task_evidence.known_tid_evidence(..., probe_live=False)` if it fits
   - or a narrower shared helper from `task_evidence.py`
+- Do not send active control probes from the lifecycle monitor. Extended
+  PING/PONG is useful for interactive reconciliation elsewhere, but Release 4
+  monitor scans must stay read-only.
 - Build one compact summary per terminal/anomalous task.
 - Include stable `summary_id`.
 - Include `reconciliation` metadata where available.

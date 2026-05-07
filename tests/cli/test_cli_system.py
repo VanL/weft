@@ -9,6 +9,7 @@ import pytest
 
 from tests.conftest import run_cli
 from tests.helpers.test_backend import prepare_project_root
+from weft._constants import WEFT_GLOBAL_LOG_QUEUE
 from weft.context import build_context
 
 pytestmark = [pytest.mark.shared]
@@ -18,6 +19,14 @@ def _write_message(context, queue_name: str, body: str) -> None:
     queue = context.queue(queue_name, persistent=True)
     queue.write(body)
     queue.close()
+
+
+def _write_task_log(context, payload: dict[str, object]) -> None:
+    queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
+    try:
+        queue.write(json.dumps(payload))
+    finally:
+        queue.close()
 
 
 def _write_json(path: Path, payload: dict[str, object]) -> None:
@@ -230,3 +239,131 @@ def test_system_load_imports_dump(workdir) -> None:
         assert queue.peek_one() == "hello"
     finally:
         queue.close()
+
+
+def test_system_lifecycle_monitor_stdout_jsonl(workdir) -> None:
+    context = build_context(spec_context=workdir)
+    tid = "1778084345905438730"
+    _write_task_log(
+        context,
+        {
+            "event": "work_completed",
+            "status": "completed",
+            "tid": tid,
+            "taskspec": {
+                "tid": tid,
+                "name": "cli-lifecycle",
+                "spec": {
+                    "type": "function",
+                    "function_target": "tests.tasks.sample_targets:echo_payload",
+                    "runner": {"name": "host", "options": {}},
+                },
+                "io": {
+                    "outputs": {"outbox": f"T{tid}.outbox"},
+                    "control": {
+                        "ctrl_in": f"T{tid}.ctrl_in",
+                        "ctrl_out": f"T{tid}.ctrl_out",
+                    },
+                },
+                "state": {"status": "completed"},
+            },
+        },
+    )
+
+    rc, out, err = run_cli(
+        "system",
+        "lifecycle-monitor",
+        "--once",
+        "--sink",
+        "stdout",
+        "--no-checkpoint",
+        "--since",
+        "0",
+        "--context",
+        workdir,
+        cwd=workdir,
+    )
+
+    assert rc == 0
+    assert err == ""
+    records = [json.loads(line) for line in out.splitlines() if line.strip()]
+    assert any(record["record_type"] == "monitor_run_started" for record in records)
+    assert any(
+        record["record_type"] == "task_summary"
+        and record["classification"] == "terminal_log"
+        for record in records
+    )
+
+
+def test_system_lifecycle_monitor_rejects_stdout_json(workdir) -> None:
+    rc, out, err = run_cli(
+        "system",
+        "lifecycle-monitor",
+        "--sink",
+        "stdout",
+        "--json",
+        "--context",
+        workdir,
+        cwd=workdir,
+    )
+
+    assert rc == 1
+    assert out == ""
+    assert "cannot be combined" in err
+
+
+def test_system_lifecycle_monitor_disk_json_summary(workdir) -> None:
+    context = build_context(spec_context=workdir)
+    tid = "1778084345905438731"
+    _write_task_log(
+        context,
+        {
+            "event": "work_completed",
+            "status": "completed",
+            "tid": tid,
+            "taskspec": {
+                "tid": tid,
+                "name": "cli-lifecycle-disk",
+                "spec": {
+                    "type": "function",
+                    "function_target": "tests.tasks.sample_targets:echo_payload",
+                    "runner": {"name": "host", "options": {}},
+                },
+                "io": {
+                    "outputs": {"outbox": f"T{tid}.outbox"},
+                    "control": {
+                        "ctrl_in": f"T{tid}.ctrl_in",
+                        "ctrl_out": f"T{tid}.ctrl_out",
+                    },
+                },
+                "state": {"status": "completed"},
+            },
+        },
+    )
+    archive_dir = workdir / "archive"
+    checkpoint = workdir / "checkpoint.json"
+
+    rc, out, err = run_cli(
+        "system",
+        "lifecycle-monitor",
+        "--once",
+        "--sink",
+        "disk",
+        "--archive-dir",
+        archive_dir,
+        "--checkpoint",
+        checkpoint,
+        "--json",
+        "--since",
+        "0",
+        "--context",
+        workdir,
+        cwd=workdir,
+    )
+
+    assert rc == 0
+    assert err == ""
+    summary = json.loads(out)
+    assert summary["summaries_emitted"] >= 1
+    assert checkpoint.exists()
+    assert list(archive_dir.glob("*.jsonl"))

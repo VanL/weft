@@ -39,7 +39,9 @@ from simplebroker.ext import BrokerError
 from weft._constants import (
     CONTROL_KILL,
     CONTROL_PAUSE,
+    CONTROL_PING,
     CONTROL_RESUME,
+    CONTROL_STATUS,
     CONTROL_STOP,
     DEFAULT_OUTPUT_SIZE_LIMIT_MB,
     INTERNAL_HEARTBEAT_ENDPOINT_NAME,
@@ -102,6 +104,18 @@ class TaskControlPolicy:
     reserved_policy: str
     ack: str
     terminal_state: str
+
+
+@dataclass(frozen=True, slots=True)
+class ControlRequest:
+    """Parsed task control request.
+
+    Spec: [CC-2.4], [MF-3]
+    """
+
+    command: str
+    request_id: str | None = None
+    raw: str | None = None
 
 
 def _merge_host_process_observations(
@@ -559,22 +573,25 @@ class BaseTask(MultiQueueWatcher, ABC):
 
         Spec: [CC-2.4], [MF-3]
         """
-        command = message.strip().upper()
+        request = self._parse_control_request(message)
 
-        if self._handle_control_command(command, context):
+        if self._handle_control_command(request, context):
             self._ack_control_message(context.queue_name, context.timestamp)
             return
 
         self._report_state_change(
             event="control_unknown",
             message_id=timestamp,
-            command=command,
+            command=request.command,
         )
-        self._send_control_response(command, "unknown", error="Unsupported command")
+        response_extra: dict[str, Any] = {"error": "Unsupported command"}
+        if request.request_id is not None:
+            response_extra["request_id"] = request.request_id
+        self._send_control_response(request.command, "unknown", **response_extra)
         self._ack_control_message(context.queue_name, context.timestamp)
 
     def _handle_control_command(
-        self, command: str, context: QueueMessageContext
+        self, request: ControlRequest, context: QueueMessageContext
     ) -> bool:
         """Optional extension hook for subclasses to handle custom control commands.
 
@@ -589,11 +606,16 @@ class BaseTask(MultiQueueWatcher, ABC):
 
         Spec: [CC-2.4], [MF-3]
         """
+        command = request.command
         if self._interactive_handle_control(command):
             return True
 
-        if command == "PING":
-            self._send_control_response("PING", "ok", message="PONG")
+        if command == CONTROL_PING:
+            self._send_control_response(
+                CONTROL_PING,
+                "ok",
+                **self._control_response_extras(request, message="PONG"),
+            )
             return True
 
         if command == CONTROL_STOP:
@@ -636,17 +658,113 @@ class BaseTask(MultiQueueWatcher, ABC):
             self._send_control_response(CONTROL_RESUME, "ack", paused=False)
             return True
 
-        if command == "STATUS":
+        if command == CONTROL_STATUS:
             self._send_control_response(
-                "STATUS",
+                CONTROL_STATUS,
                 "ok",
-                paused=self._paused,
-                should_stop=self.should_stop,
-                task_status=self.taskspec.state.status,
+                **self._control_response_extras(request),
             )
             return True
 
         return False
+
+    def _parse_control_request(self, message: str) -> ControlRequest:
+        """Parse raw or JSON-envelope control messages.
+
+        Spec: [CC-2.4], [MF-3]
+        """
+
+        raw = message.strip()
+        if raw.startswith("{"):
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                payload = None
+            if isinstance(payload, dict):
+                command_value = payload.get("command")
+                command = (
+                    command_value.strip().upper()
+                    if isinstance(command_value, str)
+                    else ""
+                )
+                request_id_value = payload.get("request_id")
+                request_id = (
+                    request_id_value
+                    if isinstance(request_id_value, str) and request_id_value
+                    else None
+                )
+                return ControlRequest(command=command, request_id=request_id, raw=raw)
+        return ControlRequest(command=raw.upper(), raw=raw)
+
+    def _control_response_extras(
+        self,
+        request: ControlRequest,
+        /,
+        **extra: Any,
+    ) -> dict[str, Any]:
+        """Return shared task-local fields for STATUS/PONG responses.
+
+        Spec: [CC-2.4], [MF-3]
+        """
+
+        payload = self._control_snapshot_fields()
+        payload.update(extra)
+        if request.request_id is not None:
+            payload["request_id"] = request.request_id
+        return payload
+
+    def _control_snapshot_fields(self) -> dict[str, Any]:
+        """Return a small task-local status snapshot for control responses."""
+
+        payload: dict[str, Any] = {
+            "task_status": self.taskspec.state.status,
+            "paused": self._paused,
+            "should_stop": self.should_stop,
+            "runner": self._current_runner_name(),
+        }
+        if (
+            self._activity is not None
+            and self.taskspec.state.status not in TERMINAL_TASK_STATUSES
+        ):
+            payload["activity"] = self._activity
+            if self._waiting_on is not None:
+                payload["waiting_on"] = self._waiting_on
+        runtime = self._control_runtime_summary()
+        if runtime is not None:
+            payload["runtime"] = runtime
+        return payload
+
+    def _control_runtime_summary(self) -> dict[str, Any] | None:
+        """Return best-effort active runner details for PONG/STATUS."""
+
+        handle = self._runtime_handle
+        if handle is None:
+            return None
+        fallback_metadata: dict[str, Any] = {
+            **dict(handle.observations),
+            **dict(handle.metadata),
+        }
+        fallback: dict[str, Any] = {
+            "runner": handle.runner,
+            "id": handle.id,
+            "state": "unknown",
+            "metadata": fallback_metadata,
+        }
+        try:
+            plugin = require_runner_plugin(handle.runner)
+            description = plugin.describe(handle)
+        except Exception as exc:  # pragma: no cover - defensive plugin boundary
+            metadata = dict(fallback_metadata)
+            metadata["describe_error"] = str(exc)
+            return {
+                "runner": handle.runner,
+                "id": handle.id,
+                "state": "unknown",
+                "metadata": metadata,
+            }
+        if description is None:
+            return fallback
+        return description.to_dict()
 
     def _handle_reserved_message(
         self, message: str, timestamp: int, context: QueueMessageContext

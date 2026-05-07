@@ -29,6 +29,7 @@ from weft.core.pipelines import pipeline_public_queues
 from weft.core.queue_wait import QueueChangeMonitor
 from weft.helpers import iter_queue_json_entries
 
+from . import task_evidence
 from ._result_wait import (
     append_public_value,
     await_one_shot_result,
@@ -64,6 +65,29 @@ class ResultMaterialization:
     terminal_event_timestamp: int | None = None
     batch_boundary_timestamps: tuple[int, ...] = ()
     result_surface_had_activity: bool = False
+
+
+def _claimed_result_blockage(
+    context: WeftContext,
+    tid: str,
+    materialized: ResultMaterialization,
+) -> task_evidence.TaskEvidenceSnapshot | None:
+    """Return claimed-result recovery evidence for an explicit result read."""
+
+    counts = task_evidence.queue_message_counts(context, materialized.outbox_name)
+    if counts is None or counts.total <= 0 or counts.unclaimed > 0:
+        return None
+    evidence = task_evidence.known_tid_evidence(
+        context,
+        tid=tid,
+        taskspec_payload=materialized.taskspec_payload,
+    )
+    if (
+        evidence is not None
+        and evidence.classification == "claimed_result_without_terminal"
+    ):
+        return evidence
+    return None
 
 
 def _normalize_tid(raw_tid: str) -> str:
@@ -734,6 +758,21 @@ def await_task_result(
             error=f"No outbox queue for task {normalized_tid}",
         )
 
+    claimed_evidence = _claimed_result_blockage(
+        context,
+        normalized_tid,
+        materialized,
+    )
+    if claimed_evidence is not None:
+        return TaskResult(
+            tid=normalized_tid,
+            status=claimed_evidence.status,
+            value=None,
+            stdout=None,
+            stderr=None,
+            error=claimed_evidence.error,
+        )
+
     remaining_timeout = timeout
     if timeout is not None and timeout > 0:
         elapsed = time.monotonic() - start_monotonic
@@ -820,6 +859,22 @@ def cmd_result(
         if timeout is not None and timeout > 0:
             return 124, f"Timed out after {timeout} seconds waiting for task {full_tid}"
         return 2, f"weft result: no outbox queue for task {full_tid}"
+
+    claimed_evidence = _claimed_result_blockage(context, full_tid, materialized)
+    if claimed_evidence is not None:
+        claimed_error = claimed_evidence.error or (
+            f"weft result: task {full_tid} result output is claimed and requires recovery"
+        )
+        if json_output:
+            json_payload = {
+                "tid": full_tid,
+                "status": claimed_evidence.status,
+                "result": None,
+                "error": claimed_error,
+                "reconciliation": claimed_evidence.reconciliation,
+            }
+            return 1, json.dumps(json_payload, ensure_ascii=False)
+        return 1, claimed_error
 
     remaining_timeout = timeout
     if timeout is not None and timeout > 0:

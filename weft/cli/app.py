@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
 import typer
 
@@ -23,6 +23,11 @@ from weft.commands import status as status_cmd
 from weft.commands import tasks as task_cmd
 from weft.commands.builtins import cmd_system_builtins
 from weft.commands.dump import cmd_dump
+from weft.commands.lifecycle_monitor import (
+    ArchiveSinkName,
+    LifecycleMonitorConfig,
+    run_lifecycle_monitor,
+)
 from weft.commands.load import cmd_load
 from weft.commands.result import cmd_result
 from weft.commands.validate_taskspec import cmd_validate_taskspec
@@ -664,6 +669,13 @@ def task_status(
         bool,
         typer.Option("--json", help="Output as JSON"),
     ] = False,
+    probe_live: Annotated[
+        bool,
+        typer.Option(
+            "--probe-live",
+            help="Send a keyed PING and use the matched PONG as current-state proof",
+        ),
+    ] = False,
     context_dir: Annotated[
         Path | None,
         typer.Option("--context", help="Project root (defaults to auto-discovery)"),
@@ -681,7 +693,11 @@ def task_status(
             typer.echo(watch_payload)
         raise typer.Exit(code=exit_code)
 
-    snapshot = task_cmd.task_status(tid, context_path=context_dir)
+    snapshot = task_cmd.task_status(
+        tid,
+        context_path=context_dir,
+        probe_live=probe_live,
+    )
     if snapshot is None:
         typer.echo(f"Task {tid} not found", err=True)
         raise typer.Exit(code=2)
@@ -865,6 +881,73 @@ def tidy(
     if payload:
         typer.echo(payload)
     raise typer.Exit(code=exit_code)
+
+
+@system_app.command("lifecycle-monitor")
+def lifecycle_monitor(
+    context: Annotated[
+        Path | None,
+        typer.Option(
+            "--context", help="Run the lifecycle monitor against a project root"
+        ),
+    ] = None,
+    once: Annotated[
+        bool,
+        typer.Option(
+            "--once/--follow",
+            help="Scan once or follow for future lifecycle log entries",
+        ),
+    ] = True,
+    sink: Annotated[
+        str,
+        typer.Option("--sink", help="Archive sink: stdout or disk"),
+    ] = "stdout",
+    archive_dir: Annotated[
+        Path | None,
+        typer.Option("--archive-dir", help="Directory for disk JSONL archive files"),
+    ] = None,
+    checkpoint: Annotated[
+        Path | None,
+        typer.Option("--checkpoint", help="Lifecycle monitor checkpoint path"),
+    ] = None,
+    no_checkpoint: Annotated[
+        bool,
+        typer.Option("--no-checkpoint", help="Do not read or write checkpoint state"),
+    ] = False,
+    since: Annotated[
+        int | None,
+        typer.Option("--since", help="Start after this task-log timestamp"),
+    ] = None,
+    limit: Annotated[
+        int | None,
+        typer.Option("--limit", help="Maximum task-log events to process"),
+    ] = None,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Emit final command summary as JSON for disk sink"),
+    ] = False,
+) -> None:
+    """Scan lifecycle evidence and emit non-destructive archive JSONL."""
+
+    result = run_lifecycle_monitor(
+        LifecycleMonitorConfig(
+            context_path=context,
+            once=once,
+            follow=not once,
+            sink=cast(ArchiveSinkName, sink),
+            archive_dir=archive_dir,
+            checkpoint_path=checkpoint,
+            no_checkpoint=no_checkpoint,
+            since_timestamp=since,
+            limit=limit,
+            json_output=json_output,
+        )
+    )
+    if result.stdout:
+        typer.echo(result.stdout, nl=not result.stdout.endswith("\n"))
+    if result.stderr:
+        typer.echo(result.stderr, err=True)
+    raise typer.Exit(code=result.exit_code)
 
 
 @app.command("status")

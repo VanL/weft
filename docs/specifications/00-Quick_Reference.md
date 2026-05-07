@@ -65,7 +65,19 @@ Current top-level verbs and subcommands:
 | `weft manager` | `start`, `serve`, `stop`, `list`, `status` |
 | `weft spec` | `create`, `list`, `show`, `delete`, `validate`, `generate` |
 | `weft queue` | `read`, `write`, `peek`, `move`, `list`, `resolve`, `watch`, `delete`, `broadcast`, `alias add/list/remove` |
-| `weft system` | `tidy`, `dump`, `builtins`, `load` |
+| `weft system` | `tidy`, `dump`, `builtins`, `load`, `lifecycle-monitor` |
+
+## Operational Files
+
+| Path | Purpose |
+|------|---------|
+| `.weft/archive/tasks/YYYY-MM-DD.jsonl` | Append-only lifecycle monitor archive records for one UTC date |
+| `.weft/state/lifecycle-monitor/default.json` | Lifecycle monitor operational checkpoint cursor |
+
+Notes:
+- Lifecycle monitor archive files and checkpoints are operational outputs, not
+  lifecycle truth. Status and result commands reconstruct state from broker
+  evidence, not from these files.
 
 ## Task States
 
@@ -88,8 +100,8 @@ State transitions and rules live in `05-Message_Flow_and_State.md`.
 |---------|--------|
 | `STOP` | Graceful shutdown (task cancels and reports) |
 | `KILL` | Force terminate the task |
-| `STATUS` | Emit current status on `ctrl_out` |
-| `PING` | Health check (responds `PONG`) |
+| `STATUS` | Emit current task-local status on `ctrl_out` |
+| `PING` | Health check; responds `PONG` with a live task-local status snapshot and echoes `request_id` for structured requests |
 | `PAUSE` | Pause task processing |
 | `RESUME` | Resume a paused task |
 

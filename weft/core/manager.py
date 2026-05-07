@@ -80,7 +80,7 @@ from .pipelines import (
 )
 from .spec_store import resolve_named_spec_from_root
 from .tasks import Consumer
-from .tasks.base import BaseTask, QueueMessageContext, TaskControlPolicy
+from .tasks.base import BaseTask, ControlRequest, QueueMessageContext, TaskControlPolicy
 from .tasks.multiqueue_watcher import QueueMode
 from .taskspec import (
     ReservedPolicy,
@@ -187,6 +187,7 @@ class Manager(BaseTask):
         self._drain_signaled_children: set[str] = set()
         self._drain_signal_started_ns: dict[str, int] = {}
         self._drain_started_ns: int | None = None
+        self._pending_termination_signal: int | None = None
         self._dispatch_suspension: DispatchSuspension | None = None
         self._autostart_enabled = bool(self._config.get("WEFT_AUTOSTART_TASKS", True))
         autostart_dir = self._config.get("WEFT_AUTOSTART_DIR")
@@ -250,15 +251,15 @@ class Manager(BaseTask):
         return payload
 
     def _handle_control_command(
-        self, command: str, context: QueueMessageContext
+        self, request: ControlRequest, context: QueueMessageContext
     ) -> bool:
         """Override STOP to drain active children before manager exit."""
 
-        if command == CONTROL_STOP:
+        if request.command == CONTROL_STOP:
             self._begin_graceful_shutdown(message_id=context.timestamp)
             self._send_control_response("STOP", "ack", draining=True)
             return True
-        return super()._handle_control_command(command, context)
+        return super()._handle_control_command(request, context)
 
     def _launch_child_task(
         self,
@@ -1258,15 +1259,43 @@ class Manager(BaseTask):
         self.should_stop = True
 
     def handle_termination_signal(self, signum: int) -> None:
+        """Record an external signal for processing on the manager loop.
+
+        Python signal handlers may run while the manager is inside a broker
+        operation. Starting a drain here would perform queue writes from inside
+        that interrupted stack frame and can re-enter backend drivers such as
+        psycopg. Keep this handler to plain in-memory state; ``process_once``
+        owns the broker-visible shutdown work.
+        """
+
         sigusr1 = getattr(signal, "SIGUSR1", None)
         if sigusr1 is not None and signum == sigusr1:
-            self._terminate_children()
-            super().handle_termination_signal(signum)
+            self._pending_termination_signal = signum
+            self._external_stop_handled = True
             return
 
         if self._external_stop_handled:
             return
+        self._pending_termination_signal = signum
         self._external_stop_handled = True
+
+    def _process_pending_termination_signal(self) -> None:
+        """Apply a signal recorded by ``handle_termination_signal``."""
+
+        signum = self._pending_termination_signal
+        if signum is None:
+            return
+        self._pending_termination_signal = None
+
+        sigusr1 = getattr(signal, "SIGUSR1", None)
+        if sigusr1 is not None and signum == sigusr1:
+            self._terminate_children()
+            self._external_stop_handled = False
+            super().handle_termination_signal(signum)
+            return
+
+        if self._draining or self.should_stop:
+            return
 
         try:
             signal_name = signal.Signals(signum).name
@@ -1995,6 +2024,9 @@ class Manager(BaseTask):
         super().cleanup()
 
     def process_once(self) -> None:
+        self._process_pending_termination_signal()
+        if self.should_stop:
+            return
         self._refresh_manager_registration()
         if self._draining:
             # Finish an in-flight drain before reevaluating leadership. Otherwise a

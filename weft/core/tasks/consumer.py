@@ -24,7 +24,7 @@ from weft.core.targets import decode_work_message, serialize_result
 from weft.core.taskspec import ReservedPolicy, TaskSpec
 from weft.helpers import kill_process_tree, terminate_process_tree
 
-from .base import BaseTask, TaskControlPolicy
+from .base import BaseTask, ControlRequest, TaskControlPolicy
 from .interactive import InteractiveTaskMixin
 from .multiqueue_watcher import QueueMessageContext, QueueMode
 from .runner import RunnerOutcome, TaskRunner
@@ -1156,13 +1156,13 @@ class Monitor(BaseTask):
         # message already moved to downstream queue by the watcher
 
     def _handle_control_command(
-        self, command: str, context: QueueMessageContext
+        self, request: ControlRequest, context: QueueMessageContext
     ) -> bool:
         """Allow STOP to cancel the monitor without reserved-queue manipulation.
 
         Spec: [CC-2.4], [MF-3]
         """
-        if command == CONTROL_STOP:
+        if request.command == CONTROL_STOP:
             self._handle_stop_request(
                 reason="STOP command received",
                 event="control_stop",
@@ -1171,7 +1171,7 @@ class Monitor(BaseTask):
             )
             self._send_control_response("STOP", "ack")
             return True
-        if command == CONTROL_KILL:
+        if request.command == CONTROL_KILL:
             self._handle_kill_request(
                 reason="KILL command received",
                 event="control_kill",
@@ -1180,7 +1180,7 @@ class Monitor(BaseTask):
             )
             self._send_control_response("KILL", "ack")
             return True
-        return False
+        return super()._handle_control_command(request, context)
 
     def _cleanup_reserved_if_needed(self) -> None:
         """Monitor never allocates its own reserved queue so cleanup is unnecessary.

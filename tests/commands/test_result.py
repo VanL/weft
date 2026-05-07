@@ -12,6 +12,7 @@ from weft._constants import WEFT_GLOBAL_LOG_QUEUE
 from weft.commands import _result_wait as result_wait
 from weft.commands import events as events_cmd
 from weft.commands import result as result_cmd
+from weft.commands import task_evidence
 from weft.commands._streaming import (
     collect_interactive_queue_output,
     handle_ctrl_stream,
@@ -48,6 +49,24 @@ def _write_task_log_event(queue, tid: str, event: str, status: str) -> None:
             }
         )
     )
+
+
+def _one_shot_taskspec_payload(tid: str) -> dict[str, object]:
+    return {
+        "tid": tid,
+        "name": f"task-{tid[-4:]}",
+        "spec": {
+            "type": "function",
+            "function_target": "tests.tasks.sample_targets:echo_payload",
+            "runner": {"name": "host", "options": {}},
+        },
+        "io": {
+            "outputs": {"outbox": f"T{tid}.outbox"},
+            "control": {"ctrl_out": f"T{tid}.ctrl_out"},
+        },
+        "state": {"status": "running", "started_at": time.time_ns()},
+        "metadata": {},
+    }
 
 
 def _log_timestamps_by_tid(queue) -> dict[str, list[int]]:
@@ -382,6 +401,62 @@ def test_cmd_result_reports_failed_task_without_outbox(tmp_path) -> None:
 
     assert exit_code == 1
     assert payload == "intentional failure"
+
+
+def test_cmd_result_reports_claimed_outbox_without_waiting(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    taskspec_payload = _one_shot_taskspec_payload(tid)
+    log_queue = ctx.queue("weft.log.tasks", persistent=False)
+    outbox_queue = ctx.queue(f"T{tid}.outbox", persistent=True)
+    monkeypatch.setattr(task_evidence, "STATUS_RUNTIMELESS_STALE_AFTER_SECONDS", -1.0)
+
+    def fail_result_wait(*args: object, **kwargs: object) -> tuple[str, None, str]:
+        raise AssertionError("claimed result blockage should not enter result wait")
+
+    monkeypatch.setattr(result_cmd, "_await_single_result", fail_result_wait)
+    try:
+        log_queue.write(
+            json.dumps(
+                {
+                    "tid": tid,
+                    "status": "running",
+                    "event": "work_started",
+                    "taskspec": taskspec_payload,
+                }
+            )
+        )
+        outbox_queue.write(json.dumps({"ok": True}))
+        assert outbox_queue.read_one() is not None
+
+        exit_code, payload = cmd_result(
+            tid=tid,
+            all_results=False,
+            peek=False,
+            timeout=RESULT_WAIT_TIMEOUT,
+            stream=False,
+            json_output=True,
+            show_stderr=False,
+            context_path=str(root),
+        )
+    finally:
+        outbox_queue.close()
+        log_queue.close()
+
+    assert exit_code == 1
+    assert payload is not None
+    data = json.loads(payload)
+    assert data["tid"] == tid
+    assert data["status"] == "failed"
+    assert data["result"] is None
+    assert "claimed" in data["error"]
+    assert data["reconciliation"]["classification"] == (
+        "claimed_result_without_terminal"
+    )
 
 
 def test_await_single_result_reads_outbox_after_completion_event(

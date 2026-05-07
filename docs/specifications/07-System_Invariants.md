@@ -85,7 +85,8 @@ _Implementation mapping_: `weft/core/tasks/consumer.py`,
 ### Observability Invariants
 
 _Implementation mapping_: `weft/core/tasks/base.py`,
-`weft/commands/status.py`, `weft/_constants.py`.
+`weft/core/tasks/lifecycle_monitor.py`, `weft/commands/status.py`,
+`weft/commands/lifecycle_monitor.py`, `weft/_constants.py`.
 
 - **OBS.1**: lifecycle changes are written to `weft.log.tasks`
 - **OBS.2**: Weft does not use a separate state database for task lifecycle
@@ -103,8 +104,23 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
   when an old or invalid runtime-handle payload is ignored. Runtime control and
   liveness probes must reject invalid handle shapes instead of inferring
   authority from legacy PID fields.
-- **OBS.11**: live runtime evidence may explain a conflict, but public status
-  reconstruction must not use it to reanimate terminal lifecycle state.
+- **OBS.11**: live runtime evidence may explain a conflict, but read-only
+  public status reconstruction must not use it to reanimate terminal lifecycle
+  state.
+- **OBS.12**: a matched keyed PONG is an authoritative live task-local
+  observation at its timestamp for explicit current-state probes. It is not a
+  lifecycle mutation, and it must not use a second runner-specific inspection
+  path outside the existing runner handle/plugin description contract.
+- **OBS.13**: lifecycle monitor archive files and checkpoints are operational
+  outputs only. They must not become task lifecycle truth, status authority,
+  result authority, or cleanup authority.
+- **OBS.14**: claimed outbox residue is recovery evidence, not decoded result
+  evidence. Status/result readers may surface
+  `claimed_result_without_terminal`, but they must not delete, unclaim, or
+  treat that claimed row as a readable final result.
+- **OBS.15**: manager task snapshots must not publish a non-active historical
+  manager row as `running` when `weft.state.managers` has selected a different
+  active manager.
 
 ### Implementation Invariants
 
@@ -209,9 +225,11 @@ Current invariant visibility comes from:
 - task-local control and output queues
 - process titles
 - CLI status/result/task inspection
+- foreground `weft system lifecycle-monitor` archive scans
 - the test suite
 
-There is no separate invariant-monitor daemon in the current contract.
+There is no separate invariant-monitor daemon in the current contract. The
+lifecycle monitor is a foreground, non-destructive system command.
 
 ## Scope Boundary
 
@@ -227,6 +245,7 @@ doc:
 - [`docs/plans/2026-05-06-status-coherence-and-stale-pid-liveness-plan.md`](../plans/2026-05-06-status-coherence-and-stale-pid-liveness-plan.md)
 - [`docs/plans/2026-05-06-terminal-publication-hardening-plan.md`](../plans/2026-05-06-terminal-publication-hardening-plan.md)
 - [`docs/plans/2026-05-07-lifecycle-monitor-archive-sink-plan.md`](../plans/2026-05-07-lifecycle-monitor-archive-sink-plan.md)
+- [`docs/plans/2026-05-07-result-evidence-and-superseded-manager-reconciliation-plan.md`](../plans/2026-05-07-result-evidence-and-superseded-manager-reconciliation-plan.md)
 - [`docs/plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md`](../plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md)
 - [`docs/plans/2026-04-17-canonical-owner-fence-plan.md`](../plans/2026-04-17-canonical-owner-fence-plan.md)
 

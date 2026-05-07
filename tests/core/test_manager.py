@@ -1164,7 +1164,8 @@ def test_manager_sigterm_drains_nonpersistent_children(manager_setup) -> None:
 
     manager.handle_termination_signal(signal.SIGTERM)
 
-    assert manager._draining is True
+    assert manager._pending_termination_signal == signal.SIGTERM
+    assert manager._draining is False
     assert manager.should_stop is False
     assert manager.taskspec.state.status == "running"
 
@@ -1184,29 +1185,42 @@ def test_manager_sigterm_drains_nonpersistent_children(manager_setup) -> None:
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX signals required")
 def test_foreground_serve_sigterm_uses_async_drain_path(manager_setup) -> None:
-    """Foreground serve SIGTERM must not run child teardown in the signal handler."""
+    """Foreground serve SIGTERM must not do broker work in the signal handler."""
 
     manager, _make_queue = manager_setup
     manager.taskspec.metadata["foreground_serve"] = True
-    terminate_called = False
+    drain_started = False
     original_terminate_children = manager._terminate_children
+    original_begin_shutdown_drain = manager._begin_shutdown_drain
+
+    def fail_if_signal_handler_starts_drain(*args, **kwargs) -> None:
+        nonlocal drain_started
+        drain_started = True
+        raise AssertionError("signal handler must not synchronously start draining")
 
     def fail_if_signal_handler_terminates_children() -> None:
-        nonlocal terminate_called
-        terminate_called = True
         raise AssertionError("signal handler must not synchronously terminate children")
 
     try:
+        manager._begin_shutdown_drain = fail_if_signal_handler_starts_drain  # type: ignore[method-assign]
         manager._terminate_children = fail_if_signal_handler_terminates_children  # type: ignore[method-assign]
 
         manager.handle_termination_signal(signal.SIGTERM)
 
-        assert terminate_called is False
-        assert manager._draining is True
+        assert drain_started is False
+        assert manager._pending_termination_signal == signal.SIGTERM
+        assert manager._draining is False
         assert manager.should_stop is False
         assert manager.taskspec.state.status == "running"
     finally:
         manager._terminate_children = original_terminate_children  # type: ignore[method-assign]
+        manager._begin_shutdown_drain = original_begin_shutdown_drain  # type: ignore[method-assign]
+
+    manager.process_once()
+
+    assert manager._pending_termination_signal is None
+    assert manager.should_stop is True
+    assert manager.taskspec.state.status == "cancelled"
 
 
 def test_manager_drain_timeout_force_finishes_stubborn_children(
@@ -1292,6 +1306,9 @@ def test_manager_sigusr1_keeps_kill_semantics(manager_setup) -> None:
     _child_tid, child_info = next(iter(manager._child_processes.items()))
 
     manager.handle_termination_signal(signal.SIGUSR1)
+    assert manager._pending_termination_signal == signal.SIGUSR1
+
+    manager.process_once()
 
     assert manager.should_stop is True
     assert manager.taskspec.state.status == "killed"

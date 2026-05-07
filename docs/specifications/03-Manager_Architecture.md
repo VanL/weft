@@ -35,6 +35,7 @@ always be rolled back from the public request queue.
 - [Pipeline Autostart Extension Plan](../plans/2026-04-16-pipeline-autostart-extension-plan.md) – Extend autostart manifests so stored pipeline targets compile and launch through the ordinary first-class pipeline runtime.
 - [Canonical Owner Fence Plan](../plans/2026-04-17-canonical-owner-fence-plan.md) – Add a shared canonical-owner reduction helper and harden manager child dispatch with a final ownership fence before launch.
 - [Heartbeat Service Plan](../plans/2026-04-17-heartbeat-service-plan.md) – Add the built-in runtime heartbeat service, reserve its internal endpoint namespace, and reuse the canonical-owner fence in a long-lived interval emitter.
+- [Result Evidence And Superseded Manager Reconciliation Plan](../plans/2026-05-07-result-evidence-and-superseded-manager-reconciliation-plan.md) – Keep task-list/status read models aligned with selected active-manager registry truth.
 - [Persistent Agent Runtime Implementation Plan](../plans/2026-04-06-persistent-agent-runtime-implementation-plan.md) – references Manager Architecture for long-lived agent sessions.
 - [TaskSpec Clean Design Plan](../plans/2026-04-06-taskspec-clean-design-plan.md) – references Manager Architecture for TaskSpec schema alignment.
 
@@ -85,6 +86,9 @@ Key responsibilities implemented in `weft/core/manager.py`:
    claimants for `weft.spawn.requests`. Manager dispatch keeps four
    runtime-owned outcomes distinct:
    `self`, `other`, `none`, and `unknown`.
+   Task-list/status read models use the same selected active-manager view. A
+   historical manager task-log row is not enough to publish that manager as
+   `running` after a different active manager has been selected.
 5. **Idle timeout** – Managers honour the `idle_timeout` metadata field first.
    When that metadata is absent they fall back to
    `WEFT_MANAGER_LIFETIME_TIMEOUT`, which must parse as a non-negative float at
@@ -104,17 +108,19 @@ Key responsibilities implemented in `weft/core/manager.py`:
    manifest state indefinitely. Pipeline targets are compiled into the same
    first-class pipeline task used by `weft run --pipeline` before the manager
    enqueues the compiled top-level pipeline task on the spawn queue.
-7. **Control channel** – In addition to STOP/STATUS, managers reply `PONG` to
-  `PING` messages on `ctrl_out`, supporting simple health checks.
+7. **Control channel** – In addition to STOP/STATUS, managers inherit the
+  task control contract: `PING` replies with `PONG` plus a live task-local
+  status snapshot on `ctrl_out`, echoing `request_id` for structured PING
+  envelopes.
 
 _Implementation mapping_:
 - [MA-1.1] Spawn queue consumption — `Manager._handle_work_message`, `Manager._build_child_spec`.
 - [MA-1.2] Child process launch — `Manager._launch_child_task`, `launch_task_process` (`weft/core/launcher.py`).
 - [MA-1.3] Initial payload delivery — `Manager._launch_child_task` (inbox seeding block).
-- [MA-1.4] Registry heartbeat and leadership view — `Manager._register_manager`, `Manager._unregister_manager`, `Manager._atexit_unregister`, `Manager._read_active_manager_records`, `Manager._active_manager_records`, `Manager._leader_tid`, `Manager._evaluate_dispatch_ownership`, `Manager._refresh_dispatch_suspension`, `Manager._maybe_yield_leadership`, plus `weft/helpers.py::is_canonical_manager_record` and `weft/helpers.py::canonical_owner_tid`.
+- [MA-1.4] Registry heartbeat and leadership view — `Manager._register_manager`, `Manager._unregister_manager`, `Manager._atexit_unregister`, `Manager._read_active_manager_records`, `Manager._active_manager_records`, `Manager._leader_tid`, `Manager._evaluate_dispatch_ownership`, `Manager._refresh_dispatch_suspension`, `Manager._maybe_yield_leadership`, `weft/commands/system.py::_collect_task_snapshot_records`, plus `weft/helpers.py::is_canonical_manager_record` and `weft/helpers.py::canonical_owner_tid`.
 - [MA-1.5] Idle timeout — `Manager.process_once` (idle-timeout check), `Manager._read_broker_timestamp`, `Manager._update_idle_activity_from_broker`.
 - [MA-1.6] Autostart manifests — `Manager._tick_autostart`, `Manager._prune_autostart_state`, `Manager._build_autostart_spawn_payload`, `Manager._load_autostart_manifest`, `Manager._load_autostart_taskspec`, `Manager._load_autostart_pipeline`, `Manager._active_autostart_sources`, `Manager._enqueue_autostart_request`, `Manager._cleanup_children`, plus `weft/core/pipelines.py::compile_linear_pipeline` for stored pipeline targets.
-- [MA-1.7] Control channel — inherited from `BaseTask._handle_control_command` (`weft/core/tasks/base.py`); PING/PONG, STOP, STATUS, KILL handling.
+- [MA-1.7] Control channel — inherited from `BaseTask._handle_control_command` (`weft/core/tasks/base.py`); structured PING/PONG snapshots, STOP, STATUS, KILL handling.
 
 Current ownership-fence rules:
 

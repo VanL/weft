@@ -231,6 +231,62 @@ def test_interactive_client_waits_for_control_response(broker_env) -> None:
     assert response["status"] == "ack"
 
 
+def test_interactive_client_waits_for_matching_request_id(broker_env) -> None:
+    db_path, make_queue = broker_env
+    tid = str(time.time_ns())
+    spec = _make_interactive_spec(tid)
+
+    ctrl_out = make_queue(spec.io.control["ctrl_out"])
+
+    config = load_config()
+    client = InteractiveStreamClient(
+        db_path=db_path,
+        config=config,
+        tid=tid,
+        inbox=spec.io.inputs["inbox"],
+        outbox=spec.io.outputs["outbox"],
+        ctrl_out=spec.io.control["ctrl_out"],
+    )
+
+    client.start()
+    try:
+        ctrl_out.write(
+            json.dumps(
+                {
+                    "command": "PING",
+                    "status": "ok",
+                    "message": "PONG",
+                    "request_id": "old",
+                    "tid": tid,
+                    "timestamp": time.time_ns(),
+                }
+            )
+        )
+        ctrl_out.write(
+            json.dumps(
+                {
+                    "command": "PING",
+                    "status": "ok",
+                    "message": "PONG",
+                    "request_id": "new",
+                    "tid": tid,
+                    "timestamp": time.time_ns(),
+                }
+            )
+        )
+        response = client.wait_for_control_response(
+            "PING",
+            status="ok",
+            request_id="new",
+            timeout=5.0,
+        )
+    finally:
+        client.stop()
+
+    assert response is not None
+    assert response["request_id"] == "new"
+
+
 def test_interactive_client_control_stop_is_terminal(broker_env) -> None:
     db_path, make_queue = broker_env
     tid = str(time.time_ns())

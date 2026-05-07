@@ -312,8 +312,13 @@ Current behavior:
   one of the normal lifecycle states
 - JSON task snapshots may also include additive reconciliation classifications
   from shared task evidence, including `wrapper_lost`, `terminal_ctrl_out`, and
-  `result_without_terminal`; these classifications are diagnostics, not public
-  lifecycle states
+  `result_without_terminal`; claimed result residue may surface as
+  `claimed_result_without_terminal`, and superseded manager task rows may
+  surface as `superseded_manager_record`; these classifications are
+  diagnostics, not public lifecycle states
+- project-wide `weft status` does not actively PING every task by default;
+  keyed PING/PONG current-state probing belongs to known-task inspection paths
+  or explicit command/client options
 - JSON task snapshots must not report `status="running"` with `completed_at`
   set
 
@@ -333,6 +338,8 @@ Implementation plan backlinks:
 - `docs/plans/2026-04-30-known-tid-terminal-snapshot-api-plan.md`
 - `docs/plans/2026-05-06-task-evidence-reconciliation-model-plan.md`
 - `docs/plans/2026-05-06-terminal-publication-hardening-plan.md`
+- `docs/plans/2026-05-07-extended-ping-pong-state-probe-plan.md`
+- `docs/plans/2026-05-07-result-evidence-and-superseded-manager-reconciliation-plan.md`
 
 ### `result` - Read task output [CLI-1.2]
 
@@ -349,6 +356,10 @@ Current behavior:
 - `--peek` inspects `--all` results without consuming them
 - `--error` selects stderr-oriented output where available
 - `--json` includes metadata
+- if a known result row exists only as claimed outbox residue and no terminal
+  lifecycle proof is visible, `weft result TID --json` returns promptly with
+  `status="failed"`, `result=null`, `error`, and additive `reconciliation`
+  metadata instead of waiting until timeout
 - `--stream` is single-task only and cannot be combined with `--all` or
   `--json`
 
@@ -362,12 +373,18 @@ Current behavior:
   `--all`, can filter by status, can summarize counts with `--stats`, and can
   emit JSON
 - `weft task status TID` shows one task, optionally with process information,
-  JSON output, or live watch updates
+  JSON output, explicit keyed PING/PONG current-state probing, or live watch
+  updates
 - `weft task status TID --json` uses the same additive `reconciliation`
   diagnostic object as `weft status --json` when runtime evidence conflicts
   with lifecycle evidence, when a typed terminal `ctrl_out` envelope proves
   terminal state, or when one-shot outbox evidence is visible without terminal
   task-log publication
+- `weft task status TID --probe-live` sends a structured PING with a
+  `request_id`, waits for the matching PONG, and may return a `live_pong`
+  reconciliation classification plus best-effort runner-specific `runtime`
+  details, including Docker details from `RunnerRuntimeDescription` when the
+  task runs under Docker
 - `weft task tid` resolves short TIDs, PID lookups, or reverse lookups via the
   TID-mapping queue
 - `weft task stop` and `weft task kill` can act on one task, all active tasks,
@@ -582,8 +599,9 @@ Related plan:
 
 _Implementation mapping_: `weft/commands/tidy.py` `cmd_tidy()`,
 `weft/commands/dump.py` `cmd_dump()`, `weft/commands/load.py` `cmd_load()`,
-`weft/commands/builtins.py` `cmd_system_builtins()`, registered in
-`weft/cli/app.py` under the `system` sub-app.
+`weft/commands/builtins.py` `cmd_system_builtins()`,
+`weft/commands/lifecycle_monitor.py` `run_lifecycle_monitor()`, registered
+in `weft/cli/app.py` under the `system` sub-app.
 
 Current subcommands:
 
@@ -591,6 +609,7 @@ Current subcommands:
 - `weft system dump`
 - `weft system builtins`
 - `weft system load`
+- `weft system lifecycle-monitor`
 
 Current behavior:
 
@@ -605,6 +624,15 @@ Current behavior:
   `weft.state.*` queues
 - `system load` imports a dump and returns exit code `3` on alias conflicts
   before writes begin
+- `system lifecycle-monitor` scans `weft.log.tasks` without consuming broker
+  messages and emits JSONL archive records to stdout or append-only disk files
+  under `.weft/archive/tasks/YYYY-MM-DD.jsonl`
+- `system lifecycle-monitor --sink disk --json` emits a final command summary
+  on stdout; `--sink stdout --json` is rejected because stdout is reserved for
+  archive JSONL records in stdout-sink mode
+- lifecycle-monitor checkpoints under `.weft/state/lifecycle-monitor/` are
+  operational cursors only and are not read by `status`, `task status`, or
+  `result`
 - file-backed sqlite contexts can use snapshot rollback on apply failure
 - non-file-backed backends report partial-apply risk if a failure happens after
   writes begin
@@ -623,6 +651,7 @@ flags, and future queue or control ergonomics live in the companion doc:
 - [`docs/plans/2026-05-06-task-evidence-reconciliation-model-plan.md`](../plans/2026-05-06-task-evidence-reconciliation-model-plan.md)
 - [`docs/plans/2026-05-06-terminal-publication-hardening-plan.md`](../plans/2026-05-06-terminal-publication-hardening-plan.md)
 - [`docs/plans/2026-05-07-lifecycle-monitor-archive-sink-plan.md`](../plans/2026-05-07-lifecycle-monitor-archive-sink-plan.md)
+- [`docs/plans/2026-05-07-result-evidence-and-superseded-manager-reconciliation-plan.md`](../plans/2026-05-07-result-evidence-and-superseded-manager-reconciliation-plan.md)
 - [`docs/plans/2026-04-14-config-precedence-and-parsing-alignment-plan.md`](../plans/2026-04-14-config-precedence-and-parsing-alignment-plan.md)
 - [`docs/plans/2026-04-14-spawn-request-reconciliation-plan.md`](../plans/2026-04-14-spawn-request-reconciliation-plan.md)
 - [`docs/plans/2026-04-13-result-stream-implementation-plan.md`](../plans/2026-04-13-result-stream-implementation-plan.md)

@@ -436,6 +436,8 @@ def task_status(
     tid: str,
     *,
     include_terminal: bool = True,
+    probe_live: bool = False,
+    probe_timeout: float = CONTROL_SURFACE_WAIT_TIMEOUT,
     context_path: str | os.PathLike[str] | None = None,
 ) -> status_cmd.TaskSnapshot | None:
     ctx = _resolve_context(context_path)
@@ -459,8 +461,137 @@ def task_status(
     ):
         return _pipeline_task_snapshot(ctx, full_tid, pipeline_snapshot, base_snapshot)
     if pipeline_snapshot is not None and base_snapshot is not None:
-        return replace(base_snapshot, pipeline_status=pipeline_snapshot)
+        base_snapshot = replace(base_snapshot, pipeline_status=pipeline_snapshot)
+    if probe_live and full_tid.isdigit() and len(full_tid) == 19:
+        taskspec_payload = load_latest_taskspec_payload(ctx, full_tid)
+        mapping_entry = mapping_for_tid(ctx, full_tid)
+        evidence = task_evidence.known_tid_evidence(
+            ctx,
+            tid=full_tid,
+            taskspec_payload=taskspec_payload,
+            mapping_entry=mapping_entry,
+            probe_live=True,
+            probe_timeout=probe_timeout,
+        )
+        if evidence is not None and evidence.classification == "live_pong":
+            return _task_snapshot_from_live_pong(
+                full_tid,
+                evidence,
+                base_snapshot=base_snapshot,
+                taskspec_payload=taskspec_payload,
+            )
     return base_snapshot
+
+
+def _task_snapshot_from_live_pong(
+    tid: str,
+    evidence: task_evidence.TaskEvidenceSnapshot,
+    *,
+    base_snapshot: status_cmd.TaskSnapshot | None,
+    taskspec_payload: dict[str, Any] | None,
+) -> status_cmd.TaskSnapshot:
+    state = taskspec_payload.get("state") if isinstance(taskspec_payload, dict) else {}
+    state = state if isinstance(state, dict) else {}
+    spec = taskspec_payload.get("spec") if isinstance(taskspec_payload, dict) else {}
+    spec = spec if isinstance(spec, dict) else {}
+    metadata: dict[str, Any] = {}
+    if base_snapshot is not None:
+        metadata.update(base_snapshot.metadata)
+    task_metadata = (
+        taskspec_payload.get("metadata") if isinstance(taskspec_payload, dict) else None
+    )
+    if isinstance(task_metadata, dict):
+        metadata.update(task_metadata)
+
+    observed_at = evidence.observed_at or time.time_ns()
+    started_at = (
+        base_snapshot.started_at
+        if base_snapshot is not None
+        else state.get("started_at")
+        if isinstance(state.get("started_at"), int)
+        else None
+    )
+    completed_at = (
+        base_snapshot.completed_at
+        if base_snapshot is not None
+        else state.get("completed_at")
+        if isinstance(state.get("completed_at"), int)
+        else None
+    )
+    if evidence.status not in status_cmd.TERMINAL_TASK_STATUSES:
+        completed_at = None
+    elif not isinstance(completed_at, int):
+        completed_at = observed_at
+
+    if isinstance(started_at, int) and not isinstance(completed_at, int):
+        duration = max(0.0, (time.time_ns() - started_at) / 1_000_000_000)
+    elif isinstance(started_at, int) and isinstance(completed_at, int):
+        duration = max(0.0, (completed_at - started_at) / 1_000_000_000)
+    else:
+        duration = None
+
+    runtime = evidence.runtime or (
+        base_snapshot.runtime if base_snapshot is not None else None
+    )
+    runner = (
+        str(runtime.get("runner"))
+        if isinstance(runtime, dict) and isinstance(runtime.get("runner"), str)
+        else base_snapshot.runner
+        if base_snapshot is not None
+        else _runner_name_from_taskspec(spec)
+    )
+    name = (
+        base_snapshot.name
+        if base_snapshot is not None
+        else str(taskspec_payload.get("name") or tid)
+        if isinstance(taskspec_payload, dict)
+        else tid
+    )
+    return status_cmd.TaskSnapshot(
+        tid=tid,
+        tid_short=tid[-TASKSPEC_TID_SHORT_LENGTH:],
+        name=name,
+        status=evidence.status,
+        event="live_pong",
+        activity=evidence.activity
+        if evidence.status not in status_cmd.TERMINAL_TASK_STATUSES
+        else None,
+        waiting_on=evidence.waiting_on
+        if evidence.status not in status_cmd.TERMINAL_TASK_STATUSES
+        else None,
+        started_at=started_at if isinstance(started_at, int) else None,
+        completed_at=completed_at if isinstance(completed_at, int) else None,
+        return_code=evidence.return_code
+        if evidence.return_code is not None
+        else base_snapshot.return_code
+        if base_snapshot is not None
+        else None,
+        error=evidence.error
+        if evidence.error is not None
+        else base_snapshot.error
+        if base_snapshot is not None
+        else None,
+        last_timestamp=observed_at,
+        duration_seconds=duration,
+        runner=runner,
+        runtime_handle=base_snapshot.runtime_handle
+        if base_snapshot is not None
+        else None,
+        runtime=runtime,
+        metadata=metadata,
+        pipeline_status=base_snapshot.pipeline_status
+        if base_snapshot is not None
+        else None,
+        reconciliation=evidence.reconciliation,
+    )
+
+
+def _runner_name_from_taskspec(spec: dict[str, Any]) -> str | None:
+    runner = spec.get("runner")
+    if isinstance(runner, dict):
+        name = runner.get("name")
+        return name if isinstance(name, str) and name else None
+    return None
 
 
 def list_task_snapshots(

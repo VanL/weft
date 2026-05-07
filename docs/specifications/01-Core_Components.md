@@ -117,9 +117,9 @@ Concrete task classes express different queue behaviors on top of `BaseTask`.
 
 _Implementation mapping_: `weft/core/tasks/consumer.py`,
 `weft/core/tasks/observer.py`, `weft/core/tasks/monitor.py`,
-`weft/core/tasks/pipeline.py`, `weft/core/tasks/debugger.py`,
-`weft/core/tasks/heartbeat.py`, `weft/core/tasks/interactive.py`,
-`weft/core/tasks/sessions.py`;
+`weft/core/tasks/lifecycle_monitor.py`, `weft/core/tasks/pipeline.py`,
+`weft/core/tasks/debugger.py`, `weft/core/tasks/heartbeat.py`,
+`weft/core/tasks/interactive.py`, `weft/core/tasks/sessions.py`;
 re-exported from `weft/core/tasks/__init__.py`.
 
 Current task families:
@@ -129,6 +129,9 @@ Current task families:
 - `SelectiveConsumer`: conditionally consumes based on a selector
 - `Monitor`: forwards while observing
 - `SamplingObserver`: observer variant with interval-based sampling
+- `LifecycleMonitorTask`: foreground system-command primitive that scans
+  `weft.log.tasks` with generator-based peek semantics and does not consume,
+  reserve, move, or delete lifecycle messages
 - `PipelineTask`: internal orchestrator for first-class linear pipelines
 - `PipelineEdgeTask`: generated one-shot edge task for pipeline handoff
 - `HeartbeatTask`: internal runtime-owned interval emitter for runtime-scoped

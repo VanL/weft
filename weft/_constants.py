@@ -216,6 +216,27 @@ QUEUE_RESERVED_SUFFIX: Final[str] = "reserved"
 WEFT_GLOBAL_LOG_QUEUE: Final[str] = "weft.log.tasks"
 """Global queue for task state changes and events."""
 
+LIFECYCLE_MONITOR_SCHEMA_VERSION: Final[int] = 1
+"""JSONL schema version for lifecycle monitor archive records."""
+
+LIFECYCLE_MONITOR_ARCHIVE_SUBDIR: Final[str] = "archive/tasks"
+"""Subdirectory under the Weft context for lifecycle monitor disk archives."""
+
+LIFECYCLE_MONITOR_CHECKPOINT_PATH: Final[str] = "state/lifecycle-monitor/default.json"
+"""Default lifecycle monitor checkpoint path under the Weft metadata directory."""
+
+LIFECYCLE_MONITOR_WEFT_ANOMALY_CLASSIFICATIONS: Final[frozenset[str]] = frozenset(
+    {
+        "wrapper_lost",
+        "result_without_terminal",
+        "runtime_conflict",
+        "stale_created",
+        "orphaned_reserved",
+        "orphaned_inbox",
+    }
+)
+"""Lifecycle monitor classifications owned by Weft lifecycle anomalies."""
+
 WEFT_TID_MAPPINGS_QUEUE: Final[str] = "weft.state.tid_mappings"
 """Global queue for TID short->full mappings for process management."""
 
@@ -385,6 +406,12 @@ NON_LIVE_RUNTIME_STATES: Final[frozenset[str]] = frozenset(
 
 # Control Commands
 # ----------------
+CONTROL_PING: Final[str] = "PING"
+"""Control command to request a liveness/status response."""
+
+CONTROL_STATUS: Final[str] = "STATUS"
+"""Control command to request current task-local status."""
+
 CONTROL_STOP: Final[str] = "STOP"
 """Control command to stop a running task."""
 
