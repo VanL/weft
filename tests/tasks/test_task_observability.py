@@ -10,6 +10,7 @@ import types
 import pytest
 
 from simplebroker.ext import BrokerError
+from tests.helpers.queue_payloads import terminal_envelopes
 from tests.tasks import sample_targets as targets  # noqa: F401
 from weft import helpers as weft_helpers
 from weft._constants import (
@@ -275,6 +276,43 @@ def test_state_logging_records_events(broker_env, task_factory, unique_tid) -> N
     assert "work_completed" in events
     assert statuses[0] == "created"
     assert statuses[-1] == "completed"
+
+
+def test_success_terminal_ctrl_out_published_when_completed_log_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    broker_env,
+    task_factory,
+    unique_tid,
+) -> None:
+    db_path, make_queue = broker_env
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    drain_queue(log_queue)
+
+    spec = build_function_spec(unique_tid)
+    task = task_factory(spec)
+    drain_queue(log_queue)
+    original_report_state_change = task._report_state_change
+
+    def drop_completed_log(event: str, **extra: object) -> None:
+        if event == "work_completed":
+            return
+        original_report_state_change(event, **extra)
+
+    monkeypatch.setattr(task, "_report_state_change", drop_completed_log)
+    inbox = make_queue(spec.io.inputs["inbox"])
+    inbox.write(json.dumps({"args": ["payload"]}))
+
+    task._drain_queue()
+
+    outbox = make_queue(spec.io.outputs["outbox"])
+    assert outbox.read_one() == "payload"
+    records = [json.loads(msg) for msg in drain_queue(log_queue)]
+    assert not any(record["event"] == "work_completed" for record in records)
+    ctrl_out = make_queue(spec.io.control["ctrl_out"])
+    envelopes = terminal_envelopes(ctrl_out, tid=unique_tid, source="task")
+    assert len(envelopes) == 1
+    assert envelopes[0]["status"] == "completed"
+    assert envelopes[0]["return_code"] == 0
 
 
 def test_state_logging_records_failure(broker_env, task_factory, unique_tid) -> None:

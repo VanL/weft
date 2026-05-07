@@ -55,6 +55,7 @@ from weft._constants import (
     STREAM_CHUNK_SIZE_BYTES,
     TASK_PROCESS_POLL_INTERVAL,
     TASKSPEC_TID_SHORT_LENGTH,
+    TERMINAL_ENVELOPE_TYPE,
     TERMINAL_TASK_STATUSES,
     WEFT_ENDPOINTS_REGISTRY_QUEUE,
     WEFT_GLOBAL_LOG_QUEUE,
@@ -742,7 +743,7 @@ class BaseTask(MultiQueueWatcher, ABC):
         if self.taskspec.state.status not in TERMINAL_TASK_STATUSES:
             return
         payload = {
-            "type": "terminal",
+            "type": TERMINAL_ENVELOPE_TYPE,
             "source": source,
             "tid": self.tid,
             "status": self.taskspec.state.status,

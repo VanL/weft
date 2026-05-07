@@ -23,6 +23,7 @@ from weft._constants import (
     INTERNAL_RUNTIME_TASK_CLASS_PIPELINE,
     INTERNAL_RUNTIME_TASK_CLASS_PIPELINE_EDGE,
     PIPELINE_RUNTIME_METADATA_KEY,
+    TERMINAL_ENVELOPE_TYPE,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MANAGER_CTRL_IN_QUEUE,
     WEFT_MANAGER_CTRL_OUT_QUEUE,
@@ -30,6 +31,7 @@ from weft._constants import (
     WEFT_MANAGERS_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
+    WRAPPER_LOST_ERROR,
     load_config,
 )
 from weft.core.manager import (
@@ -655,9 +657,74 @@ def test_manager_terminal_envelope_does_not_cache_child_ctrl_out_queue(
     assert all(queue.closed for queue in FakeTerminalQueue.instances)
     assert len(FakeTerminalQueue.instances[1].writes) == 1
     payload = json.loads(FakeTerminalQueue.instances[1].writes[0])
-    assert payload["type"] == "terminal"
+    assert payload["type"] == TERMINAL_ENVELOPE_TYPE
     assert payload["source"] == "manager"
     assert payload["tid"] == child_tid
+    assert payload["status"] == "failed"
+    assert payload["error"] == WRAPPER_LOST_ERROR
+    assert payload["return_code"] == 1
+
+
+def test_manager_terminal_envelope_skips_when_task_terminal_proof_exists(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _make_queue = manager_setup
+    child_tid = str(time.time_ns())
+    child_ctrl_out = f"T{child_tid}.ctrl_out"
+    terminal_payload = json.dumps(
+        {
+            "type": TERMINAL_ENVELOPE_TYPE,
+            "source": "task",
+            "tid": child_tid,
+            "status": "completed",
+            "timestamp": time.time_ns(),
+            "return_code": 0,
+        }
+    )
+
+    class FakeTerminalQueue:
+        instances: list[FakeTerminalQueue] = []
+
+        def __init__(self, name: str, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+            self.name = name
+            self.writes: list[str] = []
+            self.closed = False
+            FakeTerminalQueue.instances.append(self)
+
+        def peek_generator(self, *, with_timestamps: bool = False):
+            del with_timestamps
+            return iter(((terminal_payload, time.time_ns()),))
+
+        def write(self, payload: str) -> None:
+            self.writes.append(payload)
+
+        def close(self) -> None:
+            self.closed = True
+
+    class FakeProcess:
+        pid = None
+        exitcode = 1
+
+        def is_alive(self) -> bool:
+            return False
+
+        def join(self, timeout: float | None = None) -> None:
+            del timeout
+
+    monkeypatch.setattr(manager_mod, "Queue", FakeTerminalQueue)
+    child = ManagedChild(
+        process=FakeProcess(),
+        ctrl_queue=None,
+        ctrl_out_queue=child_ctrl_out,
+    )
+
+    manager._write_manager_terminal_envelope(child_tid, child)
+
+    assert [queue.name for queue in FakeTerminalQueue.instances] == [child_ctrl_out]
+    assert FakeTerminalQueue.instances[0].writes == []
+    assert FakeTerminalQueue.instances[0].closed is True
 
 
 def test_manager_registry_entries(manager_setup) -> None:

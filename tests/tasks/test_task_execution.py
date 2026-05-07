@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from simplebroker import Queue
+from tests.helpers.queue_payloads import terminal_envelopes
 from tests.tasks import (
     sample_targets as targets,  # noqa: F401 - ensure module importable
 )
@@ -217,6 +218,8 @@ def test_task_processes_function_target_and_writes_outbox(
         "tests.tasks.sample_targets:echo_payload",
     )
     task = Consumer(db_path, spec)
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    drain_queue(log_queue)
 
     inbox_name = spec.io.inputs["inbox"]
     reserved_name = f"T{unique_tid}.{QUEUE_RESERVED_SUFFIX}"
@@ -235,6 +238,15 @@ def test_task_processes_function_target_and_writes_outbox(
     assert reserved_queue.peek_one() is None
     assert task.taskspec.state.status == "completed"
     assert task.taskspec.state.return_code == 0
+    events = [json.loads(msg) for msg in drain_queue(log_queue)]
+    assert any(event["event"] == "work_completed" for event in events)
+
+    ctrl_out = make_queue(spec.io.control["ctrl_out"])
+    envelopes = terminal_envelopes(ctrl_out, tid=unique_tid, source="task")
+    assert len(envelopes) == 1
+    terminal = envelopes[0]
+    assert terminal["status"] == "completed"
+    assert terminal["return_code"] == 0
 
 
 def test_run_work_item_executes_payload(broker_env, unique_tid: str) -> None:
@@ -787,6 +799,34 @@ def test_persistent_live_command_streaming_clears_session_before_waiting(
         assert task.taskspec.state.status == "running"
         assert writes, "expected streaming session entry"
         assert deletes, "expected streaming session deletion before returning"
+    finally:
+        task.cleanup()
+
+
+def test_persistent_work_item_success_does_not_emit_terminal_envelope(
+    broker_env,
+    unique_tid: str,
+) -> None:
+    db_path, make_queue = broker_env
+    spec = make_command_taskspec(
+        unique_tid,
+        sys.executable,
+        args=[PROCESS_SCRIPT, "--result", "persistent-result"],
+        persistent=True,
+    )
+    task = Consumer(db_path, spec)
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    drain_queue(log_queue)
+
+    try:
+        result = task.run_work_item({})
+
+        assert result == "persistent-result"
+        assert task.taskspec.state.status == "running"
+        events = [json.loads(msg) for msg in drain_queue(log_queue)]
+        assert any(event["event"] == "work_item_completed" for event in events)
+        ctrl_out = make_queue(spec.io.control["ctrl_out"])
+        assert terminal_envelopes(ctrl_out, tid=unique_tid, source="task") == []
     finally:
         task.cleanup()
 

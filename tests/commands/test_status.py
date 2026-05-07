@@ -282,6 +282,78 @@ def test_cmd_status_json_includes_runner_runtime_details(
     assert entry["metadata"]["owner"] == "tests"
 
 
+def test_task_status_does_not_apply_host_pid_identity_to_docker_runtime(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = "1844674407370955168"
+    started = 1_762_000_000_000_000_000
+    docker_host_pid = 57
+    mapping_queue = ctx.queue("weft.state.tid_mappings", persistent=False)
+
+    _write_task_log_entry(
+        ctx=ctx,
+        tid=tid,
+        event="work_started",
+        status="running",
+        started_at=started,
+        completed_at=None,
+        name="docker-task",
+        runner_name="docker",
+    )
+    mapping_queue.write(
+        json.dumps(
+            {
+                "short": tid[-10:],
+                "full": tid,
+                "runner": "docker",
+                "runtime_handle": _runtime_handle(
+                    "docker",
+                    "container-123",
+                    kind="container",
+                    authority="runner",
+                    observations={"container_id": "container-123"},
+                    metadata={"image": "python:3.13-alpine"},
+                ),
+            }
+        )
+    )
+
+    class FakeRunnerPlugin:
+        def describe(self, handle: Any) -> RunnerRuntimeDescription | None:
+            return RunnerRuntimeDescription(
+                runner=handle.runner,
+                id=handle.id,
+                state="running",
+                metadata={
+                    "container_id": "container-123",
+                    "host_pid": docker_host_pid,
+                    "image": "python:3.13-alpine",
+                },
+            )
+
+    def fail_host_liveness_check(mapping_entry: Any) -> bool:
+        raise AssertionError("docker runtime was checked as a host-pid task")
+
+    monkeypatch.setattr(status_cmd, "_task_process_alive", fail_host_liveness_check)
+    monkeypatch.setattr(
+        status_cmd,
+        "require_runner_plugin",
+        lambda name: FakeRunnerPlugin(),
+    )
+
+    snapshot = task_cmd.task_status(tid, context_path=root)
+
+    assert snapshot is not None
+    assert snapshot.status == "running"
+    assert snapshot.runner == "docker"
+    assert snapshot.runtime is not None
+    assert snapshot.runtime["runner"] == "docker"
+    assert snapshot.runtime["state"] == "running"
+    assert snapshot.runtime["metadata"]["host_pid"] == docker_host_pid
+
+
 def test_terminal_log_status_wins_over_weak_live_host_pid(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1328,6 +1400,73 @@ def test_cmd_status_host_runtime_uses_zombie_safe_pid_liveness(
     assert entry["runtime_handle"]["runner"] == "host"
     assert entry["runtime"]["runner"] == "host"
     assert entry["runtime"]["state"] == "missing"
+
+
+def test_task_status_rejects_running_host_task_when_pid_identity_mismatches(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = "1844674407370955167"
+    started = 1_762_000_000_000_000_000
+    stale_pid = 57
+    mapping_queue = ctx.queue("weft.state.tid_mappings", persistent=False)
+
+    _write_task_log_entry(
+        ctx=ctx,
+        tid=tid,
+        event="work_started",
+        status="running",
+        started_at=started,
+        completed_at=None,
+        name="host-task",
+        runner_name="host",
+    )
+    mapping_queue.write(
+        json.dumps(
+            {
+                "short": tid[-10:],
+                "full": tid,
+                "runner": "host",
+                "runtime_handle": _runtime_handle(
+                    "host",
+                    str(stale_pid),
+                    host_pids=[stale_pid],
+                    observations={
+                        "host_processes": [
+                            {"pid": stale_pid, "create_time": 1_778_084_364.13}
+                        ],
+                    },
+                ),
+            }
+        )
+    )
+
+    class FakeRunnerPlugin:
+        def describe(self, handle: Any) -> RunnerRuntimeDescription | None:
+            return RunnerRuntimeDescription(
+                runner=handle.runner,
+                id=handle.id,
+                state="missing",
+                metadata={"host_pids": [stale_pid]},
+            )
+
+    monkeypatch.setattr(status_cmd, "_pid_alive", lambda pid: pid == stale_pid)
+    monkeypatch.setattr(
+        status_cmd, "handle_has_live_host_process", lambda handle: False
+    )
+    monkeypatch.setattr(
+        status_cmd,
+        "require_runner_plugin",
+        lambda name: FakeRunnerPlugin(),
+    )
+
+    snapshot = task_cmd.task_status(tid, context_path=root)
+
+    assert snapshot is not None
+    assert snapshot.runtime is not None
+    assert snapshot.runtime["state"] == "missing"
+    assert snapshot.status == "failed"
 
 
 def test_cmd_status_discovers_parent_context_from_subdirectory(

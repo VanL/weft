@@ -22,6 +22,8 @@ See also:
 - [`docs/plans/2026-04-17-canonical-owner-fence-plan.md`](../plans/2026-04-17-canonical-owner-fence-plan.md)
 - [`docs/plans/2026-04-17-heartbeat-service-plan.md`](../plans/2026-04-17-heartbeat-service-plan.md)
 - [`docs/plans/2026-05-05-simplebroker-multiqueue-waiter-integration-plan.md`](../plans/2026-05-05-simplebroker-multiqueue-waiter-integration-plan.md)
+- [`docs/plans/2026-05-06-terminal-publication-hardening-plan.md`](../plans/2026-05-06-terminal-publication-hardening-plan.md)
+- [`docs/plans/2026-05-07-lifecycle-monitor-archive-sink-plan.md`](../plans/2026-05-07-lifecycle-monitor-archive-sink-plan.md)
 
 ## 1. TaskSpec (`weft/core/taskspec/model.py`) [CC-1]
 

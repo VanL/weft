@@ -556,6 +556,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             metrics=metrics_payload,
             agent_execution=agent_execution,
         )
+        self._send_terminal_envelope()
         self._emit_pipeline_terminal_event(status="completed")
         self._update_process_title("completed")
         self._cleanup_spilled_outputs_if_needed()

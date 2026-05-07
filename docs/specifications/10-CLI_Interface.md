@@ -332,6 +332,7 @@ Implementation plan backlinks:
 - `docs/plans/2026-05-06-status-coherence-and-stale-pid-liveness-plan.md`
 - `docs/plans/2026-04-30-known-tid-terminal-snapshot-api-plan.md`
 - `docs/plans/2026-05-06-task-evidence-reconciliation-model-plan.md`
+- `docs/plans/2026-05-06-terminal-publication-hardening-plan.md`
 
 ### `result` - Read task output [CLI-1.2]
 
@@ -620,6 +621,8 @@ flags, and future queue or control ergonomics live in the companion doc:
 - [`docs/plans/2026-05-06-lifecycle-reconciliation-architecture-plan.md`](../plans/2026-05-06-lifecycle-reconciliation-architecture-plan.md)
 - [`docs/plans/2026-05-06-status-coherence-and-stale-pid-liveness-plan.md`](../plans/2026-05-06-status-coherence-and-stale-pid-liveness-plan.md)
 - [`docs/plans/2026-05-06-task-evidence-reconciliation-model-plan.md`](../plans/2026-05-06-task-evidence-reconciliation-model-plan.md)
+- [`docs/plans/2026-05-06-terminal-publication-hardening-plan.md`](../plans/2026-05-06-terminal-publication-hardening-plan.md)
+- [`docs/plans/2026-05-07-lifecycle-monitor-archive-sink-plan.md`](../plans/2026-05-07-lifecycle-monitor-archive-sink-plan.md)
 - [`docs/plans/2026-04-14-config-precedence-and-parsing-alignment-plan.md`](../plans/2026-04-14-config-precedence-and-parsing-alignment-plan.md)
 - [`docs/plans/2026-04-14-spawn-request-reconciliation-plan.md`](../plans/2026-04-14-spawn-request-reconciliation-plan.md)
 - [`docs/plans/2026-04-13-result-stream-implementation-plan.md`](../plans/2026-04-13-result-stream-implementation-plan.md)

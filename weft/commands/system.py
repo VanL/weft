@@ -485,7 +485,7 @@ def _effective_public_status(
             status in {"spawning", "running"}
             and (not normalized_runner or normalized_runner == "host")
             and host_task_pid is not None
-            and not _pid_alive(host_task_pid)
+            and not _task_process_alive(mapping_entry)
         ):
             return "failed"
         if (

@@ -104,6 +104,9 @@ The control plane is explicit:
 - terminal task-local notifications must be typed JSON envelopes with
   `type="terminal"`, `source="task"` or `source="manager"`, `tid`, `status`,
   and `timestamp`; optional fields include `error` and `return_code`
+- one-shot non-persistent task success publishes a task-owned typed terminal
+  `ctrl_out` envelope after the task reaches `completed`, so task-local
+  terminal proof exists alongside the `work_completed` task-log event
 - readers must ignore ordinary control replies, stderr stream chunks, malformed
   JSON, and other `ctrl_out` payloads when looking for terminal state
 - the shared task-evidence reader may use a typed terminal `ctrl_out` envelope
@@ -123,6 +126,8 @@ Implementation plan backlinks:
 
 - `docs/plans/2026-04-30-known-tid-terminal-snapshot-api-plan.md`
 - `docs/plans/2026-05-06-task-evidence-reconciliation-model-plan.md`
+- `docs/plans/2026-05-06-terminal-publication-hardening-plan.md`
+- `docs/plans/2026-05-07-lifecycle-monitor-archive-sink-plan.md`
 
 ### 3.1 Named Endpoint Discovery [MF-3.1]
 
@@ -231,9 +236,14 @@ Current rules:
 - when task-log terminal proof is missing, a typed terminal `ctrl_out` envelope
   may classify the task as terminal, including `wrapper_lost` for
   manager-authored wrapper-exit envelopes
+- for new one-shot non-persistent success paths, terminal proof should normally
+  include both `work_completed` in `weft.log.tasks` and a task-owned typed
+  terminal `ctrl_out` envelope
 - for one-shot non-persistent tasks, a final unambiguous outbox result may be
   classified as `result_without_terminal`; persistent, interactive, streaming,
-  partial, or ambiguous outbox traffic does not prove task completion
+  partial, or ambiguous outbox traffic does not prove task completion, and
+  `result_without_terminal` remains a diagnostic fallback for historical rows
+  or unavoidable crash windows rather than the normal success proof
 - status surfaces must not emit `status="running"` with `completed_at` set
 - host tasks that still look `running` or `spawning` in the durable log but
   have no runtime proof are treated as stale after the configured status
@@ -560,6 +570,8 @@ management live in the companion doc:
 - [`docs/plans/2026-05-06-lifecycle-reconciliation-architecture-plan.md`](../plans/2026-05-06-lifecycle-reconciliation-architecture-plan.md)
 - [`docs/plans/2026-05-06-status-coherence-and-stale-pid-liveness-plan.md`](../plans/2026-05-06-status-coherence-and-stale-pid-liveness-plan.md)
 - [`docs/plans/2026-05-06-task-evidence-reconciliation-model-plan.md`](../plans/2026-05-06-task-evidence-reconciliation-model-plan.md)
+- [`docs/plans/2026-05-06-terminal-publication-hardening-plan.md`](../plans/2026-05-06-terminal-publication-hardening-plan.md)
+- [`docs/plans/2026-05-07-lifecycle-monitor-archive-sink-plan.md`](../plans/2026-05-07-lifecycle-monitor-archive-sink-plan.md)
 - [`docs/plans/2026-04-14-spawn-request-reconciliation-plan.md`](../plans/2026-04-14-spawn-request-reconciliation-plan.md)
 - [`docs/plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md`](../plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md)
 - [`docs/plans/2026-04-09-manager-bootstrap-unification-plan.md`](../plans/2026-04-09-manager-bootstrap-unification-plan.md)

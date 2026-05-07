@@ -46,6 +46,7 @@ from weft._constants import (
     QUEUE_CTRL_OUT_SUFFIX,
     SPEC_TYPE_PIPELINE,
     SPEC_TYPE_TASK,
+    TERMINAL_ENVELOPE_TYPE,
     TERMINAL_TASK_STATUSES,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MANAGER_LIFETIME_TIMEOUT,
@@ -54,6 +55,7 @@ from weft._constants import (
     WEFT_SPAWN_REQUESTS_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
     WORK_ENVELOPE_START,
+    WRAPPER_LOST_ERROR,
     get_weft_directory_name,
 )
 from weft.ext import RunnerHandle
@@ -974,7 +976,7 @@ class Manager(BaseTask):
                 if not isinstance(payload, dict):
                     continue
                 if (
-                    payload.get("type") == "terminal"
+                    payload.get("type") == TERMINAL_ENVELOPE_TYPE
                     and payload.get("tid") == tid
                     and payload.get("source") == "task"
                 ):
@@ -1025,11 +1027,11 @@ class Manager(BaseTask):
         ctrl_out_name = child.ctrl_out_queue or f"T{tid}.{QUEUE_CTRL_OUT_SUFFIX}"
         exitcode = child.process.exitcode
         payload: dict[str, Any] = {
-            "type": "terminal",
+            "type": TERMINAL_ENVELOPE_TYPE,
             "source": "manager",
             "tid": tid,
             "status": "failed",
-            "error": "Task wrapper exited before publishing terminal state",
+            "error": WRAPPER_LOST_ERROR,
             "timestamp": time.time_ns(),
         }
         if exitcode is not None:
