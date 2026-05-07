@@ -168,7 +168,7 @@ def _await_result_materialization(
     *,
     timeout: float | None,
 ) -> ResultMaterialization | None:
-    """Wait for taskspec metadata or result queues to become visible.
+    """Wait for taskspec metadata or live result activity to become visible.
 
     For stored specs with custom outbox/control queue names, ``weft result`` can
     race the manager on backends where task initialization becomes visible after
@@ -188,9 +188,7 @@ def _await_result_materialization(
         while True:
             taskspec_payload = _load_taskspec_payload(context, tid)
             outbox_name, ctrl_out_name = _queue_names_for_tid(tid, taskspec_payload)
-            if taskspec_payload is not None or _queue_names_exist(
-                context, outbox_name, ctrl_out_name
-            ):
+            if taskspec_payload is not None:
                 return ResultMaterialization(
                     taskspec_payload=taskspec_payload,
                     outbox_name=outbox_name,

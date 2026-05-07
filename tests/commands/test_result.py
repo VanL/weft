@@ -995,6 +995,10 @@ def test_cmd_result_waits_for_custom_result_channels_to_materialize(
     tid = str(time.time_ns())
     log_queue = ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
     outbox_queue = ctx.queue("late.custom.outbox", persistent=True)
+    default_outbox_queue = ctx.queue(f"T{tid}.outbox", persistent=True)
+    default_ctrl_queue = ctx.queue(f"T{tid}.ctrl_out", persistent=False)
+    default_outbox_queue.close()
+    default_ctrl_queue.close()
 
     taskspec_payload = {
         "tid": tid,

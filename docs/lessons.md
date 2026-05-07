@@ -200,6 +200,10 @@ runbook needs to become stricter.
   per-child STOP retries. Release-load PG runs can leave a child slow enough
   that the supervisor-facing `weft manager serve` process gets force-killed by
   the test harness unless the manager itself escalates and exits cleanly.
+- Result materialization must not treat empty default result queues as proof
+  that the default surface is the right surface. Probing can create queues on
+  some backends; wait for TaskSpec metadata or real outbox/control activity
+  before choosing a result queue for an unknown TID.
 
 ## 2026-04-08 Zombie PID Liveness
 
