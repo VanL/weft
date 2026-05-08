@@ -688,6 +688,21 @@ def test_build_precheck_commands_cover_release_gate_and_quality_gates() -> None:
     }
 
 
+def test_build_precheck_env_overrides_sets_worker_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Release prechecks should use the repo helper's xdist worker count."""
+
+    release = _load_release_module()
+    monkeypatch.setattr(release, "_pytest_worker_count", lambda: "17")
+
+    assert release.build_precheck_env_overrides() == {
+        "PYTEST_ADDOPTS": "-x --maxfail=1",
+        "WEFT_EAGER_FAILURE_TRACEBACK": "1",
+        "PYTEST_XDIST_AUTO_NUM_WORKERS": "17",
+    }
+
+
 def test_build_postupdate_steps_build_all_publishable_packages() -> None:
     """Post-update verification should build every publishable first-party package."""
 

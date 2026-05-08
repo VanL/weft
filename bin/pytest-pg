@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Final, Literal
 
 ROOT = Path(__file__).resolve().parents[1]
+PYTEST_WORKER_COUNT_HELPER = ROOT / "bin" / "pytest-worker-count"
 POSTGRES_IMAGE = os.environ.get("SIMPLEBROKER_PG_TEST_IMAGE", "postgres:18")
 POSTGRES_DB = os.environ.get("SIMPLEBROKER_PG_TEST_DB", "simplebroker_test")
 POSTGRES_USER = os.environ.get("SIMPLEBROKER_PG_TEST_USER", "postgres")
@@ -169,7 +170,30 @@ def _build_test_env(*, dsn: str) -> dict[str, str]:
     env = os.environ.copy()
     env["BROKER_TEST_BACKEND"] = "postgres"
     env["SIMPLEBROKER_PG_TEST_DSN"] = dsn
+    if "PYTEST_XDIST_AUTO_NUM_WORKERS" not in env:
+        env["PYTEST_XDIST_AUTO_NUM_WORKERS"] = _pytest_worker_count()
     return env
+
+
+def _pytest_worker_count() -> str:
+    """Return the xdist worker count from the repo helper."""
+
+    result = subprocess.run(
+        [sys.executable, str(PYTEST_WORKER_COUNT_HELPER)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "unknown error"
+        raise RuntimeError(f"Unable to compute pytest worker count: {detail}")
+    count = result.stdout.strip()
+    if not count:
+        raise RuntimeError("Unable to compute pytest worker count: empty output")
+    return count
 
 
 def _build_pytest_command(

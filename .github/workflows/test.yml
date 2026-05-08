@@ -48,6 +48,10 @@ jobs:
       run: |
         uv pip install --system -e ".[dev,docker,django,macos-sandbox]"
 
+    - name: Set pytest worker count
+      run: |
+        python bin/pytest-worker-count --github-env
+
     - name: Run tests with pytest
       if: ${{ matrix.os != 'ubuntu-latest' || matrix.python-version != '3.13' }}
       run: |

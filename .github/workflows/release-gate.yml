@@ -145,6 +145,10 @@ jobs:
         run: |
           uv pip install --system -e ".[dev,docker,macos-sandbox]"
 
+      - name: Set pytest worker count
+        run: |
+          python bin/pytest-worker-count --github-env
+
       - name: Run full SQLite suite
         run: |
           pytest -v --tb=short -m "" ${{ matrix.pytest_targets }} --override-ini="addopts=-ra -q --strict-markers -n logical --dist load" --durations=50 --durations-min=1.0
@@ -181,6 +185,10 @@ jobs:
           cache-dependency-glob: |
             pyproject.toml
             uv.lock
+
+      - name: Set pytest worker count
+        run: |
+          python bin/pytest-worker-count --github-env
 
       - name: Run PG-compatible suite
         env:

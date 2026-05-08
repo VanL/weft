@@ -9,6 +9,8 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
+import pytest
+
 
 def _load_pytest_pg_module() -> ModuleType:
     script_path = Path(__file__).resolve().parents[2] / "bin" / "pytest-pg"
@@ -19,6 +21,23 @@ def _load_pytest_pg_module() -> ModuleType:
     spec = importlib.util.spec_from_loader(loader.name, loader)
     if spec is None:
         raise AssertionError(f"Unable to load pytest-pg script: {script_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    loader.exec_module(module)
+    return module
+
+
+def _load_worker_count_module() -> ModuleType:
+    script_path = Path(__file__).resolve().parents[2] / "bin" / "pytest-worker-count"
+    loader = importlib.machinery.SourceFileLoader(
+        "weft_pytest_worker_count_script",
+        str(script_path),
+    )
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    if spec is None:
+        raise AssertionError(
+            f"Unable to load pytest worker count script: {script_path}"
+        )
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     loader.exec_module(module)
@@ -79,6 +98,68 @@ def test_launch_pytest_process_isolates_ctrl_c_on_current_platform(
         assert "creationflags" in recorded["kwargs"]
     else:
         assert recorded["kwargs"]["start_new_session"] is True
+
+
+def test_worker_count_helper_returns_logical_cpu_count_plus_extra(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The helper should intentionally oversubscribe visible logical CPUs."""
+
+    worker_count = _load_worker_count_module()
+    monkeypatch.setattr(worker_count.os, "cpu_count", lambda: 16)
+
+    assert worker_count.worker_count(extra=1) == 17
+    assert worker_count.worker_count(extra=2) == 18
+
+
+def test_worker_count_helper_writes_github_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CI should be able to export the computed xdist worker count."""
+
+    worker_count = _load_worker_count_module()
+    github_env = tmp_path / "github-env"
+    monkeypatch.setenv("GITHUB_ENV", str(github_env))
+
+    worker_count.write_github_env("PYTEST_XDIST_AUTO_NUM_WORKERS", "17")
+
+    assert github_env.read_text(encoding="utf-8") == (
+        "PYTEST_XDIST_AUTO_NUM_WORKERS=17\n"
+    )
+
+
+def test_build_test_env_sets_worker_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The PG helper should run with the same oversubscribed xdist count."""
+
+    pytest_pg = _load_pytest_pg_module()
+    monkeypatch.delenv("PYTEST_XDIST_AUTO_NUM_WORKERS", raising=False)
+    monkeypatch.setattr(pytest_pg, "_pytest_worker_count", lambda: "17")
+
+    env = pytest_pg._build_test_env(dsn="postgresql://example")
+
+    assert env["PYTEST_XDIST_AUTO_NUM_WORKERS"] == "17"
+    assert env["BROKER_TEST_BACKEND"] == "postgres"
+
+
+def test_build_test_env_preserves_explicit_worker_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Manual PG runs should be able to override the worker count."""
+
+    pytest_pg = _load_pytest_pg_module()
+    monkeypatch.setenv("PYTEST_XDIST_AUTO_NUM_WORKERS", "5")
+    monkeypatch.setattr(
+        pytest_pg,
+        "_pytest_worker_count",
+        lambda: (_ for _ in ()).throw(AssertionError("should not be called")),
+    )
+
+    env = pytest_pg._build_test_env(dsn="postgresql://example")
+
+    assert env["PYTEST_XDIST_AUTO_NUM_WORKERS"] == "5"
 
 
 def test_build_pytest_command_accepts_target_slices() -> None:

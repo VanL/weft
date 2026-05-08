@@ -1,0 +1,53 @@
+#!/usr/bin/env python3
+"""Compute the pytest-xdist worker count used by CI."""
+
+from __future__ import annotations
+
+import argparse
+import os
+from pathlib import Path
+
+
+def worker_count(*, extra: int = 1) -> int:
+    """Return visible logical CPUs plus *extra*, with a minimum of one."""
+
+    return max(1, (os.cpu_count() or 1) + extra)
+
+
+def write_github_env(name: str, value: str) -> None:
+    """Write one environment variable to the GitHub Actions env file."""
+
+    github_env = os.environ.get("GITHUB_ENV")
+    if not github_env:
+        raise RuntimeError("GITHUB_ENV is not set")
+    with Path(github_env).open("a", encoding="utf-8") as file:
+        file.write(f"{name}={value}\n")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Print or export the pytest-xdist worker count."
+    )
+    parser.add_argument(
+        "--extra",
+        type=int,
+        default=1,
+        help="Workers to add above visible logical CPUs.",
+    )
+    parser.add_argument(
+        "--github-env",
+        action="store_true",
+        help="Write PYTEST_XDIST_AUTO_NUM_WORKERS to $GITHUB_ENV.",
+    )
+    args = parser.parse_args()
+
+    count = str(worker_count(extra=args.extra))
+    if args.github_env:
+        write_github_env("PYTEST_XDIST_AUTO_NUM_WORKERS", count)
+    else:
+        print(count)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

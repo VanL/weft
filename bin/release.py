@@ -35,6 +35,7 @@ MACOS_SANDBOX_EXTENSION_PYPROJECT_PATH: Final[Path] = (
     MACOS_SANDBOX_EXTENSION_DIR / "pyproject.toml"
 )
 UV_LOCK_PATH: Final[Path] = PROJECT_ROOT / "uv.lock"
+PYTEST_WORKER_COUNT_HELPER: Final[Path] = PROJECT_ROOT / "bin" / "pytest-worker-count"
 ROOT_RELEASE_GATE_WORKFLOW: Final[str] = ".github/workflows/release-gate.yml"
 DOCKER_RELEASE_GATE_WORKFLOW: Final[str] = ".github/workflows/release-gate-docker.yml"
 DJANGO_RELEASE_GATE_WORKFLOW: Final[str] = ".github/workflows/release-gate-django.yml"
@@ -614,6 +615,28 @@ def _capture_command(
     )
 
 
+def _pytest_worker_count() -> str:
+    """Return the release precheck xdist worker count from the repo helper."""
+
+    result = _capture_command((sys.executable, str(PYTEST_WORKER_COUNT_HELPER)))
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "unknown error"
+        raise RuntimeError(f"Unable to compute pytest worker count: {detail}")
+    count = result.stdout.strip()
+    if not count:
+        raise RuntimeError("Unable to compute pytest worker count: empty output")
+    return count
+
+
+def build_precheck_env_overrides() -> dict[str, str]:
+    """Return environment overrides for release precheck commands."""
+
+    return {
+        **PRECHECK_ENV_OVERRIDES,
+        "PYTEST_XDIST_AUTO_NUM_WORKERS": _pytest_worker_count(),
+    }
+
+
 def _git_output(command: tuple[str, ...], *, label: str) -> str:
     """Return git stdout or raise a targeted release-helper error."""
 
@@ -1078,11 +1101,12 @@ def main(argv: list[str] | None = None) -> int:
                 "creates the GitHub Release after the pushed tag passes"
             )
         if not args.skip_checks:
+            precheck_env = build_precheck_env_overrides()
             for command in build_precheck_commands():
                 run_command(
                     command,
                     dry_run=True,
-                    env_overrides=PRECHECK_ENV_OVERRIDES,
+                    env_overrides=precheck_env,
                 )
         if version_changed:
             print(
@@ -1135,8 +1159,9 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     if not args.skip_checks:
+        precheck_env = build_precheck_env_overrides()
         for command in build_precheck_commands():
-            run_command(command, env_overrides=PRECHECK_ENV_OVERRIDES)
+            run_command(command, env_overrides=precheck_env)
 
     if version_changed:
         write_target_version(ROOT_RELEASE_TARGET, target_version)
