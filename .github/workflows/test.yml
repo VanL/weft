@@ -9,6 +9,7 @@ on:
 
 jobs:
   test:
+    name: ${{ matrix.test_slice == 'all' && format('test ({0}, {1})', matrix.os, matrix.python-version) || format('test ({0}, {1}, {2})', matrix.os, matrix.python-version, matrix.test_slice) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 50
     strategy:
@@ -16,6 +17,24 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
         python-version: ["3.12", "3.13", "3.14"]
+        test_slice: [all]
+        include:
+          - os: windows-latest
+            python-version: "3.13"
+            test_slice: cli
+            pytest_targets: tests/cli
+          - os: windows-latest
+            python-version: "3.13"
+            test_slice: core-commands
+            pytest_targets: tests/commands tests/core
+          - os: windows-latest
+            python-version: "3.13"
+            test_slice: remaining
+            pytest_targets: tests/architecture tests/context tests/helpers tests/shell tests/specs tests/system tests/tasks tests/taskspec tests/test_harness_registration.py
+        exclude:
+          - os: windows-latest
+            python-version: "3.13"
+            test_slice: all
 
     steps:
     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -37,7 +56,7 @@ jobs:
 
     - name: Run tests with pytest
       run: |
-        pytest -v --tb=short -m "not slow" --override-ini="addopts=-ra -q --strict-markers -n auto --dist load"
+        pytest -v --tb=short -m "not slow" ${{ matrix.pytest_targets || 'tests' }} --override-ini="addopts=-ra -q --strict-markers -n auto --dist load"
 
     - name: Test CLI installation
       run: |
