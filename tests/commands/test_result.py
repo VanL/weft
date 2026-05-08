@@ -31,6 +31,8 @@ from weft.helpers import iter_queue_json_entries
 pytestmark = [pytest.mark.shared]
 
 RESULT_WAIT_TIMEOUT = 2.0
+RESULT_MATERIALIZATION_TEST_TIMEOUT = 15.0
+"""Backend-tolerant timeout for tests that validate eventual queue discovery."""
 
 
 def _write_task_log_event(queue, tid: str, event: str, status: str) -> None:
@@ -1125,7 +1127,7 @@ def test_cmd_result_waits_for_custom_result_channels_to_materialize(
             tid=tid,
             all_results=False,
             peek=False,
-            timeout=RESULT_WAIT_TIMEOUT,
+            timeout=RESULT_MATERIALIZATION_TEST_TIMEOUT,
             stream=False,
             json_output=False,
             show_stderr=False,
