@@ -71,7 +71,7 @@ BASE_PRECHECK_COMMANDS: Final[tuple[tuple[str, ...], ...]] = (
         "--tb=short",
         "-m",
         "",
-        "--override-ini=addopts=-ra -q --strict-markers -n auto --dist load",
+        "--override-ini=addopts=-ra -q --strict-markers -n logical --dist load",
     ),
     (
         "uv",

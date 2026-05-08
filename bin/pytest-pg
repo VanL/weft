@@ -195,7 +195,7 @@ def _build_pytest_command(
         "-m",
         marker,
         "-n",
-        "auto",
+        "logical",
         "--dist",
         "load",
     ]

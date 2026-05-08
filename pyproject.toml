@@ -104,7 +104,7 @@ exclude = [
 [tool.pytest.ini_options]
 minversion = "7.0"
 testpaths = ["tests"]
-addopts = "-ra -q --strict-markers -m 'not slow' -n auto --dist load"
+addopts = "-ra -q --strict-markers -m 'not slow' -n logical --dist load"
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "shared: backend-agnostic tests that should pass across supported backends",

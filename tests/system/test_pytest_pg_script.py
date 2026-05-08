@@ -95,6 +95,7 @@ def test_build_pytest_command_accepts_target_slices() -> None:
     assert command[pytest_index + 1 : pytest_index + 3] == ["tests/cli", "tests/core"]
     assert "-m" in command
     assert command[command.index("-m") + 1] == "not sqlite_only"
+    assert command[command.index("-n") + 1] == "logical"
 
 
 def test_build_pytest_command_defaults_to_full_tests_tree() -> None:

@@ -606,7 +606,7 @@ def test_build_precheck_commands_cover_release_gate_and_quality_gates() -> None:
     assert "-m" in sqlite_command
     marker_index = sqlite_command.index("-m")
     assert sqlite_command[marker_index + 1] == ""
-    assert "--override-ini=addopts=-ra -q --strict-markers -n auto --dist load" in (
+    assert "--override-ini=addopts=-ra -q --strict-markers -n logical --dist load" in (
         sqlite_command
     )
     assert postgres_command == (
