@@ -208,7 +208,7 @@ def _service_records(context, *, service_key: str) -> list[dict[str, Any]]:
                 continue
             if metadata.get(INTERNAL_SERVICE_KEY_METADATA_KEY) != service_key:
                 continue
-            state = payload.get("state")
+            state = taskspec.get("state")
             pid = state.get("pid") if isinstance(state, dict) else None
             io_section = taskspec.get("io")
             control = io_section.get("control") if isinstance(io_section, dict) else {}
@@ -260,7 +260,8 @@ def _live_service_records(context, *, service_key: str) -> list[dict[str, Any]]:
             ctrl_out_name=ctrl_out,
             timeout=1.0,
         )
-        if probe.matched is not None:
+        pid = record.get("pid")
+        if probe.matched is not None or (isinstance(pid, int) and pid_is_live(pid)):
             live_records.append(record)
     return live_records
 
