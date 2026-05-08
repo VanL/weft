@@ -7,6 +7,9 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
+env:
+  UV_VERSION: "0.11.11"
+
 jobs:
   test:
     name: ${{ matrix.test_slice == 'all' && format('test ({0}, {1})', matrix.os, matrix.python-version) || format('test ({0}, {1}, {2})', matrix.os, matrix.python-version, matrix.test_slice) }}
@@ -47,6 +50,7 @@ jobs:
     - name: Install uv
       uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       with:
+        version: ${{ env.UV_VERSION }}
         enable-cache: true
         cache-dependency-glob: "pyproject.toml"
 
@@ -76,6 +80,7 @@ jobs:
     - name: Install uv
       uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       with:
+        version: ${{ env.UV_VERSION }}
         enable-cache: true
 
     - name: Install dependencies
@@ -108,6 +113,7 @@ jobs:
     - name: Install uv
       uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       with:
+        version: ${{ env.UV_VERSION }}
         enable-cache: true
         cache-dependency-glob: "pyproject.toml"
 
@@ -133,6 +139,7 @@ jobs:
     - name: Install uv
       uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       with:
+        version: ${{ env.UV_VERSION }}
         enable-cache: true
         cache-dependency-glob: "pyproject.toml"
 
@@ -162,6 +169,7 @@ jobs:
     - name: Install uv
       uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       with:
+        version: ${{ env.UV_VERSION }}
         enable-cache: true
         cache-dependency-glob: "pyproject.toml"
 
@@ -187,6 +195,7 @@ jobs:
     - name: Install uv
       uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       with:
+        version: ${{ env.UV_VERSION }}
         enable-cache: true
 
     - name: Install dependencies

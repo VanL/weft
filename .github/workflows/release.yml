@@ -29,6 +29,9 @@ on:
         default: false
         type: boolean
 
+env:
+  UV_VERSION: "0.11.11"
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -46,6 +49,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
+          version: ${{ env.UV_VERSION }}
           enable-cache: true
 
       - name: Verify checked out commit matches tested release commit
@@ -184,6 +188,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
+          version: ${{ env.UV_VERSION }}
           enable-cache: true
 
       - name: Publish distribution to PyPI
