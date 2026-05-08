@@ -138,6 +138,7 @@ class TaskSnapshot:
     metadata: dict[str, Any]
     pipeline_status: dict[str, Any] | None = None
     reconciliation: dict[str, Any] | None = None
+    runner_diagnostics: dict[str, Any] | None = None
     return_code: int | None = None
     error: str | None = None
 
@@ -165,6 +166,8 @@ class TaskSnapshot:
             payload["pipeline_status"] = self.pipeline_status
         if self.reconciliation is not None:
             payload["reconciliation"] = self.reconciliation
+        if self.runner_diagnostics is not None:
+            payload["runner_diagnostics"] = self.runner_diagnostics
         return payload
 
 
@@ -711,6 +714,7 @@ def _collect_task_snapshot_records(
                     "taskspec": None,
                     "metadata": {},
                     "event_payload": None,
+                    "runner_diagnostics": None,
                     "status_reason": None,
                 },
             )
@@ -789,6 +793,10 @@ def _collect_task_snapshot_records(
             record["taskspec"] = taskspec
             record["metadata"] = metadata if isinstance(metadata, dict) else {}
             record["event_payload"] = dict(payload)
+            diagnostics = payload.get("runner_diagnostics")
+            record["runner_diagnostics"] = (
+                dict(diagnostics) if isinstance(diagnostics, Mapping) else None
+            )
             record["status_reason"] = status_reason
             if record["status"] in TERMINAL_TASK_STATUSES:
                 record["activity"] = None
@@ -935,6 +943,11 @@ def _collect_task_snapshot_records(
             if isinstance(record.get("metadata"), dict)
             else {},
             reconciliation=reconciliation,
+            runner_diagnostics=(
+                dict(record["runner_diagnostics"])
+                if isinstance(record.get("runner_diagnostics"), dict)
+                else None
+            ),
         )
         records_out.append(
             CollectedTaskSnapshot(snapshot=snapshot, taskspec_payload=taskspec)
@@ -1268,6 +1281,11 @@ def _public_task_snapshot(snapshot: TaskSnapshot) -> PublicTaskSnapshot:
         reconciliation=(
             dict(payload["reconciliation"])
             if isinstance(payload.get("reconciliation"), dict)
+            else None
+        ),
+        runner_diagnostics=(
+            dict(payload["runner_diagnostics"])
+            if isinstance(payload.get("runner_diagnostics"), dict)
             else None
         ),
     )

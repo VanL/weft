@@ -391,6 +391,16 @@ readiness budget that is not shortened by a small per-work-item timeout. The
 TaskSpec timeout still applies to later session `execute` calls; startup and
 work execution have different timing failure modes.
 
+Session worker startup diagnostics are private but explicit. The worker may
+send a `booted` message as soon as the guarded worker entrypoint is running,
+then either `ready` after the runtime session has been constructed or
+`startup_error` with bounded diagnostic context when startup fails. The parent
+must preserve enough process evidence to distinguish spawn/bootstrap failure,
+worker-entry success followed by runtime failure, and a live worker that did
+not become ready before the readiness budget expired. This diagnostic evidence
+may be surfaced through task failure output or task-log metadata, but it is not
+public lifecycle truth.
+
 That parent/subprocess link uses a private JSON protocol. It is allowed to be
 explicit and versioned because it is **not** part of the public queue surface.
 
@@ -398,6 +408,7 @@ Public callers do not send or receive:
 
 - `{"type": "execute"}`
 - `{"type": "result"}`
+- `{"type": "booted"}`
 - `{"type": "ready"}`
 - `{"type": "stop"}`
 - `{"type": "startup_error"}`
@@ -405,9 +416,10 @@ Public callers do not send or receive:
 Those are private runtime-session messages only.
 
 _Implementation mapping:_ `weft/core/tasks/agent_session_protocol.py` --
-`make_execute_request`, `make_stop_request`, `make_ready_response`,
-`make_startup_error_response`, `make_result_response`, `parse_request_type`,
-`parse_result_response`, `is_ready_response`, `startup_error_message`.
+`make_execute_request`, `make_stop_request`, `make_booted_response`,
+`make_ready_response`, `make_startup_error_response`, `make_result_response`,
+`parse_request_type`, `response_type`, `parse_result_response`,
+`is_ready_response`, `is_booted_response`, `startup_error_message`.
 Versioned via
 `AGENT_SESSION_PROTOCOL_VERSION`. Session management:
 `weft/core/tasks/sessions.py` (`AgentSession` class),
@@ -693,6 +705,7 @@ This slice does not attempt to:
 
 ## Related Plans
 
+- [`docs/plans/2026-05-08-agent-session-and-task-startup-observability-plan.md`](../plans/2026-05-08-agent-session-and-task-startup-observability-plan.md)
 - [`docs/plans/2026-04-14-agent-runtime-package-refactor-plan.md`](../plans/2026-04-14-agent-runtime-package-refactor-plan.md)
 - [`docs/plans/2026-04-13-result-stream-implementation-plan.md`](../plans/2026-04-13-result-stream-implementation-plan.md)
 - [`docs/plans/2026-04-13-delegated-agent-runtime-phase-1-implementation-plan.md`](../plans/2026-04-13-delegated-agent-runtime-phase-1-implementation-plan.md)

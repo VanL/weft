@@ -893,6 +893,44 @@ def test_await_single_result_persistent_returns_one_work_item_batch(tmp_path) ->
     assert second_error is None
 
 
+def test_await_single_result_persistent_returns_quiet_visible_output_without_boundary(
+    tmp_path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    outbox_queue = ctx.queue(f"T{tid}.outbox", persistent=True)
+
+    taskspec_payload = {
+        "tid": tid,
+        "name": "persistent-agent",
+        "spec": {"type": "agent", "persistent": True},
+        "io": {
+            "outputs": {"outbox": f"T{tid}.outbox"},
+            "control": {"ctrl_out": f"T{tid}.ctrl_out"},
+        },
+        "state": {"status": "running"},
+        "metadata": {},
+    }
+
+    try:
+        outbox_queue.write("ready")
+
+        status, result, error = _await_single_result(
+            ctx,
+            tid,
+            timeout=RESULT_WAIT_TIMEOUT,
+            show_stderr=False,
+            taskspec_payload=taskspec_payload,
+        )
+    finally:
+        outbox_queue.close()
+
+    assert status == "completed"
+    assert result == "ready"
+    assert error is None
+
+
 def test_await_single_result_stream_mode_emits_chunks_without_replay(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,

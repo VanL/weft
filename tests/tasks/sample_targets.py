@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from collections.abc import Mapping
 from typing import Any
@@ -26,6 +27,12 @@ def surround_payload(
 def fail_payload(*args, **kwargs) -> None:
     """Raise an exception to simulate task failure."""
     raise RuntimeError("intentional failure for testing")
+
+
+def abrupt_exit(code: int = 73) -> None:
+    """Exit the worker process immediately without returning a result."""
+
+    os._exit(code)
 
 
 def simulate_work(

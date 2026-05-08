@@ -73,28 +73,28 @@ def _write_task_log_entry(
     runner_name: str = "host",
     state_status: str | None = None,
     metadata: dict[str, Any] | None = None,
+    runner_diagnostics: dict[str, Any] | None = None,
 ) -> None:
     state_status = state_status or status
+    payload: dict[str, Any] = {
+        "event": event,
+        "status": status,
+        "tid": tid,
+        "taskspec": {
+            "name": name,
+            "spec": {"runner": {"name": runner_name, "options": {}}},
+            "state": {
+                "status": state_status,
+                "started_at": started_at,
+                "completed_at": completed_at,
+            },
+            "metadata": metadata or {},
+        },
+    }
+    if runner_diagnostics is not None:
+        payload["runner_diagnostics"] = runner_diagnostics
     log_queue = ctx.queue("weft.log.tasks", persistent=False)
-    log_queue.write(
-        json.dumps(
-            {
-                "event": event,
-                "status": status,
-                "tid": tid,
-                "taskspec": {
-                    "name": name,
-                    "spec": {"runner": {"name": runner_name, "options": {}}},
-                    "state": {
-                        "status": state_status,
-                        "started_at": started_at,
-                        "completed_at": completed_at,
-                    },
-                    "metadata": metadata or {},
-                },
-            }
-        )
-    )
+    log_queue.write(json.dumps(payload))
 
 
 def _write_pipeline_log_entry(
@@ -1104,6 +1104,35 @@ def test_status_snapshot_preserves_activity_from_latest_log_event(
     assert snapshot.status == "running"
     assert snapshot.activity == "waiting"
     assert snapshot.waiting_on == "P123.first-to-second"
+
+
+def test_status_snapshot_preserves_runner_diagnostics(tmp_path: Path) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = "1778000000000000001"
+    diagnostics = {
+        "phase": "runtime_startup",
+        "runner": "host",
+        "target_type": "agent",
+        "message": "startup boom",
+    }
+    _write_task_log_entry(
+        ctx=ctx,
+        tid=tid,
+        event="work_failed",
+        status="failed",
+        started_at=1_000,
+        completed_at=2_000,
+        name="diagnostic-task",
+        runner_diagnostics=diagnostics,
+    )
+
+    snapshot = task_cmd.task_status(tid, context_path=root)
+
+    assert snapshot is not None
+    assert snapshot.status == "failed"
+    assert snapshot.runner_diagnostics == diagnostics
+    assert snapshot.to_dict()["runner_diagnostics"] == diagnostics
 
 
 def test_terminal_snapshot_omits_activity_when_status_is_terminal(

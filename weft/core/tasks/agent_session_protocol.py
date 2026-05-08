@@ -55,34 +55,70 @@ def make_ready_response() -> dict[str, Any]:
     }
 
 
+def make_booted_response() -> dict[str, Any]:
+    """Build a private worker-booted response payload."""
+    return {
+        "version": AGENT_SESSION_PROTOCOL_VERSION,
+        "type": "booted",
+    }
+
+
+def response_type(payload: Mapping[str, Any]) -> str | None:
+    """Return the response type when the payload matches the private protocol."""
+
+    if payload.get("version") != AGENT_SESSION_PROTOCOL_VERSION:
+        return None
+    candidate = payload.get("type")
+    if not isinstance(candidate, str) or not candidate:
+        return None
+    if candidate not in {"booted", "ready", "startup_error", "result"}:
+        return None
+    return candidate
+
+
+def is_booted_response(payload: Mapping[str, Any]) -> bool:
+    """Return ``True`` when *payload* is a private booted response."""
+    return response_type(payload) == "booted"
+
+
 def is_ready_response(payload: Mapping[str, Any]) -> bool:
     """Return ``True`` when *payload* is a private ready response."""
-    return (
-        payload.get("version") == AGENT_SESSION_PROTOCOL_VERSION
-        and payload.get("type") == "ready"
-    )
+    return response_type(payload) == "ready"
 
 
-def make_startup_error_response(error: str) -> dict[str, Any]:
+def make_startup_error_response(
+    error: str,
+    *,
+    diagnostics: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Build a private startup-error response payload."""
-    return {
+    payload: dict[str, Any] = {
         "version": AGENT_SESSION_PROTOCOL_VERSION,
         "type": "startup_error",
         "error": error,
     }
+    if diagnostics is not None:
+        payload["diagnostics"] = dict(diagnostics)
+    return payload
 
 
 def startup_error_message(payload: Mapping[str, Any]) -> str | None:
     """Return the startup error string when *payload* is a startup error."""
-    if (
-        payload.get("version") != AGENT_SESSION_PROTOCOL_VERSION
-        or payload.get("type") != "startup_error"
-    ):
+    if response_type(payload) != "startup_error":
         return None
     error = payload.get("error")
     if not isinstance(error, str) or not error:
         return "Agent session failed to start"
     return error
+
+
+def startup_error_diagnostics(payload: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Return startup diagnostic payload when present."""
+
+    if response_type(payload) != "startup_error":
+        return None
+    diagnostics = payload.get("diagnostics")
+    return dict(diagnostics) if isinstance(diagnostics, Mapping) else None
 
 
 def make_result_response(
@@ -131,12 +167,16 @@ def parse_result_response(
 
 __all__ = [
     "make_execute_request",
+    "make_booted_response",
     "make_ready_response",
     "make_result_response",
     "make_startup_error_response",
     "make_stop_request",
     "parse_request_type",
     "parse_result_response",
+    "response_type",
+    "startup_error_diagnostics",
     "startup_error_message",
+    "is_booted_response",
     "is_ready_response",
 ]

@@ -253,6 +253,12 @@ Current rules:
 - CLI status surfaces reconstruct task snapshots from that log plus the latest
   `weft.state.tid_mappings` entries and live runtime liveness where needed; they
   do not depend on a separate state database
+- terminal task-log events may carry `runner_diagnostics` for process/session
+  startup, runtime readiness, and runner-boundary failure evidence. These
+  diagnostics are operational metadata only. They may explain an already
+  selected lifecycle event such as `work_failed`, `work_timeout`, or
+  `work_limit_violation`, but they must not create, override, or infer public
+  lifecycle state by themselves.
 - `weft system task-monitor` can scan `weft.log.tasks` without consuming
   broker messages and emit compact JSONL records to stdout or append-only disk
   log files under `.weft/logs/task-monitor/`
@@ -687,6 +693,7 @@ management live in the companion doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-05-08-agent-session-and-task-startup-observability-plan.md`](../plans/2026-05-08-agent-session-and-task-startup-observability-plan.md)
 - [`docs/plans/2026-05-06-lifecycle-reconciliation-architecture-plan.md`](../plans/2026-05-06-lifecycle-reconciliation-architecture-plan.md)
 - [`docs/plans/2026-05-06-status-coherence-and-stale-pid-liveness-plan.md`](../plans/2026-05-06-status-coherence-and-stale-pid-liveness-plan.md)
 - [`docs/plans/2026-05-06-task-evidence-reconciliation-model-plan.md`](../plans/2026-05-06-task-evidence-reconciliation-model-plan.md)

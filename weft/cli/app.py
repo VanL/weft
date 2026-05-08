@@ -22,6 +22,7 @@ from weft.commands import specs as spec_cmd
 from weft.commands import status as status_cmd
 from weft.commands import tasks as task_cmd
 from weft.commands.builtins import cmd_system_builtins
+from weft.commands.diagnostics import format_runner_diagnostics
 from weft.commands.dump import cmd_dump
 from weft.commands.load import cmd_load
 from weft.commands.result import cmd_result
@@ -734,6 +735,9 @@ def task_status(
         typer.echo(f"activity: {snapshot.activity}")
     if snapshot.waiting_on:
         typer.echo(f"waiting_on: {snapshot.waiting_on}")
+    diagnostics = format_runner_diagnostics(snapshot.runner_diagnostics)
+    if diagnostics is not None and snapshot.status in {"failed", "timeout", "killed"}:
+        typer.echo(f"runner_diagnostics: {diagnostics}")
     if process:
         managed = status_payload.get("managed_pids")
         live_managed = status_payload.get("live_managed_pids")

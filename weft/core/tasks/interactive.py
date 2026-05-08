@@ -26,6 +26,7 @@ from weft._constants import (
     INTERACTIVE_STOP_POLL_INTERVAL,
     TERMINAL_TASK_STATUSES,
 )
+from weft.core.runner_diagnostics import runner_diagnostics
 from weft.core.targets import decode_work_message
 from weft.core.taskspec import ReservedPolicy, TaskSpec
 
@@ -225,7 +226,31 @@ class InteractiveTaskMixin(ABC):
         self._report_state_change(event="work_spawning", message_id=message_id)
 
         runner = self._make_task_runner(interactive=True)
-        session = runner.start_session()
+        try:
+            session = runner.start_session()
+        except Exception as exc:
+            diagnostics = runner_diagnostics(
+                phase="process_spawn",
+                runner=self.taskspec.spec.runner.name,
+                target_type=self.taskspec.spec.type,
+                message=str(exc),
+                exception_type=type(exc).__name__,
+            )
+            self.taskspec.mark_failed(error=str(exc))
+            self._update_process_title("failed")
+            self._report_state_change(
+                event="work_failed",
+                message_id=message_id,
+                error=str(exc),
+                runner_diagnostics=diagnostics,
+            )
+            policy = self.taskspec.spec.reserved_policy_on_error
+            self._apply_reserved_policy(policy, message_timestamp=message_id)
+            if policy is not ReservedPolicy.KEEP:
+                self._ensure_reserved_empty()
+                self._cleanup_reserved_if_needed()
+            self.should_stop = True
+            raise
         self._interactive_runner = runner
         self._interactive_session = session
         self._interactive_started = True
@@ -397,6 +422,15 @@ class InteractiveTaskMixin(ABC):
                     event="work_failed",
                     message_id=time.time_ns(),
                     error=message,
+                    runner_diagnostics=runner_diagnostics(
+                        phase="execute",
+                        runner=self.taskspec.spec.runner.name,
+                        target_type=self.taskspec.spec.type,
+                        pid=session.pid,
+                        exitcode=returncode,
+                        alive=session.is_alive(),
+                        message=message,
+                    ),
                 )
                 policy = self.taskspec.spec.reserved_policy_on_error
                 self._apply_reserved_policy(policy)

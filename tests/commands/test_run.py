@@ -623,6 +623,87 @@ def test_start_manager_does_not_terminate_competing_startup_manager(
     assert terminated is False
 
 
+def test_start_manager_detaches_registered_startup_manager_after_losing_selection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    fake_process = _FakePopen(poll_results=[None, None])
+    invocation = core_manager_runtime.ManagerRuntimeInvocation(
+        task_cls_path="weft.core.manager.Manager",
+        tid="9" * 19,
+        spec=_FakeManagerSpec(),
+    )
+    competing_record = {
+        "tid": "1775619800000000000",
+        "status": "active",
+        "runtime_handle": _host_runtime_handle(31337),
+        "requests": WEFT_SPAWN_REQUESTS_QUEUE,
+        "role": "manager",
+    }
+    launched_record = {
+        "tid": invocation.tid,
+        "status": "active",
+        "runtime_handle": _host_runtime_handle(fake_process.pid),
+        "requests": WEFT_SPAWN_REQUESTS_QUEUE,
+        "role": "manager",
+    }
+    launch = core_manager_runtime.DetachedManagerLaunch(
+        pid=fake_process.pid,
+        stderr_path=root / ".weft" / "logs" / "manager-startup" / "manager.stderr",
+        launcher_process=fake_process,
+    )
+    acknowledged: list[str] = []
+    launcher_signals: list[str] = []
+
+    monkeypatch.setattr(
+        "weft.core.manager_runtime._build_manager_runtime_invocation",
+        lambda context: invocation,
+    )
+    monkeypatch.setattr(
+        "weft.core.manager_runtime._launch_detached_manager",
+        lambda context, invocation_arg: launch,
+    )
+    monkeypatch.setattr(
+        "weft.core.manager_runtime.QueueChangeMonitor",
+        _FakeQueueChangeMonitor,
+    )
+    monkeypatch.setattr(
+        "weft.core.manager_runtime._registry_view",
+        lambda context, *, target_tid=None, prune_stale=True, probe_stale=False, probe_cache=None, queue=None: (
+            _registry_view(active=competing_record, target=launched_record)
+        ),
+    )
+    monkeypatch.setattr(
+        "weft.core.manager_runtime._is_pid_alive",
+        lambda pid: True,
+    )
+    monkeypatch.setattr(
+        "weft.core.manager_runtime._acknowledge_competing_launched_manager",
+        lambda launch_arg, *, manager_tid: acknowledged.append(manager_tid),
+    )
+    monkeypatch.setattr(
+        "weft.core.manager_runtime._send_launcher_signal",
+        lambda process, signal_name: (
+            launcher_signals.append(signal_name) or True,
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        "weft.core.manager_runtime._cleanup_startup_stderr",
+        lambda path: None,
+    )
+
+    record, started_here, handle = _start_manager(ctx, verbose=False)
+
+    assert record == competing_record
+    assert started_here is False
+    assert handle is None
+    assert acknowledged == [invocation.tid]
+    assert launcher_signals == []
+
+
 def test_start_manager_adopts_competing_manager_after_losing_pid_exits(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -2,19 +2,26 @@
 
 from __future__ import annotations
 
+import multiprocessing
 import subprocess
 import sys
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from tests.fixtures.llm_test_models import TEST_MODEL_ID
 from weft.core.resource_monitor import ResourceMetrics
+from weft.core.runner_diagnostics import runner_diagnostics
 from weft.core.runners import RunnerOutcome
 from weft.core.runners import host as host_module
 from weft.core.runners.subprocess_runner import run_monitored_subprocess
+from weft.core.tasks.agent_session_protocol import (
+    make_booted_response,
+    make_startup_error_response,
+)
 from weft.core.tasks.runner import TaskRunner
 from weft.core.tasks.sessions import AgentSession
 from weft.core.taskspec import LimitsSection
@@ -129,6 +136,58 @@ def test_task_runner_executes_function_successfully():
     assert outcome.error is None
 
 
+def test_task_runner_reports_abrupt_worker_exit_diagnostics() -> None:
+    runner = TaskRunner(
+        target_type="function",
+        tid=None,
+        function_target="tests.tasks.sample_targets:abrupt_exit",
+        process_target=None,
+        agent=None,
+        args=[73],
+        kwargs=None,
+        env={},
+        working_dir=None,
+        timeout=5.0,
+        limits=None,
+        monitor_class=None,
+        monitor_interval=0.1,
+    )
+
+    outcome = runner.run(None)
+
+    assert outcome.status == "error"
+    assert outcome.returncode == 73
+    assert outcome.diagnostics is not None
+    assert outcome.diagnostics["phase"] == "process_spawn"
+    assert outcome.diagnostics["exitcode"] == 73
+
+
+def test_task_runner_reports_command_spawn_diagnostics() -> None:
+    runner = TaskRunner(
+        target_type="command",
+        tid=None,
+        function_target=None,
+        process_target="weft-definitely-missing-command",
+        agent=None,
+        args=None,
+        kwargs=None,
+        env={},
+        working_dir=None,
+        timeout=5.0,
+        limits=None,
+        monitor_class=None,
+        monitor_interval=0.1,
+    )
+
+    outcome = runner.run(None)
+
+    assert outcome.status == "error"
+    assert outcome.diagnostics is not None
+    assert outcome.diagnostics["phase"] == "process_spawn"
+    assert outcome.diagnostics["target_type"] == "command"
+    assert outcome.diagnostics["exception_type"] == "FileNotFoundError"
+
+
 def test_agent_session_close_releases_multiprocessing_handles() -> None:
     class FakeProcess:
         def __init__(self) -> None:
@@ -183,7 +242,107 @@ def test_agent_session_close_releases_multiprocessing_handles() -> None:
     assert process.closed is True
 
 
+def test_agent_session_startup_error_survives_immediate_child_exit() -> None:
+    session = _spawn_agent_session_for_target(_agent_session_startup_error_worker)
+    try:
+        with pytest.raises(RuntimeError) as exc_info:
+            session.wait_ready(timeout=5.0)
+    finally:
+        session.close()
+
+    message = str(exc_info.value)
+    assert "startup boom" in message
+    assert "last_handshake=startup_error" in message
+    assert "phase=runtime_startup" in message
+
+
+def test_agent_session_reports_child_exit_before_handshake() -> None:
+    session = _spawn_agent_session_for_target(
+        _agent_session_exit_without_handshake_worker
+    )
+    try:
+        with pytest.raises(RuntimeError) as exc_info:
+            session.wait_ready(timeout=5.0)
+    finally:
+        session.close()
+
+    message = str(exc_info.value)
+    assert "Agent session failed to signal readiness" in message
+    assert "exitcode=73" in message
+    assert "alive=False" in message
+
+
+def test_agent_session_reports_hang_after_boot_handshake() -> None:
+    session = _spawn_agent_session_for_target(_agent_session_boot_then_hang_worker)
+    try:
+        with pytest.raises(RuntimeError) as exc_info:
+            session.wait_ready(timeout=2.0)
+    finally:
+        session.close()
+
+    message = str(exc_info.value)
+    assert "Agent session failed to signal readiness" in message
+    assert "alive=True" in message
+    assert "last_handshake=booted" in message
+
+
 PROCESS_SCRIPT = str(Path(__file__).resolve().parent / "process_target.py")
+
+
+def _agent_session_startup_error_worker(
+    _request_queue: Any,
+    response_queue: Any,
+) -> None:
+    diagnostics = runner_diagnostics(
+        phase="runtime_startup",
+        runner="host",
+        target_type="agent",
+        message="startup boom",
+        last_handshake="booted",
+    )
+    response_queue.put(make_booted_response())
+    response_queue.put(
+        make_startup_error_response(
+            "startup boom",
+            diagnostics=diagnostics,
+        )
+    )
+    response_queue.close()
+    response_queue.join_thread()
+
+
+def _agent_session_exit_without_handshake_worker(
+    _request_queue: Any,
+    _response_queue: Any,
+) -> None:
+    import os
+
+    os._exit(73)
+
+
+def _agent_session_boot_then_hang_worker(
+    _request_queue: Any,
+    response_queue: Any,
+) -> None:
+    response_queue.put(make_booted_response())
+    time.sleep(2.0)
+
+
+def _spawn_agent_session_for_target(target: Any) -> AgentSession:
+    ctx = multiprocessing.get_context("spawn")
+    ctx.set_executable(sys.executable)
+    request_queue = ctx.Queue()
+    response_queue = ctx.Queue()
+    process = ctx.Process(target=target, args=(request_queue, response_queue))
+    process.start()
+    return AgentSession(
+        process,
+        request_queue,
+        response_queue,
+        monitor=None,
+        limits=None,
+        timeout=None,
+    )
 
 
 def test_run_monitored_subprocess_uses_supplied_monitor(

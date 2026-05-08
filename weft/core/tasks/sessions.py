@@ -11,7 +11,7 @@ from __future__ import annotations
 import queue
 import subprocess
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from multiprocessing.process import BaseProcess
 from multiprocessing.queues import Queue as MPQueue
@@ -26,11 +26,15 @@ from weft.core.resource_monitor import (
     BaseResourceMonitor,
     ResourceMetrics,
 )
+from weft.core.runner_diagnostics import diagnostic_summary, runner_diagnostics
 from weft.core.tasks.agent_session_protocol import (
+    is_booted_response,
     is_ready_response,
     make_execute_request,
     make_stop_request,
     parse_result_response,
+    response_type,
+    startup_error_diagnostics,
     startup_error_message,
 )
 from weft.ext import RunnerHandle
@@ -219,20 +223,103 @@ class AgentSession:
 
     def wait_ready(self, *, timeout: float = 5.0) -> None:
         deadline = time.monotonic() + timeout
+        last_handshake: str | None = None
+        start = time.monotonic()
         while time.monotonic() < deadline:
             remaining = max(deadline - time.monotonic(), 0.01)
             try:
                 payload = self._response_queue.get(timeout=remaining)
             except queue.Empty:
                 if not self.is_alive():
+                    late_payload = self._join_and_drain_ready_response()
+                    if late_payload is not None:
+                        if is_ready_response(late_payload):
+                            return
+                        late_type = response_type(late_payload)
+                        if late_type is not None:
+                            last_handshake = late_type
+                        startup_error = startup_error_message(late_payload)
+                        if startup_error is not None:
+                            raise RuntimeError(
+                                self._format_ready_failure(
+                                    startup_error,
+                                    timeout=timeout,
+                                    started_at=start,
+                                    last_handshake=last_handshake,
+                                    diagnostics=startup_error_diagnostics(late_payload),
+                                )
+                            ) from None
                     break
+                continue
+            if not isinstance(payload, Mapping):
+                continue
+            payload_type = response_type(payload)
+            if payload_type is not None:
+                last_handshake = payload_type
+            if is_booted_response(payload):
                 continue
             if is_ready_response(payload):
                 return
             startup_error = startup_error_message(payload)
             if startup_error is not None:
-                raise RuntimeError(startup_error)
-        raise RuntimeError("Agent session failed to signal readiness")
+                raise RuntimeError(
+                    self._format_ready_failure(
+                        startup_error,
+                        timeout=timeout,
+                        started_at=start,
+                        last_handshake=last_handshake,
+                        diagnostics=startup_error_diagnostics(payload),
+                    )
+                )
+        raise RuntimeError(
+            self._format_ready_failure(
+                "Agent session failed to signal readiness",
+                timeout=timeout,
+                started_at=start,
+                last_handshake=last_handshake,
+                diagnostics=None,
+            )
+        )
+
+    def _join_and_drain_ready_response(self) -> Mapping[str, Any] | None:
+        """Join a dead startup child briefly and drain one late response."""
+
+        try:
+            self._process.join(timeout=0.2)
+        except Exception:  # pragma: no cover - defensive process observation
+            pass
+        try:
+            payload = self._response_queue.get_nowait()
+        except queue.Empty:
+            return None
+        return payload if isinstance(payload, Mapping) else None
+
+    def _format_ready_failure(
+        self,
+        message: str,
+        *,
+        timeout: float,
+        started_at: float,
+        last_handshake: str | None,
+        diagnostics: Mapping[str, Any] | None,
+    ) -> str:
+        elapsed = time.monotonic() - started_at
+        process_diagnostics = runner_diagnostics(
+            phase="runtime_startup",
+            runner="host",
+            pid=self.pid,
+            exitcode=getattr(self._process, "exitcode", None),
+            alive=self.is_alive(),
+            duration_seconds=elapsed,
+            timeout_seconds=timeout,
+            message=message,
+            last_handshake=last_handshake,
+            extra=diagnostics,
+        )
+        summary = diagnostic_summary(process_diagnostics)
+        if summary is None:
+            return message
+        return f"{message} ({summary})"
 
     def execute(
         self,

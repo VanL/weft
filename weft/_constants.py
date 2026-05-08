@@ -119,6 +119,15 @@ STATUS_WATCH_MIN_INTERVAL: Final[float] = 0.1
 AGENT_SESSION_READY_TIMEOUT_SECONDS: Final[float] = 10.0
 """Minimum startup-readiness budget for persistent agent session workers."""
 
+RUNNER_DIAGNOSTICS_FIELD: Final[str] = "runner_diagnostics"
+"""Task-log/result field for bounded runner-boundary diagnostic metadata."""
+
+RUNNER_DIAGNOSTICS_MESSAGE_MAX_CHARS: Final[int] = 500
+"""Maximum length for a single runner diagnostic message string."""
+
+RUNNER_DIAGNOSTICS_TRACEBACK_MAX_CHARS: Final[int] = 4000
+"""Maximum length for a runner diagnostic traceback tail."""
+
 MANAGER_STARTUP_TIMEOUT_SECONDS: Final[float] = 10.0
 """Time budget for a detached manager to publish a stable active registry entry."""
 

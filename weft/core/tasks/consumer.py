@@ -20,6 +20,7 @@ from weft._constants import (
     WORK_ENVELOPE_START,
 )
 from weft.core.agents.runtime import AgentExecutionResult
+from weft.core.runner_diagnostics import runner_diagnostics
 from weft.core.targets import decode_work_message, serialize_result
 from weft.core.taskspec import ReservedPolicy, TaskSpec
 from weft.helpers import kill_process_tree, terminate_process_tree
@@ -155,6 +156,15 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         try:
             outcome = self._run_task(work_item)
         except Exception as exc:
+            diagnostics = runner_diagnostics(
+                phase="execute",
+                runner=self.taskspec.spec.runner.name,
+                target_type=self.taskspec.spec.type,
+                pid=os.getpid(),
+                alive=True,
+                message=str(exc),
+                exception_type=type(exc).__name__,
+            )
             self.taskspec.mark_failed(error=str(exc))
             return self._finalize_terminal_outcome(
                 title_state="failed",
@@ -163,6 +173,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
                 pipeline_status="failed",
                 timestamp=timestamp,
                 metrics_payload=None,
+                runner_diagnostics=diagnostics,
                 exc=exc,
             )
         live_command_streaming = self._active_live_command_streaming
@@ -664,6 +675,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         timestamp: int | None,
         metrics_payload: dict[str, Any] | None,
         exc: BaseException,
+        runner_diagnostics: dict[str, Any] | None = None,
     ) -> NoReturn:
         """Run standard terminal cleanup after the caller marks state."""
         self._clear_activity()
@@ -671,12 +683,14 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             self._update_process_title(title_state)
         else:
             self._update_process_title(title_state, title_detail)
-        self._report_state_change(
-            event=event,
-            message_id=timestamp,
-            error=str(exc),
-            metrics=metrics_payload,
-        )
+        state_extra: dict[str, Any] = {
+            "message_id": timestamp,
+            "error": str(exc),
+            "metrics": metrics_payload,
+        }
+        if runner_diagnostics is not None:
+            state_extra["runner_diagnostics"] = runner_diagnostics
+        self._report_state_change(event=event, **state_extra)
         self._send_terminal_envelope()
         self._emit_pipeline_terminal_event(
             status=pipeline_status,
@@ -713,6 +727,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
                 timestamp=timestamp,
                 metrics_payload=metrics_payload,
                 exc=timeout_exc,
+                runner_diagnostics=outcome.diagnostics,
             )
 
         if outcome.status == "limit":
@@ -727,6 +742,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
                 timestamp=timestamp,
                 metrics_payload=metrics_payload,
                 exc=limit_exc,
+                runner_diagnostics=outcome.diagnostics,
             )
 
         if outcome.status == "error":
@@ -751,6 +767,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
                 timestamp=timestamp,
                 metrics_payload=metrics_payload,
                 exc=error_exc,
+                runner_diagnostics=outcome.diagnostics,
             )
 
         if outcome.status == "cancelled":

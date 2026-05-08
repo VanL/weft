@@ -325,6 +325,49 @@ def test_run_work_item_deferred_stop_without_active_message_preserves_reserved_q
     task.cleanup()
 
 
+def test_runner_error_diagnostics_are_written_to_terminal_task_log(
+    broker_env,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    spec = make_function_taskspec(
+        unique_tid,
+        "tests.tasks.sample_targets:echo_payload",
+    )
+    task = Consumer(db_path, spec)
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    drain_queue(log_queue)
+    diagnostics = {
+        "phase": "execute",
+        "runner": "host",
+        "target_type": "function",
+        "message": "runner boom",
+    }
+
+    def fake_run_task(_work_item: object) -> RunnerOutcome:
+        return RunnerOutcome(
+            status="error",
+            value=None,
+            error="runner boom",
+            stdout=None,
+            stderr=None,
+            returncode=None,
+            duration=0.0,
+            diagnostics=diagnostics,
+        )
+
+    monkeypatch.setattr(task, "_run_task", fake_run_task)
+
+    with pytest.raises(RuntimeError, match="runner boom"):
+        task.run_work_item({"args": ["direct"]})
+
+    events = [json.loads(msg) for msg in drain_queue(log_queue)]
+    failed = next(event for event in events if event["event"] == "work_failed")
+    assert failed["runner_diagnostics"] == diagnostics
+    task.cleanup()
+
+
 def test_task_failure_leaves_message_in_reserved(broker_env, unique_tid: str) -> None:
     db_path, make_queue = broker_env
     spec = make_function_taskspec(

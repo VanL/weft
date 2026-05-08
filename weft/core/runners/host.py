@@ -35,12 +35,14 @@ from weft.core.agents.runtime import (
     start_agent_runtime_session,
 )
 from weft.core.resource_monitor import ResourceMetrics, load_resource_monitor
+from weft.core.runner_diagnostics import runner_diagnostics
 from weft.core.runners.subprocess_runner import (
     prepare_command_invocation,
     run_monitored_subprocess,
 )
 from weft.core.targets import execute_command_target, execute_function_target
 from weft.core.tasks.agent_session_protocol import (
+    make_booted_response,
     make_ready_response,
     make_result_response,
     make_startup_error_response,
@@ -78,6 +80,7 @@ class RunnerOutcome:
     metrics: ResourceMetrics | None = None
     worker_pid: int | None = None
     runtime_handle: RunnerHandle | None = None
+    diagnostics: dict[str, Any] | None = None
 
     @property
     def ok(self) -> bool:
@@ -121,6 +124,7 @@ def _worker_entry(
     stdout = None
     stderr = None
     returncode: int | None = 0
+    diagnostics: dict[str, Any] | None
 
     try:
         with _worker_runtime_context(spec_data):
@@ -163,13 +167,25 @@ def _worker_entry(
                         f"Command exited with {completed.returncode}: "
                         f"{(completed.stderr or '').strip()}"
                     )
-    except Exception:  # pragma: no cover - propagated via parent
+    except Exception as exc:  # pragma: no cover - propagated via parent
+        traceback_text = traceback.format_exc()
         status = "error"
-        error = traceback.format_exc()
+        error = traceback_text
         returncode = None
+        diagnostics = runner_diagnostics(
+            phase="execute",
+            runner="host",
+            target_type=str(spec_data.get("type") or "unknown"),
+            message=str(exc),
+            exception_type=type(exc).__name__,
+            traceback_text=traceback_text,
+        )
+    else:
+        diagnostics = None
 
     end = time.monotonic()
-    result_queue.put(
+    _put_terminal_mp_queue(
+        result_queue,
         RunnerOutcome(
             status=status,
             value=value,
@@ -178,7 +194,8 @@ def _worker_entry(
             stderr=stderr,
             returncode=returncode,
             duration=end - start,
-        )
+            diagnostics=diagnostics,
+        ),
     )
 
 
@@ -220,6 +237,7 @@ def _agent_session_worker_entry(
     """Run a long-lived agent session in a spawned subprocess."""
     session = None
     try:
+        response_queue.put(make_booted_response())
         with _worker_runtime_context(spec_data):
             agent = AgentSection.model_validate(spec_data["agent"])
             session = start_agent_runtime_session(
@@ -252,14 +270,43 @@ def _agent_session_worker_entry(
                     break
 
                 response_queue.put(make_result_response(status="ok", result=result))
-    except Exception:  # pragma: no cover - propagated via parent
-        response_queue.put(make_startup_error_response(traceback.format_exc()))
+    except Exception as exc:  # pragma: no cover - propagated via parent
+        traceback_text = traceback.format_exc()
+        diagnostics = runner_diagnostics(
+            phase="runtime_startup" if session is None else "execute",
+            runner="host",
+            target_type=str(spec_data.get("type") or "agent"),
+            message=str(exc),
+            exception_type=type(exc).__name__,
+            traceback_text=traceback_text,
+        )
+        _put_terminal_mp_queue(
+            response_queue,
+            make_startup_error_response(
+                traceback_text,
+                diagnostics=diagnostics,
+            ),
+        )
     finally:
         if session is not None:
             try:
                 session.close()
             except Exception:  # pragma: no cover - defensive
                 pass
+
+
+def _put_terminal_mp_queue(mp_queue: MPQueue[Any], payload: Any) -> None:
+    """Put a terminal child-process payload and flush the queue before exit."""
+
+    mp_queue.put(payload)
+    try:
+        mp_queue.close()
+    except Exception:  # pragma: no cover - defensive child cleanup
+        pass
+    try:
+        mp_queue.join_thread()
+    except Exception:  # pragma: no cover - defensive child cleanup
+        pass
 
 
 class HostTaskRunner:
@@ -457,6 +504,7 @@ class HostTaskRunner:
                         )
 
             process.join()
+            exitcode = process.exitcode
 
             if safe_cancel(cancel_requested):
                 if monitor:
@@ -494,11 +542,21 @@ class HostTaskRunner:
                         error="Worker produced no result",
                         stdout=None,
                         stderr=None,
-                        returncode=None,
+                        returncode=exitcode,
                         duration=time.monotonic() - start_time,
                         metrics=last_metrics,
                         worker_pid=worker_pid,
                         runtime_handle=runtime_handle,
+                        diagnostics=runner_diagnostics(
+                            phase="process_spawn",
+                            runner="host",
+                            target_type=str(self._spec_data.get("type") or "unknown"),
+                            pid=worker_pid,
+                            exitcode=exitcode,
+                            alive=process.is_alive(),
+                            duration_seconds=time.monotonic() - start_time,
+                            message="Worker produced no result",
+                        ),
                     )
 
             outcome.metrics = outcome.metrics or last_metrics
@@ -543,18 +601,37 @@ class HostTaskRunner:
         if sys.platform == "win32":
             creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP
 
-        process = subprocess.Popen(
-            command,
-            stdin=subprocess.PIPE if stdin_data is not None else None,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            cwd=cwd_value,
-            env=env_vars,
-            creationflags=creation_flags,
-        )
+        try:
+            process = subprocess.Popen(
+                command,
+                stdin=subprocess.PIPE if stdin_data is not None else None,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                cwd=cwd_value,
+                env=env_vars,
+                creationflags=creation_flags,
+            )
+        except OSError as exc:
+            return RunnerOutcome(
+                status="error",
+                value=None,
+                error=str(exc),
+                stdout=None,
+                stderr=None,
+                returncode=None,
+                duration=0.0,
+                diagnostics=runner_diagnostics(
+                    phase="process_spawn",
+                    runner="host",
+                    target_type="command",
+                    message=str(exc),
+                    exception_type=type(exc).__name__,
+                    extra={"command": command[:1], "cwd": cwd_value},
+                ),
+            )
 
         runtime_handle = _host_handle(process.pid)
         if runtime_handle is None:

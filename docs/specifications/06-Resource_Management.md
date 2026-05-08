@@ -138,6 +138,10 @@ Current behavior:
 - persistent agent session startup uses a separate internal readiness timeout
   for the private `ready` message, because import/plugin/provider startup and
   work execution fail for different reasons
+- private startup and readiness failures should report bounded runner
+  diagnostics such as startup phase, child PID, exit code, liveness, timeout
+  budget, and last private handshake when available. These diagnostics explain
+  timeout/error handling but do not change the work-execution timeout contract.
 
 Timeout terminal state and reserved-queue error policy still use the normal
 task lifecycle: when work execution exceeds `spec.timeout`, the task reports a
@@ -223,6 +227,7 @@ controls stay here only when they are already shipped and observable:
 
 ## Related Plans
 
+- [`docs/plans/2026-05-08-agent-session-and-task-startup-observability-plan.md`](../plans/2026-05-08-agent-session-and-task-startup-observability-plan.md)
 - [`docs/plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md`](../plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md)
 - [`docs/plans/2026-04-06-runner-extension-point-plan.md`](../plans/2026-04-06-runner-extension-point-plan.md)
 

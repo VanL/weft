@@ -1042,6 +1042,41 @@ def _acknowledge_manager_launch_success(launch: _DetachedManagerLaunch) -> None:
     )
 
 
+def _acknowledge_competing_launched_manager(
+    launch: _DetachedManagerLaunch,
+    *,
+    manager_tid: str,
+) -> None:
+    """Detach a launched manager that lost selection to another live manager."""
+
+    try:
+        _acknowledge_manager_launch_success(launch)
+    except _ManagerLaunchAcknowledgementError as exc:
+        if not exc.success_signal_sent:
+            raise
+        logger.debug(
+            "Detached manager launch for %s lost selection after success "
+            "acknowledgement failed: %s",
+            manager_tid,
+            exc,
+            exc_info=True,
+        )
+
+
+def _view_contains_registered_launch(
+    view: _ManagerRegistryView,
+    *,
+    manager_tid: str,
+    launch_pid: int,
+) -> bool:
+    record = view.target_record
+    return (
+        isinstance(record, dict)
+        and record.get("tid") == manager_tid
+        and _manager_start_record_matches_launch(record, launch_pid=launch_pid)
+    )
+
+
 def _start_manager(
     context: WeftContext, *, verbose: bool
 ) -> tuple[dict[str, Any], bool, subprocess.Popen[Any] | None]:
@@ -1069,6 +1104,24 @@ def _start_manager(
             if selected_record is not None:
                 if selected_record.get("tid") != manager_tid:
                     competing_record = selected_record
+                    if _view_contains_registered_launch(
+                        view,
+                        manager_tid=manager_tid,
+                        launch_pid=launch.pid,
+                    ):
+                        try:
+                            _acknowledge_competing_launched_manager(
+                                launch,
+                                manager_tid=manager_tid,
+                            )
+                        except _ManagerLaunchAcknowledgementError as exc:
+                            _fail_manager_start(
+                                launch=launch,
+                                message=str(exc),
+                                abort_launcher=True,
+                            )
+                        _cleanup_startup_stderr(launch.stderr_path)
+                        return selected_record, False, None
                 else:
                     if _manager_start_record_matches_launch(
                         selected_record,
@@ -1170,6 +1223,30 @@ def _start_manager(
         registry_queue.close()
 
     if competing_record is not None:
+        view = _registry_view(
+            context,
+            target_tid=manager_tid,
+            probe_stale=True,
+            probe_cache={},
+        )
+        if _view_contains_registered_launch(
+            view,
+            manager_tid=manager_tid,
+            launch_pid=launch.pid,
+        ):
+            try:
+                _acknowledge_competing_launched_manager(
+                    launch,
+                    manager_tid=manager_tid,
+                )
+            except _ManagerLaunchAcknowledgementError as exc:
+                _fail_manager_start(
+                    launch=launch,
+                    message=str(exc),
+                    abort_launcher=True,
+                )
+            _cleanup_startup_stderr(launch.stderr_path)
+            return competing_record, False, None
         _send_launcher_signal(launch.launcher_process, MANAGER_LAUNCHER_SIGNAL_ABORT)
         _communicate_launcher(launch.launcher_process, timeout=1.0)
         _cleanup_startup_stderr(launch.stderr_path)
@@ -1181,6 +1258,30 @@ def _start_manager(
         deadline=time.monotonic() + MANAGER_COMPETING_STARTUP_GRACE_SECONDS,
     )
     if settled_record is not None:
+        view = _registry_view(
+            context,
+            target_tid=manager_tid,
+            probe_stale=True,
+            probe_cache={},
+        )
+        if _view_contains_registered_launch(
+            view,
+            manager_tid=manager_tid,
+            launch_pid=launch.pid,
+        ):
+            try:
+                _acknowledge_competing_launched_manager(
+                    launch,
+                    manager_tid=manager_tid,
+                )
+            except _ManagerLaunchAcknowledgementError as exc:
+                _fail_manager_start(
+                    launch=launch,
+                    message=str(exc),
+                    abort_launcher=True,
+                )
+            _cleanup_startup_stderr(launch.stderr_path)
+            return settled_record, False, None
         _send_launcher_signal(launch.launcher_process, MANAGER_LAUNCHER_SIGNAL_ABORT)
         _communicate_launcher(launch.launcher_process, timeout=1.0)
         _cleanup_startup_stderr(launch.stderr_path)
@@ -1244,6 +1345,7 @@ def _run_manager_process_foreground(
         invocation.spec,
         context.config,
         MANAGER_POLL_INTERVAL,
+        hard_exit_on_return=True,
     )
 
 

@@ -14,6 +14,7 @@ See also:
 
 ## Related Plans
 
+- [`docs/plans/2026-05-08-agent-session-and-task-startup-observability-plan.md`](../plans/2026-05-08-agent-session-and-task-startup-observability-plan.md)
 - [`docs/plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md`](../plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md)
 - [`docs/plans/2026-04-06-runner-extension-point-plan.md`](../plans/2026-04-06-runner-extension-point-plan.md)
 - [`docs/plans/2026-04-06-persistent-agent-runtime-implementation-plan.md`](../plans/2026-04-06-persistent-agent-runtime-implementation-plan.md)
@@ -334,16 +335,24 @@ _Implementation mapping_: `weft/core/runner_validation.py`,
 Current rule:
 
 - monitoring belongs at the runner boundary
+- runner diagnostics are operational metadata about process/session startup,
+  runtime handles, exits, and private readiness handshakes; they are not task
+  lifecycle truth
 
 That means:
 
 - the host runner and session helpers use Weft's psutil-based monitor path
 - alternate runners may surface runtime-native monitoring
 - status surfaces should prefer runner-native descriptions when available
+- terminal task-log events may include bounded `runner_diagnostics` when a
+  runner or runtime boundary fails, but status and result code must continue to
+  derive lifecycle state from lifecycle events, terminal control evidence, and
+  result evidence rather than from diagnostics alone
 
 _Implementation mapping_: `weft/core/resource_monitor.py`,
-`weft/core/runners/host.py`, `weft/core/runners/subprocess_runner.py`,
-`weft/core/tasks/sessions.py`, `weft/core/tasks/consumer.py`.
+`weft/core/runner_diagnostics.py`, `weft/core/runners/host.py`,
+`weft/core/runners/subprocess_runner.py`, `weft/core/tasks/sessions.py`,
+`weft/core/tasks/consumer.py`.
 
 ## Related Documents
 

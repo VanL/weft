@@ -281,6 +281,11 @@ def _public_snapshot(
             if isinstance(status_snapshot.reconciliation, dict)
             else None
         ),
+        runner_diagnostics=(
+            dict(status_snapshot.runner_diagnostics)
+            if isinstance(status_snapshot.runner_diagnostics, dict)
+            else None
+        ),
     )
 
 
@@ -583,6 +588,9 @@ def _task_snapshot_from_live_pong(
         if base_snapshot is not None
         else None,
         reconciliation=evidence.reconciliation,
+        runner_diagnostics=base_snapshot.runner_diagnostics
+        if base_snapshot is not None
+        else None,
     )
 
 
@@ -893,6 +901,9 @@ def _pipeline_task_snapshot(
         runtime=runtime,
         metadata=metadata,
         pipeline_status=pipeline_status,
+        runner_diagnostics=base_snapshot.runner_diagnostics
+        if base_snapshot is not None
+        else None,
     )
 
 

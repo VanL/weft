@@ -150,7 +150,7 @@ def _task_process_entry(
         else:
             task.cleanup()
 
-    if hard_exit_on_return and os.name != "nt":
+    if hard_exit_on_return:
         os._exit(0)
 
 

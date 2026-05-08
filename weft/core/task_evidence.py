@@ -33,6 +33,7 @@ from weft.core.outbox import (
     aggregate_public_outputs,
     process_outbox_message,
 )
+from weft.core.runner_diagnostics import diagnostic_summary
 from weft.ext import RunnerHandle
 from weft.helpers import handle_has_live_host_process, iter_queue_json_entries
 
@@ -269,6 +270,11 @@ def terminal_error_message(payload: dict[str, Any], status: str) -> str | None:
             state_error = state.get("error")
             if isinstance(state_error, str) and state_error:
                 return state_error
+    diagnostics = payload.get("runner_diagnostics")
+    if isinstance(diagnostics, dict):
+        summary = diagnostic_summary(diagnostics)
+        if summary is not None:
+            return summary
     if status == "cancelled":
         return "task cancelled"
     if status == "killed":

@@ -552,6 +552,8 @@ def _await_single_result(
         time.monotonic() if initial_terminal_status == "completed" else None
     )
     first_pending_timestamp: int | None = None
+    latest_pending_timestamp: int | None = None
+    pending_quiet_since: float | None = None
     boundary_timestamp: int | None = None
     boundary_seen_at: float | None = None
     pending_completion_timestamps: list[int] = list(initial_batch_boundary_timestamps)
@@ -587,6 +589,22 @@ def _await_single_result(
                 )
                 if boundary_timestamp is not None:
                     boundary_seen_at = time.monotonic()
+            if first_pending_timestamp is not None and boundary_timestamp is None:
+                latest_visible_timestamp = _latest_visible_outbox_timestamp(
+                    outbox_queue
+                )
+                if latest_visible_timestamp is not None:
+                    if latest_visible_timestamp != latest_pending_timestamp:
+                        latest_pending_timestamp = latest_visible_timestamp
+                        pending_quiet_since = time.monotonic()
+                    elif (
+                        not emit_stream
+                        and pending_quiet_since is not None
+                        and time.monotonic() - pending_quiet_since
+                        >= WEFT_COMPLETED_RESULT_GRACE_SECONDS
+                    ):
+                        boundary_timestamp = latest_visible_timestamp
+                        boundary_seen_at = pending_quiet_since
 
             events: list[tuple[dict[str, Any], int]]
             events, log_last_timestamp = poll_log_events(
@@ -681,6 +699,27 @@ def _await_single_result(
                 break
 
             if deadline is not None and time.monotonic() >= deadline:
+                if (
+                    not emit_stream
+                    and boundary_timestamp is None
+                    and latest_pending_timestamp is not None
+                ):
+                    drained_outputs = _drain_outbox_until_timestamp(
+                        outbox_queue,
+                        boundary_timestamp=latest_pending_timestamp,
+                        stream_buffer=stream_buffer,
+                        emit_stream=emit_stream,
+                    )
+                    for output in drained_outputs:
+                        append_public_value(
+                            result_values,
+                            output,
+                            show_stderr=show_stderr,
+                        )
+                    if result_values:
+                        result_value = aggregate_public_outputs(result_values)
+                        status = "completed"
+                        break
                 status = "timeout"
                 error_message = (
                     f"Timed out after {timeout} seconds waiting for task {tid}"
@@ -700,6 +739,21 @@ def _await_single_result(
                     grace_remaining
                     if wait_timeout is None
                     else min(wait_timeout, grace_remaining)
+                )
+            if (
+                not emit_stream
+                and boundary_timestamp is None
+                and pending_quiet_since is not None
+            ):
+                output_grace_remaining = max(
+                    0.0,
+                    WEFT_COMPLETED_RESULT_GRACE_SECONDS
+                    - (time.monotonic() - pending_quiet_since),
+                )
+                wait_timeout = (
+                    output_grace_remaining
+                    if wait_timeout is None
+                    else min(wait_timeout, output_grace_remaining)
                 )
             if completed_at is not None:
                 completion_remaining = max(

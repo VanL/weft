@@ -80,6 +80,7 @@ class TaskSnapshot:
     runtime: dict[str, Any] | None = None
     pipeline_status: dict[str, Any] | None = None
     reconciliation: dict[str, Any] | None = None
+    runner_diagnostics: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -24,6 +24,7 @@ from weft._constants import (
     SUBPROCESS_TERMINATION_WAIT_TIMEOUT,
 )
 from weft.core.resource_monitor import ResourceMetrics, load_resource_monitor
+from weft.core.runner_diagnostics import runner_diagnostics
 from weft.ext import RunnerHandle
 from weft.helpers import safe_cancel
 
@@ -194,6 +195,17 @@ def run_monitored_subprocess(
                 metrics=last_metrics,
                 worker_pid=actual_worker_pid,
                 runtime_handle=runtime_handle,
+                diagnostics=runner_diagnostics(
+                    phase="execute",
+                    runner=runtime_handle.runner,
+                    target_type="command",
+                    pid=actual_worker_pid,
+                    exitcode=process.returncode,
+                    alive=process.poll() is None,
+                    duration_seconds=elapsed,
+                    timeout_seconds=timeout,
+                    message="Target execution timed out",
+                ),
             )
 
         if process.poll() is not None and stdout_closed and stderr_closed:
@@ -247,6 +259,16 @@ def run_monitored_subprocess(
                     metrics=last_metrics,
                     worker_pid=actual_worker_pid,
                     runtime_handle=runtime_handle,
+                    diagnostics=runner_diagnostics(
+                        phase="execute",
+                        runner=runtime_handle.runner,
+                        target_type="command",
+                        pid=actual_worker_pid,
+                        exitcode=process.returncode,
+                        alive=process.poll() is None,
+                        duration_seconds=time.monotonic() - start_time,
+                        message=violation,
+                    ),
                 )
 
         time.sleep(sleep_for)
@@ -286,13 +308,24 @@ def run_monitored_subprocess(
             metrics=last_metrics,
             worker_pid=actual_worker_pid,
             runtime_handle=runtime_handle,
+            diagnostics=runner_diagnostics(
+                phase="execute",
+                runner=runtime_handle.runner,
+                target_type="command",
+                pid=actual_worker_pid,
+                exitcode=returncode,
+                alive=process.poll() is None,
+                duration_seconds=time.monotonic() - start_time,
+                message="Worker produced no result",
+            ),
         )
 
     if returncode != 0:
+        message = f"Command exited with {returncode}: {(stderr or '').strip()}"
         return RunnerOutcome(
             status="error",
             value=None,
-            error=f"Command exited with {returncode}: {(stderr or '').strip()}",
+            error=message,
             stdout=stdout,
             stderr=stderr,
             returncode=returncode,
@@ -300,6 +333,16 @@ def run_monitored_subprocess(
             metrics=last_metrics,
             worker_pid=actual_worker_pid,
             runtime_handle=runtime_handle,
+            diagnostics=runner_diagnostics(
+                phase="execute",
+                runner=runtime_handle.runner,
+                target_type="command",
+                pid=actual_worker_pid,
+                exitcode=returncode,
+                alive=False,
+                duration_seconds=time.monotonic() - start_time,
+                message=message,
+            ),
         )
 
     return RunnerOutcome(
