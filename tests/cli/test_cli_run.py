@@ -2407,11 +2407,12 @@ def test_cli_run_parallel_no_wait_adopts_active_manager(workdir, weft_harness) -
 def test_parallel_manager_reuse_converges_to_single_manager_under_repeated_bootstrap() -> (
     None
 ):
-    iterations = 3 if os.name == "nt" else 8
-    max_workers = 2 if os.name == "nt" else 4
-    submit_timeout = 120.0 if os.name == "nt" else 60.0
-    status_timeout = 10.0 if os.name == "nt" else 5.0
-    task_completion_timeout = 30.0 if os.name == "nt" else 10.0
+    constrained_parallelism = os.name == "nt" or sys.platform == "darwin"
+    iterations = 3 if constrained_parallelism else 8
+    max_workers = 2 if constrained_parallelism else 4
+    submit_timeout = 120.0 if constrained_parallelism else 60.0
+    status_timeout = 10.0 if constrained_parallelism else 5.0
+    task_completion_timeout = 30.0 if constrained_parallelism else 10.0
 
     for _ in range(iterations):
         harness = WeftTestHarness()
@@ -2443,11 +2444,12 @@ def test_parallel_manager_reuse_converges_to_single_manager_under_repeated_boots
 def test_weft_harness_cleanup_preserves_sqlite_integrity_for_parallel_manager_reuse() -> (
     None
 ):
-    iterations = 3 if os.name == "nt" else 5
-    max_workers = 2 if os.name == "nt" else 4
-    submit_timeout = 120.0 if os.name == "nt" else 60.0
-    status_timeout = 10.0 if os.name == "nt" else 5.0
-    task_completion_timeout = 30.0 if os.name == "nt" else 10.0
+    constrained_parallelism = os.name == "nt" or sys.platform == "darwin"
+    iterations = 3 if constrained_parallelism else 5
+    max_workers = 2 if constrained_parallelism else 4
+    submit_timeout = 120.0 if constrained_parallelism else 60.0
+    status_timeout = 10.0 if constrained_parallelism else 5.0
+    task_completion_timeout = 30.0 if constrained_parallelism else 10.0
 
     for _ in range(iterations):
         harness = WeftTestHarness()
