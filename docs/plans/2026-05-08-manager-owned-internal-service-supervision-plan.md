@@ -1,5 +1,9 @@
 # Manager-Owned Internal Service Supervision Plan
 
+Status: draft
+Source specs: see Source Documents below
+Superseded by: none
+
 ## 1. Goal
 
 Move Weft-owned singleton runtimes onto one manager-owned service
