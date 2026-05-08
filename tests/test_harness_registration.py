@@ -12,7 +12,11 @@ from simplebroker import Queue
 from tests.conftest import _register_from_json
 from tests.helpers import weft_harness as harness_mod
 from tests.helpers.weft_harness import WeftTestHarness
-from weft._constants import WEFT_GLOBAL_LOG_QUEUE, WEFT_TID_MAPPINGS_QUEUE
+from weft._constants import (
+    MANAGER_STARTUP_LOG_DIRNAME,
+    WEFT_GLOBAL_LOG_QUEUE,
+    WEFT_TID_MAPPINGS_QUEUE,
+)
 from weft.commands import manager as manager_cmd
 from weft.commands import tasks as task_cmd
 
@@ -445,6 +449,35 @@ def test_harness_stop_active_managers_stops_registered_task_and_manager_tids(
         assert manager_calls == ["1775630560447778816", "1775630560999999999"]
         assert task_calls == ["1775630560739303424"]
     finally:
+        harness.cleanup()
+
+
+@pytest.mark.sqlite_only
+def test_harness_cleanup_manager_records_include_startup_log_tids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = WeftTestHarness()
+    repo_cwd = os.getcwd()
+    try:
+        harness.__enter__()
+        monkeypatch.setattr(harness, "_list_active_manager_records", lambda: [])
+        startup_dir = harness.context.logs_dir / MANAGER_STARTUP_LOG_DIRNAME
+        startup_dir.mkdir(parents=True, exist_ok=True)
+        (startup_dir / "manager-1775630560447778816.stderr.log").write_text(
+            "",
+            encoding="utf-8",
+        )
+        (startup_dir / "manager-not-a-tid.stderr.log").write_text(
+            "",
+            encoding="utf-8",
+        )
+
+        records = harness._cleanup_manager_records()
+
+        assert records == {"1775630560447778816": {"tid": "1775630560447778816"}}
+        assert harness.registered_manager_tids() == {"1775630560447778816"}
+    finally:
+        os.chdir(repo_cwd)
         harness.cleanup()
 
 

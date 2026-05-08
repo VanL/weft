@@ -17,6 +17,7 @@ from simplebroker import Queue
 from tests.helpers.test_backend import cleanup_prepared_roots, prepare_project_root
 from weft._constants import (
     CONTROL_STOP,
+    MANAGER_STARTUP_LOG_DIRNAME,
     QUEUE_OUTBOX_SUFFIX,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MANAGER_RUNTIME_HANDLE_JSON_ENV,
@@ -716,9 +717,33 @@ class WeftTestHarness:
             if isinstance(tid, str):
                 self.register_manager_tid(tid)
                 manager_records[tid] = record
+        for tid in self._manager_tids_from_startup_logs():
+            self.register_manager_tid(tid)
         for tid in self._registered_manager_tids:
             manager_records.setdefault(tid, {"tid": tid})
         return manager_records
+
+    def _manager_tids_from_startup_logs(self) -> set[str]:
+        if self._context is None:
+            return set()
+
+        startup_dir = self.context.logs_dir / MANAGER_STARTUP_LOG_DIRNAME
+        try:
+            paths = list(startup_dir.glob("manager-*.stderr.log"))
+        except OSError:
+            return set()
+
+        tids: set[str] = set()
+        for path in paths:
+            name = path.name
+            prefix = "manager-"
+            suffix = ".stderr.log"
+            if not name.startswith(prefix) or not name.endswith(suffix):
+                continue
+            tid = name[len(prefix) : -len(suffix)]
+            if tid.isdigit():
+                tids.add(tid)
+        return tids
 
     def _send_manager_stop(self, tid: str, *, record: dict[str, object]) -> None:
         ctrl_in = record.get("ctrl_in")
