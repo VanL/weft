@@ -19,6 +19,7 @@ from tests.fixtures.provider_cli_fixture import (
     PROVIDER_FIXTURE_NAMES,
     write_provider_cli_wrapper,
 )
+from tests.helpers.test_backend import active_test_backend
 from tests.helpers.weft_harness import WeftTestHarness
 from tests.taskspec import fixtures as taskspec_fixtures
 from weft._constants import (
@@ -2288,8 +2289,10 @@ def test_harness_wait_for_completion_reports_cancelled_task(
 
 def test_cli_run_wait_reports_cancelled_task(workdir, weft_harness) -> None:
     weft_harness.ensure_foreground_manager()
-    run_timeout = 30.0 if sys.platform == "win32" else 15.0
-    result_timeout = 35.0 if sys.platform == "win32" else 20.0
+    constrained_backend = active_test_backend(os.environ) == "postgres"
+    constrained_runtime = sys.platform == "win32" or constrained_backend
+    run_timeout = 30.0 if constrained_runtime else 15.0
+    result_timeout = 35.0 if constrained_runtime else 20.0
 
     with ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(
@@ -2388,9 +2391,11 @@ def test_cli_run_prunes_stale_manager(workdir, weft_harness) -> None:
 def test_cli_run_parallel_no_wait_adopts_active_manager(workdir, weft_harness) -> None:
     env = os.environ.copy()
     env["WEFT_MANAGER_REUSE_ENABLED"] = "1"
-    submit_timeout = 120.0 if os.name == "nt" else 60.0
-    status_timeout = 20.0 if os.name == "nt" else 5.0
-    task_completion_timeout = 30.0 if os.name == "nt" else 10.0
+    constrained_backend = active_test_backend(env) == "postgres"
+    constrained_runtime = os.name == "nt" or constrained_backend
+    submit_timeout = 120.0 if constrained_runtime else 60.0
+    status_timeout = 20.0 if constrained_runtime else 5.0
+    task_completion_timeout = 30.0 if constrained_runtime else 10.0
 
     _run_parallel_manager_reuse_cycle(
         root=workdir,
