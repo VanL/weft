@@ -38,6 +38,7 @@ class ManagedServiceSpec:
     lifecycle: ServiceLifecycle
     spawn_payload: dict[str, Any]
     restart_backoff_ns: int = 0
+    max_restarts: int | None = None
     autostart_source: str | None = None
 
 
@@ -50,6 +51,9 @@ class ManagedServiceState:
     next_allowed_ns: int = 0
     launched_once: bool = False
     restarts: int = 0
+    uncertain_attempts: int = 0
+    uncertain_since_ns: int | None = None
+    last_uncertain_reason: str | None = None
     locally_terminal_tids: set[str] = field(default_factory=set)
 
 

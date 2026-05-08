@@ -40,6 +40,8 @@ from weft._constants import (
     INTERNAL_SERVICE_KEY_HEARTBEAT,
     INTERNAL_SERVICE_KEY_TASK_MONITOR,
     INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY,
+    MANAGED_SERVICE_PING_TIMEOUT_SECONDS,
+    MANAGED_SERVICE_UNCERTAIN_RETRY_LIMIT,
     MANAGER_CHILD_EXIT_POLL_INTERVAL,
     MANAGER_DISPATCH_RECOVERY_MAX_ATTEMPTS,
     MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS,
@@ -251,9 +253,7 @@ class Manager(BaseTask):
         self.taskspec.mark_running(pid=multiprocessing.current_process().pid)
         self._update_process_title("running")
         self._report_state_change(event="task_started")
-        self._tick_internal_services(force=True)
-        if self._autostart_enabled:
-            self._tick_autostart(force=True)
+        self._reconcile_managed_services(force=True)
         atexit.register(self._atexit_unregister)
 
     def _service_state(self, service_key: str) -> ManagedServiceState:
@@ -1800,8 +1800,6 @@ class Manager(BaseTask):
     def _service_supervision_allowed(self) -> bool:
         """Return whether this manager may launch singleton services."""
 
-        if self._queue_names["inbox"] != WEFT_SPAWN_REQUESTS_QUEUE:
-            return False
         if self._draining or self.should_stop or self._dispatch_suspension is not None:
             return False
         return self._evaluate_dispatch_ownership().state == "self"
@@ -1963,6 +1961,32 @@ class Manager(BaseTask):
         except ValueError:
             return None
 
+    def _latest_tid_runtime_handles(self, tids: set[str]) -> dict[str, RunnerHandle]:
+        """Return latest runtime handles for the requested TIDs from one scan."""
+
+        if not tids:
+            return {}
+        queue = self._queue(WEFT_TID_MAPPINGS_QUEUE)
+        latest_by_tid: dict[str, tuple[dict[str, Any], int]] = {}
+        for payload, timestamp in iter_queue_json_entries(queue):
+            tid = payload.get("full")
+            if not isinstance(tid, str) or tid not in tids:
+                continue
+            existing = latest_by_tid.get(tid)
+            if existing is None or existing[1] <= timestamp:
+                latest_by_tid[tid] = (payload, timestamp)
+
+        handles: dict[str, RunnerHandle] = {}
+        for tid, (payload, _timestamp) in latest_by_tid.items():
+            handle_payload = payload.get("runtime_handle")
+            if not isinstance(handle_payload, Mapping):
+                continue
+            try:
+                handles[tid] = RunnerHandle.from_dict(handle_payload)
+            except ValueError:
+                continue
+        return handles
+
     def _service_candidate_from_task_log(
         self,
         *,
@@ -1970,6 +1994,7 @@ class Manager(BaseTask):
         tid: str,
         payload: Mapping[str, Any],
         timestamp: int,
+        runtime_handle: RunnerHandle | None = None,
     ) -> ServiceCandidate:
         status = payload.get("status")
         if isinstance(status, str) and status in TERMINAL_TASK_STATUSES:
@@ -1982,8 +2007,7 @@ class Manager(BaseTask):
                 reason=status,
             )
 
-        handle = self._latest_tid_runtime_handle(tid)
-        if handle is not None and handle_has_live_host_process(handle):
+        if runtime_handle is not None and handle_has_live_host_process(runtime_handle):
             return ServiceCandidate(
                 key=service_key,
                 tid=tid,
@@ -2000,7 +2024,7 @@ class Manager(BaseTask):
                 tid=tid,
                 ctrl_in_name=ctrl_in_name,
                 ctrl_out_name=ctrl_out_name,
-                timeout=0.15,
+                timeout=MANAGED_SERVICE_PING_TIMEOUT_SECONDS,
             )
             if probe.matched is not None:
                 return ServiceCandidate(
@@ -2028,6 +2052,119 @@ class Manager(BaseTask):
             timestamp=timestamp,
             reason="non-terminal state without live runtime proof or PONG",
         )
+
+    @staticmethod
+    def _trusted_internal_service_key(
+        metadata: Mapping[str, Any],
+        *,
+        envelope_runtime_class: str | None = None,
+    ) -> str | None:
+        key = service_key_from_metadata(metadata)
+        if key == INTERNAL_SERVICE_KEY_HEARTBEAT:
+            if metadata.get("internal") is not True:
+                return None
+            if metadata.get("role") != "heartbeat_service":
+                return None
+            runtime_class = envelope_runtime_class or metadata.get(
+                INTERNAL_RUNTIME_TASK_CLASS_KEY
+            )
+            if (
+                runtime_class is not None
+                and runtime_class != INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT
+            ):
+                return None
+            endpoint = metadata.get(INTERNAL_RUNTIME_ENDPOINT_NAME_KEY)
+            if endpoint is not None and endpoint != INTERNAL_HEARTBEAT_ENDPOINT_NAME:
+                return None
+            return key
+
+        if key == INTERNAL_SERVICE_KEY_TASK_MONITOR:
+            if metadata.get("internal") is not True:
+                return None
+            if metadata.get("role") != "task_monitor":
+                return None
+            runtime_class = envelope_runtime_class or metadata.get(
+                INTERNAL_RUNTIME_TASK_CLASS_KEY
+            )
+            if (
+                runtime_class is not None
+                and runtime_class != INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR
+            ):
+                return None
+            return key
+        return None
+
+    def _trusted_service_key_from_metadata(
+        self,
+        metadata: Any,
+        *,
+        desired_keys: set[str],
+        envelope_runtime_class: str | None = None,
+    ) -> str | None:
+        """Return a trusted service key for Manager-owned evidence.
+
+        Public task metadata is not enough to claim an internal singleton. For
+        autostart services, evidence is considered only for currently desired
+        manifest keys and only when the log entry carries autostart metadata.
+        """
+
+        if not isinstance(metadata, Mapping):
+            return None
+
+        internal_key = self._trusted_internal_service_key(
+            metadata,
+            envelope_runtime_class=envelope_runtime_class,
+        )
+        if internal_key is not None:
+            return internal_key if internal_key in desired_keys else None
+
+        key = service_key_from_metadata(metadata)
+        source = metadata.get("autostart_source")
+        if key is None and isinstance(source, str):
+            key = source
+        if not isinstance(key, str) or key not in desired_keys:
+            return None
+        if key in {INTERNAL_SERVICE_KEY_HEARTBEAT, INTERNAL_SERVICE_KEY_TASK_MONITOR}:
+            return None
+        if metadata.get("internal") is True:
+            return None
+        if metadata.get("autostart") is not True:
+            return None
+        if source != key:
+            return None
+        return key
+
+    def _spawn_request_service_key(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        desired_keys: set[str],
+    ) -> str | None:
+        taskspec_payload = payload.get("taskspec")
+        if not isinstance(taskspec_payload, Mapping):
+            return None
+        metadata = taskspec_payload.get("metadata")
+        envelope_runtime_class = payload.get(INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY)
+        return self._trusted_service_key_from_metadata(
+            metadata,
+            desired_keys=desired_keys,
+            envelope_runtime_class=envelope_runtime_class
+            if isinstance(envelope_runtime_class, str)
+            else None,
+        )
+
+    def _pending_service_keys(self, desired_keys: set[str]) -> set[str]:
+        """Return desired service keys that already have unconsumed spawn work."""
+
+        if not desired_keys:
+            return set()
+        pending: set[str] = set()
+        queue = self._queue(self._queue_names["inbox"])
+        for payload, _timestamp in iter_queue_json_entries(queue):
+            key = self._spawn_request_service_key(payload, desired_keys=desired_keys)
+            if key is not None:
+                pending.add(key)
+        return pending
 
     @staticmethod
     def _service_candidate_control_queues(
@@ -2067,14 +2204,18 @@ class Manager(BaseTask):
             )
         return ctx
 
-    def _observed_service_candidates(self, service_key: str) -> list[ServiceCandidate]:
-        candidates: list[ServiceCandidate] = []
-        state = self._service_state(service_key)
-        tracked = self._tracked_service_candidate(service_key)
-        if tracked is not None:
-            candidates.append(tracked)
+    def _observed_service_candidates_by_key(
+        self, desired_keys: set[str]
+    ) -> dict[str, list[ServiceCandidate]]:
+        candidates_by_key: dict[str, list[ServiceCandidate]] = {
+            key: [] for key in desired_keys
+        }
+        for service_key in desired_keys:
+            tracked = self._tracked_service_candidate(service_key)
+            if tracked is not None:
+                candidates_by_key[service_key].append(tracked)
 
-        latest_by_tid: dict[str, tuple[Mapping[str, Any], int]] = {}
+        latest_by_tid: dict[str, tuple[str, Mapping[str, Any], int]] = {}
         queue = self._queue(WEFT_GLOBAL_LOG_QUEUE)
         for payload, timestamp in iter_queue_json_entries(queue):
             tid = payload.get("tid")
@@ -2086,18 +2227,21 @@ class Manager(BaseTask):
             metadata = taskspec_dump.get("metadata") or {}
             if not isinstance(metadata, dict):
                 continue
-            candidate_key = service_key_from_metadata(metadata)
+            candidate_key = self._trusted_service_key_from_metadata(
+                metadata,
+                desired_keys=desired_keys,
+            )
             if candidate_key is None:
-                candidate_key = metadata.get("autostart_source")
-            if candidate_key != service_key:
                 continue
             existing = latest_by_tid.get(tid)
-            if existing is None or existing[1] <= timestamp:
-                latest_by_tid[tid] = (payload, timestamp)
+            if existing is None or existing[2] <= timestamp:
+                latest_by_tid[tid] = (candidate_key, payload, timestamp)
 
-        for tid, (logged_payload, timestamp) in latest_by_tid.items():
+        runtime_handles = self._latest_tid_runtime_handles(set(latest_by_tid))
+        for tid, (service_key, logged_payload, timestamp) in latest_by_tid.items():
+            state = self._service_state(service_key)
             if tid in state.locally_terminal_tids:
-                candidates.append(
+                candidates_by_key.setdefault(service_key, []).append(
                     ServiceCandidate(
                         key=service_key,
                         tid=tid,
@@ -2108,65 +2252,186 @@ class Manager(BaseTask):
                     )
                 )
                 continue
-            candidates.append(
+            candidates_by_key.setdefault(service_key, []).append(
                 self._service_candidate_from_task_log(
                     service_key=service_key,
                     tid=tid,
                     payload=logged_payload,
                     timestamp=timestamp,
+                    runtime_handle=runtime_handles.get(tid),
                 )
             )
-        return candidates
+        return candidates_by_key
 
-    def _service_has_owner_evidence(self, service_key: str) -> bool:
-        candidates = self._observed_service_candidates(service_key)
+    def _observed_service_candidates(self, service_key: str) -> list[ServiceCandidate]:
+        return self._observed_service_candidates_by_key({service_key}).get(
+            service_key, []
+        )
+
+    @staticmethod
+    def _reset_service_uncertainty(state: ManagedServiceState) -> None:
+        state.uncertain_attempts = 0
+        state.uncertain_since_ns = None
+        state.last_uncertain_reason = None
+
+    def _service_has_owner_evidence(
+        self,
+        service_key: str,
+        candidates: list[ServiceCandidate] | None = None,
+    ) -> bool:
+        if candidates is None:
+            candidates = self._observed_service_candidates(service_key)
         live = select_canonical_live_candidate(candidates)
+        state = self._service_state(service_key)
         if live is not None:
-            self._service_state(service_key).active_tid = live.tid
+            state.active_tid = live.tid
+            self._reset_service_uncertainty(state)
             return True
-        return any(candidate.state == "uncertain" for candidate in candidates)
+        uncertain = [
+            candidate for candidate in candidates if candidate.state == "uncertain"
+        ]
+        if not uncertain:
+            self._reset_service_uncertainty(state)
+            return False
+        state.uncertain_attempts += 1
+        state.uncertain_since_ns = state.uncertain_since_ns or time.time_ns()
+        state.last_uncertain_reason = uncertain[0].reason
+        return state.uncertain_attempts < MANAGED_SERVICE_UNCERTAIN_RETRY_LIMIT
 
     def _tick_managed_service(
-        self, service: ManagedServiceSpec, *, force: bool = False
+        self,
+        service: ManagedServiceSpec,
+        *,
+        force: bool = False,
+        pending_keys: set[str] | None = None,
+        candidates: list[ServiceCandidate] | None = None,
     ) -> None:
         """Ensure a desired manager-owned service according to its lifecycle."""
 
         if not self._service_supervision_allowed():
             return
 
+        pending_keys = pending_keys or set()
+        candidates = candidates or []
         state = self._service_state(service.key)
+        if self._tracked_service_candidate(service.key) is not None:
+            self._reset_service_uncertainty(state)
+            return
         if (
             state.active_tid is not None
             and state.active_tid in self._child_processes
             and not self._child_has_exited(self._child_processes[state.active_tid])
         ):
             return
+        if state.spawn_pending and service.key not in pending_keys:
+            state.spawn_pending = False
+        if service.key in pending_keys:
+            state.spawn_pending = True
+            return
         if state.spawn_pending:
             return
-        if self._service_has_owner_evidence(service.key):
+        if self._service_has_owner_evidence(service.key, candidates):
             return
         if service.lifecycle == "once" and state.launched_once:
+            return
+        if (
+            service.lifecycle == "ensure"
+            and service.max_restarts is not None
+            and state.launched_once
+            and state.restarts >= service.max_restarts
+        ):
             return
 
         now_ns = time.time_ns()
         if not force and state.next_allowed_ns and now_ns < state.next_allowed_ns:
+            if service.autostart_source:
+                self._schedule_autostart_rescan_at(state.next_allowed_ns)
             return
-        if self._enqueue_managed_service_request(service):
+        launched_before = state.launched_once
+        if not self._enqueue_managed_service_request(service):
+            return
+        if service.autostart_source:
+            self._mark_autostart_enqueued(
+                service,
+                now_ns=now_ns,
+                launched_before=launched_before,
+            )
+        else:
             state.next_allowed_ns = 0
+
+    def _reconcile_managed_services(
+        self,
+        *,
+        force: bool = False,
+        include_internal: bool = True,
+        include_autostart: bool = True,
+    ) -> None:
+        """Reconcile all Manager-owned singleton services through one path."""
+
+        if not self._service_supervision_allowed():
+            return
+
+        services: list[ManagedServiceSpec] = []
+        if (
+            include_internal
+            and self._task_monitor_enabled
+            and self._queue_names["inbox"] == WEFT_SPAWN_REQUESTS_QUEUE
+        ):
+            # The heartbeat is a dependency of internal periodic services. Do not
+            # run it as standalone background work when there is no dependent
+            # service enabled.
+            services.append(self._heartbeat_service_spec())
+            services.append(self._task_monitor_service_spec())
+        if include_autostart:
+            services.extend(self._desired_autostart_services(force=force))
+        if not services:
+            return
+
+        desired_keys = {service.key for service in services}
+        pending_keys = self._pending_service_keys(desired_keys)
+        keys_needing_evidence: set[str] = set()
+        for service in services:
+            state = self._service_state(service.key)
+            if self._tracked_service_candidate(service.key) is not None:
+                continue
+            if state.spawn_pending and service.key in pending_keys:
+                continue
+            if service.key in pending_keys:
+                continue
+            if service.lifecycle == "once" and state.launched_once:
+                continue
+            keys_needing_evidence.add(service.key)
+
+        candidates_by_key = (
+            self._observed_service_candidates_by_key(keys_needing_evidence)
+            if keys_needing_evidence
+            else {}
+        )
+        for service in services:
+            self._tick_managed_service(
+                service,
+                force=force,
+                pending_keys=pending_keys,
+                candidates=candidates_by_key.get(service.key, []),
+            )
 
     def _tick_internal_services(self, *, force: bool = False) -> None:
         """Ensure built-in Manager-owned services for the elected leader."""
 
-        self._tick_managed_service(self._heartbeat_service_spec(), force=force)
-        if self._task_monitor_enabled:
-            self._tick_managed_service(self._task_monitor_service_spec(), force=force)
+        self._reconcile_managed_services(
+            force=force,
+            include_internal=True,
+            include_autostart=False,
+        )
 
     def _tick_task_monitor(self, *, force: bool = False) -> None:
         """Ensure one supervised TaskMonitor child exists for the leader manager."""
 
-        if not self._task_monitor_supervision_allowed():
-            return
-        self._tick_managed_service(self._task_monitor_service_spec(), force=force)
+        self._reconcile_managed_services(
+            force=force,
+            include_internal=True,
+            include_autostart=False,
+        )
 
     # ------------------------------------------------------------------
     # Autostart handling
@@ -2362,46 +2627,45 @@ class Manager(BaseTask):
         mode = policy.get("mode", "once")
         return mode if isinstance(mode, str) else "once"
 
+    @staticmethod
+    def _autostart_manifest_source(path: Path) -> str:
+        """Return the canonical service key for an autostart manifest path."""
+
+        return str(path.resolve(strict=False))
+
+    def _autostart_manifest_paths(self) -> list[Path]:
+        directory = self._autostart_dir
+        if not directory or not directory.exists():
+            return []
+        try:
+            return sorted(path for path in directory.glob("*.json") if path.is_file())
+        except OSError:
+            logger.debug(
+                "Failed to enumerate autostart manifests in %s",
+                directory,
+                exc_info=True,
+            )
+            return []
+
     def _active_autostart_sources(self) -> set[str]:
         tracked_sources = {
             child.autostart_source
             for child in self._child_processes.values()
             if child.autostart_source and not self._child_has_exited(child)
         }
-        queue = self._queue(WEFT_GLOBAL_LOG_QUEUE)
-        active: dict[str, tuple[str | None, str | None, int]] = {}
-        for payload, timestamp in iter_queue_json_entries(queue):
-            tid_value = payload.get("tid")
-            tid = tid_value if isinstance(tid_value, str) and tid_value else None
-            taskspec_dump = payload.get("taskspec")
-            if not isinstance(taskspec_dump, dict):
-                continue
-            metadata = taskspec_dump.get("metadata") or {}
-            source = metadata.get("autostart_source")
-            if not source:
-                continue
-            recorded = active.get(source)
-            if recorded is None or recorded[2] <= timestamp:
-                status = payload.get("status")
-                active[source] = (
-                    tid,
-                    status if isinstance(status, str) else None,
-                    timestamp,
-                )
-
-        terminal = {"completed", "failed", "timeout", "cancelled", "killed"}
-        durable_sources: set[str] = set()
-        for source, (tid, status, _ts) in active.items():
-            state = self._managed_service_state.get(source)
-            if (
-                tid is not None
-                and state is not None
-                and tid in state.locally_terminal_tids
-            ):
-                continue
-            if status not in terminal:
-                durable_sources.add(source)
-        return durable_sources | tracked_sources
+        manifest_sources = {
+            self._autostart_manifest_source(path)
+            for path in self._autostart_manifest_paths()
+        }
+        desired_sources = {source for source in tracked_sources if source is not None}
+        desired_sources.update(manifest_sources)
+        candidates_by_key = self._observed_service_candidates_by_key(desired_sources)
+        durable_sources = {
+            source
+            for source, candidates in candidates_by_key.items()
+            if select_canonical_live_candidate(candidates) is not None
+        }
+        return durable_sources | {source for source in tracked_sources if source}
 
     def _managed_pids_for_child(self, tid: str) -> set[int]:
         queue = self._queue(WEFT_TID_MAPPINGS_QUEUE)
@@ -2471,45 +2735,35 @@ class Manager(BaseTask):
         for source in stale_launched:
             self._autostart_launched.discard(source)
 
-    def _tick_autostart(self, *, force: bool = False) -> None:
-        """Scan autostart manifests and enqueue spawn requests (Spec: [MA-1.6])."""
+    def _desired_autostart_services(
+        self, *, force: bool = False
+    ) -> list[ManagedServiceSpec]:
+        """Return desired autostart services after manifest and policy checks."""
+
         if not self._autostart_enabled:
-            return
+            return []
         now_ns = time.time_ns()
         if (
             not force
             and now_ns - self._autostart_last_scan_ns < self._autostart_scan_interval_ns
         ):
-            return
+            return []
         self._autostart_last_scan_ns = now_ns
-        next_backoff_due_ns: int | None = None
 
         directory = self._autostart_dir
         if not directory:
-            return
+            return []
         if not directory.exists():
             self._prune_autostart_state(set())
-            return
+            return []
 
-        active_sources = self._active_autostart_sources()
-
-        try:
-            manifests = sorted(
-                path for path in directory.glob("*.json") if path.is_file()
-            )
-        except OSError:
-            logger.debug(
-                "Failed to enumerate autostart manifests in %s",
-                directory,
-                exc_info=True,
-            )
-            return
-
-        manifest_sources = {str(path.resolve()) for path in manifests}
+        manifests = self._autostart_manifest_paths()
+        manifest_sources = {self._autostart_manifest_source(path) for path in manifests}
         self._prune_autostart_state(manifest_sources)
 
+        services: list[ManagedServiceSpec] = []
         for manifest_path in manifests:
-            source = str(manifest_path.resolve())
+            source = self._autostart_manifest_source(manifest_path)
             manifest = self._load_autostart_manifest(manifest_path)
             if manifest is None:
                 continue
@@ -2533,29 +2787,24 @@ class Manager(BaseTask):
             service_state.launched_once = bool(state["launched_once"])
 
             if mode == "once":
-                if source in self._autostart_launched or source in active_sources:
+                if source in self._autostart_launched or service_state.launched_once:
                     continue
             elif mode == "ensure":
-                if source in active_sources:
-                    continue
                 launched_once = bool(state.get("launched_once", False))
                 max_restarts = (
                     policy.get("max_restarts") if isinstance(policy, dict) else None
                 )
+                parsed_max_restarts = (
+                    int(max_restarts)
+                    if isinstance(max_restarts, int)
+                    and not isinstance(max_restarts, bool)
+                    else None
+                )
                 if (
                     launched_once
-                    and max_restarts is not None
-                    and state["restarts"] >= max_restarts
+                    and parsed_max_restarts is not None
+                    and int(state["restarts"]) >= parsed_max_restarts
                 ):
-                    continue
-                next_allowed = state.get("next_allowed_ns", 0)
-                if launched_once and next_allowed and now_ns < next_allowed:
-                    if isinstance(next_allowed, int):
-                        if (
-                            next_backoff_due_ns is None
-                            or next_allowed < next_backoff_due_ns
-                        ):
-                            next_backoff_due_ns = next_allowed
                     continue
             else:
                 logger.warning("Unknown autostart policy mode %s for %s", mode, source)
@@ -2565,35 +2814,91 @@ class Manager(BaseTask):
             if spawn_payload is None:
                 continue
             taskspec_payload, inbox_message = spawn_payload
-
-            logger.debug("Auto-start enqueuing spawn request from %s", manifest_path)
-            if not self._enqueue_autostart_request(taskspec_payload, inbox_message):
-                continue
-            self._autostart_launched.add(source)
-
-            if mode == "ensure":
-                launched_once = bool(state.get("launched_once", False))
-                if launched_once:
-                    state["restarts"] += 1
-                state["launched_once"] = True
-                backoff = (
-                    policy.get("backoff_seconds") if isinstance(policy, dict) else None
-                )
-                if isinstance(backoff, (int, float)) and backoff > 0:
-                    multiplier = max(0, int(state["restarts"]))
-                    delay = float(backoff) * (2**multiplier)
-                    state["next_allowed_ns"] = now_ns + int(delay * 1_000_000_000)
-                else:
-                    state["next_allowed_ns"] = 0
-                service_state.restarts = int(state["restarts"])
-                service_state.next_allowed_ns = int(state["next_allowed_ns"])
-                service_state.launched_once = bool(state["launched_once"])
-
-        if next_backoff_due_ns is not None:
-            self._autostart_last_scan_ns = min(
-                self._autostart_last_scan_ns,
-                max(0, next_backoff_due_ns - self._autostart_scan_interval_ns),
+            lifecycle = "ensure" if mode == "ensure" else "once"
+            backoff = (
+                policy.get("backoff_seconds") if isinstance(policy, dict) else None
             )
+            restart_backoff_ns = (
+                int(float(backoff) * 1_000_000_000)
+                if isinstance(backoff, (int, float)) and backoff > 0
+                else 0
+            )
+            max_restarts_value = (
+                policy.get("max_restarts") if isinstance(policy, dict) else None
+            )
+            max_restarts = (
+                int(max_restarts_value)
+                if isinstance(max_restarts_value, int)
+                and not isinstance(max_restarts_value, bool)
+                else None
+            )
+            services.append(
+                ManagedServiceSpec(
+                    key=source,
+                    lifecycle=cast(Literal["once", "ensure"], lifecycle),
+                    spawn_payload={
+                        "taskspec": taskspec_payload,
+                        "inbox_message": inbox_message,
+                    },
+                    restart_backoff_ns=restart_backoff_ns,
+                    max_restarts=max_restarts,
+                    autostart_source=source,
+                )
+            )
+        return services
+
+    def _mark_autostart_enqueued(
+        self,
+        service: ManagedServiceSpec,
+        *,
+        now_ns: int,
+        launched_before: bool,
+    ) -> None:
+        """Synchronize legacy autostart policy counters after enqueue."""
+
+        source = service.autostart_source
+        if source is None:
+            return
+        self._autostart_launched.add(source)
+        state = self._autostart_state.setdefault(
+            source,
+            {"restarts": 0, "next_allowed_ns": 0, "launched_once": False},
+        )
+        state.setdefault("restarts", 0)
+        state.setdefault("next_allowed_ns", 0)
+        if launched_before:
+            state["restarts"] = int(state.get("restarts", 0)) + 1
+        state["launched_once"] = True
+        if service.restart_backoff_ns > 0:
+            multiplier = max(0, int(state["restarts"]))
+            state["next_allowed_ns"] = now_ns + service.restart_backoff_ns * (
+                2**multiplier
+            )
+        else:
+            state["next_allowed_ns"] = 0
+        service_state = self._service_state(source)
+        service_state.restarts = int(state["restarts"])
+        service_state.next_allowed_ns = int(state["next_allowed_ns"])
+        service_state.launched_once = True
+        if service_state.next_allowed_ns:
+            self._schedule_autostart_rescan_at(service_state.next_allowed_ns)
+
+    def _schedule_autostart_rescan_at(self, due_ns: int) -> None:
+        """Adjust scan throttling so backoff expiry is observed promptly."""
+
+        self._autostart_last_scan_ns = min(
+            self._autostart_last_scan_ns,
+            max(0, due_ns - self._autostart_scan_interval_ns),
+        )
+
+    def _tick_autostart(self, *, force: bool = False) -> None:
+        """Reconcile autostart manifests through the shared service path."""
+
+        self._reconcile_managed_services(
+            force=force,
+            include_internal=False,
+            include_autostart=True,
+        )
 
     # ------------------------------------------------------------------
     # Cleanup
@@ -2641,8 +2946,7 @@ class Manager(BaseTask):
         if self._maybe_yield_leadership():
             return
         self._cleanup_children()
-        self._tick_internal_services()
-        self._tick_autostart()
+        self._reconcile_managed_services()
         self._update_idle_activity_from_broker()
         now_ns = time.time_ns()
         idle_timeout_ns = int(float(self._idle_timeout) * 1_000_000_000)

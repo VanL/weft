@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 72 plan files in this directory.
+There are currently 74 plan files in this directory.
 
 ## Curation Policy
 
@@ -22,7 +22,9 @@ There are currently 72 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
-| [`2026-05-08-manager-owned-internal-service-supervision-plan.md`](./2026-05-08-manager-owned-internal-service-supervision-plan.md) | Manager-Owned Internal Service Supervision Plan | `draft` | none |
+| [`2026-05-08-phase-7-manager-service-reconciler-cleanup-plan.md`](./2026-05-08-phase-7-manager-service-reconciler-cleanup-plan.md) | Phase 7 Manager Service Reconciler Cleanup Plan | `draft` | none |
+| [`2026-05-08-planning-guidance-zero-context-hardening-plan.md`](./2026-05-08-planning-guidance-zero-context-hardening-plan.md) | Planning Guidance Zero-Context Hardening Plan | `completed` | none |
+| [`2026-05-08-manager-owned-internal-service-supervision-plan.md`](./2026-05-08-manager-owned-internal-service-supervision-plan.md) | Manager-Owned Internal Service Supervision Plan | `draft` | [`2026-05-08-phase-7-manager-service-reconciler-cleanup-plan.md`](./2026-05-08-phase-7-manager-service-reconciler-cleanup-plan.md) |
 | [`2026-05-07-phase-7-task-monitor-supervision-and-cleanup-plan.md`](./2026-05-07-phase-7-task-monitor-supervision-and-cleanup-plan.md) | Phase 7 Task Monitor Supervision And Cleanup Plan | `draft` | none |
 | [`2026-05-07-task-monitor-ping-logs-breaking-cleanup-plan.md`](./2026-05-07-task-monitor-ping-logs-breaking-cleanup-plan.md) | Task Monitor, Ping Flag, And Logs Directory Breaking Cleanup Plan | `completed` | none |
 | [`2026-05-07-task-local-reaper-retention-policy-plan.md`](./2026-05-07-task-local-reaper-retention-policy-plan.md) | Task Local Reaper And Retention Policy Plan | `completed` | none |

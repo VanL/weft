@@ -172,9 +172,14 @@ def _build_test_env(*, dsn: str) -> dict[str, str]:
     return env
 
 
-def _build_pytest_command(*, marker: str) -> list[str]:
+def _build_pytest_command(
+    *,
+    marker: str,
+    pytest_targets: list[str] | None = None,
+) -> list[str]:
     """Return the repo-local pytest command for the requested marker."""
 
+    targets = pytest_targets or ["tests"]
     return [
         "uv",
         "run",
@@ -185,7 +190,7 @@ def _build_pytest_command(*, marker: str) -> list[str]:
         "--with",
         "simplebroker-pg[dev]",
         "pytest",
-        "tests",
+        *targets,
         "-x",
         "-m",
         marker,
@@ -370,6 +375,11 @@ def main() -> int:
         action="store_true",
         help="Leave the temporary Postgres container running for debugging.",
     )
+    parser.add_argument(
+        "pytest_targets",
+        nargs="*",
+        help="Optional pytest target paths to run instead of the full tests tree.",
+    )
     args = parser.parse_args()
 
     if shutil.which("docker") is None:
@@ -394,7 +404,7 @@ def main() -> int:
         container_name, dsn = _start_postgres_container()
         print(f"Postgres test DSN: {dsn}", flush=True)
         return _run_pytest_command(
-            _build_pytest_command(marker=marker),
+            _build_pytest_command(marker=marker, pytest_targets=args.pytest_targets),
             env=_build_test_env(dsn=dsn),
         )
     except subprocess.CalledProcessError as exc:

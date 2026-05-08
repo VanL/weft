@@ -81,6 +81,34 @@ def test_launch_pytest_process_isolates_ctrl_c_on_current_platform(
         assert recorded["kwargs"]["start_new_session"] is True
 
 
+def test_build_pytest_command_accepts_target_slices() -> None:
+    """The PG helper should support release-gate sharding by pytest target."""
+
+    pytest_pg = _load_pytest_pg_module()
+
+    command = pytest_pg._build_pytest_command(
+        marker="not sqlite_only",
+        pytest_targets=["tests/cli", "tests/core"],
+    )
+
+    pytest_index = command.index("pytest")
+    assert command[pytest_index + 1 : pytest_index + 3] == ["tests/cli", "tests/core"]
+    assert "-m" in command
+    assert command[command.index("-m") + 1] == "not sqlite_only"
+
+
+def test_build_pytest_command_defaults_to_full_tests_tree() -> None:
+    """The default PG helper behavior should stay unchanged."""
+
+    pytest_pg = _load_pytest_pg_module()
+
+    command = pytest_pg._build_pytest_command(marker="shared")
+
+    pytest_index = command.index("pytest")
+    assert command[pytest_index + 1] == "tests"
+    assert command[command.index("-m") + 1] == "shared"
+
+
 def test_run_pytest_command_forwards_first_interrupt_and_returns_130(
     monkeypatch,
     capsys,

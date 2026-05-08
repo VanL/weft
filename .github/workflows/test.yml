@@ -12,7 +12,7 @@ env:
 
 jobs:
   test:
-    name: ${{ matrix.test_slice == 'all' && format('test ({0}, {1})', matrix.os, matrix.python-version) || format('test ({0}, {1}, {2})', matrix.os, matrix.python-version, matrix.test_slice) }}
+    name: test (${{ matrix.os }}, ${{ matrix.python-version }}, ${{ matrix.test_slice }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 50
     strategy:
@@ -20,24 +20,14 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
         python-version: ["3.12", "3.13", "3.14"]
-        test_slice: [all]
+        test_slice: [cli, core-commands, remaining]
         include:
-          - os: windows-latest
-            python-version: "3.13"
-            test_slice: cli
+          - test_slice: cli
             pytest_targets: tests/cli
-          - os: windows-latest
-            python-version: "3.13"
-            test_slice: core-commands
+          - test_slice: core-commands
             pytest_targets: tests/commands tests/core
-          - os: windows-latest
-            python-version: "3.13"
-            test_slice: remaining
+          - test_slice: remaining
             pytest_targets: tests/architecture tests/context tests/helpers tests/shell tests/specs tests/system tests/tasks tests/taskspec tests/test_harness_registration.py
-        exclude:
-          - os: windows-latest
-            python-version: "3.13"
-            test_slice: all
 
     steps:
     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -59,10 +49,28 @@ jobs:
         uv pip install --system -e ".[dev,docker,django,macos-sandbox]"
 
     - name: Run tests with pytest
+      if: ${{ matrix.os != 'ubuntu-latest' || matrix.python-version != '3.13' }}
       run: |
-        pytest -v --tb=short -m "not slow" ${{ matrix.pytest_targets || 'tests' }} --override-ini="addopts=-ra -q --strict-markers -n auto --dist load"
+        pytest -v --tb=short -m "not slow" ${{ matrix.pytest_targets }} --override-ini="addopts=-ra -q --strict-markers -n auto --dist load" --durations=50 --durations-min=1.0
+
+    - name: Run tests with coverage
+      if: ${{ matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13' }}
+      run: |
+        pytest -v --tb=short -m "not slow" ${{ matrix.pytest_targets }} --override-ini="addopts=-ra -q --strict-markers -n auto --dist load" --durations=50 --durations-min=1.0 --cov=weft --cov-report=term-missing --cov-report=xml:coverage-${{ matrix.test_slice }}.xml
+
+    - name: Upload coverage reports
+      if: ${{ matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13' }}
+      uses: codecov/codecov-action@57e3a136b779b570ffcdbf80b3bdc90e7fab3de2 # v6.0.0
+      with:
+        file: ./coverage-${{ matrix.test_slice }}.xml
+        flags: unittests,${{ matrix.test_slice }}
+        name: codecov-${{ matrix.test_slice }}
+        fail_ci_if_error: false
+        token: ${{ secrets.CODECOV_TOKEN }}
+        slug: VanL/weft
 
     - name: Test CLI installation
+      if: ${{ matrix.test_slice == 'cli' }}
       run: |
        weft --version
 
@@ -100,6 +108,9 @@ jobs:
         mypy weft integrations/weft_django/weft_django extensions/weft_docker/weft_docker extensions/weft_macos_sandbox/weft_macos_sandbox --config-file pyproject.toml
 
   test-django-integration:
+    # Release commits are covered by the root tag release gate, which keeps
+    # bundled extension proof on the publishing path without rerunning it here.
+    if: ${{ github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'Release ') }}
     runs-on: ubuntu-latest
     timeout-minutes: 50
     steps:
@@ -123,9 +134,12 @@ jobs:
 
     - name: Run Django integration tests
       run: |
-        pytest -q -n 0 integrations/weft_django/tests
+        pytest -q -n 0 integrations/weft_django/tests --durations=50 --durations-min=1.0
 
   test-docker-extension:
+    # Release commits are covered by the root tag release gate, which keeps
+    # bundled extension proof on the publishing path without rerunning it here.
+    if: ${{ github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'Release ') }}
     runs-on: ubuntu-latest
     timeout-minutes: 50
     steps:
@@ -153,9 +167,12 @@ jobs:
 
     - name: Run Docker extension tests
       run: |
-        pytest -q -n 0 extensions/weft_docker/tests
+        pytest -q -n 0 extensions/weft_docker/tests --durations=50 --durations-min=1.0
 
   test-macos-sandbox-extension:
+    # Release commits are covered by the root tag release gate, which keeps
+    # bundled extension proof on the publishing path without rerunning it here.
+    if: ${{ github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'Release ') }}
     runs-on: macos-latest
     timeout-minutes: 50
     steps:
@@ -179,40 +196,4 @@ jobs:
 
     - name: Run macOS sandbox extension tests
       run: |
-        pytest -q -n 0 extensions/weft_macos_sandbox/tests
-
-  coverage:
-    runs-on: ubuntu-latest
-    timeout-minutes: 50
-    steps:
-    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-    - name: Set up Python
-      uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
-      with:
-        python-version: "3.13"
-
-    - name: Install uv
-      uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-      with:
-        version: ${{ env.UV_VERSION }}
-        enable-cache: true
-
-    - name: Install dependencies
-      run: |
-        uv pip install --system -e ".[dev,docker,django,macos-sandbox]"
-        uv pip install --system pytest-cov
-
-    - name: Run tests with coverage
-      run: |
-        pytest --cov=weft --cov-report=term-missing --cov-report=html --cov-report=xml -m "not slow" --override-ini="addopts=-ra -q --strict-markers -n auto --dist load"
-
-    - name: Upload coverage reports
-      uses: codecov/codecov-action@57e3a136b779b570ffcdbf80b3bdc90e7fab3de2 # v6.0.0
-      with:
-        file: ./coverage.xml
-        flags: unittests
-        name: codecov-umbrella
-        fail_ci_if_error: false
-        token: ${{ secrets.CODECOV_TOKEN }}
-        slug: VanL/weft 
+        pytest -q -n 0 extensions/weft_macos_sandbox/tests --durations=50 --durations-min=1.0

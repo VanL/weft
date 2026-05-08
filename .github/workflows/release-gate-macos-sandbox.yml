@@ -44,7 +44,7 @@ jobs:
 
       - name: Run macOS sandbox extension tests
         run: |
-          pytest -q -n 0 extensions/weft_macos_sandbox/tests
+          pytest -q -n 0 extensions/weft_macos_sandbox/tests --durations=50 --durations-min=1.0
 
   publish-release:
     needs:

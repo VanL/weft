@@ -7,12 +7,16 @@ Write every plan as if the implementer is technically strong but:
 
 - has zero context for the Weft codebase
 - knows almost nothing about the local toolset or problem domain
+- has questionable taste when the plan leaves room for judgment
 - will make poor local design choices if the plan leaves room for them
 - tends to over-mock tests unless the real production path is named
+- does not know good test design unless the plan explains the observable
+  behavior to prove
 - and will follow ambiguous instructions literally
 
 If the plan is ambiguous, assume the implementer will choose the wrong file,
-the wrong abstraction, and the wrong test seam.
+the wrong abstraction, the wrong test seam, and a mock-heavy proof that hides
+the real behavior.
 
 For risky or boundary-crossing work, the plan is not review-ready or
 implementation-ready until it also satisfies:
@@ -28,6 +32,8 @@ implementation-ready until it also satisfies:
 - Prone to over-abstracting or future-proofing if shared paths are not called
   out explicitly.
 - Prone to over-mocking tests unless the production path is spelled out.
+- Prone to treating tests as implementation probes unless the plan names the
+  contract, fixture, and queue/process evidence to assert.
 - Will follow the plan literally, including ambiguities.
 
 ## Planning Standard
@@ -65,6 +71,9 @@ the plan as authoritative.
 - Prefer red-green TDD when the behavior can be expressed cleanly as a failing
   test first. If not, say why and name the smallest concrete proof that should
   replace it.
+- Treat DRY, YAGNI, and red-green TDD as planning requirements, not slogans:
+  name the existing helper to reuse, the abstraction not to add, and the
+  failing test or equivalent proof for each behavior change.
 - For risky work, write rollback and rollout notes early enough to shape the
   task breakdown.
 - Required reading should describe the current structure and load-bearing path,
@@ -95,6 +104,24 @@ true:
 - **Always** use a date-prefixed filename: `YYYY-MM-DD-<descriptive-name>.md`.
   The date is the creation date of the plan.
 - Do not rename existing historical plans just to enforce a naming convention.
+- Every plan must include the normalized metadata block immediately after the
+  level-1 title, with these exact keys and order:
+
+  ```text
+  Status: draft
+  Source specs: docs/specifications/... [REF] or None - reason
+  Superseded by: none
+  ```
+
+- `Status` must be either `draft` or `completed`.
+- `Superseded by` must be `none` or a valid relative Markdown link to an
+  existing plan file.
+- Every plan file in `docs/plans/` must have a matching row in
+  `docs/plans/README.md`, and the row status must match the plan metadata.
+  This is enforced by `tests/specs/test_plan_metadata.py`.
+- If changing canonical agent-context guidance, update
+  `docs/agent-context/context.index.yaml` when its timestamp, read order, or
+  document inventory would otherwise become stale.
 
 ## Required Plan Sections
 
@@ -221,7 +248,9 @@ rediscover the approach. At minimum, cover:
 - outcome of the task
 - exact files to touch
 - files/docs to read before editing
+- local code style rules that matter for the touched files
 - shared helpers or patterns to reuse
+- abstractions, dependencies, or refactors that are explicitly not allowed
 - tests to add or update
 - stop-and-re-evaluate gates when the work starts drifting
 - per-task verification or "done" signal
@@ -291,6 +320,9 @@ Include:
 - what observable behavior should prove the change
 - which invariants each test is protecting
 - what should not be mocked
+- what failure or regression should be proven red before the implementation
+  when red-green TDD is practical
+- what edge case would be tempting to skip and why it is in or out of scope
 
 Weft-specific guidance:
 
@@ -317,6 +349,10 @@ Good test design guidance:
 - Mock only boundaries that are external, slow, or nondeterministic.
 - Name the exact regression being protected so the implementer does not add a
   vague "happy path" test and stop there.
+- When an implementer reaches for mocks around queues, process lifecycle,
+  state transitions, reservations, or result delivery, the plan should make
+  that a stop-and-re-evaluate moment unless the mock is limited to a truly
+  external boundary.
 
 ### 7. Verification and Gates
 

@@ -2,7 +2,7 @@
 
 Status: draft
 Source specs: see Source Documents below
-Superseded by: none
+Superseded by: ./2026-05-08-phase-7-manager-service-reconciler-cleanup-plan.md
 
 ## 1. Goal
 
@@ -14,6 +14,11 @@ current split where heartbeat is started and selected through endpoint lookup
 while TaskMonitor is manager-supervised, and it fixes the TaskMonitor idle CPU
 loop by making the monitor reactive to heartbeat/inbox/control wakeups instead
 of re-entering its scheduling turn every 50ms.
+
+This plan is retained for background context. Remaining single-reconciler
+cleanup work should follow
+`2026-05-08-phase-7-manager-service-reconciler-cleanup-plan.md`, which tightens
+the implementation scope after review.
 
 ## 2. Source Documents
 

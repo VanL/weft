@@ -259,6 +259,12 @@ WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS_DEFAULT: Final[float] = 60.0
 TASK_MONITOR_ACTIVITY_WAIT_CAP_SECONDS: Final[float] = 1.0
 """Maximum launcher wait for TaskMonitor when no queue wake is observed."""
 
+MANAGED_SERVICE_PING_TIMEOUT_SECONDS: Final[float] = 0.15
+"""Bounded PING/PONG probe budget for manager-supervised singleton evidence."""
+
+MANAGED_SERVICE_UNCERTAIN_RETRY_LIMIT: Final[int] = 3
+"""Number of uncertain singleton evidence turns that may block replacement."""
+
 RUNTIME_PRUNE_SCHEMA_VERSION: Final[int] = 1
 """JSONL schema version for explicit runtime-state prune reports."""
 

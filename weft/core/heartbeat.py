@@ -24,11 +24,13 @@ from weft._constants import (
     MANAGER_STARTUP_TIMEOUT_SECONDS,
     TERMINAL_TASK_STATUSES,
     WEFT_GLOBAL_LOG_QUEUE,
+    WEFT_TID_MAPPINGS_QUEUE,
 )
 from weft.context import WeftContext
 from weft.core.control_probe import send_keyed_ping_probe
 from weft.core.endpoints import ResolvedEndpoint, resolve_endpoint
-from weft.helpers import iter_queue_json_entries
+from weft.ext import RunnerHandle
+from weft.helpers import handle_has_live_host_process, iter_queue_json_entries
 
 
 def _ensure_manager_running(context: WeftContext) -> None:
@@ -88,6 +90,34 @@ def _latest_heartbeat_task_status(
     return latest_status
 
 
+def _heartbeat_runtime_handle_is_live(
+    context: WeftContext,
+    *,
+    tid: str,
+) -> bool:
+    queue = context.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
+    latest_payload: dict[str, Any] | None = None
+    latest_timestamp = -1
+    try:
+        for payload, timestamp in iter_queue_json_entries(queue):
+            if payload.get("full") != tid or timestamp < latest_timestamp:
+                continue
+            latest_payload = payload
+            latest_timestamp = timestamp
+    finally:
+        queue.close()
+    if latest_payload is None:
+        return False
+    handle_payload = latest_payload.get("runtime_handle")
+    if not isinstance(handle_payload, Mapping):
+        return False
+    try:
+        handle = RunnerHandle.from_dict(handle_payload)
+    except ValueError:
+        return False
+    return handle_has_live_host_process(handle)
+
+
 def _heartbeat_endpoint_is_live(
     context: WeftContext,
     *,
@@ -112,7 +142,9 @@ def _heartbeat_endpoint_is_live(
         if probe.matched is not None:
             return True
 
-    return latest_status is not None and latest_status not in TERMINAL_TASK_STATUSES
+    if latest_status is None:
+        return False
+    return _heartbeat_runtime_handle_is_live(context, tid=record.tid)
 
 
 def ensure_heartbeat_service(
