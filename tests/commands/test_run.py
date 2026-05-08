@@ -10,7 +10,7 @@ import threading
 import time
 from collections.abc import Iterator, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import pytest
 
@@ -56,6 +56,15 @@ from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 from weft.helpers import iter_queue_json_entries
 
 pytestmark = [pytest.mark.shared]
+
+MANAGER_SELECTION_TEST_PROBE_TIMEOUT_SECONDS: Final[float] = 5.0
+"""Test-only budget for selector probes that a helper thread must answer.
+
+The production default is intentionally short. These tests are not exercising
+that timeout; they are exercising how a matched PONG affects selection. The
+Postgres backend can spend enough of the production budget opening queues that
+the responder thread races the selector instead of the behavior under test.
+"""
 
 
 def _host_runtime_handle(pid: int) -> dict[str, Any]:
@@ -117,10 +126,16 @@ def _select_active_manager_while_answering_probe(
     ctx,
     *,
     tid: str,
+    monkeypatch: pytest.MonkeyPatch,
     pong_fields: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     result: dict[str, dict[str, Any] | None] = {}
     errors: list[BaseException] = []
+
+    ctrl_in_name = f"T{tid}.ctrl_in"
+    ctrl_out_name = f"T{tid}.ctrl_out"
+    ctrl_in = ctx.queue(ctrl_in_name, persistent=True)
+    ctrl_out = ctx.queue(ctrl_out_name, persistent=False)
 
     def _select() -> None:
         try:
@@ -132,14 +147,17 @@ def _select_active_manager_while_answering_probe(
             errors.append(exc)
 
     thread = threading.Thread(target=_select)
-    thread.start()
-
-    ctrl_in_name = f"T{tid}.ctrl_in"
-    ctrl_out_name = f"T{tid}.ctrl_out"
-    ctrl_in = ctx.queue(ctrl_in_name, persistent=True)
-    ctrl_out = ctx.queue(ctrl_out_name, persistent=False)
     try:
-        deadline = time.monotonic() + 2.0
+        monkeypatch.setattr(
+            core_manager_runtime,
+            "MANAGER_COMPETING_STARTUP_GRACE_SECONDS",
+            max(
+                core_manager_runtime.MANAGER_COMPETING_STARTUP_GRACE_SECONDS,
+                MANAGER_SELECTION_TEST_PROBE_TIMEOUT_SECONDS,
+            ),
+        )
+        thread.start()
+        deadline = time.monotonic() + MANAGER_SELECTION_TEST_PROBE_TIMEOUT_SECONDS
         while thread.is_alive() and time.monotonic() < deadline:
             raw = ctrl_in.read_one()
             if raw is None:
@@ -167,7 +185,7 @@ def _select_active_manager_while_answering_probe(
         ctrl_in.close()
         ctrl_out.close()
 
-    thread.join(timeout=2.0)
+    thread.join(timeout=MANAGER_SELECTION_TEST_PROBE_TIMEOUT_SECONDS)
     assert not thread.is_alive(), "manager selection probe did not finish"
     if errors:
         raise errors[0]
@@ -2226,7 +2244,11 @@ def test_select_active_manager_uses_matched_pong_for_stale_supervised_record(
         runtime_handle=_external_supervisor_runtime_handle(),
     )
 
-    record = _select_active_manager_while_answering_probe(ctx, tid=tid)
+    record = _select_active_manager_while_answering_probe(
+        ctx,
+        tid=tid,
+        monkeypatch=monkeypatch,
+    )
 
     assert record is not None
     assert record["tid"] == tid
@@ -2253,6 +2275,7 @@ def test_select_active_manager_rejects_non_manager_pong_for_stale_record(
     record = _select_active_manager_while_answering_probe(
         ctx,
         tid=tid,
+        monkeypatch=monkeypatch,
         pong_fields={"role": "consumer"},
     )
 
@@ -2309,7 +2332,11 @@ def test_select_active_manager_lowest_tid_pong_beats_higher_hard_live_record(
         runtime_handle=_host_runtime_handle(os.getpid()),
     )
 
-    record = _select_active_manager_while_answering_probe(ctx, tid=lower_tid)
+    record = _select_active_manager_while_answering_probe(
+        ctx,
+        tid=lower_tid,
+        monkeypatch=monkeypatch,
+    )
 
     assert record is not None
     assert record["tid"] == lower_tid
@@ -2338,7 +2365,11 @@ def test_select_active_manager_lower_hard_live_record_beats_higher_pong(
         runtime_handle=_external_supervisor_runtime_handle(),
     )
 
-    record = _select_active_manager_while_answering_probe(ctx, tid=higher_tid)
+    record = _select_active_manager_while_answering_probe(
+        ctx,
+        tid=higher_tid,
+        monkeypatch=monkeypatch,
+    )
 
     assert record is not None
     assert record["tid"] == lower_tid
