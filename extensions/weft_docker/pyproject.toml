@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "weft-docker"
-version = "0.9.20"
+version = "0.9.21"
 description = "Docker runner plugin for Weft"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -14,7 +14,7 @@ authors = [
 ]
 dependencies = [
     "docker>=7.1.0,<8",
-    "weft>=0.9.19,<1",
+    "weft>=0.9.21,<1",
 ]
 
 [project.optional-dependencies]
