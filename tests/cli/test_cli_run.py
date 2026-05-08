@@ -1581,12 +1581,13 @@ def test_cli_run_persistent_spec_no_wait_consumes_initial_piped_stdin(
     assert rc == 0
     assert err == ""
     tid = out.strip()
+    result_timeout = "20" if active_test_backend() == "postgres" else "5"
 
     rc, out, err = run_cli(
         "result",
         tid,
         "--timeout",
-        "5",
+        result_timeout,
         "--json",
         cwd=workdir,
         harness=weft_harness,
