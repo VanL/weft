@@ -32,6 +32,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -64,13 +65,14 @@ jobs:
 
   verify-main-test-workflow:
     runs-on: ubuntu-latest
+    timeout-minutes: 50
     steps:
       - name: Wait for successful Test workflow on release commit
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           EXPECTED_SHA: ${{ inputs.expected_tag_commit }}
           POLL_INTERVAL_SECONDS: "30"
-          MAX_WAIT_SECONDS: "5400"
+          MAX_WAIT_SECONDS: "3000"
         with:
           script: |
             const expectedSha = process.env.EXPECTED_SHA;
@@ -135,6 +137,7 @@ jobs:
 
   verify-tag-current:
     runs-on: ubuntu-latest
+    timeout-minutes: 50
     needs:
       - build
     steps:
@@ -164,6 +167,7 @@ jobs:
       - verify-main-test-workflow
       - verify-tag-current
     runs-on: ubuntu-latest
+    timeout-minutes: 50
     environment:
       name: pypi
       url: ${{ format('https://pypi.org/p/{0}', inputs.package_name) }}
@@ -191,6 +195,7 @@ jobs:
     needs:
       - publish-to-pypi
     runs-on: ubuntu-latest
+    timeout-minutes: 50
     permissions:
       contents: write
 

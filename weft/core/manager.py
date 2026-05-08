@@ -188,6 +188,7 @@ class Manager(BaseTask):
         self._draining = False
         self._drain_reason: str | None = None
         self._drain_completion_event = "manager_stop_drained"
+        self._drain_stops_children = True
         self._drain_signaled_children: set[str] = set()
         self._drain_signal_started_ns: dict[str, int] = {}
         self._drain_started_ns: int | None = None
@@ -1285,6 +1286,7 @@ class Manager(BaseTask):
         self._drain_started_ns = time.time_ns()
         self._drain_reason = reason
         self._drain_completion_event = completion_event
+        self._drain_stops_children = True
         if event is not None:
             self._report_state_change(
                 event=event,
@@ -1315,9 +1317,12 @@ class Manager(BaseTask):
             return
 
         self._draining = True
+        self._drain_signaled_children.clear()
+        self._drain_signal_started_ns.clear()
         self._drain_started_ns = time.time_ns()
         self._drain_reason = f"Superseded by lower-TID manager {leader_tid}"
         self._drain_completion_event = "manager_leadership_drained"
+        self._drain_stops_children = False
         self._report_state_change(
             event="manager_leadership_yielded",
             leader_tid=leader_tid,
@@ -1332,6 +1337,7 @@ class Manager(BaseTask):
             self._report_state_change(event=self._drain_completion_event)
             self._update_process_title("cancelled")
         self._drain_started_ns = None
+        self._drain_stops_children = True
         self.should_stop = True
 
     def handle_termination_signal(self, signum: int) -> None:
@@ -2254,9 +2260,14 @@ class Manager(BaseTask):
             self.should_stop = True
 
     def _continue_shutdown_drain(self) -> None:
-        self._signal_children_to_stop()
+        if self._drain_stops_children:
+            self._signal_children_to_stop()
         self._cleanup_children()
-        if self._child_processes and self._shutdown_drain_timed_out():
+        if (
+            self._drain_stops_children
+            and self._child_processes
+            and self._shutdown_drain_timed_out()
+        ):
             logger.warning(
                 "Manager %s drain timed out with %s child task(s); terminating",
                 self.tid,

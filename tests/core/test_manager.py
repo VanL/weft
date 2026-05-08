@@ -2301,11 +2301,13 @@ def test_manager_leadership_yield_drains_nonpersistent_children(
     manager_setup, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     manager, make_queue = manager_setup
+    ctrl_queue_name = "manager.leadership-child.ctrl_in"
+    ctrl_queue = make_queue(ctrl_queue_name)
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     drain(log_queue)
 
     class FakeProcess:
-        pid = 424243
+        pid = None
         exitcode = None
 
         def is_alive(self) -> bool:
@@ -2316,7 +2318,7 @@ def test_manager_leadership_yield_drains_nonpersistent_children(
 
     manager._child_processes["child"] = ManagedChild(
         process=FakeProcess(),
-        ctrl_queue=None,
+        ctrl_queue=ctrl_queue_name,
         persistent=False,
     )
 
@@ -2344,6 +2346,12 @@ def test_manager_leadership_yield_drains_nonpersistent_children(
     assert yield_events[0]["leader_tid"] == lower_leader_tid
     assert yield_events[0]["draining"] is True
     assert yield_events[0]["status"] == "running"
+
+    manager.process_once()
+
+    assert ctrl_queue.peek_one() is None
+    assert manager.should_stop is False
+    assert manager._child_processes
 
     manager._child_processes.clear()
     manager.process_once()

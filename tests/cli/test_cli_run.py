@@ -262,6 +262,7 @@ def _run_parallel_manager_reuse_cycle(
     max_workers: int,
     submit_timeout: float,
     status_timeout: float,
+    task_completion_timeout: float,
 ) -> dict[str, object]:
     def _submit(
         current_root: Path = root,
@@ -320,6 +321,26 @@ def _run_parallel_manager_reuse_cycle(
             status_timeout=status_timeout,
             submit_results=results,
         )
+
+    # Superseded managers are allowed to stay registered while draining any
+    # children they already launched. Manager convergence is only a stable
+    # invariant after the submitted no-wait work has reached terminal state.
+    for _rc, out, _err in results:
+        tid = out.strip()
+        try:
+            harness.wait_for_completion(tid, timeout=task_completion_timeout)
+        except TimeoutError as exc:
+            _raise_parallel_manager_reuse_failure(
+                phase="task_completion_timeout",
+                root=root,
+                env=env,
+                harness=harness,
+                max_workers=max_workers,
+                submit_timeout=submit_timeout,
+                status_timeout=status_timeout,
+                submit_results=results,
+                detail=f"tid={tid}: {exc}",
+            )
 
     deadline = time.time() + status_timeout
     payload: dict[str, object] | None = None
@@ -1923,6 +1944,7 @@ def test_cli_run_continuous_overrides_nonpersistent_spec(workdir, weft_harness) 
     assert rc == 0
     assert err == ""
     tid = out.strip()
+    result_timeout = "15" if os.name == "nt" else "5"
 
     _write_queue_message(
         context,
@@ -1934,7 +1956,7 @@ def test_cli_run_continuous_overrides_nonpersistent_spec(workdir, weft_harness) 
         "result",
         tid,
         "--timeout",
-        "5",
+        result_timeout,
         "--json",
         cwd=workdir,
         harness=weft_harness,
@@ -1955,7 +1977,7 @@ def test_cli_run_continuous_overrides_nonpersistent_spec(workdir, weft_harness) 
         "result",
         tid,
         "--timeout",
-        "5",
+        result_timeout,
         "--json",
         cwd=workdir,
         harness=weft_harness,
@@ -2201,14 +2223,17 @@ def test_cli_run_no_wait_returns_tid(workdir, weft_harness) -> None:
 
 def test_cli_run_no_wait_survives_short_manager_lifetime(workdir, weft_harness) -> None:
     env = os.environ.copy()
-    env["WEFT_MANAGER_LIFETIME_TIMEOUT"] = "0.2"
+    manager_lifetime = 1.0 if os.name == "nt" else 0.2
+    task_duration = 1.5 if os.name == "nt" else 0.5
+    completion_timeout = 20.0 if os.name == "nt" else 10.0
+    env["WEFT_MANAGER_LIFETIME_TIMEOUT"] = str(manager_lifetime)
 
     rc, out, err = run_cli(
         "run",
         "--function",
         "tests.tasks.sample_targets:simulate_work",
         "--kw",
-        "duration=0.5",
+        f"duration={task_duration}",
         "--kw",
         "result=payload",
         "--no-wait",
@@ -2220,7 +2245,7 @@ def test_cli_run_no_wait_survives_short_manager_lifetime(workdir, weft_harness) 
     assert rc == 0
     assert err == ""
     assert len(out) == 19 and out.isdigit()
-    weft_harness.wait_for_completion(out, timeout=10.0)
+    weft_harness.wait_for_completion(out, timeout=completion_timeout)
 
 
 def test_harness_wait_for_completion_reports_cancelled_task(
@@ -2363,14 +2388,18 @@ def test_cli_run_prunes_stale_manager(workdir, weft_harness) -> None:
 def test_cli_run_parallel_no_wait_adopts_active_manager(workdir, weft_harness) -> None:
     env = os.environ.copy()
     env["WEFT_MANAGER_REUSE_ENABLED"] = "1"
+    submit_timeout = 120.0 if os.name == "nt" else 60.0
+    status_timeout = 20.0 if os.name == "nt" else 5.0
+    task_completion_timeout = 30.0 if os.name == "nt" else 10.0
 
     _run_parallel_manager_reuse_cycle(
         root=workdir,
         env=env,
         harness=weft_harness,
         max_workers=4,
-        submit_timeout=60.0,
-        status_timeout=5.0,
+        submit_timeout=submit_timeout,
+        status_timeout=status_timeout,
+        task_completion_timeout=task_completion_timeout,
     )
 
 
@@ -2382,6 +2411,7 @@ def test_parallel_manager_reuse_converges_to_single_manager_under_repeated_boots
     max_workers = 2 if os.name == "nt" else 4
     submit_timeout = 120.0 if os.name == "nt" else 60.0
     status_timeout = 10.0 if os.name == "nt" else 5.0
+    task_completion_timeout = 30.0 if os.name == "nt" else 10.0
 
     for _ in range(iterations):
         harness = WeftTestHarness()
@@ -2397,6 +2427,7 @@ def test_parallel_manager_reuse_converges_to_single_manager_under_repeated_boots
                 max_workers=max_workers,
                 submit_timeout=submit_timeout,
                 status_timeout=status_timeout,
+                task_completion_timeout=task_completion_timeout,
             )
         finally:
             if not harness._closed:
@@ -2416,6 +2447,7 @@ def test_weft_harness_cleanup_preserves_sqlite_integrity_for_parallel_manager_re
     max_workers = 2 if os.name == "nt" else 4
     submit_timeout = 120.0 if os.name == "nt" else 60.0
     status_timeout = 10.0 if os.name == "nt" else 5.0
+    task_completion_timeout = 30.0 if os.name == "nt" else 10.0
 
     for _ in range(iterations):
         harness = WeftTestHarness()
@@ -2433,6 +2465,7 @@ def test_weft_harness_cleanup_preserves_sqlite_integrity_for_parallel_manager_re
                 max_workers=max_workers,
                 submit_timeout=submit_timeout,
                 status_timeout=status_timeout,
+                task_completion_timeout=task_completion_timeout,
             )
             _assert_sqlite_integrity(db_path)
             harness.cleanup(preserve_database=True)
