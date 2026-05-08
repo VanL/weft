@@ -527,6 +527,9 @@ HEARTBEAT_MIN_INTERVAL_SECONDS: Final[int] = 60
 HEARTBEAT_IDLE_TIMEOUT_SECONDS: Final[float] = 60.0
 """Idle timeout after the last registration before the heartbeat service exits."""
 
+HEARTBEAT_ENDPOINT_PROBE_TIMEOUT: Final[float] = 0.25
+"""Bounded PING/PONG probe timeout used when validating a heartbeat endpoint."""
+
 PIPELINE_RUNTIME_METADATA_KEY: Final[str] = "_weft_pipeline_runtime"
 """Reserved metadata key carrying a precompiled pipeline runtime plan."""
 

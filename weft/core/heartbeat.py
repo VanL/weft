@@ -13,6 +13,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from weft._constants import (
+    HEARTBEAT_ENDPOINT_PROBE_TIMEOUT,
     INTERNAL_HEARTBEAT_ENDPOINT_NAME,
     INTERNAL_RUNTIME_ENDPOINT_NAME_KEY,
     INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
@@ -28,9 +29,6 @@ from weft.context import WeftContext
 from weft.core.control_probe import send_keyed_ping_probe
 from weft.core.endpoints import ResolvedEndpoint, resolve_endpoint
 from weft.helpers import iter_queue_json_entries
-
-HEARTBEAT_ENDPOINT_PROBE_TIMEOUT: float = 0.25
-"""Bounded PING/PONG probe timeout used when validating a heartbeat endpoint."""
 
 
 def _ensure_manager_running(context: WeftContext) -> None:
