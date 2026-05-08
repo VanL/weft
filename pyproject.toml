@@ -27,7 +27,7 @@ classifiers = [
     "Topic :: Utilities",
 ]
 dependencies = [
-    "llm>=0.26",
+    "llm>=0.31",
     "prompt-toolkit>=3.0.52",
     "psutil>=7.0.0",
     "pydantic>=2.0.0",
@@ -43,7 +43,7 @@ pg = [
     "simplebroker-pg>=1.1.1",
 ]
 docker = [
-    "weft-docker>=0.9.19",
+    "weft-docker>=0.9.20",
 ]
 django = [
     "weft-django>=0.9.19",
@@ -52,13 +52,13 @@ django-channels = [
     "weft-django[channels]>=0.9.19",
 ]
 macos-sandbox = [
-    "weft-macos-sandbox>=0.5.1",
+    "weft-macos-sandbox>=0.5.2",
 ]
 all = [
     "simplebroker-pg>=1.1.1",
     "weft-docker>=0.9.19",
     "weft-django>=0.9.19",
-    "weft-macos-sandbox>=0.5.1",
+    "weft-macos-sandbox>=0.5.2",
 ]
 dev = [
     "simplebroker-pg>=1.1.1",
