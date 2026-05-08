@@ -11,11 +11,29 @@ import base64
 import binascii
 import json
 import sys
-from dataclasses import dataclass
 from typing import Any
 
 from simplebroker import Queue
+from weft.core.outbox import (
+    DecodedOutboxValue,
+    aggregate_public_outputs,
+    decode_result_payload,
+)
+from weft.core.outbox import (
+    process_outbox_message as _process_outbox_message,
+)
 from weft.helpers import iter_queue_json_entries
+
+__all__ = [
+    "DecodedOutboxValue",
+    "aggregate_public_outputs",
+    "collect_interactive_queue_output",
+    "decode_result_payload",
+    "drain_available_outbox_values",
+    "handle_ctrl_stream",
+    "poll_log_events",
+    "process_outbox_message",
+]
 
 
 class _TyperCompat:
@@ -32,14 +50,6 @@ class _TyperCompat:
 
 
 typer = _TyperCompat()
-
-
-@dataclass(frozen=True, slots=True)
-class DecodedOutboxValue:
-    """One caller-facing outbox value plus whether it was emitted live already."""
-
-    value: Any
-    emitted: bool = False
 
 
 def _emit_text(text: str = "", *, err: bool = False, nl: bool = True) -> None:
@@ -87,42 +97,12 @@ def process_outbox_message(
     emit_stream: bool = True,
 ) -> tuple[bool, DecodedOutboxValue | None]:
     """Decode one outbox payload, accumulating stream fragments when needed."""
-    try:
-        envelope = json.loads(raw)
-    except json.JSONDecodeError:
-        return True, DecodedOutboxValue(decode_result_payload(raw))
-
-    if isinstance(envelope, dict) and envelope.get("type") == "stream":
-        stream_name = str(envelope.get("stream") or "stdout")
-        encoding = envelope.get("encoding", "text")
-        data = envelope.get("data", "")
-        if encoding == "base64":
-            try:
-                chunk = base64.b64decode(data)
-                text = chunk.decode("utf-8", errors="replace")
-            except (
-                binascii.Error,
-                ValueError,
-                UnicodeDecodeError,
-            ):  # pragma: no cover - malformed base64 envelope
-                text = ""
-        else:
-            text = str(data)
-        if text:
-            if emit_stream:
-                _emit_text(text, err=stream_name == "stderr", nl=False)
-            stream_buffer.append(text)
-        if envelope.get("final"):
-            if emit_stream:
-                _emit_text(err=stream_name == "stderr")
-            value = "".join(stream_buffer)
-            if envelope.get("result_transform") == "strip":
-                value = value.strip()
-            stream_buffer.clear()
-            return True, DecodedOutboxValue(value, emitted=emit_stream)
-        return False, None
-
-    return True, DecodedOutboxValue(envelope)
+    return _process_outbox_message(
+        raw,
+        stream_buffer,
+        emit_stream=emit_stream,
+        emit_text=lambda text, err, nl: _emit_text(text, err=err, nl=nl),
+    )
 
 
 def drain_available_outbox_values(
@@ -149,15 +129,6 @@ def drain_available_outbox_values(
         )
         if final and value is not None:
             values.append(value)
-
-
-def aggregate_public_outputs(values: list[Any]) -> Any:
-    """Collapse collected public outputs into the CLI-facing shape."""
-    if not values:
-        return None
-    if len(values) == 1:
-        return values[0]
-    return list(values)
 
 
 def poll_log_events(
@@ -217,11 +188,3 @@ def collect_interactive_queue_output(outbox_queue: Queue) -> list[str]:
         collected.append(json.dumps(payload_obj, ensure_ascii=False))
 
     return collected
-
-
-def decode_result_payload(raw: str) -> Any:
-    """Decode a non-stream result payload for public output."""
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        return raw

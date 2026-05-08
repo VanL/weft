@@ -17,11 +17,16 @@ from tests.conftest import REPO_ROOT, run_cli
 from tests.helpers.test_backend import active_test_backend, prepare_cli_root
 from tests.helpers.weft_harness import WeftTestHarness
 from weft._constants import (
+    INTERNAL_SERVICE_KEY_HEARTBEAT,
+    INTERNAL_SERVICE_KEY_METADATA_KEY,
+    INTERNAL_SERVICE_KEY_TASK_MONITOR,
+    TERMINAL_TASK_STATUSES,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MANAGERS_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
 )
 from weft.context import build_context
+from weft.core.control_probe import send_keyed_ping_probe
 from weft.helpers import (
     is_canonical_manager_record,
     iter_queue_json_entries,
@@ -187,6 +192,114 @@ def _wait_for_started_task_tid(
     raise AssertionError(f"Timed out waiting for started task {task_name!r}")
 
 
+def _service_records(context, *, service_key: str) -> list[dict[str, Any]]:
+    queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
+    try:
+        latest_by_tid: dict[str, dict[str, Any]] = {}
+        for payload, timestamp in iter_queue_json_entries(queue):
+            tid = payload.get("tid")
+            if not isinstance(tid, str) or not tid:
+                continue
+            taskspec = payload.get("taskspec")
+            if not isinstance(taskspec, dict):
+                continue
+            metadata = taskspec.get("metadata")
+            if not isinstance(metadata, dict):
+                continue
+            if metadata.get(INTERNAL_SERVICE_KEY_METADATA_KEY) != service_key:
+                continue
+            state = payload.get("state")
+            pid = state.get("pid") if isinstance(state, dict) else None
+            io_section = taskspec.get("io")
+            control = io_section.get("control") if isinstance(io_section, dict) else {}
+            ctrl_in = control.get("ctrl_in") if isinstance(control, dict) else None
+            ctrl_out = control.get("ctrl_out") if isinstance(control, dict) else None
+            record = {
+                "tid": tid,
+                "timestamp": timestamp,
+                "event": payload.get("event"),
+                "status": payload.get("status"),
+                "pid": pid if isinstance(pid, int) else None,
+                "ctrl_in": ctrl_in if isinstance(ctrl_in, str) else None,
+                "ctrl_out": ctrl_out if isinstance(ctrl_out, str) else None,
+            }
+            existing = latest_by_tid.get(tid)
+            if existing is not None and record["pid"] is None:
+                record["pid"] = existing.get("pid")
+            if existing is not None and record["ctrl_in"] is None:
+                record["ctrl_in"] = existing.get("ctrl_in")
+            if existing is not None and record["ctrl_out"] is None:
+                record["ctrl_out"] = existing.get("ctrl_out")
+            if existing is None or int(existing["timestamp"]) <= timestamp:
+                latest_by_tid[tid] = record
+    finally:
+        queue.close()
+    return sorted(
+        latest_by_tid.values(),
+        key=lambda record: (str(record["tid"]), int(record["timestamp"])),
+    )
+
+
+def _live_service_records(context, *, service_key: str) -> list[dict[str, Any]]:
+    live_records: list[dict[str, Any]] = []
+    for record in _service_records(context, service_key=service_key):
+        status = record.get("status")
+        if isinstance(status, str) and status in TERMINAL_TASK_STATUSES:
+            continue
+        tid = record.get("tid")
+        ctrl_in = record.get("ctrl_in")
+        ctrl_out = record.get("ctrl_out")
+        if not isinstance(tid, str):
+            continue
+        if not isinstance(ctrl_in, str) or not isinstance(ctrl_out, str):
+            continue
+        probe = send_keyed_ping_probe(
+            context,
+            tid=tid,
+            ctrl_in_name=ctrl_in,
+            ctrl_out_name=ctrl_out,
+            timeout=1.0,
+        )
+        if probe.matched is not None:
+            live_records.append(record)
+    return live_records
+
+
+def _wait_for_single_live_service(
+    context,
+    *,
+    service_key: str,
+    process: subprocess.Popen[str],
+    previous_tids: set[str] | None = None,
+    timeout: float = 15.0,
+) -> dict[str, Any]:
+    deadline = time.time() + timeout
+    ignored_tids = previous_tids or set()
+    last_records: list[dict[str, Any]] = []
+    while time.time() < deadline:
+        if process.poll() is not None:
+            stdout, stderr = _stop_process(process, timeout=1.0)
+            raise AssertionError(
+                "Serve process exited while waiting for service "
+                f"{service_key}: returncode={process.returncode}, "
+                f"stdout={stdout!r}, stderr={stderr!r}"
+            )
+        live_records = _live_service_records(context, service_key=service_key)
+        last_records = live_records
+        replacement_records = [
+            record for record in live_records if record["tid"] not in ignored_tids
+        ]
+        if len(live_records) == 1 and replacement_records:
+            return replacement_records[0]
+        time.sleep(0.05)
+
+    all_records = _service_records(context, service_key=service_key)
+    raise AssertionError(
+        "Timed out waiting for exactly one live service "
+        f"{service_key}; live={last_records!r}; all={all_records!r}"
+    )
+
+
 def _stop_process(
     process: subprocess.Popen[str], *, timeout: float = 10.0
 ) -> tuple[str, str]:
@@ -236,6 +349,94 @@ def test_serve_runs_in_foreground_and_reuses_single_manager(
 
         active_records = _active_canonical_manager_records(context)
         assert [entry["tid"] for entry in active_records] == [manager_tid]
+
+        rc, out, err = run_cli(
+            "manager",
+            "stop",
+            manager_tid,
+            "--context",
+            context_root,
+            cwd=workdir,
+            harness=weft_harness,
+        )
+        assert rc == 0
+        assert out == ""
+        assert err == ""
+
+        stdout, stderr = _stop_process(process)
+        assert process.returncode == 0
+        assert stdout == ""
+        assert stderr == ""
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            _stop_process(process)
+
+
+def test_serve_restarts_singleton_services_without_duplicates(
+    workdir,
+    weft_harness: WeftTestHarness,
+) -> None:
+    context_root = workdir
+    context = build_context(spec_context=context_root)
+
+    process = _popen_cli(
+        "manager",
+        "serve",
+        "--context",
+        context_root,
+        cwd=workdir,
+        env={
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS": "0.1",
+        },
+    )
+    weft_harness.register_pid(process.pid, kind="owner")
+
+    try:
+        record = _wait_for_active_canonical_manager(context, process=process)
+        manager_tid = record["tid"]
+        weft_harness.register_manager_tid(manager_tid)
+
+        heartbeat = _wait_for_single_live_service(
+            context,
+            service_key=INTERNAL_SERVICE_KEY_HEARTBEAT,
+            process=process,
+        )
+        task_monitor = _wait_for_single_live_service(
+            context,
+            service_key=INTERNAL_SERVICE_KEY_TASK_MONITOR,
+            process=process,
+        )
+        assert heartbeat["tid"] != task_monitor["tid"]
+
+        for service_key, current in (
+            (INTERNAL_SERVICE_KEY_TASK_MONITOR, task_monitor),
+            (INTERNAL_SERVICE_KEY_HEARTBEAT, heartbeat),
+        ):
+            old_tid = str(current["tid"])
+            rc, out, err = run_cli(
+                "task",
+                "kill",
+                old_tid,
+                "--context",
+                context_root,
+                cwd=workdir,
+                harness=weft_harness,
+                timeout=15.0,
+            )
+            assert rc == 0
+            assert out.startswith("Killed ")
+            assert err == ""
+
+            replacement = _wait_for_single_live_service(
+                context,
+                service_key=service_key,
+                process=process,
+                previous_tids={old_tid},
+            )
+            assert replacement["tid"] != old_tid
+            weft_harness.register_tid(str(replacement["tid"]))
 
         rc, out, err = run_cli(
             "manager",

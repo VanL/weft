@@ -118,9 +118,10 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
   runtime-prune reports, and retention-prune reports/archives are operational
   outputs only. They must not become task lifecycle truth, status authority,
   result authority, or automatic cleanup authority. The manager-supervised
-  `TaskMonitorTask` added in phase 7 part 1 is also operational and
-  non-destructive; its processor results and checkpoints do not change public
-  lifecycle reconstruction.
+  `TaskMonitorTask` is also operational and non-destructive; its lifecycle
+  classifications, cleanup-candidate classifications, processor results, and
+  checkpoints do not change public lifecycle reconstruction or delete broker
+  rows.
 - **OBS.14**: claimed outbox residue is recovery evidence, not decoded result
   evidence. Status/result readers may surface
   `claimed_result_without_terminal`, but they must not delete, unclaim, or
@@ -254,7 +255,8 @@ Current invariant visibility comes from:
 
 There is now a manager-supervised `TaskMonitorTask` in addition to the
 foreground `weft system task-monitor` command. In the current contract it is
-non-destructive and operational only.
+non-destructive and operational only, even though it can report read-only
+cleanup candidates for operator validation.
 
 ## Scope Boundary
 
@@ -273,6 +275,7 @@ doc:
 - [`docs/plans/2026-05-07-result-evidence-and-superseded-manager-reconciliation-plan.md`](../plans/2026-05-07-result-evidence-and-superseded-manager-reconciliation-plan.md)
 - [`docs/plans/2026-05-07-manager-selection-ping-pong-liveness-plan.md`](../plans/2026-05-07-manager-selection-ping-pong-liveness-plan.md)
 - [`docs/plans/2026-05-07-phase-7-task-monitor-supervision-and-cleanup-plan.md`](../plans/2026-05-07-phase-7-task-monitor-supervision-and-cleanup-plan.md)
+- [`docs/plans/2026-05-08-manager-owned-internal-service-supervision-plan.md`](../plans/2026-05-08-manager-owned-internal-service-supervision-plan.md)
 - [`docs/plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md`](../plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md)
 - [`docs/plans/2026-04-17-canonical-owner-fence-plan.md`](../plans/2026-04-17-canonical-owner-fence-plan.md)
 

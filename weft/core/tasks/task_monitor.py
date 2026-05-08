@@ -31,6 +31,7 @@ from weft._constants import (
     QUEUE_CTRL_OUT_SUFFIX,
     QUEUE_INBOX_SUFFIX,
     QUEUE_OUTBOX_SUFFIX,
+    TASK_MONITOR_ACTIVITY_WAIT_CAP_SECONDS,
     WEFT_GLOBAL_LOG_QUEUE,
 )
 from weft.context import WeftContext, build_context
@@ -40,8 +41,9 @@ from weft.core.task_monitoring import (
     TaskMonitorProcessorRequest,
     TaskMonitorProcessorResult,
     TaskMonitorRuntimeConfig,
+    build_task_monitor_cycle_snapshot,
     resolve_task_monitor_processor,
-    task_log_seen_candidate,
+    task_monitor_candidate_class_counts,
 )
 from weft.core.tasks.base import ControlRequest
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
@@ -109,6 +111,8 @@ class TaskMonitorTask(BaseTask):
         self._last_checkpoint: int | None = None
         self._last_cycle_at: int | None = None
         self._last_candidates_seen = 0
+        self._last_candidate_class_counts: dict[str, int] = {}
+        self._last_safe_to_delete_candidates = 0
         self._last_processor_success: bool | None = None
         self._last_error: str | None = None
         self._last_processed = 0
@@ -152,6 +156,34 @@ class TaskMonitorTask(BaseTask):
                 self._handle_control_message
             ),
         }
+
+    def _has_pending_runtime_input(self) -> bool:
+        for queue_name in (self._queue_names["ctrl_in"], self._queue_names["inbox"]):
+            try:
+                if self._queue(queue_name).has_pending():
+                    return True
+            except (BrokerError, OSError, RuntimeError):
+                continue
+        return False
+
+    def next_wait_timeout(self) -> float:
+        """Return the launcher wait timeout for the next monitor turn.
+
+        The monitor is reactive to task-local wakeups and its heartbeat-driven
+        schedule. It must not rely on the launcher's 50 ms default polling loop
+        while it is simply waiting for the next scheduled cycle.
+        """
+
+        if self._first_cycle_pending or self._wake_requested:
+            return 0.0
+        if self._has_pending_runtime_input():
+            return 0.0
+        if not self._monitor_config.enabled:
+            return TASK_MONITOR_ACTIVITY_WAIT_CAP_SECONDS
+        remaining = self._next_cycle_due_monotonic - time.monotonic()
+        if remaining <= 0:
+            return 0.0
+        return min(remaining, TASK_MONITOR_ACTIVITY_WAIT_CAP_SECONDS)
 
     @staticmethod
     def _ignore_task_log_entry(
@@ -248,6 +280,8 @@ class TaskMonitorTask(BaseTask):
                 "last_cycle_at": self._last_cycle_at,
                 "last_checkpoint": self._last_checkpoint,
                 "last_candidates_seen": self._last_candidates_seen,
+                "last_candidate_class_counts": dict(self._last_candidate_class_counts),
+                "last_safe_to_delete_candidates": self._last_safe_to_delete_candidates,
                 "last_processor_success": self._last_processor_success,
                 "last_error": self._last_error,
                 "last_processed": self._last_processed,
@@ -311,29 +345,18 @@ class TaskMonitorTask(BaseTask):
     def _scan_task_log_candidates(
         self,
     ) -> tuple[tuple[TaskMonitorCandidate, ...], int | None, int]:
-        candidates: list[TaskMonitorCandidate] = []
-        last_timestamp: int | None = None
-        events_scanned = 0
-        queue = self._queue(WEFT_GLOBAL_LOG_QUEUE)
-        for message, timestamp in iter_queue_entries(
-            queue,
+        snapshot = build_task_monitor_cycle_snapshot(
+            self._monitor_context(),
             since_timestamp=self._last_checkpoint,
-        ):
-            if self._last_checkpoint is not None and timestamp <= self._last_checkpoint:
-                continue
-            self._task_observer(WEFT_GLOBAL_LOG_QUEUE, message, timestamp)
-            last_timestamp = max(last_timestamp or 0, timestamp)
-            events_scanned += 1
-            candidate = task_log_seen_candidate(
-                queue_name=WEFT_GLOBAL_LOG_QUEUE,
-                message=message,
-                message_id=timestamp,
-            )
-            if candidate is not None and candidate.tid != self.tid:
-                candidates.append(candidate)
-            if events_scanned >= self._monitor_config.batch_size:
-                break
-        return tuple(candidates), last_timestamp, events_scanned
+            limit=self._monitor_config.batch_size,
+            monitor_tid=self.tid,
+            observer=self._task_observer,
+        )
+        return (
+            snapshot.candidates,
+            snapshot.last_task_log_timestamp,
+            snapshot.events_scanned,
+        )
 
     def _run_monitor_cycle(self) -> None:
         now_ns = time.time_ns()
@@ -341,6 +364,12 @@ class TaskMonitorTask(BaseTask):
         candidates, last_timestamp, events_scanned = self._scan_task_log_candidates()
         self._last_cycle_at = now_ns
         self._last_candidates_seen = len(candidates)
+        self._last_candidate_class_counts = task_monitor_candidate_class_counts(
+            candidates
+        )
+        self._last_safe_to_delete_candidates = sum(
+            1 for candidate in candidates if candidate.safe_to_delete
+        )
 
         request = TaskMonitorProcessorRequest(
             context=self._monitor_context(),

@@ -25,6 +25,10 @@ from weft._constants import (
     INTERNAL_RUNTIME_TASK_CLASS_PIPELINE,
     INTERNAL_RUNTIME_TASK_CLASS_PIPELINE_EDGE,
     INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR,
+    INTERNAL_SERVICE_KEY_HEARTBEAT,
+    INTERNAL_SERVICE_KEY_METADATA_KEY,
+    INTERNAL_SERVICE_KEY_TASK_MONITOR,
+    INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY,
     PIPELINE_RUNTIME_METADATA_KEY,
     TERMINAL_ENVELOPE_TYPE,
     WEFT_GLOBAL_LOG_QUEUE,
@@ -381,7 +385,7 @@ def manager_setup(broker_env, unique_tid):
 
 def wait_for_children(manager: Manager, timeout: float = 5.0) -> None:
     deadline = time.monotonic() + timeout
-    while manager._child_processes and time.monotonic() < deadline:
+    while manager._user_work_children() and time.monotonic() < deadline:
         manager._cleanup_children()
         time.sleep(0.05)
 
@@ -686,9 +690,43 @@ def test_manager_does_not_enqueue_task_monitor_when_disabled(
     manager = Manager(db_path, spec, config=config)
     try:
         inbox_queue = make_queue(WEFT_SPAWN_REQUESTS_QUEUE)
-        assert drain(inbox_queue) == []
+        payloads = [json.loads(item) for item in drain(inbox_queue)]
     finally:
         manager.cleanup()
+    assert not any(
+        payload.get(INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY)
+        == INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR
+        for payload in payloads
+    )
+
+
+def test_manager_enqueues_heartbeat_through_service_path(
+    broker_env,
+    unique_tid,
+) -> None:
+    db_path, make_queue = broker_env
+    config = load_config({"WEFT_TASK_MONITOR_ENABLED": "0"})
+    spec = make_manager_spec(unique_tid, idle_timeout=0.0)
+
+    manager = Manager(db_path, spec, config=config)
+    try:
+        payloads = [
+            json.loads(item) for item in drain(make_queue(WEFT_SPAWN_REQUESTS_QUEUE))
+        ]
+    finally:
+        manager.cleanup()
+
+    heartbeat_payloads = [
+        payload
+        for payload in payloads
+        if payload.get(INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY)
+        == INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT
+    ]
+    assert len(heartbeat_payloads) == 1
+    metadata = heartbeat_payloads[0]["taskspec"]["metadata"]
+    assert metadata[INTERNAL_SERVICE_KEY_METADATA_KEY] == INTERNAL_SERVICE_KEY_HEARTBEAT
+    assert metadata[INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY] == "ensure"
+    assert INTERNAL_RUNTIME_TASK_CLASS_KEY not in metadata
 
 
 def test_task_monitor_spawn_payload_uses_manager_owned_envelope(
@@ -708,6 +746,11 @@ def test_task_monitor_spawn_payload_uses_manager_owned_envelope(
         child_spec.metadata[INTERNAL_RUNTIME_TASK_CLASS_KEY]
         == INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR
     )
+    assert (
+        child_spec.metadata[INTERNAL_SERVICE_KEY_METADATA_KEY]
+        == INTERNAL_SERVICE_KEY_TASK_MONITOR
+    )
+    assert child_spec.metadata[INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY] == "ensure"
 
 
 def test_manager_skips_task_monitor_when_not_dispatch_owner(
@@ -759,11 +802,11 @@ def test_manager_restarts_dead_task_monitor_after_backoff(
         "_evaluate_dispatch_ownership",
         lambda: DispatchOwnership(state="self", leader_tid=manager.tid),
     )
-    enqueued: list[bool] = []
+    enqueued: list[str] = []
     monkeypatch.setattr(
         manager,
-        "_enqueue_task_monitor_request",
-        lambda: enqueued.append(True) or True,
+        "_enqueue_managed_service_request",
+        lambda service: enqueued.append(service.key) or True,
     )
 
     manager._cleanup_children()
@@ -775,7 +818,110 @@ def test_manager_restarts_dead_task_monitor_after_backoff(
     manager._task_monitor_next_start_allowed_ns = 0
     manager._tick_task_monitor()
 
-    assert enqueued == [True]
+    assert enqueued == [INTERNAL_SERVICE_KEY_TASK_MONITOR]
+
+
+def test_task_monitor_stale_log_without_liveness_does_not_block_restart(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, make_queue = manager_setup
+    manager._task_monitor_enabled = True
+    manager._queue_names["inbox"] = WEFT_SPAWN_REQUESTS_QUEUE
+    old_tid = "1777000000000000100"
+    make_queue(WEFT_GLOBAL_LOG_QUEUE).write(
+        json.dumps(
+            {
+                "tid": old_tid,
+                "status": "running",
+                "taskspec": {
+                    "metadata": {
+                        INTERNAL_SERVICE_KEY_METADATA_KEY: (
+                            INTERNAL_SERVICE_KEY_TASK_MONITOR
+                        )
+                    },
+                    "io": {
+                        "control": {
+                            "ctrl_in": f"T{old_tid}.ctrl_in",
+                            "ctrl_out": f"T{old_tid}.ctrl_out",
+                        }
+                    },
+                },
+            }
+        )
+    )
+    monkeypatch.setattr(
+        manager,
+        "_evaluate_dispatch_ownership",
+        lambda: DispatchOwnership(state="self", leader_tid=manager.tid),
+    )
+    monkeypatch.setattr(
+        manager_mod,
+        "send_keyed_ping_probe",
+        lambda *args, **kwargs: SimpleNamespace(matched=None, error=None),
+    )
+    enqueued: list[str] = []
+    monkeypatch.setattr(
+        manager,
+        "_enqueue_managed_service_request",
+        lambda service: enqueued.append(service.key) or True,
+    )
+
+    manager._tick_task_monitor(force=True)
+
+    assert enqueued == [INTERNAL_SERVICE_KEY_TASK_MONITOR]
+
+
+def test_task_monitor_matching_pong_blocks_duplicate_restart(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, make_queue = manager_setup
+    manager._task_monitor_enabled = True
+    manager._queue_names["inbox"] = WEFT_SPAWN_REQUESTS_QUEUE
+    old_tid = "1777000000000000200"
+    make_queue(WEFT_GLOBAL_LOG_QUEUE).write(
+        json.dumps(
+            {
+                "tid": old_tid,
+                "status": "running",
+                "taskspec": {
+                    "metadata": {
+                        INTERNAL_SERVICE_KEY_METADATA_KEY: (
+                            INTERNAL_SERVICE_KEY_TASK_MONITOR
+                        )
+                    },
+                    "io": {
+                        "control": {
+                            "ctrl_in": f"T{old_tid}.ctrl_in",
+                            "ctrl_out": f"T{old_tid}.ctrl_out",
+                        }
+                    },
+                },
+            }
+        )
+    )
+    monkeypatch.setattr(
+        manager,
+        "_evaluate_dispatch_ownership",
+        lambda: DispatchOwnership(state="self", leader_tid=manager.tid),
+    )
+    monkeypatch.setattr(
+        manager_mod,
+        "send_keyed_ping_probe",
+        lambda *args, **kwargs: SimpleNamespace(matched=object(), error=None),
+    )
+    enqueued: list[str] = []
+    monkeypatch.setattr(
+        manager,
+        "_enqueue_managed_service_request",
+        lambda service: enqueued.append(service.key) or True,
+    )
+
+    manager._tick_task_monitor(force=True)
+
+    assert enqueued == []
+    assert manager._task_monitor_tid == old_tid
 
 
 def test_internal_task_monitor_child_does_not_block_idle_shutdown(
@@ -2730,7 +2876,7 @@ def test_manager_idle_timeout_waits_for_active_child_to_finish(
         assert manager._child_processes
 
         wait_for_children(manager, timeout=8.0 if os.name == "nt" else 5.0)
-        assert not manager._child_processes
+        assert not manager._user_work_children()
 
         start = time.time()
         while not manager.should_stop and time.time() - start < 2.0:
@@ -2843,7 +2989,7 @@ def test_manager_autostart_skips_active_templates(
     manager = Manager(db_path, spec, config=config)
     try:
         manager.process_once()
-        assert not manager._child_processes
+        assert not manager._user_work_children()
         assert not manager._autostart_launched
     finally:
         manager.cleanup()
@@ -2974,7 +3120,7 @@ def test_manager_autostart_ensure_restarts(
             timeout=30.0 if os.name == "nt" else 20.0,
         )
         wait_for_children(manager, timeout=10.0)
-        assert not manager._child_processes
+        assert not manager._user_work_children()
         second_spawn = wait_for_log_event(
             manager,
             log_queue,
@@ -3270,7 +3416,7 @@ def test_manager_autostart_ensure_applies_backoff_to_restart_only(
             timeout=30.0 if os.name == "nt" else 20.0,
         )
         wait_for_children(manager, timeout=20.0 if os.name == "nt" else 10.0)
-        assert not manager._child_processes
+        assert not manager._user_work_children()
 
         restart_events = []
         deadline = time.time() + 8.0

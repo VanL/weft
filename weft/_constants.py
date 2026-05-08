@@ -256,6 +256,9 @@ WEFT_TASK_MONITOR_LOG_SINKS: Final[frozenset[str]] = frozenset(
 WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS_DEFAULT: Final[float] = 60.0
 """Default manager restart backoff for the supervised task monitor."""
 
+TASK_MONITOR_ACTIVITY_WAIT_CAP_SECONDS: Final[float] = 1.0
+"""Maximum launcher wait for TaskMonitor when no queue wake is observed."""
+
 RUNTIME_PRUNE_SCHEMA_VERSION: Final[int] = 1
 """JSONL schema version for explicit runtime-state prune reports."""
 
@@ -488,6 +491,18 @@ INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR: Final[str] = "task_monitor"
 
 INTERNAL_HEARTBEAT_ENDPOINT_NAME: Final[str] = "_weft.heartbeat"
 """Reserved runtime endpoint claimed by the built-in heartbeat service."""
+
+INTERNAL_SERVICE_KEY_METADATA_KEY: Final[str] = "_weft_service_key"
+"""Reserved metadata key naming a manager-supervised singleton service."""
+
+INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY: Final[str] = "_weft_service_lifecycle"
+"""Reserved metadata key selecting manager supervision policy for a service."""
+
+INTERNAL_SERVICE_KEY_HEARTBEAT: Final[str] = "_weft.service.heartbeat"
+"""Manager-supervised singleton key for the built-in heartbeat service."""
+
+INTERNAL_SERVICE_KEY_TASK_MONITOR: Final[str] = "_weft.service.task_monitor"
+"""Manager-supervised singleton key for the built-in task monitor service."""
 
 MANAGER_SPAWN_FENCED_REQUEUED_EVENT: Final[str] = "manager_spawn_fenced_requeued"
 """Manager event emitted when a fenced spawn request is requeued exactly."""

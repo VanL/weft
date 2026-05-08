@@ -32,8 +32,8 @@ from weft._constants import (
     TASK_MONITOR_WEFT_ANOMALY_CLASSIFICATIONS,
     TASKSPEC_TID_SHORT_LENGTH,
 )
-from weft.commands import task_evidence
 from weft.context import WeftContext, build_context
+from weft.core import task_evidence
 from weft.core.tasks.task_monitor import (
     TaskMonitorTask,
     make_task_monitor_taskspec,

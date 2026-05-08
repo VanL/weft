@@ -16,7 +16,7 @@ import signal
 import threading
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from multiprocessing.process import BaseProcess
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -28,6 +28,7 @@ from simplebroker.ext import BrokerError
 from weft._constants import (
     CONTROL_STOP,
     DEFAULT_FUNCTION_TARGET,
+    INTERNAL_HEARTBEAT_ENDPOINT_NAME,
     INTERNAL_RUNTIME_ENDPOINT_NAME_KEY,
     INTERNAL_RUNTIME_ENVELOPE_ENDPOINT_NAME_KEY,
     INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY,
@@ -36,6 +37,9 @@ from weft._constants import (
     INTERNAL_RUNTIME_TASK_CLASS_PIPELINE,
     INTERNAL_RUNTIME_TASK_CLASS_PIPELINE_EDGE,
     INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR,
+    INTERNAL_SERVICE_KEY_HEARTBEAT,
+    INTERNAL_SERVICE_KEY_TASK_MONITOR,
+    INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY,
     MANAGER_CHILD_EXIT_POLL_INTERVAL,
     MANAGER_DISPATCH_RECOVERY_MAX_ATTEMPTS,
     MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS,
@@ -62,6 +66,7 @@ from weft._constants import (
     WRAPPER_LOST_ERROR,
     get_weft_directory_name,
 )
+from weft.context import WeftContext, build_context
 from weft.ext import RunnerHandle
 from weft.helpers import (
     canonical_owner_tid,
@@ -75,7 +80,17 @@ from weft.helpers import (
     terminate_process_tree,
 )
 
+from .control_probe import send_keyed_ping_probe
 from .launcher import launch_task_process
+from .manager_services import (
+    ManagedServiceSpec,
+    ManagedServiceState,
+    ServiceCandidate,
+    apply_service_metadata,
+    select_canonical_live_candidate,
+    service_key_from_metadata,
+    service_metadata,
+)
 from .pipelines import (
     PipelineCompilationContext,
     compile_linear_pipeline,
@@ -108,6 +123,7 @@ class ManagedChild:
     autostart_source: str | None = None
     ctrl_out_queue: str | None = None
     internal_role: str | None = None
+    service_key: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,15 +214,13 @@ class Manager(BaseTask):
         autostart_dir = self._config.get("WEFT_AUTOSTART_DIR")
         self._autostart_dir = Path(autostart_dir) if autostart_dir else None
         self._autostart_launched: set[str] = set()
+        self._managed_service_state: dict[str, ManagedServiceState] = {}
         self._autostart_state: dict[str, dict[str, Any]] = {}
         self._autostart_last_scan_ns = 0
         self._autostart_scan_interval_ns = 1_000_000_000
         self._task_monitor_enabled = bool(
             self._config.get("WEFT_TASK_MONITOR_ENABLED", True)
         )
-        self._task_monitor_tid: str | None = None
-        self._task_monitor_spawn_pending = False
-        self._task_monitor_next_start_allowed_ns = 0
         self._task_monitor_restart_backoff_ns = int(
             float(
                 self._config.get(
@@ -237,10 +251,42 @@ class Manager(BaseTask):
         self.taskspec.mark_running(pid=multiprocessing.current_process().pid)
         self._update_process_title("running")
         self._report_state_change(event="task_started")
-        self._tick_task_monitor(force=True)
+        self._tick_internal_services(force=True)
         if self._autostart_enabled:
             self._tick_autostart(force=True)
         atexit.register(self._atexit_unregister)
+
+    def _service_state(self, service_key: str) -> ManagedServiceState:
+        """Return Manager-local mutable state for a supervised service key."""
+
+        return self._managed_service_state.setdefault(
+            service_key,
+            ManagedServiceState(),
+        )
+
+    @property
+    def _task_monitor_tid(self) -> str | None:
+        return self._service_state(INTERNAL_SERVICE_KEY_TASK_MONITOR).active_tid
+
+    @_task_monitor_tid.setter
+    def _task_monitor_tid(self, value: str | None) -> None:
+        self._service_state(INTERNAL_SERVICE_KEY_TASK_MONITOR).active_tid = value
+
+    @property
+    def _task_monitor_spawn_pending(self) -> bool:
+        return self._service_state(INTERNAL_SERVICE_KEY_TASK_MONITOR).spawn_pending
+
+    @_task_monitor_spawn_pending.setter
+    def _task_monitor_spawn_pending(self, value: bool) -> None:
+        self._service_state(INTERNAL_SERVICE_KEY_TASK_MONITOR).spawn_pending = value
+
+    @property
+    def _task_monitor_next_start_allowed_ns(self) -> int:
+        return self._service_state(INTERNAL_SERVICE_KEY_TASK_MONITOR).next_allowed_ns
+
+    @_task_monitor_next_start_allowed_ns.setter
+    def _task_monitor_next_start_allowed_ns(self, value: int) -> None:
+        self._service_state(INTERNAL_SERVICE_KEY_TASK_MONITOR).next_allowed_ns = value
 
     # ------------------------------------------------------------------
     # Queue configuration
@@ -307,6 +353,7 @@ class Manager(BaseTask):
         inbox_message: Any | None,
         *,
         autostart_source: str | None = None,
+        service_key: str | None = None,
     ) -> bool:
         """Seed child inbox, spawn process, and emit task_spawned event.
 
@@ -372,6 +419,10 @@ class Manager(BaseTask):
         internal_role = child_spec.metadata.get(INTERNAL_RUNTIME_TASK_CLASS_KEY)
         if not isinstance(internal_role, str):
             internal_role = None
+        if service_key is None:
+            service_key = service_key_from_metadata(child_spec.metadata)
+        if service_key is None and autostart_source:
+            service_key = autostart_source
 
         process = launch_task_process(
             task_cls,
@@ -387,10 +438,12 @@ class Manager(BaseTask):
             persistent=bool(getattr(child_spec.spec, "persistent", False)),
             autostart_source=autostart_source,
             internal_role=internal_role,
+            service_key=service_key,
         )
-        if internal_role == INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR:
-            self._task_monitor_tid = child_spec.tid
-            self._task_monitor_spawn_pending = False
+        if service_key is not None:
+            state = self._service_state(service_key)
+            state.active_tid = child_spec.tid
+            state.spawn_pending = False
         self._last_activity_ns = time.time_ns()
 
         event_payload = {
@@ -401,6 +454,8 @@ class Manager(BaseTask):
         }
         if autostart_source:
             event_payload["autostart_source"] = autostart_source
+        if service_key:
+            event_payload["service_key"] = service_key
 
         self._report_state_change(event="task_spawned", **event_payload)
         return True
@@ -1158,12 +1213,26 @@ class Manager(BaseTask):
                     self._child_processes.pop(tid, None)
                 if child.autostart_source:
                     autostart_child_exited = True
-                if child.internal_role == INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR:
-                    self._task_monitor_tid = None
-                    self._task_monitor_spawn_pending = False
-                    self._task_monitor_next_start_allowed_ns = (
-                        time.time_ns() + self._task_monitor_restart_backoff_ns
-                    )
+                service_key = child.service_key
+                if service_key is None and child.internal_role == (
+                    INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR
+                ):
+                    service_key = INTERNAL_SERVICE_KEY_TASK_MONITOR
+                if service_key is None and child.internal_role == (
+                    INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT
+                ):
+                    service_key = INTERNAL_SERVICE_KEY_HEARTBEAT
+                if service_key is None and child.autostart_source:
+                    service_key = child.autostart_source
+                if service_key:
+                    state = self._service_state(service_key)
+                    if state.active_tid == tid:
+                        state.active_tid = None
+                    state.spawn_pending = False
+                    if service_key == INTERNAL_SERVICE_KEY_TASK_MONITOR:
+                        state.next_allowed_ns = (
+                            time.time_ns() + self._task_monitor_restart_backoff_ns
+                        )
 
         if autostart_child_exited:
             # Re-evaluate ensure-style autostart manifests immediately after an
@@ -1724,18 +1793,56 @@ class Manager(BaseTask):
         return child_spec
 
     # ------------------------------------------------------------------
-    # Task monitor supervision
+    # Manager-owned service supervision
     # ------------------------------------------------------------------
-    def _task_monitor_supervision_allowed(self) -> bool:
-        """Return whether this manager may supervise a task monitor."""
+    def _service_supervision_allowed(self) -> bool:
+        """Return whether this manager may launch singleton services."""
 
-        if not self._task_monitor_enabled:
-            return False
         if self._queue_names["inbox"] != WEFT_SPAWN_REQUESTS_QUEUE:
             return False
         if self._draining or self.should_stop or self._dispatch_suspension is not None:
             return False
         return self._evaluate_dispatch_ownership().state == "self"
+
+    def _task_monitor_supervision_allowed(self) -> bool:
+        """Return whether this manager may supervise a task monitor."""
+
+        return self._task_monitor_enabled and self._service_supervision_allowed()
+
+    def _build_heartbeat_spawn_payload(self) -> dict[str, Any]:
+        """Build the manager-owned spawn envelope for the heartbeat service."""
+
+        spec_section: dict[str, Any] = {
+            "type": "function",
+            "function_target": DEFAULT_FUNCTION_TARGET,
+            "persistent": True,
+            "enable_process_title": False,
+        }
+        weft_context = getattr(self.taskspec.spec, "weft_context", None)
+        if weft_context is not None:
+            spec_section["weft_context"] = str(weft_context)
+
+        return {
+            "taskspec": {
+                "name": "heartbeat-service",
+                "spec": spec_section,
+                "metadata": service_metadata(
+                    key=INTERNAL_SERVICE_KEY_HEARTBEAT,
+                    lifecycle="ensure",
+                    extra={
+                        "internal": True,
+                        "role": "heartbeat_service",
+                    },
+                ),
+            },
+            "inbox_message": None,
+            INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY: (
+                INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT
+            ),
+            INTERNAL_RUNTIME_ENVELOPE_ENDPOINT_NAME_KEY: (
+                INTERNAL_HEARTBEAT_ENDPOINT_NAME
+            ),
+        }
 
     def _build_task_monitor_spawn_payload(self) -> dict[str, Any]:
         """Build the manager-owned spawn envelope for the supervised monitor."""
@@ -1754,10 +1861,14 @@ class Manager(BaseTask):
             "taskspec": {
                 "name": "task-monitor",
                 "spec": spec_section,
-                "metadata": {
-                    "internal": True,
-                    "role": "task_monitor",
-                },
+                "metadata": service_metadata(
+                    key=INTERNAL_SERVICE_KEY_TASK_MONITOR,
+                    lifecycle="ensure",
+                    extra={
+                        "internal": True,
+                        "role": "task_monitor",
+                    },
+                ),
             },
             "inbox_message": {
                 "type": "task_monitor_wakeup",
@@ -1768,44 +1879,279 @@ class Manager(BaseTask):
             ),
         }
 
-    def _enqueue_task_monitor_request(self) -> bool:
-        """Enqueue one internal monitor spawn request on this manager inbox."""
+    def _heartbeat_service_spec(self) -> ManagedServiceSpec:
+        return ManagedServiceSpec(
+            key=INTERNAL_SERVICE_KEY_HEARTBEAT,
+            lifecycle="ensure",
+            spawn_payload=self._build_heartbeat_spawn_payload(),
+        )
 
-        payload = self._build_task_monitor_spawn_payload()
+    def _task_monitor_service_spec(self) -> ManagedServiceSpec:
+        return ManagedServiceSpec(
+            key=INTERNAL_SERVICE_KEY_TASK_MONITOR,
+            lifecycle="ensure",
+            spawn_payload=self._build_task_monitor_spawn_payload(),
+            restart_backoff_ns=self._task_monitor_restart_backoff_ns,
+        )
+
+    def _enqueue_managed_service_request(self, service: ManagedServiceSpec) -> bool:
+        """Enqueue one manager-owned service spawn request."""
+
         try:
             self._queue(self._queue_names["inbox"]).write(
-                json.dumps(payload, ensure_ascii=False)
+                json.dumps(service.spawn_payload, ensure_ascii=False)
             )
         except (BrokerError, OSError, RuntimeError):
             logger.warning(
-                "Failed to enqueue task-monitor spawn request", exc_info=True
+                "Failed to enqueue managed service %s", service.key, exc_info=True
             )
             return False
-        self._task_monitor_spawn_pending = True
+        state = self._service_state(service.key)
+        state.spawn_pending = True
+        state.launched_once = True
         return True
+
+    def _enqueue_task_monitor_request(self) -> bool:
+        """Enqueue one internal monitor spawn request on this manager inbox."""
+
+        return self._enqueue_managed_service_request(self._task_monitor_service_spec())
+
+    def _tracked_service_candidate(self, service_key: str) -> ServiceCandidate | None:
+        for tid, child in list(self._child_processes.items()):
+            child_service_key = child.service_key
+            if child_service_key is None and child.internal_role == (
+                INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR
+            ):
+                child_service_key = INTERNAL_SERVICE_KEY_TASK_MONITOR
+            if child_service_key is None and child.internal_role == (
+                INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT
+            ):
+                child_service_key = INTERNAL_SERVICE_KEY_HEARTBEAT
+            if child_service_key is None and child.autostart_source:
+                child_service_key = child.autostart_source
+            if child_service_key != service_key:
+                continue
+            if self._child_has_exited(child):
+                continue
+            return ServiceCandidate(
+                key=service_key,
+                tid=tid,
+                state="live",
+                source="manager-child",
+            )
+        return None
+
+    def _latest_tid_runtime_handle(self, tid: str) -> RunnerHandle | None:
+        queue = self._queue(WEFT_TID_MAPPINGS_QUEUE)
+        latest_payload: dict[str, Any] | None = None
+        latest_timestamp = -1
+        for payload, timestamp in iter_queue_json_entries(queue):
+            if payload.get("full") != tid or timestamp < latest_timestamp:
+                continue
+            latest_payload = payload
+            latest_timestamp = timestamp
+        if latest_payload is None:
+            return None
+
+        handle_payload = latest_payload.get("runtime_handle")
+        if not isinstance(handle_payload, Mapping):
+            return None
+        try:
+            return RunnerHandle.from_dict(handle_payload)
+        except ValueError:
+            return None
+
+    def _service_candidate_from_task_log(
+        self,
+        *,
+        service_key: str,
+        tid: str,
+        payload: Mapping[str, Any],
+        timestamp: int,
+    ) -> ServiceCandidate:
+        status = payload.get("status")
+        if isinstance(status, str) and status in TERMINAL_TASK_STATUSES:
+            return ServiceCandidate(
+                key=service_key,
+                tid=tid,
+                state="terminal",
+                source="task-log",
+                timestamp=timestamp,
+                reason=status,
+            )
+
+        handle = self._latest_tid_runtime_handle(tid)
+        if handle is not None and handle_has_live_host_process(handle):
+            return ServiceCandidate(
+                key=service_key,
+                tid=tid,
+                state="live",
+                source="tid-mapping",
+                timestamp=timestamp,
+            )
+
+        ctrl_queues = self._service_candidate_control_queues(payload)
+        if ctrl_queues is not None:
+            ctrl_in_name, ctrl_out_name = ctrl_queues
+            probe = send_keyed_ping_probe(
+                self._manager_context(),
+                tid=tid,
+                ctrl_in_name=ctrl_in_name,
+                ctrl_out_name=ctrl_out_name,
+                timeout=0.15,
+            )
+            if probe.matched is not None:
+                return ServiceCandidate(
+                    key=service_key,
+                    tid=tid,
+                    state="live",
+                    source="control-pong",
+                    timestamp=timestamp,
+                )
+            if probe.error:
+                return ServiceCandidate(
+                    key=service_key,
+                    tid=tid,
+                    state="uncertain",
+                    source="control-pong",
+                    timestamp=timestamp,
+                    reason=probe.error,
+                )
+
+        return ServiceCandidate(
+            key=service_key,
+            tid=tid,
+            state="terminal",
+            source="task-log",
+            timestamp=timestamp,
+            reason="non-terminal state without live runtime proof or PONG",
+        )
+
+    @staticmethod
+    def _service_candidate_control_queues(
+        payload: Mapping[str, Any],
+    ) -> tuple[str, str] | None:
+        taskspec_dump = payload.get("taskspec")
+        if not isinstance(taskspec_dump, dict):
+            return None
+        io_section = taskspec_dump.get("io")
+        if not isinstance(io_section, dict):
+            return None
+        control = io_section.get("control")
+        if not isinstance(control, dict):
+            return None
+        ctrl_in_name = control.get("ctrl_in")
+        ctrl_out_name = control.get("ctrl_out")
+        if not isinstance(ctrl_in_name, str) or not ctrl_in_name:
+            return None
+        if not isinstance(ctrl_out_name, str) or not ctrl_out_name:
+            return None
+        return ctrl_in_name, ctrl_out_name
+
+    def _manager_context(self) -> WeftContext:
+        spec_context = getattr(self.taskspec.spec, "weft_context", None)
+        ctx = build_context(spec_context=spec_context, config=self._config)
+        broker_target = self._db_path
+        if isinstance(broker_target, BrokerTarget):
+            return replace(
+                ctx,
+                broker_target=broker_target,
+                database_path=broker_target.target_path,
+                broker_config={
+                    key: value
+                    for key, value in self._config.items()
+                    if key.startswith("BROKER_")
+                },
+            )
+        return ctx
+
+    def _observed_service_candidates(self, service_key: str) -> list[ServiceCandidate]:
+        candidates: list[ServiceCandidate] = []
+        tracked = self._tracked_service_candidate(service_key)
+        if tracked is not None:
+            candidates.append(tracked)
+
+        latest_by_tid: dict[str, tuple[Mapping[str, Any], int]] = {}
+        queue = self._queue(WEFT_GLOBAL_LOG_QUEUE)
+        for payload, timestamp in iter_queue_json_entries(queue):
+            tid = payload.get("tid")
+            if not isinstance(tid, str) or not tid:
+                continue
+            taskspec_dump = payload.get("taskspec")
+            if not isinstance(taskspec_dump, dict):
+                continue
+            metadata = taskspec_dump.get("metadata") or {}
+            if not isinstance(metadata, dict):
+                continue
+            candidate_key = service_key_from_metadata(metadata)
+            if candidate_key is None:
+                candidate_key = metadata.get("autostart_source")
+            if candidate_key != service_key:
+                continue
+            existing = latest_by_tid.get(tid)
+            if existing is None or existing[1] <= timestamp:
+                latest_by_tid[tid] = (payload, timestamp)
+
+        for tid, (logged_payload, timestamp) in latest_by_tid.items():
+            candidates.append(
+                self._service_candidate_from_task_log(
+                    service_key=service_key,
+                    tid=tid,
+                    payload=logged_payload,
+                    timestamp=timestamp,
+                )
+            )
+        return candidates
+
+    def _service_has_owner_evidence(self, service_key: str) -> bool:
+        candidates = self._observed_service_candidates(service_key)
+        live = select_canonical_live_candidate(candidates)
+        if live is not None:
+            self._service_state(service_key).active_tid = live.tid
+            return True
+        return any(candidate.state == "uncertain" for candidate in candidates)
+
+    def _tick_managed_service(
+        self, service: ManagedServiceSpec, *, force: bool = False
+    ) -> None:
+        """Ensure a desired manager-owned service according to its lifecycle."""
+
+        if not self._service_supervision_allowed():
+            return
+
+        state = self._service_state(service.key)
+        if (
+            state.active_tid is not None
+            and state.active_tid in self._child_processes
+            and not self._child_has_exited(self._child_processes[state.active_tid])
+        ):
+            return
+        if state.spawn_pending:
+            return
+        if self._service_has_owner_evidence(service.key):
+            return
+        if service.lifecycle == "once" and state.launched_once:
+            return
+
+        now_ns = time.time_ns()
+        if not force and state.next_allowed_ns and now_ns < state.next_allowed_ns:
+            return
+        if self._enqueue_managed_service_request(service):
+            state.next_allowed_ns = 0
+
+    def _tick_internal_services(self, *, force: bool = False) -> None:
+        """Ensure built-in Manager-owned services for the elected leader."""
+
+        self._tick_managed_service(self._heartbeat_service_spec(), force=force)
+        if self._task_monitor_enabled:
+            self._tick_managed_service(self._task_monitor_service_spec(), force=force)
 
     def _tick_task_monitor(self, *, force: bool = False) -> None:
         """Ensure one supervised TaskMonitor child exists for the leader manager."""
 
         if not self._task_monitor_supervision_allowed():
             return
-        if (
-            self._task_monitor_tid is not None
-            and self._task_monitor_tid in self._child_processes
-        ):
-            return
-        if self._task_monitor_spawn_pending:
-            return
-
-        now_ns = time.time_ns()
-        if (
-            not force
-            and self._task_monitor_next_start_allowed_ns
-            and now_ns < self._task_monitor_next_start_allowed_ns
-        ):
-            return
-        if self._enqueue_task_monitor_request():
-            self._task_monitor_next_start_allowed_ns = 0
+        self._tick_managed_service(self._task_monitor_service_spec(), force=force)
 
     # ------------------------------------------------------------------
     # Autostart handling
@@ -1980,11 +2326,26 @@ class Manager(BaseTask):
 
         candidate["metadata"]["autostart_source"] = source
         candidate["metadata"]["autostart"] = True
+        candidate = apply_service_metadata(
+            candidate,
+            key=source,
+            lifecycle="ensure"
+            if self._autostart_manifest_mode(manifest) == "ensure"
+            else "once",
+        )
 
         if isinstance(defaults, dict) and "input" in defaults:
             inbox_message = defaults.get("input")
 
         return candidate, inbox_message
+
+    @staticmethod
+    def _autostart_manifest_mode(manifest: Mapping[str, Any]) -> str:
+        policy = manifest.get("policy")
+        if not isinstance(policy, dict):
+            return "once"
+        mode = policy.get("mode", "once")
+        return mode if isinstance(mode, str) else "once"
 
     def _active_autostart_sources(self) -> set[str]:
         tracked_sources = {
@@ -2040,13 +2401,28 @@ class Manager(BaseTask):
             "taskspec": payload,
             "inbox_message": inbox_message,
         }
-        serialized_payload = json.dumps(spawn_payload, ensure_ascii=False)
-        try:
-            self._queue(self._queue_names["inbox"]).write(serialized_payload)
-        except (BrokerError, OSError, RuntimeError):
-            logger.warning("Failed to enqueue autostart spawn request", exc_info=True)
+        metadata = payload.get("metadata")
+        service_key = service_key_from_metadata(metadata)
+        if service_key is None and isinstance(metadata, dict):
+            source = metadata.get("autostart_source")
+            service_key = source if isinstance(source, str) and source else None
+        if service_key is None:
+            logger.warning("Autostart payload missing service key")
             return False
-        return True
+        lifecycle = (
+            "ensure"
+            if isinstance(metadata, dict)
+            and metadata.get(INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY) == "ensure"
+            else "once"
+        )
+        return self._enqueue_managed_service_request(
+            ManagedServiceSpec(
+                key=service_key,
+                lifecycle=cast(Literal["once", "ensure"], lifecycle),
+                spawn_payload=spawn_payload,
+                autostart_source=service_key,
+            )
+        )
 
     def _prune_autostart_state(self, manifest_sources: set[str]) -> None:
         stale_sources = [
@@ -2054,6 +2430,7 @@ class Manager(BaseTask):
         ]
         for source in stale_sources:
             self._autostart_state.pop(source, None)
+            self._managed_service_state.pop(source, None)
             self._autostart_launched.discard(source)
 
         stale_launched = {
@@ -2120,6 +2497,10 @@ class Manager(BaseTask):
             state.setdefault("restarts", 0)
             state.setdefault("next_allowed_ns", 0)
             state.setdefault("launched_once", False)
+            service_state = self._service_state(source)
+            service_state.restarts = int(state["restarts"])
+            service_state.next_allowed_ns = int(state["next_allowed_ns"])
+            service_state.launched_once = bool(state["launched_once"])
 
             if mode == "once":
                 if source in self._autostart_launched or source in active_sources:
@@ -2174,6 +2555,9 @@ class Manager(BaseTask):
                     state["next_allowed_ns"] = now_ns + int(delay * 1_000_000_000)
                 else:
                     state["next_allowed_ns"] = 0
+                service_state.restarts = int(state["restarts"])
+                service_state.next_allowed_ns = int(state["next_allowed_ns"])
+                service_state.launched_once = bool(state["launched_once"])
 
         if next_backoff_due_ns is not None:
             self._autostart_last_scan_ns = min(
@@ -2227,7 +2611,7 @@ class Manager(BaseTask):
         if self._maybe_yield_leadership():
             return
         self._cleanup_children()
-        self._tick_task_monitor()
+        self._tick_internal_services()
         self._tick_autostart()
         self._update_idle_activity_from_broker()
         now_ns = time.time_ns()

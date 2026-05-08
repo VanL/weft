@@ -132,11 +132,17 @@ def _task_process_entry(
             status = task.taskspec.state.status
             if status in TERMINAL_TASK_STATUSES or task.should_stop:
                 break
+            wait_timeout = poll_interval
+            next_wait_timeout = getattr(task, "next_wait_timeout", None)
+            if callable(next_wait_timeout):
+                candidate_timeout = next_wait_timeout()
+                if candidate_timeout is not None:
+                    wait_timeout = max(0.0, float(candidate_timeout))
             wait_for_activity = getattr(task, "wait_for_activity", None)
             if callable(wait_for_activity):
-                wait_for_activity(timeout=poll_interval)
+                wait_for_activity(timeout=wait_timeout)
             else:
-                time.sleep(poll_interval)
+                time.sleep(wait_timeout)
     finally:
         stop = getattr(task, "stop", None)
         if callable(stop):

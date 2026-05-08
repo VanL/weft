@@ -25,6 +25,7 @@ See also:
 - [`docs/plans/2026-05-06-terminal-publication-hardening-plan.md`](../plans/2026-05-06-terminal-publication-hardening-plan.md)
 - [`docs/plans/2026-05-07-lifecycle-monitor-archive-sink-plan.md`](../plans/2026-05-07-lifecycle-monitor-archive-sink-plan.md)
 - [`docs/plans/2026-05-07-phase-7-task-monitor-supervision-and-cleanup-plan.md`](../plans/2026-05-07-phase-7-task-monitor-supervision-and-cleanup-plan.md)
+- [`docs/plans/2026-05-08-manager-owned-internal-service-supervision-plan.md`](../plans/2026-05-08-manager-owned-internal-service-supervision-plan.md)
 
 ## 1. TaskSpec (`weft/core/taskspec/model.py`) [CC-1]
 
@@ -135,13 +136,18 @@ Current task families:
   monitor service. Its foreground `scan_once()` path scans `weft.log.tasks`
   with generator-based peek semantics. Its persistent path wakes from its own
   `T{tid}.inbox`, scans task-log history by high-water cursor, and calls the
-  configured task-monitor processor. The current supervised monitor is
-  non-destructive: it does not consume, reserve, move, or delete lifecycle
-  messages.
+  configured task-monitor processor. The launcher asks the persistent monitor
+  for its next wait timeout so the monitor sleeps until heartbeat/local due
+  time or task-local input instead of polling at the default task-process
+  interval. The supervised monitor builds read-only lifecycle and cleanup
+  candidate snapshots, including Weft lifecycle anomalies, domain failures,
+  stale runtime-state rows, and superseded task-log rows. It is
+  non-destructive in the current contract: it does not consume, reserve, move,
+  or delete lifecycle messages.
 - `PipelineTask`: internal orchestrator for first-class linear pipelines
 - `PipelineEdgeTask`: generated one-shot edge task for pipeline handoff
-- `HeartbeatTask`: internal runtime-owned interval emitter for runtime-scoped
-  periodic queue writes
+- `HeartbeatTask`: manager-supervised internal interval emitter for
+  runtime-scoped periodic queue writes
 - `Debugger`: in-process diagnostic command surface for interactive debugging
 
 Interactive command sessions reuse the same task/runtime conventions rather

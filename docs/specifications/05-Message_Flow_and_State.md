@@ -180,7 +180,7 @@ _Implementation mapping_: `weft/core/tasks/base.py`
 `register_endpoint_name()` and `unregister_endpoint_name()`;
 `weft/core/endpoints.py`; `weft/commands/queue.py`.
 
-### 3.2 Heartbeat Service Flow
+### 3.2 Heartbeat Service Flow [MF-3.2]
 
 Current heartbeat flow is task-shaped:
 
@@ -195,9 +195,10 @@ Current rules:
   multiplexes many registrations in one process
 - heartbeat registrations are runtime-only and disappear on service or Weft
   restart
-- helper startup ensures a manager exists, submits the internal heartbeat
-  runtime through the ordinary spawn path, and waits for live endpoint
-  resolution of `_weft.heartbeat`
+- helper startup ensures a manager exists and waits for a live manager-owned
+  heartbeat endpoint. The helper does not submit heartbeat tasks directly;
+  heartbeat launch and restart belong to the manager-owned internal service
+  path.
 - registration messages are ordinary inbox payloads with `action` `upsert` or
   `cancel`
 - `upsert` resets `next_due_at` to `now + interval_seconds`
@@ -207,8 +208,10 @@ Current rules:
   future slot
 - if a due registration is late, the service coalesces to one emit and does
   not replay every missed slot
-- duplicate heartbeat services converge by loser exit once a lower-TID live
-  owner is positively visible
+- duplicate heartbeat services converge through the manager-owned singleton
+  service contract. Live ownership is proved by tracked child state, a live
+  runtime handle, or keyed `PING`/`PONG`; stale non-terminal rows without live
+  proof do not block replacement.
 - the heartbeat service is an interval emitter, not a scheduler: there is no
   cron syntax, wall-clock scheduling, timezone handling, or missed-run replay
 - the supervised `TaskMonitorTask` uses heartbeat registrations for periodic
@@ -217,7 +220,8 @@ Current rules:
   bounded local interval
 
 _Implementation mapping_: `weft/core/heartbeat.py`;
-`weft/core/tasks/heartbeat.py`; `weft/core/endpoints.py`.
+`weft/core/tasks/heartbeat.py`; `weft/core/manager.py`;
+`weft/core/manager_services.py`; `weft/core/endpoints.py`.
 
 ### 4. Pipeline Flow [MF-4]
 
@@ -256,15 +260,21 @@ Current rules:
   operational cursors only; deleting or corrupting them may affect duplicate
   log output, but it must not change task lifecycle truth, public status,
   result materialization, or cleanup decisions
-- task-monitor log records are observational output only in the
-  current release. The monitor does not delete, reserve, move, prune, reap, or
-  mark broker messages as cleanup candidates
+- task-monitor log records and processor summaries are operational output only
+  in the current release. The monitor may mark broker messages as read-only
+  lifecycle or cleanup candidates, but it does not delete, reserve, move,
+  prune, reap, acknowledge, or unclaim them.
 - when enabled, the canonical manager supervises one internal
   `TaskMonitorTask`. The supervised monitor reads the same task-log evidence by
-  generator/high-water cursor, builds non-destructive part-1 candidates such as
-  `task_log_tid_seen`, calls the configured processor, and advances its
-  operational checkpoint only after a successful processor result. The manager
-  owns only child supervision; it does not scan lifecycle queues.
+  generator/high-water cursor, reduces lifecycle rows by TID, builds
+  non-destructive candidates such as `domain_failure`,
+  `result_without_terminal`, `claimed_result_without_terminal`,
+  `runtime_conflict`, `superseded_tid_mapping`, `stale_manager_registry`, and
+  task-log/task-local retention classes for superseded logs and terminal
+  outbox/ctrl_out rows with independent terminal-log proof, calls the
+  configured processor, and advances its operational checkpoint only after a
+  successful processor result. The manager owns only child supervision; it does
+  not scan lifecycle queues.
 - `weft system prune` is a separate foreground maintenance command.
   `--family runtime-state` reports or deletes exact message IDs from supported
   `weft.state.*` queues after conservative live/recent checks.
@@ -332,10 +342,12 @@ _Implementation mapping_: `weft/core/tasks/base.py` `_report_state_change`;
 supervised non-destructive monitor task;
 `weft/core/task_monitoring.py` task-monitor runtime config, candidate, and
 processor contract;
+`weft/core/task_evidence.py` shared lifecycle/result evidence classification;
+`weft/core/outbox.py` shared outbox decoding;
 `weft/commands/status.py` and `weft/commands/system.py` log replay and snapshot
 collection;
 `weft/commands/result.py` materialization and completion waits;
-`weft/commands/task_evidence.py`;
+`weft/commands/task_evidence.py` compatibility re-exports;
 `weft/commands/task_monitor.py` archive summaries and checkpoints;
 `weft/commands/runtime_prune.py` explicit runtime-only prune reports and
 exact-message deletion;
@@ -413,18 +425,22 @@ in-memory startup state.
 Autostart manifests follow the same overall spawn path. Current autostart
 runtime support covers stored task specs and stored pipeline targets. Pipeline
 targets are compiled into the same top-level pipeline task submitted by
-`weft run --pipeline`, and internal runtime classes such as pipelines and the
-built-in heartbeat service travel on the manager-owned spawn envelope rather
-than public TaskSpec metadata. The manager only treats a manifest launch or restart
-as consumed after the synthesized spawn request is successfully written to the
-ordinary manager inbox queue, and ensure-mode manifests are rescanned
-immediately after a tracked autostart child exits.
+`weft run --pipeline`, and internal runtime classes such as pipelines,
+heartbeat, and TaskMonitor travel on the manager-owned spawn envelope rather
+than public TaskSpec metadata. Autostarts, heartbeat, and TaskMonitor share
+manager-owned service metadata for `once`/`ensure` lifecycle policy. The
+manager only treats a manifest launch or restart as consumed after the
+synthesized spawn request is successfully written to the ordinary manager inbox
+queue, and ensure-mode manifests are rescanned immediately after a tracked
+autostart child exits.
 
 _Implementation mapping_: `weft/core/manager.py` — `Manager._handle_work_message`,
 `Manager._build_child_spec`, `Manager._apply_final_dispatch_fence`,
 `Manager._requeue_reserved_spawn_request`,
 `Manager._record_dispatch_recovery_failure`,
-`Manager._control_allows_child_launch`, `Manager.process_once`;
+`Manager._control_allows_child_launch`, `Manager._tick_managed_service`,
+`Manager._enqueue_managed_service_request`, `Manager.process_once`;
+`weft/core/manager_services.py`;
 `weft/core/spawn_requests.py`;
 `weft/cli/run.py`; `weft/commands/_spawn_submission.py` —
 `_inspect_task_log_for_tid`, `_reconcile_submitted_spawn_once`.
@@ -600,8 +616,9 @@ system pruning:
 
 - task-owned cleanup may remove spilled output when `cleanup_on_exit` is enabled
 - there is no built-in age-based output sweeper in the current contract
-- the supervised task monitor exists in the current contract, but phase 7
-  part 1 is report-only/non-destructive and performs no broker cleanup
+- the supervised task monitor exists in the current contract. It classifies
+  read-only lifecycle and cleanup candidates, but it is report-only and
+  performs no broker cleanup until a later destructive processor contract lands
 - `weft system prune --family task-log|task-local|retention` is an explicit
   operator action, not a background sweeper. Ordinary apply mode requires an
   archive artifact before deletion. Force apply mode is a human override for
@@ -645,6 +662,9 @@ Current rules:
   claimed outbox residue, malformed/unknown-shape rows, and inbox/reserved work
   unless the class is safe for ordinary deletion. `--force --apply` is the
   explicit human override for those ordinary protections.
+- the manager-supervised `TaskMonitorTask` may report the same families of
+  stale runtime-state and retention candidates for observation, but it must not
+  apply deletion or archive side effects in the current contract.
 - `weft system tidy` handles backend-native cleanup of empty queues and broker
   maintenance
 - there is no autonomous destructive queue-lifecycle service in the current
@@ -682,3 +702,4 @@ management live in the companion doc:
 - [`docs/plans/2026-04-16-autostart-hardening-and-contract-alignment-plan.md`](../plans/2026-04-16-autostart-hardening-and-contract-alignment-plan.md)
 - [`docs/plans/2026-04-16-pipeline-autostart-extension-plan.md`](../plans/2026-04-16-pipeline-autostart-extension-plan.md)
 - [`docs/plans/2026-04-17-canonical-owner-fence-plan.md`](../plans/2026-04-17-canonical-owner-fence-plan.md)
+- [`docs/plans/2026-05-08-manager-owned-internal-service-supervision-plan.md`](../plans/2026-05-08-manager-owned-internal-service-supervision-plan.md)

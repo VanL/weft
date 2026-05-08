@@ -125,8 +125,8 @@ def test_task_monitor_process_once_calls_processor_without_consuming_task_log(
     request = PROCESSOR_REQUESTS[0]
     assert [candidate.tid for candidate in request.candidates] == [
         "1778084345905438720",
-        "1778084345905438720",
     ]
+    assert request.candidates[0].candidate_class == "active"
     assert all(candidate.safe_to_delete is False for candidate in request.candidates)
     remaining = [
         json.loads(message)
@@ -134,6 +134,65 @@ def test_task_monitor_process_once_calls_processor_without_consuming_task_log(
     ]
     assert payloads[0] in remaining
     assert payloads[1] in remaining
+
+
+def test_task_monitor_next_wait_timeout_is_capped_after_cycle(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, _make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_PROCESSOR": "tests.tasks.test_task_monitor:recording_processor",
+        }
+    )
+    task = TaskMonitorTask(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999988"),
+        config=config,
+    )
+    try:
+        task.process_once()
+
+        assert 0.0 < task.next_wait_timeout() <= 1.0
+    finally:
+        task.stop()
+
+
+def test_task_monitor_next_wait_timeout_returns_zero_for_pending_wakeup(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_PROCESSOR": "tests.tasks.test_task_monitor:recording_processor",
+        }
+    )
+    task = TaskMonitorTask(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999987"),
+        config=config,
+    )
+    try:
+        task.process_once()
+        make_queue(task.taskspec.io.inputs["inbox"]).write(
+            json.dumps({"type": "task_monitor_wakeup"})
+        )
+
+        assert task.next_wait_timeout() == 0.0
+    finally:
+        task.stop()
 
 
 def test_task_monitor_ping_includes_health_and_preserves_task_log(
@@ -157,17 +216,22 @@ def test_task_monitor_ping_includes_health_and_preserves_task_log(
     log_queue.write(json.dumps({"event": "work_started", "tid": "1778084345905438720"}))
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
     ctrl_out = make_queue(spec.io.control["ctrl_out"])
-    ctrl_in.write(json.dumps({"command": CONTROL_PING, "request_id": "ping-1"}))
+    ctrl_in.write(json.dumps({"command": CONTROL_PING, "request_id": "ping-before"}))
 
     task = TaskMonitorTask(db_path, spec, config=config)
     try:
+        task.process_once()
+        ctrl_in.write(json.dumps({"command": CONTROL_PING, "request_id": "ping-after"}))
         task.process_once()
     finally:
         task.stop()
 
     responses = [json.loads(item) for item in ctrl_out.peek_generator()]
     pong = next(
-        response for response in responses if response["command"] == CONTROL_PING
+        response
+        for response in responses
+        if response["command"] == CONTROL_PING
+        and response.get("request_id") == "ping-after"
     )
     assert pong["status"] == "ok"
     assert pong["message"] == "PONG"
@@ -176,6 +240,8 @@ def test_task_monitor_ping_includes_health_and_preserves_task_log(
     assert pong["processor"] == "report_only"
     assert pong["interval_seconds"] == 60
     assert pong["batch_size"] == 10
+    assert pong["last_candidate_class_counts"] == {"active": 1}
+    assert pong["last_safe_to_delete_candidates"] == 0
     assert log_queue.peek_one() is not None
 
 

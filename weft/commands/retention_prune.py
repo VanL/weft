@@ -53,7 +53,8 @@ from weft._constants import (
     TERMINAL_TASK_STATUSES,
     WEFT_GLOBAL_LOG_QUEUE,
 )
-from weft.commands.task_evidence import (
+from weft.context import WeftContext, build_context
+from weft.core.task_evidence import (
     coerce_terminal_envelope,
     control_queue_names_for_tid,
     peek_final_outbox_evidence,
@@ -61,7 +62,6 @@ from weft.commands.task_evidence import (
     queue_names_for_tid,
     terminal_status_from_event,
 )
-from weft.context import WeftContext, build_context
 from weft.helpers import iter_queue_entries, iter_queue_json_entries
 
 RetentionFamily = Literal["task-local", "task-log", "retention"]

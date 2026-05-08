@@ -12,9 +12,9 @@ import pytest
 from tests.helpers.test_backend import prepare_project_root
 from tests.tasks.test_task_execution import make_function_taskspec
 from weft.commands import system as status_cmd
-from weft.commands import task_evidence
 from weft.commands import tasks as task_cmd
 from weft.context import build_context
+from weft.core import task_evidence
 from weft.core.tasks import Consumer
 
 pytestmark = [pytest.mark.shared]

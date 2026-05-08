@@ -40,6 +40,7 @@ always be rolled back from the public request queue.
 - [Persistent Agent Runtime Implementation Plan](../plans/2026-04-06-persistent-agent-runtime-implementation-plan.md) – references Manager Architecture for long-lived agent sessions.
 - [TaskSpec Clean Design Plan](../plans/2026-04-06-taskspec-clean-design-plan.md) – references Manager Architecture for TaskSpec schema alignment.
 - [Phase 7 Task Monitor Supervision And Cleanup Plan](../plans/2026-05-07-phase-7-task-monitor-supervision-and-cleanup-plan.md) – proposes manager-supervised `TaskMonitor` lifecycle and safe autonomous cleanup slices.
+- [Manager-Owned Internal Service Supervision Plan](../plans/2026-05-08-manager-owned-internal-service-supervision-plan.md) – unify manager-owned `once`/`ensure` reconciliation for heartbeat, TaskMonitor, and autostarts.
 
 ## Conceptual Model: Everything is a Task [MA-0]
 
@@ -108,23 +109,30 @@ Key responsibilities implemented in `weft/core/manager.py`:
    context, the manager scans `.weft/autostart/` for manifests that reference
    stored task specs or pipelines and launches each target through the ordinary
    manager spawn queue (`weft.spawn.requests`). Manifest lifecycle policy
-   (`once`/`ensure`) governs restarts while the manager is running. Launch and
-   restart accounting advances only after a spawn request is successfully
-   written. Ensure-mode manifests are reconsidered immediately after a tracked
-   autostart child exits. Scan bookkeeping for deleted manifest paths is
-   pruned during refresh so long-lived managers do not accumulate stale
-   manifest state indefinitely. Pipeline targets are compiled into the same
-   first-class pipeline task used by `weft run --pipeline` before the manager
-   enqueues the compiled top-level pipeline task on the spawn queue.
-7. **TaskMonitor supervision** – The canonical dispatch owner for
-   `weft.spawn.requests` supervises one internal `TaskMonitorTask` when
-   `WEFT_TASK_MONITOR_ENABLED` is true. The manager uses the same
+   (`once`/`ensure`) is represented with the same manager-owned service
+   metadata used by built-in singleton services. Launch and restart accounting
+   advances only after a spawn request is successfully written. Ensure-mode
+   manifests are reconsidered immediately after a tracked autostart child exits.
+   Scan bookkeeping for deleted manifest paths is pruned during refresh so
+   long-lived managers do not accumulate stale manifest state indefinitely.
+   Pipeline targets are compiled into the same first-class pipeline task used
+   by `weft run --pipeline` before the manager enqueues the compiled top-level
+   pipeline task on the spawn queue.
+7. **Managed internal services** – The canonical dispatch owner for
+   `weft.spawn.requests` supervises singleton runtime services through one
+   deterministic manager-owned service path. The built-in heartbeat service is
+   an `ensure` service. The internal `TaskMonitorTask` is also an `ensure`
+   service when `WEFT_TASK_MONITOR_ENABLED` is true. The manager uses the same
    dispatch-ownership/election view that gates child launches; non-leaders,
    draining managers, and dispatch-suspended managers do not start or restart
-   the monitor. The manager enqueues the monitor through its own inbox using a
-   manager-owned internal runtime envelope, tracks the child as supervision
-   rather than user work, and applies bounded restart backoff after exit. The
-   manager does not scan `weft.log.tasks` or run monitor processors itself.
+   singleton services. Live ownership can be proved by a tracked child, a live
+   runtime handle, or a matched keyed `PING`/`PONG`; stale non-terminal
+   task-log rows without live proof do not count as a live singleton. The
+   manager enqueues services through its own inbox using manager-owned internal
+   runtime envelopes, tracks these children as supervision rather than user
+   work, and applies bounded restart backoff after TaskMonitor exit. The
+   manager does not scan task-log history for cleanup and does not run monitor
+   processors itself.
 8. **Control channel** – In addition to STOP/STATUS, managers inherit the
   task control contract: `PING` replies with `PONG` plus a live task-local
   status snapshot on `ctrl_out`, echoing `request_id` for structured PING
@@ -139,8 +147,8 @@ _Implementation mapping_:
 - [MA-1.3] Initial payload delivery — `Manager._launch_child_task` (inbox seeding block).
 - [MA-1.4] Registry heartbeat and leadership view — `Manager._register_manager`, `Manager._unregister_manager`, `Manager._atexit_unregister`, `Manager._read_active_manager_records`, `Manager._active_manager_records`, `Manager._leader_tid`, `Manager._evaluate_dispatch_ownership`, `Manager._refresh_dispatch_suspension`, `Manager._maybe_yield_leadership`, `weft/commands/system.py::_collect_task_snapshot_records`, plus `weft/helpers.py::is_canonical_manager_record` and `weft/helpers.py::canonical_owner_tid`.
 - [MA-1.5] Idle timeout — `Manager.process_once` (idle-timeout check), `Manager._read_broker_timestamp`, `Manager._update_idle_activity_from_broker`.
-- [MA-1.6] Autostart manifests — `Manager._tick_autostart`, `Manager._prune_autostart_state`, `Manager._build_autostart_spawn_payload`, `Manager._load_autostart_manifest`, `Manager._load_autostart_taskspec`, `Manager._load_autostart_pipeline`, `Manager._active_autostart_sources`, `Manager._enqueue_autostart_request`, `Manager._cleanup_children`, plus `weft/core/pipelines.py::compile_linear_pipeline` for stored pipeline targets.
-- [MA-1.6a] TaskMonitor supervision — `Manager._tick_task_monitor`, `Manager._build_task_monitor_spawn_payload`, `Manager._enqueue_task_monitor_request`, `Manager._task_monitor_supervision_allowed`, `Manager._cleanup_children`, and `Manager._user_work_children`; runtime behavior lives in `weft/core/tasks/task_monitor.py` and processor contracts in `weft/core/task_monitoring.py`.
+- [MA-1.6] Autostart manifests — `Manager._tick_autostart`, `Manager._prune_autostart_state`, `Manager._build_autostart_spawn_payload`, `Manager._load_autostart_manifest`, `Manager._load_autostart_taskspec`, `Manager._load_autostart_pipeline`, `Manager._active_autostart_sources`, `Manager._enqueue_autostart_request`, `Manager._cleanup_children`, plus `weft/core/pipelines.py::compile_linear_pipeline` for stored pipeline targets. Autostarts share `weft/core/manager_services.py` metadata/state primitives with built-in singleton services.
+- [MA-1.6a] Managed internal service supervision — `Manager._tick_internal_services`, `Manager._tick_managed_service`, `Manager._service_supervision_allowed`, `Manager._build_heartbeat_spawn_payload`, `Manager._build_task_monitor_spawn_payload`, `Manager._observed_service_candidates`, `Manager._service_candidate_from_task_log`, `Manager._enqueue_managed_service_request`, `Manager._cleanup_children`, and `Manager._user_work_children`; shared service models live in `weft/core/manager_services.py`, runtime TaskMonitor behavior lives in `weft/core/tasks/task_monitor.py`, and processor contracts live in `weft/core/task_monitoring.py`.
 - [MA-1.7] Control channel — inherited from `BaseTask._handle_control_command` (`weft/core/tasks/base.py`) and extended by `Manager._control_snapshot_fields` (`weft/core/manager.py`); structured PING/PONG snapshots, STOP, STATUS, KILL handling.
 
 Current ownership-fence rules:

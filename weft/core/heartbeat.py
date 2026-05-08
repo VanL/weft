@@ -13,34 +13,24 @@ from collections.abc import Mapping
 from typing import Any
 
 from weft._constants import (
-    DEFAULT_FUNCTION_TARGET,
     INTERNAL_HEARTBEAT_ENDPOINT_NAME,
     INTERNAL_RUNTIME_ENDPOINT_NAME_KEY,
     INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
     INTERNAL_RUNTIME_TASK_CLASS_KEY,
+    INTERNAL_SERVICE_KEY_HEARTBEAT,
+    INTERNAL_SERVICE_KEY_METADATA_KEY,
     MANAGER_REGISTRY_POLL_INTERVAL,
     MANAGER_STARTUP_TIMEOUT_SECONDS,
+    TERMINAL_TASK_STATUSES,
+    WEFT_GLOBAL_LOG_QUEUE,
 )
 from weft.context import WeftContext
+from weft.core.control_probe import send_keyed_ping_probe
 from weft.core.endpoints import ResolvedEndpoint, resolve_endpoint
-from weft.core.spawn_requests import submit_spawn_request
+from weft.helpers import iter_queue_json_entries
 
-
-def _heartbeat_service_taskspec_payload(context: WeftContext) -> dict[str, Any]:
-    return {
-        "name": "heartbeat-service",
-        "spec": {
-            "type": "function",
-            "function_target": DEFAULT_FUNCTION_TARGET,
-            "persistent": True,
-            "weft_context": str(context.root),
-        },
-        "metadata": {
-            "role": "heartbeat_service",
-            INTERNAL_RUNTIME_TASK_CLASS_KEY: INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
-            INTERNAL_RUNTIME_ENDPOINT_NAME_KEY: INTERNAL_HEARTBEAT_ENDPOINT_NAME,
-        },
-    }
+HEARTBEAT_ENDPOINT_PROBE_TIMEOUT: float = 0.25
+"""Bounded PING/PONG probe timeout used when validating a heartbeat endpoint."""
 
 
 def _ensure_manager_running(context: WeftContext) -> None:
@@ -63,6 +53,70 @@ def _write_heartbeat_request(
         queue.close()
 
 
+def _latest_heartbeat_task_status(
+    context: WeftContext,
+    *,
+    tid: str,
+) -> str | None:
+    queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
+    latest_status: str | None = None
+    latest_timestamp = -1
+    try:
+        for payload, timestamp in iter_queue_json_entries(queue):
+            if payload.get("tid") != tid or timestamp < latest_timestamp:
+                continue
+            taskspec_dump = payload.get("taskspec")
+            if not isinstance(taskspec_dump, dict):
+                continue
+            metadata = taskspec_dump.get("metadata") or {}
+            if not isinstance(metadata, dict):
+                continue
+            is_heartbeat = (
+                metadata.get(INTERNAL_SERVICE_KEY_METADATA_KEY)
+                == INTERNAL_SERVICE_KEY_HEARTBEAT
+                or metadata.get(INTERNAL_RUNTIME_ENDPOINT_NAME_KEY)
+                == INTERNAL_HEARTBEAT_ENDPOINT_NAME
+                or metadata.get(INTERNAL_RUNTIME_TASK_CLASS_KEY)
+                == INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT
+            )
+            if not is_heartbeat:
+                continue
+            status = payload.get("status")
+            if isinstance(status, str):
+                latest_status = status
+                latest_timestamp = timestamp
+    finally:
+        queue.close()
+    return latest_status
+
+
+def _heartbeat_endpoint_is_live(
+    context: WeftContext,
+    *,
+    resolved: ResolvedEndpoint,
+) -> bool:
+    record = resolved.record
+    if record.status != "active":
+        return False
+
+    latest_status = _latest_heartbeat_task_status(context, tid=record.tid)
+    if latest_status in TERMINAL_TASK_STATUSES:
+        return False
+
+    if record.ctrl_in and record.ctrl_out:
+        probe = send_keyed_ping_probe(
+            context,
+            tid=record.tid,
+            ctrl_in_name=record.ctrl_in,
+            ctrl_out_name=record.ctrl_out,
+            timeout=HEARTBEAT_ENDPOINT_PROBE_TIMEOUT,
+        )
+        if probe.matched is not None:
+            return True
+
+    return latest_status is not None and latest_status not in TERMINAL_TASK_STATUSES
+
+
 def ensure_heartbeat_service(
     context: WeftContext,
     *,
@@ -71,26 +125,18 @@ def ensure_heartbeat_service(
     """Ensure the built-in heartbeat service is live and return its endpoint."""
 
     resolved = resolve_endpoint(context, INTERNAL_HEARTBEAT_ENDPOINT_NAME)
-    if resolved is not None:
+    if resolved is not None and _heartbeat_endpoint_is_live(context, resolved=resolved):
         return resolved
 
     _ensure_manager_running(context)
 
-    resolved = resolve_endpoint(context, INTERNAL_HEARTBEAT_ENDPOINT_NAME)
-    if resolved is None:
-        submit_spawn_request(
-            context.broker_target,
-            taskspec=_heartbeat_service_taskspec_payload(context),
-            work_payload=None,
-            config=context.broker_config,
-            inherited_weft_context=str(context.root),
-            allow_internal_runtime=True,
-        )
-
     deadline = time.monotonic() + startup_timeout
     while time.monotonic() < deadline:
         resolved = resolve_endpoint(context, INTERNAL_HEARTBEAT_ENDPOINT_NAME)
-        if resolved is not None:
+        if resolved is not None and _heartbeat_endpoint_is_live(
+            context,
+            resolved=resolved,
+        ):
             return resolved
         time.sleep(MANAGER_REGISTRY_POLL_INTERVAL)
 

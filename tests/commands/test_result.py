@@ -12,7 +12,6 @@ from weft._constants import WEFT_GLOBAL_LOG_QUEUE
 from weft.commands import _result_wait as result_wait
 from weft.commands import events as events_cmd
 from weft.commands import result as result_cmd
-from weft.commands import task_evidence
 from weft.commands._streaming import (
     collect_interactive_queue_output,
     handle_ctrl_stream,
@@ -26,6 +25,7 @@ from weft.commands.result import (
     cmd_result,
 )
 from weft.context import build_context
+from weft.core import task_evidence
 from weft.helpers import iter_queue_json_entries
 
 pytestmark = [pytest.mark.shared]

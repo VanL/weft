@@ -72,9 +72,9 @@ def test_ensure_heartbeat_service_starts_service_on_first_use(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     context = build_context(spec_context=tmp_path)
-    calls: dict[str, int] = {"ensure": 0, "submit": 0}
+    calls: dict[str, int] = {"ensure": 0}
     resolved = _resolved_endpoint("1777000000000000001")
-    responses = iter([None, None, resolved])
+    responses = iter([None, resolved])
 
     monkeypatch.setattr(
         "weft.core.heartbeat.resolve_endpoint",
@@ -85,15 +85,15 @@ def test_ensure_heartbeat_service_starts_service_on_first_use(
         lambda context_arg: calls.__setitem__("ensure", calls["ensure"] + 1),
     )
     monkeypatch.setattr(
-        "weft.core.heartbeat.submit_spawn_request",
-        lambda *args, **kwargs: calls.__setitem__("submit", calls["submit"] + 1),
+        "weft.core.heartbeat._heartbeat_endpoint_is_live",
+        lambda context_arg, *, resolved: True,
     )
     monkeypatch.setattr("weft.core.heartbeat.time.sleep", lambda _seconds: None)
 
     result = ensure_heartbeat_service(context)
 
     assert result == resolved
-    assert calls == {"ensure": 1, "submit": 1}
+    assert calls == {"ensure": 1}
 
 
 def test_upsert_heartbeat_reuses_live_service_without_second_startup(
@@ -113,10 +113,8 @@ def test_upsert_heartbeat_reuses_live_service_without_second_startup(
         lambda context_arg: (_ for _ in ()).throw(AssertionError("unexpected ensure")),
     )
     monkeypatch.setattr(
-        "weft.core.heartbeat.submit_spawn_request",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError("unexpected spawn")
-        ),
+        "weft.core.heartbeat._heartbeat_endpoint_is_live",
+        lambda context_arg, *, resolved: True,
     )
     monkeypatch.setattr(
         "weft.core.heartbeat._write_heartbeat_request",
@@ -156,10 +154,6 @@ def test_ensure_heartbeat_service_fails_on_startup_timeout(
     monkeypatch.setattr(
         "weft.core.heartbeat._ensure_manager_running",
         lambda context_arg: None,
-    )
-    monkeypatch.setattr(
-        "weft.core.heartbeat.submit_spawn_request",
-        lambda *args, **kwargs: 1777000000000000003,
     )
 
     with pytest.raises(RuntimeError, match="did not publish a live endpoint"):
