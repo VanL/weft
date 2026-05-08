@@ -1925,6 +1925,7 @@ class Manager(BaseTask):
         return self._enqueue_managed_service_request(self._task_monitor_service_spec())
 
     def _tracked_service_candidate(self, service_key: str) -> ServiceCandidate | None:
+        candidates: list[ServiceCandidate] = []
         for tid, child in list(self._child_processes.items()):
             child_service_key = child.service_key
             if child_service_key is None and child.internal_role == (
@@ -1941,13 +1942,30 @@ class Manager(BaseTask):
                 continue
             if self._child_has_exited(child):
                 continue
-            return ServiceCandidate(
-                key=service_key,
-                tid=tid,
-                state="live",
-                source="manager-child",
+            if self._child_terminal_proof_visible(tid, child):
+                candidates.append(
+                    ServiceCandidate(
+                        key=service_key,
+                        tid=tid,
+                        state="terminal",
+                        source="terminal-envelope",
+                        reason="tracked child published terminal proof",
+                    )
+                )
+                continue
+            candidates.append(
+                ServiceCandidate(
+                    key=service_key,
+                    tid=tid,
+                    state="live",
+                    source="manager-child",
+                )
             )
-        return None
+
+        live = select_canonical_live_candidate(candidates)
+        if live is not None:
+            return live
+        return next(iter(candidates), None)
 
     def _latest_tid_runtime_handle(self, tid: str) -> RunnerHandle | None:
         queue = self._queue(WEFT_TID_MAPPINGS_QUEUE)
@@ -2282,6 +2300,40 @@ class Manager(BaseTask):
         state.uncertain_since_ns = None
         state.last_uncertain_reason = None
 
+    def _apply_service_terminal_transition(
+        self,
+        service: ManagedServiceSpec,
+        state: ManagedServiceState,
+        candidate: ServiceCandidate,
+    ) -> None:
+        """Apply terminal service evidence to Manager-local service state."""
+
+        state.locally_terminal_tids.add(candidate.tid)
+        if state.active_tid != candidate.tid:
+            return
+
+        state.active_tid = None
+        state.spawn_pending = False
+        if service.lifecycle != "ensure":
+            state.next_allowed_ns = 0
+            return
+
+        if service.restart_backoff_ns <= 0:
+            state.next_allowed_ns = 0
+            return
+
+        base_ns = (
+            candidate.timestamp if candidate.timestamp is not None else time.time_ns()
+        )
+        state.next_allowed_ns = max(0, base_ns + service.restart_backoff_ns)
+        if service.autostart_source:
+            autostart_state = self._autostart_state.setdefault(
+                service.autostart_source,
+                {"restarts": 0, "next_allowed_ns": 0, "launched_once": False},
+            )
+            autostart_state["next_allowed_ns"] = state.next_allowed_ns
+            self._schedule_autostart_rescan_at(state.next_allowed_ns)
+
     def _service_has_owner_evidence(
         self,
         service_key: str,
@@ -2289,8 +2341,19 @@ class Manager(BaseTask):
     ) -> bool:
         if candidates is None:
             candidates = self._observed_service_candidates(service_key)
-        live = select_canonical_live_candidate(candidates)
+        terminal_tids = {
+            candidate.tid for candidate in candidates if candidate.state == "terminal"
+        }
         state = self._service_state(service_key)
+        if state.active_tid in terminal_tids:
+            state.active_tid = None
+        live = select_canonical_live_candidate(
+            [
+                candidate
+                for candidate in candidates
+                if candidate.tid not in terminal_tids
+            ]
+        )
         if live is not None:
             state.active_tid = live.tid
             self._reset_service_uncertainty(state)
@@ -2322,15 +2385,15 @@ class Manager(BaseTask):
         pending_keys = pending_keys or set()
         candidates = candidates or []
         state = self._service_state(service.key)
-        if self._tracked_service_candidate(service.key) is not None:
+        tracked = self._tracked_service_candidate(service.key)
+        if tracked is not None and tracked.state == "live":
             self._reset_service_uncertainty(state)
             return
-        if (
-            state.active_tid is not None
-            and state.active_tid in self._child_processes
-            and not self._child_has_exited(self._child_processes[state.active_tid])
-        ):
-            return
+        if tracked is not None and tracked.state == "terminal":
+            candidates = [tracked, *candidates]
+        for candidate in candidates:
+            if candidate.state == "terminal":
+                self._apply_service_terminal_transition(service, state, candidate)
         if state.spawn_pending and service.key not in pending_keys:
             state.spawn_pending = False
         if service.key in pending_keys:
@@ -2400,7 +2463,11 @@ class Manager(BaseTask):
         keys_needing_evidence: set[str] = set()
         for service in services:
             state = self._service_state(service.key)
-            if self._tracked_service_candidate(service.key) is not None:
+            tracked = self._tracked_service_candidate(service.key)
+            if tracked is not None and tracked.state == "live":
+                continue
+            if tracked is not None and tracked.state == "terminal":
+                keys_needing_evidence.add(service.key)
                 continue
             if state.spawn_pending and service.key in pending_keys:
                 continue

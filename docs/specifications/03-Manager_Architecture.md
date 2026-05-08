@@ -131,8 +131,11 @@ Key responsibilities implemented in `weft/core/manager.py`:
    dispatch-ownership/election view that gates child launches; non-leaders,
    draining managers, and dispatch-suspended managers do not start or restart
    singleton services. Live ownership can be proved by a tracked child, a live
-   runtime handle, or a matched keyed `PING`/`PONG`; stale non-terminal
-   task-log rows without live proof do not count as a live singleton. The
+   runtime handle, or a matched keyed `PING`/`PONG`; task-owned terminal proof
+   for that TID (terminal envelope or terminal task-log status) wins over host
+   process liveness, so a service process still unwinding after `control_kill`
+   is not a live singleton owner. Stale non-terminal task-log rows without
+   live proof do not count as a live singleton. The
    manager enqueues services through its own inbox using manager-owned internal
    runtime envelopes, tracks these children as supervision rather than user
    work, and applies bounded restart backoff after TaskMonitor exit. The
