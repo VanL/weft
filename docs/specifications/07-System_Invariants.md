@@ -207,6 +207,11 @@ _Implementation mapping_: `weft/core/manager.py`,
 - **MANAGER.14**: if dispatch ownership returns to `self` after suspension, the
   exact fenced spawn request is requeued to `weft.spawn.requests` before later
   inbox work resumes
+- **MANAGER.15**: manager-owned singleton services reduce all pending-spawn,
+  live, terminal, and uncertain evidence through one deterministic transition
+  table before Manager applies side effects. Terminal proof for a TID wins over
+  live evidence for the same TID, and uncertain evidence must become visible
+  degraded wait rather than an unqualified duplicate launch.
 
 ### Context Invariants
 
@@ -278,6 +283,7 @@ doc:
 - [`docs/plans/2026-05-07-phase-7-task-monitor-supervision-and-cleanup-plan.md`](../plans/2026-05-07-phase-7-task-monitor-supervision-and-cleanup-plan.md)
 - [`docs/plans/2026-05-08-manager-owned-internal-service-supervision-plan.md`](../plans/2026-05-08-manager-owned-internal-service-supervision-plan.md)
 - [`docs/plans/2026-05-08-phase-7-manager-service-reconciler-cleanup-plan.md`](../plans/2026-05-08-phase-7-manager-service-reconciler-cleanup-plan.md)
+- [`docs/plans/2026-05-08-deterministic-manager-service-reconciler-plan.md`](../plans/2026-05-08-deterministic-manager-service-reconciler-plan.md)
 - [`docs/plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md`](../plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md)
 - [`docs/plans/2026-04-17-canonical-owner-fence-plan.md`](../plans/2026-04-17-canonical-owner-fence-plan.md)
 

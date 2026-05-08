@@ -41,7 +41,6 @@ from weft._constants import (
     INTERNAL_SERVICE_KEY_TASK_MONITOR,
     INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY,
     MANAGED_SERVICE_PING_TIMEOUT_SECONDS,
-    MANAGED_SERVICE_UNCERTAIN_RETRY_LIMIT,
     MANAGER_CHILD_EXIT_POLL_INTERVAL,
     MANAGER_DISPATCH_RECOVERY_MAX_ATTEMPTS,
     MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS,
@@ -85,10 +84,13 @@ from weft.helpers import (
 from .control_probe import send_keyed_ping_probe
 from .launcher import launch_task_process
 from .manager_services import (
+    ManagedServiceDecision,
+    ManagedServiceEvidence,
     ManagedServiceSpec,
     ManagedServiceState,
     ServiceCandidate,
     apply_service_metadata,
+    reduce_managed_service_state,
     select_canonical_live_candidate,
     service_key_from_metadata,
     service_metadata,
@@ -2295,44 +2297,22 @@ class Manager(BaseTask):
         )
 
     @staticmethod
-    def _reset_service_uncertainty(state: ManagedServiceState) -> None:
-        state.uncertain_attempts = 0
-        state.uncertain_since_ns = None
-        state.last_uncertain_reason = None
-
-    def _apply_service_terminal_transition(
-        self,
-        service: ManagedServiceSpec,
+    def _apply_managed_service_decision_state(
         state: ManagedServiceState,
-        candidate: ServiceCandidate,
+        decision: ManagedServiceDecision,
     ) -> None:
-        """Apply terminal service evidence to Manager-local service state."""
+        """Apply pure reducer state updates to Manager-local state."""
 
-        state.locally_terminal_tids.add(candidate.tid)
-        if state.active_tid != candidate.tid:
-            return
-
-        state.active_tid = None
-        state.spawn_pending = False
-        if service.lifecycle != "ensure":
-            state.next_allowed_ns = 0
-            return
-
-        if service.restart_backoff_ns <= 0:
-            state.next_allowed_ns = 0
-            return
-
-        base_ns = (
-            candidate.timestamp if candidate.timestamp is not None else time.time_ns()
-        )
-        state.next_allowed_ns = max(0, base_ns + service.restart_backoff_ns)
-        if service.autostart_source:
-            autostart_state = self._autostart_state.setdefault(
-                service.autostart_source,
-                {"restarts": 0, "next_allowed_ns": 0, "launched_once": False},
-            )
-            autostart_state["next_allowed_ns"] = state.next_allowed_ns
-            self._schedule_autostart_rescan_at(state.next_allowed_ns)
+        next_state = decision.state
+        state.spawn_pending = next_state.spawn_pending
+        state.active_tid = next_state.active_tid
+        state.next_allowed_ns = next_state.next_allowed_ns
+        state.launched_once = next_state.launched_once
+        state.restarts = next_state.restarts
+        state.uncertain_attempts = next_state.uncertain_attempts
+        state.uncertain_since_ns = next_state.uncertain_since_ns
+        state.last_uncertain_reason = next_state.last_uncertain_reason
+        state.locally_terminal_tids = set(next_state.locally_terminal_tids)
 
     def _service_has_owner_evidence(
         self,
@@ -2341,33 +2321,23 @@ class Manager(BaseTask):
     ) -> bool:
         if candidates is None:
             candidates = self._observed_service_candidates(service_key)
-        terminal_tids = {
-            candidate.tid for candidate in candidates if candidate.state == "terminal"
-        }
         state = self._service_state(service_key)
-        if state.active_tid in terminal_tids:
-            state.active_tid = None
-        live = select_canonical_live_candidate(
-            [
-                candidate
-                for candidate in candidates
-                if candidate.tid not in terminal_tids
-            ]
+        decision = reduce_managed_service_state(
+            ManagedServiceSpec(
+                key=service_key,
+                lifecycle="ensure",
+                spawn_payload={},
+            ),
+            state,
+            ManagedServiceEvidence(candidates=tuple(candidates)),
+            now_ns=time.time_ns(),
         )
-        if live is not None:
-            state.active_tid = live.tid
-            self._reset_service_uncertainty(state)
-            return True
-        uncertain = [
-            candidate for candidate in candidates if candidate.state == "uncertain"
+        self._apply_managed_service_decision_state(state, decision)
+        return decision.action in [
+            "keep_live",
+            "wait_uncertain",
+            "degraded_wait",
         ]
-        if not uncertain:
-            self._reset_service_uncertainty(state)
-            return False
-        state.uncertain_attempts += 1
-        state.uncertain_since_ns = state.uncertain_since_ns or time.time_ns()
-        state.last_uncertain_reason = uncertain[0].reason
-        return state.uncertain_attempts < MANAGED_SERVICE_UNCERTAIN_RETRY_LIMIT
 
     def _tick_managed_service(
         self,
@@ -2383,44 +2353,39 @@ class Manager(BaseTask):
             return
 
         pending_keys = pending_keys or set()
-        candidates = candidates or []
+        candidates = list(candidates or [])
         state = self._service_state(service.key)
         tracked = self._tracked_service_candidate(service.key)
-        if tracked is not None and tracked.state == "live":
-            self._reset_service_uncertainty(state)
-            return
-        if tracked is not None and tracked.state == "terminal":
-            candidates = [tracked, *candidates]
-        for candidate in candidates:
-            if candidate.state == "terminal":
-                self._apply_service_terminal_transition(service, state, candidate)
-        if state.spawn_pending and service.key not in pending_keys:
-            state.spawn_pending = False
-        if service.key in pending_keys:
-            state.spawn_pending = True
-            return
-        if state.spawn_pending:
-            return
-        if self._service_has_owner_evidence(service.key, candidates):
-            return
-        if service.lifecycle == "once" and state.launched_once:
-            return
-        if (
-            service.lifecycle == "ensure"
-            and service.max_restarts is not None
-            and state.launched_once
-            and state.restarts >= service.max_restarts
+        if tracked is not None and not any(
+            candidate.tid == tracked.tid
+            and candidate.state == tracked.state
+            and candidate.source == tracked.source
+            for candidate in candidates
         ):
-            return
+            candidates.insert(0, tracked)
 
         now_ns = time.time_ns()
-        if not force and state.next_allowed_ns and now_ns < state.next_allowed_ns:
-            if service.autostart_source:
-                self._schedule_autostart_rescan_at(state.next_allowed_ns)
-            return
         launched_before = state.launched_once
+        decision = reduce_managed_service_state(
+            service,
+            state,
+            ManagedServiceEvidence(
+                pending_spawn=service.key in pending_keys,
+                candidates=tuple(candidates),
+            ),
+            now_ns=now_ns,
+        )
+        self._apply_managed_service_decision_state(state, decision)
+
+        if decision.action == "schedule_restart" and service.autostart_source:
+            self._schedule_autostart_rescan_at(state.next_allowed_ns)
+            return
+        if decision.action != "start_now":
+            return
         if not self._enqueue_managed_service_request(service):
             return
+        state.spawn_pending = True
+        state.launched_once = True
         if service.autostart_source:
             self._mark_autostart_enqueued(
                 service,
@@ -2861,27 +2826,7 @@ class Manager(BaseTask):
             service_state.next_allowed_ns = int(state["next_allowed_ns"])
             service_state.launched_once = bool(state["launched_once"])
 
-            if mode == "once":
-                if source in self._autostart_launched or service_state.launched_once:
-                    continue
-            elif mode == "ensure":
-                launched_once = bool(state.get("launched_once", False))
-                max_restarts = (
-                    policy.get("max_restarts") if isinstance(policy, dict) else None
-                )
-                parsed_max_restarts = (
-                    int(max_restarts)
-                    if isinstance(max_restarts, int)
-                    and not isinstance(max_restarts, bool)
-                    else None
-                )
-                if (
-                    launched_once
-                    and parsed_max_restarts is not None
-                    and int(state["restarts"]) >= parsed_max_restarts
-                ):
-                    continue
-            else:
+            if mode not in {"once", "ensure"}:
                 logger.warning("Unknown autostart policy mode %s for %s", mode, source)
                 continue
 

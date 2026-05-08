@@ -16,11 +16,18 @@ from weft._constants import (
     INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY,
     INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
     INTERNAL_RUNTIME_TASK_CLASS_KEY,
+    INTERNAL_SERVICE_KEY_HEARTBEAT,
+    INTERNAL_SERVICE_KEY_METADATA_KEY,
+    WEFT_GLOBAL_LOG_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
 )
 from weft.context import build_context
 from weft.core.endpoints import EndpointRecord, ResolvedEndpoint
-from weft.core.heartbeat import ensure_heartbeat_service, upsert_heartbeat
+from weft.core.heartbeat import (
+    _heartbeat_endpoint_is_live,
+    ensure_heartbeat_service,
+    upsert_heartbeat,
+)
 from weft.core.spawn_requests import submit_spawn_request
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 
@@ -158,6 +165,47 @@ def test_ensure_heartbeat_service_fails_on_startup_timeout(
 
     with pytest.raises(RuntimeError, match="did not publish a live endpoint"):
         ensure_heartbeat_service(context, startup_timeout=0.0)
+
+
+def test_heartbeat_endpoint_terminal_task_log_rejects_stale_endpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = build_context(spec_context=tmp_path)
+    tid = "1777000000000000900"
+    log_queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
+    try:
+        log_queue.write(
+            json.dumps(
+                {
+                    "tid": tid,
+                    "status": "completed",
+                    "taskspec": {
+                        "metadata": {
+                            INTERNAL_SERVICE_KEY_METADATA_KEY: (
+                                INTERNAL_SERVICE_KEY_HEARTBEAT
+                            ),
+                            INTERNAL_RUNTIME_TASK_CLASS_KEY: (
+                                INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT
+                            ),
+                            INTERNAL_RUNTIME_ENDPOINT_NAME_KEY: (
+                                INTERNAL_HEARTBEAT_ENDPOINT_NAME
+                            ),
+                        }
+                    },
+                }
+            )
+        )
+    finally:
+        log_queue.close()
+    monkeypatch.setattr(
+        "weft.core.heartbeat.send_keyed_ping_probe",
+        lambda *args, **kwargs: type(
+            "Probe", (), {"matched": object(), "error": None}
+        )(),
+    )
+
+    assert not _heartbeat_endpoint_is_live(context, resolved=_resolved_endpoint(tid))
 
 
 def test_internal_submit_spawn_request_preserves_internal_runtime_envelope(

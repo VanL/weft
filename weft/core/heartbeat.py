@@ -29,6 +29,7 @@ from weft._constants import (
 from weft.context import WeftContext
 from weft.core.control_probe import send_keyed_ping_probe
 from weft.core.endpoints import ResolvedEndpoint, resolve_endpoint
+from weft.core.manager_services import ServiceCandidate, summarize_service_candidates
 from weft.ext import RunnerHandle
 from weft.helpers import handle_has_live_host_process, iter_queue_json_entries
 
@@ -118,18 +119,38 @@ def _heartbeat_runtime_handle_is_live(
     return handle_has_live_host_process(handle)
 
 
-def _heartbeat_endpoint_is_live(
+def _heartbeat_endpoint_candidate(
     context: WeftContext,
     *,
     resolved: ResolvedEndpoint,
-) -> bool:
+) -> ServiceCandidate:
     record = resolved.record
     if record.status != "active":
-        return False
+        return ServiceCandidate(
+            key=INTERNAL_SERVICE_KEY_HEARTBEAT,
+            tid=record.tid,
+            state="terminal",
+            source="endpoint-registry",
+            reason=f"endpoint status {record.status}",
+        )
 
     latest_status = _latest_heartbeat_task_status(context, tid=record.tid)
     if latest_status in TERMINAL_TASK_STATUSES:
-        return False
+        return ServiceCandidate(
+            key=INTERNAL_SERVICE_KEY_HEARTBEAT,
+            tid=record.tid,
+            state="terminal",
+            source="task-log",
+            reason=latest_status,
+        )
+
+    if _heartbeat_runtime_handle_is_live(context, tid=record.tid):
+        return ServiceCandidate(
+            key=INTERNAL_SERVICE_KEY_HEARTBEAT,
+            tid=record.tid,
+            state="live",
+            source="tid-mapping",
+        )
 
     if record.ctrl_in and record.ctrl_out:
         probe = send_keyed_ping_probe(
@@ -140,11 +161,42 @@ def _heartbeat_endpoint_is_live(
             timeout=HEARTBEAT_ENDPOINT_PROBE_TIMEOUT,
         )
         if probe.matched is not None:
-            return True
+            return ServiceCandidate(
+                key=INTERNAL_SERVICE_KEY_HEARTBEAT,
+                tid=record.tid,
+                state="live",
+                source="control-pong",
+            )
+        if probe.error:
+            return ServiceCandidate(
+                key=INTERNAL_SERVICE_KEY_HEARTBEAT,
+                tid=record.tid,
+                state="uncertain",
+                source="control-pong",
+                reason=probe.error,
+            )
 
-    if latest_status is None:
-        return False
-    return _heartbeat_runtime_handle_is_live(context, tid=record.tid)
+    return ServiceCandidate(
+        key=INTERNAL_SERVICE_KEY_HEARTBEAT,
+        tid=record.tid,
+        state="terminal",
+        source="endpoint-registry",
+        reason="endpoint without live runtime proof or PONG",
+    )
+
+
+def _heartbeat_endpoint_is_live(
+    context: WeftContext,
+    *,
+    resolved: ResolvedEndpoint,
+) -> bool:
+    summary = summarize_service_candidates(
+        [_heartbeat_endpoint_candidate(context, resolved=resolved)]
+    )
+    return (
+        summary.canonical_live is not None
+        and summary.canonical_live.tid == resolved.record.tid
+    )
 
 
 def ensure_heartbeat_service(

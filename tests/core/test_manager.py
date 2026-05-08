@@ -3704,6 +3704,60 @@ def test_manager_autostart_ensure_enqueue_failure_does_not_advance_state(
         manager.cleanup()
 
 
+def test_manager_autostart_pending_spawn_blocks_duplicate_restart(
+    tmp_path: Path,
+    broker_env,
+    unique_tid,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    autostart_dir, manifest_path = write_autostart_fixture(
+        tmp_path,
+        task_name="pending-restart",
+        manifest_name="pending-restart",
+        mode="ensure",
+        max_restarts=2,
+        backoff_seconds=0,
+        duration=0.0,
+    )
+
+    config = load_config()
+    config["WEFT_AUTOSTART_TASKS"] = False
+    config["WEFT_AUTOSTART_DIR"] = str(autostart_dir)
+
+    spec = make_manager_spec(unique_tid, idle_timeout=1.5)
+    manager = Manager(db_path, spec, config=config)
+    source = str(manifest_path.resolve())
+    enqueued: list[Any] = []
+    try:
+        manifest = manager._load_autostart_manifest(manifest_path)
+        assert manifest is not None
+        spawn_payload = manager._build_autostart_spawn_payload(manifest, source)
+        assert spawn_payload is not None
+        taskspec_payload, inbox_message = spawn_payload
+        make_queue(WEFT_SPAWN_REQUESTS_QUEUE).write(
+            json.dumps(
+                {
+                    "taskspec": taskspec_payload,
+                    "inbox_message": inbox_message,
+                }
+            )
+        )
+        manager._autostart_enabled = True
+        monkeypatch.setattr(
+            manager,
+            "_enqueue_managed_service_request",
+            lambda service: enqueued.append(service) or True,
+        )
+
+        manager._tick_autostart(force=True)
+
+        assert enqueued == []
+        assert manager._service_state(source).spawn_pending is True
+    finally:
+        manager.cleanup()
+
+
 def test_manager_autostart_ensure_allows_one_restart_after_initial_launch(
     tmp_path: Path,
     broker_env,

@@ -211,7 +211,10 @@ Current rules:
 - duplicate heartbeat services converge through the manager-owned singleton
   service contract. Live ownership is proved by tracked child state, a live
   runtime handle, or keyed `PING`/`PONG`; stale non-terminal rows without live
-  proof do not block replacement.
+  proof do not block replacement. Helper-side endpoint validation classifies
+  the endpoint as service-candidate evidence and uses the shared singleton
+  summary rules, so terminal task-log proof for the endpoint TID rejects stale
+  endpoint rows even if older endpoint registry data remains.
 - the heartbeat service is an interval emitter, not a scheduler: there is no
   cron syntax, wall-clock scheduling, timezone handling, or missed-run replay
 - the supervised `TaskMonitorTask` uses heartbeat registrations for periodic
@@ -712,3 +715,4 @@ management live in the companion doc:
 - [`docs/plans/2026-04-17-canonical-owner-fence-plan.md`](../plans/2026-04-17-canonical-owner-fence-plan.md)
 - [`docs/plans/2026-05-08-manager-owned-internal-service-supervision-plan.md`](../plans/2026-05-08-manager-owned-internal-service-supervision-plan.md)
 - [`docs/plans/2026-05-08-phase-7-manager-service-reconciler-cleanup-plan.md`](../plans/2026-05-08-phase-7-manager-service-reconciler-cleanup-plan.md)
+- [`docs/plans/2026-05-08-deterministic-manager-service-reconciler-plan.md`](../plans/2026-05-08-deterministic-manager-service-reconciler-plan.md)

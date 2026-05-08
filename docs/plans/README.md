@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 75 plan files in this directory.
+There are currently 76 plan files in this directory.
 
 ## Curation Policy
 
@@ -23,7 +23,8 @@ There are currently 75 plan files in this directory.
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
 | [`2026-05-08-agent-session-and-task-startup-observability-plan.md`](./2026-05-08-agent-session-and-task-startup-observability-plan.md) | Agent Session And Task Startup Observability Plan | `draft` | none |
-| [`2026-05-08-phase-7-manager-service-reconciler-cleanup-plan.md`](./2026-05-08-phase-7-manager-service-reconciler-cleanup-plan.md) | Phase 7 Manager Service Reconciler Cleanup Plan | `draft` | none |
+| [`2026-05-08-deterministic-manager-service-reconciler-plan.md`](./2026-05-08-deterministic-manager-service-reconciler-plan.md) | Deterministic Manager Service Reconciler Plan | `completed` | none |
+| [`2026-05-08-phase-7-manager-service-reconciler-cleanup-plan.md`](./2026-05-08-phase-7-manager-service-reconciler-cleanup-plan.md) | Phase 7 Manager Service Reconciler Cleanup Plan | `draft` | [`2026-05-08-deterministic-manager-service-reconciler-plan.md`](./2026-05-08-deterministic-manager-service-reconciler-plan.md) |
 | [`2026-05-08-planning-guidance-zero-context-hardening-plan.md`](./2026-05-08-planning-guidance-zero-context-hardening-plan.md) | Planning Guidance Zero-Context Hardening Plan | `completed` | none |
 | [`2026-05-08-manager-owned-internal-service-supervision-plan.md`](./2026-05-08-manager-owned-internal-service-supervision-plan.md) | Manager-Owned Internal Service Supervision Plan | `draft` | [`2026-05-08-phase-7-manager-service-reconciler-cleanup-plan.md`](./2026-05-08-phase-7-manager-service-reconciler-cleanup-plan.md) |
 | [`2026-05-07-phase-7-task-monitor-supervision-and-cleanup-plan.md`](./2026-05-07-phase-7-task-monitor-supervision-and-cleanup-plan.md) | Phase 7 Task Monitor Supervision And Cleanup Plan | `draft` | none |

@@ -2,7 +2,7 @@
 
 Status: draft
 Source specs: see Source Documents below
-Superseded by: none
+Superseded by: [`2026-05-08-deterministic-manager-service-reconciler-plan.md`](./2026-05-08-deterministic-manager-service-reconciler-plan.md)
 
 ## 1. Goal
 
