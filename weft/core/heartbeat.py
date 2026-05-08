@@ -182,10 +182,11 @@ def upsert_heartbeat(
     interval_seconds: int,
     destination_queue: str,
     message: Any,
+    startup_timeout: float = MANAGER_STARTUP_TIMEOUT_SECONDS,
 ) -> int | None:
     """Register or replace one runtime-scoped heartbeat."""
 
-    resolved = ensure_heartbeat_service(context)
+    resolved = ensure_heartbeat_service(context, startup_timeout=startup_timeout)
     return _write_heartbeat_request(
         context,
         resolved=resolved,

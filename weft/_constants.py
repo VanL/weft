@@ -259,6 +259,9 @@ WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS_DEFAULT: Final[float] = 60.0
 TASK_MONITOR_ACTIVITY_WAIT_CAP_SECONDS: Final[float] = 1.0
 """Maximum launcher wait for TaskMonitor when no queue wake is observed."""
 
+TASK_MONITOR_HEARTBEAT_STARTUP_TIMEOUT_SECONDS: Final[float] = 0.5
+"""Bounded heartbeat lookup budget used by TaskMonitor before retrying later."""
+
 MANAGED_SERVICE_PING_TIMEOUT_SECONDS: Final[float] = 0.15
 """Bounded PING/PONG probe budget for manager-supervised singleton evidence."""
 

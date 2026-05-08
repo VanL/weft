@@ -32,6 +32,7 @@ from weft._constants import (
     QUEUE_INBOX_SUFFIX,
     QUEUE_OUTBOX_SUFFIX,
     TASK_MONITOR_ACTIVITY_WAIT_CAP_SECONDS,
+    TASK_MONITOR_HEARTBEAT_STARTUP_TIMEOUT_SECONDS,
     WEFT_GLOBAL_LOG_QUEUE,
 )
 from weft.context import WeftContext, build_context
@@ -123,6 +124,7 @@ class TaskMonitorTask(BaseTask):
         self._heartbeat_registered = False
         self._heartbeat_error: str | None = None
         self._heartbeat_id = f"task-monitor:{taskspec.tid}"
+        self._next_heartbeat_registration_attempt_monotonic = 0.0
         self._next_cycle_due_monotonic = 0.0
         super().__init__(db=db, taskspec=taskspec, stop_event=stop_event, config=config)
         self._monitor_config = TaskMonitorRuntimeConfig.from_config(self._config)
@@ -229,11 +231,11 @@ class TaskMonitorTask(BaseTask):
             self._maybe_emit_poll_report()
             return
 
-        self._ensure_heartbeat_registered()
         self._drain_queue()
         if self.should_stop:
             self._maybe_emit_poll_report()
             return
+        self._ensure_heartbeat_registered()
 
         now_monotonic = time.monotonic()
         should_run = (
@@ -313,6 +315,9 @@ class TaskMonitorTask(BaseTask):
     def _ensure_heartbeat_registered(self) -> None:
         if self._heartbeat_registered:
             return
+        now_monotonic = time.monotonic()
+        if now_monotonic < self._next_heartbeat_registration_attempt_monotonic:
+            return
         try:
             upsert_heartbeat(
                 self._monitor_context(),
@@ -323,14 +328,19 @@ class TaskMonitorTask(BaseTask):
                     "type": "task_monitor_wakeup",
                     "monitor_tid": self.tid,
                 },
+                startup_timeout=TASK_MONITOR_HEARTBEAT_STARTUP_TIMEOUT_SECONDS,
             )
         except (BrokerError, OSError, RuntimeError, ValueError) as exc:
             self._heartbeat_error = f"heartbeat registration failed: {exc}"
             self._last_error = self._heartbeat_error
             self._heartbeat_registered = False
+            self._next_heartbeat_registration_attempt_monotonic = (
+                now_monotonic + TASK_MONITOR_ACTIVITY_WAIT_CAP_SECONDS
+            )
             return
         self._heartbeat_error = None
         self._heartbeat_registered = True
+        self._next_heartbeat_registration_attempt_monotonic = 0.0
 
     def _cancel_heartbeat(self) -> None:
         if not self._heartbeat_registered:
