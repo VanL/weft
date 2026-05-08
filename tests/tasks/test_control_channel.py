@@ -226,26 +226,36 @@ def test_structured_ping_echoes_request_id_and_snapshot(broker_env, unique_tid):
 def test_manager_ping_includes_manager_selection_fields(broker_env, unique_tid):
     db_path, make_queue = broker_env
     spec = _make_manager_taskspec(unique_tid)
-    task = Manager(db_path, spec, config={"WEFT_AUTOSTART_TASKS": False})
+    task = Manager(
+        db_path,
+        spec,
+        config={
+            "WEFT_AUTOSTART_TASKS": False,
+            "WEFT_TASK_MONITOR_ENABLED": False,
+        },
+    )
 
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
     ctrl_out = task._ctrl_out_queue  # type: ignore[attr-defined]
     request_id = "manager-probe-request"
 
-    ctrl_in.write(json.dumps({"command": "PING", "request_id": request_id}))
-    task.process_once()
+    try:
+        ctrl_in.write(json.dumps({"command": "PING", "request_id": request_id}))
+        task.process_once()
 
-    responses = [json.loads(msg) for msg in _read_all(ctrl_out)]
-    ping_response = next(r for r in responses if r.get("command") == "PING")
-    assert ping_response["status"] == "ok"
-    assert ping_response["message"] == "PONG"
-    assert ping_response["request_id"] == request_id
-    assert ping_response["role"] == "manager"
-    assert ping_response["requests"] == WEFT_SPAWN_REQUESTS_QUEUE
-    assert ping_response["ctrl_in"] == f"T{unique_tid}.ctrl_in"
-    assert ping_response["ctrl_out"] == f"T{unique_tid}.ctrl_out"
-    assert ping_response["outbox"] == WEFT_MANAGER_OUTBOX_QUEUE
-    assert ping_response["weft_context"] == "."
+        responses = [json.loads(msg) for msg in _read_all(ctrl_out)]
+        ping_response = next(r for r in responses if r.get("command") == "PING")
+        assert ping_response["status"] == "ok"
+        assert ping_response["message"] == "PONG"
+        assert ping_response["request_id"] == request_id
+        assert ping_response["role"] == "manager"
+        assert ping_response["requests"] == WEFT_SPAWN_REQUESTS_QUEUE
+        assert ping_response["ctrl_in"] == f"T{unique_tid}.ctrl_in"
+        assert ping_response["ctrl_out"] == f"T{unique_tid}.ctrl_out"
+        assert ping_response["outbox"] == WEFT_MANAGER_OUTBOX_QUEUE
+        assert ping_response["weft_context"] == "."
+    finally:
+        task.cleanup()
 
 
 def test_ping_includes_runtime_summary_from_runner_plugin(

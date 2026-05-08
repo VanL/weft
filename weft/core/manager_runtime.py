@@ -81,6 +81,14 @@ class _DetachedManagerLaunch:
     launcher_process: subprocess.Popen[str]
 
 
+class _ManagerLaunchAcknowledgementError(RuntimeError):
+    """Raised when the detached launcher acknowledgement does not settle cleanly."""
+
+    def __init__(self, message: str, *, success_signal_sent: bool) -> None:
+        super().__init__(message)
+        self.success_signal_sent = success_signal_sent
+
+
 @dataclass(frozen=True)
 class _ManagerRegistryView:
     """One polled view of the manager registry for a specific lifecycle check."""
@@ -1023,13 +1031,14 @@ def _acknowledge_manager_launch_success(launch: _DetachedManagerLaunch) -> None:
     message = "Detached manager launcher did not exit cleanly after success."
     if error:
         message = f"{message} {error}"
-    raise RuntimeError(
+    raise _ManagerLaunchAcknowledgementError(
         _format_manager_start_failure(
             message=message,
             launch=launch,
             launcher_events=launcher_events,
             launcher_stderr=launcher_stderr,
-        )
+        ),
+        success_signal_sent=sent,
     )
 
 
@@ -1067,7 +1076,13 @@ def _start_manager(
                     ):
                         try:
                             _acknowledge_manager_launch_success(launch)
-                        except RuntimeError as exc:
+                        except _ManagerLaunchAcknowledgementError as exc:
+                            if not exc.success_signal_sent:
+                                _fail_manager_start(
+                                    launch=launch,
+                                    message=str(exc),
+                                    abort_launcher=True,
+                                )
                             settled_record = _await_manager_start_settlement(
                                 context,
                                 manager_tid=manager_tid,

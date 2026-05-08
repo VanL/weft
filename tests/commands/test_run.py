@@ -8,7 +8,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import Any, Final
 
@@ -25,6 +25,7 @@ from weft._constants import (
     INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY,
     INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
     INTERNAL_RUNTIME_TASK_CLASS_KEY,
+    MANAGER_LAUNCHER_SIGNAL_SUCCESS,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MANAGER_OUTBOX_QUEUE,
     WEFT_MANAGERS_REGISTRY_QUEUE,
@@ -286,6 +287,46 @@ def _stop_active_manager(context) -> None:
         stop_if_absent=True,
     )
     assert stopped, error
+
+
+def _make_post_success_ack_failure(
+    *,
+    root: Path,
+    submitted_tid: dict[str, str],
+) -> Callable[[Any], None]:
+    """Return an ack seam that sends launcher SUCCESS, then raises.
+
+    The detached manager launcher treats missing SUCCESS as an abort request.
+    These tests exercise failure after the success signal, so the seam must
+    preserve that ordering instead of replacing the whole acknowledgement
+    protocol.
+    """
+
+    def _fail_after_launcher_success(launch: Any) -> None:
+        deadline = time.time() + 8.0
+        while time.time() < deadline:
+            tid = submitted_tid.get("value")
+            if tid and task_cmd.task_status(tid, context_path=root) is not None:
+                sent, error = core_manager_runtime._send_launcher_signal(
+                    launch.launcher_process,
+                    MANAGER_LAUNCHER_SIGNAL_SUCCESS,
+                )
+                core_manager_runtime._communicate_launcher(
+                    launch.launcher_process,
+                    timeout=2.0,
+                )
+                if not sent:
+                    raise AssertionError(
+                        f"test setup failed to send launcher SUCCESS: {error}"
+                    )
+                raise core_manager_runtime._ManagerLaunchAcknowledgementError(
+                    "synthetic late acknowledgement failure",
+                    success_signal_sent=True,
+                )
+            time.sleep(0.05)
+        raise RuntimeError("timed out waiting for spawned task visibility")
+
+    return _fail_after_launcher_success
 
 
 def _registry_view(
@@ -855,7 +896,10 @@ def test_start_manager_treats_post_proof_ack_failure_as_nonfatal(
     monkeypatch.setattr(
         "weft.core.manager_runtime._acknowledge_manager_launch_success",
         lambda launch_arg: (_ for _ in ()).throw(
-            RuntimeError("post-proof acknowledgement failed")
+            core_manager_runtime._ManagerLaunchAcknowledgementError(
+                "post-proof acknowledgement failed",
+                success_signal_sent=True,
+            )
         ),
     )
     monkeypatch.setattr(
@@ -897,6 +941,72 @@ def test_start_manager_treats_post_proof_ack_failure_as_nonfatal(
     assert handle is None
     assert warnings == []
     assert debug_messages
+
+
+def test_start_manager_rejects_ack_failure_before_success_signal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    fake_process = _FakePopen(poll_results=[None, None, 0])
+    invocation = core_manager_runtime.ManagerRuntimeInvocation(
+        task_cls_path="weft.core.manager.Manager",
+        tid="9" * 19,
+        spec=_FakeManagerSpec(),
+    )
+    launch = core_manager_runtime.DetachedManagerLaunch(
+        pid=fake_process.pid,
+        stderr_path=root / ".weft" / "logs" / "manager-startup" / "manager.stderr",
+        launcher_process=fake_process,
+    )
+
+    monkeypatch.setattr(
+        "weft.core.manager_runtime._build_manager_runtime_invocation",
+        lambda context: invocation,
+    )
+    monkeypatch.setattr(
+        "weft.core.manager_runtime._launch_detached_manager",
+        lambda context, invocation_arg: launch,
+    )
+    monkeypatch.setattr(
+        "weft.core.manager_runtime.QueueChangeMonitor",
+        _FakeQueueChangeMonitor,
+    )
+    monkeypatch.setattr(
+        "weft.core.manager_runtime._acknowledge_manager_launch_success",
+        lambda launch_arg: (_ for _ in ()).throw(
+            core_manager_runtime._ManagerLaunchAcknowledgementError(
+                "success signal was not sent",
+                success_signal_sent=False,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        "weft.core.manager_runtime._registry_view",
+        lambda context, *, target_tid=None, prune_stale=True, probe_stale=False, probe_cache=None, queue=None: (
+            _registry_view(
+                active={
+                    "tid": invocation.tid,
+                    "runtime_handle": _host_runtime_handle(fake_process.pid),
+                    "status": "active",
+                    "requests": WEFT_SPAWN_REQUESTS_QUEUE,
+                    "role": "manager",
+                }
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        "weft.core.manager_runtime._is_pid_alive",
+        lambda pid: True,
+    )
+    monkeypatch.setattr(
+        "weft.core.manager_runtime.time.sleep",
+        lambda seconds: None,
+    )
+
+    with pytest.raises(ManagerStartFailed, match="success signal was not sent"):
+        _start_manager(ctx, verbose=False)
 
 
 def test_manager_start_record_matches_external_supervisor_launch_pid(
@@ -1099,16 +1209,6 @@ def test_run_inline_no_wait_succeeds_when_post_proof_acknowledgement_fails(
         submitted_tid["value"] = str(tid)
         return tid
 
-    def _fail_ack_after_spawn(*args: Any, **kwargs: Any) -> None:
-        del args, kwargs
-        deadline = time.time() + 8.0
-        while time.time() < deadline:
-            tid = submitted_tid.get("value")
-            if tid and task_cmd.task_status(tid, context_path=root) is not None:
-                raise RuntimeError("synthetic late acknowledgement failure")
-            time.sleep(0.05)
-        raise RuntimeError("timed out waiting for spawned task visibility")
-
     monkeypatch.setattr(
         "weft.commands.run.build_context",
         lambda spec_context=None, autostart=True: context,
@@ -1118,7 +1218,7 @@ def test_run_inline_no_wait_succeeds_when_post_proof_acknowledgement_fails(
     monkeypatch.setattr("weft.commands.run._enqueue_taskspec", _recording_enqueue)
     monkeypatch.setattr(
         "weft.core.manager_runtime._acknowledge_manager_launch_success",
-        _fail_ack_after_spawn,
+        _make_post_success_ack_failure(root=root, submitted_tid=submitted_tid),
     )
     monkeypatch.setattr("weft.commands.run._echo", lambda *args, **kwargs: None)
 
@@ -1165,16 +1265,6 @@ def test_run_inline_wait_succeeds_when_post_proof_acknowledgement_fails(
         submitted_tid["value"] = str(tid)
         return tid
 
-    def _fail_ack_after_spawn(*args: Any, **kwargs: Any) -> None:
-        del args, kwargs
-        deadline = time.time() + 8.0
-        while time.time() < deadline:
-            tid = submitted_tid.get("value")
-            if tid and task_cmd.task_status(tid, context_path=root) is not None:
-                raise RuntimeError("synthetic late acknowledgement failure")
-            time.sleep(0.05)
-        raise RuntimeError("timed out waiting for spawned task visibility")
-
     monkeypatch.setattr(
         "weft.commands.run.build_context",
         lambda spec_context=None, autostart=True: context,
@@ -1184,7 +1274,7 @@ def test_run_inline_wait_succeeds_when_post_proof_acknowledgement_fails(
     monkeypatch.setattr("weft.commands.run._enqueue_taskspec", _recording_enqueue)
     monkeypatch.setattr(
         "weft.core.manager_runtime._acknowledge_manager_launch_success",
-        _fail_ack_after_spawn,
+        _make_post_success_ack_failure(root=root, submitted_tid=submitted_tid),
     )
     monkeypatch.setattr("weft.commands.run._echo", lambda *args, **kwargs: None)
 
