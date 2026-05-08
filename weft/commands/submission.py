@@ -19,6 +19,7 @@ from typing import Any
 from weft._constants import (
     DEFAULT_STREAM_OUTPUT,
     INTERNAL_RUNTIME_ENDPOINT_NAME_KEY,
+    SPAWN_RESERVED_CLAIM_RECONCILIATION_TIMEOUT,
     SPEC_TYPE_PIPELINE,
     SPEC_TYPE_TASK,
     SUBMIT_OVERRIDE_NAMES,
@@ -240,6 +241,21 @@ def ensure_manager_after_submission(
             context,
             submitted_tid_str,
             timeout=0.2,
+        )
+        if reconciliation.outcome == "spawned":
+            return None, False, None
+        if reconciliation.outcome == "rejected":
+            reason = (
+                reconciliation.error
+                or f"Manager rejected submitted task {submitted_tid_str}"
+            )
+            raise RuntimeError(reason) from startup_error
+    if reconciliation.outcome == "reserved":
+        reconciliation = reconcile_submitted_spawn(
+            context,
+            submitted_tid_str,
+            timeout=SPAWN_RESERVED_CLAIM_RECONCILIATION_TIMEOUT,
+            reserved_is_terminal=False,
         )
         if reconciliation.outcome == "spawned":
             return None, False, None

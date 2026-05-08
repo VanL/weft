@@ -378,7 +378,8 @@ Current submission-reconciliation rules:
 - if the exact message is still in `weft.spawn.requests`, the CLI may delete it
   and report submission failure
 - if the exact message has moved into a manager reserved queue, the CLI must
-  not claim rollback succeeded; recovery is manual from that reserved queue
+  not claim rollback succeeded; it observes for spawned/rejected child
+  evidence before surfacing manual recovery from that reserved queue
 - if none of those surfaces prove success or rollback, the CLI reports an
   explicit unknown submission outcome keyed by TID
 

@@ -113,6 +113,9 @@ QUEUE_CHANGE_MONITOR_JOIN_TIMEOUT_SECONDS: Final[float] = 2.0
 SPAWN_SUBMISSION_RECONCILIATION_TIMEOUT: Final[float] = 1.0
 """Default time budget for classifying a submitted spawn request via durable state."""
 
+SPAWN_RESERVED_CLAIM_RECONCILIATION_TIMEOUT: Final[float] = 4.0
+"""Time budget for a claimed spawn request to publish child evidence."""
+
 STATUS_WATCH_MIN_INTERVAL: Final[float] = 0.1
 """Minimum poll interval for CLI status-watch loops to avoid broker-hot spins."""
 

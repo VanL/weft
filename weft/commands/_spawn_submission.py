@@ -222,6 +222,7 @@ def reconcile_submitted_spawn(
     *,
     timeout: float = SPAWN_SUBMISSION_RECONCILIATION_TIMEOUT,
     poll_interval: float = CONTROL_SURFACE_WAIT_INTERVAL,
+    reserved_is_terminal: bool = True,
 ) -> SpawnSubmissionReconciliation:
     """Classify a previously submitted spawn request using durable state only.
 
@@ -231,14 +232,20 @@ def reconcile_submitted_spawn(
     deadline = time.monotonic() + max(timeout, 0.0)
     queue_specs = _spawn_reconciliation_queue_specs(context)
     monitor_queues, monitor = _open_spawn_reconciliation_monitor(context, queue_specs)
+    last_reserved: SpawnSubmissionReconciliation | None = None
     try:
         while True:
             result = _reconcile_submitted_spawn_once(context, tid)
             if result.outcome != "unknown":
-                return result
+                if result.outcome == "reserved" and not reserved_is_terminal:
+                    last_reserved = result
+                else:
+                    return result
 
             remaining = deadline - time.monotonic()
             if remaining <= 0:
+                if last_reserved is not None:
+                    return last_reserved
                 return result
 
             current_specs = _spawn_reconciliation_queue_specs(context)

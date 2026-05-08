@@ -1551,6 +1551,63 @@ def test_reconcile_submitted_spawn_reports_reserved_for_claimed_request(
     )
 
 
+def test_reconcile_submitted_spawn_can_wait_past_reserved_claim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+    submitted_tid = str(time.time_ns())
+    created_monitors: list[_FakeQueueChangeMonitor] = []
+    results = iter(
+        [
+            SpawnSubmissionReconciliation(
+                outcome="reserved",
+                tid=submitted_tid,
+                reserved_queue="T1776000000000000001.reserved",
+            ),
+            SpawnSubmissionReconciliation(outcome="spawned", tid=submitted_tid),
+        ]
+    )
+
+    def _fake_monitor(queues, *, config=None):
+        monitor = _FakeQueueChangeMonitor(queues, config=config)
+        created_monitors.append(monitor)
+        return monitor
+
+    monkeypatch.setattr(spawn_submission_cmd, "QueueChangeMonitor", _fake_monitor)
+    monkeypatch.setattr(
+        spawn_submission_cmd,
+        "_reconcile_submitted_spawn_once",
+        lambda *_args, **_kwargs: next(results),
+    )
+    monkeypatch.setattr(
+        spawn_submission_cmd,
+        "_spawn_reconciliation_queue_specs",
+        lambda _context: (
+            (WEFT_TID_MAPPINGS_QUEUE, False),
+            (WEFT_GLOBAL_LOG_QUEUE, False),
+            (WEFT_SPAWN_REQUESTS_QUEUE, False),
+            (WEFT_MANAGERS_REGISTRY_QUEUE, False),
+            ("T1776000000000000001.reserved", False),
+        ),
+    )
+
+    result = reconcile_submitted_spawn(
+        context,
+        submitted_tid,
+        timeout=0.1,
+        reserved_is_terminal=False,
+    )
+
+    assert result == SpawnSubmissionReconciliation(
+        outcome="spawned",
+        tid=submitted_tid,
+    )
+    assert len(created_monitors) == 1
+    assert created_monitors[0].wait_calls
+
+
 def test_reconcile_submitted_spawn_reports_rejected_from_manager_log(
     tmp_path: Path,
 ) -> None:

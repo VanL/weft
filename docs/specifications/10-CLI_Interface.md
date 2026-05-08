@@ -221,6 +221,7 @@ Current rules:
   location for that submitted TID
 - only spawn requests still provably present in `weft.spawn.requests` are
   rollback-safe; requests already claimed into a manager reserved queue require
+  continued observation for spawned/rejected child evidence before surfacing
   manual operator recovery
 - ahead-of-time runtime checks live under
   `weft spec validate --load-runner` and `--preflight`
