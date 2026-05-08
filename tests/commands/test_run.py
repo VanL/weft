@@ -2814,6 +2814,63 @@ def test_stop_manager_waits_for_pid_exit_after_stopped_status(
     assert seen_pids.count(4321) >= 2
 
 
+def test_stop_manager_accepts_foreground_serve_stopped_registry_before_pid_exit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = "1775622400000000006"
+    stopped_handle = _host_runtime_handle(4321)
+    stopped_handle["metadata"] = {"foreground_serve": True}
+
+    responses = iter(
+        [
+            _registry_view(
+                target={
+                    "tid": tid,
+                    "status": "active",
+                    "runtime_handle": _host_runtime_handle(4321),
+                }
+            ),
+            _registry_view(
+                target={
+                    "tid": tid,
+                    "status": "stopped",
+                    "runtime_handle": stopped_handle,
+                }
+            ),
+        ]
+    )
+
+    monkeypatch.setattr(
+        "weft.core.manager_runtime._send_stop", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        "weft.core.manager_runtime.QueueChangeMonitor",
+        _FakeQueueChangeMonitor,
+    )
+    monkeypatch.setattr(
+        "weft.core.manager_runtime._registry_view",
+        lambda *args, **kwargs: next(responses),
+    )
+    monkeypatch.setattr(
+        "weft.core.manager_runtime._is_pid_alive",
+        lambda pid: True,
+    )
+
+    stopped, message = core_manager_runtime.stop_manager(
+        ctx,
+        None,
+        tid=tid,
+        timeout=1.0,
+        stop_if_absent=True,
+    )
+
+    assert stopped is True
+    assert message is None
+
+
 def test_stop_manager_stop_if_absent_short_circuits_after_stop_write(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

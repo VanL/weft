@@ -71,6 +71,7 @@ jobs:
         name: coverage-data-${{ matrix.test_slice }}
         path: .coverage.${{ matrix.test_slice }}
         if-no-files-found: warn
+        include-hidden-files: true
 
     - name: Test CLI installation
       if: ${{ matrix.test_slice == 'cli' }}

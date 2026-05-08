@@ -948,6 +948,10 @@ def _await_manager_stop_confirmation(
                 entry_observed = True
                 last_record = current
                 current_pid = _record_pid(current)
+                if current.get(
+                    "status"
+                ) == "stopped" and _manager_record_is_foreground_serve(current):
+                    return True, current
                 if current.get("status") == "stopped" and not _is_pid_alive(
                     current_pid
                 ):
@@ -969,6 +973,13 @@ def _await_manager_stop_confirmation(
     finally:
         monitor.close()
         registry_queue.close()
+
+
+def _manager_record_is_foreground_serve(record: dict[str, Any] | None) -> bool:
+    handle = _manager_handle_from_record(record)
+    if handle is None:
+        return False
+    return handle.metadata.get("foreground_serve") is True
 
 
 def _fail_manager_start(

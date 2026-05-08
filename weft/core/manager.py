@@ -648,7 +648,11 @@ class Manager(BaseTask):
                 id=f"{container.runtime}:{container.identifier or 'unknown'}",
                 control={"authority": "external-supervisor"},
                 observations=container.observations(container_pid=pid),
-                metadata={},
+                metadata={
+                    "foreground_serve": True,
+                }
+                if self.taskspec.metadata.get("foreground_serve") is True
+                else {},
             )
         return RunnerHandle(
             runner="host",
@@ -661,7 +665,11 @@ class Manager(BaseTask):
                     {"pid": pid, "create_time": process_create_time(pid)}
                 ],
             },
-            metadata={},
+            metadata={
+                "foreground_serve": True,
+            }
+            if self.taskspec.metadata.get("foreground_serve") is True
+            else {},
         )
 
     def _latest_registry_entry(
