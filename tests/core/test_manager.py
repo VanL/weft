@@ -3178,6 +3178,68 @@ def test_manager_autostart_ensure_restarts_after_child_exit_without_scan_wait(
         manager.cleanup()
 
 
+def test_manager_autostart_local_reap_overrides_stale_active_log_evidence(
+    tmp_path: Path,
+    broker_env,
+    unique_tid,
+) -> None:
+    db_path, make_queue = broker_env
+
+    autostart_dir, manifest_path = write_autostart_fixture(
+        tmp_path,
+        task_name="restart",
+        manifest_name="restart",
+        mode="ensure",
+        max_restarts=2,
+        backoff_seconds=0,
+        duration=0.0,
+    )
+
+    config = load_config()
+    config["WEFT_AUTOSTART_TASKS"] = True
+    config["WEFT_AUTOSTART_DIR"] = str(autostart_dir)
+
+    spec = make_manager_spec(unique_tid, idle_timeout=1.5)
+    manager = Manager(db_path, spec, config=config)
+    source = str(manifest_path.resolve())
+    child_tid = str(int(unique_tid) - 1)
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    try:
+        ctx = multiprocessing.get_context("spawn")
+        child = ctx.Process(target=time.sleep, args=(0.0,))
+        child.start()
+        child.join(timeout=2.0)
+        assert child.is_alive() is False
+
+        manager._child_processes[child_tid] = ManagedChild(
+            process=child,
+            ctrl_queue=None,
+            persistent=False,
+            autostart_source=source,
+            service_key=source,
+        )
+        log_queue.write(
+            json.dumps(
+                {
+                    "event": "task_started",
+                    "tid": child_tid,
+                    "status": "running",
+                    "taskspec": {"metadata": {"autostart_source": source}},
+                }
+            )
+        )
+
+        assert source in manager._active_autostart_sources()
+
+        manager._cleanup_children()
+
+        assert manager._child_processes == {}
+        assert source not in manager._active_autostart_sources()
+    finally:
+        log_queue.close()
+        manager.cleanup()
+
+
 def test_manager_autostart_pipeline_target_launches_pipeline_run(
     tmp_path: Path,
     broker_env,

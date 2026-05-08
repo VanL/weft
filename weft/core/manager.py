@@ -444,6 +444,7 @@ class Manager(BaseTask):
             state = self._service_state(service_key)
             state.active_tid = child_spec.tid
             state.spawn_pending = False
+            state.locally_terminal_tids.discard(child_spec.tid)
         self._last_activity_ns = time.time_ns()
 
         event_payload = {
@@ -1226,6 +1227,7 @@ class Manager(BaseTask):
                     service_key = child.autostart_source
                 if service_key:
                     state = self._service_state(service_key)
+                    state.locally_terminal_tids.add(tid)
                     if state.active_tid == tid:
                         state.active_tid = None
                     state.spawn_pending = False
@@ -2067,6 +2069,7 @@ class Manager(BaseTask):
 
     def _observed_service_candidates(self, service_key: str) -> list[ServiceCandidate]:
         candidates: list[ServiceCandidate] = []
+        state = self._service_state(service_key)
         tracked = self._tracked_service_candidate(service_key)
         if tracked is not None:
             candidates.append(tracked)
@@ -2093,6 +2096,18 @@ class Manager(BaseTask):
                 latest_by_tid[tid] = (payload, timestamp)
 
         for tid, (logged_payload, timestamp) in latest_by_tid.items():
+            if tid in state.locally_terminal_tids:
+                candidates.append(
+                    ServiceCandidate(
+                        key=service_key,
+                        tid=tid,
+                        state="terminal",
+                        source="manager-local",
+                        timestamp=timestamp,
+                        reason="locally reaped child process",
+                    )
+                )
+                continue
             candidates.append(
                 self._service_candidate_from_task_log(
                     service_key=service_key,
@@ -2354,8 +2369,10 @@ class Manager(BaseTask):
             if child.autostart_source and not self._child_has_exited(child)
         }
         queue = self._queue(WEFT_GLOBAL_LOG_QUEUE)
-        active: dict[str, tuple[str | None, int]] = {}
+        active: dict[str, tuple[str | None, str | None, int]] = {}
         for payload, timestamp in iter_queue_json_entries(queue):
+            tid_value = payload.get("tid")
+            tid = tid_value if isinstance(tid_value, str) and tid_value else None
             taskspec_dump = payload.get("taskspec")
             if not isinstance(taskspec_dump, dict):
                 continue
@@ -2364,13 +2381,26 @@ class Manager(BaseTask):
             if not source:
                 continue
             recorded = active.get(source)
-            if recorded is None or recorded[1] <= timestamp:
-                active[source] = (payload.get("status"), timestamp)
+            if recorded is None or recorded[2] <= timestamp:
+                status = payload.get("status")
+                active[source] = (
+                    tid,
+                    status if isinstance(status, str) else None,
+                    timestamp,
+                )
 
         terminal = {"completed", "failed", "timeout", "cancelled", "killed"}
-        durable_sources = {
-            source for source, (status, _ts) in active.items() if status not in terminal
-        }
+        durable_sources: set[str] = set()
+        for source, (tid, status, _ts) in active.items():
+            state = self._managed_service_state.get(source)
+            if (
+                tid is not None
+                and state is not None
+                and tid in state.locally_terminal_tids
+            ):
+                continue
+            if status not in terminal:
+                durable_sources.add(source)
         return durable_sources | tracked_sources
 
     def _managed_pids_for_child(self, tid: str) -> set[int]:

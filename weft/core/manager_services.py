@@ -50,6 +50,7 @@ class ManagedServiceState:
     next_allowed_ns: int = 0
     launched_once: bool = False
     restarts: int = 0
+    locally_terminal_tids: set[str] = field(default_factory=set)
 
 
 @dataclass(frozen=True, slots=True)
