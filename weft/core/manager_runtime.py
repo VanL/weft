@@ -158,18 +158,17 @@ def _snapshot_registry(
             if prune_stale and record.get("status") == "active":
                 is_stale, definitive_stale = _manager_record_stale_status(record)
                 if is_stale:
-                    if not (
-                        definitive_stale
-                        or (
-                            probe_stale
-                            and is_canonical_manager_record(record)
-                            and _manager_record_has_matched_pong(
-                                context,
-                                record,
-                                probe_cache=probe_cache,
-                            )
+                    rescued_by_pong = (
+                        not definitive_stale
+                        and probe_stale
+                        and is_canonical_manager_record(record)
+                        and _manager_record_has_matched_pong(
+                            context,
+                            record,
+                            probe_cache=probe_cache,
                         )
-                    ):
+                    )
+                    if not rescued_by_pong:
                         stale_timestamps.append(timestamp)
                         continue
             existing = snapshot.get(tid)
