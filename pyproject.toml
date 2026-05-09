@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "weft"
-version = "0.9.26"
+version = "0.9.27"
 description = "The durable task substrate for agent systems"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -43,7 +43,7 @@ pg = [
     "simplebroker-pg>=1.1.1",
 ]
 docker = [
-    "weft-docker>=0.9.21",
+    "weft-docker>=0.9.26",
 ]
 django = [
     "weft-django>=0.9.21",
@@ -56,7 +56,7 @@ macos-sandbox = [
 ]
 all = [
     "simplebroker-pg>=1.1.1",
-    "weft-docker>=0.9.21",
+    "weft-docker>=0.9.26",
     "weft-django>=0.9.21",
     "weft-macos-sandbox>=0.5.2",
 ]
