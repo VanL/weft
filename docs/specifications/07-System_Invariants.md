@@ -213,7 +213,9 @@ _Implementation mapping_: `weft/core/manager.py`,
   live, terminal, and uncertain evidence through one deterministic transition
   table before Manager applies side effects. Terminal proof for a TID wins over
   live evidence for the same TID, and uncertain evidence must become visible
-  degraded wait rather than an unqualified duplicate launch.
+  degraded wait rather than an unqualified duplicate launch. Broker timestamps
+  may order service evidence, but restart backoff is scheduled from the
+  manager's observation clock.
 - **MANAGER.16**: canonical managers must drain manager-owned internal spawn
   work before ordinary public spawn work whenever both are pending and launch is
   otherwise authorized.
@@ -291,6 +293,7 @@ doc:
 - [`docs/plans/2026-05-08-manager-owned-internal-service-supervision-plan.md`](../plans/2026-05-08-manager-owned-internal-service-supervision-plan.md)
 - [`docs/plans/2026-05-08-phase-7-manager-service-reconciler-cleanup-plan.md`](../plans/2026-05-08-phase-7-manager-service-reconciler-cleanup-plan.md)
 - [`docs/plans/2026-05-08-deterministic-manager-service-reconciler-plan.md`](../plans/2026-05-08-deterministic-manager-service-reconciler-plan.md)
+- [`docs/plans/2026-05-09-managed-service-restart-clock-hardening-plan.md`](../plans/2026-05-09-managed-service-restart-clock-hardening-plan.md)
 - [`docs/plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md`](../plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md)
 - [`docs/plans/2026-04-17-canonical-owner-fence-plan.md`](../plans/2026-04-17-canonical-owner-fence-plan.md)
 

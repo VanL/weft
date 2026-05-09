@@ -243,26 +243,12 @@ def reduce_managed_service_state(
         else None
     )
     if terminal_active is not None:
-        terminal_candidate = next(
-            (
-                candidate
-                for candidate in summary.candidates
-                if candidate.tid == terminal_active and candidate.state == "terminal"
-            ),
-            None,
-        )
         next_state.active_tid = None
         next_state.spawn_pending = False
         if service.lifecycle == "ensure" and service.restart_backoff_ns > 0:
-            base_ns = (
-                terminal_candidate.timestamp
-                if terminal_candidate is not None
-                and terminal_candidate.timestamp is not None
-                else now_ns
-            )
             next_state.next_allowed_ns = max(
                 next_state.next_allowed_ns,
-                base_ns + service.restart_backoff_ns,
+                now_ns + service.restart_backoff_ns,
             )
         elif service.lifecycle != "ensure":
             next_state.next_allowed_ns = 0

@@ -208,6 +208,10 @@ runbook needs to become stricter.
   internal child-drain budget. If both clocks are the same length, PG-backed
   xdist runs can time out exactly as the Manager finishes force-reaping
   children and publishing its stopped registry record.
+- Broker timestamps are ordering evidence, not scheduling clocks. Manager-owned
+  service restart backoff should use the manager's observation time; otherwise
+  backend clock skew or future broker timestamps can make an ensure-mode
+  service wait far longer than its configured backoff.
 
 ## 2026-04-08 Zombie PID Liveness
 

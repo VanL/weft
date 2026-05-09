@@ -23,12 +23,14 @@ NOW_NS = 1_000_000_000
 def _service(
     *,
     lifecycle: ServiceLifecycle = "ensure",
+    restart_backoff_ns: int = 0,
     max_restarts: int | None = None,
 ) -> ManagedServiceSpec:
     return ManagedServiceSpec(
         key=SERVICE_KEY,
         lifecycle=lifecycle,
         spawn_payload={},
+        restart_backoff_ns=restart_backoff_ns,
         max_restarts=max_restarts,
     )
 
@@ -136,6 +138,30 @@ def test_ensure_service_waits_for_backoff_before_restart() -> None:
     )
 
     assert decision.action == "schedule_restart"
+
+
+def test_terminal_backoff_uses_manager_observation_time_not_broker_timestamp() -> None:
+    service = _service(restart_backoff_ns=100)
+    evidence = ManagedServiceEvidence(
+        candidates=(_candidate("10", "terminal", timestamp=NOW_NS + 10_000_000_000),)
+    )
+
+    first = reduce_managed_service_state(
+        service,
+        ManagedServiceState(active_tid="10", launched_once=True),
+        evidence,
+        now_ns=NOW_NS,
+    )
+    second = reduce_managed_service_state(
+        service,
+        first.state,
+        evidence,
+        now_ns=NOW_NS + 101,
+    )
+
+    assert first.action == "schedule_restart"
+    assert first.state.next_allowed_ns == NOW_NS + 100
+    assert second.action == "start_now"
 
 
 def test_ensure_service_suppresses_after_max_restarts() -> None:
