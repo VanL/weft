@@ -1185,10 +1185,15 @@ class WeftTestHarness:
                 # startup stderr log.
                 time.sleep(TEMP_DIR_CLEANUP_RETRY_SLEEP_SECONDS)
         if last_error is not None:
-            if self._is_locked_database_cleanup_error(last_error):
+            if self._is_locked_harness_artifact_cleanup_error(last_error):
                 self._detach_tempdir_finalizer()
                 return
             raise last_error
+
+    def _is_locked_harness_artifact_cleanup_error(self, exc: OSError) -> bool:
+        return self._is_locked_database_cleanup_error(
+            exc
+        ) or self._is_locked_startup_log_cleanup_error(exc)
 
     def _is_locked_database_cleanup_error(self, exc: OSError) -> bool:
         if not _is_windows() or self._context is None:
@@ -1204,6 +1209,22 @@ class WeftTestHarness:
             for path in self._database_candidate_paths()
         }
         return locked_path in database_paths
+
+    def _is_locked_startup_log_cleanup_error(self, exc: OSError) -> bool:
+        if not _is_windows() or self._context is None:
+            return False
+
+        filename = getattr(exc, "filename", None)
+        if filename is None:
+            return False
+
+        locked_path = self._normalized_database_path(filename)
+        startup_dir = self._normalized_database_path(
+            self.context.logs_dir / MANAGER_STARTUP_LOG_DIRNAME
+        )
+        return locked_path.startswith(startup_dir) and locked_path.endswith(
+            ".stderr.log"
+        )
 
     def _detach_tempdir_finalizer(self) -> None:
         finalizer = getattr(self._tempdir, "_finalizer", None)

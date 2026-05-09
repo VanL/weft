@@ -2390,6 +2390,7 @@ def test_cli_run_prunes_stale_manager(workdir, weft_harness) -> None:
 
 
 def test_cli_run_parallel_no_wait_adopts_active_manager(workdir, weft_harness) -> None:
+    weft_harness.ensure_foreground_manager()
     env = os.environ.copy()
     env["WEFT_MANAGER_REUSE_ENABLED"] = "1"
     constrained_backend = active_test_backend(env) == "postgres"

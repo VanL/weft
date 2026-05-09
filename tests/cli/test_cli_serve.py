@@ -416,6 +416,7 @@ def test_serve_restarts_singleton_services_without_duplicates(
             (INTERNAL_SERVICE_KEY_HEARTBEAT, heartbeat),
         ):
             old_tid = str(current["tid"])
+            kill_timeout = 45.0 if os.name == "nt" else 15.0
             rc, out, err = run_cli(
                 "task",
                 "kill",
@@ -424,7 +425,7 @@ def test_serve_restarts_singleton_services_without_duplicates(
                 context_root,
                 cwd=workdir,
                 harness=weft_harness,
-                timeout=15.0,
+                timeout=kill_timeout,
             )
             assert rc == 0
             assert out.startswith("Killed ")
