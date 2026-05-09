@@ -1536,13 +1536,9 @@ def test_manager_closes_seeded_child_inbox_queue(
     manager, _make_queue = manager_setup
 
     class FakeSeedQueue:
-        instances: list[FakeSeedQueue] = []
-
-        def __init__(self, *args: object, **kwargs: object) -> None:
-            del args, kwargs
+        def __init__(self) -> None:
             self.writes: list[str] = []
             self.closed = False
-            FakeSeedQueue.instances.append(self)
 
         def write(self, payload: str) -> None:
             self.writes.append(payload)
@@ -1560,12 +1556,20 @@ def test_manager_closes_seeded_child_inbox_queue(
         def join(self, timeout: float | None = None) -> None:
             del timeout
 
-    monkeypatch.setattr(manager_mod, "Queue", FakeSeedQueue)
     monkeypatch.setattr(
         manager_mod,
         "launch_task_process",
         lambda *args, **kwargs: FakeProcess(),
     )
+    seed_queue = FakeSeedQueue()
+    original_get_queue = manager.get_queue
+
+    def fake_get_queue(name: str):
+        if name == "seeded.inbox":
+            return seed_queue
+        return original_get_queue(name)
+
+    monkeypatch.setattr(manager, "get_queue", fake_get_queue)
 
     child_spec = TaskSpec(
         tid=str(time.time_ns()),
@@ -1584,9 +1588,12 @@ def test_manager_closes_seeded_child_inbox_queue(
     )
 
     assert manager._launch_child_task(child_spec, {"args": ["payload"]}) is True
-    assert len(FakeSeedQueue.instances) == 1
-    assert FakeSeedQueue.instances[0].writes == [json.dumps({"args": ["payload"]})]
-    assert FakeSeedQueue.instances[0].closed is True
+    assert seed_queue.writes == [json.dumps({"args": ["payload"]})]
+    assert seed_queue.closed is False
+
+    manager.cleanup()
+
+    assert seed_queue.closed is True
 
 
 def test_manager_terminal_envelope_does_not_cache_child_ctrl_out_queue(
@@ -3521,6 +3528,54 @@ def test_manager_idle_timeout_waits_for_active_child_to_finish(
             manager.process_once()
             time.sleep(0.05)
         assert manager.should_stop is True
+    finally:
+        manager.cleanup()
+
+
+def test_manager_does_not_launch_child_when_initial_inbox_seed_fails(
+    broker_env,
+    unique_tid,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, _make_queue = broker_env
+    manager = Manager(db_path, make_manager_spec(unique_tid, idle_timeout=0.0))
+    child_tid = str(int(unique_tid) + 1)
+    child = TaskSpec(
+        tid=child_tid,
+        name="manager-child",
+        spec=SpecSection(
+            type="function",
+            function_target="tests.tasks.sample_targets:simulate_work",
+        ),
+        io=IOSection(
+            inputs={"inbox": f"T{child_tid}.inbox"},
+            outputs={"outbox": f"T{child_tid}.outbox"},
+            control={
+                "ctrl_in": f"T{child_tid}.ctrl_in",
+                "ctrl_out": f"T{child_tid}.ctrl_out",
+            },
+        ),
+        state=StateSection(),
+    )
+
+    class FailingQueue:
+        def write(self, _payload: str) -> None:
+            raise RuntimeError("locked")
+
+    original_queue = manager._queue
+
+    def fake_queue(name: str):
+        if name == child.io.inputs["inbox"]:
+            return FailingQueue()
+        return original_queue(name)
+
+    monkeypatch.setattr(manager, "_queue", fake_queue)
+
+    try:
+        launched = manager._launch_child_task(child, {"args": []})
+
+        assert launched is False
+        assert manager._child_processes == {}
     finally:
         manager.cleanup()
 

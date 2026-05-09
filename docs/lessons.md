@@ -633,6 +633,11 @@ runbook needs to become stricter.
   should use host PID identity only for `control.authority="host-pid"` handles;
   supervised runtimes need their registered liveness probe, with unknown
   remaining unknown until the heartbeat age rule resolves it.
+- A manager child launch must be atomic with respect to the first work item:
+  seed the child inbox durably before starting the process, and do not launch
+  the child if seeding fails. Logging and continuing creates live children that
+  can only report `waiting_on=T...inbox`, which turns into result/run/pipeline
+  hangs under backend load.
 
 ## 2026-05-06 Status Reanimation Boundary
 

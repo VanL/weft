@@ -430,37 +430,16 @@ class Manager(BaseTask):
             return False
 
         inbox_name = child_spec.io.inputs.get("inbox")
-        if inbox_message is not None and inbox_name:
-            payload = (
-                json.dumps(inbox_message)
-                if not isinstance(inbox_message, str)
-                else inbox_message
+        if (
+            inbox_message is not None
+            and inbox_name
+            and not self._seed_child_inbox(
+                child_spec,
+                inbox_name=inbox_name,
+                inbox_message=inbox_message,
             )
-            inbox_queue = Queue(
-                inbox_name,
-                db_path=self._db_path,
-                persistent=True,
-                config=self._config,
-            )
-            try:
-                inbox_queue.write(payload)
-            except (BrokerError, OSError, RuntimeError):
-                logger.debug(
-                    "Failed to seed inbox %s for child %s",
-                    inbox_name,
-                    child_spec.tid,
-                    exc_info=True,
-                )
-            finally:
-                try:
-                    inbox_queue.close()
-                except (BrokerError, OSError, RuntimeError):
-                    logger.debug(
-                        "Failed to close seeded inbox %s for child %s",
-                        inbox_name,
-                        child_spec.tid,
-                        exc_info=True,
-                    )
+        ):
+            return False
 
         child_spec.metadata.setdefault("parent_tid", self.tid)
         if autostart_source:
@@ -522,6 +501,42 @@ class Manager(BaseTask):
 
         self._report_state_change(event="task_spawned", **event_payload)
         return True
+
+    def _seed_child_inbox(
+        self,
+        child_spec: TaskSpec,
+        *,
+        inbox_name: str,
+        inbox_message: Any,
+    ) -> bool:
+        """Durably write the first child work item before process launch."""
+
+        payload = (
+            json.dumps(inbox_message)
+            if not isinstance(inbox_message, str)
+            else inbox_message
+        )
+        last_error: BaseException | None = None
+        for attempt in range(3):
+            try:
+                self._queue(inbox_name).write(payload)
+                return True
+            except (BrokerError, OSError, RuntimeError) as exc:
+                last_error = exc
+                if attempt < 2:
+                    time.sleep(0.05 * (attempt + 1))
+
+        error = (
+            f"Failed to seed inbox {inbox_name} for child {child_spec.tid}: "
+            f"{last_error}"
+        )
+        logger.warning(error, exc_info=last_error)
+        self._report_state_change(
+            event="task_spawn_rejected",
+            child_tid=child_spec.tid,
+            error=error,
+        )
+        return False
 
     @staticmethod
     def _resolve_child_task_class(child_spec: TaskSpec) -> type[BaseTask]:
