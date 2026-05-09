@@ -648,7 +648,7 @@ class DockerRunnerPlugin:
 
 
 _PLUGIN = DockerRunnerPlugin()
-_LIVENESS_PROBES_REGISTERED = False
+_liveness_probes_registered = False
 
 
 def get_runner_plugin() -> RunnerPlugin:
@@ -657,12 +657,12 @@ def get_runner_plugin() -> RunnerPlugin:
 
 
 def _register_liveness_probes() -> None:
-    global _LIVENESS_PROBES_REGISTERED
-    if _LIVENESS_PROBES_REGISTERED:
+    global _liveness_probes_registered
+    if _liveness_probes_registered:
         return
     register_runtime_liveness_probe("docker", _docker_runtime_liveness)
     register_runtime_liveness_probe("manager-supervisor", _docker_runtime_liveness)
-    _LIVENESS_PROBES_REGISTERED = True
+    _liveness_probes_registered = True
 
 
 def _docker_runtime_liveness(handle: RunnerHandle) -> RuntimeLiveness:

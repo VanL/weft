@@ -53,13 +53,13 @@ def _fake_docker_client() -> Iterator[object]:
 def test_docker_plugin_registers_runtime_liveness_probes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(runtime_liveness, "_RUNTIME_LIVENESS_PROBES", {})
-    monkeypatch.setattr(plugin, "_LIVENESS_PROBES_REGISTERED", False)
+    monkeypatch.setattr(runtime_liveness, "_runtime_liveness_probes", {})
+    monkeypatch.setattr(plugin, "_liveness_probes_registered", False)
 
     get_runner_plugin()
 
-    assert "docker" in runtime_liveness._RUNTIME_LIVENESS_PROBES
-    assert "manager-supervisor" in runtime_liveness._RUNTIME_LIVENESS_PROBES
+    assert "docker" in runtime_liveness._runtime_liveness_probes
+    assert "manager-supervisor" in runtime_liveness._runtime_liveness_probes
 
 
 def test_docker_runtime_liveness_reports_running_container(

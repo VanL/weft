@@ -17,8 +17,8 @@ from weft.ext import RunnerHandle
 RuntimeLiveness = Literal["live", "stale", "unknown"]
 RuntimeLivenessProbe = Callable[[RunnerHandle], RuntimeLiveness]
 
-_RUNTIME_LIVENESS_PROBES: dict[str, RuntimeLivenessProbe] = {}
-_RUNTIME_LIVENESS_LOCK = RLock()
+_runtime_liveness_probes: dict[str, RuntimeLivenessProbe] = {}
+_runtime_liveness_lock = RLock()
 
 logger = logging.getLogger(__name__)
 
@@ -38,18 +38,18 @@ def register_runtime_liveness_probe(
     normalized = key.strip()
     if not normalized:
         raise ValueError("runtime liveness probe key must be non-empty")
-    with _RUNTIME_LIVENESS_LOCK:
-        if normalized in _RUNTIME_LIVENESS_PROBES:
+    with _runtime_liveness_lock:
+        if normalized in _runtime_liveness_probes:
             logger.debug("Replacing runtime liveness probe for %s", normalized)
-        _RUNTIME_LIVENESS_PROBES[normalized] = probe
+        _runtime_liveness_probes[normalized] = probe
 
 
 def runtime_liveness_from_registered_probe(handle: RunnerHandle) -> RuntimeLiveness:
     """Return registered runtime liveness for ``handle`` or ``unknown``."""
 
     key = handle.runner.strip()
-    with _RUNTIME_LIVENESS_LOCK:
-        probe = _RUNTIME_LIVENESS_PROBES.get(key)
+    with _runtime_liveness_lock:
+        probe = _runtime_liveness_probes.get(key)
     if probe is None:
         return "unknown"
     try:

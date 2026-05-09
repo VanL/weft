@@ -24,7 +24,7 @@ def _runtime_handle(*, runner: str = "example") -> RunnerHandle:
 def test_runtime_liveness_registry_returns_unknown_for_missing_probe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(runtime_liveness, "_RUNTIME_LIVENESS_PROBES", {})
+    monkeypatch.setattr(runtime_liveness, "_runtime_liveness_probes", {})
 
     assert (
         runtime_liveness.runtime_liveness_from_registered_probe(_runtime_handle())
@@ -35,7 +35,7 @@ def test_runtime_liveness_registry_returns_unknown_for_missing_probe(
 def test_runtime_liveness_registry_returns_registered_probe_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(runtime_liveness, "_RUNTIME_LIVENESS_PROBES", {})
+    monkeypatch.setattr(runtime_liveness, "_runtime_liveness_probes", {})
 
     runtime_liveness.register_runtime_liveness_probe("example", lambda handle: "stale")
 
@@ -48,7 +48,7 @@ def test_runtime_liveness_registry_returns_registered_probe_result(
 def test_runtime_liveness_registry_returns_unknown_when_probe_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(runtime_liveness, "_RUNTIME_LIVENESS_PROBES", {})
+    monkeypatch.setattr(runtime_liveness, "_runtime_liveness_probes", {})
 
     def failing_probe(handle: RunnerHandle) -> runtime_liveness.RuntimeLiveness:
         del handle
@@ -65,7 +65,7 @@ def test_runtime_liveness_registry_returns_unknown_when_probe_raises(
 def test_runtime_liveness_registry_replaces_existing_probe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(runtime_liveness, "_RUNTIME_LIVENESS_PROBES", {})
+    monkeypatch.setattr(runtime_liveness, "_runtime_liveness_probes", {})
 
     runtime_liveness.register_runtime_liveness_probe("example", lambda handle: "live")
     runtime_liveness.register_runtime_liveness_probe("example", lambda handle: "stale")
