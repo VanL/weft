@@ -1278,7 +1278,7 @@ class Manager(BaseTask):
                     exc_info=True,
                 )
 
-    def _cleanup_children(self) -> None:
+    def _cleanup_children(self) -> bool:
         autostart_child_exited = False
         child_exited = False
         for tid, child in list(self._child_processes.items()):
@@ -1332,6 +1332,7 @@ class Manager(BaseTask):
             # Child completion is activity. The manager should only begin its idle
             # countdown after in-flight work has actually finished.
             self._last_activity_ns = time.time_ns()
+        return child_exited
 
     def _terminate_children(self) -> None:
         children: dict[str, ManagedChild] = dict(self._child_processes)
@@ -3222,6 +3223,8 @@ class Manager(BaseTask):
                 self._last_activity_ns = max(self._last_activity_ns, time.time_ns())
                 self._idle_shutdown_logged = False
             return
+        if self._cleanup_children():
+            self._reconcile_managed_services(include_autostart=False)
         super().process_once()
         if self._draining:
             self._continue_shutdown_drain()

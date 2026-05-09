@@ -1196,6 +1196,103 @@ def test_task_monitor_pending_spawn_request_blocks_duplicate_restart(
     assert manager._task_monitor_spawn_pending is True
 
 
+def test_process_once_reconciles_internal_services_before_user_spawn_work(
+    broker_env,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    manager = Manager(
+        db_path,
+        make_manager_spec(unique_tid, idle_timeout=0.0),
+        config=load_config({"WEFT_TASK_MONITOR_ENABLED": False}),
+    )
+    try:
+        class FakeDeadProcess:
+            pid = None
+            exitcode = 1
+
+            def is_alive(self) -> bool:
+                return False
+
+            def join(self, timeout: float | None = None) -> None:
+                del timeout
+
+        old_tid = "1777000000000000250"
+        manager._task_monitor_enabled = True
+        manager._task_monitor_tid = old_tid
+        manager._task_monitor_restart_backoff_ns = 0
+        manager._child_processes[old_tid] = ManagedChild(
+            process=FakeDeadProcess(),
+            ctrl_queue=f"T{old_tid}.ctrl_in",
+            ctrl_out_queue=f"T{old_tid}.ctrl_out",
+            persistent=True,
+            internal_role=INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR,
+        )
+        make_queue(WEFT_GLOBAL_LOG_QUEUE).write(
+            json.dumps(
+                {
+                    "tid": old_tid,
+                    "status": "killed",
+                    "taskspec": {
+                        "metadata": {
+                            "internal": True,
+                            "role": "task_monitor",
+                            INTERNAL_RUNTIME_TASK_CLASS_KEY: (
+                                INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR
+                            ),
+                            INTERNAL_SERVICE_KEY_METADATA_KEY: (
+                                INTERNAL_SERVICE_KEY_TASK_MONITOR
+                            ),
+                        },
+                        "io": {
+                            "control": {
+                                "ctrl_in": f"T{old_tid}.ctrl_in",
+                                "ctrl_out": f"T{old_tid}.ctrl_out",
+                            }
+                        },
+                    },
+                }
+            )
+        )
+        make_queue(WEFT_SPAWN_REQUESTS_QUEUE).write("{}")
+        monkeypatch.setattr(
+            manager,
+            "_evaluate_dispatch_ownership",
+            lambda: DispatchOwnership(state="self", leader_tid=manager.tid),
+        )
+
+        order: list[str] = []
+
+        def record_service_enqueue(service) -> bool:
+            order.append(f"service:{service.key}")
+            return True
+
+        def record_user_work(
+            message: str,
+            timestamp: int,
+            context: QueueMessageContext,
+        ) -> None:
+            del message, timestamp, context
+            order.append("user-work")
+
+        monkeypatch.setattr(
+            manager,
+            "_enqueue_managed_service_request",
+            record_service_enqueue,
+        )
+        manager._queues[WEFT_SPAWN_REQUESTS_QUEUE].handler = record_user_work
+
+        manager.process_once()
+
+        assert order.index(f"service:{INTERNAL_SERVICE_KEY_TASK_MONITOR}") < (
+            order.index("user-work")
+        )
+    finally:
+        manager.stop(join=False)
+        manager.cleanup()
+
+
 def test_task_monitor_spoofed_public_metadata_does_not_claim_singleton(
     manager_setup,
     monkeypatch: pytest.MonkeyPatch,
