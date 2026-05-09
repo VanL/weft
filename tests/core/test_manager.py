@@ -1671,6 +1671,37 @@ def test_manager_liveness_rejects_stale_external_supervisor_record(
     assert Manager._manager_record_is_live(record) is False
 
 
+def test_manager_liveness_rejects_missing_docker_supervisor_record(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        manager_mod,
+        "runtime_liveness_from_registered_probe",
+        lambda handle: "stale",
+    )
+    record = {
+        "tid": "1761000000000000012",
+        "status": "active",
+        "runtime_handle": {
+            "runner": "manager-supervisor",
+            "kind": "supervised-process",
+            "id": "docker:container123",
+            "control": {"authority": "external-supervisor"},
+            "observations": {
+                "container_runtime": "docker",
+                "container_pid": 1,
+                "container_id": "container123",
+            },
+            "metadata": {},
+        },
+        "_timestamp": time.time_ns(),
+        "role": "manager",
+        "requests": WEFT_SPAWN_REQUESTS_QUEUE,
+    }
+
+    assert Manager._manager_record_is_live(record) is False
+
+
 def test_manager_liveness_rejects_host_pid_identity_mismatch(
     monkeypatch,
 ) -> None:

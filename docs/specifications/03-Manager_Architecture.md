@@ -45,6 +45,8 @@ always be rolled back from the public request queue.
 - [Deterministic Manager Service Reconciler Plan](../plans/2026-05-08-deterministic-manager-service-reconciler-plan.md) – supersedes the cleanup plan for the pure reducer, transition-table, and full test support work.
 - [Manager Stop Timeout Hardening Plan](../plans/2026-05-09-manager-stop-timeout-hardening-plan.md) – separates the manager's internal child-drain timeout from caller-side stop confirmation defaults so slower backends have observation margin.
 - [Internal Spawn Priority Queue Plan](../plans/2026-05-09-internal-spawn-priority-queue-plan.md) – adds `weft.spawn.internal` as strict-priority manager-owned service spawn work while preserving the shared manager launch path.
+- [Runtime Liveness Probe Registry Plan](../plans/2026-05-09-runtime-liveness-probe-registry-plan.md) – draft plan to move runtime-specific manager liveness checks behind a lightweight core registry with Docker-specific probing owned by `weft_docker`.
+- [Prune Path Unification Plan](../plans/2026-05-09-prune-path-unification-plan.md) – draft plan to make CLI pruning and manager-supervised TaskMonitor cleanup share one core prune engine.
 
 ## Conceptual Model: Everything is a Task [MA-0]
 
@@ -92,8 +94,11 @@ Key responsibilities implemented in `weft/core/manager.py`:
    process identity: a PID is live only when it still matches the recorded
    process creation time when that identity is available. Externally supervised
    records use the same scoped host-process check when the supervisor supplied
-   scoped host PIDs, otherwise their registry heartbeat age is the generic
-   liveness boundary. When startup or manager selection sees an otherwise
+   scoped host PIDs. Otherwise lifecycle readers may ask the process-local
+   runtime liveness probe registry whether an extension can prove the handle
+   live or stale. A definitive extension `stale` result is treated as stale
+   immediately; inconclusive or missing probes fall back to the generic registry
+   heartbeat age boundary. When startup or manager selection sees an otherwise
    canonical active manager row that is stale by PID/time evidence, it may send
    one bounded keyed PING to that manager's task-local control queue. A matched
    PONG from the same TID can rescue the row as positive liveness evidence for
@@ -251,7 +256,7 @@ must be longer than the internal manager drain window, because a Manager may use
 the full drain budget before publishing its stopped registry record.
 
 _Implementation mapping_:
-- Shared manager lifecycle owner — `weft/core/manager_runtime.py` :: `_build_manager_runtime_invocation`, `_select_active_manager`, `_ensure_manager`, `_start_manager`, `_serve_manager_foreground`, `_list_manager_records`, `_manager_record`, `_stop_manager` plus `weft/core/control_probe.py` :: `send_keyed_ping_probe` (owns canonical manager bootstrap, foreground serve, normalized registry replay, bounded manager PONG liveness probes, and graceful/forced stop observation).
+- Shared manager lifecycle owner — `weft/core/manager_runtime.py` :: `_build_manager_runtime_invocation`, `_select_active_manager`, `_ensure_manager`, `_start_manager`, `_serve_manager_foreground`, `_list_manager_records`, `_manager_record`, `_stop_manager`; `weft/runtime_liveness.py` :: `runtime_liveness_from_registered_probe`; plus `weft/core/control_probe.py` :: `send_keyed_ping_probe` (owns canonical manager bootstrap, foreground serve, normalized registry replay, extension-provided supervised-manager stale checks, bounded manager PONG liveness probes, and graceful/forced stop observation).
 - Command-side capability surface — `weft/commands/manager.py` and `weft/commands/serve.py` (thin manager-facing commands layered over the shared runtime helper).
 - Detached bootstrap launcher — `weft/manager_detached_launcher.py` :: `main` (short-lived wrapper that starts the real manager runtime in a detached session/process-group boundary and reports early launch status back to `_start_manager`).
 - Manager process launch — `weft/core/manager_runtime.py` :: `_start_manager` (builds manager TaskSpec, launches the detached wrapper, requires matching pid-plus-registry readiness before success, treats post-proof acknowledgement cleanup as best effort, and reports early bootstrap diagnostics on failure).

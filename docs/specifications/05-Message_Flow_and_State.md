@@ -480,8 +480,8 @@ Current rules:
   launched PID in `observations.host_pids`
 - supervised or containerized manager launches must provide an explicit
   `WEFT_MANAGER_RUNTIME_HANDLE_JSON` value or use an external-supervisor
-  runtime handle; generic manager code must not inspect Docker or trust a
-  container-local PID as a host PID
+  runtime handle; generic manager code must not trust a container-local PID as a
+  host PID
 - when no explicit manager runtime handle is supplied, manager startup may use
   conservative local container detection markers such as `/.dockerenv`,
   `/run/.containerenv`, Kubernetes environment, or cgroup hints to publish an
@@ -489,7 +489,10 @@ Current rules:
 - external-supervisor manager records are still live records, not permanent
   truth: the manager refreshes its active registry record periodically, and
   lifecycle readers treat an expired external-supervisor heartbeat as stale
-  unless the handle includes live scoped host PIDs
+  unless the handle includes live scoped host PIDs. If an extension has
+  registered a process-local liveness probe for the handle's runner, lifecycle
+  readers may mark the manager live or stale from that probe. A missing or
+  inconclusive probe falls back to the heartbeat rule.
 - host-pid manager records require scoped host-process identity, not just raw
   PID existence; if `observations.host_processes` includes process creation
   times, PID liveness checks must reject records whose current process identity
@@ -509,7 +512,8 @@ _Implementation mapping_: `weft/core/manager_runtime.py`,
 `weft/manager_process.py`.
 
 Plan backlink:
-[`docs/plans/2026-04-24-runtime-handle-authority-migration-plan.md`](../plans/2026-04-24-runtime-handle-authority-migration-plan.md).
+[`docs/plans/2026-04-24-runtime-handle-authority-migration-plan.md`](../plans/2026-04-24-runtime-handle-authority-migration-plan.md);
+[`docs/plans/2026-05-09-runtime-liveness-probe-registry-plan.md`](../plans/2026-05-09-runtime-liveness-probe-registry-plan.md).
 
 ### 8. Failure Recovery Flow
 
@@ -644,7 +648,9 @@ system pruning:
   ordinary retention protections, but it still deletes only selected exact
   broker message IDs.
 
-_Implementation mapping_: `weft/commands/retention_prune.py`.
+_Implementation mapping_: canonical prune candidate selection and exact delete
+live in `weft/core/pruning/`; command rendering and CLI adaptation live in
+`weft/commands/runtime_prune.py` and `weft/commands/retention_prune.py`.
 
 ## Queue Management Patterns
 
@@ -681,11 +687,13 @@ Current rules:
   claimed outbox residue, malformed/unknown-shape rows, and inbox/reserved work
   unless the class is safe for ordinary deletion. `--force --apply` is the
   explicit human override for those ordinary protections.
-- the manager-supervised `TaskMonitorTask` may report the same families of
-  stale runtime-state and retention candidates for observation. If configured
-  with `WEFT_TASK_MONITOR_PROCESSOR=delete`, it may delete exact safe candidate
-  message IDs only. It must not apply archive side effects, force-only
-  retention cleanup, or logging-before-delete behavior in this slice.
+- the manager-supervised `TaskMonitorTask` reports and deletes through the same
+  canonical `weft/core/pruning/` candidate and exact-delete path used by
+  foreground `weft system prune`, with monitor-safe policy arguments. If
+  configured with `WEFT_TASK_MONITOR_PROCESSOR=delete`, it may delete exact safe
+  candidate message IDs only. It must not apply archive side effects,
+  force-only retention cleanup, or logging-before-delete behavior in this
+  slice.
 - `weft system tidy` handles backend-native cleanup of empty queues and broker
   maintenance
 - autonomous destructive queue lifecycle is limited to the supervised
@@ -727,3 +735,5 @@ management live in the companion doc:
 - [`docs/plans/2026-05-08-manager-owned-internal-service-supervision-plan.md`](../plans/2026-05-08-manager-owned-internal-service-supervision-plan.md)
 - [`docs/plans/2026-05-08-phase-7-manager-service-reconciler-cleanup-plan.md`](../plans/2026-05-08-phase-7-manager-service-reconciler-cleanup-plan.md)
 - [`docs/plans/2026-05-08-deterministic-manager-service-reconciler-plan.md`](../plans/2026-05-08-deterministic-manager-service-reconciler-plan.md)
+- [`docs/plans/2026-05-09-runtime-liveness-probe-registry-plan.md`](../plans/2026-05-09-runtime-liveness-probe-registry-plan.md)
+- [`docs/plans/2026-05-09-prune-path-unification-plan.md`](../plans/2026-05-09-prune-path-unification-plan.md)

@@ -457,6 +457,21 @@ def _runtime_evidence_details(
     return _runtime_description_is_live(runtime_description), "none", "unknown"
 
 
+def _is_internal_service_record(record: Mapping[str, Any]) -> bool:
+    """Return whether a task-log record describes manager-owned service work."""
+
+    metadata = record.get("metadata")
+    if not isinstance(metadata, Mapping):
+        return False
+    if metadata.get("internal") is True:
+        return True
+    role = metadata.get("role")
+    if role in {"task_monitor", "heartbeat_service"}:
+        return True
+    service_key = metadata.get("_weft_service_key")
+    return isinstance(service_key, str) and service_key.startswith("_weft.service.")
+
+
 def _effective_public_status(
     status: str,
     *,
@@ -466,6 +481,7 @@ def _effective_public_status(
     last_timestamp: int,
     now_ns: int,
     has_live_manager_record: bool = False,
+    internal_service: bool = False,
 ) -> str:
     """Keep public state coherent with lifecycle and runtime liveness."""
 
@@ -484,6 +500,8 @@ def _effective_public_status(
     )
 
     if status not in TERMINAL_TASK_STATUSES:
+        if internal_service and status in {"spawning", "running"}:
+            return status
         if (
             status in {"spawning", "running"}
             and (not normalized_runner or normalized_runner == "host")
@@ -849,6 +867,7 @@ def _collect_task_snapshot_records(
                 last_timestamp=int(record.get("last_timestamp") or 0),
                 now_ns=now_ns,
                 has_live_manager_record=tid == selected_active_manager_tid,
+                internal_service=_is_internal_service_record(record),
             )
         reconciliation = _reconciliation_diagnostic(
             lifecycle_status=public_status,

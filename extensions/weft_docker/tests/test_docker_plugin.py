@@ -12,9 +12,126 @@ from typing import Any
 import pytest
 from weft_docker import get_runner_plugin, plugin
 
-from weft.ext import RunnerRuntimeDescription
+import weft.runtime_liveness as runtime_liveness
+from weft.ext import RunnerHandle, RunnerRuntimeDescription
 
 pytestmark = [pytest.mark.shared]
+
+
+def _docker_manager_handle() -> RunnerHandle:
+    return RunnerHandle(
+        runner="manager-supervisor",
+        kind="supervised-process",
+        id="docker:container123",
+        control={"authority": "external-supervisor"},
+        observations={
+            "container_runtime": "docker",
+            "container_id": "container123",
+        },
+        metadata={},
+    )
+
+
+class _FakeContainer:
+    def __init__(self, *, running: bool | None, status: str | None = None) -> None:
+        state: dict[str, object] = {}
+        if running is not None:
+            state["Running"] = running
+        if status is not None:
+            state["Status"] = status
+        self.attrs = {"State": state}
+
+    def reload(self) -> None:
+        return None
+
+
+@contextmanager
+def _fake_docker_client() -> Iterator[object]:
+    yield object()
+
+
+def test_docker_plugin_registers_runtime_liveness_probes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runtime_liveness, "_RUNTIME_LIVENESS_PROBES", {})
+    monkeypatch.setattr(plugin, "_LIVENESS_PROBES_REGISTERED", False)
+
+    get_runner_plugin()
+
+    assert "docker" in runtime_liveness._RUNTIME_LIVENESS_PROBES
+    assert "manager-supervisor" in runtime_liveness._RUNTIME_LIVENESS_PROBES
+
+
+def test_docker_runtime_liveness_reports_running_container(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        plugin, "_docker_client", lambda timeout=10: _fake_docker_client()
+    )
+    monkeypatch.setattr(
+        plugin,
+        "_lookup_container",
+        lambda client, runtime_id, *, fallback_id=None: _FakeContainer(running=True),
+    )
+
+    assert plugin._docker_runtime_liveness(_docker_manager_handle()) == "live"
+
+
+def test_docker_runtime_liveness_reports_missing_container(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        plugin, "_docker_client", lambda timeout=10: _fake_docker_client()
+    )
+    monkeypatch.setattr(
+        plugin,
+        "_lookup_container",
+        lambda client, runtime_id, *, fallback_id=None: None,
+    )
+
+    assert plugin._docker_runtime_liveness(_docker_manager_handle()) == "stale"
+
+
+def test_docker_runtime_liveness_reports_stopped_container(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        plugin, "_docker_client", lambda timeout=10: _fake_docker_client()
+    )
+    monkeypatch.setattr(
+        plugin,
+        "_lookup_container",
+        lambda client, runtime_id, *, fallback_id=None: _FakeContainer(running=False),
+    )
+
+    assert plugin._docker_runtime_liveness(_docker_manager_handle()) == "stale"
+
+
+def test_docker_runtime_liveness_reports_unknown_when_docker_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @contextmanager
+    def failing_client(*, timeout: int = 10) -> Iterator[object]:
+        del timeout
+        raise RuntimeError("docker unavailable")
+        yield object()
+
+    monkeypatch.setattr(plugin, "_docker_client", failing_client)
+
+    assert plugin._docker_runtime_liveness(_docker_manager_handle()) == "unknown"
+
+
+def test_docker_runtime_liveness_ignores_non_docker_handle() -> None:
+    handle = RunnerHandle(
+        runner="manager-supervisor",
+        kind="supervised-process",
+        id="container123",
+        control={"authority": "external-supervisor"},
+        observations={},
+        metadata={},
+    )
+
+    assert plugin._docker_runtime_liveness(handle) == "unknown"
 
 
 def test_docker_runner_accepts_docker_enforced_limits_and_rejects_unsupported_ones() -> (

@@ -55,6 +55,7 @@ from weft.helpers import (
     pid_matches_create_time,
     terminate_process_tree,
 )
+from weft.runtime_liveness import runtime_liveness_from_registered_probe
 
 from .queue_wait import QueueChangeMonitor
 
@@ -155,14 +156,18 @@ def _snapshot_registry(
                 continue
             record = _normalize_manager_record(data, timestamp=timestamp)
             if prune_stale and record.get("status") == "active":
-                if _manager_record_is_stale(record):
+                is_stale, definitive_stale = _manager_record_stale_status(record)
+                if is_stale:
                     if not (
-                        probe_stale
-                        and is_canonical_manager_record(record)
-                        and _manager_record_has_matched_pong(
-                            context,
-                            record,
-                            probe_cache=probe_cache,
+                        definitive_stale
+                        or (
+                            probe_stale
+                            and is_canonical_manager_record(record)
+                            and _manager_record_has_matched_pong(
+                                context,
+                                record,
+                                probe_cache=probe_cache,
+                            )
                         )
                     ):
                         stale_timestamps.append(timestamp)
@@ -281,22 +286,34 @@ def _manager_handle_is_stale(handle: RunnerHandle | None) -> bool:
 
 
 def _manager_record_is_stale(record: dict[str, Any] | None) -> bool:
+    return _manager_record_stale_status(record)[0]
+
+
+def _manager_record_stale_status(record: dict[str, Any] | None) -> tuple[bool, bool]:
+    """Return ``(is_stale, is_definitive)`` for manager registry liveness."""
+
     handle = _manager_handle_from_record(record)
     if handle is None:
-        return True
+        return True, True
     if handle.control.get("authority") != "external-supervisor":
-        return _manager_handle_is_stale(handle)
+        return _manager_handle_is_stale(handle), False
 
     if handle.scoped_host_processes():
-        return not _manager_handle_has_live_host_process(handle)
+        return not _manager_handle_has_live_host_process(handle), False
+
+    runtime_liveness = runtime_liveness_from_registered_probe(handle)
+    if runtime_liveness == "live":
+        return False, False
+    if runtime_liveness == "stale":
+        return True, True
 
     timestamp = _manager_record_timestamp(record)
     if timestamp is None:
-        return False
+        return False, False
     stale_after_ns = int(
         MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS * 1_000_000_000
     )
-    return time.time_ns() - timestamp > stale_after_ns
+    return time.time_ns() - timestamp > stale_after_ns, False
 
 
 def _manager_record_has_pong_live(record: dict[str, Any] | None) -> bool:

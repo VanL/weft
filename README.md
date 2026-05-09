@@ -984,7 +984,10 @@ Operational notes:
   container-local PIDs such as `1` as host-scoped process identities when it can
   detect the container. For production supervisors, prefer providing
   `WEFT_MANAGER_RUNTIME_HANDLE_JSON` with an explicit `external-supervisor`
-  runtime handle.
+  runtime handle. Runtime extensions such as `weft_docker` may register
+  process-local liveness probes that can mark an external-supervisor handle
+  stale sooner; missing or inconclusive probes fall back to normal heartbeat
+  expiry.
 - `weft manager stop <tid>` still sends a graceful STOP, but an auto-restarting
   service manager may start the manager again unless the service itself is
   stopped.

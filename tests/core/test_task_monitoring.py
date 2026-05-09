@@ -16,6 +16,10 @@ from weft._constants import (
     WEFT_TID_MAPPINGS_QUEUE,
     load_config,
 )
+from weft.core.pruning.retention import (
+    RetentionPruneConfig,
+    run_retention_prune_for_context,
+)
 from weft.core.task_monitoring import (
     TaskMonitorCandidate,
     TaskMonitorProcessorRequest,
@@ -572,6 +576,69 @@ def test_cycle_snapshot_reports_superseded_task_log_cleanup_candidate(
     assert candidate.queue == WEFT_GLOBAL_LOG_QUEUE
     assert candidate.safe_to_delete is True
     assert candidate.metadata["cleanup_candidate"] is True
+
+
+def test_canonical_retention_prune_sees_superseded_rows_across_monitor_batches(
+    weft_harness,
+) -> None:
+    ctx = weft_harness.context
+    target_tid = "1778084345905438729"
+    old_id = _write_raw(
+        ctx,
+        WEFT_GLOBAL_LOG_QUEUE,
+        json.dumps(
+            {
+                "event": "work_started",
+                "status": "running",
+                "tid": target_tid,
+                "taskspec": _taskspec_payload(target_tid),
+            }
+        ),
+    )
+    for index in range(5):
+        tid = f"17780843459054388{index:02d}"
+        _write_log(
+            ctx,
+            {
+                "event": "work_started",
+                "status": "running",
+                "tid": tid,
+                "taskspec": _taskspec_payload(tid),
+            },
+        )
+    _write_log(
+        ctx,
+        {
+            "event": "work_completed",
+            "status": "completed",
+            "tid": target_tid,
+            "taskspec": _taskspec_payload(
+                target_tid,
+                status="completed",
+                completed_at=time.time_ns(),
+            ),
+        },
+    )
+
+    batch_snapshot = build_task_monitor_cycle_snapshot(ctx, since_timestamp=0, limit=1)
+    prune_result = run_retention_prune_for_context(
+        ctx,
+        RetentionPruneConfig(
+            context_path=ctx.root,
+            family="task-log",
+            min_age_seconds=0,
+            limit=20,
+        ),
+    )
+
+    assert not any(
+        candidate.message_id == old_id and candidate.safe_to_delete
+        for candidate in batch_snapshot.candidates
+    )
+    assert {
+        (candidate.message_id, candidate.candidate_class)
+        for candidate in prune_result.candidates
+    } >= {(old_id, "nonterminal_task_log_superseded")}
 
 
 def test_cycle_snapshot_reports_terminal_task_local_cleanup_candidates(

@@ -213,6 +213,14 @@ runbook needs to become stricter.
   backend clock skew or future broker timestamps can make an ensure-mode
   service wait far longer than its configured backoff.
 
+## 2026-05-09 Prune Path Ownership
+
+- Destructive cleanup must have one canonical candidate-selection and exact
+  delete path. Foreground CLI wrappers and background monitor services may pass
+  different policy arguments, but they must not reimplement pruning semantics.
+  The TaskMonitor checkpoint-window cleanup bug showed that duplicate paths can
+  both look reasonable while answering different evidence questions under load.
+
 ## 2026-04-08 Zombie PID Liveness
 
 - `psutil.Process(pid).is_running()` is not a sufficient liveness check for
@@ -616,6 +624,10 @@ runbook needs to become stricter.
   publish an `external-supervisor` handle than to publish an in-namespace
   `host-pid` handle. Auto-detection is only a conservative fallback; production
   supervisors should still inject explicit runtime identity when they can.
+- Runtime-specific external-supervisor liveness belongs behind an extension
+  probe registry, not in core manager code. A probe may return immediate stale
+  proof when it can prove the named runtime is gone; missing or inconclusive
+  probes fall back to heartbeat age.
 
 ## 2026-05-06 Status Reanimation Boundary
 

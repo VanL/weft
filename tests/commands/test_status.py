@@ -947,6 +947,50 @@ def test_cmd_status_demotes_stale_runtime_less_running_snapshot(
     assert tasks[0]["status"] == "failed"
 
 
+def test_cmd_status_keeps_internal_service_running_without_runtime_proof(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = "1844674407370955190"
+    started = time.time_ns()
+
+    monkeypatch.setattr(status_cmd, "STATUS_RUNTIMELESS_STALE_AFTER_SECONDS", -1.0)
+    _write_task_log_entry(
+        ctx=ctx,
+        tid=tid,
+        event="task_started",
+        status="running",
+        started_at=started,
+        completed_at=None,
+        name="task-monitor",
+        metadata={
+            "internal": True,
+            "role": "task_monitor",
+            "_weft_service_key": "_weft.service.task_monitor",
+        },
+    )
+    ctx.queue("weft.log.tasks", persistent=False).write(
+        json.dumps(
+            {
+                "event": "task_activity",
+                "status": "running",
+                "tid": tid,
+                "activity": "scanning",
+                "waiting_on": "weft.log.tasks",
+            }
+        )
+    )
+
+    snapshot = task_cmd.task_status(tid, context_path=root)
+
+    assert snapshot is not None
+    assert snapshot.status == "running"
+    assert snapshot.activity == "scanning"
+    assert snapshot.waiting_on == "weft.log.tasks"
+
+
 def test_cmd_status_keeps_runtime_less_manager_running_when_registry_is_live(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

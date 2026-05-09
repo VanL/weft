@@ -603,8 +603,9 @@ _Implementation mapping_: `weft/commands/tidy.py` `cmd_tidy()`,
 `weft/commands/builtins.py` `cmd_system_builtins()`,
 `weft/commands/task_monitor.py` `run_task_monitor()`,
 `weft/commands/runtime_prune.py` `cmd_prune()`,
-`weft/commands/retention_prune.py` `cmd_retention_prune()`, registered in
-`weft/cli/app.py` under the `system` sub-app.
+`weft/commands/retention_prune.py` `cmd_retention_prune()`, and the canonical
+prune implementation under `weft/core/pruning/`, registered in `weft/cli/app.py`
+under the `system` sub-app.
 
 Current subcommands:
 
@@ -666,7 +667,7 @@ Current behavior:
   queues
 - retention pruning deletes exact message IDs only from selected
   `weft.log.tasks` and `T{tid}.*` task-local queues, according to the
-  evidence/candidate classes in `weft/commands/retention_prune.py`
+  evidence/candidate classes in `weft/core/pruning/retention.py`
 - file-backed sqlite contexts can use snapshot rollback on apply failure
 - non-file-backed backends report partial-apply risk if a failure happens after
   writes begin
@@ -690,6 +691,7 @@ flags, and future queue or control ergonomics live in the companion doc:
 - [`docs/plans/2026-05-07-lifecycle-monitor-archive-sink-plan.md`](../plans/2026-05-07-lifecycle-monitor-archive-sink-plan.md)
 - [`docs/plans/2026-05-07-result-evidence-and-superseded-manager-reconciliation-plan.md`](../plans/2026-05-07-result-evidence-and-superseded-manager-reconciliation-plan.md)
 - [`docs/plans/2026-05-07-phase-7-task-monitor-supervision-and-cleanup-plan.md`](../plans/2026-05-07-phase-7-task-monitor-supervision-and-cleanup-plan.md)
+- [`docs/plans/2026-05-09-prune-path-unification-plan.md`](../plans/2026-05-09-prune-path-unification-plan.md)
 - [`docs/plans/2026-04-14-config-precedence-and-parsing-alignment-plan.md`](../plans/2026-04-14-config-precedence-and-parsing-alignment-plan.md)
 - [`docs/plans/2026-04-14-spawn-request-reconciliation-plan.md`](../plans/2026-04-14-spawn-request-reconciliation-plan.md)
 - [`docs/plans/2026-04-13-result-stream-implementation-plan.md`](../plans/2026-04-13-result-stream-implementation-plan.md)

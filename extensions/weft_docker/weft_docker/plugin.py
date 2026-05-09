@@ -38,6 +38,10 @@ from weft.ext import (
     RunnerPlugin,
     RunnerRuntimeDescription,
 )
+from weft.runtime_liveness import (
+    RuntimeLiveness,
+    register_runtime_liveness_probe,
+)
 
 from ._sdk import docker_client as shared_docker_client
 from ._sdk import docker_client_from_env as shared_docker_client_from_env
@@ -644,10 +648,96 @@ class DockerRunnerPlugin:
 
 
 _PLUGIN = DockerRunnerPlugin()
+_LIVENESS_PROBES_REGISTERED = False
 
 
 def get_runner_plugin() -> RunnerPlugin:
+    _register_liveness_probes()
     return _PLUGIN
+
+
+def _register_liveness_probes() -> None:
+    global _LIVENESS_PROBES_REGISTERED
+    if _LIVENESS_PROBES_REGISTERED:
+        return
+    register_runtime_liveness_probe("docker", _docker_runtime_liveness)
+    register_runtime_liveness_probe("manager-supervisor", _docker_runtime_liveness)
+    _LIVENESS_PROBES_REGISTERED = True
+
+
+def _docker_runtime_liveness(handle: RunnerHandle) -> RuntimeLiveness:
+    if not _handle_is_docker_backed(handle):
+        return "unknown"
+    runtime_id, fallback_id = _docker_liveness_identifiers(handle)
+    if runtime_id is None:
+        return "unknown"
+    try:
+        with _docker_client(timeout=2) as client:
+            container = _lookup_container(
+                client,
+                runtime_id,
+                fallback_id=fallback_id,
+            )
+            if container is None:
+                return "stale"
+            return _docker_container_liveness(container)
+    except Exception:  # pragma: no cover - Docker availability is environmental
+        return "unknown"
+
+
+def _handle_is_docker_backed(handle: RunnerHandle) -> bool:
+    runtime = handle.observations.get("container_runtime")
+    return (
+        handle.runner == "docker"
+        or runtime == "docker"
+        or handle.id.startswith("docker:")
+    )
+
+
+def _docker_liveness_identifiers(handle: RunnerHandle) -> tuple[str | None, str | None]:
+    identifiers: list[str] = []
+    for source in (handle.observations, handle.metadata):
+        for key in ("container_id", "container_name"):
+            value = source.get(key)
+            if isinstance(value, str) and value.strip():
+                identifiers.append(value.strip())
+    if handle.id.startswith("docker:"):
+        value = handle.id.removeprefix("docker:").strip()
+        if value:
+            identifiers.append(value)
+    elif handle.runner == "docker" and handle.id:
+        identifiers.append(handle.id)
+
+    deduped: list[str] = []
+    for identifier in identifiers:
+        if identifier not in deduped:
+            deduped.append(identifier)
+    if not deduped:
+        return None, None
+    fallback_id = deduped[1] if len(deduped) > 1 else None
+    return deduped[0], fallback_id
+
+
+def _docker_container_liveness(container: Any) -> RuntimeLiveness:
+    try:
+        container.reload()
+    except Exception:
+        return "unknown"
+    attrs = getattr(container, "attrs", None)
+    state = attrs.get("State") if isinstance(attrs, Mapping) else None
+    if not isinstance(state, Mapping):
+        return "unknown"
+    running = state.get("Running")
+    if running is True:
+        return "live"
+    if running is False:
+        return "stale"
+    status = state.get("Status")
+    if status == "running":
+        return "live"
+    if isinstance(status, str) and status:
+        return "stale"
+    return "unknown"
 
 
 def _container_name(tid: str | None) -> str:

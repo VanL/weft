@@ -37,6 +37,11 @@ from weft._constants import (
 )
 from weft.context import WeftContext, build_context
 from weft.core.heartbeat import cancel_heartbeat, upsert_heartbeat
+from weft.core.pruning.retention import (
+    RetentionPruneConfig,
+    run_retention_prune_for_context,
+)
+from weft.core.pruning.runtime import RuntimePruneConfig, run_runtime_prune_for_context
 from weft.core.task_monitoring import (
     TaskMonitorCandidate,
     TaskMonitorProcessorRequest,
@@ -121,6 +126,7 @@ class TaskMonitorTask(BaseTask):
         self._last_reported = 0
         self._last_warnings: tuple[str, ...] = ()
         self._last_errors: tuple[str, ...] = ()
+        self._last_prune_records_scanned = 0
         self._heartbeat_registered = False
         self._heartbeat_error: str | None = None
         self._heartbeat_id = f"task-monitor:{taskspec.tid}"
@@ -291,6 +297,7 @@ class TaskMonitorTask(BaseTask):
                 "last_reported": self._last_reported,
                 "last_warnings": list(self._last_warnings),
                 "last_errors": list(self._last_errors),
+                "last_prune_records_scanned": self._last_prune_records_scanned,
             }
         )
         return payload
@@ -381,19 +388,7 @@ class TaskMonitorTask(BaseTask):
             1 for candidate in candidates if candidate.safe_to_delete
         )
 
-        request = TaskMonitorProcessorRequest(
-            context=self._monitor_context(),
-            config=self._monitor_config,
-            cycle_id=f"{self.tid}:{now_ns}",
-            monitor_tid=self.tid,
-            candidates=candidates,
-            now_ns=now_ns,
-        )
-        try:
-            processor = resolve_task_monitor_processor(self._monitor_config.processor)
-            result = processor(request)
-        except Exception as exc:  # pragma: no cover - custom processor boundary
-            result = TaskMonitorProcessorResult(success=False, errors=(str(exc),))
+        result = self._process_monitor_candidates(candidates, now_ns=now_ns)
 
         self._last_processor_success = result.success
         self._last_processed = result.processed
@@ -416,6 +411,84 @@ class TaskMonitorTask(BaseTask):
         )
         if events_scanned == 0 and result.success:
             self._last_error = self._heartbeat_error
+
+    def _process_monitor_candidates(
+        self,
+        candidates: tuple[TaskMonitorCandidate, ...],
+        *,
+        now_ns: int,
+    ) -> TaskMonitorProcessorResult:
+        if self._monitor_config.processor in {"delete", "report_only"}:
+            return self._run_canonical_prune_cycle(
+                apply=self._monitor_config.processor == "delete"
+            )
+
+        request = TaskMonitorProcessorRequest(
+            context=self._monitor_context(),
+            config=self._monitor_config,
+            cycle_id=f"{self.tid}:{now_ns}",
+            monitor_tid=self.tid,
+            candidates=candidates,
+            now_ns=now_ns,
+        )
+        try:
+            processor = resolve_task_monitor_processor(self._monitor_config.processor)
+            return processor(request)
+        except Exception as exc:  # pragma: no cover - custom processor boundary
+            return TaskMonitorProcessorResult(success=False, errors=(str(exc),))
+
+    def _run_canonical_prune_cycle(self, *, apply: bool) -> TaskMonitorProcessorResult:
+        ctx = self._monitor_context()
+        self._set_activity("cleanup_scanning", waiting_on=WEFT_GLOBAL_LOG_QUEUE)
+        runtime = run_runtime_prune_for_context(
+            ctx,
+            RuntimePruneConfig(
+                context_path=ctx.root,
+                apply=apply,
+                limit=self._monitor_config.batch_size,
+            ),
+        )
+        retention = run_retention_prune_for_context(
+            ctx,
+            RetentionPruneConfig(
+                context_path=ctx.root,
+                family="retention",
+                apply=apply,
+                force=False,
+                limit=self._monitor_config.batch_size,
+                exclude_tids=(self.tid,),
+                archive_path=None,
+                require_archive=False,
+            ),
+        )
+        self._last_prune_records_scanned = (
+            runtime.records_scanned + retention.records_scanned
+        )
+        errors = (*runtime.errors, *retention.errors)
+        warnings = retention.warnings
+        processed = len(runtime.candidates) + len(retention.candidates)
+        deleted = runtime.deleted + retention.deleted
+        reported = 0 if apply else processed
+        return TaskMonitorProcessorResult(
+            success=not errors and runtime.failed == 0 and retention.failed == 0,
+            processed=processed,
+            deleted=deleted,
+            reported=reported,
+            errors=(
+                *errors,
+                *(
+                    candidate.error or "runtime prune candidate failed"
+                    for candidate in runtime.applied_candidates
+                    if candidate.error
+                ),
+                *(
+                    candidate.error or "retention prune candidate failed"
+                    for candidate in retention.applied_candidates
+                    if candidate.error
+                ),
+            ),
+            warnings=warnings,
+        )
 
     def _cleanup_reserved_if_needed(self) -> None:
         """Task monitors never create reserved messages."""

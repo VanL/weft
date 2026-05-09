@@ -84,6 +84,7 @@ from weft.helpers import (
     redact_taskspec_dump,
     terminate_process_tree,
 )
+from weft.runtime_liveness import runtime_liveness_from_registered_probe
 
 from .control_probe import send_keyed_ping_probe
 from .launcher import launch_task_process
@@ -802,6 +803,11 @@ class Manager(BaseTask):
         if handle.control.get("authority") == "external-supervisor":
             if handle.scoped_host_processes():
                 return handle_has_live_host_process(handle)
+            runtime_liveness = runtime_liveness_from_registered_probe(handle)
+            if runtime_liveness == "live":
+                return True
+            if runtime_liveness == "stale":
+                return False
             timestamp = record.get("_timestamp")
             if not isinstance(timestamp, int):
                 return True

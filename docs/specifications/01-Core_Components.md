@@ -28,6 +28,8 @@ See also:
 - [`docs/plans/2026-05-07-phase-7-task-monitor-supervision-and-cleanup-plan.md`](../plans/2026-05-07-phase-7-task-monitor-supervision-and-cleanup-plan.md)
 - [`docs/plans/2026-05-08-manager-owned-internal-service-supervision-plan.md`](../plans/2026-05-08-manager-owned-internal-service-supervision-plan.md)
 - [`docs/plans/2026-05-08-phase-7-manager-service-reconciler-cleanup-plan.md`](../plans/2026-05-08-phase-7-manager-service-reconciler-cleanup-plan.md)
+- [`docs/plans/2026-05-09-runtime-liveness-probe-registry-plan.md`](../plans/2026-05-09-runtime-liveness-probe-registry-plan.md)
+- [`docs/plans/2026-05-09-prune-path-unification-plan.md`](../plans/2026-05-09-prune-path-unification-plan.md)
 
 ## 1. TaskSpec (`weft/core/taskspec/model.py`) [CC-1]
 
@@ -144,7 +146,8 @@ Current task families:
   interval. The supervised monitor builds lifecycle and cleanup
   candidate snapshots, including Weft lifecycle anomalies, domain failures,
   stale runtime-state rows, and superseded task-log rows. Its default `delete`
-  processor may delete exact safe cleanup candidates only; it must not consume,
+  processor may delete exact safe cleanup candidates only through the canonical
+  prune implementation under `weft/core/pruning/`; it must not consume,
   reserve, move, unclaim, or delete active, ambiguous, claimed, malformed,
   unknown, or non-exact lifecycle messages. `report_only` remains available as
   a non-destructive override. `jsonl_then_delete` remains fail-closed until the
@@ -299,7 +302,9 @@ Current rule:
   `host_pids` are invalid at runtime-contract boundaries
 - manager records use the same `runtime_handle` shape. Detached host launch
   publishes a scoped host-process handle; supervised/container managers must
-  be given an explicit handle or use `external-supervisor`.
+  be given an explicit handle or use `external-supervisor`. Extensions may
+  register process-local runtime liveness probes for specific handle runners;
+  inconclusive or missing probes do not replace the generic heartbeat boundary.
 
 _Implementation mapping_: `weft/ext.py` `RunnerHandle`; `weft/core/tasks/base.py`
 `register_runtime_handle()`; CLI status/control surfaces in

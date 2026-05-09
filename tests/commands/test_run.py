@@ -157,6 +157,11 @@ def _select_active_manager_while_answering_probe(
                 MANAGER_SELECTION_TEST_PROBE_TIMEOUT_SECONDS,
             ),
         )
+        monkeypatch.setattr(
+            core_manager_runtime,
+            "runtime_liveness_from_registered_probe",
+            lambda handle: "unknown",
+        )
         thread.start()
         deadline = time.monotonic() + MANAGER_SELECTION_TEST_PROBE_TIMEOUT_SECONDS
         while thread.is_alive() and time.monotonic() < deadline:
@@ -2526,6 +2531,10 @@ def test_select_active_manager_prunes_stale_record_without_pong(
         "weft.core.manager_runtime.MANAGER_COMPETING_STARTUP_GRACE_SECONDS",
         0.01,
     )
+    monkeypatch.setattr(
+        "weft.core.manager_runtime.runtime_liveness_from_registered_probe",
+        lambda handle: "unknown",
+    )
     _write_active_manager_registry_record(
         ctx,
         tid=tid,
@@ -2615,6 +2624,10 @@ def test_select_active_manager_does_not_probe_fresh_supervised_record(
         "weft.core.manager_runtime.MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS",
         60.0,
     )
+    monkeypatch.setattr(
+        "weft.core.manager_runtime.runtime_liveness_from_registered_probe",
+        lambda handle: "unknown",
+    )
     _write_active_manager_registry_record(
         ctx,
         tid=tid,
@@ -2625,6 +2638,33 @@ def test_select_active_manager_does_not_probe_fresh_supervised_record(
 
     assert record is not None
     assert record["tid"] == tid
+    assert _read_all_queue_messages(ctx, f"T{tid}.ctrl_in", persistent=True) == []
+
+
+def test_select_active_manager_prunes_missing_docker_supervised_record_immediately(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = "1775622400000000211"
+    monkeypatch.setattr(
+        "weft.core.manager_runtime.MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS",
+        60.0,
+    )
+    monkeypatch.setattr(
+        "weft.core.manager_runtime.runtime_liveness_from_registered_probe",
+        lambda handle: "stale",
+    )
+    _write_active_manager_registry_record(
+        ctx,
+        tid=tid,
+        runtime_handle=_external_supervisor_runtime_handle(),
+    )
+
+    record = core_manager_runtime._select_active_manager(ctx, probe_stale=True)
+
+    assert record is None
     assert _read_all_queue_messages(ctx, f"T{tid}.ctrl_in", persistent=True) == []
 
 
@@ -2647,6 +2687,10 @@ def test_await_manager_start_settlement_probes_stale_record_once(
     monkeypatch.setattr(
         "weft.core.manager_runtime.MANAGER_REGISTRY_POLL_INTERVAL",
         0.001,
+    )
+    monkeypatch.setattr(
+        "weft.core.manager_runtime.runtime_liveness_from_registered_probe",
+        lambda handle: "unknown",
     )
     _write_active_manager_registry_record(
         ctx,

@@ -58,6 +58,7 @@ from weft.core.manager_runtime import (
     manager_registry_record_is_stale,
     normalize_manager_registry_record,
 )
+from weft.core.pruning.apply import apply_exact_prune_candidates
 from weft.helpers import iter_queue_entries
 
 TaskLogObserver = Callable[[str, str, int], None]
@@ -200,6 +201,14 @@ class TaskMonitorProcessor(Protocol):
         """Process one monitor cycle."""
 
 
+@dataclass(frozen=True, slots=True)
+class _ExactTaskMonitorDeleteCandidate:
+    candidate: TaskMonitorCandidate
+    queue: str
+    message_id: int
+    report_only: bool = False
+
+
 @dataclass(slots=True)
 class TaskLogRow:
     """One decoded task-log row retained for exact candidate construction."""
@@ -264,9 +273,8 @@ def delete_processor(
     Spec: [CC-2.3], [MF-5]
     """
 
-    deleted = 0
     warnings: list[str] = []
-    errors: list[str] = []
+    exact_candidates: list[_ExactTaskMonitorDeleteCandidate] = []
 
     for candidate in request.candidates:
         if not candidate.safe_to_delete:
@@ -277,28 +285,38 @@ def delete_processor(
                 f"{candidate.candidate_id}"
             )
             continue
-
-        queue = request.context.queue(
-            candidate.queue,
-            persistent=_candidate_queue_is_persistent(candidate.queue),
-        )
-        try:
-            removed = bool(queue.delete(message_id=candidate.message_id))
-        except (BrokerError, OSError, RuntimeError, ValueError) as exc:
-            errors.append(
-                "failed to delete task-monitor candidate "
-                f"{candidate.candidate_id} from {candidate.queue} "
-                f"at {candidate.message_id}: {exc}"
+        exact_candidates.append(
+            _ExactTaskMonitorDeleteCandidate(
+                candidate=candidate,
+                queue=candidate.queue,
+                message_id=candidate.message_id,
             )
-            continue
-        finally:
-            queue.close()
+        )
 
+    applied = apply_exact_prune_candidates(
+        request.context,
+        exact_candidates,
+        apply_result=lambda candidate, removed, error: (candidate, removed, error),
+    )
+    errors: list[str] = []
+    for exact_candidate, _removed, error in applied:
+        if error is None:
+            continue
+        errors.append(
+            "failed to delete task-monitor candidate "
+            f"{exact_candidate.candidate.candidate_id} from {exact_candidate.queue} "
+            f"at {exact_candidate.message_id}: {error}"
+        )
+    deleted = 0
+    for exact_candidate, removed, error in applied:
+        if error is not None:
+            continue
         if removed:
             deleted += 1
         else:
             warnings.append(
-                f"task-monitor candidate was already absent: {candidate.candidate_id}"
+                "task-monitor candidate was already absent: "
+                f"{exact_candidate.candidate.candidate_id}"
             )
 
     return TaskMonitorProcessorResult(
@@ -323,12 +341,6 @@ def _unsupported_logging_delete_processor(
             "logging callback is implemented",
         ),
     )
-
-
-def _candidate_queue_is_persistent(queue_name: str) -> bool:
-    """Return the queue persistence mode needed for exact candidate deletion."""
-
-    return queue_name.endswith(".outbox")
 
 
 def resolve_task_monitor_processor(name: str) -> TaskMonitorProcessor:
