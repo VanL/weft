@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 76 plan files in this directory.
+There are currently 77 plan files in this directory.
 
 ## Curation Policy
 
@@ -22,6 +22,7 @@ There are currently 76 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-05-09-manager-stop-timeout-hardening-plan.md`](./2026-05-09-manager-stop-timeout-hardening-plan.md) | Manager Stop Timeout Hardening Plan | `completed` | none |
 | [`2026-05-08-agent-session-and-task-startup-observability-plan.md`](./2026-05-08-agent-session-and-task-startup-observability-plan.md) | Agent Session And Task Startup Observability Plan | `draft` | none |
 | [`2026-05-08-deterministic-manager-service-reconciler-plan.md`](./2026-05-08-deterministic-manager-service-reconciler-plan.md) | Deterministic Manager Service Reconciler Plan | `completed` | none |
 | [`2026-05-08-phase-7-manager-service-reconciler-cleanup-plan.md`](./2026-05-08-phase-7-manager-service-reconciler-cleanup-plan.md) | Phase 7 Manager Service Reconciler Cleanup Plan | `draft` | [`2026-05-08-deterministic-manager-service-reconciler-plan.md`](./2026-05-08-deterministic-manager-service-reconciler-plan.md) |

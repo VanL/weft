@@ -31,6 +31,7 @@ from weft._constants import (
     MANAGER_REGISTRY_POLL_INTERVAL,
     MANAGER_STARTUP_LOG_DIRNAME,
     MANAGER_STARTUP_TIMEOUT_SECONDS,
+    MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
     MANAGER_TASK_CLASS_PATH,
     QUEUE_CTRL_IN_SUFFIX,
     QUEUE_CTRL_OUT_SUFFIX,
@@ -1386,7 +1387,7 @@ def _stop_manager(
     process: subprocess.Popen[Any] | None = None,
     *,
     tid: str | None = None,
-    timeout: float = 5.0,
+    timeout: float = MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
     force: bool = False,
     stop_if_absent: bool = False,
 ) -> tuple[bool, str | None]:
@@ -1567,7 +1568,7 @@ def stop_manager(
     process: subprocess.Popen[Any] | None = None,
     *,
     tid: str | None = None,
-    timeout: float = 5.0,
+    timeout: float = MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
     force: bool = False,
     stop_if_absent: bool = False,
 ) -> tuple[bool, str | None]:

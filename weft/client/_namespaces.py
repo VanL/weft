@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from weft._constants import MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS
 from weft.commands import manager as managers
 from weft.commands import queue as queues
 from weft.commands import specs, tasks
@@ -309,7 +310,13 @@ class ManagersNamespace:
     def serve(self) -> None:
         managers.serve_manager(self.client.context)
 
-    def stop(self, tid: str, *, force: bool = False, timeout: float = 5.0) -> None:
+    def stop(
+        self,
+        tid: str,
+        *,
+        force: bool = False,
+        timeout: float = MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
+    ) -> None:
         managers.stop_manager(self.client.context, tid, force=force, timeout=timeout)
 
     def list(self, *, include_stopped: bool = False) -> list[ManagerSnapshot]:

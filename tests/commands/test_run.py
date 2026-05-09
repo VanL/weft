@@ -283,7 +283,8 @@ def _stop_active_manager(context) -> None:
     stopped, error = core_manager_runtime.stop_manager(
         context,
         record,
-        timeout=5.0,
+        timeout=30.0,
+        force=True,
         stop_if_absent=True,
     )
     assert stopped, error

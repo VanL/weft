@@ -13,7 +13,12 @@ from typing import Annotated, Any, cast
 
 import typer
 
-from weft._constants import PROG_NAME, __version__, get_weft_directory_name
+from weft._constants import (
+    MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
+    PROG_NAME,
+    __version__,
+    get_weft_directory_name,
+)
 from weft.commands import cmd_init, cmd_status, cmd_tidy
 from weft.commands import manager as manager_cmd
 from weft.commands import queue as queue_cmd
@@ -1479,7 +1484,7 @@ def manager_stop_command(
     timeout: Annotated[
         float,
         typer.Option("--timeout", help="Seconds to wait for graceful stop"),
-    ] = 5.0,
+    ] = MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
     context: Annotated[
         Path | None,
         typer.Option("--context", help="Weft project directory"),

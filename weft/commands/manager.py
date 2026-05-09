@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 from typing import Any, cast
 
+from weft._constants import MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS
 from weft._exceptions import ControlRejected, ManagerNotRunning
 from weft.commands.types import ManagerSnapshot
 from weft.context import WeftContext, build_context
@@ -91,7 +92,7 @@ def stop_manager(
     tid: str,
     *,
     force: bool = False,
-    timeout: float = 5.0,
+    timeout: float = MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
 ) -> None:
     """Stop one manager or raise a typed exception."""
 
@@ -149,7 +150,7 @@ def stop_command(
     *,
     tid: str,
     force: bool,
-    timeout: float,
+    timeout: float = MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
     context_path: Path | None = None,
     stop_if_absent: bool = False,
 ) -> tuple[int, str | None]:

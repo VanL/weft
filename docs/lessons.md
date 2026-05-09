@@ -204,6 +204,10 @@ runbook needs to become stricter.
   that the default surface is the right surface. Probing can create queues on
   some backends; wait for TaskSpec metadata or real outbox/control activity
   before choosing a result queue for an unknown TID.
+- Manager stop callers need an observation budget larger than the Manager's
+  internal child-drain budget. If both clocks are the same length, PG-backed
+  xdist runs can time out exactly as the Manager finishes force-reaping
+  children and publishing its stopped registry record.
 
 ## 2026-04-08 Zombie PID Liveness
 

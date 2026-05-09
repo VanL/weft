@@ -43,6 +43,7 @@ always be rolled back from the public request queue.
 - [Manager-Owned Internal Service Supervision Plan](../plans/2026-05-08-manager-owned-internal-service-supervision-plan.md) – unify manager-owned `once`/`ensure` reconciliation for heartbeat, TaskMonitor, and autostarts.
 - [Phase 7 Manager Service Reconciler Cleanup Plan](../plans/2026-05-08-phase-7-manager-service-reconciler-cleanup-plan.md) – closes the single-reconciler implementation gaps for heartbeat, TaskMonitor, and autostart lifecycle handling.
 - [Deterministic Manager Service Reconciler Plan](../plans/2026-05-08-deterministic-manager-service-reconciler-plan.md) – supersedes the cleanup plan for the pure reducer, transition-table, and full test support work.
+- [Manager Stop Timeout Hardening Plan](../plans/2026-05-09-manager-stop-timeout-hardening-plan.md) – separates the manager's internal child-drain timeout from caller-side stop confirmation defaults so slower backends have observation margin.
 
 ## Conceptual Model: Everything is a Task [MA-0]
 
@@ -240,7 +241,9 @@ request queue do not participate in default-manager selection. External
 manager drain has a bounded child-exit window; if child tasks do not exit after
 STOP is broadcast and the drain window expires, the Manager forcefully reaps
 tracked child process trees before publishing its drained terminal event.
-`SIGUSR1` retains immediate kill semantics.
+`SIGUSR1` retains immediate kill semantics. Caller-facing manager stop defaults
+must be longer than the internal manager drain window, because a Manager may use
+the full drain budget before publishing its stopped registry record.
 
 _Implementation mapping_:
 - Shared manager lifecycle owner — `weft/core/manager_runtime.py` :: `_build_manager_runtime_invocation`, `_select_active_manager`, `_ensure_manager`, `_start_manager`, `_serve_manager_foreground`, `_list_manager_records`, `_manager_record`, `_stop_manager` plus `weft/core/control_probe.py` :: `send_keyed_ping_probe` (owns canonical manager bootstrap, foreground serve, normalized registry replay, bounded manager PONG liveness probes, and graceful/forced stop observation).

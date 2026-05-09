@@ -11,7 +11,11 @@ import pytest
 
 from simplebroker import Queue
 from tests.helpers.test_backend import prepare_project_root
-from weft._constants import WEFT_MANAGERS_REGISTRY_QUEUE
+from weft._constants import (
+    MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS,
+    MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
+    WEFT_MANAGERS_REGISTRY_QUEUE,
+)
 from weft.commands import manager as manager_cmd
 from weft.context import build_context
 from weft.helpers import iter_queue_json_entries
@@ -107,7 +111,7 @@ def test_stop_command_delegates_to_shared_lifecycle_helper(tmp_path, monkeypatch
         process=None,
         *,
         tid=None,
-        timeout=5.0,
+        timeout=MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
         force=False,
         stop_if_absent=False,
     ):
@@ -127,6 +131,80 @@ def test_stop_command_delegates_to_shared_lifecycle_helper(tmp_path, monkeypatch
     assert exit_code == 0
     assert message is None
     assert calls == [(context, None, "1761000000000000001", 0.1, False)]
+
+
+def test_stop_command_default_timeout_exceeds_manager_drain_budget(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    context_root = prepare_project_root(tmp_path / "ctx")
+    context = build_context(context_root)
+    calls: list[float] = []
+
+    monkeypatch.setattr(manager_cmd, "build_context", lambda spec_context=None: context)
+
+    def fake_stop_manager(
+        context_arg,
+        record,
+        process=None,
+        *,
+        tid=None,
+        timeout=MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
+        force=False,
+        stop_if_absent=False,
+    ):
+        del context_arg, record, process, tid, force, stop_if_absent
+        calls.append(timeout)
+        return True, None
+
+    monkeypatch.setattr(manager_cmd, "_stop_manager", fake_stop_manager)
+
+    exit_code, message = manager_cmd.stop_command(
+        tid="1761000000000000001",
+        force=False,
+        context_path=context_root,
+    )
+
+    assert exit_code == 0
+    assert message is None
+    assert calls == [MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS]
+    assert (
+        MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS
+        > MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS
+    )
+
+
+def test_stop_manager_default_timeout_exceeds_manager_drain_budget(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    context_root = prepare_project_root(tmp_path / "ctx")
+    context = build_context(context_root)
+    calls: list[float] = []
+
+    def fake_stop_manager(
+        context_arg,
+        record,
+        process=None,
+        *,
+        tid=None,
+        timeout=MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
+        force=False,
+        stop_if_absent=False,
+    ):
+        del context_arg, record, process, tid, force, stop_if_absent
+        calls.append(timeout)
+        return True, None
+
+    monkeypatch.setattr(manager_cmd, "_stop_manager", fake_stop_manager)
+
+    manager_cmd.stop_manager(context, "1761000000000000001")
+
+    assert calls == [MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS]
+    assert (
+        MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS
+        > MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS
+    )
 
 
 def test_stop_command_rewrites_timeout_message(tmp_path, monkeypatch):
