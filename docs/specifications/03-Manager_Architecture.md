@@ -44,6 +44,7 @@ always be rolled back from the public request queue.
 - [Phase 7 Manager Service Reconciler Cleanup Plan](../plans/2026-05-08-phase-7-manager-service-reconciler-cleanup-plan.md) – closes the single-reconciler implementation gaps for heartbeat, TaskMonitor, and autostart lifecycle handling.
 - [Deterministic Manager Service Reconciler Plan](../plans/2026-05-08-deterministic-manager-service-reconciler-plan.md) – supersedes the cleanup plan for the pure reducer, transition-table, and full test support work.
 - [Manager Stop Timeout Hardening Plan](../plans/2026-05-09-manager-stop-timeout-hardening-plan.md) – separates the manager's internal child-drain timeout from caller-side stop confirmation defaults so slower backends have observation margin.
+- [Internal Spawn Priority Queue Plan](../plans/2026-05-09-internal-spawn-priority-queue-plan.md) – adds `weft.spawn.internal` as strict-priority manager-owned service spawn work while preserving the shared manager launch path.
 
 ## Conceptual Model: Everything is a Task [MA-0]
 
@@ -64,12 +65,16 @@ _Implementation mapping_:
 
 Key responsibilities implemented in `weft/core/manager.py`:
 
-1. **Spawn queue consumption** – A manager’s inbox is bound to
-   `weft.spawn.requests`. Each message contains a serialized child TaskSpec and
-   an optional `inbox_message`. Messages are reserved, parsed, and acknowledged
-   via the `BaseTask` helpers. The manager performs a final dispatch-ownership
-   check immediately before child launch side effects. Only positive `self`
-   ownership preserves the normal launch path.
+1. **Spawn queue consumption** – A canonical manager’s public inbox is bound to
+   `weft.spawn.requests`, and it also monitors `weft.spawn.internal` for
+   manager-owned internal service spawn requests. Internal spawn work has
+   strict priority: when internal and public work are both pending, the manager
+   drains internal spawn work before public work. Each message contains a
+   serialized child TaskSpec and an optional `inbox_message`. Messages are
+   reserved into source-specific reserved queues, parsed, and acknowledged via
+   the standard manager launch path. The manager performs a final
+   dispatch-ownership check immediately before child launch side effects. Only
+   positive `self` ownership preserves the normal launch path.
 2. **Child process launch** – Validated TaskSpecs are executed via
    `launch_task_process(Consumer, …)`, preserving the standard isolation model
    (a dedicated subprocess per child task).
@@ -154,7 +159,7 @@ Key responsibilities implemented in `weft/core/manager.py`:
   responding task without importing command-layer helpers.
 
 _Implementation mapping_:
-- [MA-1.1] Spawn queue consumption — `Manager._handle_work_message`, `Manager._build_child_spec`.
+- [MA-1.1] Spawn queue consumption — `Manager._build_queue_configs`, `Manager._handle_work_message`, `Manager._build_child_spec`.
 - [MA-1.2] Child process launch — `Manager._launch_child_task`, `launch_task_process` (`weft/core/launcher.py`).
 - [MA-1.3] Initial payload delivery — `Manager._launch_child_task` (inbox seeding block).
 - [MA-1.4] Registry heartbeat and leadership view — `Manager._register_manager`, `Manager._unregister_manager`, `Manager._atexit_unregister`, `Manager._read_active_manager_records`, `Manager._active_manager_records`, `Manager._leader_tid`, `Manager._evaluate_dispatch_ownership`, `Manager._refresh_dispatch_suspension`, `Manager._maybe_yield_leadership`, `weft/commands/system.py::_collect_task_snapshot_records`, plus `weft/helpers.py::is_canonical_manager_record` and `weft/helpers.py::canonical_owner_tid`.
@@ -202,12 +207,12 @@ These are manager-scoped diagnostics, not spawn rejection signals.
 ## TID Correlation [MA-2]
 
 Task IDs are the message IDs assigned when spawn requests are written to
-`weft.spawn.requests`. The Manager copies that ID into the expanded TaskSpec
-`tid`, enabling correlation across registry entries, task logs, and
-outbox/control messages.
+`weft.spawn.requests` or `weft.spawn.internal`. The Manager copies that ID into
+the expanded TaskSpec `tid`, enabling correlation across registry entries,
+task logs, and outbox/control messages.
 
 _Implementation mapping_:
-- TID generation — `weft/cli/run.py` :: `_generate_tid` (uses `Queue.generate_timestamp` on the spawn-requests queue).
+- Public TID generation — `weft/cli/run.py` :: `_generate_tid` (uses `Queue.generate_timestamp` on the spawn-requests queue); manager-owned internal service requests use the message timestamp assigned by `weft.spawn.internal`.
 - Enqueue with TID as message timestamp — `weft/cli/run.py` :: `_enqueue_taskspec` (writes spawn payload at `int(task_tid)`).
 - Manager-side TID propagation — `weft/core/manager.py` :: `Manager._build_child_spec` (passes `str(timestamp)` as child TID via `resolve_taskspec_payload`).
 

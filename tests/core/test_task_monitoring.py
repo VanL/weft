@@ -22,10 +22,12 @@ from weft.core.task_monitoring import (
     TaskMonitorProcessorResult,
     TaskMonitorRuntimeConfig,
     build_task_monitor_cycle_snapshot,
+    delete_processor,
     report_only_processor,
     resolve_task_monitor_processor,
     task_log_seen_candidate,
 )
+from weft.helpers import iter_queue_entries
 
 pytestmark = [pytest.mark.shared]
 
@@ -83,10 +85,41 @@ def _write_log(ctx: Any, payload: dict[str, Any]) -> None:
         queue.close()
 
 
-def _write_json(ctx: Any, queue_name: str, payload: dict[str, Any]) -> None:
-    queue = ctx.queue(queue_name, persistent=False)
+def _write_json(ctx: Any, queue_name: str, payload: dict[str, Any]) -> int:
+    return _write_raw(ctx, queue_name, json.dumps(payload), persistent=False)
+
+
+def _write_raw(
+    ctx: Any,
+    queue_name: str,
+    message: str,
+    *,
+    persistent: bool = False,
+) -> int:
+    queue = ctx.queue(queue_name, persistent=persistent)
     try:
-        queue.write(json.dumps(payload))
+        message_id = queue.write(message)
+        if message_id is not None:
+            return int(message_id)
+        latest: int | None = None
+        for body, timestamp in iter_queue_entries(queue):
+            if body == message:
+                latest = int(timestamp)
+        assert latest is not None
+        return latest
+    finally:
+        queue.close()
+
+
+def _read_ids(
+    ctx: Any,
+    queue_name: str,
+    *,
+    persistent: bool = False,
+) -> set[int]:
+    queue = ctx.queue(queue_name, persistent=persistent)
+    try:
+        return {int(timestamp) for _body, timestamp in iter_queue_entries(queue)}
     finally:
         queue.close()
 
@@ -113,8 +146,38 @@ def test_runtime_config_reads_loaded_weft_config() -> None:
     assert runtime_config.restart_backoff_seconds == 3.5
 
 
+def test_runtime_config_defaults_to_delete_processor() -> None:
+    runtime_config = TaskMonitorRuntimeConfig.from_config(load_config({}))
+
+    assert runtime_config.processor == "delete"
+
+
 def test_resolve_report_only_processor() -> None:
     assert resolve_task_monitor_processor("report_only") is report_only_processor
+
+
+def test_resolve_delete_processor() -> None:
+    assert resolve_task_monitor_processor("delete") is delete_processor
+
+
+def test_jsonl_then_delete_is_reserved_until_logging_callback_lands(
+    weft_harness,
+) -> None:
+    processor = resolve_task_monitor_processor("jsonl_then_delete")
+    request = TaskMonitorProcessorRequest(
+        context=weft_harness.context,
+        config=TaskMonitorRuntimeConfig(processor="jsonl_then_delete"),
+        cycle_id="cycle-logging-later",
+        monitor_tid="1778089999999999999",
+        candidates=(),
+        now_ns=1,
+    )
+
+    result = processor(request)
+
+    assert result.success is False
+    assert result.deleted == 0
+    assert "logging callback" in result.errors[0]
 
 
 def test_resolve_custom_processor() -> None:
@@ -151,6 +214,125 @@ def test_report_only_reports_all_candidates(weft_harness) -> None:
     assert result.processed == 1
     assert result.reported == 1
     assert result.deleted == 0
+
+
+def test_delete_processor_deletes_only_safe_exact_candidates(weft_harness) -> None:
+    ctx = weft_harness.context
+    tid = "1778084345905438730"
+    safe_id = _write_json(
+        ctx,
+        WEFT_TID_MAPPINGS_QUEUE,
+        {"short": "5438730", "full": tid, "name": "old"},
+    )
+    unsafe_id = _write_json(
+        ctx,
+        WEFT_TID_MAPPINGS_QUEUE,
+        {"short": "5438730", "full": tid, "name": "active"},
+    )
+    missing_id = safe_id - 1
+    while missing_id in {safe_id, unsafe_id}:
+        missing_id -= 1
+    candidates = (
+        TaskMonitorCandidate(
+            candidate_id="safe-runtime",
+            tid=tid,
+            queue=WEFT_TID_MAPPINGS_QUEUE,
+            message_id=safe_id,
+            candidate_class="superseded_tid_mapping",
+            reason="older duplicate mapping",
+            safe_to_delete=True,
+        ),
+        TaskMonitorCandidate(
+            candidate_id="unsafe-runtime",
+            tid=tid,
+            queue=WEFT_TID_MAPPINGS_QUEUE,
+            message_id=unsafe_id,
+            candidate_class="task_log_tid_seen",
+            reason="active evidence",
+            safe_to_delete=False,
+        ),
+        TaskMonitorCandidate(
+            candidate_id="missing-runtime",
+            tid=tid,
+            queue=WEFT_TID_MAPPINGS_QUEUE,
+            message_id=missing_id,
+            candidate_class="superseded_tid_mapping",
+            reason="already cleaned",
+            safe_to_delete=True,
+        ),
+        TaskMonitorCandidate(
+            candidate_id="ambiguous-runtime",
+            tid=tid,
+            queue=None,
+            message_id=None,
+            candidate_class="superseded_tid_mapping",
+            reason="no exact row",
+            safe_to_delete=True,
+        ),
+    )
+    request = TaskMonitorProcessorRequest(
+        context=ctx,
+        config=TaskMonitorRuntimeConfig(processor="delete"),
+        cycle_id="cycle-delete",
+        monitor_tid="1778089999999999999",
+        candidates=candidates,
+        now_ns=1,
+    )
+
+    result = delete_processor(request)
+
+    remaining = _read_ids(ctx, WEFT_TID_MAPPINGS_QUEUE)
+    assert result.success is True
+    assert result.processed == 4
+    assert result.deleted == 1
+    assert len(result.warnings) == 2
+    assert safe_id not in remaining
+    assert unsafe_id in remaining
+
+
+def test_delete_processor_deletes_safe_persistent_outbox_candidate(
+    weft_harness,
+) -> None:
+    ctx = weft_harness.context
+    tid = "1778084345905438731"
+    queue_name = f"T{tid}.outbox"
+    safe_id = _write_raw(ctx, queue_name, '{"ok": true}', persistent=True)
+    claimed_id = _write_raw(ctx, queue_name, '{"claimed": true}', persistent=True)
+    request = TaskMonitorProcessorRequest(
+        context=ctx,
+        config=TaskMonitorRuntimeConfig(processor="delete"),
+        cycle_id="cycle-delete-outbox",
+        monitor_tid="1778089999999999999",
+        candidates=(
+            TaskMonitorCandidate(
+                candidate_id="safe-outbox",
+                tid=tid,
+                queue=queue_name,
+                message_id=safe_id,
+                candidate_class="terminal_result_outbox_archived",
+                reason="terminal result archived",
+                safe_to_delete=True,
+            ),
+            TaskMonitorCandidate(
+                candidate_id="claimed-outbox",
+                tid=tid,
+                queue=queue_name,
+                message_id=claimed_id,
+                candidate_class="claimed_result_without_terminal",
+                reason="claimed result requires recovery",
+                safe_to_delete=False,
+            ),
+        ),
+        now_ns=1,
+    )
+
+    result = delete_processor(request)
+
+    remaining = _read_ids(ctx, queue_name, persistent=True)
+    assert result.success is True
+    assert result.deleted == 1
+    assert safe_id not in remaining
+    assert claimed_id in remaining
 
 
 def test_task_log_seen_candidate_is_stable_for_same_row() -> None:

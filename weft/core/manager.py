@@ -52,11 +52,15 @@ from weft._constants import (
     MANAGER_SPAWN_FENCED_STRANDED_EVENT,
     QUEUE_CTRL_IN_SUFFIX,
     QUEUE_CTRL_OUT_SUFFIX,
+    QUEUE_INTERNAL_RESERVED_SUFFIX,
+    QUEUE_PRIORITY_INTERNAL,
+    QUEUE_PRIORITY_NORMAL,
     SPEC_TYPE_PIPELINE,
     SPEC_TYPE_TASK,
     TERMINAL_ENVELOPE_TYPE,
     TERMINAL_TASK_STATUSES,
     WEFT_GLOBAL_LOG_QUEUE,
+    WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
     WEFT_MANAGER_LIFETIME_TIMEOUT,
     WEFT_MANAGER_RUNTIME_HANDLE_JSON_ENV,
     WEFT_MANAGERS_REGISTRY_QUEUE,
@@ -151,6 +155,8 @@ class DispatchSuspension:
     ownership_state: DispatchSuspensionState
     child_tid: str
     message_id: int
+    source_queue: str
+    reserved_queue: str
     recovery_pending: bool
     leader_tid: str | None = None
     recovery_attempts: int = 0
@@ -293,23 +299,73 @@ class Manager(BaseTask):
     # ------------------------------------------------------------------
     # Queue configuration
     # ------------------------------------------------------------------
+    def _resolve_queue_names(self) -> dict[str, str]:
+        """Map manager queue roles, including canonical internal spawn queues."""
+
+        queue_names = super()._resolve_queue_names()
+        if queue_names["inbox"] == WEFT_SPAWN_REQUESTS_QUEUE:
+            tid_prefix = f"T{self.taskspec.tid}"
+            queue_names["internal_inbox"] = WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE
+            queue_names["internal_reserved"] = (
+                f"{tid_prefix}.{QUEUE_INTERNAL_RESERVED_SUFFIX}"
+            )
+        return queue_names
+
+    def _internal_spawn_queue_attached(self) -> bool:
+        return self._queue_names.get("internal_inbox") == (
+            WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE
+        )
+
+    def _spawn_inbox_queue_names(self) -> tuple[str, ...]:
+        queue_names = [self._queue_names["inbox"]]
+        internal_inbox = self._queue_names.get("internal_inbox")
+        if internal_inbox is not None:
+            queue_names.insert(0, internal_inbox)
+        return tuple(dict.fromkeys(queue_names))
+
+    def _spawn_reserved_queue_pairs(self) -> tuple[tuple[str, str], ...]:
+        pairs = [(self._queue_names["reserved"], self._queue_names["inbox"])]
+        internal_reserved = self._queue_names.get("internal_reserved")
+        internal_inbox = self._queue_names.get("internal_inbox")
+        if internal_reserved is not None and internal_inbox is not None:
+            pairs.insert(0, (internal_reserved, internal_inbox))
+        return tuple(dict.fromkeys(pairs))
+
     def _build_queue_configs(self) -> dict[str, dict[str, Any]]:
         """Configure inbox reserve mode and control peek mode for the manager.
 
         Spec: [CC-2.2], [CC-2.5], [MA-1]
         """
-        return {
-            self._queue_names["inbox"]: self._reserve_queue_config(
+        configs: dict[str, dict[str, Any]] = {}
+        internal_inbox = self._queue_names.get("internal_inbox")
+        internal_reserved = self._queue_names.get("internal_reserved")
+        if internal_inbox is not None and internal_reserved is not None:
+            configs[internal_inbox] = self._reserve_queue_config(
                 self._handle_work_message,
-                reserved_queue=self._queue_names["reserved"],
-            ),
-            self._queue_names["ctrl_in"]: self._peek_queue_config(
-                self._handle_control_message
-            ),
-            self._queue_names["reserved"]: self._peek_queue_config(
+                reserved_queue=internal_reserved,
+                priority=QUEUE_PRIORITY_INTERNAL,
+            )
+
+        configs.update(
+            {
+                self._queue_names["inbox"]: self._reserve_queue_config(
+                    self._handle_work_message,
+                    reserved_queue=self._queue_names["reserved"],
+                    priority=QUEUE_PRIORITY_NORMAL,
+                ),
+                self._queue_names["ctrl_in"]: self._peek_queue_config(
+                    self._handle_control_message
+                ),
+                self._queue_names["reserved"]: self._peek_queue_config(
+                    self._handle_reserved_message
+                ),
+            }
+        )
+        if internal_reserved is not None:
+            configs[internal_reserved] = self._peek_queue_config(
                 self._handle_reserved_message
-            ),
-        }
+            )
+        return configs
 
     def _build_tid_mapping_payload(self) -> dict[str, Any]:
         """Publish manager identity in tid mappings even without explicit metadata."""
@@ -333,6 +389,9 @@ class Manager(BaseTask):
                 "outbox": self._queue_names["outbox"],
             }
         )
+        if self._internal_spawn_queue_attached():
+            payload["internal_requests"] = self._queue_names["internal_inbox"]
+            payload["internal_reserved"] = self._queue_names["internal_reserved"]
         weft_context = getattr(self.taskspec.spec, "weft_context", None)
         if weft_context is not None:
             payload["weft_context"] = str(weft_context)
@@ -528,6 +587,9 @@ class Manager(BaseTask):
             "outbox": self._queue_names["outbox"],
             "role": self.taskspec.metadata.get("role", "manager"),
         }
+        if self._internal_spawn_queue_attached():
+            payload["internal_requests"] = self._queue_names["internal_inbox"]
+            payload["internal_reserved"] = self._queue_names["internal_reserved"]
         serialized_payload = json.dumps(payload)
         try:
             message_id = cast(int | None, registry_queue.write(serialized_payload))
@@ -607,6 +669,9 @@ class Manager(BaseTask):
             "outbox": self._queue_names["outbox"],
             "role": self.taskspec.metadata.get("role", "manager"),
         }
+        if self._internal_spawn_queue_attached():
+            payload["internal_requests"] = self._queue_names["internal_inbox"]
+            payload["internal_reserved"] = self._queue_names["internal_reserved"]
         latest_after_prune = self._latest_registry_entry(registry_queue, self.tid)
         if latest_after_prune is not None:
             payload_existing, _ = latest_after_prune
@@ -859,12 +924,17 @@ class Manager(BaseTask):
                 self._dispatch_suspension = None
                 return DispatchSuspensionRefresh(ownership=ownership)
 
-            if self._reserved_spawn_request_missing(message_id=suspension.message_id):
+            if self._reserved_spawn_request_missing(
+                message_id=suspension.message_id,
+                reserved_queue=suspension.reserved_queue,
+            ):
                 self._dispatch_suspension = None
                 return DispatchSuspensionRefresh(ownership=ownership, halt_turn=True)
 
             requeued = self._requeue_reserved_spawn_request(
-                message_id=suspension.message_id
+                message_id=suspension.message_id,
+                source_queue=suspension.source_queue,
+                reserved_queue=suspension.reserved_queue,
             )
             if requeued:
                 self._dispatch_suspension = None
@@ -875,37 +945,35 @@ class Manager(BaseTask):
                 )
             return DispatchSuspensionRefresh(ownership=ownership, halt_turn=True)
 
-        self._dispatch_suspension = DispatchSuspension(
+        self._dispatch_suspension = replace(
+            suspension,
             ownership_state=ownership.state,
-            child_tid=suspension.child_tid,
-            message_id=suspension.message_id,
-            recovery_pending=suspension.recovery_pending,
             leader_tid=ownership.leader_tid,
-            recovery_attempts=suspension.recovery_attempts,
         )
 
         if suspension.recovery_pending and ownership.state == "other":
-            if self._reserved_spawn_request_missing(message_id=suspension.message_id):
-                self._dispatch_suspension = DispatchSuspension(
+            if self._reserved_spawn_request_missing(
+                message_id=suspension.message_id,
+                reserved_queue=suspension.reserved_queue,
+            ):
+                self._dispatch_suspension = replace(
+                    suspension,
                     ownership_state="other",
-                    child_tid=suspension.child_tid,
-                    message_id=suspension.message_id,
                     recovery_pending=False,
                     leader_tid=ownership.leader_tid,
-                    recovery_attempts=suspension.recovery_attempts,
                 )
             else:
                 requeued = self._requeue_reserved_spawn_request(
-                    message_id=suspension.message_id
+                    message_id=suspension.message_id,
+                    source_queue=suspension.source_queue,
+                    reserved_queue=suspension.reserved_queue,
                 )
                 if requeued:
-                    self._dispatch_suspension = DispatchSuspension(
+                    self._dispatch_suspension = replace(
+                        suspension,
                         ownership_state="other",
-                        child_tid=suspension.child_tid,
-                        message_id=suspension.message_id,
                         recovery_pending=False,
                         leader_tid=ownership.leader_tid,
-                        recovery_attempts=suspension.recovery_attempts,
                     )
                 else:
                     self._record_dispatch_recovery_failure(
@@ -944,7 +1012,8 @@ class Manager(BaseTask):
                 event=MANAGER_SPAWN_FENCE_RECOVERY_EXHAUSTED_EVENT,
                 child_tid=suspension.child_tid,
                 leader_tid=leader_tid,
-                reserved_queue=self._queue_names["reserved"],
+                source_queue=suspension.source_queue,
+                reserved_queue=suspension.reserved_queue,
                 message_id=suspension.message_id,
                 ownership_state=ownership.state,
                 attempts=attempts,
@@ -952,10 +1021,9 @@ class Manager(BaseTask):
             if ownership.state == "self":
                 self._dispatch_suspension = None
                 return
-            self._dispatch_suspension = DispatchSuspension(
+            self._dispatch_suspension = replace(
+                suspension,
                 ownership_state=ownership.state,
-                child_tid=suspension.child_tid,
-                message_id=suspension.message_id,
                 recovery_pending=False,
                 leader_tid=leader_tid,
                 recovery_attempts=attempts,
@@ -965,19 +1033,23 @@ class Manager(BaseTask):
         ownership_state = (
             "other" if ownership.state == "other" else suspension.ownership_state
         )
-        self._dispatch_suspension = DispatchSuspension(
+        self._dispatch_suspension = replace(
+            suspension,
             ownership_state=ownership_state,
-            child_tid=suspension.child_tid,
-            message_id=suspension.message_id,
             recovery_pending=True,
             leader_tid=leader_tid,
             recovery_attempts=attempts,
         )
 
-    def _reserved_spawn_request_missing(self, *, message_id: int) -> bool:
+    def _reserved_spawn_request_missing(
+        self,
+        *,
+        message_id: int,
+        reserved_queue: str,
+    ) -> bool:
         try:
             return (
-                self._get_reserved_queue().peek_one(exact_timestamp=message_id) is None
+                self._queue(reserved_queue).peek_one(exact_timestamp=message_id) is None
             )
         except (BrokerError, OSError, RuntimeError):
             logger.debug(
@@ -1598,18 +1670,158 @@ class Manager(BaseTask):
                 self._last_activity_ns, max(now_ns, new_timestamp)
             )
 
+    def _ensure_reserved_queue_empty(self, reserved_queue_name: str) -> None:
+        """Drain one manager reserved queue when policy requires it."""
+
+        reserved_queue = self._queue(reserved_queue_name)
+        try:
+            has_pending = reserved_queue.has_pending()
+        except (BrokerError, OSError, RuntimeError):
+            logger.debug(
+                "Failed to check reserved queue %s state",
+                reserved_queue_name,
+                exc_info=True,
+            )
+            return
+
+        if not has_pending:
+            return
+
+        logger.warning(
+            "Reserved queue %s not empty for manager %s",
+            reserved_queue_name,
+            self.tid,
+        )
+        while reserved_queue.read_many(64):
+            continue
+
+    def _cleanup_reserved_queue_if_needed(self, reserved_queue_name: str) -> None:
+        """Remove one manager reserved queue's messages when cleanup is enabled."""
+
+        if not self.taskspec.spec.cleanup_on_exit:
+            return
+
+        reserved_queue = self._queue(reserved_queue_name)
+        while reserved_queue.read_many(64):
+            continue
+
+    def _apply_spawn_reserved_policy(
+        self,
+        policy: ReservedPolicy,
+        *,
+        source_queue: str,
+        reserved_queue: str,
+        message_timestamp: int | None = None,
+    ) -> None:
+        """Apply a reserved policy to one manager spawn source/reserved pair."""
+
+        if policy is ReservedPolicy.KEEP:
+            return
+
+        reserved = self._queue(reserved_queue)
+
+        if policy is ReservedPolicy.CLEAR:
+            if message_timestamp is not None:
+                try:
+                    reserved.delete(message_id=message_timestamp)
+                except (BrokerError, OSError, RuntimeError):
+                    logger.debug(
+                        "Failed to clear reserved spawn message %s",
+                        message_timestamp,
+                        exc_info=True,
+                    )
+            else:
+                while reserved.read_many(64):
+                    continue
+            return
+
+        if policy is ReservedPolicy.REQUEUE:
+            if message_timestamp is not None:
+                try:
+                    reserved.move_one(
+                        source_queue,
+                        exact_timestamp=message_timestamp,
+                        require_unclaimed=True,
+                        with_timestamps=False,
+                    )
+                    return
+                except (BrokerError, OSError, RuntimeError):
+                    logger.debug(
+                        "Failed to requeue reserved spawn message %s",
+                        message_timestamp,
+                        exc_info=True,
+                    )
+            while True:
+                try:
+                    batch = reserved.move_many(
+                        source_queue,
+                        limit=64,
+                        require_unclaimed=True,
+                        with_timestamps=False,
+                    )
+                except (BrokerError, OSError, RuntimeError):
+                    logger.debug(
+                        "Failed moving reserved spawn messages back to %s",
+                        source_queue,
+                        exc_info=True,
+                    )
+                    break
+                if not batch:
+                    break
+
+    def _apply_reserved_policy(
+        self,
+        policy: ReservedPolicy,
+        message_timestamp: int | None = None,
+    ) -> None:
+        """Apply manager reserved policy across all attached spawn sources."""
+
+        if message_timestamp is not None:
+            self._apply_spawn_reserved_policy(
+                policy,
+                source_queue=self._queue_names["inbox"],
+                reserved_queue=self._queue_names["reserved"],
+                message_timestamp=message_timestamp,
+            )
+            return
+
+        for reserved_queue, source_queue in self._spawn_reserved_queue_pairs():
+            self._apply_spawn_reserved_policy(
+                policy,
+                source_queue=source_queue,
+                reserved_queue=reserved_queue,
+            )
+
+    def _ensure_reserved_empty(self) -> None:
+        """Drain all manager spawn reserved queues when policies require it."""
+
+        for reserved_queue, _source_queue in self._spawn_reserved_queue_pairs():
+            self._ensure_reserved_queue_empty(reserved_queue)
+
+    def _cleanup_reserved_if_needed(self) -> None:
+        """Clean all manager spawn reserved queues when cleanup is enabled."""
+
+        for reserved_queue, _source_queue in self._spawn_reserved_queue_pairs():
+            self._cleanup_reserved_queue_if_needed(reserved_queue)
+
     # ------------------------------------------------------------------
     # Message handling
     # ------------------------------------------------------------------
-    def _requeue_reserved_spawn_request(self, *, message_id: int) -> bool:
-        """Attempt to move one reserved spawn request back to the global inbox.
+    def _requeue_reserved_spawn_request(
+        self,
+        *,
+        message_id: int,
+        source_queue: str,
+        reserved_queue: str,
+    ) -> bool:
+        """Attempt to move one reserved spawn request back to its source queue.
 
         Spec: [MF-6]
         """
 
         try:
-            moved = self._get_reserved_queue().move_one(
-                WEFT_SPAWN_REQUESTS_QUEUE,
+            moved = self._queue(reserved_queue).move_one(
+                source_queue,
                 exact_timestamp=message_id,
                 require_unclaimed=True,
                 with_timestamps=False,
@@ -1628,6 +1840,8 @@ class Manager(BaseTask):
         child_spec: TaskSpec,
         *,
         message_id: int,
+        source_queue: str,
+        reserved_queue: str,
     ) -> bool:
         """Apply the final ownership fence before a child launch side effect.
 
@@ -1640,21 +1854,27 @@ class Manager(BaseTask):
 
         child_tid = child_spec.tid
         assert child_tid is not None
-        reserved_queue = self._queue_names["reserved"]
-
         if ownership.state == "other":
             self._dispatch_suspension = DispatchSuspension(
                 ownership_state="other",
                 child_tid=child_tid,
                 message_id=message_id,
+                source_queue=source_queue,
+                reserved_queue=reserved_queue,
                 recovery_pending=True,
                 leader_tid=ownership.leader_tid,
             )
-            requeued = self._requeue_reserved_spawn_request(message_id=message_id)
+            requeued = self._requeue_reserved_spawn_request(
+                message_id=message_id,
+                source_queue=source_queue,
+                reserved_queue=reserved_queue,
+            )
             self._dispatch_suspension = DispatchSuspension(
                 ownership_state="other",
                 child_tid=child_tid,
                 message_id=message_id,
+                source_queue=source_queue,
+                reserved_queue=reserved_queue,
                 recovery_pending=not requeued,
                 leader_tid=ownership.leader_tid,
             )
@@ -1667,6 +1887,7 @@ class Manager(BaseTask):
                 event=event,
                 child_tid=child_tid,
                 leader_tid=ownership.leader_tid,
+                source_queue=source_queue,
                 reserved_queue=reserved_queue,
                 message_id=message_id,
             )
@@ -1684,11 +1905,14 @@ class Manager(BaseTask):
             ownership_state=cast(DispatchSuspensionState, ownership.state),
             child_tid=child_tid,
             message_id=message_id,
+            source_queue=source_queue,
+            reserved_queue=reserved_queue,
             recovery_pending=True,
         )
         self._report_state_change(
             event=MANAGER_SPAWN_FENCE_SUSPENDED_EVENT,
             child_tid=child_tid,
+            source_queue=source_queue,
             reserved_queue=reserved_queue,
             message_id=message_id,
             ownership_state=ownership.state,
@@ -1700,6 +1924,8 @@ class Manager(BaseTask):
     ) -> None:
         """Consume a spawn request, build child spec, and launch (Spec: [MA-1.1], [MA-2], [MF-6])."""
         self._cleanup_children()
+        source_queue = context.queue_name
+        reserved_queue = context.reserved_queue_name or self._queue_names["reserved"]
         if not self._control_allows_child_launch():
             return
 
@@ -1708,25 +1934,40 @@ class Manager(BaseTask):
         except json.JSONDecodeError:
             logger.warning("Manager received non-JSON spawn request: %s", message)
             policy = self.taskspec.spec.reserved_policy_on_error
-            self._apply_reserved_policy(policy, message_timestamp=timestamp)
+            self._apply_spawn_reserved_policy(
+                policy,
+                source_queue=source_queue,
+                reserved_queue=reserved_queue,
+                message_timestamp=timestamp,
+            )
             if policy is not ReservedPolicy.KEEP:
-                self._ensure_reserved_empty()
-                self._cleanup_reserved_if_needed()
+                self._ensure_reserved_queue_empty(reserved_queue)
+                self._cleanup_reserved_queue_if_needed(reserved_queue)
             return
 
         child_spec = self._build_child_spec(payload, timestamp)
         if child_spec is None:
             policy = self.taskspec.spec.reserved_policy_on_error
-            self._apply_reserved_policy(policy, message_timestamp=timestamp)
+            self._apply_spawn_reserved_policy(
+                policy,
+                source_queue=source_queue,
+                reserved_queue=reserved_queue,
+                message_timestamp=timestamp,
+            )
             if policy is not ReservedPolicy.KEEP:
-                self._ensure_reserved_empty()
-                self._cleanup_reserved_if_needed()
+                self._ensure_reserved_queue_empty(reserved_queue)
+                self._cleanup_reserved_queue_if_needed(reserved_queue)
             return
 
         inbox_message = payload.get("inbox_message", WORK_ENVELOPE_START)
         if not self._control_allows_child_launch():
             return
-        if not self._apply_final_dispatch_fence(child_spec, message_id=timestamp):
+        if not self._apply_final_dispatch_fence(
+            child_spec,
+            message_id=timestamp,
+            source_queue=source_queue,
+            reserved_queue=reserved_queue,
+        ):
             return
 
         launched = self._launch_child_task(
@@ -1738,7 +1979,7 @@ class Manager(BaseTask):
             return
 
         try:
-            self._get_reserved_queue().delete(message_id=timestamp)
+            self._queue(reserved_queue).delete(message_id=timestamp)
         except (BrokerError, OSError, RuntimeError):
             logger.debug(
                 "Failed to acknowledge manager message %s", timestamp, exc_info=True
@@ -1904,11 +2145,23 @@ class Manager(BaseTask):
             restart_backoff_ns=self._task_monitor_restart_backoff_ns,
         )
 
+    def _managed_service_spawn_queue_name(self, service: ManagedServiceSpec) -> str:
+        """Return the spawn queue for one manager-owned service request."""
+
+        if (
+            service.key
+            in {INTERNAL_SERVICE_KEY_HEARTBEAT, INTERNAL_SERVICE_KEY_TASK_MONITOR}
+            and self._internal_spawn_queue_attached()
+        ):
+            return self._queue_names["internal_inbox"]
+        return self._queue_names["inbox"]
+
     def _enqueue_managed_service_request(self, service: ManagedServiceSpec) -> bool:
         """Enqueue one manager-owned service spawn request."""
 
+        queue_name = self._managed_service_spawn_queue_name(service)
         try:
-            self._queue(self._queue_names["inbox"]).write(
+            self._queue(queue_name).write(
                 json.dumps(service.spawn_payload, ensure_ascii=False)
             )
         except (BrokerError, OSError, RuntimeError):
@@ -2187,11 +2440,15 @@ class Manager(BaseTask):
         if not desired_keys:
             return set()
         pending: set[str] = set()
-        queue = self._queue(self._queue_names["inbox"])
-        for payload, _timestamp in iter_queue_json_entries(queue):
-            key = self._spawn_request_service_key(payload, desired_keys=desired_keys)
-            if key is not None:
-                pending.add(key)
+        for queue_name in self._spawn_inbox_queue_names():
+            queue = self._queue(queue_name)
+            for payload, _timestamp in iter_queue_json_entries(queue):
+                key = self._spawn_request_service_key(
+                    payload,
+                    desired_keys=desired_keys,
+                )
+                if key is not None:
+                    pending.add(key)
         return pending
 
     @staticmethod
@@ -2977,10 +3234,11 @@ class Manager(BaseTask):
         if self._idle_timeout <= 0:
             return
         try:
-            inbox_queue = self._queue(self._queue_names["inbox"])
-            if inbox_queue.has_pending():
-                self._last_activity_ns = time.time_ns()
-                return
+            for inbox_name in self._spawn_inbox_queue_names():
+                inbox_queue = self._queue(inbox_name)
+                if inbox_queue.has_pending():
+                    self._last_activity_ns = time.time_ns()
+                    return
         except (BrokerError, OSError, RuntimeError):  # pragma: no cover - defensive
             logger.debug(
                 "Failed to inspect inbox queue for pending work", exc_info=True

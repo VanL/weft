@@ -32,6 +32,7 @@ from weft._constants import (
     PIPELINE_RUNTIME_METADATA_KEY,
     TERMINAL_ENVELOPE_TYPE,
     WEFT_GLOBAL_LOG_QUEUE,
+    WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
     WEFT_MANAGER_CTRL_IN_QUEUE,
     WEFT_MANAGER_CTRL_OUT_QUEUE,
     WEFT_MANAGER_OUTBOX_QUEUE,
@@ -54,6 +55,7 @@ from weft.core.tasks import (
     PipelineTask,
     TaskMonitorTask,
 )
+from weft.core.tasks.multiqueue_watcher import QueueMessageContext, QueueMode
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 from weft.helpers import ContainerRuntimeDetection
 
@@ -660,8 +662,9 @@ def test_manager_enqueues_one_internal_task_monitor_spawn(
 
     manager = Manager(db_path, spec, config=config)
     try:
-        inbox_queue = make_queue(WEFT_SPAWN_REQUESTS_QUEUE)
+        inbox_queue = make_queue(WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE)
         payloads = [json.loads(item) for item in drain(inbox_queue)]
+        assert drain(make_queue(WEFT_SPAWN_REQUESTS_QUEUE)) == []
     finally:
         manager.cleanup()
 
@@ -689,8 +692,10 @@ def test_manager_does_not_enqueue_task_monitor_when_disabled(
 
     manager = Manager(db_path, spec, config=config)
     try:
-        inbox_queue = make_queue(WEFT_SPAWN_REQUESTS_QUEUE)
-        payloads = [json.loads(item) for item in drain(inbox_queue)]
+        payloads = [
+            json.loads(item)
+            for item in drain(make_queue(WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE))
+        ]
     finally:
         manager.cleanup()
     assert not any(
@@ -716,8 +721,10 @@ def test_manager_enqueues_heartbeat_through_service_path(
     manager = Manager(db_path, spec, config=config)
     try:
         payloads = [
-            json.loads(item) for item in drain(make_queue(WEFT_SPAWN_REQUESTS_QUEUE))
+            json.loads(item)
+            for item in drain(make_queue(WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE))
         ]
+        assert drain(make_queue(WEFT_SPAWN_REQUESTS_QUEUE)) == []
     finally:
         manager.cleanup()
 
@@ -732,6 +739,149 @@ def test_manager_enqueues_heartbeat_through_service_path(
     assert metadata[INTERNAL_SERVICE_KEY_METADATA_KEY] == INTERNAL_SERVICE_KEY_HEARTBEAT
     assert metadata[INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY] == "ensure"
     assert INTERNAL_RUNTIME_TASK_CLASS_KEY not in metadata
+
+
+def test_manager_processes_internal_spawn_before_public_spawn(
+    broker_env,
+    unique_tid,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    config = load_config({"WEFT_TASK_MONITOR_ENABLED": "0"})
+    manager = Manager(
+        db_path, make_manager_spec(unique_tid, idle_timeout=0.0), config=config
+    )
+    internal_queue = make_queue(WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE)
+    public_queue = make_queue(WEFT_SPAWN_REQUESTS_QUEUE)
+    drain(internal_queue)
+    drain(public_queue)
+
+    def spawn_payload(name: str) -> dict[str, object]:
+        return {
+            "name": name,
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:echo_payload",
+            },
+        }
+
+    internal_queue.write(json.dumps(spawn_payload("internal-first")))
+    public_queue.write(json.dumps(spawn_payload("public-second")))
+    launched: list[str] = []
+
+    def record_launch(child_spec: TaskSpec, *_args: object, **_kwargs: object) -> bool:
+        launched.append(child_spec.name)
+        return True
+
+    monkeypatch.setattr(manager, "_launch_child_task", record_launch)
+
+    try:
+        manager.process_once()
+    finally:
+        manager.cleanup()
+
+    assert launched == ["internal-first", "public-second"]
+
+
+def test_custom_inbox_manager_does_not_consume_internal_spawn_queue(
+    broker_env,
+    unique_tid,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    config = load_config({"WEFT_TASK_MONITOR_ENABLED": "0"})
+    manager = Manager(
+        db_path,
+        make_manager_spec(unique_tid, inbox="custom.spawn.requests", idle_timeout=0.0),
+        config=config,
+    )
+    internal_queue = make_queue(WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE)
+    drain(internal_queue)
+    internal_queue.write(
+        json.dumps(
+            {
+                "name": "must-not-launch",
+                "spec": {
+                    "type": "function",
+                    "function_target": "tests.tasks.sample_targets:echo_payload",
+                },
+            }
+        )
+    )
+    launched: list[str] = []
+    monkeypatch.setattr(
+        manager,
+        "_launch_child_task",
+        lambda child_spec, *_args, **_kwargs: launched.append(child_spec.name) or True,
+    )
+
+    try:
+        manager.process_once()
+    finally:
+        manager.cleanup()
+
+    assert launched == []
+    assert internal_queue.peek_one() is not None
+
+
+def test_internal_spawn_fence_requeues_to_internal_source(
+    broker_env,
+    unique_tid,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    config = load_config({"WEFT_TASK_MONITOR_ENABLED": "0"})
+    manager = Manager(
+        db_path, make_manager_spec(unique_tid, idle_timeout=0.0), config=config
+    )
+    internal_queue = make_queue(WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE)
+    public_queue = make_queue(WEFT_SPAWN_REQUESTS_QUEUE)
+    internal_reserved = make_queue(manager._queue_names["internal_reserved"])
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    drain(internal_queue)
+    drain(public_queue)
+    drain(log_queue)
+    payload = {
+        "name": "internal-fenced",
+        "spec": {
+            "type": "function",
+            "function_target": "tests.tasks.sample_targets:echo_payload",
+        },
+    }
+    internal_queue.write(json.dumps(payload))
+    message_id = pending_timestamps(internal_queue)[0]
+    lower_leader_tid = str(int(manager.tid) - 1)
+    monkeypatch.setattr(
+        manager,
+        "_evaluate_dispatch_ownership",
+        lambda: DispatchOwnership(state="other", leader_tid=lower_leader_tid),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_launch_child_task",
+        lambda *_args, **_kwargs: False,
+    )
+
+    try:
+        manager.process_once()
+    finally:
+        manager.cleanup()
+
+    assert internal_queue.peek_one(exact_timestamp=message_id) is not None
+    assert public_queue.peek_one(exact_timestamp=message_id) is None
+    assert internal_reserved.peek_one(exact_timestamp=message_id) is None
+    events = [json.loads(item) for item in drain(log_queue)]
+    requeued_events = [
+        event
+        for event in events
+        if event.get("event") == "manager_spawn_fenced_requeued"
+    ]
+    assert requeued_events
+    assert requeued_events[-1]["source_queue"] == WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE
+    assert (
+        requeued_events[-1]["reserved_queue"]
+        == manager._queue_names["internal_reserved"]
+    )
 
 
 def test_task_monitor_spawn_payload_uses_manager_owned_envelope(
@@ -2195,7 +2345,8 @@ def test_manager_other_owner_fence_requeues_request_and_emits_exact_event(
     manager.process_once()
 
     assert reserved_queue.peek_one(exact_timestamp=message_id) is None
-    assert spawn_queue.peek_one(exact_timestamp=message_id) is not None
+    assert inbox_queue.peek_one(exact_timestamp=message_id) is not None
+    assert spawn_queue.peek_one(exact_timestamp=message_id) is None
     assert manager._dispatch_suspended_state == "other"
 
     events = [json.loads(item) for item in drain(log_queue)]
@@ -2206,6 +2357,7 @@ def test_manager_other_owner_fence_requeues_request_and_emits_exact_event(
     )
     assert fenced_event["child_tid"] == str(message_id)
     assert fenced_event["leader_tid"] == lower_leader_tid
+    assert fenced_event["source_queue"] == manager._queue_names["inbox"]
     assert fenced_event["reserved_queue"] == manager._queue_names["reserved"]
     assert fenced_event["message_id"] == message_id
     assert not any(
@@ -2428,7 +2580,7 @@ def test_manager_stranded_other_owner_does_not_yield_with_unrecovered_reserved_w
     monkeypatch.setattr(
         manager,
         "_requeue_reserved_spawn_request",
-        lambda *, message_id: False,
+        lambda **_kwargs: False,
     )
 
     manager.process_once()
@@ -2471,7 +2623,7 @@ def test_manager_stranded_other_owner_exhausts_recovery_and_can_yield(
 
     failed_requeues: list[int] = []
 
-    def _fail_requeue(*, message_id: int) -> bool:
+    def _fail_requeue(*, message_id: int, **_kwargs: object) -> bool:
         failed_requeues.append(message_id)
         return False
 
@@ -2560,7 +2712,7 @@ def test_manager_self_owner_exhausts_recovery_before_later_inbox_work(
 
     failed_requeues: list[int] = []
 
-    def _fail_requeue(*, message_id: int) -> bool:
+    def _fail_requeue(*, message_id: int, **_kwargs: object) -> bool:
         failed_requeues.append(message_id)
         return False
 
@@ -2653,6 +2805,8 @@ def test_manager_suspension_skips_autostart_tick_while_dispatch_is_blocked(
         ownership_state="unknown",
         child_tid="1777000000000000001",
         message_id=1777000000000000001,
+        source_queue=manager._queue_names["inbox"],
+        reserved_queue=manager._queue_names["reserved"],
         recovery_pending=True,
     )
     monkeypatch.setattr(
@@ -2724,9 +2878,17 @@ def test_manager_other_owner_fence_keeps_persistent_child_supervised_while_suspe
         )
         assert moved is not None
 
-        manager._handle_work_message(first_payload, first_message_id, None)
+        context = QueueMessageContext(
+            queue_name=manager._queue_names["inbox"],
+            queue=inbox_queue,
+            mode=QueueMode.RESERVE,
+            timestamp=first_message_id,
+            reserved_queue_name=manager._queue_names["reserved"],
+        )
+        manager._handle_work_message(first_payload, first_message_id, context)
 
-        assert spawn_queue.peek_one(exact_timestamp=first_message_id) is not None
+        assert inbox_queue.peek_one(exact_timestamp=first_message_id) is not None
+        assert spawn_queue.peek_one(exact_timestamp=first_message_id) is None
         assert reserved_queue.peek_one(exact_timestamp=first_message_id) is None
         assert manager._dispatch_suspended_state == "other"
         assert manager._draining is False

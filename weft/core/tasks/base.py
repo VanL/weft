@@ -503,6 +503,7 @@ class BaseTask(MultiQueueWatcher, ABC):
         reserved_queue: str,
         *,
         error_handler: Callable[[Exception, str, int], bool | None] | None = None,
+        priority: int | None = None,
     ) -> dict[str, Any]:
         """Build a reserve-mode queue configuration dictionary.
 
@@ -515,6 +516,8 @@ class BaseTask(MultiQueueWatcher, ABC):
         }
         if error_handler is not None:
             config["error_handler"] = error_handler
+        if priority is not None:
+            config["priority"] = priority
         return config
 
     def _peek_queue_config(
@@ -522,6 +525,7 @@ class BaseTask(MultiQueueWatcher, ABC):
         handler: Callable[[str, int, QueueMessageContext], None],
         *,
         error_handler: Callable[[Exception, str, int], bool | None] | None = None,
+        priority: int | None = None,
     ) -> dict[str, Any]:
         """Build a peek-mode queue configuration dictionary.
 
@@ -533,6 +537,8 @@ class BaseTask(MultiQueueWatcher, ABC):
         }
         if error_handler is not None:
             config["error_handler"] = error_handler
+        if priority is not None:
+            config["priority"] = priority
         return config
 
     def _read_queue_config(
@@ -540,6 +546,7 @@ class BaseTask(MultiQueueWatcher, ABC):
         handler: Callable[[str, int, QueueMessageContext], None],
         *,
         error_handler: Callable[[Exception, str, int], bool | None] | None = None,
+        priority: int | None = None,
     ) -> dict[str, Any]:
         """Build a read-mode queue configuration dictionary.
 
@@ -551,6 +558,8 @@ class BaseTask(MultiQueueWatcher, ABC):
         }
         if error_handler is not None:
             config["error_handler"] = error_handler
+        if priority is not None:
+            config["priority"] = priority
         return config
 
     # ------------------------------------------------------------------

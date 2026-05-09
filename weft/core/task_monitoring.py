@@ -252,19 +252,83 @@ def report_only_processor(
     )
 
 
-def _unsupported_destructive_processor(
+def delete_processor(
     request: TaskMonitorProcessorRequest,
 ) -> TaskMonitorProcessorResult:
-    """Return a fail-closed result for processors reserved for a later phase."""
+    """Delete exact safe task-monitor candidates from broker queues.
+
+    Unsafe, ambiguous, and non-exact candidates are left untouched. Missing
+    exact rows are treated as idempotent skips so concurrent cleanup does not
+    turn a successful monitor cycle into a failure.
+
+    Spec: [CC-2.3], [MF-5]
+    """
+
+    deleted = 0
+    warnings: list[str] = []
+    errors: list[str] = []
+
+    for candidate in request.candidates:
+        if not candidate.safe_to_delete:
+            continue
+        if candidate.queue is None or candidate.message_id is None:
+            warnings.append(
+                "safe task-monitor candidate lacks exact queue/message id: "
+                f"{candidate.candidate_id}"
+            )
+            continue
+
+        queue = request.context.queue(
+            candidate.queue,
+            persistent=_candidate_queue_is_persistent(candidate.queue),
+        )
+        try:
+            removed = bool(queue.delete(message_id=candidate.message_id))
+        except (BrokerError, OSError, RuntimeError, ValueError) as exc:
+            errors.append(
+                "failed to delete task-monitor candidate "
+                f"{candidate.candidate_id} from {candidate.queue} "
+                f"at {candidate.message_id}: {exc}"
+            )
+            continue
+        finally:
+            queue.close()
+
+        if removed:
+            deleted += 1
+        else:
+            warnings.append(
+                f"task-monitor candidate was already absent: {candidate.candidate_id}"
+            )
+
+    return TaskMonitorProcessorResult(
+        success=not errors,
+        processed=len(request.candidates),
+        deleted=deleted,
+        errors=tuple(errors),
+        warnings=tuple(warnings),
+    )
+
+
+def _unsupported_logging_delete_processor(
+    request: TaskMonitorProcessorRequest,
+) -> TaskMonitorProcessorResult:
+    """Return a fail-closed result for logging delete reserved for later."""
 
     del request
     return TaskMonitorProcessorResult(
         success=False,
         errors=(
-            "delete and jsonl_then_delete task-monitor processors are reserved "
-            "until phase 7 part 3",
+            "jsonl_then_delete task-monitor processor is reserved until the "
+            "logging callback is implemented",
         ),
     )
+
+
+def _candidate_queue_is_persistent(queue_name: str) -> bool:
+    """Return the queue persistence mode needed for exact candidate deletion."""
+
+    return queue_name.endswith(".outbox")
 
 
 def resolve_task_monitor_processor(name: str) -> TaskMonitorProcessor:
@@ -272,8 +336,10 @@ def resolve_task_monitor_processor(name: str) -> TaskMonitorProcessor:
 
     if name == "report_only":
         return report_only_processor
-    if name in {"delete", "jsonl_then_delete"}:
-        return _unsupported_destructive_processor
+    if name == "delete":
+        return delete_processor
+    if name == "jsonl_then_delete":
+        return _unsupported_logging_delete_processor
 
     if ":" not in name:
         raise ValueError(
@@ -1253,6 +1319,7 @@ __all__ = [
     "TaskMonitorProcessorResult",
     "TaskMonitorRuntimeConfig",
     "build_task_monitor_cycle_snapshot",
+    "delete_processor",
     "report_only_processor",
     "reduce_task_log_messages",
     "resolve_task_monitor_processor",

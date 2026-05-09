@@ -32,6 +32,7 @@ Global queues:
 |------|---------|--------------------|
 | `weft.log.tasks` | Global task log / state events | Yes |
 | `weft.spawn.requests` | Manager spawn requests | Yes |
+| `weft.spawn.internal` | Manager-owned internal service spawn requests | Yes |
 | `weft.manager.ctrl_in` | Manager control input | Yes |
 | `weft.manager.ctrl_out` | Manager control output | Yes |
 | `weft.manager.outbox` | Manager informational output | Yes |
@@ -128,10 +129,10 @@ Format rules and sanitization live in `01-Core_Components.md`.
 | `WEFT_MANAGER_LIFETIME_TIMEOUT` | Default manager idle timeout. Must parse as a non-negative float. |
 | `WEFT_MANAGER_REUSE_ENABLED` | Whether CLI-started managers stay alive after task completion. |
 | `WEFT_AUTOSTART_TASKS` | Whether manager boot should consider autostart manifests under the active Weft metadata directory. |
-| `WEFT_TASK_MONITOR_ENABLED` | Whether the canonical manager supervises the internal non-destructive `TaskMonitorTask`. Defaults to true. |
+| `WEFT_TASK_MONITOR_ENABLED` | Whether the canonical manager supervises the internal `TaskMonitorTask`. Defaults to true. |
 | `WEFT_TASK_MONITOR_INTERVAL_SECONDS` | Heartbeat wake interval for the supervised task monitor. Must be at least the heartbeat minimum. |
 | `WEFT_TASK_MONITOR_BATCH_SIZE` | Maximum task-log rows scanned by one supervised monitor cycle. |
-| `WEFT_TASK_MONITOR_PROCESSOR` | Task-monitor processor name. Built-ins are `report_only`, `delete`, and `jsonl_then_delete`; destructive built-ins remain fail-closed until the cleanup phase lands. Custom values use `module:function`. |
+| `WEFT_TASK_MONITOR_PROCESSOR` | Task-monitor processor name. Defaults to `delete`. Built-ins are `report_only`, `delete`, and `jsonl_then_delete`; `delete` removes exact safe cleanup candidates only, while `jsonl_then_delete` remains fail-closed until the logging callback lands. Custom values use `module:function`. |
 | `WEFT_TASK_MONITOR_LOG_SINK` | Operational output sink selector for monitor processors: `stdout`, `disk`, or `none`. |
 | `WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS` | Manager restart backoff after the supervised monitor exits. |
 | `WEFT_DIRECTORY_NAME` | Name of the Weft metadata directory. Defaults to `.weft` and is used before project discovery. |

@@ -235,6 +235,15 @@ QUEUE_CTRL_OUT_SUFFIX: Final[str] = "ctrl_out"
 QUEUE_RESERVED_SUFFIX: Final[str] = "reserved"
 """Suffix for reserved queue names (T{tid}.reserved) used for WIP and recovery."""
 
+QUEUE_INTERNAL_RESERVED_SUFFIX: Final[str] = "internal_reserved"
+"""Suffix for manager-owned internal spawn reserved queues."""
+
+QUEUE_PRIORITY_INTERNAL: Final[int] = 0
+"""Queue watcher priority for manager-owned internal work. Lower runs first."""
+
+QUEUE_PRIORITY_NORMAL: Final[int] = 100
+"""Default queue watcher priority for ordinary task work."""
+
 # Global Queue Names
 # ------------------
 # Spec: docs/specifications/00-Quick_Reference.md#queue-names
@@ -259,7 +268,7 @@ WEFT_TASK_MONITOR_INTERVAL_SECONDS_DEFAULT: Final[int] = 300
 WEFT_TASK_MONITOR_BATCH_SIZE_DEFAULT: Final[int] = 1000
 """Default maximum task-log rows scanned by one supervised monitor cycle."""
 
-WEFT_TASK_MONITOR_PROCESSOR_DEFAULT: Final[str] = "report_only"
+WEFT_TASK_MONITOR_PROCESSOR_DEFAULT: Final[str] = "delete"
 """Default processor for supervised task-monitor candidates."""
 
 WEFT_TASK_MONITOR_PROCESSOR_BUILTINS: Final[frozenset[str]] = frozenset(
@@ -481,6 +490,9 @@ RETENTION_PRUNE_REPORT_ONLY_CLASSES: Final[frozenset[str]] = frozenset(
 
 WEFT_SPAWN_REQUESTS_QUEUE: Final[str] = "weft.spawn.requests"
 """Global queue for manager-consumed task spawn requests."""
+
+WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE: Final[str] = "weft.spawn.internal"
+"""Global queue for manager-owned internal spawn requests."""
 
 WEFT_MANAGER_CTRL_IN_QUEUE: Final[str] = "weft.manager.ctrl_in"
 """Control inbox for manager lifecycle commands."""

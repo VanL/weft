@@ -17,7 +17,7 @@ import itertools
 import logging
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -31,7 +31,7 @@ from simplebroker.watcher import (
     _StopLoop,
     default_error_handler,
 )
-from weft._constants import load_config
+from weft._constants import QUEUE_PRIORITY_NORMAL, load_config
 from weft.context import resolve_context_broker_target
 
 logger = logging.getLogger(__name__)
@@ -66,6 +66,7 @@ class QueueRuntimeConfig:
     mode: QueueMode
     error_handler: Callable[[Exception, str, int], bool | None]
     reserved_queue_name: str | None = None
+    priority: int = QUEUE_PRIORITY_NORMAL
 
 
 def _resolve_db_target(
@@ -222,6 +223,13 @@ class MultiQueueWatcher(BaseWatcher):
                     f"Queue '{queue_name}' configured in reserve mode must supply 'reserved_queue'"
                 )
 
+            priority_obj = raw_config.get("priority", QUEUE_PRIORITY_NORMAL)
+            if not isinstance(priority_obj, int):
+                raise TypeError(
+                    f"priority for '{queue_name}' must be an int, "
+                    f"got {type(priority_obj).__name__}"
+                )
+
             runtime_config = QueueRuntimeConfig(
                 name=queue_name,
                 queue=queue_obj,
@@ -229,6 +237,7 @@ class MultiQueueWatcher(BaseWatcher):
                 mode=mode,
                 error_handler=error_handler or default_error_handler_fn,
                 reserved_queue_name=reserved_name,
+                priority=priority_obj,
             )
             self._queues[queue_name] = runtime_config
 
@@ -264,6 +273,7 @@ class MultiQueueWatcher(BaseWatcher):
         mode: QueueMode = QueueMode.READ,
         reserved_queue: str | None = None,
         error_handler: Callable[[Exception, str, int], bool | None] | None = None,
+        priority: int = QUEUE_PRIORITY_NORMAL,
     ) -> None:
         """Dynamically add a queue to the watcher.
 
@@ -279,6 +289,8 @@ class MultiQueueWatcher(BaseWatcher):
             )
         if mode is QueueMode.RESERVE and reserved_queue is None:
             raise ValueError("reserve mode requires reserved_queue")
+        if not isinstance(priority, int):
+            raise TypeError(f"priority must be an int, got {type(priority).__name__}")
 
         queue_obj = Queue(
             queue_name,
@@ -296,6 +308,7 @@ class MultiQueueWatcher(BaseWatcher):
             mode=mode,
             error_handler=error_handler or self._default_error_handler,
             reserved_queue_name=reserved_queue,
+            priority=priority,
         )
         self._queue_generation += 1
         self._reset_multi_activity_waiter()
@@ -553,6 +566,180 @@ class MultiQueueWatcher(BaseWatcher):
 
         return wrapper
 
+    def _active_queue_priorities(self) -> set[int]:
+        """Return priorities for active queues.
+
+        Spec: [CC-2.1], [CC-2.5]
+        """
+        return {self._queues[name].priority for name in self._active_queues}
+
+    def _process_queue_message(
+        self,
+        queue_name: str,
+        inactive_candidates: set[str],
+    ) -> bool:
+        """Process one message for one active queue.
+
+        Spec: [CC-2.1], [CC-2.5]
+        """
+        config = self._queues[queue_name]
+        result = self._fetch_next_message(config)
+        if not result:
+            if config.mode is not QueueMode.PEEK:
+                inactive_candidates.add(queue_name)
+            return False
+
+        body, timestamp = result
+        context = QueueMessageContext(
+            queue_name=queue_name,
+            queue=config.queue,
+            mode=config.mode,
+            timestamp=timestamp,
+            reserved_queue_name=config.reserved_queue_name,
+        )
+
+        handler_wrapper = self._make_handler_wrapper(config.handler, context)
+        original_handler = self._handler
+        original_error_handler = self._error_handler
+
+        self._handler = handler_wrapper
+        self._error_handler = config.error_handler
+
+        try:
+            self._dispatch(body, timestamp, config=self._config)
+        finally:
+            self._handler = original_handler
+            self._error_handler = original_error_handler
+
+        if self._stop_event.is_set():
+            inactive_candidates.add(queue_name)
+        elif not self._queue_has_pending(config.queue):
+            inactive_candidates.add(queue_name)
+
+        return True
+
+    def _remove_inactive_queues(self, inactive_candidates: set[str]) -> None:
+        """Remove inactive queue names from the active scheduling set."""
+        if not inactive_candidates:
+            return
+
+        self._active_queues = [
+            q for q in self._active_queues if q not in inactive_candidates
+        ]
+        self._queue_iterator = (
+            itertools.cycle(self._active_queues)
+            if self._active_queues
+            else itertools.cycle([])
+        )
+
+    def _drain_round_robin_pass(
+        self,
+        *,
+        queue_names: Sequence[str] | None = None,
+    ) -> int:
+        """Process one round-robin scheduling pass.
+
+        Spec: [CC-2.1], [CC-2.5]
+        """
+        messages_processed = 0
+        inactive_candidates: set[str] = set()
+
+        if queue_names is None:
+            iterations = len(self._active_queues)
+            selected_queue_names: list[str] = []
+        else:
+            iterations = len(queue_names)
+            selected_queue_names = list(queue_names)
+
+        for index in range(iterations):
+            if self._stop_event.is_set():
+                break
+
+            if queue_names is None:
+                try:
+                    queue_name = next(self._queue_iterator)
+                except StopIteration:
+                    break
+            else:
+                queue_name = selected_queue_names[index]
+                if queue_name not in self._active_queues:
+                    continue
+
+            if self._process_queue_message(queue_name, inactive_candidates):
+                messages_processed += 1
+
+            if self._stop_event.is_set():
+                break
+
+        self._remove_inactive_queues(inactive_candidates)
+        return messages_processed
+
+    def _pending_non_peek_priorities(self) -> set[int]:
+        """Return priorities for pending queues that can be drained repeatedly."""
+        priorities: set[int] = set()
+        for queue_name in self._active_queues:
+            config = self._queues[queue_name]
+            if config.mode is QueueMode.PEEK:
+                continue
+            if self._queue_has_pending(config.queue):
+                priorities.add(config.priority)
+        return priorities
+
+    def _drain_priority_queues(self) -> int:
+        """Drain the highest-priority non-PEEK queues before one normal pass.
+
+        Spec: [CC-2.1], [CC-2.5]
+        """
+        messages_processed = 0
+        priorities = self._pending_non_peek_priorities()
+        if priorities:
+            priority = min(priorities)
+            while not self._stop_event.is_set():
+                queue_names = [
+                    name
+                    for name in self._active_queues
+                    if self._queues[name].priority == priority
+                    and self._queues[name].mode is not QueueMode.PEEK
+                ]
+                if not queue_names:
+                    break
+
+                processed = self._drain_round_robin_pass(queue_names=queue_names)
+                messages_processed += processed
+                if processed == 0:
+                    break
+
+                self._update_active_queues()
+                if priority not in self._pending_non_peek_priorities():
+                    break
+
+        if self._stop_event.is_set():
+            return messages_processed
+
+        self._update_active_queues()
+        lower_priority_queue_names = [
+            name
+            for name in self._active_queues
+            if self._queues[name].mode is not QueueMode.PEEK
+        ]
+        if lower_priority_queue_names:
+            messages_processed += self._drain_round_robin_pass(
+                queue_names=lower_priority_queue_names
+            )
+
+        if self._active_queues and not self._stop_event.is_set():
+            peek_queue_names = [
+                name
+                for name in self._active_queues
+                if self._queues[name].mode is QueueMode.PEEK
+            ]
+            if peek_queue_names:
+                messages_processed += self._drain_round_robin_pass(
+                    queue_names=peek_queue_names
+                )
+
+        return messages_processed
+
     def _drain_queue(self) -> None:
         """Process one scheduling pass across all active queues.
 
@@ -562,64 +749,10 @@ class MultiQueueWatcher(BaseWatcher):
         if not self._active_queues:
             return
 
-        messages_processed = 0
-        inactive_candidates: set[str] = set()
-
-        for _ in range(len(self._active_queues)):
-            if self._stop_event.is_set():
-                break
-
-            try:
-                queue_name = next(self._queue_iterator)
-            except StopIteration:
-                break
-
-            config = self._queues[queue_name]
-            result = self._fetch_next_message(config)
-            if not result:
-                if config.mode is not QueueMode.PEEK:
-                    inactive_candidates.add(queue_name)
-                continue
-
-            body, timestamp = result
-            context = QueueMessageContext(
-                queue_name=queue_name,
-                queue=config.queue,
-                mode=config.mode,
-                timestamp=timestamp,
-                reserved_queue_name=config.reserved_queue_name,
-            )
-
-            handler_wrapper = self._make_handler_wrapper(config.handler, context)
-            original_handler = self._handler
-            original_error_handler = self._error_handler
-
-            self._handler = handler_wrapper
-            self._error_handler = config.error_handler
-
-            try:
-                self._dispatch(body, timestamp, config=self._config)
-                messages_processed += 1
-            finally:
-                self._handler = original_handler
-                self._error_handler = original_error_handler
-
-            if self._stop_event.is_set():
-                inactive_candidates.add(queue_name)
-                break
-
-            if not self._queue_has_pending(config.queue):
-                inactive_candidates.add(queue_name)
+        if len(self._active_queue_priorities()) <= 1:
+            messages_processed = self._drain_round_robin_pass()
+        else:
+            messages_processed = self._drain_priority_queues()
 
         if messages_processed > 0:
             self._strategy.notify_activity()
-
-        if inactive_candidates:
-            self._active_queues = [
-                q for q in self._active_queues if q not in inactive_candidates
-            ]
-            self._queue_iterator = (
-                itertools.cycle(self._active_queues)
-                if self._active_queues
-                else itertools.cycle([])
-            )

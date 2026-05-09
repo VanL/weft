@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 import time
 
+from weft._constants import QUEUE_PRIORITY_INTERNAL, QUEUE_PRIORITY_NORMAL
 from weft.core.tasks.multiqueue_watcher import (
     MultiQueueWatcher,
     QueueMessageContext,
@@ -349,6 +350,155 @@ def test_background_watcher_path_uses_multi_queue_waiter(
     finally:
         watcher.stop(join=True)
         thread.join(timeout=1.0)
+
+
+def test_priority_queue_drains_before_lower_priority(broker_env) -> None:
+    db_path, make_queue = broker_env
+    internal_name = "priority.internal"
+    public_name = "priority.public"
+    internal_reserved_name = "priority.internal.reserved"
+    public_reserved_name = "priority.public.reserved"
+    internal = make_queue(internal_name)
+    public = make_queue(public_name)
+    internal_reserved = make_queue(internal_reserved_name)
+    public_reserved = make_queue(public_reserved_name)
+
+    for body in ["internal-1", "internal-2", "internal-3"]:
+        internal.write(body)
+    for body in ["public-1", "public-2"]:
+        public.write(body)
+
+    seen: list[tuple[str, str]] = []
+
+    def handler(message: str, timestamp: int, context: QueueMessageContext) -> None:
+        seen.append((context.queue_name, message))
+        assert context.reserved_queue_name is not None
+        make_queue(context.reserved_queue_name).delete(message_id=timestamp)
+
+    watcher = MultiQueueWatcher(
+        queue_configs={
+            internal_name: {
+                "handler": handler,
+                "mode": QueueMode.RESERVE,
+                "reserved_queue": internal_reserved_name,
+                "priority": QUEUE_PRIORITY_INTERNAL,
+            },
+            public_name: {
+                "handler": handler,
+                "mode": QueueMode.RESERVE,
+                "reserved_queue": public_reserved_name,
+                "priority": QUEUE_PRIORITY_NORMAL,
+            },
+        },
+        db=db_path,
+    )
+
+    try:
+        run_single_drain(watcher)
+    finally:
+        watcher.stop(join=False)
+
+    assert seen[:3] == [
+        (internal_name, "internal-1"),
+        (internal_name, "internal-2"),
+        (internal_name, "internal-3"),
+    ]
+    assert seen[3:] == [(public_name, "public-1")]
+    assert internal.peek_one() is None
+    assert internal_reserved.peek_one() is None
+    assert public_reserved.peek_one() is None
+    assert public.peek_one() == "public-2"
+
+
+def test_equal_priority_preserves_existing_round_robin_behavior(broker_env) -> None:
+    db_path, make_queue = broker_env
+    first_name = "priority.equal.first"
+    second_name = "priority.equal.second"
+    first_reserved_name = "priority.equal.first.reserved"
+    second_reserved_name = "priority.equal.second.reserved"
+    make_queue(first_name).write("first-1")
+    make_queue(first_name).write("first-2")
+    make_queue(second_name).write("second-1")
+    make_queue(second_name).write("second-2")
+
+    seen: list[tuple[str, str]] = []
+
+    def handler(message: str, timestamp: int, context: QueueMessageContext) -> None:
+        seen.append((context.queue_name, message))
+        assert context.reserved_queue_name is not None
+        make_queue(context.reserved_queue_name).delete(message_id=timestamp)
+
+    watcher = MultiQueueWatcher(
+        queue_configs={
+            first_name: {
+                "handler": handler,
+                "mode": QueueMode.RESERVE,
+                "reserved_queue": first_reserved_name,
+            },
+            second_name: {
+                "handler": handler,
+                "mode": QueueMode.RESERVE,
+                "reserved_queue": second_reserved_name,
+            },
+        },
+        db=db_path,
+    )
+
+    try:
+        run_single_drain(watcher)
+    finally:
+        watcher.stop(join=False)
+
+    assert seen == [
+        (first_name, "first-1"),
+        (second_name, "second-1"),
+    ]
+    assert make_queue(first_name).peek_one() == "first-2"
+    assert make_queue(second_name).peek_one() == "second-2"
+
+
+def test_priority_drain_stops_when_high_priority_queue_is_empty(broker_env) -> None:
+    db_path, make_queue = broker_env
+    internal_name = "priority.empty.internal"
+    public_name = "priority.empty.public"
+    internal_reserved_name = "priority.empty.internal.reserved"
+    public_reserved_name = "priority.empty.public.reserved"
+    public = make_queue(public_name)
+    public.write("public-1")
+    public.write("public-2")
+
+    seen: list[tuple[str, str]] = []
+
+    def handler(message: str, timestamp: int, context: QueueMessageContext) -> None:
+        seen.append((context.queue_name, message))
+        assert context.reserved_queue_name is not None
+        make_queue(context.reserved_queue_name).delete(message_id=timestamp)
+
+    watcher = MultiQueueWatcher(
+        queue_configs={
+            internal_name: {
+                "handler": handler,
+                "mode": QueueMode.RESERVE,
+                "reserved_queue": internal_reserved_name,
+                "priority": QUEUE_PRIORITY_INTERNAL,
+            },
+            public_name: {
+                "handler": handler,
+                "mode": QueueMode.RESERVE,
+                "reserved_queue": public_reserved_name,
+                "priority": QUEUE_PRIORITY_NORMAL,
+            },
+        },
+        db=db_path,
+    )
+
+    try:
+        run_single_drain(watcher)
+    finally:
+        watcher.stop(join=False)
+
+    assert seen == [(public_name, "public-1")]
+    assert public.peek_one() == "public-2"
 
 
 def test_peek_mode_without_ack_leaves_message(broker_env) -> None:

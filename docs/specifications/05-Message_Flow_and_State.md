@@ -270,13 +270,16 @@ Current rules:
   log output, but it must not change task lifecycle truth, public status,
   result materialization, or cleanup decisions
 - task-monitor log records and processor summaries are operational output only
-  in the current release. The monitor may mark broker messages as read-only
-  lifecycle or cleanup candidates, but it does not delete, reserve, move,
-  prune, reap, acknowledge, or unclaim them.
+  in the current release. The monitor may mark broker messages as lifecycle or
+  cleanup candidates. With the default `delete` processor it may delete exact
+  safe cleanup candidates only. With the built-in `report_only` processor it
+  does not delete, reserve, move, prune, reap, acknowledge, or unclaim them.
+  The `jsonl_then_delete` processor remains fail-closed until the operational
+  logging callback lands.
 - when enabled, the canonical manager supervises one internal
   `TaskMonitorTask`. The supervised monitor reads the same task-log evidence by
   generator/high-water cursor, reduces lifecycle rows by TID, builds
-  non-destructive candidates such as `domain_failure`,
+  candidate classes such as `domain_failure`,
   `result_without_terminal`, `claimed_result_without_terminal`,
   `runtime_conflict`, `superseded_tid_mapping`, `stale_manager_registry`, and
   task-log/task-local retention classes for superseded logs and terminal
@@ -369,8 +372,11 @@ Implementation plan backlink:
 
 ### 6. Manager Spawn Flow [MF-6]
 
-Managers consume `weft.spawn.requests`, validate and expand TaskSpecs, launch
-child tasks, and seed initial inbox payloads when present.
+Managers consume `weft.spawn.requests` and, for canonical managers,
+`weft.spawn.internal`. Internal spawn requests are manager-owned service work
+and are drained before public spawn requests whenever both queues are pending.
+Both queues share the same validation, TaskSpec expansion, child launch, initial
+inbox seeding, and acknowledgement path.
 
 Current submission-reconciliation rules:
 
@@ -393,18 +399,18 @@ Current manager-dispatch fence rules:
 - only positive `self` ownership permits launch
 - on positive `other` ownership proof, the manager must not launch the child;
   it becomes non-dispatching for later loop iterations before attempting to
-  move the exact reserved message back to `weft.spawn.requests`
+  move the exact reserved message back to the original spawn source queue
 - if that exact-message move succeeds, the manager emits
   `manager_spawn_fenced_requeued` with required fields `child_tid`,
-  `leader_tid`, `reserved_queue`, and `message_id`
+  `leader_tid`, `source_queue`, `reserved_queue`, and `message_id`
 - if that exact-message move fails, the manager leaves the exact request in
   reserved and emits `manager_spawn_fenced_stranded` with required fields
-  `child_tid`, `leader_tid`, `reserved_queue`, and `message_id`
+  `child_tid`, `leader_tid`, `source_queue`, `reserved_queue`, and `message_id`
 - on `none` or `unknown`, the manager must not launch and must not requeue on
   guesswork; it leaves the exact request in reserved, emits
   `manager_spawn_fence_suspended` with required fields `child_tid`,
-  `reserved_queue`, `message_id`, and `ownership_state`, and enters
-  manager-wide dispatch suspension
+  `source_queue`, `reserved_queue`, `message_id`, and `ownership_state`, and
+  enters manager-wide dispatch suspension
 - while dispatch-suspended, the manager may continue control handling and child
   supervision, but it must not reserve or launch later spawn requests until a
   later ownership check resolves to `self` or `other`
@@ -412,12 +418,12 @@ Current manager-dispatch fence rules:
   private reserved queue, the manager must not leadership-yield, idle-exit, or
   run ensure-style autostart scans that enqueue more undispatchable work
 - if ownership later resolves back to `self`, the manager exact-message
-  requeues the older fenced request back to `weft.spawn.requests` before later
-  inbox work resumes
+  requeues the older fenced request back to its original spawn source queue
+  before later inbox work resumes
 - exact-message requeue recovery is bounded by
   `MANAGER_DISPATCH_RECOVERY_MAX_ATTEMPTS`; when the ceiling is reached, the
   manager emits `manager_spawn_fence_recovery_exhausted` with required fields
-  `child_tid`, `leader_tid`, `reserved_queue`, `message_id`,
+  `child_tid`, `leader_tid`, `source_queue`, `reserved_queue`, `message_id`,
   `ownership_state`, and `attempts`
 - exhausted recovery never deletes the reserved message and never emits
   `task_spawn_rejected`; it leaves the stranded work operator-visible in the
@@ -627,8 +633,11 @@ system pruning:
 - task-owned cleanup may remove spilled output when `cleanup_on_exit` is enabled
 - there is no built-in age-based output sweeper in the current contract
 - the supervised task monitor exists in the current contract. It classifies
-  read-only lifecycle and cleanup candidates, but it is report-only and
-  performs no broker cleanup until a later destructive processor contract lands
+  lifecycle and cleanup candidates. Its default `delete` processor may delete
+  exact safe cleanup candidates from runtime-state, task-log, and task-local
+  queues. It must not delete active work, ambiguous evidence, claimed outbox
+  residue, malformed/unknown rows, or candidates without exact message IDs.
+  `report_only` remains available as a non-destructive override.
 - `weft system prune --family task-log|task-local|retention` is an explicit
   operator action, not a background sweeper. Ordinary apply mode requires an
   archive artifact before deletion. Force apply mode is a human override for
@@ -673,12 +682,14 @@ Current rules:
   unless the class is safe for ordinary deletion. `--force --apply` is the
   explicit human override for those ordinary protections.
 - the manager-supervised `TaskMonitorTask` may report the same families of
-  stale runtime-state and retention candidates for observation, but it must not
-  apply deletion or archive side effects in the current contract.
+  stale runtime-state and retention candidates for observation. If configured
+  with `WEFT_TASK_MONITOR_PROCESSOR=delete`, it may delete exact safe candidate
+  message IDs only. It must not apply archive side effects, force-only
+  retention cleanup, or logging-before-delete behavior in this slice.
 - `weft system tidy` handles backend-native cleanup of empty queues and broker
   maintenance
-- there is no autonomous destructive queue-lifecycle service in the current
-  contract
+- autonomous destructive queue lifecycle is limited to the supervised
+  task-monitor `delete` processor and only for exact safe candidates
 
 ## Scope Boundary
 

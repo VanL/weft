@@ -795,6 +795,13 @@ candidates. It must remain configurable and reversible.
 
 ### 1. Implement built-in delete processors
 
+2026-05-09 implementation note: the approved slice implements the built-in
+`delete` processor only. `jsonl_then_delete` remains accepted by config but
+fail-closed until the logging callback is implemented in a later slice.
+
+2026-05-09 default note: the approved slice also changes the production
+default to `delete`. `report_only` remains the rollback override.
+
 - Files to touch:
   - `weft/core/task_monitoring.py` or `weft/core/task_monitor_processors.py`
   - `weft/core/runtime_pruning.py`
@@ -909,9 +916,9 @@ candidates. It must remain configurable and reversible.
   - Document autonomous safe cleanup as current behavior only after it lands.
   - Keep operational-output caveats clear.
 - Ops rollout:
-  - Deploy with `WEFT_TASK_MONITOR_PROCESSOR=report_only`.
-  - Confirm monitor sees candidates and manager remains healthy.
-  - Switch to `delete` or `jsonl_then_delete`.
+  - Deploy with the default `WEFT_TASK_MONITOR_PROCESSOR=delete`.
+  - If rollback is needed, set `WEFT_TASK_MONITOR_PROCESSOR=report_only` or
+    `WEFT_TASK_MONITOR_ENABLED=0`.
   - Observe queue counts decreasing over several cycles:
     `weft.log.tasks`, `weft.state.tid_mappings`, old task-local outboxes,
     old ctrl queues.

@@ -141,11 +141,14 @@ Current task families:
   configured task-monitor processor. The launcher asks the persistent monitor
   for its next wait timeout so the monitor sleeps until heartbeat/local due
   time or task-local input instead of polling at the default task-process
-  interval. The supervised monitor builds read-only lifecycle and cleanup
+  interval. The supervised monitor builds lifecycle and cleanup
   candidate snapshots, including Weft lifecycle anomalies, domain failures,
-  stale runtime-state rows, and superseded task-log rows. It is
-  non-destructive in the current contract: it does not consume, reserve, move,
-  or delete lifecycle messages.
+  stale runtime-state rows, and superseded task-log rows. Its default `delete`
+  processor may delete exact safe cleanup candidates only; it must not consume,
+  reserve, move, unclaim, or delete active, ambiguous, claimed, malformed,
+  unknown, or non-exact lifecycle messages. `report_only` remains available as
+  a non-destructive override. `jsonl_then_delete` remains fail-closed until the
+  operational logging callback lands.
 - `PipelineTask`: internal orchestrator for first-class linear pipelines
 - `PipelineEdgeTask`: generated one-shot edge task for pipeline handoff
 - `HeartbeatTask`: manager-supervised internal interval emitter for

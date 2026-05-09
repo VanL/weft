@@ -117,11 +117,13 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
 - **OBS.13**: task monitor log files, task monitor checkpoints,
   runtime-prune reports, and retention-prune reports/archives are operational
   outputs only. They must not become task lifecycle truth, status authority,
-  result authority, or automatic cleanup authority. The manager-supervised
-  `TaskMonitorTask` is also operational and non-destructive; its lifecycle
-  classifications, cleanup-candidate classifications, processor results, and
-  checkpoints do not change public lifecycle reconstruction or delete broker
-  rows.
+  or result authority. The manager-supervised `TaskMonitorTask` is also
+  operational: its lifecycle classifications, cleanup-candidate
+  classifications, processor results, and checkpoints do not change public
+  lifecycle reconstruction. If configured with the built-in `delete`
+  processor, it may delete exact safe cleanup candidate rows only. It must not
+  delete active, ambiguous, claimed, malformed, unknown, inbox/reserved, or
+  non-exact lifecycle evidence.
 - **OBS.14**: claimed outbox residue is recovery evidence, not decoded result
   evidence. Status/result readers may surface
   `claimed_result_without_terminal`, but they must not delete, unclaim, or
@@ -192,8 +194,8 @@ _Implementation mapping_: `weft/core/manager.py`,
   reserved spawn request; `none` and `unknown` are not launch authority
 - **MANAGER.10**: if a lower-TID canonical owner is positively proved after
   reservation but before launch, the manager must keep the exact work item
-  durable by either exact-message requeue to `weft.spawn.requests` or visibly
-  stranded reserved state
+  durable by either exact-message requeue to the original spawn source queue or
+  visibly stranded reserved state
 - **MANAGER.11**: manager-scoped fence diagnostics
   (`manager_spawn_fenced_requeued`, `manager_spawn_fenced_stranded`,
   `manager_spawn_fence_suspended`) must not be reused as spawn rejection
@@ -205,13 +207,16 @@ _Implementation mapping_: `weft/core/manager.py`,
   private reserved queue must not leadership-yield, idle-exit, or enqueue new
   ensure-mode autostart work before that exact request is recovered
 - **MANAGER.14**: if dispatch ownership returns to `self` after suspension, the
-  exact fenced spawn request is requeued to `weft.spawn.requests` before later
-  inbox work resumes
+  exact fenced spawn request is requeued to the original spawn source queue
+  before later inbox work resumes
 - **MANAGER.15**: manager-owned singleton services reduce all pending-spawn,
   live, terminal, and uncertain evidence through one deterministic transition
   table before Manager applies side effects. Terminal proof for a TID wins over
   live evidence for the same TID, and uncertain evidence must become visible
   degraded wait rather than an unqualified duplicate launch.
+- **MANAGER.16**: canonical managers must drain manager-owned internal spawn
+  work before ordinary public spawn work whenever both are pending and launch is
+  otherwise authorized.
 
 ### Context Invariants
 
@@ -260,8 +265,10 @@ Current invariant visibility comes from:
 
 There is now a manager-supervised `TaskMonitorTask` in addition to the
 foreground `weft system task-monitor` command. In the current contract it is
-non-destructive and operational only, even though it can report read-only
-cleanup candidates for operator validation.
+operational only. The default processor is `delete`, which may delete exact
+safe cleanup candidates. Those deletes do not make task-monitor output
+lifecycle truth or result authority. `report_only` remains available as a
+non-destructive override.
 
 ## Scope Boundary
 
