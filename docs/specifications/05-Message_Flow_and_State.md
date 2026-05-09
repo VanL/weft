@@ -25,6 +25,8 @@ See also:
   [`07-System_Invariants.md`](07-System_Invariants.md)
 - implementation plan:
   [`docs/plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md`](../plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md)
+- active service-health convergence plan:
+  [`docs/plans/2026-05-09-service-liveness-and-health-convergence-plan.md`](../plans/2026-05-09-service-liveness-and-health-convergence-plan.md)
 
 ## Message Flow Patterns [MF-0]
 
@@ -324,14 +326,15 @@ Current rules:
   or unavoidable crash windows rather than the normal success proof
 - claimed outbox residue is not decoded result evidence. When no readable
   result remains and stale observer fallback would otherwise produce a generic
-  failure, status/result surfaces may classify the row as
+  stale-liveness diagnostic, status/result surfaces may classify the row as
   `claimed_result_without_terminal`; this is a recovery diagnostic, not proof
   that the result value is readable
 - status surfaces must not emit `status="running"` with `completed_at` set
 - host tasks that still look `running` or `spawning` in the durable log but
-  have no runtime proof are treated as stale after the configured status
-  liveness window, unless a live manager registry record still proves a manager
-  task is active
+  have no runtime proof are reported with stale-liveness reconciliation after
+  the configured status liveness window, unless a live manager registry record
+  still proves a manager task is active. Stale liveness alone is not terminal
+  failure proof.
 - manager task snapshots must respect the selected active manager from
   `weft.state.managers`; a historical non-terminal manager task row must not be
   published as `running` when a different active manager has been selected
@@ -489,10 +492,11 @@ Current rules:
 - external-supervisor manager records are still live records, not permanent
   truth: the manager refreshes its active registry record periodically, and
   lifecycle readers treat an expired external-supervisor heartbeat as stale
-  unless the handle includes live scoped host PIDs. If an extension has
-  registered a process-local liveness probe for the handle's runner, lifecycle
-  readers may mark the manager live or stale from that probe. A missing or
-  inconclusive probe falls back to the heartbeat rule.
+  unless an extension has registered a process-local liveness probe that proves
+  the handle live. Lifecycle readers may mark the manager live or stale from
+  that probe. A missing or inconclusive probe falls back to the heartbeat rule.
+  Generic lifecycle readers must not treat supervisor/container-local PID
+  fields as host process identity.
 - host-pid manager records require scoped host-process identity, not just raw
   PID existence; if `observations.host_processes` includes process creation
   times, PID liveness checks must reject records whose current process identity

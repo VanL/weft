@@ -2668,6 +2668,36 @@ def test_select_active_manager_prunes_missing_docker_supervised_record_immediate
     assert _read_all_queue_messages(ctx, f"T{tid}.ctrl_in", persistent=True) == []
 
 
+def test_select_active_manager_uses_supervisor_liveness_before_host_pid_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = "1775622400000000212"
+    handle = _external_supervisor_runtime_handle()
+    handle["observations"] = {
+        **handle["observations"],
+        "host_processes": [{"pid": 57, "create_time": 111.0}],
+    }
+    monkeypatch.setattr(
+        "weft.core.manager_runtime.runtime_liveness_from_registered_probe",
+        lambda runtime_handle: "live",
+    )
+    monkeypatch.setattr(
+        "weft.core.manager_runtime._manager_handle_has_live_host_process",
+        lambda runtime_handle: (_ for _ in ()).throw(
+            AssertionError("supervised manager used host PID identity")
+        ),
+    )
+    _write_active_manager_registry_record(ctx, tid=tid, runtime_handle=handle)
+
+    record = core_manager_runtime._select_active_manager(ctx, probe_stale=True)
+
+    assert record is not None
+    assert record["tid"] == tid
+
+
 def test_await_manager_start_settlement_probes_stale_record_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

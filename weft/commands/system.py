@@ -234,6 +234,8 @@ def _format_manager_summary(records: list[dict[str, Any]]) -> str:
         role = record.get("role", "manager")
         runtime_handle = record.get("runtime_handle")
         requests = record.get("requests", WEFT_SPAWN_REQUESTS_QUEUE)
+        internal_requests = record.get("internal_requests")
+        internal_reserved = record.get("internal_reserved")
         outbox = record.get("outbox", "")
         timestamp = _to_int(record.get("timestamp"))
         relative_ts = format_timestamp_ns_relative(timestamp)
@@ -241,14 +243,22 @@ def _format_manager_summary(records: list[dict[str, Any]]) -> str:
         if relative_ts:
             ts_line += f" ({relative_ts})"
 
+        queue_lines = [
+            f"    requests: {requests}",
+        ]
+        if isinstance(internal_requests, str) and internal_requests:
+            queue_lines.append(f"    internal_requests: {internal_requests}")
+        if isinstance(internal_reserved, str) and internal_reserved:
+            queue_lines.append(f"    internal_reserved: {internal_reserved}")
+        queue_lines.append(f"    outbox: {outbox}")
+
         lines.extend(
             [
                 f"  - tid: {tid}",
                 f"    role: {role}",
                 f"    status: {status}",
                 f"    runtime: {json.dumps(runtime_handle, sort_keys=True) if isinstance(runtime_handle, dict) else 'n/a'}",
-                f"    requests: {requests}",
-                f"    outbox: {outbox}",
+                *queue_lines,
                 f"    {ts_line}",
             ]
         )
@@ -485,6 +495,22 @@ def _effective_public_status(
 ) -> str:
     """Keep public state coherent with lifecycle and runtime liveness."""
 
+    return status
+
+
+def _stale_liveness_reason(
+    status: str,
+    *,
+    runner_name: str | None,
+    mapping_entry: Mapping[str, Any] | None,
+    runtime_description: Mapping[str, Any] | None,
+    last_timestamp: int,
+    now_ns: int,
+    has_live_manager_record: bool = False,
+    internal_service: bool = False,
+) -> str | None:
+    """Return why nonterminal liveness evidence is stale without failing it."""
+
     normalized_runner = (
         runner_name.strip().lower() if isinstance(runner_name, str) else ""
     )
@@ -499,25 +525,39 @@ def _effective_public_status(
         > int(STATUS_RUNTIMELESS_STALE_AFTER_SECONDS * 1_000_000_000)
     )
 
-    if status not in TERMINAL_TASK_STATUSES:
-        if internal_service and status in {"spawning", "running"}:
-            return status
-        if (
-            status in {"spawning", "running"}
-            and (not normalized_runner or normalized_runner == "host")
-            and host_task_pid is not None
-            and not _task_process_alive(mapping_entry)
-        ):
-            return "failed"
-        if (
-            status in {"spawning", "running"}
-            and (not normalized_runner or normalized_runner == "host")
-            and stale_without_runtime
-        ):
-            return "failed"
-        return status
+    if status in TERMINAL_TASK_STATUSES:
+        return None
+    if internal_service and status in {"spawning", "running"}:
+        return None
+    if (
+        status in {"spawning", "running"}
+        and (not normalized_runner or normalized_runner == "host")
+        and host_task_pid is not None
+        and not _task_process_alive(mapping_entry)
+    ):
+        return "host_process_not_live"
+    if (
+        status in {"spawning", "running"}
+        and (not normalized_runner or normalized_runner == "host")
+        and stale_without_runtime
+    ):
+        return "runtime_missing_after_stale_window"
+    return None
 
-    return status
+
+def _stale_liveness_reconciliation(
+    *,
+    reason: str,
+    lifecycle_status: str,
+    public_status: str,
+) -> dict[str, Any]:
+    return {
+        "classification": "stale_liveness",
+        "reason": reason,
+        "lifecycle_status": lifecycle_status,
+        "public_status": public_status,
+        "evidence_source": "runtime",
+    }
 
 
 def _reconcile_lifecycle_status(
@@ -858,8 +898,19 @@ def _collect_task_snapshot_records(
             )
         if local_evidence is not None and local_evidence.terminal:
             public_status = local_evidence.status
+            stale_liveness_reason = None
         else:
             public_status = _effective_public_status(
+                lifecycle_status,
+                runner_name=runner,
+                mapping_entry=runtime_entry,
+                runtime_description=runtime_description,
+                last_timestamp=int(record.get("last_timestamp") or 0),
+                now_ns=now_ns,
+                has_live_manager_record=tid == selected_active_manager_tid,
+                internal_service=_is_internal_service_record(record),
+            )
+            stale_liveness_reason = _stale_liveness_reason(
                 lifecycle_status,
                 runner_name=runner,
                 mapping_entry=runtime_entry,
@@ -877,9 +928,7 @@ def _collect_task_snapshot_records(
         )
         if local_evidence is not None and local_evidence.reconciliation is not None:
             reconciliation = local_evidence.reconciliation
-        elif (
-            lifecycle_status not in TERMINAL_TASK_STATUSES and public_status == "failed"
-        ):
+        elif lifecycle_status not in TERMINAL_TASK_STATUSES:
             outbox_name, _ctrl_out_name = task_evidence.queue_names_for_tid(
                 tid,
                 taskspec,
@@ -893,6 +942,13 @@ def _collect_task_snapshot_records(
             if claimed_evidence is not None:
                 local_evidence = claimed_evidence
                 reconciliation = claimed_evidence.reconciliation
+                public_status = claimed_evidence.status
+            elif stale_liveness_reason is not None:
+                reconciliation = _stale_liveness_reconciliation(
+                    reason=stale_liveness_reason,
+                    lifecycle_status=lifecycle_status,
+                    public_status=public_status,
+                )
 
         if (
             lifecycle_status not in TERMINAL_TASK_STATUSES
@@ -1225,6 +1281,16 @@ def _manager_snapshot(record: dict[str, Any]) -> ManagerSnapshot:
         role=record.get("role") if isinstance(record.get("role"), str) else None,
         requests=(
             record.get("requests") if isinstance(record.get("requests"), str) else None
+        ),
+        internal_requests=(
+            record.get("internal_requests")
+            if isinstance(record.get("internal_requests"), str)
+            else None
+        ),
+        internal_reserved=(
+            record.get("internal_reserved")
+            if isinstance(record.get("internal_reserved"), str)
+            else None
         ),
         outbox=record.get("outbox") if isinstance(record.get("outbox"), str) else None,
         ctrl_in=record.get("ctrl_in")

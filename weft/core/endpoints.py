@@ -30,7 +30,12 @@ from weft._constants import (
 )
 from weft.context import WeftContext
 from weft.ext import RunnerHandle
-from weft.helpers import canonical_owner_tid, iter_queue_json_entries, pid_is_live
+from weft.helpers import (
+    canonical_owner_tid,
+    handle_has_live_host_process,
+    iter_queue_json_entries,
+)
+from weft.runtime_liveness import runtime_liveness_from_registered_probe
 
 
 def normalize_endpoint_name(name: str) -> str:
@@ -303,9 +308,10 @@ def _record_owner_is_live(
         handle = RunnerHandle.from_dict(handle_payload)
     except (TypeError, ValueError):
         return False
-    if handle.control.get("authority") != "host-pid":
-        return True
-    return any(pid_is_live(pid) for pid in handle.scoped_host_pids())
+    authority = handle.control.get("authority")
+    if authority == "host-pid":
+        return handle_has_live_host_process(handle)
+    return runtime_liveness_from_registered_probe(handle) == "live"
 
 
 def endpoint_record_owner_is_live(

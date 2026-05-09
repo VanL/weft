@@ -11,7 +11,11 @@ from typing import Any
 import pytest
 
 from tests.helpers.test_backend import prepare_project_root
-from weft._constants import WEFT_MANAGERS_REGISTRY_QUEUE, WEFT_SPAWN_REQUESTS_QUEUE
+from weft._constants import (
+    WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
+    WEFT_MANAGERS_REGISTRY_QUEUE,
+    WEFT_SPAWN_REQUESTS_QUEUE,
+)
 from weft.commands import system as status_cmd
 from weft.commands import tasks as task_cmd
 from weft.commands.status import cmd_status, collect_status
@@ -156,6 +160,48 @@ def test_collect_status_reports_message_counts(tmp_path):
 
     assert snapshot.total_messages == 2
     assert snapshot.db_size >= 0
+
+
+def test_system_status_manager_snapshot_includes_internal_spawn_queues(
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    registry = ctx.queue(WEFT_MANAGERS_REGISTRY_QUEUE, persistent=False)
+    tid = "1779000000000000001"
+    internal_reserved = f"T{tid}.internal_reserved"
+    try:
+        registry.write(
+            json.dumps(
+                {
+                    "tid": tid,
+                    "status": "active",
+                    "name": "manager",
+                    "timestamp": time.time_ns(),
+                    "role": "manager",
+                    "requests": WEFT_SPAWN_REQUESTS_QUEUE,
+                    "internal_requests": WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
+                    "internal_reserved": internal_reserved,
+                    "outbox": "weft.manager.outbox",
+                    "ctrl_in": f"T{tid}.ctrl_in",
+                    "ctrl_out": f"T{tid}.ctrl_out",
+                    "runtime_handle": _runtime_handle(
+                        "host",
+                        str(os.getpid()),
+                        host_pids=[os.getpid()],
+                    ),
+                }
+            )
+        )
+    finally:
+        registry.close()
+
+    snapshot = status_cmd.system_status(ctx)
+
+    assert len(snapshot.managers) == 1
+    manager = snapshot.managers[0]
+    assert manager.internal_requests == WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE
+    assert manager.internal_reserved == internal_reserved
 
 
 def test_cmd_status_text_output(tmp_path):
@@ -819,7 +865,7 @@ def test_task_status_surfaces_terminal_log_state_once_task_pid_is_gone(
     assert snapshot.status == "cancelled"
 
 
-def test_task_status_marks_dead_host_running_snapshot_failed(
+def test_task_status_reports_dead_host_running_snapshot_as_stale_liveness(
     tmp_path: Path,
 ) -> None:
     root = prepare_project_root(tmp_path)
@@ -856,10 +902,13 @@ def test_task_status_marks_dead_host_running_snapshot_failed(
 
     assert snapshot is not None
     assert snapshot.event == "task_started"
-    assert snapshot.status == "failed"
+    assert snapshot.status == "running"
+    assert snapshot.reconciliation is not None
+    assert snapshot.reconciliation["classification"] == "stale_liveness"
+    assert snapshot.reconciliation["reason"] == "host_process_not_live"
 
 
-def test_cmd_status_surfaces_dead_host_running_snapshot_as_failed_with_all(
+def test_cmd_status_surfaces_dead_host_running_snapshot_as_stale_liveness(
     tmp_path: Path,
 ) -> None:
     root = prepare_project_root(tmp_path)
@@ -904,10 +953,12 @@ def test_cmd_status_surfaces_dead_host_running_snapshot_as_failed_with_all(
     tasks = data["tasks"]
     assert len(tasks) == 1
     assert tasks[0]["tid"] == tid
-    assert tasks[0]["status"] == "failed"
+    assert tasks[0]["status"] == "running"
+    assert tasks[0]["reconciliation"]["classification"] == "stale_liveness"
+    assert tasks[0]["reconciliation"]["reason"] == "host_process_not_live"
 
 
-def test_cmd_status_demotes_stale_runtime_less_running_snapshot(
+def test_cmd_status_reports_stale_runtime_less_running_snapshot(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -931,7 +982,11 @@ def test_cmd_status_demotes_stale_runtime_less_running_snapshot(
 
     assert exit_code == 0
     assert payload is not None
-    assert json.loads(payload)["tasks"] == []
+    tasks = json.loads(payload)["tasks"]
+    assert len(tasks) == 1
+    assert tasks[0]["tid"] == tid
+    assert tasks[0]["status"] == "running"
+    assert tasks[0]["reconciliation"]["reason"] == "runtime_missing_after_stale_window"
 
     exit_code, payload = cmd_status(
         json_output=True,
@@ -944,7 +999,8 @@ def test_cmd_status_demotes_stale_runtime_less_running_snapshot(
     tasks = json.loads(payload)["tasks"]
     assert len(tasks) == 1
     assert tasks[0]["tid"] == tid
-    assert tasks[0]["status"] == "failed"
+    assert tasks[0]["status"] == "running"
+    assert tasks[0]["reconciliation"]["reason"] == "runtime_missing_after_stale_window"
 
 
 def test_cmd_status_keeps_internal_service_running_without_runtime_proof(
@@ -1611,7 +1667,10 @@ def test_task_status_rejects_running_host_task_when_pid_identity_mismatches(
     assert snapshot is not None
     assert snapshot.runtime is not None
     assert snapshot.runtime["state"] == "missing"
-    assert snapshot.status == "failed"
+    assert snapshot.status == "running"
+    assert snapshot.reconciliation is not None
+    assert snapshot.reconciliation["classification"] == "stale_liveness"
+    assert snapshot.reconciliation["reason"] == "host_process_not_live"
 
 
 def test_cmd_status_discovers_parent_context_from_subdirectory(

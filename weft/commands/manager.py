@@ -62,6 +62,16 @@ def _manager_snapshot(record: dict[str, Any]) -> ManagerSnapshot:
         requests=(
             record.get("requests") if isinstance(record.get("requests"), str) else None
         ),
+        internal_requests=(
+            record.get("internal_requests")
+            if isinstance(record.get("internal_requests"), str)
+            else None
+        ),
+        internal_reserved=(
+            record.get("internal_reserved")
+            if isinstance(record.get("internal_reserved"), str)
+            else None
+        ),
         outbox=record.get("outbox") if isinstance(record.get("outbox"), str) else None,
         ctrl_in=record.get("ctrl_in")
         if isinstance(record.get("ctrl_in"), str)

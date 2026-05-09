@@ -448,6 +448,24 @@ def task_status(
     ctx = _resolve_context(context_path)
     full_tid = resolve_full_tid(ctx, tid) or tid.strip().lstrip("T")
     pipeline_snapshot = _latest_pipeline_status_snapshot(ctx, full_tid)
+    if ping and full_tid.isdigit() and len(full_tid) == 19:
+        taskspec_payload = load_latest_taskspec_payload(ctx, full_tid)
+        mapping_entry = mapping_for_tid(ctx, full_tid)
+        evidence = task_evidence.known_tid_evidence(
+            ctx,
+            tid=full_tid,
+            taskspec_payload=taskspec_payload,
+            mapping_entry=mapping_entry,
+            ping=True,
+            probe_timeout=probe_timeout,
+        )
+        if evidence is not None and evidence.classification == "live_pong":
+            return _task_snapshot_from_live_pong(
+                full_tid,
+                evidence,
+                base_snapshot=None,
+                taskspec_payload=taskspec_payload,
+            )
     if full_tid.isdigit() and len(full_tid) == 19:
         base_snapshot = status_cmd.collect_known_tid_snapshot(
             ctx,
@@ -467,24 +485,6 @@ def task_status(
         return _pipeline_task_snapshot(ctx, full_tid, pipeline_snapshot, base_snapshot)
     if pipeline_snapshot is not None and base_snapshot is not None:
         base_snapshot = replace(base_snapshot, pipeline_status=pipeline_snapshot)
-    if ping and full_tid.isdigit() and len(full_tid) == 19:
-        taskspec_payload = load_latest_taskspec_payload(ctx, full_tid)
-        mapping_entry = mapping_for_tid(ctx, full_tid)
-        evidence = task_evidence.known_tid_evidence(
-            ctx,
-            tid=full_tid,
-            taskspec_payload=taskspec_payload,
-            mapping_entry=mapping_entry,
-            ping=True,
-            probe_timeout=probe_timeout,
-        )
-        if evidence is not None and evidence.classification == "live_pong":
-            return _task_snapshot_from_live_pong(
-                full_tid,
-                evidence,
-                base_snapshot=base_snapshot,
-                taskspec_payload=taskspec_payload,
-            )
     return base_snapshot
 
 
@@ -996,6 +996,7 @@ def _await_control_surface(
     monitor = QueueChangeMonitor(monitor_queues, config=ctx.config)
     try:
         while True:
+            acknowledged_terminal_status: str | None = None
             taskspec_payload = load_latest_taskspec_payload(ctx, tid) or {}
             pipeline_status_queue = pipeline_status_queue_name(tid, taskspec_payload)
             ctrl_out_queue = _ctrl_out_for_tid(
@@ -1051,6 +1052,10 @@ def _await_control_surface(
                     public_signal_deadline = (
                         time.monotonic() + CONTROL_SURFACE_WAIT_INTERVAL
                     )
+                command = str(payload.get("command", "")).strip().upper()
+                status = str(payload.get("status", "")).strip().lower()
+                if command == CONTROL_KILL and status == "ack":
+                    acknowledged_terminal_status = "killed"
 
             mapping_entry = mapping_for_tid(ctx, tid)
             if mapping_entry is not None:
@@ -1060,6 +1065,23 @@ def _await_control_surface(
                 latest_snapshot = snapshot
                 if snapshot.status in status_cmd.TERMINAL_TASK_STATUSES:
                     return latest_entry, latest_snapshot
+                if acknowledged_terminal_status == "killed":
+                    return latest_entry, replace(
+                        snapshot,
+                        status="killed",
+                        event="control_kill",
+                        activity=None,
+                        waiting_on=None,
+                        completed_at=snapshot.completed_at or time.time_ns(),
+                        last_timestamp=max(snapshot.last_timestamp, time.time_ns()),
+                        reconciliation={
+                            "classification": "control_ack",
+                            "reason": "kill_ack_before_terminal_log_visibility",
+                            "lifecycle_status": snapshot.status,
+                            "public_status": "killed",
+                            "evidence_source": "ctrl_out",
+                        },
+                    )
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 if public_signal_deadline is not None:

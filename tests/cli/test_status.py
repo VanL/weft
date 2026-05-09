@@ -185,7 +185,7 @@ def test_status_reports_running_task_json(workdir) -> None:
     assert entry["metadata"]["owner"] == "tests"
 
 
-def test_status_json_hides_dead_host_running_task_by_default(workdir) -> None:
+def test_status_json_reports_dead_host_running_task_as_stale_liveness(workdir) -> None:
     context = build_context(spec_context=workdir)
     tid = "1844674407370955169"
     started = time.time_ns()
@@ -234,10 +234,14 @@ def test_status_json_hides_dead_host_running_task_by_default(workdir) -> None:
     assert rc == 0
     assert err == ""
     data = json.loads(out)
-    assert data["tasks"] == []
+    assert len(data["tasks"]) == 1
+    assert data["tasks"][0]["tid"] == tid
+    assert data["tasks"][0]["status"] == "running"
+    assert data["tasks"][0]["reconciliation"]["classification"] == "stale_liveness"
+    assert data["tasks"][0]["reconciliation"]["reason"] == "host_process_not_live"
 
 
-def test_task_status_process_json_reports_dead_pid_liveness(workdir) -> None:
+def test_task_status_process_json_reports_dead_pid_stale_liveness(workdir) -> None:
     context = build_context(spec_context=workdir)
     tid = "1844674407370955170"
     started = time.time_ns()
@@ -294,7 +298,9 @@ def test_task_status_process_json_reports_dead_pid_liveness(workdir) -> None:
     assert err == ""
     payload = json.loads(out)
     assert payload["tid"] == tid
-    assert payload["status"] == "failed"
+    assert payload["status"] == "running"
+    assert payload["reconciliation"]["classification"] == "stale_liveness"
+    assert payload["reconciliation"]["reason"] == "host_process_not_live"
     assert payload["host_pids"] == [999_999_994, 999_999_995]
     assert payload["managed_pids"] == [999_999_994, 999_999_995]
     assert payload["live_managed_pids"] == []

@@ -628,6 +628,11 @@ runbook needs to become stricter.
   probe registry, not in core manager code. A probe may return immediate stale
   proof when it can prove the named runtime is gone; missing or inconclusive
   probes fall back to heartbeat age.
+- Treating scoped host PIDs on an `external-supervisor` handle as direct task or
+  manager identity recreates the container PID bug in another form. Core code
+  should use host PID identity only for `control.authority="host-pid"` handles;
+  supervised runtimes need their registered liveness probe, with unknown
+  remaining unknown until the heartbeat age rule resolves it.
 
 ## 2026-05-06 Status Reanimation Boundary
 

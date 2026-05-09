@@ -369,6 +369,40 @@ def test_claimed_outbox_without_terminal_reports_recovery_diagnostic(
         outbox.close()
 
 
+def test_stale_liveness_without_terminal_or_claimed_result_is_not_failed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    taskspec = _taskspec_payload(tid, name="stale-liveness")
+    monkeypatch.setattr(task_evidence, "STATUS_RUNTIMELESS_STALE_AFTER_SECONDS", -1.0)
+    _write_log(
+        ctx,
+        {
+            "event": "work_started",
+            "status": "running",
+            "tid": tid,
+            "taskspec": taskspec,
+        },
+    )
+    _write_dead_runtime_mapping(ctx, tid)
+
+    evidence = task_evidence.known_tid_evidence(
+        ctx,
+        tid=tid,
+        taskspec_payload=taskspec,
+    )
+
+    assert evidence is not None
+    assert evidence.status == "pending"
+    assert evidence.terminal is False
+    assert evidence.classification == "stale_liveness"
+    assert evidence.reconciliation is not None
+    assert evidence.reconciliation["classification"] == "stale_liveness"
+
+
 def test_outbox_evidence_does_not_complete_persistent_or_ambiguous_tasks(
     tmp_path,
 ) -> None:

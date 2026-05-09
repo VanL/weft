@@ -22,7 +22,11 @@ from weft._constants import (
     WEFT_SPAWN_REQUESTS_QUEUE,
 )
 from weft.context import build_context
-from weft.core.endpoints import EndpointRecord, ResolvedEndpoint
+from weft.core.endpoints import (
+    EndpointRecord,
+    ResolvedEndpoint,
+    endpoint_record_owner_is_live,
+)
 from weft.core.heartbeat import (
     _heartbeat_endpoint_is_live,
     ensure_heartbeat_service,
@@ -206,6 +210,72 @@ def test_heartbeat_endpoint_terminal_task_log_rejects_stale_endpoint(
     )
 
     assert not _heartbeat_endpoint_is_live(context, resolved=_resolved_endpoint(tid))
+
+
+def test_external_supervisor_endpoint_owner_uses_runtime_liveness_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tid = "1777000000000000901"
+    record = _resolved_endpoint(tid).record
+    handle_payload = {
+        "runner": "manager-supervisor",
+        "kind": "supervised-process",
+        "id": "docker:container123",
+        "control": {"authority": "external-supervisor"},
+        "observations": {
+            "container_runtime": "docker",
+            "container_id": "container123",
+            "host_processes": [{"pid": 57, "create_time": 111.0}],
+        },
+        "metadata": {},
+    }
+
+    def fail_host_liveness(_handle: Any) -> bool:
+        raise AssertionError("external-supervisor endpoint used host PID liveness")
+
+    monkeypatch.setattr(
+        "weft.core.endpoints.handle_has_live_host_process", fail_host_liveness
+    )
+    monkeypatch.setattr(
+        "weft.core.endpoints.runtime_liveness_from_registered_probe",
+        lambda handle: "live",
+    )
+
+    assert endpoint_record_owner_is_live(
+        record,
+        task_statuses={},
+        tid_mappings={tid: {"runtime_handle": handle_payload}},
+    )
+
+
+def test_external_supervisor_endpoint_owner_rejects_unknown_runtime_liveness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tid = "1777000000000000902"
+    record = _resolved_endpoint(tid).record
+    handle_payload = {
+        "runner": "manager-supervisor",
+        "kind": "supervised-process",
+        "id": "docker:container123",
+        "control": {"authority": "external-supervisor"},
+        "observations": {
+            "container_runtime": "docker",
+            "container_id": "container123",
+            "host_processes": [{"pid": 57, "create_time": 111.0}],
+        },
+        "metadata": {},
+    }
+
+    monkeypatch.setattr(
+        "weft.core.endpoints.runtime_liveness_from_registered_probe",
+        lambda handle: "unknown",
+    )
+
+    assert not endpoint_record_owner_is_live(
+        record,
+        task_statuses={},
+        tid_mappings={tid: {"runtime_handle": handle_payload}},
+    )
 
 
 def test_internal_submit_spawn_request_preserves_internal_runtime_envelope(

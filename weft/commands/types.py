@@ -210,6 +210,8 @@ class ManagerSnapshot:
     timestamp: int | None
     role: str | None = None
     requests: str | None = None
+    internal_requests: str | None = None
+    internal_reserved: str | None = None
     outbox: str | None = None
     ctrl_in: str | None = None
     ctrl_out: str | None = None

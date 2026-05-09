@@ -294,11 +294,9 @@ def _manager_record_stale_status(record: dict[str, Any] | None) -> tuple[bool, b
     handle = _manager_handle_from_record(record)
     if handle is None:
         return True, True
-    if handle.control.get("authority") != "external-supervisor":
+    authority = handle.control.get("authority")
+    if authority != "external-supervisor":
         return _manager_handle_is_stale(handle), False
-
-    if handle.scoped_host_processes():
-        return not _manager_handle_has_live_host_process(handle), False
 
     runtime_liveness = runtime_liveness_from_registered_probe(handle)
     if runtime_liveness == "live":

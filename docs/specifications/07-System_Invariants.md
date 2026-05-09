@@ -11,6 +11,8 @@ See also:
 - current task/runtime contracts:
   [`01-Core_Components.md`](01-Core_Components.md),
   [`05-Message_Flow_and_State.md`](05-Message_Flow_and_State.md)
+- active service-health convergence plan:
+  [`docs/plans/2026-05-09-service-liveness-and-health-convergence-plan.md`](../plans/2026-05-09-service-liveness-and-health-convergence-plan.md)
 
 ## System Invariants
 
@@ -107,6 +109,10 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
 - **OBS.11**: live runtime evidence may explain a conflict, but read-only
   public status reconstruction must not use it to reanimate terminal lifecycle
   state.
+- **OBS.11a**: missing or stale liveness evidence may explain a nonterminal
+  row through reconciliation metadata, but it must not synthesize terminal
+  failure without task-owned terminal proof or an explicit recovery diagnostic
+  such as claimed outbox residue.
 - **OBS.12**: a matched keyed PONG is an authoritative live task-local
   observation at its timestamp for explicit current-state probes. It is not a
   lifecycle mutation, and it must not use a second runner-specific inspection

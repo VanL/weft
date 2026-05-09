@@ -801,8 +801,6 @@ class Manager(BaseTask):
         except ValueError:
             return False
         if handle.control.get("authority") == "external-supervisor":
-            if handle.scoped_host_processes():
-                return handle_has_live_host_process(handle)
             runtime_liveness = runtime_liveness_from_registered_probe(handle)
             if runtime_liveness == "live":
                 return True

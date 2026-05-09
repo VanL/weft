@@ -1208,6 +1208,7 @@ def test_process_once_reconciles_internal_services_before_user_spawn_work(
         config=load_config({"WEFT_TASK_MONITOR_ENABLED": False}),
     )
     try:
+
         class FakeDeadProcess:
             pid = None
             exitcode = 1
@@ -1797,6 +1798,44 @@ def test_manager_liveness_rejects_missing_docker_supervisor_record(
     }
 
     assert Manager._manager_record_is_live(record) is False
+
+
+def test_manager_liveness_uses_supervisor_probe_before_host_pid_identity(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        manager_mod,
+        "runtime_liveness_from_registered_probe",
+        lambda handle: "live",
+    )
+    monkeypatch.setattr(
+        manager_mod,
+        "handle_has_live_host_process",
+        lambda handle: (_ for _ in ()).throw(
+            AssertionError("supervised manager used host PID identity")
+        ),
+    )
+    record = {
+        "tid": "1761000000000013",
+        "status": "active",
+        "runtime_handle": {
+            "runner": "manager-supervisor",
+            "kind": "supervised-process",
+            "id": "docker:container123",
+            "control": {"authority": "external-supervisor"},
+            "observations": {
+                "container_runtime": "docker",
+                "container_id": "container123",
+                "host_processes": [{"pid": 57, "create_time": 111.0}],
+            },
+            "metadata": {},
+        },
+        "_timestamp": time.time_ns(),
+        "role": "manager",
+        "requests": WEFT_SPAWN_REQUESTS_QUEUE,
+    }
+
+    assert Manager._manager_record_is_live(record) is True
 
 
 def test_manager_liveness_rejects_host_pid_identity_mismatch(

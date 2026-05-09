@@ -818,19 +818,19 @@ def stale_observer_evidence(
             source="observer",
             terminal=False,
         )
-    classification = "stale_created" if created_waiting else "unknown"
+    classification = "stale_created" if created_waiting else "stale_liveness"
     return TaskEvidenceSnapshot(
         tid=tid,
-        status="failed",
+        status="pending",
         classification=classification,
         source="observer",
         error="Task is not live and no terminal task-local state is visible",
-        terminal=True,
+        terminal=False,
         observed_at=time.time_ns(),
         reconciliation={
             "classification": classification,
             "reason": "not_live_without_terminal_task_local_state",
-            "lifecycle_status": "failed",
+            "lifecycle_status": "pending",
             "evidence_source": "observer",
         },
     )
@@ -883,7 +883,7 @@ def known_tid_evidence(
             prior_live=prior_live,
             prior_live_at=prior_live_at,
         )
-        if stale_snapshot is not None and stale_snapshot.status == "failed":
+        if stale_snapshot is not None:
             outbox_name, _ctrl_out_name = queue_names_for_tid(tid, taskspec_payload)
             claimed_snapshot = claimed_outbox_result_evidence(
                 ctx,
@@ -892,8 +892,6 @@ def known_tid_evidence(
                 taskspec_payload=taskspec_payload,
             )
             read_only_snapshot = claimed_snapshot or stale_snapshot
-        else:
-            read_only_snapshot = stale_snapshot
 
     if not ping:
         return read_only_snapshot

@@ -47,6 +47,7 @@ always be rolled back from the public request queue.
 - [Internal Spawn Priority Queue Plan](../plans/2026-05-09-internal-spawn-priority-queue-plan.md) – adds `weft.spawn.internal` as strict-priority manager-owned service spawn work while preserving the shared manager launch path.
 - [Runtime Liveness Probe Registry Plan](../plans/2026-05-09-runtime-liveness-probe-registry-plan.md) – draft plan to move runtime-specific manager liveness checks behind a lightweight core registry with Docker-specific probing owned by `weft_docker`.
 - [Prune Path Unification Plan](../plans/2026-05-09-prune-path-unification-plan.md) – draft plan to make CLI pruning and manager-supervised TaskMonitor cleanup share one core prune engine.
+- [Service Liveness And Health Convergence Plan](../plans/2026-05-09-service-liveness-and-health-convergence-plan.md) – draft plan to make manager ownership, heartbeat supersession, singleton restart timing, and status liveness diagnostics share one interpretation path.
 
 ## Conceptual Model: Everything is a Task [MA-0]
 
@@ -93,12 +94,12 @@ Key responsibilities implemented in `weft/core/manager.py`:
    the result as the active-manager view. Host-managed records use scoped host
    process identity: a PID is live only when it still matches the recorded
    process creation time when that identity is available. Externally supervised
-   records use the same scoped host-process check when the supervisor supplied
-   scoped host PIDs. Otherwise lifecycle readers may ask the process-local
-   runtime liveness probe registry whether an extension can prove the handle
-   live or stale. A definitive extension `stale` result is treated as stale
-   immediately; inconclusive or missing probes fall back to the generic registry
-   heartbeat age boundary. When startup or manager selection sees an otherwise
+   records use the process-local runtime liveness probe registry when an
+   extension can prove the handle live or stale. Generic manager readers must
+   not reinterpret container-local or supervisor-local PIDs as host process
+   identity for these handles. A definitive extension `stale` result is treated
+   as stale immediately; inconclusive or missing probes fall back to the generic
+   registry heartbeat age boundary. When startup or manager selection sees an otherwise
    canonical active manager row that is stale by PID/time evidence, it may send
    one bounded keyed PING to that manager's task-local control queue. A matched
    PONG from the same TID can rescue the row as positive liveness evidence for
