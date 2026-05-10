@@ -682,6 +682,42 @@ def test_manager_enqueues_one_internal_task_monitor_spawn(
     )
 
 
+def test_manager_service_enqueue_forces_next_internal_queue_probe(
+    broker_env,
+    unique_tid,
+) -> None:
+    db_path, make_queue = broker_env
+    config = load_config({"WEFT_TASK_MONITOR_ENABLED": "0"})
+    spec = make_manager_spec(unique_tid, idle_timeout=0.0)
+    manager = Manager(db_path, spec, config=config)
+    seen: list[str] = []
+
+    def record_internal_spawn(
+        message: str,
+        timestamp: int,
+        context: QueueMessageContext,
+    ) -> None:
+        del timestamp, context
+        payload = json.loads(message)
+        seen.append(payload["taskspec"]["name"])
+
+    try:
+        drain(make_queue(WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE))
+        manager._queues[
+            WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE
+        ].handler = record_internal_spawn
+        manager._check_counter = 1
+
+        assert manager._enqueue_managed_service_request(
+            manager._task_monitor_service_spec()
+        )
+        manager._drain_queue()
+    finally:
+        manager.cleanup()
+
+    assert seen == ["task-monitor"]
+
+
 def test_manager_does_not_enqueue_task_monitor_when_disabled(
     broker_env,
     unique_tid,

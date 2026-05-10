@@ -2184,6 +2184,7 @@ class Manager(BaseTask):
             self._queue(queue_name).write(
                 json.dumps(service.spawn_payload, ensure_ascii=False)
             )
+            self._mark_pending_messages_prechecked()
         except (BrokerError, OSError, RuntimeError):
             logger.warning(
                 "Failed to enqueue managed service %s", service.key, exc_info=True

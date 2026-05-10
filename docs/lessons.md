@@ -220,6 +220,11 @@ runbook needs to become stricter.
   different policy arguments, but they must not reimplement pruning semantics.
   The TaskMonitor checkpoint-window cleanup bug showed that duplicate paths can
   both look reasonable while answering different evidence questions under load.
+- Manager-owned convergence paths must treat pending work as a correctness
+  signal, not as a best-effort wake hint. If a wait/precheck path observes
+  pending messages or a manager writes service work to its own queue, the next
+  scheduler drain must probe inactive queues immediately so singleton services
+  advance by state-machine rules instead of incidental polling cadence.
 
 ## 2026-04-08 Zombie PID Liveness
 

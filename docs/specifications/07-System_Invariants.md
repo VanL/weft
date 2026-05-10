@@ -224,7 +224,9 @@ _Implementation mapping_: `weft/core/manager.py`,
   manager's observation clock.
 - **MANAGER.16**: canonical managers must drain manager-owned internal spawn
   work before ordinary public spawn work whenever both are pending and launch is
-  otherwise authorized.
+  otherwise authorized. Manager-authored singleton-service spawn requests must
+  force the next scheduler drain to probe inactive queues; they must not wait
+  for the periodic broad-probe interval before they can advance.
 
 ### Context Invariants
 

@@ -84,6 +84,9 @@ Current role:
 - support `READ`, `PEEK`, and reserve-oriented processing semantics
 - own a backend-neutral wait seam that uses SimpleBroker's multi-queue
   activity waiter when available and falls back to polling otherwise
+- treat pending work observed by the wait seam as a hard scheduling signal:
+  the next drain must probe all configured queues, including inactive queues,
+  rather than waiting for the periodic broad-probe interval
 - expose a small scheduling primitive that higher-level tasks reuse
 
 Why this exists:

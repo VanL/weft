@@ -248,6 +248,7 @@ class MultiQueueWatcher(BaseWatcher):
         self._queue_generation = 0
         self._multi_activity_waiter: Any | None = None
         self._multi_activity_waiter_generation: int | None = None
+        self._pending_messages_precheck_confirmed = False
 
         logger.debug(
             "MultiQueueWatcher initialized with queues: %s",
@@ -362,6 +363,11 @@ class MultiQueueWatcher(BaseWatcher):
         except (BrokerError, OSError, RuntimeError):
             logger.debug("Failed to close multi-queue activity waiter", exc_info=True)
 
+    def _mark_pending_messages_prechecked(self) -> None:
+        """Force the next drain to probe every configured queue."""
+
+        self._pending_messages_precheck_confirmed = True
+
     def _ensure_multi_activity_waiter(self) -> Any | None:
         """Create or return the SimpleBroker multi-queue activity waiter."""
         if self._multi_activity_waiter_generation == self._queue_generation:
@@ -413,12 +419,14 @@ class MultiQueueWatcher(BaseWatcher):
         """
         if timeout is None or timeout <= 0:
             if self._has_pending_messages():
+                self._mark_pending_messages_prechecked()
                 return
             return
 
         waiter = self._ensure_multi_activity_waiter()
         if waiter is not None:
             if self._has_pending_messages():
+                self._mark_pending_messages_prechecked()
                 return
             try:
                 waiter.wait(timeout)
@@ -504,13 +512,15 @@ class MultiQueueWatcher(BaseWatcher):
             if self._queue_has_pending(self._queues[name].queue)
         ]
 
-        should_probe_all = bool(
-            getattr(self, "_pending_messages_precheck_confirmed", False)
-        ) or (self._check_counter % self._check_interval == 0)
+        precheck_confirmed = self._pending_messages_precheck_confirmed
+        should_probe_all = precheck_confirmed or (
+            self._check_counter % self._check_interval == 0
+        )
         if should_probe_all:
             for name, config in self._queues.items():
                 if name not in still_active and self._queue_has_pending(config.queue):
                     still_active.append(name)
+            self._pending_messages_precheck_confirmed = False
 
         if set(still_active) != set(self._active_queues):
             self._active_queues = still_active

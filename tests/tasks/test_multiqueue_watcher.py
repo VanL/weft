@@ -174,7 +174,7 @@ def test_wake_precheck_forces_inactive_queue_probe(broker_env) -> None:
 
     try:
         watcher._check_counter = 1
-        watcher._pending_messages_precheck_confirmed = True
+        watcher.wait_for_activity(timeout=0)
         watcher._drain_queue()
     finally:
         watcher.stop(join=False)

@@ -77,7 +77,10 @@ Key responsibilities implemented in `weft/core/manager.py`:
    reserved into source-specific reserved queues, parsed, and acknowledged via
    the standard manager launch path. The manager performs a final
    dispatch-ownership check immediately before child launch side effects. Only
-   positive `self` ownership preserves the normal launch path.
+   positive `self` ownership preserves the normal launch path. When the manager
+   enqueues one of its own singleton-service spawn requests, that write forces
+   the next scheduling drain to probe inactive queues so convergence does not
+   depend on the periodic broad-probe interval.
 2. **Child process launch** – Validated TaskSpecs are executed via
    `launch_task_process(Consumer, …)`, preserving the standard isolation model
    (a dedicated subprocess per child task).
