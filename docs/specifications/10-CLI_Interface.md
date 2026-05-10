@@ -406,6 +406,12 @@ Current task-control surfaces:
 - `weft task stop TID`
 - `weft task kill TID`
 
+`weft task kill` reports a killed count only when the command helper observes
+terminal `killed` evidence, controlled host-process death after a kill action,
+or an authoritative runner kill result for a handle with no host-observable
+PID. A task-local `KILL` acknowledgement is command-acceptance progress, not
+terminal proof.
+
 Current manager-control surfaces:
 
 - `weft manager start`
@@ -423,6 +429,9 @@ remains the foreground supervisor path and is not interchangeable with
 
 Pattern-based task stop/kill reuse queue broadcast and control messages rather
 than inventing a second control channel.
+
+Implementation plan backlink:
+[`2026-05-10-control-and-service-convergence-state-machine-plan.md`](../plans/2026-05-10-control-and-service-convergence-state-machine-plan.md).
 
 ## Spec Management (`weft spec …`) [CLI-1.4]
 

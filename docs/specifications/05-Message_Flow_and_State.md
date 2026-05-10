@@ -134,6 +134,12 @@ The control plane is explicit:
 - active STOP/KILL may delete the raw `ctrl_in` message as an internal
   handoff detail, but public acknowledgement remains the post-unwind
   `ctrl_out` reply plus the terminal task-log event on the main task thread
+- a `KILL` acknowledgement means the task accepted the command; it is progress
+  evidence only. Readers and CLI control helpers must not promote ack-only
+  evidence into terminal lifecycle state. Kill success is proven by terminal
+  `killed` evidence, by observed controlled host PIDs becoming dead after a
+  kill action, or by an authoritative runner control surface when no
+  host-observable PID exists.
 
 _Implementation mapping_: `weft/core/tasks/base.py`,
 `weft/core/tasks/consumer.py`, `weft/core/manager.py`,
@@ -143,6 +149,7 @@ Implementation plan backlinks:
 
 - `docs/plans/2026-04-30-known-tid-terminal-snapshot-api-plan.md`
 - `docs/plans/2026-05-06-task-evidence-reconciliation-model-plan.md`
+- `docs/plans/2026-05-10-control-and-service-convergence-state-machine-plan.md`
 - `docs/plans/2026-05-06-terminal-publication-hardening-plan.md`
 - `docs/plans/2026-05-07-extended-ping-pong-state-probe-plan.md`
 - `docs/plans/2026-05-07-lifecycle-monitor-archive-sink-plan.md`
@@ -166,7 +173,9 @@ Current rules:
 - resolve and list surfaces opportunistically prune stale claims whose owner is
   terminal or no longer live
 - current liveness checks use `weft.log.tasks` plus `weft.state.tid_mappings`;
-  there is no separate endpoint lease or heartbeat contract
+  task processes publish host-PID liveness through `runtime_handle` when no
+  runner-specific handle exists, and there is no separate endpoint lease or
+  heartbeat contract
 - if multiple live tasks claim the same name, the canonical live owner is the
   lowest eligible TID; duplicate live claims remain observable conflicts
 - names under `_weft.` are reserved for Weft-owned internal runtime services;
@@ -212,11 +221,12 @@ Current rules:
   not replay every missed slot
 - duplicate heartbeat services converge through the manager-owned singleton
   service contract. Live ownership is proved by tracked child state, a live
-  runtime handle, or keyed `PING`/`PONG`; stale non-terminal rows without live
-  proof do not block replacement. Helper-side endpoint validation classifies
-  the endpoint as service-candidate evidence and uses the shared singleton
-  summary rules, so terminal task-log proof for the endpoint TID rejects stale
-  endpoint rows even if older endpoint registry data remains.
+  runtime handle, including the task process host handle in TID mappings, or
+  keyed `PING`/`PONG`; stale non-terminal rows without live proof do not block
+  replacement. Helper-side endpoint validation classifies the endpoint as
+  service-candidate evidence and uses the shared singleton summary rules, so
+  terminal task-log proof or dead host-process proof for the endpoint TID
+  rejects stale endpoint rows even if older endpoint registry data remains.
 - the heartbeat service is an interval emitter, not a scheduler: there is no
   cron syntax, wall-clock scheduling, timezone handling, or missed-run replay
 - the supervised `TaskMonitorTask` uses heartbeat registrations for periodic

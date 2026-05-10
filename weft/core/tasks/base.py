@@ -214,6 +214,7 @@ class BaseTask(MultiQueueWatcher, ABC):
         self._queue_cache: dict[str, Queue] = {}
         self._owned_queue_names: set[str] = set()
         self._task_pid = os.getpid()
+        self._task_pid_create_time = process_create_time(self._task_pid)
         self._caller_pid = os.getppid()
         self._managed_pids: set[int] = set()
         self._runtime_handle: RunnerHandle | None = None
@@ -1186,7 +1187,7 @@ class BaseTask(MultiQueueWatcher, ABC):
         self._register_tid_mapping()
 
     def _build_tid_mapping_payload(self) -> dict[str, Any]:
-        runtime_handle = self._runtime_handle
+        runtime_handle = self._runtime_handle or self._task_process_runtime_handle()
         role = self.taskspec.metadata.get("role")
         payload = {
             "short": self.tid_short,
@@ -1601,6 +1602,28 @@ class BaseTask(MultiQueueWatcher, ABC):
         if isinstance(name, str) and name.strip():
             return name.strip()
         return "host"
+
+    def _task_process_runtime_handle(self) -> RunnerHandle | None:
+        if self._task_pid <= 0:
+            return None
+        if self._current_runner_name() != "host":
+            return None
+        return RunnerHandle(
+            runner="host",
+            kind="process",
+            id=str(self._task_pid),
+            control={"authority": "host-pid"},
+            observations={
+                "host_pids": [self._task_pid],
+                "host_processes": [
+                    {
+                        "pid": self._task_pid,
+                        "create_time": self._task_pid_create_time,
+                    }
+                ],
+            },
+            metadata={"source": "weft-task-process"},
+        )
 
     def _merge_runtime_handle_host_pid(self, pid: int) -> None:
         if (

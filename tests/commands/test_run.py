@@ -264,7 +264,7 @@ def _wait_for_task_status(
     tid: str,
     *,
     expected_status: str,
-    timeout: float = 10.0,
+    timeout: float = 30.0,
 ) -> task_cmd.status_cmd.TaskSnapshot:
     deadline = time.time() + timeout
     last_snapshot: task_cmd.status_cmd.TaskSnapshot | None = None
@@ -297,7 +297,6 @@ def _stop_active_manager(context) -> None:
 
 def _make_post_success_ack_failure(
     *,
-    root: Path,
     submitted_tid: dict[str, str],
 ) -> Callable[[Any], None]:
     """Return an ack seam that sends launcher SUCCESS, then raises.
@@ -312,7 +311,7 @@ def _make_post_success_ack_failure(
         deadline = time.time() + 8.0
         while time.time() < deadline:
             tid = submitted_tid.get("value")
-            if tid and task_cmd.task_status(tid, context_path=root) is not None:
+            if tid:
                 sent, error = core_manager_runtime._send_launcher_signal(
                     launch.launcher_process,
                     MANAGER_LAUNCHER_SIGNAL_SUCCESS,
@@ -330,7 +329,7 @@ def _make_post_success_ack_failure(
                     success_signal_sent=True,
                 )
             time.sleep(0.05)
-        raise RuntimeError("timed out waiting for spawned task visibility")
+        raise RuntimeError("timed out waiting for submitted task id")
 
     return _fail_after_launcher_success
 
@@ -1305,7 +1304,7 @@ def test_run_inline_no_wait_succeeds_when_post_proof_acknowledgement_fails(
     monkeypatch.setattr("weft.commands.run._enqueue_taskspec", _recording_enqueue)
     monkeypatch.setattr(
         "weft.core.manager_runtime._acknowledge_manager_launch_success",
-        _make_post_success_ack_failure(root=root, submitted_tid=submitted_tid),
+        _make_post_success_ack_failure(submitted_tid=submitted_tid),
     )
     monkeypatch.setattr("weft.commands.run._echo", lambda *args, **kwargs: None)
 
@@ -1361,7 +1360,7 @@ def test_run_inline_wait_succeeds_when_post_proof_acknowledgement_fails(
     monkeypatch.setattr("weft.commands.run._enqueue_taskspec", _recording_enqueue)
     monkeypatch.setattr(
         "weft.core.manager_runtime._acknowledge_manager_launch_success",
-        _make_post_success_ack_failure(root=root, submitted_tid=submitted_tid),
+        _make_post_success_ack_failure(submitted_tid=submitted_tid),
     )
     monkeypatch.setattr("weft.commands.run._echo", lambda *args, **kwargs: None)
 

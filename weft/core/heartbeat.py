@@ -31,7 +31,10 @@ from weft.core.control_probe import send_keyed_ping_probe
 from weft.core.endpoints import ResolvedEndpoint, resolve_endpoint
 from weft.core.manager_services import ServiceCandidate, summarize_service_candidates
 from weft.ext import RunnerHandle
-from weft.helpers import handle_has_live_host_process, iter_queue_json_entries
+from weft.helpers import (
+    handle_has_live_host_process,
+    iter_queue_json_entries,
+)
 
 
 def _ensure_manager_running(context: WeftContext) -> None:

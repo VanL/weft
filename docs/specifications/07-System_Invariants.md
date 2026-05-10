@@ -81,7 +81,10 @@ _Implementation mapping_: `weft/core/tasks/consumer.py`,
 - **EXEC.2**: timeout enforcement happens through the active runner loop
 - **EXEC.3**: TID mappings do not publish top-level host PID fields. Runtime
   identity is published through `runtime_handle`; scoped host PIDs, when
-  available, live under `runtime_handle.observations.host_pids`.
+  available, live under `runtime_handle.observations.host_pids`. A task
+  process with no runner-specific runtime handle publishes its own host PID
+  through the same `runtime_handle` shape so endpoint and control surfaces have
+  current-state liveness proof without trusting legacy top-level PID fields.
 - **EXEC.4**: return-code publication belongs to terminal execution outcomes
 
 ### Observability Invariants
@@ -120,6 +123,11 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
   manager selection, a matched keyed PONG may rescue stale-looking canonical
   registry evidence; an absent or unmatched PONG is not proof that takeover is
   safe.
+- **OBS.12a**: task-local control acknowledgements are not lifecycle
+  mutations. A `KILL` ack can shorten the path to fallback control, but it
+  must not be reported as terminal `killed` state unless terminal evidence,
+  controlled host-process death, or an authoritative no-host-PID runner kill
+  proof is also present.
 - **OBS.13**: task monitor log files, task monitor checkpoints,
   runtime-prune reports, and retention-prune reports/archives are operational
   outputs only. They must not become task lifecycle truth, status authority,
@@ -219,18 +227,27 @@ _Implementation mapping_: `weft/core/manager.py`,
   live, terminal, and uncertain evidence through one deterministic transition
   table before Manager applies side effects. Terminal proof for a TID wins over
   live evidence for the same TID, and uncertain evidence must become visible
-  degraded wait rather than an unqualified duplicate launch. Broker timestamps
-  may order service evidence, but restart backoff is scheduled from the
-  manager's observation clock. A manager-authored `task_spawned` row with a
-  live child PID is valid live-owner evidence for the spawned service child
-  before the child publishes its own task lifecycle row.
+  degraded wait rather than an unqualified duplicate launch. A recent
+  nonterminal service row without live proof is uncertain, not terminal;
+  stale nonterminal rows may become restart evidence only after the recent
+  evidence window has elapsed. Broker timestamps may order service evidence,
+  but restart backoff is scheduled from the manager's observation clock. A
+  manager-authored `task_spawned` row with a live child PID is valid live-owner
+  evidence for the spawned service child before the child publishes its own
+  task lifecycle row. When more than one live owner is visible, the canonical
+  live owner is the lowest live TID and non-canonical live owners must be
+  signaled to terminate. When host PID evidence is available for a
+  non-canonical owner, the manager may force-reap that recorded process tree as
+  part of singleton convergence.
 - **MANAGER.16**: canonical managers must drain manager-owned internal spawn
   work before ordinary public spawn work whenever both are pending and launch is
   otherwise authorized. Manager-authored singleton-service spawn requests must
   force the next scheduler drain to probe inactive queues and must advance to a
   launch attempt in the same manager turn without consuming ordinary public
-  spawn work; they must not wait for the periodic broad-probe interval before
-  they can advance.
+  spawn work; they must not wait for the periodic broad-probe interval or a
+  backend activity-waiter wakeup before they can advance. The manager may use a
+  small fixed pass limit to prevent busy-loop bugs, but each pass must move
+  monotonically through reap, reduce, enqueue, and internal-drain side effects.
 
 ### Context Invariants
 

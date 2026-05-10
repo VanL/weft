@@ -995,8 +995,8 @@ def _await_control_surface(
         monitor_queues.append(ctx.queue(watched_pipeline_status_queue, persistent=True))
     monitor = QueueChangeMonitor(monitor_queues, config=ctx.config)
     try:
+        kill_ack_deadline: float | None = None
         while True:
-            acknowledged_terminal_status: str | None = None
             taskspec_payload = load_latest_taskspec_payload(ctx, tid) or {}
             pipeline_status_queue = pipeline_status_queue_name(tid, taskspec_payload)
             ctrl_out_queue = _ctrl_out_for_tid(
@@ -1055,7 +1055,7 @@ def _await_control_surface(
                 command = str(payload.get("command", "")).strip().upper()
                 status = str(payload.get("status", "")).strip().lower()
                 if command == CONTROL_KILL and status == "ack":
-                    acknowledged_terminal_status = "killed"
+                    kill_ack_deadline = time.monotonic() + CONTROL_SURFACE_WAIT_INTERVAL
 
             mapping_entry = mapping_for_tid(ctx, tid)
             if mapping_entry is not None:
@@ -1065,23 +1065,11 @@ def _await_control_surface(
                 latest_snapshot = snapshot
                 if snapshot.status in status_cmd.TERMINAL_TASK_STATUSES:
                     return latest_entry, latest_snapshot
-                if acknowledged_terminal_status == "killed":
-                    return latest_entry, replace(
-                        snapshot,
-                        status="killed",
-                        event="control_kill",
-                        activity=None,
-                        waiting_on=None,
-                        completed_at=snapshot.completed_at or time.time_ns(),
-                        last_timestamp=max(snapshot.last_timestamp, time.time_ns()),
-                        reconciliation={
-                            "classification": "control_ack",
-                            "reason": "kill_ack_before_terminal_log_visibility",
-                            "lifecycle_status": snapshot.status,
-                            "public_status": "killed",
-                            "evidence_source": "ctrl_out",
-                        },
-                    )
+                if (
+                    kill_ack_deadline is not None
+                    and time.monotonic() >= kill_ack_deadline
+                ):
+                    return latest_entry, latest_snapshot
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 if public_signal_deadline is not None:
@@ -1092,7 +1080,13 @@ def _await_control_surface(
                         )
                         continue
                 return latest_entry, latest_snapshot
-            monitor.wait(min(remaining, CONTROL_SURFACE_WAIT_INTERVAL))
+            wait_interval = min(remaining, CONTROL_SURFACE_WAIT_INTERVAL)
+            if kill_ack_deadline is not None:
+                kill_ack_remaining = kill_ack_deadline - time.monotonic()
+                if kill_ack_remaining <= 0:
+                    return latest_entry, latest_snapshot
+                wait_interval = min(wait_interval, kill_ack_remaining)
+            monitor.wait(wait_interval)
     finally:
         monitor.close()
         for queue in monitor_queues:
@@ -1178,6 +1172,51 @@ def _force_kill_task_processes(task_entry: dict[str, Any] | None) -> bool:
         if kill_process_tree(pid_value, timeout=0.2):
             task_killed = True
     return task_killed
+
+
+def _observable_host_pids_from_mapping(
+    task_entry: dict[str, Any] | None,
+) -> tuple[int, ...]:
+    if task_entry is None:
+        return ()
+
+    handle = status_cmd._runtime_handle_from_mapping(task_entry)
+    if handle is None:
+        return _host_pids_from_mapping(task_entry)
+    return handle.scoped_host_pids()
+
+
+def _observed_host_pids_are_dead(
+    task_entry: dict[str, Any] | None,
+    *,
+    timeout: float = 0.0,
+) -> bool | None:
+    pids = tuple(dict.fromkeys(_observable_host_pids_from_mapping(task_entry)))
+    if not pids:
+        return None
+
+    deadline = time.monotonic() + max(timeout, 0.0)
+    while True:
+        if all(not _pid_exists(pid) for pid in pids):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(min(0.02, max(0.0, deadline - time.monotonic())))
+
+
+def _kill_success_is_proven(
+    task_entry: dict[str, Any] | None,
+    *,
+    handled_by_runner: bool,
+    task_killed: bool,
+) -> bool:
+    observed_dead = _observed_host_pids_are_dead(
+        task_entry,
+        timeout=0.2 if handled_by_runner or task_killed else 0.0,
+    )
+    if observed_dead is not None:
+        return observed_dead
+    return handled_by_runner or task_killed
 
 
 def stop_tasks(
@@ -1279,9 +1318,14 @@ def kill_tasks(
 
         task_entry = _latest_task_entry(ctx, lookup, full, task_entry)
         task_killed = False
-        if not handled_by_runner:
+        observed_dead = _observed_host_pids_are_dead(task_entry)
+        if not handled_by_runner or observed_dead is False:
             task_killed = _force_kill_task_processes(task_entry)
-        if task_killed or handled_by_runner:
+        if _kill_success_is_proven(
+            task_entry,
+            handled_by_runner=handled_by_runner,
+            task_killed=task_killed,
+        ):
             killed += 1
     return killed
 

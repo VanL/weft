@@ -12,6 +12,7 @@ import copy
 import json
 import logging
 import multiprocessing
+import os
 import signal
 import threading
 import time
@@ -26,6 +27,7 @@ from pydantic import ValidationError
 from simplebroker import BrokerTarget, Queue
 from simplebroker.ext import BrokerError
 from weft._constants import (
+    CONTROL_KILL,
     CONTROL_STOP,
     DEFAULT_FUNCTION_TARGET,
     INTERNAL_HEARTBEAT_ENDPOINT_NAME,
@@ -40,10 +42,14 @@ from weft._constants import (
     INTERNAL_SERVICE_KEY_HEARTBEAT,
     INTERNAL_SERVICE_KEY_TASK_MONITOR,
     INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY,
+    MANAGED_SERVICE_CONVERGENCE_INTERVAL_SECONDS,
     MANAGED_SERVICE_PING_TIMEOUT_SECONDS,
+    MANAGED_SERVICE_RECENT_EVIDENCE_GRACE_SECONDS,
     MANAGER_CHILD_EXIT_POLL_INTERVAL,
+    MANAGER_CHILD_STARTUP_LIVENESS_GRACE_SECONDS,
     MANAGER_DISPATCH_RECOVERY_MAX_ATTEMPTS,
     MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS,
+    MANAGER_PID_LIVENESS_RECHECK_INTERVAL,
     MANAGER_REGISTRY_HEARTBEAT_INTERVAL_SECONDS,
     MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS,
     MANAGER_SPAWN_FENCE_RECOVERY_EXHAUSTED_EVENT,
@@ -79,6 +85,7 @@ from weft.helpers import (
     handle_has_live_host_process,
     is_canonical_manager_record,
     iter_queue_json_entries,
+    kill_process_tree,
     pid_is_live,
     process_create_time,
     redact_taskspec_dump,
@@ -133,6 +140,8 @@ class ManagedChild:
     ctrl_out_queue: str | None = None
     internal_role: str | None = None
     service_key: str | None = None
+    launched_ns: int = 0
+    last_liveness_probe_ns: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -226,6 +235,9 @@ class Manager(BaseTask):
         self._autostart_dir = Path(autostart_dir) if autostart_dir else None
         self._autostart_launched: set[str] = set()
         self._managed_service_state: dict[str, ManagedServiceState] = {}
+        self._managed_service_duplicate_scan_pending: set[str] = set()
+        self._managed_internal_spawn_enqueued = False
+        self._last_managed_service_convergence_ns = 0
         self._autostart_state: dict[str, dict[str, Any]] = {}
         self._autostart_last_scan_ns = 0
         self._autostart_scan_interval_ns = 1_000_000_000
@@ -263,6 +275,8 @@ class Manager(BaseTask):
         self._update_process_title("running")
         self._report_state_change(event="task_started")
         self._reconcile_managed_services(force=True)
+        self._managed_service_duplicate_scan_pending.clear()
+        self._managed_internal_spawn_enqueued = False
         atexit.register(self._atexit_unregister)
 
     def _service_state(self, service_key: str) -> ManagedServiceState:
@@ -480,12 +494,14 @@ class Manager(BaseTask):
             autostart_source=autostart_source,
             internal_role=internal_role,
             service_key=service_key,
+            launched_ns=time.time_ns(),
         )
         if service_key is not None:
             state = self._service_state(service_key)
             state.active_tid = child_spec.tid
             state.spawn_pending = False
             state.locally_terminal_tids.discard(child_spec.tid)
+            self._managed_service_duplicate_scan_pending.add(service_key)
         self._last_activity_ns = time.time_ns()
 
         child_dump = redact_taskspec_dump(
@@ -1181,7 +1197,35 @@ class Manager(BaseTask):
             return True
 
         pid = child.process.pid
-        if pid is not None and not self._pid_alive(pid):
+        process_live = False
+        try:
+            process_live = child.process.is_alive()
+        except (AssertionError, OSError, ValueError):  # pragma: no cover - defensive
+            pass
+
+        now_ns = time.time_ns()
+        if process_live:
+            if pid is None:
+                return False
+            recheck_interval_ns = int(
+                MANAGER_PID_LIVENESS_RECHECK_INTERVAL * 1_000_000_000
+            )
+            newest_probe_ns = max(child.launched_ns, child.last_liveness_probe_ns)
+            if (
+                child.launched_ns > 0
+                and newest_probe_ns > 0
+                and now_ns - newest_probe_ns < recheck_interval_ns
+            ):
+                return False
+            child.last_liveness_probe_ns = now_ns
+
+        if pid is not None:
+            if self._pid_alive(pid):
+                return False
+            if child.launched_ns > 0 and now_ns - child.launched_ns < int(
+                MANAGER_CHILD_STARTUP_LIVENESS_GRACE_SECONDS * 1_000_000_000
+            ):
+                return False
             try:
                 child.process.join(timeout=0.0)
             except (
@@ -1337,6 +1381,7 @@ class Manager(BaseTask):
                 if service_key:
                     state = self._service_state(service_key)
                     state.locally_terminal_tids.add(tid)
+                    self._managed_service_duplicate_scan_pending.add(service_key)
                     if state.active_tid == tid:
                         state.active_tid = None
                     state.spawn_pending = False
@@ -1572,7 +1617,7 @@ class Manager(BaseTask):
             completion_event="task_signal_stop",
         )
 
-    def _send_stop_command(self, queue_name: str) -> None:
+    def _send_child_control_command(self, queue_name: str, command: str) -> None:
         queue = Queue(
             queue_name,
             db_path=self._db_path,
@@ -1580,14 +1625,27 @@ class Manager(BaseTask):
             config=self._config,
         )
         try:
-            queue.write(CONTROL_STOP)
+            queue.write(command)
         except (BrokerError, OSError, RuntimeError):
-            logger.debug("Failed to send STOP to %s", queue_name, exc_info=True)
+            logger.debug(
+                "Failed to send %s to %s",
+                command,
+                queue_name,
+                exc_info=True,
+            )
         finally:
             try:
                 queue.close()
             except (BrokerError, OSError, RuntimeError):
-                logger.debug("Failed to close STOP queue %s", queue_name, exc_info=True)
+                logger.debug(
+                    "Failed to close %s queue %s",
+                    command,
+                    queue_name,
+                    exc_info=True,
+                )
+
+    def _send_stop_command(self, queue_name: str) -> None:
+        self._send_child_control_command(queue_name, CONTROL_STOP)
 
     def _drain_control_queue_first(self) -> None:
         """Handle pending manager control messages before new spawn work.
@@ -2193,6 +2251,8 @@ class Manager(BaseTask):
                 json.dumps(service.spawn_payload, ensure_ascii=False)
             )
             self._mark_pending_messages_prechecked()
+            if queue_name == self._queue_names.get("internal_inbox"):
+                self._managed_internal_spawn_enqueued = True
         except (BrokerError, OSError, RuntimeError):
             logger.warning(
                 "Failed to enqueue managed service %s", service.key, exc_info=True
@@ -2243,6 +2303,15 @@ class Manager(BaseTask):
                     tid=tid,
                     state="live",
                     source="manager-child",
+                    metadata={
+                        key: value
+                        for key, value in (
+                            ("ctrl_in", child.ctrl_queue),
+                            ("ctrl_out", child.ctrl_out_queue),
+                            ("pid", child.process.pid),
+                        )
+                        if value is not None
+                    },
                 )
             )
 
@@ -2250,6 +2319,90 @@ class Manager(BaseTask):
         if live is not None:
             return live
         return next(iter(candidates), None)
+
+    @staticmethod
+    def _child_matches_service(child: ManagedChild, service_key: str) -> bool:
+        child_service_key = child.service_key
+        if child_service_key is None and child.internal_role == (
+            INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR
+        ):
+            child_service_key = INTERNAL_SERVICE_KEY_TASK_MONITOR
+        if child_service_key is None and child.internal_role == (
+            INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT
+        ):
+            child_service_key = INTERNAL_SERVICE_KEY_HEARTBEAT
+        if child_service_key is None and child.autostart_source:
+            child_service_key = child.autostart_source
+        return child_service_key == service_key
+
+    def _terminate_duplicate_service_candidates(
+        self,
+        service_key: str,
+        *,
+        canonical_tid: str,
+        candidates: list[ServiceCandidate],
+    ) -> None:
+        """Terminate non-canonical live singleton owners."""
+
+        duplicate_tids = {
+            candidate.tid
+            for candidate in candidates
+            if candidate.state == "live" and candidate.tid != canonical_tid
+        }
+        if not duplicate_tids:
+            return
+
+        signaled: set[str] = set()
+        killed_pids: set[int] = set()
+        for tid, child in list(self._child_processes.items()):
+            if tid not in duplicate_tids:
+                continue
+            if not self._child_matches_service(child, service_key):
+                continue
+            ctrl_queue = child.ctrl_queue or f"T{tid}.{QUEUE_CTRL_IN_SUFFIX}"
+            self._send_child_control_command(ctrl_queue, CONTROL_KILL)
+            pid = child.process.pid
+            if isinstance(pid, int):
+                self._kill_duplicate_service_pid(tid, pid, killed_pids=killed_pids)
+            signaled.add(tid)
+
+        for candidate in candidates:
+            if candidate.tid == canonical_tid:
+                continue
+            if candidate.state != "live":
+                continue
+            if candidate.tid not in signaled:
+                ctrl_in_name = candidate.metadata.get("ctrl_in")
+                if isinstance(ctrl_in_name, str) and ctrl_in_name:
+                    self._send_child_control_command(ctrl_in_name, CONTROL_KILL)
+                    signaled.add(candidate.tid)
+            pid = candidate.metadata.get("pid")
+            if isinstance(pid, int):
+                self._kill_duplicate_service_pid(
+                    candidate.tid,
+                    pid,
+                    killed_pids=killed_pids,
+                )
+
+    @staticmethod
+    def _kill_duplicate_service_pid(
+        tid: str,
+        pid: int,
+        *,
+        killed_pids: set[int],
+    ) -> None:
+        if pid <= 0 or pid in killed_pids:
+            return
+        if pid == os.getpid():
+            logger.warning(
+                "Skipping duplicate service kill for %s because pid %s is current "
+                "manager process",
+                tid,
+                pid,
+            )
+            return
+        kill_process_tree(pid, timeout=0.2)
+        killed_pids.add(pid)
 
     def _latest_tid_runtime_handle(self, tid: str) -> RunnerHandle | None:
         queue = self._queue(WEFT_TID_MAPPINGS_QUEUE)
@@ -2306,6 +2459,9 @@ class Manager(BaseTask):
         timestamp: int,
         runtime_handle: RunnerHandle | None = None,
     ) -> ServiceCandidate:
+        candidate_metadata = self._service_candidate_metadata(payload)
+        ctrl_queues = self._service_candidate_control_queues(payload)
+
         status = payload.get("status")
         if isinstance(status, str) and status in TERMINAL_TASK_STATUSES:
             return ServiceCandidate(
@@ -2315,6 +2471,7 @@ class Manager(BaseTask):
                 source="task-log",
                 timestamp=timestamp,
                 reason=status,
+                metadata=candidate_metadata,
             )
 
         if runtime_handle is not None and handle_has_live_host_process(runtime_handle):
@@ -2324,9 +2481,9 @@ class Manager(BaseTask):
                 state="live",
                 source="tid-mapping",
                 timestamp=timestamp,
+                metadata=candidate_metadata,
             )
 
-        ctrl_queues = self._service_candidate_control_queues(payload)
         if ctrl_queues is not None:
             ctrl_in_name, ctrl_out_name = ctrl_queues
             probe = send_keyed_ping_probe(
@@ -2343,6 +2500,7 @@ class Manager(BaseTask):
                     state="live",
                     source="control-pong",
                     timestamp=timestamp,
+                    metadata=candidate_metadata,
                 )
             if probe.error:
                 return ServiceCandidate(
@@ -2352,7 +2510,22 @@ class Manager(BaseTask):
                     source="control-pong",
                     timestamp=timestamp,
                     reason=probe.error,
+                    metadata=candidate_metadata,
                 )
+
+        recent_grace_ns = int(
+            MANAGED_SERVICE_RECENT_EVIDENCE_GRACE_SECONDS * 1_000_000_000
+        )
+        if not tid.isdigit() or time.time_ns() - int(tid) <= recent_grace_ns:
+            return ServiceCandidate(
+                key=service_key,
+                tid=tid,
+                state="uncertain",
+                source="task-log",
+                timestamp=timestamp,
+                reason="recent non-terminal state without live runtime proof or PONG",
+                metadata=candidate_metadata,
+            )
 
         return ServiceCandidate(
             key=service_key,
@@ -2360,7 +2533,8 @@ class Manager(BaseTask):
             state="terminal",
             source="task-log",
             timestamp=timestamp,
-            reason="non-terminal state without live runtime proof or PONG",
+            reason="stale non-terminal state without live runtime proof or PONG",
+            metadata=candidate_metadata,
         )
 
     @staticmethod
@@ -2481,17 +2655,30 @@ class Manager(BaseTask):
         return pending
 
     @staticmethod
+    def _service_candidate_taskspec_dump(
+        payload: Mapping[str, Any],
+    ) -> Mapping[str, Any] | None:
+        if payload.get("event") == "task_spawned":
+            taskspec_dump = payload.get("child_taskspec")
+        else:
+            taskspec_dump = payload.get("taskspec")
+        if not isinstance(taskspec_dump, Mapping):
+            return None
+        return taskspec_dump
+
+    @classmethod
     def _service_candidate_control_queues(
+        cls,
         payload: Mapping[str, Any],
     ) -> tuple[str, str] | None:
-        taskspec_dump = payload.get("taskspec")
-        if not isinstance(taskspec_dump, dict):
+        taskspec_dump = cls._service_candidate_taskspec_dump(payload)
+        if taskspec_dump is None:
             return None
         io_section = taskspec_dump.get("io")
-        if not isinstance(io_section, dict):
+        if not isinstance(io_section, Mapping):
             return None
         control = io_section.get("control")
-        if not isinstance(control, dict):
+        if not isinstance(control, Mapping):
             return None
         ctrl_in_name = control.get("ctrl_in")
         ctrl_out_name = control.get("ctrl_out")
@@ -2500,6 +2687,37 @@ class Manager(BaseTask):
         if not isinstance(ctrl_out_name, str) or not ctrl_out_name:
             return None
         return ctrl_in_name, ctrl_out_name
+
+    @classmethod
+    def _service_candidate_pid(cls, payload: Mapping[str, Any]) -> int | None:
+        child_pid = payload.get("child_pid")
+        if isinstance(child_pid, int) and not isinstance(child_pid, bool):
+            if child_pid > 0:
+                return child_pid
+
+        taskspec_dump = cls._service_candidate_taskspec_dump(payload)
+        if taskspec_dump is None:
+            return None
+        state = taskspec_dump.get("state")
+        if not isinstance(state, Mapping):
+            return None
+        pid = state.get("pid")
+        if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
+            return pid
+        return None
+
+    @classmethod
+    def _service_candidate_metadata(cls, payload: Mapping[str, Any]) -> dict[str, Any]:
+        candidate_metadata: dict[str, Any] = {}
+        ctrl_queues = cls._service_candidate_control_queues(payload)
+        if ctrl_queues is not None:
+            ctrl_in_name, ctrl_out_name = ctrl_queues
+            candidate_metadata["ctrl_in"] = ctrl_in_name
+            candidate_metadata["ctrl_out"] = ctrl_out_name
+        pid = cls._service_candidate_pid(payload)
+        if pid is not None:
+            candidate_metadata["pid"] = pid
+        return candidate_metadata
 
     def _manager_context(self) -> WeftContext:
         spec_context = getattr(self.taskspec.spec, "weft_context", None)
@@ -2588,6 +2806,7 @@ class Manager(BaseTask):
                             state="live",
                             source="manager-spawned-pid",
                             timestamp=timestamp,
+                            metadata=self._service_candidate_metadata(logged_payload),
                         )
                     )
                     continue
@@ -2688,6 +2907,12 @@ class Manager(BaseTask):
         )
         self._apply_managed_service_decision_state(state, decision)
 
+        if decision.canonical_live is not None:
+            self._terminate_duplicate_service_candidates(
+                service.key,
+                canonical_tid=decision.canonical_live.tid,
+                candidates=candidates,
+            )
         if decision.action == "schedule_restart" and service.autostart_source:
             self._schedule_autostart_rescan_at(state.next_allowed_ns)
             return
@@ -2741,6 +2966,8 @@ class Manager(BaseTask):
             state = self._service_state(service.key)
             tracked = self._tracked_service_candidate(service.key)
             if tracked is not None and tracked.state == "live":
+                if force or service.key in self._managed_service_duplicate_scan_pending:
+                    keys_needing_evidence.add(service.key)
                 continue
             if tracked is not None and tracked.state == "terminal":
                 keys_needing_evidence.add(service.key)
@@ -2765,6 +2992,11 @@ class Manager(BaseTask):
                 pending_keys=pending_keys,
                 candidates=candidates_by_key.get(service.key, []),
             )
+            if service.key in keys_needing_evidence:
+                state = self._service_state(service.key)
+                tracked = self._tracked_service_candidate(service.key)
+                if tracked is not None and tracked.state == "live":
+                    self._managed_service_duplicate_scan_pending.discard(service.key)
 
     def _tick_internal_services(self, *, force: bool = False) -> None:
         """Ensure built-in Manager-owned services for the elected leader."""
@@ -3231,6 +3463,57 @@ class Manager(BaseTask):
             include_autostart=True,
         )
 
+    def _run_managed_service_convergence(
+        self,
+        *,
+        include_autostart: bool = True,
+        max_passes: int = 3,
+        force: bool = False,
+    ) -> None:
+        """Advance Manager-owned services toward a fixed point.
+
+        Each pass reaps locally tracked children, reconciles desired singleton
+        service state, and drains only the manager's internal spawn inbox. This
+        keeps restart convergence independent from public work queue traffic.
+
+        Spec: [MA-1.4], [MA-1.6a], [MANAGER.15], [MANAGER.16]
+        """
+
+        now_ns = time.time_ns()
+        interval_ns = int(MANAGED_SERVICE_CONVERGENCE_INTERVAL_SECONDS * 1_000_000_000)
+        if (
+            not force
+            and not self._managed_internal_spawn_enqueued
+            and self._last_managed_service_convergence_ns
+            and now_ns - self._last_managed_service_convergence_ns < interval_ns
+        ):
+            return
+        self._last_managed_service_convergence_ns = now_ns
+
+        for _pass_index in range(max_passes):
+            child_exited = self._cleanup_children()
+            if (
+                self.should_stop
+                or self._draining
+                or self._dispatch_suspension is not None
+            ):
+                return
+
+            self._reconcile_managed_services(include_autostart=include_autostart)
+            should_drain_internal = self._managed_internal_spawn_enqueued
+            self._managed_internal_spawn_enqueued = False
+            drained = (
+                self._drain_internal_spawn_requests() if should_drain_internal else 0
+            )
+            if drained:
+                self._last_activity_ns = time.time_ns()
+
+            if self.should_stop or self._draining:
+                return
+            if not child_exited and drained == 0:
+                return
+            include_autostart = False
+
     # ------------------------------------------------------------------
     # Cleanup
     # ------------------------------------------------------------------
@@ -3238,6 +3521,28 @@ class Manager(BaseTask):
         self._terminate_children()
         self._unregister_manager()
         super().cleanup()
+
+    def wait_for_activity(self, timeout: float | None) -> None:
+        """Bound manager sleep independent of backend activity waiters.
+
+        Service supervision is a deterministic state machine driven by repeated
+        manager turns. Queue waiters are useful hints for user work, but they
+        must not be allowed to extend the manager's supervision tick under PG
+        load.
+
+        Spec: [MA-1.4], [MANAGER.15], [MANAGER.16]
+        """
+
+        if timeout is None or timeout <= 0:
+            super().wait_for_activity(timeout=timeout)
+            return
+        if self._has_pending_messages():
+            self._mark_pending_messages_prechecked()
+            return
+        if self._stop_event is not None:
+            self._stop_event.wait(timeout)
+            return
+        time.sleep(timeout)
 
     def process_once(self) -> None:
         self._process_pending_termination_signal()
@@ -3271,23 +3576,25 @@ class Manager(BaseTask):
                 self._idle_shutdown_logged = False
             return
         if self._cleanup_children():
-            self._reconcile_managed_services(include_autostart=False)
+            self._run_managed_service_convergence(
+                include_autostart=False,
+                force=True,
+            )
+            if self._draining:
+                self._continue_shutdown_drain()
+                return
         super().process_once()
         if self._draining:
             self._continue_shutdown_drain()
             return
         if self._maybe_yield_leadership():
             return
-        self._cleanup_children()
-        self._reconcile_managed_services()
-        if self._pending_messages_precheck_confirmed:
-            self._drain_internal_spawn_requests()
-            if self._draining:
-                self._continue_shutdown_drain()
-                return
-            if self._maybe_yield_leadership():
-                return
-            self._cleanup_children()
+        self._run_managed_service_convergence()
+        if self._draining:
+            self._continue_shutdown_drain()
+            return
+        if self._maybe_yield_leadership():
+            return
         self._update_idle_activity_from_broker()
         now_ns = time.time_ns()
         idle_timeout_ns = int(float(self._idle_timeout) * 1_000_000_000)
@@ -3319,12 +3626,13 @@ class Manager(BaseTask):
                 self._idle_shutdown_logged = True
             self.should_stop = True
 
-    def _drain_internal_spawn_requests(self) -> None:
+    def _drain_internal_spawn_requests(self) -> int:
         """Drain manager-owned internal spawn work without consuming public work."""
 
         internal_inbox = self._queue_names.get("internal_inbox")
         if internal_inbox is None:
-            return
+            return 0
+        total_processed = 0
         for _ in range(4):
             try:
                 if not self._queue(internal_inbox).has_pending():
@@ -3337,8 +3645,10 @@ class Manager(BaseTask):
                 break
             self._active_queues = [internal_inbox]
             processed = self._drain_round_robin_pass(queue_names=[internal_inbox])
+            total_processed += processed
             if processed == 0:
                 break
+        return total_processed
 
     def _continue_shutdown_drain(self) -> None:
         if self._drain_stops_children:

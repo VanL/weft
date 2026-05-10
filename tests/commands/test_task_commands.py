@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 
 from tests.helpers.test_backend import prepare_project_root
-from weft._constants import WEFT_TID_MAPPINGS_QUEUE
+from weft._constants import CONTROL_KILL, WEFT_TID_MAPPINGS_QUEUE
 from weft.commands import tasks as task_cmd
 from weft.context import build_context
 from weft.core import (
@@ -325,6 +325,51 @@ def test_await_control_surface_uses_queue_monitor(
     assert created_monitors[0].wait_calls
 
 
+def test_await_control_surface_does_not_promote_kill_ack_to_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    ctrl_out = ctx.queue(f"T{tid}.ctrl_out", persistent=False)
+    ctrl_out.write(json.dumps({"command": CONTROL_KILL, "status": "ack", "tid": tid}))
+
+    monkeypatch.setattr(task_cmd, "QueueChangeMonitor", _FakeQueueChangeMonitor)
+    monkeypatch.setattr(task_cmd, "mapping_for_tid", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        task_cmd, "load_latest_taskspec_payload", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(task_cmd, "CONTROL_SURFACE_WAIT_INTERVAL", 0.001)
+    monkeypatch.setattr(
+        task_cmd,
+        "task_status",
+        lambda *_args, **_kwargs: task_cmd.status_cmd.TaskSnapshot(
+            tid=tid,
+            tid_short=tid[-10:],
+            name="task-func",
+            status="running",
+            event="task_started",
+            activity=None,
+            waiting_on=None,
+            started_at=time.time_ns(),
+            completed_at=None,
+            last_timestamp=time.time_ns(),
+            duration_seconds=None,
+            runner=None,
+            runtime_handle=None,
+            runtime=None,
+            metadata={},
+        ),
+    )
+
+    _entry, snapshot = task_cmd._await_control_surface(ctx, tid, timeout=0.001)
+
+    assert snapshot is not None
+    assert snapshot.status == "running"
+    assert snapshot.event == "task_started"
+
+
 def test_kill_tasks_terminates_active_process_tree(tmp_path) -> None:
     spec, process, worker_pid = _launch_running_task(tmp_path)
     try:
@@ -524,6 +569,74 @@ def test_kill_tasks_uses_runner_handle_when_available(
             0.2,
         )
     ]
+
+
+def test_kill_tasks_does_not_count_runner_success_while_observed_pid_lives(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    mapping_queue = ctx.queue("weft.state.tid_mappings", persistent=False)
+    calls: list[tuple[str, dict[str, Any], float]] = []
+    force_calls: list[int] = []
+    runtime_handle = _runtime_handle(
+        "fake",
+        "runtime-123",
+        host_pids=[33333],
+        metadata={"scope": "test"},
+    )
+    mapping_payload = {
+        "short": tid[-6:],
+        "full": tid,
+        "runner": "fake",
+        "runtime_handle": runtime_handle,
+        "name": "task-func",
+        "hostname": "test-host",
+    }
+
+    class FakeRunnerPlugin:
+        def kill(self, handle, *, timeout: float = 2.0) -> bool:
+            calls.append(("kill", handle.to_dict(), timeout))
+            return True
+
+    def _running_surface(_ctx, _tid, *, timeout=0.0):
+        del timeout
+        return mapping_payload, task_cmd.status_cmd.TaskSnapshot(
+            tid=tid,
+            tid_short=tid[-10:],
+            name="task-func",
+            status="running",
+            event="task_started",
+            activity=None,
+            waiting_on=None,
+            started_at=time.time_ns(),
+            completed_at=None,
+            last_timestamp=time.time_ns(),
+            duration_seconds=None,
+            runner="fake",
+            runtime_handle=runtime_handle,
+            runtime=None,
+            metadata={},
+        )
+
+    mapping_queue.write(json.dumps(mapping_payload))
+    monkeypatch.setattr(
+        task_cmd, "require_runner_plugin", lambda name: FakeRunnerPlugin()
+    )
+    monkeypatch.setattr(task_cmd, "_await_control_surface", _running_surface)
+    monkeypatch.setattr(task_cmd, "_pid_exists", lambda pid: pid == 33333)
+    monkeypatch.setattr(
+        task_cmd,
+        "kill_process_tree",
+        lambda pid, timeout=0.2: force_calls.append(pid) or False,
+    )
+
+    killed = task_cmd.kill_tasks([tid], context_path=root)
+
+    assert killed == 0
+    assert calls == [("kill", runtime_handle, 0.2)]
+    assert force_calls == [33333]
 
 
 def test_task_stop_stops_pipeline_run(

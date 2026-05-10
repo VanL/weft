@@ -149,6 +149,9 @@ MANAGER_PID_LIVENESS_RECHECK_INTERVAL: Final[float] = 0.5
 MANAGER_CHILD_EXIT_POLL_INTERVAL: Final[float] = 0.05
 """Polling interval while the Manager waits for tracked child processes to exit."""
 
+MANAGER_CHILD_STARTUP_LIVENESS_GRACE_SECONDS: Final[float] = 1.0
+"""Grace window before negative liveness can reap a just-launched Manager child."""
+
 MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS: Final[float] = 5.0
 """Maximum time a Manager drain waits before forcefully reaping child processes."""
 
@@ -198,10 +201,10 @@ DEFAULT_WEFT_CONTEXT: Final[str | None] = None
 WEFT_DIRECTORY_NAME_DEFAULT: Final[str] = ".weft"
 """Default name for the Weft-owned project metadata directory."""
 
-PROVIDER_CLI_VERSION_PROBE_TIMEOUT_SECONDS: Final[float] = 5.0
+PROVIDER_CLI_VERSION_PROBE_TIMEOUT_SECONDS: Final[float] = 15.0
 """Timeout for basic provider CLI version probes."""
 
-PROVIDER_CLI_OPENCODE_RUN_PROBE_TIMEOUT_SECONDS: Final[float] = 2.0
+PROVIDER_CLI_OPENCODE_RUN_PROBE_TIMEOUT_SECONDS: Final[float] = 10.0
 """Timeout for probing OpenCode non-interactive `run` support."""
 
 # Limits Section Defaults (moved from individual fields)
@@ -295,6 +298,12 @@ TASK_MONITOR_HEARTBEAT_STARTUP_TIMEOUT_SECONDS: Final[float] = 0.5
 
 MANAGED_SERVICE_PING_TIMEOUT_SECONDS: Final[float] = 0.15
 """Bounded PING/PONG probe budget for manager-supervised singleton evidence."""
+
+MANAGED_SERVICE_RECENT_EVIDENCE_GRACE_SECONDS: Final[float] = 5.0
+"""Window where nonterminal service rows without live proof remain uncertain."""
+
+MANAGED_SERVICE_CONVERGENCE_INTERVAL_SECONDS: Final[float] = 0.1
+"""Maximum stable-manager delay between singleton convergence turns."""
 
 MANAGED_SERVICE_UNCERTAIN_RETRY_LIMIT: Final[int] = 3
 """Number of uncertain singleton evidence turns that may block replacement."""

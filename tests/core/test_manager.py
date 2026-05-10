@@ -18,6 +18,7 @@ import pytest
 import weft.core.manager as manager_mod
 from simplebroker.ext import BrokerError
 from weft._constants import (
+    CONTROL_KILL,
     CONTROL_STOP,
     INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY,
     INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
@@ -531,16 +532,26 @@ def test_manager_spawns_child(manager_setup) -> None:
     outbox_name = child_taskspec["io"]["outputs"].get("outbox", f"T{child_tid}.outbox")
     result_queue = make_queue(outbox_name)
     raw_reference = None
-    deadline = time.time() + 5.0
-    while time.time() < deadline:
+    child_events = [e for e in events if e.get("tid") == child_tid]
+    result_timeout = 30.0 if os.name == "nt" else 20.0
+    deadline = time.monotonic() + result_timeout
+    while time.monotonic() < deadline:
         raw_reference = result_queue.read_one()
         if raw_reference is not None:
             break
+        manager._cleanup_children()
+        for item in drain(log_queue):
+            event = json.loads(item)
+            events.append(event)
+            if event.get("tid") == child_tid:
+                child_events.append(event)
         time.sleep(0.05)
 
     if raw_reference is None:
-        child_events = [e for e in events if e.get("tid") == child_tid]
-        pytest.fail(f"No output message; child events: {child_events}")
+        pytest.fail(
+            "No output message "
+            f"after {result_timeout:.1f}s; child events: {child_events}"
+        )
 
     reference = json.loads(raw_reference)
     assert reference["type"] == "large_output"
@@ -1075,6 +1086,82 @@ def test_task_monitor_terminal_tracked_child_allows_restart(
     assert INTERNAL_SERVICE_KEY_TASK_MONITOR in enqueued
 
 
+def test_task_monitor_terminal_log_overrides_tracked_live_child(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, make_queue = manager_setup
+
+    class FakeLiveProcess:
+        pid = None
+        exitcode = None
+
+        def __init__(self) -> None:
+            self.alive = True
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+        def join(self, timeout: float | None = None) -> None:
+            del timeout
+
+        def kill(self) -> None:
+            self.alive = False
+
+    old_tid = "1777000000000000052"
+    metadata = {
+        "internal": True,
+        "role": "task_monitor",
+        INTERNAL_RUNTIME_TASK_CLASS_KEY: INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR,
+        INTERNAL_SERVICE_KEY_METADATA_KEY: INTERNAL_SERVICE_KEY_TASK_MONITOR,
+    }
+    make_queue(WEFT_GLOBAL_LOG_QUEUE).write(
+        json.dumps(
+            {
+                "tid": old_tid,
+                "status": "killed",
+                "event": "control_kill",
+                "taskspec": {
+                    "metadata": metadata,
+                    "io": {
+                        "control": {
+                            "ctrl_in": f"T{old_tid}.ctrl_in",
+                            "ctrl_out": f"T{old_tid}.ctrl_out",
+                        }
+                    },
+                },
+            }
+        )
+    )
+    manager._task_monitor_enabled = True
+    manager._queue_names["inbox"] = WEFT_SPAWN_REQUESTS_QUEUE
+    manager._task_monitor_tid = old_tid
+    manager._task_monitor_restart_backoff_ns = 0
+    manager._child_processes[old_tid] = ManagedChild(
+        process=FakeLiveProcess(),
+        ctrl_queue=f"T{old_tid}.ctrl_in",
+        ctrl_out_queue=f"T{old_tid}.ctrl_out",
+        persistent=True,
+        internal_role=INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR,
+    )
+    monkeypatch.setattr(
+        manager,
+        "_evaluate_dispatch_ownership",
+        lambda: DispatchOwnership(state="self", leader_tid=manager.tid),
+    )
+    enqueued: list[str] = []
+    monkeypatch.setattr(
+        manager,
+        "_enqueue_managed_service_request",
+        lambda service: enqueued.append(service.key) or True,
+    )
+
+    manager._tick_task_monitor(force=True)
+
+    assert manager._task_monitor_tid is None
+    assert INTERNAL_SERVICE_KEY_TASK_MONITOR in enqueued
+
+
 def test_task_monitor_manager_spawned_pid_counts_as_live_owner(
     manager_setup,
     monkeypatch: pytest.MonkeyPatch,
@@ -1258,6 +1345,196 @@ def test_task_monitor_stale_log_without_liveness_does_not_block_restart(
         INTERNAL_SERVICE_KEY_HEARTBEAT,
         INTERNAL_SERVICE_KEY_TASK_MONITOR,
     ]
+
+
+def test_task_monitor_recent_log_without_liveness_blocks_duplicate_restart(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, make_queue = manager_setup
+    manager._task_monitor_enabled = True
+    manager._queue_names["inbox"] = WEFT_SPAWN_REQUESTS_QUEUE
+    recent_tid = str(time.time_ns())
+    make_queue(WEFT_GLOBAL_LOG_QUEUE).write(
+        json.dumps(
+            {
+                "tid": recent_tid,
+                "status": "running",
+                "taskspec": {
+                    "metadata": {
+                        "internal": True,
+                        "role": "task_monitor",
+                        INTERNAL_RUNTIME_TASK_CLASS_KEY: (
+                            INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR
+                        ),
+                        INTERNAL_SERVICE_KEY_METADATA_KEY: (
+                            INTERNAL_SERVICE_KEY_TASK_MONITOR
+                        ),
+                    },
+                    "io": {
+                        "control": {
+                            "ctrl_in": f"T{recent_tid}.ctrl_in",
+                            "ctrl_out": f"T{recent_tid}.ctrl_out",
+                        }
+                    },
+                },
+            }
+        )
+    )
+    monkeypatch.setattr(
+        manager,
+        "_evaluate_dispatch_ownership",
+        lambda: DispatchOwnership(state="self", leader_tid=manager.tid),
+    )
+    monkeypatch.setattr(
+        manager_mod,
+        "send_keyed_ping_probe",
+        lambda *args, **kwargs: SimpleNamespace(matched=None, error=None),
+    )
+    enqueued: list[str] = []
+    monkeypatch.setattr(
+        manager,
+        "_enqueue_managed_service_request",
+        lambda service: enqueued.append(service.key) or True,
+    )
+
+    manager._tick_task_monitor(force=True)
+
+    assert enqueued == [INTERNAL_SERVICE_KEY_HEARTBEAT]
+
+
+def test_task_monitor_duplicate_live_candidates_get_kill_signal(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, make_queue = manager_setup
+    manager._task_monitor_enabled = True
+    manager._queue_names["inbox"] = WEFT_SPAWN_REQUESTS_QUEUE
+    canonical_tid = "1777000000000000200"
+    duplicate_tid = "1777000000000000300"
+    for tid in (canonical_tid, duplicate_tid):
+        make_queue(WEFT_GLOBAL_LOG_QUEUE).write(
+            json.dumps(
+                {
+                    "tid": tid,
+                    "status": "running",
+                    "taskspec": {
+                        "metadata": {
+                            "internal": True,
+                            "role": "task_monitor",
+                            INTERNAL_RUNTIME_TASK_CLASS_KEY: (
+                                INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR
+                            ),
+                            INTERNAL_SERVICE_KEY_METADATA_KEY: (
+                                INTERNAL_SERVICE_KEY_TASK_MONITOR
+                            ),
+                        },
+                        "io": {
+                            "control": {
+                                "ctrl_in": f"T{tid}.ctrl_in",
+                                "ctrl_out": f"T{tid}.ctrl_out",
+                            }
+                        },
+                    },
+                }
+            )
+        )
+    monkeypatch.setattr(
+        manager,
+        "_evaluate_dispatch_ownership",
+        lambda: DispatchOwnership(state="self", leader_tid=manager.tid),
+    )
+    monkeypatch.setattr(
+        manager_mod,
+        "send_keyed_ping_probe",
+        lambda *args, **kwargs: SimpleNamespace(matched=object(), error=None),
+    )
+    enqueued: list[str] = []
+    monkeypatch.setattr(
+        manager,
+        "_enqueue_managed_service_request",
+        lambda service: enqueued.append(service.key) or True,
+    )
+
+    manager._tick_task_monitor(force=True)
+
+    assert make_queue(f"T{canonical_tid}.ctrl_in").read_one() is None
+    assert make_queue(f"T{duplicate_tid}.ctrl_in").read_one() == CONTROL_KILL
+    assert INTERNAL_SERVICE_KEY_TASK_MONITOR not in enqueued
+
+
+def test_task_monitor_duplicate_live_candidates_force_kill_logged_pid(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, make_queue = manager_setup
+    manager._task_monitor_enabled = True
+    manager._queue_names["inbox"] = WEFT_SPAWN_REQUESTS_QUEUE
+    canonical_tid = "1777000000000000400"
+    duplicate_tid = "1777000000000000500"
+    canonical_pid = 424200
+    duplicate_pid = 424201
+    for tid, pid in (
+        (canonical_tid, canonical_pid),
+        (duplicate_tid, duplicate_pid),
+    ):
+        make_queue(WEFT_GLOBAL_LOG_QUEUE).write(
+            json.dumps(
+                {
+                    "tid": manager.tid,
+                    "event": "task_spawned",
+                    "status": "running",
+                    "child_tid": tid,
+                    "child_pid": pid,
+                    "child_taskspec": {
+                        "tid": tid,
+                        "metadata": {
+                            "internal": True,
+                            "role": "task_monitor",
+                            INTERNAL_RUNTIME_TASK_CLASS_KEY: (
+                                INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR
+                            ),
+                            INTERNAL_SERVICE_KEY_METADATA_KEY: (
+                                INTERNAL_SERVICE_KEY_TASK_MONITOR
+                            ),
+                        },
+                        "state": {"pid": pid},
+                        "io": {
+                            "control": {
+                                "ctrl_in": f"T{tid}.ctrl_in",
+                                "ctrl_out": f"T{tid}.ctrl_out",
+                            }
+                        },
+                    },
+                }
+            )
+        )
+    monkeypatch.setattr(manager, "_pid_alive", lambda pid: pid is not None)
+    monkeypatch.setattr(
+        manager,
+        "_evaluate_dispatch_ownership",
+        lambda: DispatchOwnership(state="self", leader_tid=manager.tid),
+    )
+    killed: list[tuple[int, float]] = []
+
+    def _record_kill(pid: int, *, timeout: float = 0.5) -> set[int]:
+        killed.append((pid, timeout))
+        return {pid}
+
+    monkeypatch.setattr(manager_mod, "kill_process_tree", _record_kill)
+    enqueued: list[str] = []
+    monkeypatch.setattr(
+        manager,
+        "_enqueue_managed_service_request",
+        lambda service: enqueued.append(service.key) or True,
+    )
+
+    manager._tick_task_monitor(force=True)
+
+    assert make_queue(f"T{canonical_tid}.ctrl_in").read_one() is None
+    assert make_queue(f"T{duplicate_tid}.ctrl_in").read_one() == CONTROL_KILL
+    assert killed == [(duplicate_pid, 0.2)]
+    assert INTERNAL_SERVICE_KEY_TASK_MONITOR not in enqueued
 
 
 def test_task_monitor_pending_spawn_request_blocks_duplicate_restart(
@@ -3426,6 +3703,50 @@ def test_cleanup_children_reaps_os_dead_child_without_mapping_scan(
 
     assert manager._child_processes == {}
     assert fake_process.join_calls == [0.0, 0.1]
+
+
+def test_child_has_exited_trusts_live_host_pid_before_process_view(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _make_queue = manager_setup
+
+    class FakeProcess:
+        pid = 424243
+        exitcode = None
+
+        def is_alive(self) -> bool:
+            return False
+
+        def join(self, timeout: float | None = None) -> None:
+            del timeout
+
+    monkeypatch.setattr(manager, "_pid_alive", lambda pid: pid == 424243)
+
+    assert manager._child_has_exited(ManagedChild(FakeProcess(), None)) is False
+
+
+def test_child_has_exited_allows_startup_liveness_visibility_grace(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _make_queue = manager_setup
+
+    class FakeProcess:
+        pid = 424244
+        exitcode = None
+
+        def is_alive(self) -> bool:
+            return False
+
+        def join(self, timeout: float | None = None) -> None:
+            del timeout
+
+    monkeypatch.setattr(manager, "_pid_alive", lambda pid: False)
+
+    child = ManagedChild(FakeProcess(), None, launched_ns=time.time_ns())
+
+    assert manager._child_has_exited(child) is False
 
 
 def test_manager_autostart_templates(tmp_path: Path, broker_env, unique_tid) -> None:

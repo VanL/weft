@@ -275,6 +275,22 @@ def reduce_managed_service_state(
             reason="durable spawn request is pending",
         )
 
+    if next_state.active_tid is not None:
+        next_state.uncertain_attempts += 1
+        next_state.uncertain_since_ns = next_state.uncertain_since_ns or now_ns
+        next_state.last_uncertain_reason = "active service lacks live proof"
+        active_action: ManagedServiceAction = (
+            "wait_uncertain"
+            if next_state.uncertain_attempts <= uncertain_retry_limit
+            else "degraded_wait"
+        )
+        return ManagedServiceDecision(
+            action=active_action,
+            state=next_state,
+            terminal_tids=summary.terminal_tids,
+            reason=next_state.last_uncertain_reason,
+        )
+
     if next_state.spawn_pending:
         next_state.spawn_pending = False
 

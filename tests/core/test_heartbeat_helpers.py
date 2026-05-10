@@ -20,6 +20,7 @@ from weft._constants import (
     INTERNAL_SERVICE_KEY_METADATA_KEY,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
+    WEFT_TID_MAPPINGS_QUEUE,
 )
 from weft.context import build_context
 from weft.core.endpoints import (
@@ -53,6 +54,20 @@ def _resolved_endpoint(tid: str) -> ResolvedEndpoint:
             metadata={},
         )
     )
+
+
+def _host_runtime_handle(pid: int, create_time: float | None = None) -> dict[str, Any]:
+    return {
+        "runner": "host",
+        "kind": "process",
+        "id": str(pid),
+        "control": {"authority": "host-pid"},
+        "observations": {
+            "host_pids": [pid],
+            "host_processes": [{"pid": pid, "create_time": create_time}],
+        },
+        "metadata": {},
+    }
 
 
 def _heartbeat_service_taskspec(tid: str, root: Path) -> TaskSpec:
@@ -212,10 +227,83 @@ def test_heartbeat_endpoint_terminal_task_log_rejects_stale_endpoint(
     assert not _heartbeat_endpoint_is_live(context, resolved=_resolved_endpoint(tid))
 
 
-def test_external_supervisor_endpoint_owner_uses_runtime_liveness_probe(
+def test_endpoint_owner_uses_host_runtime_handle_liveness(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     tid = "1777000000000000901"
+    record = _resolved_endpoint(tid).record
+    observed: list[tuple[int, ...]] = []
+
+    def _handle_has_live_host_process(handle: Any) -> bool:
+        observed.append(handle.scoped_host_pids())
+        return True
+
+    monkeypatch.setattr(
+        "weft.core.endpoints.handle_has_live_host_process",
+        _handle_has_live_host_process,
+    )
+
+    assert endpoint_record_owner_is_live(
+        record,
+        task_statuses={},
+        tid_mappings={tid: {"runtime_handle": _host_runtime_handle(4242, 1.5)}},
+    )
+    assert observed == [(4242,)]
+
+
+def test_endpoint_owner_rejects_dead_host_runtime_handle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tid = "1777000000000000902"
+    record = _resolved_endpoint(tid).record
+    monkeypatch.setattr(
+        "weft.core.endpoints.handle_has_live_host_process",
+        lambda handle: False,
+    )
+
+    assert not endpoint_record_owner_is_live(
+        record,
+        task_statuses={},
+        tid_mappings={tid: {"runtime_handle": _host_runtime_handle(4242, 1.5)}},
+    )
+
+
+def test_heartbeat_endpoint_liveness_uses_task_process_runtime_handle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = build_context(spec_context=tmp_path)
+    tid = "1777000000000000903"
+    mapping_queue = context.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
+    try:
+        mapping_queue.write(
+            json.dumps(
+                {
+                    "full": tid,
+                    "runtime_handle": _host_runtime_handle(4242, 1.5),
+                }
+            )
+        )
+    finally:
+        mapping_queue.close()
+    monkeypatch.setattr(
+        "weft.core.heartbeat.handle_has_live_host_process",
+        lambda handle: True,
+    )
+
+    def fail_ping(*args: Any, **kwargs: Any) -> object:
+        del args, kwargs
+        raise AssertionError("live task pid mapping should avoid heartbeat PING")
+
+    monkeypatch.setattr("weft.core.heartbeat.send_keyed_ping_probe", fail_ping)
+
+    assert _heartbeat_endpoint_is_live(context, resolved=_resolved_endpoint(tid))
+
+
+def test_external_supervisor_endpoint_owner_uses_runtime_liveness_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tid = "1777000000000000904"
     record = _resolved_endpoint(tid).record
     handle_payload = {
         "runner": "manager-supervisor",
@@ -251,7 +339,7 @@ def test_external_supervisor_endpoint_owner_uses_runtime_liveness_probe(
 def test_external_supervisor_endpoint_owner_rejects_unknown_runtime_liveness(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    tid = "1777000000000000902"
+    tid = "1777000000000000905"
     record = _resolved_endpoint(tid).record
     handle_payload = {
         "runner": "manager-supervisor",

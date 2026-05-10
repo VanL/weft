@@ -301,6 +301,10 @@ Current rule:
   `observations.host_pids` are scoped host PIDs; `runner` means the named
   runner plugin owns control; `external-supervisor` means Weft records
   identity but does not send direct runtime control.
+- task processes publish a `host-pid` runtime handle for their own process when
+  no runner-specific runtime handle exists. This keeps endpoint liveness and
+  control proof on the runtime-handle contract rather than legacy top-level PID
+  fields.
 - legacy handle keys such as `runner_name`, `runtime_id`, and top-level
   `host_pids` are invalid at runtime-contract boundaries
 - manager records use the same `runtime_handle` shape. Detached host launch

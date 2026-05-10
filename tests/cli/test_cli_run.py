@@ -674,6 +674,7 @@ def test_cli_run_spec_name_resolves_builtin_probe_helper_and_writes_agent_settin
         cwd=workdir,
         env=env,
         harness=weft_harness,
+        timeout=180.0,
     )
 
     assert rc == 0
@@ -1946,7 +1947,7 @@ def test_cli_run_continuous_overrides_nonpersistent_spec(workdir, weft_harness) 
     assert rc == 0
     assert err == ""
     tid = out.strip()
-    result_timeout = "15" if os.name == "nt" else "5"
+    result_timeout = "30" if os.name == "nt" else "15"
 
     _write_queue_message(
         context,
@@ -2227,7 +2228,7 @@ def test_cli_run_no_wait_survives_short_manager_lifetime(workdir, weft_harness) 
     env = os.environ.copy()
     manager_lifetime = 1.0 if os.name == "nt" else 0.2
     task_duration = 1.5 if os.name == "nt" else 0.5
-    completion_timeout = 20.0 if os.name == "nt" else 10.0
+    completion_timeout = 45.0 if os.name == "nt" else 30.0
     env["WEFT_MANAGER_LIFETIME_TIMEOUT"] = str(manager_lifetime)
 
     rc, out, err = run_cli(

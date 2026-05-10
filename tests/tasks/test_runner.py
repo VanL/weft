@@ -276,7 +276,7 @@ def test_agent_session_reports_hang_after_boot_handshake() -> None:
     session = _spawn_agent_session_for_target(_agent_session_boot_then_hang_worker)
     try:
         with pytest.raises(RuntimeError) as exc_info:
-            session.wait_ready(timeout=2.0)
+            session.wait_ready(timeout=5.0)
     finally:
         session.close()
 
@@ -325,7 +325,7 @@ def _agent_session_boot_then_hang_worker(
     response_queue: Any,
 ) -> None:
     response_queue.put(make_booted_response())
-    time.sleep(2.0)
+    time.sleep(30.0)
 
 
 def _spawn_agent_session_for_target(target: Any) -> AgentSession:

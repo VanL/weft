@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 82 plan files in this directory.
+There are currently 83 plan files in this directory.
 
 ## Curation Policy
 
@@ -22,6 +22,7 @@ There are currently 82 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-05-10-control-and-service-convergence-state-machine-plan.md`](./2026-05-10-control-and-service-convergence-state-machine-plan.md) | Control And Service Convergence State Machine Plan | `completed` | none |
 | [`2026-05-09-service-liveness-and-health-convergence-plan.md`](./2026-05-09-service-liveness-and-health-convergence-plan.md) | Service Liveness And Health Convergence Plan | `draft` | none |
 | [`2026-05-09-prune-path-unification-plan.md`](./2026-05-09-prune-path-unification-plan.md) | Prune Path Unification Plan | `completed` | none |
 | [`2026-05-09-runtime-liveness-probe-registry-plan.md`](./2026-05-09-runtime-liveness-probe-registry-plan.md) | Runtime Liveness Probe Registry Plan | `completed` | none |

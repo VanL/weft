@@ -106,6 +106,18 @@ def test_pending_spawn_blocks_duplicate_start() -> None:
     assert decision.state.spawn_pending is True
 
 
+def test_active_tid_without_live_or_terminal_evidence_waits_uncertain() -> None:
+    decision = reduce_managed_service_state(
+        _service(),
+        ManagedServiceState(active_tid="10", launched_once=True),
+        ManagedServiceEvidence(),
+        now_ns=NOW_NS,
+    )
+
+    assert decision.action == "wait_uncertain"
+    assert decision.state.active_tid == "10"
+
+
 def test_local_spawn_pending_does_not_block_forever_without_durable_pending() -> None:
     decision = reduce_managed_service_state(
         _service(),

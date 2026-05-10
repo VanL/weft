@@ -92,7 +92,12 @@ def test_tid_mapping_written(broker_env, task_factory, unique_tid) -> None:
     assert data["short"] == unique_tid[-TASKSPEC_TID_SHORT_LENGTH:]
     assert data["name"] == "observability-task"
     assert data["runner"] == "host"
-    assert data["runtime_handle"] is None
+    runtime_handle = data["runtime_handle"]
+    assert runtime_handle["runner"] == "host"
+    assert runtime_handle["kind"] == "process"
+    assert runtime_handle["control"] == {"authority": "host-pid"}
+    assert runtime_handle["metadata"] == {"source": "weft-task-process"}
+    assert int(runtime_handle["id"]) in runtime_handle["observations"]["host_pids"]
     assert "pid" not in data
     assert "task_pid" not in data
     assert "caller_pid" not in data

@@ -661,3 +661,19 @@ runbook needs to become stricter.
 - Weak host PID evidence (`observations.host_pids` without process creation
   identity) is especially unsafe for old task rows. PID reuse or namespace
   changes can make an unrelated host process look like the original task.
+
+## 2026-05-10 Control And Service Convergence
+
+- Postgres under load exposes proof-boundary gaps that SQLite often hides.
+  A control ack, a successful queue write, or a backend waiter wakeup is
+  progress evidence only; it is not convergence. Command helpers must report
+  success from terminal/dead proof, and manager-owned services must advance
+  through bounded reducer passes rather than relying on incidental scheduling.
+- For manager-owned singletons, a recent `running` row with a missed PING is
+  uncertainty, not death. Treating that row as terminal clears the active owner
+  and creates restart storms; only terminal task proof or sufficiently stale
+  nonterminal evidence may drive replacement.
+- Runtime endpoints need current-state process proof on the runtime-handle
+  contract, not legacy ad hoc PID fields. A stale endpoint owner with no
+  terminal log and no host-process proof can make every replacement self-
+  supersede under load.
