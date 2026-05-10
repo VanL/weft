@@ -225,6 +225,12 @@ runbook needs to become stricter.
   pending messages or a manager writes service work to its own queue, the next
   scheduler drain must probe inactive queues immediately so singleton services
   advance by state-machine rules instead of incidental polling cadence.
+- Manager-owned service launch has two visibility phases: the manager knows a
+  child process was spawned before the child has imported Weft and written its
+  own lifecycle row. Durable convergence and tests must be able to use the
+  manager's `task_spawned` child PID as live-owner evidence, or load-heavy
+  Python process startup can look like "no replacement" even after launch
+  succeeded.
 
 ## 2026-04-08 Zombie PID Liveness
 

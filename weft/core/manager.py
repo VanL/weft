@@ -488,12 +488,20 @@ class Manager(BaseTask):
             state.locally_terminal_tids.discard(child_spec.tid)
         self._last_activity_ns = time.time_ns()
 
-        event_payload = {
+        child_dump = redact_taskspec_dump(
+            child_spec.model_dump(mode="json"), self._taskspec_redaction_paths
+        )
+        if isinstance(process.pid, int):
+            state_dump = child_dump.setdefault("state", {})
+            if isinstance(state_dump, dict):
+                state_dump["pid"] = process.pid
+
+        event_payload: dict[str, Any] = {
             "child_tid": child_spec.tid,
-            "child_taskspec": redact_taskspec_dump(
-                child_spec.model_dump(mode="json"), self._taskspec_redaction_paths
-            ),
+            "child_taskspec": child_dump,
         }
+        if isinstance(process.pid, int):
+            event_payload["child_pid"] = process.pid
         if autostart_source:
             event_payload["autostart_source"] = autostart_source
         if service_key:
@@ -2524,10 +2532,22 @@ class Manager(BaseTask):
         latest_by_tid: dict[str, tuple[str, Mapping[str, Any], int]] = {}
         queue = self._queue(WEFT_GLOBAL_LOG_QUEUE)
         for payload, timestamp in iter_queue_json_entries(queue):
-            tid = payload.get("tid")
+            tid: Any
+            taskspec_dump: Any
+            child_tid = payload.get("child_tid")
+            child_taskspec = payload.get("child_taskspec")
+            if (
+                payload.get("event") == "task_spawned"
+                and isinstance(child_tid, str)
+                and isinstance(child_taskspec, dict)
+            ):
+                tid = child_tid
+                taskspec_dump = child_taskspec
+            else:
+                tid = payload.get("tid")
+                taskspec_dump = payload.get("taskspec")
             if not isinstance(tid, str) or not tid:
                 continue
-            taskspec_dump = payload.get("taskspec")
             if not isinstance(taskspec_dump, dict):
                 continue
             metadata = taskspec_dump.get("metadata") or {}
@@ -2558,6 +2578,19 @@ class Manager(BaseTask):
                     )
                 )
                 continue
+            if logged_payload.get("event") == "task_spawned":
+                child_pid = logged_payload.get("child_pid")
+                if isinstance(child_pid, int) and self._pid_alive(child_pid):
+                    candidates_by_key.setdefault(service_key, []).append(
+                        ServiceCandidate(
+                            key=service_key,
+                            tid=tid,
+                            state="live",
+                            source="manager-spawned-pid",
+                            timestamp=timestamp,
+                        )
+                    )
+                    continue
             candidates_by_key.setdefault(service_key, []).append(
                 self._service_candidate_from_task_log(
                     service_key=service_key,

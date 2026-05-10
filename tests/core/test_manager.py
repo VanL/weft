@@ -1075,6 +1075,62 @@ def test_task_monitor_terminal_tracked_child_allows_restart(
     assert INTERNAL_SERVICE_KEY_TASK_MONITOR in enqueued
 
 
+def test_task_monitor_manager_spawned_pid_counts_as_live_owner(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, make_queue = manager_setup
+    manager._task_monitor_enabled = True
+    manager._queue_names["inbox"] = WEFT_SPAWN_REQUESTS_QUEUE
+    child_tid = "1777000000000000053"
+    make_queue(WEFT_GLOBAL_LOG_QUEUE).write(
+        json.dumps(
+            {
+                "tid": manager.tid,
+                "event": "task_spawned",
+                "status": "running",
+                "child_tid": child_tid,
+                "child_pid": os.getpid(),
+                "child_taskspec": {
+                    "tid": child_tid,
+                    "metadata": {
+                        "internal": True,
+                        "role": "task_monitor",
+                        INTERNAL_RUNTIME_TASK_CLASS_KEY: (
+                            INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR
+                        ),
+                        INTERNAL_SERVICE_KEY_METADATA_KEY: (
+                            INTERNAL_SERVICE_KEY_TASK_MONITOR
+                        ),
+                    },
+                    "io": {
+                        "control": {
+                            "ctrl_in": f"T{child_tid}.ctrl_in",
+                            "ctrl_out": f"T{child_tid}.ctrl_out",
+                        }
+                    },
+                },
+            }
+        )
+    )
+    monkeypatch.setattr(
+        manager,
+        "_evaluate_dispatch_ownership",
+        lambda: DispatchOwnership(state="self", leader_tid=manager.tid),
+    )
+    enqueued: list[str] = []
+    monkeypatch.setattr(
+        manager,
+        "_enqueue_managed_service_request",
+        lambda service: enqueued.append(service.key) or True,
+    )
+
+    manager._tick_task_monitor()
+
+    assert manager._task_monitor_tid == child_tid
+    assert INTERNAL_SERVICE_KEY_TASK_MONITOR not in enqueued
+
+
 def test_task_monitor_terminal_tracked_child_does_not_hide_new_live_owner(
     manager_setup,
     monkeypatch: pytest.MonkeyPatch,
@@ -3501,6 +3557,11 @@ def test_manager_overrides_supplied_tid(manager_setup, unique_tid) -> None:
     assert spawn_events, "Expected spawn event"
     assert spawn_events[-1]["child_tid"] == str(message_id)
     assert spawn_events[-1]["child_taskspec"]["tid"] == str(message_id)
+    assert isinstance(spawn_events[-1]["child_pid"], int)
+    assert (
+        spawn_events[-1]["child_taskspec"]["state"]["pid"]
+        == (spawn_events[-1]["child_pid"])
+    )
 
 
 def test_manager_idle_timeout_waits_for_active_child_to_finish(

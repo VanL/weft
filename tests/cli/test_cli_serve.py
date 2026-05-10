@@ -197,10 +197,14 @@ def _service_records(context, *, service_key: str) -> list[dict[str, Any]]:
     try:
         latest_by_tid: dict[str, dict[str, Any]] = {}
         for payload, timestamp in iter_queue_json_entries(queue):
-            tid = payload.get("tid")
+            if payload.get("event") == "task_spawned":
+                tid = payload.get("child_tid")
+                taskspec = payload.get("child_taskspec")
+            else:
+                tid = payload.get("tid")
+                taskspec = payload.get("taskspec")
             if not isinstance(tid, str) or not tid:
                 continue
-            taskspec = payload.get("taskspec")
             if not isinstance(taskspec, dict):
                 continue
             metadata = taskspec.get("metadata")

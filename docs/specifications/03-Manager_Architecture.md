@@ -80,7 +80,10 @@ Key responsibilities implemented in `weft/core/manager.py`:
    positive `self` ownership preserves the normal launch path. When the manager
    enqueues one of its own singleton-service spawn requests, that write forces
    the next scheduling drain to probe inactive queues so convergence does not
-   depend on the periodic broad-probe interval.
+   depend on the periodic broad-probe interval. Successful child launch emits
+   durable `task_spawned` evidence with the child TID, child TaskSpec, and child
+   PID so manager-owned singleton convergence can observe a live replacement
+   before the child has completed its own initialization log writes.
 2. **Child process launch** – Validated TaskSpecs are executed via
    `launch_task_process(Consumer, …)`, preserving the standard isolation model
    (a dedicated subprocess per child task).
@@ -157,8 +160,10 @@ Key responsibilities implemented in `weft/core/manager.py`:
    work, and applies bounded restart backoff after TaskMonitor exit. The
    manager reduces pending-spawn, live, terminal, and uncertain evidence
    through one pure transition table before applying queue or process side
-   effects. The manager does not scan task-log history for cleanup and does not
-   run monitor processors itself.
+   effects. Manager `task_spawned` rows for service children are valid live
+   owner evidence when their recorded child PID is still live. The manager does
+   not scan task-log history for cleanup and does not run monitor processors
+   itself.
 8. **Control channel** – In addition to STOP/STATUS, managers inherit the
   task control contract: `PING` replies with `PONG` plus a live task-local
   status snapshot on `ctrl_out`, echoing `request_id` for structured PING

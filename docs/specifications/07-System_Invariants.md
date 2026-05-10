@@ -221,7 +221,9 @@ _Implementation mapping_: `weft/core/manager.py`,
   live evidence for the same TID, and uncertain evidence must become visible
   degraded wait rather than an unqualified duplicate launch. Broker timestamps
   may order service evidence, but restart backoff is scheduled from the
-  manager's observation clock.
+  manager's observation clock. A manager-authored `task_spawned` row with a
+  live child PID is valid live-owner evidence for the spawned service child
+  before the child publishes its own task lifecycle row.
 - **MANAGER.16**: canonical managers must drain manager-owned internal spawn
   work before ordinary public spawn work whenever both are pending and launch is
   otherwise authorized. Manager-authored singleton-service spawn requests must
