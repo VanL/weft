@@ -1386,6 +1386,42 @@ def test_process_once_reconciles_internal_services_before_user_spawn_work(
         manager.cleanup()
 
 
+def test_process_once_launches_service_spawn_in_same_reconcile_turn(
+    broker_env,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    manager = Manager(
+        db_path,
+        make_manager_spec(unique_tid, idle_timeout=0.0),
+        config=load_config({"WEFT_TASK_MONITOR_ENABLED": False}),
+    )
+    drain(make_queue(WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE))
+    manager._task_monitor_enabled = True
+    manager._task_monitor_restart_backoff_ns = 0
+    monkeypatch.setattr(
+        manager,
+        "_evaluate_dispatch_ownership",
+        lambda: DispatchOwnership(state="self", leader_tid=manager.tid),
+    )
+    launched: list[str] = []
+
+    def record_launch(child_spec: TaskSpec, *_args: object, **_kwargs: object) -> bool:
+        launched.append(child_spec.name)
+        return True
+
+    monkeypatch.setattr(manager, "_launch_child_task", record_launch)
+
+    try:
+        manager.process_once()
+    finally:
+        manager.stop(join=False)
+        manager.cleanup()
+
+    assert "task-monitor" in launched
+
+
 def test_task_monitor_spoofed_public_metadata_does_not_claim_singleton(
     manager_setup,
     monkeypatch: pytest.MonkeyPatch,

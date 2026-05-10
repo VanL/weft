@@ -3280,6 +3280,14 @@ class Manager(BaseTask):
             return
         self._cleanup_children()
         self._reconcile_managed_services()
+        if self._pending_messages_precheck_confirmed:
+            self._drain_internal_spawn_requests()
+            if self._draining:
+                self._continue_shutdown_drain()
+                return
+            if self._maybe_yield_leadership():
+                return
+            self._cleanup_children()
         self._update_idle_activity_from_broker()
         now_ns = time.time_ns()
         idle_timeout_ns = int(float(self._idle_timeout) * 1_000_000_000)
@@ -3310,6 +3318,27 @@ class Manager(BaseTask):
                 self._report_state_change(event="manager_idle_shutdown")
                 self._idle_shutdown_logged = True
             self.should_stop = True
+
+    def _drain_internal_spawn_requests(self) -> None:
+        """Drain manager-owned internal spawn work without consuming public work."""
+
+        internal_inbox = self._queue_names.get("internal_inbox")
+        if internal_inbox is None:
+            return
+        for _ in range(4):
+            try:
+                if not self._queue(internal_inbox).has_pending():
+                    break
+            except (BrokerError, OSError, RuntimeError):
+                logger.debug(
+                    "Failed to inspect internal spawn inbox pending state",
+                    exc_info=True,
+                )
+                break
+            self._active_queues = [internal_inbox]
+            processed = self._drain_round_robin_pass(queue_names=[internal_inbox])
+            if processed == 0:
+                break
 
     def _continue_shutdown_drain(self) -> None:
         if self._drain_stops_children:

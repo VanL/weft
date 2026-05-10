@@ -224,7 +224,9 @@ runbook needs to become stricter.
   signal, not as a best-effort wake hint. If a wait/precheck path observes
   pending messages or a manager writes service work to its own queue, the next
   scheduler drain must probe inactive queues immediately so singleton services
-  advance by state-machine rules instead of incidental polling cadence.
+  advance by state-machine rules instead of incidental polling cadence. For
+  internal singleton services, advance that internal spawn work in the same
+  manager turn without draining unrelated public spawn requests.
 - Manager-owned service launch has two visibility phases: the manager knows a
   child process was spawned before the child has imported Weft and written its
   own lifecycle row. Durable convergence and tests must be able to use the

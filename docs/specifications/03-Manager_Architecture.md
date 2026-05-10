@@ -80,10 +80,12 @@ Key responsibilities implemented in `weft/core/manager.py`:
    positive `self` ownership preserves the normal launch path. When the manager
    enqueues one of its own singleton-service spawn requests, that write forces
    the next scheduling drain to probe inactive queues so convergence does not
-   depend on the periodic broad-probe interval. Successful child launch emits
-   durable `task_spawned` evidence with the child TID, child TaskSpec, and child
-   PID so manager-owned singleton convergence can observe a live replacement
-   before the child has completed its own initialization log writes.
+   depend on the periodic broad-probe interval. Internal singleton-service
+   spawn requests are advanced to a launch attempt in the same manager turn
+   without consuming ordinary public spawn work. Successful child launch emits
+   durable `task_spawned` evidence with the child TID, child TaskSpec, and
+   child PID so manager-owned singleton convergence can observe a live
+   replacement before the child has completed its own initialization log writes.
 2. **Child process launch** – Validated TaskSpecs are executed via
    `launch_task_process(Consumer, …)`, preserving the standard isolation model
    (a dedicated subprocess per child task).
