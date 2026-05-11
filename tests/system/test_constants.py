@@ -98,6 +98,7 @@ _RUNTIME_OBJECT_ALLOWLIST = {
     "weft/core/agents/runtime.py": {"_RUNTIME_REGISTRY"},
     "weft/core/agents/templates.py": {"_TEMPLATE_PATTERN"},
     "weft/core/runners/host.py": {"_HOST_PLUGIN"},
+    "weft/core/serve_log.py": {"_LOG_QUEUE", "_LOG_QUEUE_LOCK", "_LOG_WRITER_FD"},
     "weft/manager_detached_launcher.py": {"_NO_SIGNAL"},
 }
 

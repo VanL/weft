@@ -308,6 +308,13 @@ MANAGER_SERVE_LOG_SCHEMA_VERSION: Final[int] = 1
 MANAGER_SERVE_LOG_EVENT_MAX_CHARS: Final[int] = 500
 """Maximum string length for one manager operational-log field value."""
 
+MANAGER_SERVE_LOG_QUEUE_SIZE: Final[int] = 256
+"""Maximum foreground manager operational-log records buffered per process.
+
+The serve log is diagnostic. When stderr stops draining, the manager must keep
+converging and may drop diagnostic records instead of blocking the control loop.
+"""
+
 MANAGER_SERVE_LOG_CANDIDATE_LIMIT: Final[int] = 8
 """Maximum service candidates included in one manager operational-log event."""
 
