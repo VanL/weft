@@ -119,7 +119,7 @@ SPAWN_RESERVED_CLAIM_RECONCILIATION_TIMEOUT: Final[float] = 4.0
 STATUS_WATCH_MIN_INTERVAL: Final[float] = 0.1
 """Minimum poll interval for CLI status-watch loops to avoid broker-hot spins."""
 
-AGENT_SESSION_READY_TIMEOUT_SECONDS: Final[float] = 10.0
+AGENT_SESSION_READY_TIMEOUT_SECONDS: Final[float] = 30.0
 """Minimum startup-readiness budget for persistent agent session workers."""
 
 RUNNER_DIAGNOSTICS_FIELD: Final[str] = "runner_diagnostics"
@@ -303,7 +303,10 @@ MANAGED_SERVICE_RECENT_EVIDENCE_GRACE_SECONDS: Final[float] = 5.0
 """Window where nonterminal service rows without live proof remain uncertain."""
 
 MANAGED_SERVICE_CONVERGENCE_INTERVAL_SECONDS: Final[float] = 0.1
-"""Maximum stable-manager delay between singleton convergence turns."""
+"""Maximum delay between active singleton convergence turns."""
+
+MANAGED_SERVICE_STABLE_AUDIT_INTERVAL_SECONDS: Final[float] = 5.0
+"""Maximum delay between audits when singleton services are already stable."""
 
 MANAGED_SERVICE_UNCERTAIN_RETRY_LIMIT: Final[int] = 3
 """Number of uncertain singleton evidence turns that may block replacement."""
@@ -549,6 +552,27 @@ INTERNAL_SERVICE_KEY_METADATA_KEY: Final[str] = "_weft_service_key"
 
 INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY: Final[str] = "_weft_service_lifecycle"
 """Reserved metadata key selecting manager supervision policy for a service."""
+
+INTERNAL_SERVICE_AUTHORITY_METADATA_KEY: Final[str] = "_weft_service_authority"
+"""Reserved metadata key marking manager-authored service supervision data."""
+
+INTERNAL_SERVICE_AUTHORITY_MANAGER: Final[str] = "manager"
+"""Value for manager-authored service supervision metadata."""
+
+INTERNAL_AUTOSTART_SOURCE_METADATA_KEY: Final[str] = "autostart_source"
+"""Reserved metadata key linking an autostart task to its manifest source."""
+
+INTERNAL_AUTOSTART_ENABLED_METADATA_KEY: Final[str] = "autostart"
+"""Reserved metadata key marking a task as manager-authored autostart work."""
+
+PUBLIC_RESERVED_SERVICE_METADATA_KEYS: Final[tuple[str, ...]] = (
+    INTERNAL_SERVICE_KEY_METADATA_KEY,
+    INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY,
+    INTERNAL_SERVICE_AUTHORITY_METADATA_KEY,
+    INTERNAL_AUTOSTART_SOURCE_METADATA_KEY,
+    INTERNAL_AUTOSTART_ENABLED_METADATA_KEY,
+)
+"""Metadata keys stripped from ordinary public spawn submissions."""
 
 INTERNAL_SERVICE_KEY_HEARTBEAT: Final[str] = "_weft.service.heartbeat"
 """Manager-supervised singleton key for the built-in heartbeat service."""
@@ -930,6 +954,9 @@ KNOWN_INTERPRETER_DEFINITIONS: Final[dict[str, tuple[str, tuple[str, ...]]]] = {
 
 DOCKER_CONTAINER_LOOKUP_TIMEOUT: Final[float] = 2.0
 """Time budget for Docker runner state reconciliation against the daemon."""
+
+DOCKER_CONTAINER_START_TIMEOUT: Final[float] = 15.0
+"""Time budget for a created Docker container to become runnable."""
 
 DOCKER_CONTAINER_LOOKUP_INTERVAL: Final[float] = 0.05
 """Polling interval while waiting for Docker container state visibility."""

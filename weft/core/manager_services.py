@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from weft._constants import (
+    INTERNAL_SERVICE_AUTHORITY_MANAGER,
+    INTERNAL_SERVICE_AUTHORITY_METADATA_KEY,
     INTERNAL_SERVICE_KEY_METADATA_KEY,
     INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY,
     MANAGED_SERVICE_UNCERTAIN_RETRY_LIMIT,
@@ -123,6 +125,9 @@ def service_metadata(
     metadata = dict(extra or {})
     metadata[INTERNAL_SERVICE_KEY_METADATA_KEY] = key
     metadata[INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY] = lifecycle
+    metadata[INTERNAL_SERVICE_AUTHORITY_METADATA_KEY] = (
+        INTERNAL_SERVICE_AUTHORITY_MANAGER
+    )
     return metadata
 
 
@@ -141,6 +146,9 @@ def apply_service_metadata(
         candidate["metadata"] = metadata
     metadata[INTERNAL_SERVICE_KEY_METADATA_KEY] = key
     metadata[INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY] = lifecycle
+    metadata[INTERNAL_SERVICE_AUTHORITY_METADATA_KEY] = (
+        INTERNAL_SERVICE_AUTHORITY_MANAGER
+    )
     return candidate
 
 

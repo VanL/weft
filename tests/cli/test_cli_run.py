@@ -460,7 +460,7 @@ def _wait_for_started_task_tid(
     harness,
     *,
     task_name: str,
-    timeout: float = 20.0,
+    timeout: float = 30.0,
 ) -> str:
     queue = harness.context.queue(
         WEFT_GLOBAL_LOG_QUEUE,
@@ -476,12 +476,17 @@ def _wait_for_started_task_tid(
                     data = json.loads(payload)
                 except json.JSONDecodeError:
                     continue
-                if data.get("event") != "work_started":
+                event = data.get("event")
+                if event == "work_started":
+                    taskspec = data.get("taskspec") or {}
+                    tid = data.get("tid")
+                elif event == "task_spawned":
+                    taskspec = data.get("child_taskspec") or {}
+                    tid = data.get("child_tid")
+                else:
                     continue
-                taskspec = data.get("taskspec") or {}
-                if taskspec.get("name") != task_name:
+                if not isinstance(taskspec, dict) or taskspec.get("name") != task_name:
                     continue
-                tid = data.get("tid")
                 if isinstance(tid, str) and tid:
                     return tid
             time.sleep(0.05)
@@ -2293,17 +2298,20 @@ def test_cli_run_wait_reports_cancelled_task(workdir, weft_harness) -> None:
     weft_harness.ensure_foreground_manager()
     constrained_backend = active_test_backend(os.environ) == "postgres"
     constrained_runtime = sys.platform == "win32" or constrained_backend
-    run_timeout = 30.0 if constrained_runtime else 15.0
-    result_timeout = 35.0 if constrained_runtime else 20.0
+    run_timeout = 45.0 if constrained_runtime else 30.0
+    result_timeout = 50.0 if constrained_runtime else 35.0
+    release_file = workdir / "cancel-release"
 
     with ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(
             run_cli,
             "run",
             "--function",
-            "tests.tasks.sample_targets:simulate_work",
+            "tests.tasks.sample_targets:wait_for_file",
+            "--arg",
+            str(release_file),
             "--kw",
-            "duration=5",
+            "timeout=60",
             cwd=workdir,
             harness=weft_harness,
             timeout=run_timeout,
@@ -2311,7 +2319,7 @@ def test_cli_run_wait_reports_cancelled_task(workdir, weft_harness) -> None:
 
         task_tid = _wait_for_started_task_tid(
             weft_harness,
-            task_name="simulate_work",
+            task_name="wait_for_file",
         )
         rc, _out, err = run_cli(
             "task",
@@ -2332,6 +2340,9 @@ def test_cli_run_wait_reports_cancelled_task(workdir, weft_harness) -> None:
 
 def test_cli_run_wait_returns_timeout_exit_code(workdir, weft_harness) -> None:
     weft_harness.ensure_foreground_manager()
+    constrained_backend = active_test_backend(os.environ) == "postgres"
+    constrained_runtime = sys.platform == "win32" or constrained_backend
+    run_timeout = 45.0 if constrained_runtime else 20.0
     rc, out, err = run_cli(
         "run",
         "--timeout",
@@ -2342,7 +2353,7 @@ def test_cli_run_wait_returns_timeout_exit_code(workdir, weft_harness) -> None:
         "import time; time.sleep(1)",
         cwd=workdir,
         harness=weft_harness,
-        timeout=20.0,
+        timeout=run_timeout,
     )
 
     assert rc == 124

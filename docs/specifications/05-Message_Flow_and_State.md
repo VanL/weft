@@ -27,6 +27,8 @@ See also:
   [`docs/plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md`](../plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md)
 - active service-health convergence plan:
   [`docs/plans/2026-05-09-service-liveness-and-health-convergence-plan.md`](../plans/2026-05-09-service-liveness-and-health-convergence-plan.md)
+- active manager-service authority hardening plan:
+  [`docs/plans/2026-05-10-manager-service-authority-boundary-hardening-plan.md`](../plans/2026-05-10-manager-service-authority-boundary-hardening-plan.md)
 
 ## Message Flow Patterns [MF-0]
 
@@ -50,6 +52,12 @@ error handling reconciles that submitted TID against durable task, log, and
 queue surfaces instead of assuming the public inbox delete path can always roll
 the request back. Only requests still provably present in
 `weft.spawn.requests` are safe to delete as rollback.
+
+Public spawn submission is also a trust boundary. Submission strips reserved
+internal runtime, endpoint-claim, manager-service, and autostart authority
+metadata from caller-provided TaskSpecs before queueing. Manager-owned internal
+spawn paths may still use those keys inside explicit internal runtime
+envelopes.
 
 _Implementation mapping_: `weft/cli/run.py` `_enqueue_taskspec`;
 `weft/commands/_spawn_submission.py` `reconcile_submitted_spawn`;
@@ -358,6 +366,9 @@ Current rules:
   `work_completed` as completion boundaries for the same task
 - `weft result --stream` follows unread outbox stream chunks without changing
   the task-log boundary events that define completion
+- when a one-shot streamed result has already been emitted to the caller, shared
+  result waiters retain that emitted-result fact as completion evidence so a
+  delayed terminal log cannot turn visible output into a later timeout
 - `weft result` first waits for taskspec metadata or outbox/control queue names
   to materialize when those surfaces are not yet visible, then falls back to the
   shared completion wait
@@ -751,3 +762,4 @@ management live in the companion doc:
 - [`docs/plans/2026-05-08-deterministic-manager-service-reconciler-plan.md`](../plans/2026-05-08-deterministic-manager-service-reconciler-plan.md)
 - [`docs/plans/2026-05-09-runtime-liveness-probe-registry-plan.md`](../plans/2026-05-09-runtime-liveness-probe-registry-plan.md)
 - [`docs/plans/2026-05-09-prune-path-unification-plan.md`](../plans/2026-05-09-prune-path-unification-plan.md)
+- [`docs/plans/2026-05-10-manager-service-authority-boundary-hardening-plan.md`](../plans/2026-05-10-manager-service-authority-boundary-hardening-plan.md)

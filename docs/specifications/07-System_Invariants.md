@@ -232,13 +232,20 @@ _Implementation mapping_: `weft/core/manager.py`,
   stale nonterminal rows may become restart evidence only after the recent
   evidence window has elapsed. Broker timestamps may order service evidence,
   but restart backoff is scheduled from the manager's observation clock. A
-  manager-authored `task_spawned` row with a live child PID is valid live-owner
-  evidence for the spawned service child before the child publishes its own
-  task lifecycle row. When more than one live owner is visible, the canonical
-  live owner is the lowest live TID and non-canonical live owners must be
-  signaled to terminate. When host PID evidence is available for a
-  non-canonical owner, the manager may force-reap that recorded process tree as
-  part of singleton convergence.
+  stable singleton audit may run on a slower cadence than active convergence,
+  but pending spawn work, missing required owners, duplicate scans, uncertain
+  evidence, or due autostart scans must return the manager to the active
+  convergence cadence. Manager-authored internal runtime envelopes,
+  manager-authored autostart metadata, tracked children, runtime handles, and
+  keyed PONG replies may establish singleton service authority; caller-owned
+  TaskSpec metadata alone must not. A manager-authored `task_spawned` row with a
+  live child PID is valid live-owner evidence for the spawned service child
+  before the child publishes its own task lifecycle row. When more than one live
+  owner is visible, the canonical live owner is the lowest live TID and
+  non-canonical live owners must be signaled to terminate. The manager may
+  force-reap only PIDs tied to the current scoped authority that proved the
+  non-canonical owner live, such as a tracked child process or a `host-pid`
+  runtime handle.
 - **MANAGER.16**: canonical managers must drain manager-owned internal spawn
   work before ordinary public spawn work whenever both are pending and launch is
   otherwise authorized. Manager-authored singleton-service spawn requests must
@@ -324,6 +331,7 @@ doc:
 - [`docs/plans/2026-05-08-deterministic-manager-service-reconciler-plan.md`](../plans/2026-05-08-deterministic-manager-service-reconciler-plan.md)
 - [`docs/plans/2026-05-09-managed-service-restart-clock-hardening-plan.md`](../plans/2026-05-09-managed-service-restart-clock-hardening-plan.md)
 - [`docs/plans/2026-05-09-prune-path-unification-plan.md`](../plans/2026-05-09-prune-path-unification-plan.md)
+- [`docs/plans/2026-05-10-manager-service-authority-boundary-hardening-plan.md`](../plans/2026-05-10-manager-service-authority-boundary-hardening-plan.md)
 - [`docs/plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md`](../plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md)
 - [`docs/plans/2026-04-17-canonical-owner-fence-plan.md`](../plans/2026-04-17-canonical-owner-fence-plan.md)
 

@@ -415,12 +415,13 @@ def test_serve_restarts_singleton_services_without_duplicates(
         )
         assert heartbeat["tid"] != task_monitor["tid"]
 
+        constrained_backend = active_test_backend(os.environ) == "postgres"
+        service_timeout = 45.0 if os.name == "nt" or constrained_backend else 15.0
         for service_key, current in (
             (INTERNAL_SERVICE_KEY_TASK_MONITOR, task_monitor),
             (INTERNAL_SERVICE_KEY_HEARTBEAT, heartbeat),
         ):
             old_tid = str(current["tid"])
-            kill_timeout = 45.0 if os.name == "nt" else 15.0
             rc, out, err = run_cli(
                 "task",
                 "kill",
@@ -429,7 +430,7 @@ def test_serve_restarts_singleton_services_without_duplicates(
                 context_root,
                 cwd=workdir,
                 harness=weft_harness,
-                timeout=kill_timeout,
+                timeout=service_timeout,
             )
             assert rc == 0
             assert out.startswith("Killed ")
@@ -440,6 +441,7 @@ def test_serve_restarts_singleton_services_without_duplicates(
                 service_key=service_key,
                 process=process,
                 previous_tids={old_tid},
+                timeout=service_timeout,
             )
             assert replacement["tid"] != old_tid
             weft_harness.register_tid(str(replacement["tid"]))

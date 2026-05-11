@@ -21,11 +21,13 @@ def run_single_drain(watcher: MultiQueueWatcher) -> None:
 class FakeWaiter:
     def __init__(self, *, raises: bool = False) -> None:
         self.wait_calls: list[float | None] = []
+        self.wait_entered = threading.Event()
         self.close_calls = 0
         self.raises = raises
 
     def wait(self, timeout: float | None) -> bool:
         self.wait_calls.append(timeout)
+        self.wait_entered.set()
         if self.raises:
             raise RuntimeError("waiter failed")
         return False
@@ -343,9 +345,7 @@ def test_background_watcher_path_uses_multi_queue_waiter(
 
     thread = watcher.run_in_thread()
     try:
-        deadline = time.monotonic() + 1.0
-        while not fake_waiter.wait_calls and time.monotonic() < deadline:
-            time.sleep(0.01)
+        assert fake_waiter.wait_entered.wait(timeout=5.0)
         assert fake_waiter.wait_calls
     finally:
         watcher.stop(join=True)

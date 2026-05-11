@@ -677,3 +677,18 @@ runbook needs to become stricter.
   contract, not legacy ad hoc PID fields. A stale endpoint owner with no
   terminal log and no host-process proof can make every replacement self-
   supersede under load.
+- Tight convergence loops must be conditional on active work. A stable
+  singleton service still needs periodic audit, but auditing a healthy steady
+  state at the same cadence as pending spawn or uncertain evidence can burn CPU
+  and regress manager startup under SQLite even if it helps a PG load failure.
+- Caller-owned TaskSpec metadata is not manager service authority. Public
+  submissions may carry useful user tags named `role` or `internal`, but
+  singleton reconciliation must trust only manager-authored envelopes, runtime
+  handles, tracked children, or keyed control responses.
+- Force-kill authority must come from the same proof that made a duplicate
+  service candidate live. A logged PID can explain history, but only a tracked
+  child or scoped runtime handle should be used as a process-tree kill target.
+- A Docker runtime handle is a control and observation contract, not mere
+  allocation evidence. Do not publish it while Docker still reports the
+  container as `created`; either wait until the runtime leaves that transient
+  state or fail before exposing misleading status.

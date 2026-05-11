@@ -56,21 +56,27 @@ def wait_for_container_runtime_start(
         return
 
     deadline = time.monotonic() + timeout
+    runtime_id = getattr(container, "name", None) or getattr(container, "id", "unknown")
     while True:
         try:
             container.reload()
         except Exception:  # pragma: no cover - defensive Docker API guard
             return
 
-        if _container_status(container) != "created":
+        status = _container_status(container)
+        if status != "created":
             return
 
         poll = getattr(process, "poll", None)
         if callable(poll) and poll() is not None:
             return
-        if time.monotonic() >= deadline:
-            return
-        time.sleep(interval)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(
+                f"Docker container '{runtime_id}' did not leave created state "
+                f"within {timeout:.1f}s"
+            )
+        time.sleep(min(interval, remaining))
 
 
 def _container_status(container: Any) -> str | None:

@@ -319,6 +319,12 @@ _Implementation mapping_: `weft/ext.py` `RunnerHandle`; `weft/core/tasks/base.py
 
 Plan backlink:
 [`docs/plans/2026-04-24-runtime-handle-authority-migration-plan.md`](../plans/2026-04-24-runtime-handle-authority-migration-plan.md).
+[`docs/plans/2026-05-10-manager-service-authority-boundary-hardening-plan.md`](../plans/2026-05-10-manager-service-authority-boundary-hardening-plan.md)
+hardens manager-owned singleton force-kill authority so raw task-log PIDs are
+not treated as scoped runtime-handle proof.
+Manager singleton duplicate cleanup may force-reap scoped host PIDs from a
+runtime handle, but must not derive force-kill authority from caller metadata or
+legacy logged PID fields alone.
 
 Why this matters:
 

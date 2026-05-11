@@ -310,7 +310,14 @@ ownership:
 - **`metadata` is caller-owned.** The task creator sets tags, owner identifiers,
   session IDs, and any application-specific key-value pairs. Running tasks and
   external callers can update metadata via `update_metadata` control messages
-  over `ctrl_in`. Weft does not interpret metadata contents.
+  over `ctrl_in`. Weft does not reinterpret ordinary metadata contents as
+  submission configuration or lifecycle authority.
+
+Reserved runtime and service-supervision keys are the explicit exception to
+caller ownership. Public spawn submission strips reserved internal runtime,
+endpoint-claim, manager-service, and autostart authority keys before queueing.
+Only manager-authored internal envelopes may set those keys for singleton
+service reconciliation.
 
 Rule of thumb: if Weft writes it automatically, it belongs in `state`. If the
 user or application writes it, it belongs in `metadata`.
@@ -568,3 +575,4 @@ _Implementation mapping_: `weft/core/tasks/base.py` (`BaseTask._apply_reserved_p
 - [`docs/plans/2026-04-15-spec-run-input-adapter-and-declared-args-plan.md`](../plans/2026-04-15-spec-run-input-adapter-and-declared-args-plan.md)
 - [`docs/plans/2026-04-16-autostart-hardening-and-contract-alignment-plan.md`](../plans/2026-04-16-autostart-hardening-and-contract-alignment-plan.md)
 - [`docs/plans/2026-04-16-pipeline-autostart-extension-plan.md`](../plans/2026-04-16-pipeline-autostart-extension-plan.md)
+- [`docs/plans/2026-05-10-manager-service-authority-boundary-hardening-plan.md`](../plans/2026-05-10-manager-service-authority-boundary-hardening-plan.md)

@@ -217,7 +217,7 @@ class DockerProviderCLIRunner:
                     container.start()
                     wait_for_container_runtime_start(
                         container,
-                        timeout=weft_constants.DOCKER_CONTAINER_LOOKUP_TIMEOUT,
+                        timeout=weft_constants.DOCKER_CONTAINER_START_TIMEOUT,
                         interval=weft_constants.DOCKER_CONTAINER_LOOKUP_INTERVAL,
                     )
                     runtime_handle = RunnerHandle(

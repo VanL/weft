@@ -7,6 +7,8 @@ import json
 from tests.conftest import run_cli
 from weft.context import build_context
 
+PIPELINE_CLI_TIMEOUT = 120.0
+
 
 def _write_json(path, payload) -> None:
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -65,6 +67,7 @@ def test_pipeline_run_sequential(workdir, weft_harness) -> None:
         "hello",
         cwd=workdir,
         harness=weft_harness,
+        timeout=PIPELINE_CLI_TIMEOUT,
     )
     assert rc == 0
     assert "hello-done" in out
@@ -125,6 +128,7 @@ def test_pipeline_run_reads_piped_stdin_when_input_omitted(
         cwd=workdir,
         harness=weft_harness,
         stdin="hello",
+        timeout=PIPELINE_CLI_TIMEOUT,
     )
 
     assert rc == 0
@@ -181,6 +185,7 @@ def test_pipeline_run_stage_can_be_bundle_backed_task_spec(
         "hello",
         cwd=workdir,
         harness=weft_harness,
+        timeout=PIPELINE_CLI_TIMEOUT,
     )
 
     assert rc == 0
@@ -255,6 +260,7 @@ def test_pipeline_run_no_wait_returns_pipeline_tid(workdir, weft_harness) -> Non
         tid,
         cwd=workdir,
         harness=weft_harness,
+        timeout=PIPELINE_CLI_TIMEOUT,
     )
     assert rc == 0
     assert out == "hello-done"
@@ -312,6 +318,7 @@ def test_pipeline_stage_failure_returns_nonzero_and_names_failing_stage(
         "hello",
         cwd=workdir,
         harness=weft_harness,
+        timeout=PIPELINE_CLI_TIMEOUT,
     )
 
     assert rc == 1

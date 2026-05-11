@@ -93,6 +93,7 @@ def await_one_shot_result(
     result_values: list[Any] = []
     result_value: Any | None = None
     error_message: str | None = initial_error_message
+    emitted_result_seen = False
     completed_at: float | None = (
         time.monotonic() if initial_terminal_status == "completed" else None
     )
@@ -132,12 +133,14 @@ def await_one_shot_result(
                 else:
                     single_result_seen_at = None
             for output in ready_values:
+                if output.emitted:
+                    emitted_result_seen = True
                 append_public_value(
                     result_values,
                     output,
                     show_stderr=show_stderr,
                 )
-            if materialized_completed and result_values:
+            if materialized_completed and (result_values or emitted_result_seen):
                 result_value = aggregate_public_outputs(result_values)
                 status = "completed"
                 break
@@ -173,6 +176,8 @@ def await_one_shot_result(
                     emit_stream=emit_stream,
                 )
                 for output in late_values:
+                    if output.emitted:
+                        emitted_result_seen = True
                     append_public_value(
                         result_values,
                         output,
@@ -190,6 +195,7 @@ def await_one_shot_result(
                 completed_at is None
                 and single_result_seen_at is not None
                 and not stream_buffer
+                and (result_values or emitted_result_seen)
                 and time.monotonic() - single_result_seen_at
                 >= WEFT_COMPLETED_RESULT_GRACE_SECONDS
             ):
@@ -200,7 +206,7 @@ def await_one_shot_result(
             if deadline is not None and time.monotonic() >= deadline:
                 if (
                     single_result_seen_at is not None
-                    and result_values
+                    and (result_values or emitted_result_seen)
                     and not stream_buffer
                 ):
                     result_value = aggregate_public_outputs(result_values)

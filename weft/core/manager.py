@@ -16,7 +16,7 @@ import os
 import signal
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from multiprocessing.process import BaseProcess
 from pathlib import Path
@@ -30,6 +30,8 @@ from weft._constants import (
     CONTROL_KILL,
     CONTROL_STOP,
     DEFAULT_FUNCTION_TARGET,
+    INTERNAL_AUTOSTART_ENABLED_METADATA_KEY,
+    INTERNAL_AUTOSTART_SOURCE_METADATA_KEY,
     INTERNAL_HEARTBEAT_ENDPOINT_NAME,
     INTERNAL_RUNTIME_ENDPOINT_NAME_KEY,
     INTERNAL_RUNTIME_ENVELOPE_ENDPOINT_NAME_KEY,
@@ -39,12 +41,15 @@ from weft._constants import (
     INTERNAL_RUNTIME_TASK_CLASS_PIPELINE,
     INTERNAL_RUNTIME_TASK_CLASS_PIPELINE_EDGE,
     INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR,
+    INTERNAL_SERVICE_AUTHORITY_MANAGER,
+    INTERNAL_SERVICE_AUTHORITY_METADATA_KEY,
     INTERNAL_SERVICE_KEY_HEARTBEAT,
     INTERNAL_SERVICE_KEY_TASK_MONITOR,
     INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY,
     MANAGED_SERVICE_CONVERGENCE_INTERVAL_SECONDS,
     MANAGED_SERVICE_PING_TIMEOUT_SECONDS,
     MANAGED_SERVICE_RECENT_EVIDENCE_GRACE_SECONDS,
+    MANAGED_SERVICE_STABLE_AUDIT_INTERVAL_SECONDS,
     MANAGER_CHILD_EXIT_POLL_INTERVAL,
     MANAGER_CHILD_STARTUP_LIVENESS_GRACE_SECONDS,
     MANAGER_DISPATCH_RECOVERY_MAX_ATTEMPTS,
@@ -86,6 +91,7 @@ from weft.helpers import (
     is_canonical_manager_record,
     iter_queue_json_entries,
     kill_process_tree,
+    live_host_processes_from_handle,
     pid_is_live,
     process_create_time,
     redact_taskspec_dump,
@@ -457,8 +463,12 @@ class Manager(BaseTask):
 
         child_spec.metadata.setdefault("parent_tid", self.tid)
         if autostart_source:
-            child_spec.metadata.setdefault("autostart_source", autostart_source)
-            child_spec.metadata.setdefault("autostart", True)
+            child_spec.metadata.setdefault(
+                INTERNAL_AUTOSTART_SOURCE_METADATA_KEY, autostart_source
+            )
+            child_spec.metadata.setdefault(
+                INTERNAL_AUTOSTART_ENABLED_METADATA_KEY, True
+            )
 
         try:
             task_cls = self._resolve_child_task_class(child_spec)
@@ -1367,17 +1377,7 @@ class Manager(BaseTask):
                     self._child_processes.pop(tid, None)
                 if child.autostart_source:
                     autostart_child_exited = True
-                service_key = child.service_key
-                if service_key is None and child.internal_role == (
-                    INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR
-                ):
-                    service_key = INTERNAL_SERVICE_KEY_TASK_MONITOR
-                if service_key is None and child.internal_role == (
-                    INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT
-                ):
-                    service_key = INTERNAL_SERVICE_KEY_HEARTBEAT
-                if service_key is None and child.autostart_source:
-                    service_key = child.autostart_source
+                service_key = self._service_key_for_child(child)
                 if service_key:
                     state = self._service_state(service_key)
                     state.locally_terminal_tids.add(tid)
@@ -2059,7 +2059,9 @@ class Manager(BaseTask):
         launched = self._launch_child_task(
             child_spec,
             inbox_message,
-            autostart_source=child_spec.metadata.get("autostart_source"),
+            autostart_source=child_spec.metadata.get(
+                INTERNAL_AUTOSTART_SOURCE_METADATA_KEY
+            ),
         )
         if not launched:
             return
@@ -2268,24 +2270,29 @@ class Manager(BaseTask):
 
         return self._enqueue_managed_service_request(self._task_monitor_service_spec())
 
+    @staticmethod
+    def _service_key_for_child(child: ManagedChild) -> str | None:
+        """Return the manager-supervised service key for a tracked child."""
+
+        if child.service_key is not None:
+            return child.service_key
+        if child.internal_role == INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR:
+            return INTERNAL_SERVICE_KEY_TASK_MONITOR
+        if child.internal_role == INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT:
+            return INTERNAL_SERVICE_KEY_HEARTBEAT
+        if child.autostart_source:
+            return child.autostart_source
+        return None
+
     def _tracked_service_candidate(self, service_key: str) -> ServiceCandidate | None:
         candidates: list[ServiceCandidate] = []
         for tid, child in list(self._child_processes.items()):
-            child_service_key = child.service_key
-            if child_service_key is None and child.internal_role == (
-                INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR
-            ):
-                child_service_key = INTERNAL_SERVICE_KEY_TASK_MONITOR
-            if child_service_key is None and child.internal_role == (
-                INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT
-            ):
-                child_service_key = INTERNAL_SERVICE_KEY_HEARTBEAT
-            if child_service_key is None and child.autostart_source:
-                child_service_key = child.autostart_source
-            if child_service_key != service_key:
+            if self._service_key_for_child(child) != service_key:
                 continue
             if self._child_has_exited(child):
                 continue
+            pid = child.process.pid
+            force_kill_pids = [pid] if isinstance(pid, int) and pid > 0 else []
             if self._child_terminal_proof_visible(tid, child):
                 candidates.append(
                     ServiceCandidate(
@@ -2308,9 +2315,10 @@ class Manager(BaseTask):
                         for key, value in (
                             ("ctrl_in", child.ctrl_queue),
                             ("ctrl_out", child.ctrl_out_queue),
-                            ("pid", child.process.pid),
+                            ("pid", pid),
+                            ("force_kill_pids", force_kill_pids),
                         )
-                        if value is not None
+                        if value not in (None, [])
                     },
                 )
             )
@@ -2322,18 +2330,7 @@ class Manager(BaseTask):
 
     @staticmethod
     def _child_matches_service(child: ManagedChild, service_key: str) -> bool:
-        child_service_key = child.service_key
-        if child_service_key is None and child.internal_role == (
-            INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR
-        ):
-            child_service_key = INTERNAL_SERVICE_KEY_TASK_MONITOR
-        if child_service_key is None and child.internal_role == (
-            INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT
-        ):
-            child_service_key = INTERNAL_SERVICE_KEY_HEARTBEAT
-        if child_service_key is None and child.autostart_source:
-            child_service_key = child.autostart_source
-        return child_service_key == service_key
+        return Manager._service_key_for_child(child) == service_key
 
     def _terminate_duplicate_service_candidates(
         self,
@@ -2376,13 +2373,23 @@ class Manager(BaseTask):
                 if isinstance(ctrl_in_name, str) and ctrl_in_name:
                     self._send_child_control_command(ctrl_in_name, CONTROL_KILL)
                     signaled.add(candidate.tid)
-            pid = candidate.metadata.get("pid")
-            if isinstance(pid, int):
+            for pid in self._candidate_force_kill_pids(candidate):
                 self._kill_duplicate_service_pid(
                     candidate.tid,
                     pid,
                     killed_pids=killed_pids,
                 )
+
+    @staticmethod
+    def _candidate_force_kill_pids(candidate: ServiceCandidate) -> tuple[int, ...]:
+        raw_pids = candidate.metadata.get("force_kill_pids")
+        if not isinstance(raw_pids, Sequence) or isinstance(raw_pids, (str, bytes)):
+            return ()
+        return tuple(
+            pid
+            for pid in raw_pids
+            if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0
+        )
 
     @staticmethod
     def _kill_duplicate_service_pid(
@@ -2475,13 +2482,17 @@ class Manager(BaseTask):
             )
 
         if runtime_handle is not None and handle_has_live_host_process(runtime_handle):
+            force_kill_pids = self._runtime_handle_force_kill_pids(runtime_handle)
             return ServiceCandidate(
                 key=service_key,
                 tid=tid,
                 state="live",
                 source="tid-mapping",
                 timestamp=timestamp,
-                metadata=candidate_metadata,
+                metadata=self._service_candidate_metadata(
+                    payload,
+                    force_kill_pids=force_kill_pids,
+                ),
             )
 
         if ctrl_queues is not None:
@@ -2541,7 +2552,7 @@ class Manager(BaseTask):
     def _trusted_internal_service_key(
         metadata: Mapping[str, Any],
         *,
-        envelope_runtime_class: str | None = None,
+        runtime_class: str | None = None,
     ) -> str | None:
         key = service_key_from_metadata(metadata)
         if key == INTERNAL_SERVICE_KEY_HEARTBEAT:
@@ -2549,13 +2560,7 @@ class Manager(BaseTask):
                 return None
             if metadata.get("role") != "heartbeat_service":
                 return None
-            runtime_class = envelope_runtime_class or metadata.get(
-                INTERNAL_RUNTIME_TASK_CLASS_KEY
-            )
-            if (
-                runtime_class is not None
-                and runtime_class != INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT
-            ):
+            if runtime_class != INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT:
                 return None
             endpoint = metadata.get(INTERNAL_RUNTIME_ENDPOINT_NAME_KEY)
             if endpoint is not None and endpoint != INTERNAL_HEARTBEAT_ENDPOINT_NAME:
@@ -2567,13 +2572,7 @@ class Manager(BaseTask):
                 return None
             if metadata.get("role") != "task_monitor":
                 return None
-            runtime_class = envelope_runtime_class or metadata.get(
-                INTERNAL_RUNTIME_TASK_CLASS_KEY
-            )
-            if (
-                runtime_class is not None
-                and runtime_class != INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR
-            ):
+            if runtime_class != INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR:
                 return None
             return key
         return None
@@ -2583,13 +2582,15 @@ class Manager(BaseTask):
         metadata: Any,
         *,
         desired_keys: set[str],
-        envelope_runtime_class: str | None = None,
+        runtime_class: str | None = None,
+        manager_event_autostart_source: str | None = None,
     ) -> str | None:
         """Return a trusted service key for Manager-owned evidence.
 
         Public task metadata is not enough to claim an internal singleton. For
         autostart services, evidence is considered only for currently desired
-        manifest keys and only when the log entry carries autostart metadata.
+        manifest keys and only when the log entry carries manager-authored
+        autostart authority.
         """
 
         if not isinstance(metadata, Mapping):
@@ -2597,13 +2598,13 @@ class Manager(BaseTask):
 
         internal_key = self._trusted_internal_service_key(
             metadata,
-            envelope_runtime_class=envelope_runtime_class,
+            runtime_class=runtime_class,
         )
         if internal_key is not None:
             return internal_key if internal_key in desired_keys else None
 
         key = service_key_from_metadata(metadata)
-        source = metadata.get("autostart_source")
+        source = metadata.get(INTERNAL_AUTOSTART_SOURCE_METADATA_KEY)
         if key is None and isinstance(source, str):
             key = source
         if not isinstance(key, str) or key not in desired_keys:
@@ -2612,9 +2613,16 @@ class Manager(BaseTask):
             return None
         if metadata.get("internal") is True:
             return None
-        if metadata.get("autostart") is not True:
+        if metadata.get(INTERNAL_AUTOSTART_ENABLED_METADATA_KEY) is not True:
             return None
         if source != key:
+            return None
+        manager_authority = (
+            metadata.get(INTERNAL_SERVICE_AUTHORITY_METADATA_KEY)
+            == INTERNAL_SERVICE_AUTHORITY_MANAGER
+        )
+        legacy_manager_event = manager_event_autostart_source == key
+        if not manager_authority and not legacy_manager_event:
             return None
         return key
 
@@ -2632,7 +2640,7 @@ class Manager(BaseTask):
         return self._trusted_service_key_from_metadata(
             metadata,
             desired_keys=desired_keys,
-            envelope_runtime_class=envelope_runtime_class
+            runtime_class=envelope_runtime_class
             if isinstance(envelope_runtime_class, str)
             else None,
         )
@@ -2688,6 +2696,14 @@ class Manager(BaseTask):
             return None
         return ctrl_in_name, ctrl_out_name
 
+    @staticmethod
+    def _runtime_handle_force_kill_pids(handle: RunnerHandle) -> tuple[int, ...]:
+        if handle.control.get("authority") != "host-pid":
+            return ()
+        return tuple(
+            pid for pid, _create_time in live_host_processes_from_handle(handle)
+        )
+
     @classmethod
     def _service_candidate_pid(cls, payload: Mapping[str, Any]) -> int | None:
         child_pid = payload.get("child_pid")
@@ -2707,7 +2723,12 @@ class Manager(BaseTask):
         return None
 
     @classmethod
-    def _service_candidate_metadata(cls, payload: Mapping[str, Any]) -> dict[str, Any]:
+    def _service_candidate_metadata(
+        cls,
+        payload: Mapping[str, Any],
+        *,
+        force_kill_pids: Sequence[int] = (),
+    ) -> dict[str, Any]:
         candidate_metadata: dict[str, Any] = {}
         ctrl_queues = cls._service_candidate_control_queues(payload)
         if ctrl_queues is not None:
@@ -2717,6 +2738,13 @@ class Manager(BaseTask):
         pid = cls._service_candidate_pid(payload)
         if pid is not None:
             candidate_metadata["pid"] = pid
+        kill_pids = [
+            pid
+            for pid in force_kill_pids
+            if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0
+        ]
+        if kill_pids:
+            candidate_metadata["force_kill_pids"] = kill_pids
         return candidate_metadata
 
     def _manager_context(self) -> WeftContext:
@@ -2771,9 +2799,19 @@ class Manager(BaseTask):
             metadata = taskspec_dump.get("metadata") or {}
             if not isinstance(metadata, dict):
                 continue
+            runtime_class = metadata.get(INTERNAL_RUNTIME_TASK_CLASS_KEY)
+            manager_event_autostart_source = (
+                payload.get(INTERNAL_AUTOSTART_SOURCE_METADATA_KEY)
+                if payload.get("event") == "task_spawned"
+                else None
+            )
             candidate_key = self._trusted_service_key_from_metadata(
                 metadata,
                 desired_keys=desired_keys,
+                runtime_class=runtime_class if isinstance(runtime_class, str) else None,
+                manager_event_autostart_source=manager_event_autostart_source
+                if isinstance(manager_event_autostart_source, str)
+                else None,
             )
             if candidate_key is None:
                 continue
@@ -2843,31 +2881,6 @@ class Manager(BaseTask):
         state.uncertain_since_ns = next_state.uncertain_since_ns
         state.last_uncertain_reason = next_state.last_uncertain_reason
         state.locally_terminal_tids = set(next_state.locally_terminal_tids)
-
-    def _service_has_owner_evidence(
-        self,
-        service_key: str,
-        candidates: list[ServiceCandidate] | None = None,
-    ) -> bool:
-        if candidates is None:
-            candidates = self._observed_service_candidates(service_key)
-        state = self._service_state(service_key)
-        decision = reduce_managed_service_state(
-            ManagedServiceSpec(
-                key=service_key,
-                lifecycle="ensure",
-                spawn_payload={},
-            ),
-            state,
-            ManagedServiceEvidence(candidates=tuple(candidates)),
-            now_ns=time.time_ns(),
-        )
-        self._apply_managed_service_decision_state(state, decision)
-        return decision.action in [
-            "keep_live",
-            "wait_uncertain",
-            "degraded_wait",
-        ]
 
     def _tick_managed_service(
         self,
@@ -3187,8 +3200,8 @@ class Manager(BaseTask):
                 if isinstance(spec_section["env"], dict):
                     spec_section["env"].update(env)
 
-        candidate["metadata"]["autostart_source"] = source
-        candidate["metadata"]["autostart"] = True
+        candidate["metadata"][INTERNAL_AUTOSTART_SOURCE_METADATA_KEY] = source
+        candidate["metadata"][INTERNAL_AUTOSTART_ENABLED_METADATA_KEY] = True
         candidate = apply_service_metadata(
             candidate,
             key=source,
@@ -3281,7 +3294,7 @@ class Manager(BaseTask):
         metadata = payload.get("metadata")
         service_key = service_key_from_metadata(metadata)
         if service_key is None and isinstance(metadata, dict):
-            source = metadata.get("autostart_source")
+            source = metadata.get(INTERNAL_AUTOSTART_SOURCE_METADATA_KEY)
             service_key = source if isinstance(source, str) and source else None
         if service_key is None:
             logger.warning("Autostart payload missing service key")
@@ -3463,6 +3476,38 @@ class Manager(BaseTask):
             include_autostart=True,
         )
 
+    def _managed_service_convergence_active(self, *, include_autostart: bool) -> bool:
+        """Return whether singleton convergence has non-stable work to advance."""
+
+        if self._managed_internal_spawn_enqueued:
+            return True
+        if self._managed_service_duplicate_scan_pending:
+            return True
+        internal_keys = {
+            INTERNAL_SERVICE_KEY_HEARTBEAT,
+            INTERNAL_SERVICE_KEY_TASK_MONITOR,
+        }
+        for service_key, state in self._managed_service_state.items():
+            if state.spawn_pending or state.active_tid is None:
+                if state.spawn_pending:
+                    return True
+                if (
+                    service_key in internal_keys
+                    and self._task_monitor_enabled
+                    and self._queue_names["inbox"] == WEFT_SPAWN_REQUESTS_QUEUE
+                ):
+                    return True
+            if state.uncertain_attempts > 0:
+                return True
+        if include_autostart and self._autostart_enabled and self._autostart_dir:
+            if self._autostart_last_scan_ns == 0:
+                return True
+            return (
+                time.time_ns() - self._autostart_last_scan_ns
+                >= self._autostart_scan_interval_ns
+            )
+        return False
+
     def _run_managed_service_convergence(
         self,
         *,
@@ -3480,7 +3525,15 @@ class Manager(BaseTask):
         """
 
         now_ns = time.time_ns()
-        interval_ns = int(MANAGED_SERVICE_CONVERGENCE_INTERVAL_SECONDS * 1_000_000_000)
+        active = self._managed_service_convergence_active(
+            include_autostart=include_autostart
+        )
+        interval_seconds = (
+            MANAGED_SERVICE_CONVERGENCE_INTERVAL_SECONDS
+            if active
+            else MANAGED_SERVICE_STABLE_AUDIT_INTERVAL_SECONDS
+        )
+        interval_ns = int(interval_seconds * 1_000_000_000)
         if (
             not force
             and not self._managed_internal_spawn_enqueued

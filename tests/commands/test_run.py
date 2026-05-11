@@ -19,12 +19,19 @@ import weft.commands._spawn_submission as spawn_submission_cmd
 import weft.commands.run as run_cmd
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import (
+    INTERNAL_AUTOSTART_ENABLED_METADATA_KEY,
+    INTERNAL_AUTOSTART_SOURCE_METADATA_KEY,
     INTERNAL_HEARTBEAT_ENDPOINT_NAME,
     INTERNAL_RUNTIME_ENDPOINT_NAME_KEY,
     INTERNAL_RUNTIME_ENVELOPE_ENDPOINT_NAME_KEY,
     INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY,
     INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
     INTERNAL_RUNTIME_TASK_CLASS_KEY,
+    INTERNAL_SERVICE_AUTHORITY_MANAGER,
+    INTERNAL_SERVICE_AUTHORITY_METADATA_KEY,
+    INTERNAL_SERVICE_KEY_HEARTBEAT,
+    INTERNAL_SERVICE_KEY_METADATA_KEY,
+    INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY,
     MANAGER_LAUNCHER_SIGNAL_SUCCESS,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MANAGER_OUTBOX_QUEUE,
@@ -1424,6 +1431,17 @@ def test_enqueue_taskspec_strips_reserved_internal_runtime_metadata_from_public_
     taskspec.metadata[INTERNAL_RUNTIME_ENDPOINT_NAME_KEY] = (
         INTERNAL_HEARTBEAT_ENDPOINT_NAME
     )
+    taskspec.metadata[INTERNAL_SERVICE_KEY_METADATA_KEY] = (
+        INTERNAL_SERVICE_KEY_HEARTBEAT
+    )
+    taskspec.metadata[INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY] = "ensure"
+    taskspec.metadata[INTERNAL_SERVICE_AUTHORITY_METADATA_KEY] = (
+        INTERNAL_SERVICE_AUTHORITY_MANAGER
+    )
+    taskspec.metadata[INTERNAL_AUTOSTART_SOURCE_METADATA_KEY] = str(root / "auto.json")
+    taskspec.metadata[INTERNAL_AUTOSTART_ENABLED_METADATA_KEY] = True
+    taskspec.metadata["role"] = "public-role"
+    taskspec.metadata["internal"] = True
 
     _enqueue_taskspec(context, taskspec, None)
 
@@ -1438,6 +1456,13 @@ def test_enqueue_taskspec_strips_reserved_internal_runtime_metadata_from_public_
     taskspec_payload = payload["taskspec"]
     assert INTERNAL_RUNTIME_TASK_CLASS_KEY not in taskspec_payload["metadata"]
     assert INTERNAL_RUNTIME_ENDPOINT_NAME_KEY not in taskspec_payload["metadata"]
+    assert INTERNAL_SERVICE_KEY_METADATA_KEY not in taskspec_payload["metadata"]
+    assert INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY not in taskspec_payload["metadata"]
+    assert INTERNAL_SERVICE_AUTHORITY_METADATA_KEY not in taskspec_payload["metadata"]
+    assert INTERNAL_AUTOSTART_SOURCE_METADATA_KEY not in taskspec_payload["metadata"]
+    assert INTERNAL_AUTOSTART_ENABLED_METADATA_KEY not in taskspec_payload["metadata"]
+    assert taskspec_payload["metadata"]["role"] == "public-role"
+    assert taskspec_payload["metadata"]["internal"] is True
     assert INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY not in payload
     assert INTERNAL_RUNTIME_ENVELOPE_ENDPOINT_NAME_KEY not in payload
 

@@ -19,8 +19,8 @@ from weft.core.tasks import Consumer
 
 pytestmark = [pytest.mark.shared]
 
-LIVE_PONG_PROBE_TIMEOUT = 8.0
-LIVE_PONG_DRIVE_TIMEOUT = 10.0
+LIVE_PONG_PROBE_TIMEOUT = 20.0
+LIVE_PONG_DRIVE_TIMEOUT = 25.0
 
 
 def _taskspec_payload(

@@ -199,7 +199,7 @@ class TestConstants:
         assert SUBPROCESS_POLL_INTERVAL_FLOOR == 0.01
 
     def test_lifecycle_polling_and_timeout_constants(self) -> None:
-        assert AGENT_SESSION_READY_TIMEOUT_SECONDS == 10.0
+        assert AGENT_SESSION_READY_TIMEOUT_SECONDS == 30.0
         assert RUNNER_DIAGNOSTICS_FIELD == "runner_diagnostics"
         assert RUNNER_DIAGNOSTICS_MESSAGE_MAX_CHARS == 500
         assert RUNNER_DIAGNOSTICS_TRACEBACK_MAX_CHARS == 4000

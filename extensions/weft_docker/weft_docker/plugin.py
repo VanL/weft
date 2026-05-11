@@ -230,7 +230,7 @@ class DockerCommandRunner:
                 wait_for_container_runtime_start(
                     container,
                     process=process,
-                    timeout=weft_constants.DOCKER_CONTAINER_LOOKUP_TIMEOUT,
+                    timeout=weft_constants.DOCKER_CONTAINER_START_TIMEOUT,
                     interval=weft_constants.DOCKER_CONTAINER_LOOKUP_INTERVAL,
                 )
                 runtime_handle = _runtime_handle_for_container(

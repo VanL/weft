@@ -271,6 +271,25 @@ class AgentSession:
                         diagnostics=startup_error_diagnostics(payload),
                     )
                 )
+        late_payload = self._drain_ready_response(timeout=0.2)
+        if late_payload is not None:
+            if is_ready_response(late_payload):
+                return
+            late_type = response_type(late_payload)
+            if late_type is not None:
+                last_handshake = late_type
+            startup_error = startup_error_message(late_payload)
+            if startup_error is not None:
+                raise RuntimeError(
+                    self._format_ready_failure(
+                        startup_error,
+                        timeout=timeout,
+                        started_at=start,
+                        last_handshake=last_handshake,
+                        diagnostics=startup_error_diagnostics(late_payload),
+                    )
+                ) from None
+
         raise RuntimeError(
             self._format_ready_failure(
                 "Agent session failed to signal readiness",
@@ -288,8 +307,16 @@ class AgentSession:
             self._process.join(timeout=0.2)
         except Exception:  # pragma: no cover - defensive process observation
             pass
+        return self._drain_ready_response(timeout=0.0)
+
+    def _drain_ready_response(self, *, timeout: float) -> Mapping[str, Any] | None:
+        """Drain one late startup response without assuming process liveness."""
+
         try:
-            payload = self._response_queue.get_nowait()
+            if timeout > 0:
+                payload = self._response_queue.get(timeout=timeout)
+            else:
+                payload = self._response_queue.get_nowait()
         except queue.Empty:
             return None
         return payload if isinstance(payload, Mapping) else None

@@ -19,6 +19,7 @@ from weft._constants import (
     INTERNAL_RUNTIME_ENVELOPE_ENDPOINT_NAME_KEY,
     INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY,
     INTERNAL_RUNTIME_TASK_CLASS_KEY,
+    PUBLIC_RESERVED_SERVICE_METADATA_KEYS,
     WEFT_SPAWN_REQUESTS_QUEUE,
     WORK_ENVELOPE_START,
 )
@@ -81,6 +82,40 @@ def generate_spawn_request_timestamp(
         queue.close()
 
 
+def _prepare_spawn_metadata(
+    metadata: dict[str, Any],
+    *,
+    allow_internal_runtime: bool,
+) -> tuple[str | None, str | None]:
+    """Strip public-only reserved metadata and return internal envelope claims."""
+
+    internal_runtime_task_class = metadata.pop(INTERNAL_RUNTIME_TASK_CLASS_KEY, None)
+    internal_endpoint_name = None
+    endpoint_name = metadata.get(INTERNAL_RUNTIME_ENDPOINT_NAME_KEY)
+    if (
+        isinstance(endpoint_name, str)
+        and endpoint_name
+        and is_reserved_internal_endpoint_name(endpoint_name)
+    ):
+        if allow_internal_runtime:
+            internal_endpoint_name = metadata.pop(
+                INTERNAL_RUNTIME_ENDPOINT_NAME_KEY, None
+            )
+        else:
+            metadata.pop(INTERNAL_RUNTIME_ENDPOINT_NAME_KEY, None)
+
+    if not allow_internal_runtime:
+        for key in PUBLIC_RESERVED_SERVICE_METADATA_KEYS:
+            metadata.pop(key, None)
+
+    return (
+        internal_runtime_task_class
+        if isinstance(internal_runtime_task_class, str)
+        else None,
+        internal_endpoint_name if isinstance(internal_endpoint_name, str) else None,
+    )
+
+
 def submit_spawn_request(
     broker_target: BrokerTarget | str | Path,
     *,
@@ -122,21 +157,10 @@ def submit_spawn_request(
     internal_runtime_task_class = None
     internal_endpoint_name = None
     if isinstance(metadata, dict):
-        internal_runtime_task_class = metadata.pop(
-            INTERNAL_RUNTIME_TASK_CLASS_KEY, None
+        internal_runtime_task_class, internal_endpoint_name = _prepare_spawn_metadata(
+            metadata,
+            allow_internal_runtime=allow_internal_runtime,
         )
-        endpoint_name = metadata.get(INTERNAL_RUNTIME_ENDPOINT_NAME_KEY)
-        if (
-            isinstance(endpoint_name, str)
-            and endpoint_name
-            and is_reserved_internal_endpoint_name(endpoint_name)
-        ):
-            if allow_internal_runtime:
-                internal_endpoint_name = metadata.pop(
-                    INTERNAL_RUNTIME_ENDPOINT_NAME_KEY, None
-                )
-            else:
-                metadata.pop(INTERNAL_RUNTIME_ENDPOINT_NAME_KEY, None)
 
     message = {
         "taskspec": taskspec_payload,

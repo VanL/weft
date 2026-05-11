@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from weft_docker import _sdk as docker_sdk
 from weft_docker import get_runner_plugin, plugin
 
 import weft.runtime_liveness as runtime_liveness
@@ -620,6 +621,38 @@ def test_command_runner_waits_for_container_to_leave_created_before_runtime_hand
 
     assert outcome.status == "ok"
     assert callback_state["status"] == "running"
+
+
+def test_wait_for_container_runtime_start_fails_when_created_state_sticks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = {"now": 0.0}
+
+    class FakeContainer:
+        id = "container-789"
+        name = "weft-stuck"
+        attrs: dict[str, Any] = {"State": {"Status": "created"}}
+
+        def reload(self) -> None:
+            return None
+
+    def monotonic() -> float:
+        return clock["now"]
+
+    def sleep(duration: float) -> None:
+        clock["now"] += duration
+
+    monkeypatch.setattr(docker_sdk.time, "monotonic", monotonic)
+    monkeypatch.setattr(docker_sdk.time, "sleep", sleep)
+
+    with pytest.raises(TimeoutError, match="weft-stuck"):
+        docker_sdk.wait_for_container_runtime_start(
+            FakeContainer(),
+            timeout=0.2,
+            interval=0.05,
+        )
+
+    assert clock["now"] >= 0.2
 
 
 def test_command_runner_cleans_up_container_when_runtime_start_fails(

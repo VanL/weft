@@ -6,6 +6,7 @@ import json
 import os
 import time
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 
@@ -55,6 +56,18 @@ def simulate_work(
         output_size=output_size,
         cpu_percent=cpu_percent,
     )
+
+
+def wait_for_file(path: str, *, timeout: float = 30.0, result: str = "done") -> str:
+    """Block until *path* exists, then return a deterministic result."""
+
+    deadline = time.monotonic() + timeout
+    sentinel = Path(path)
+    while time.monotonic() < deadline:
+        if sentinel.exists():
+            return result
+        time.sleep(0.05)
+    raise TimeoutError(f"Timed out waiting for {path}")
 
 
 def large_output(size: int = 4_194_304, *, char: str = "x") -> str:

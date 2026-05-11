@@ -571,6 +571,10 @@ Backend-specific notes:
   created by the Docker runner, but the outer task lifecycle still stays on the
   existing `TaskSpec -> Manager -> Consumer -> TaskRunner -> runner plugin ->
   queues/state log` spine
+- Docker-backed command and provider lanes publish their runtime handle only
+  after the container has left Docker's transient `created` state. If Docker
+  cannot make the runtime observable within the configured startup budget, the
+  runner fails before publishing a misleading live runtime handle.
 - Docker-backed provider runtime defaults such as allowlisted host env
   forwarding and optional config mounts are owned by internal
   provider container runtime descriptors in core `provider_cli` code, not by
