@@ -894,7 +894,6 @@ class Manager(BaseTask):
                 own_record is None
                 or own_record.get("status") != "active"
                 or time.time_ns() - own_timestamp >= interval_ns
-                or not self._manager_record_is_live(own_record)
             ):
                 self._refresh_manager_registration(force=True)
                 latest = self._latest_registry_entry(queue, self.tid)
@@ -968,7 +967,7 @@ class Manager(BaseTask):
         Spec: [MA-1.4], [MF-6]
         """
 
-        if self._child_processes:
+        if any(child.persistent for child in self._user_work_children().values()):
             return True
         if self._managed_internal_spawn_enqueued:
             return True
@@ -1033,7 +1032,7 @@ class Manager(BaseTask):
         if leader_tid is None or leader_tid == self.tid:
             return False
 
-        if self._child_processes:
+        if self._user_work_children():
             user_children = self._user_work_children()
             if any(child.persistent for child in user_children.values()):
                 return False
@@ -2856,7 +2855,7 @@ class Manager(BaseTask):
                     self._managed_service_duplicate_scan_pending.discard(service.key)
 
     def _tick_internal_services(self, *, force: bool = False) -> None:
-        """Ensure built-in Manager-owned services for the elected leader."""
+        """Ensure built-in Manager-owned services for this live manager."""
 
         self._reconcile_managed_services(
             force=force,
@@ -2865,7 +2864,7 @@ class Manager(BaseTask):
         )
 
     def _tick_task_monitor(self, *, force: bool = False) -> None:
-        """Ensure one supervised TaskMonitor child exists for the leader manager."""
+        """Ensure one supervised TaskMonitor child exists for this live manager."""
 
         self._reconcile_managed_services(
             force=force,

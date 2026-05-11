@@ -191,7 +191,11 @@ _Implementation mapping_: `weft/core/manager.py`,
 - **MANAGER.1**: managers are task-shaped runtimes with a long-lived dispatcher
   loop
 - **MANAGER.2**: manager TIDs follow the same TID rules as other tasks
-- **MANAGER.3**: managers register themselves in `weft.state.managers`
+- **MANAGER.3**: managers register themselves in `weft.state.managers`. A
+  manager must treat its own active canonical registry row as live while it has
+  not unregistered and is not stopping; external liveness probes are for other
+  manager records. Managers periodically refresh their own active row so other
+  processes have current evidence even when no PONG probe is in flight.
 - **MANAGER.4**: spawn-request message ID becomes child task TID
 - **MANAGER.5**: managers spawn child tasks through the same overall task model
 - **MANAGER.6**: one shared manager bootstrap path owns startup and

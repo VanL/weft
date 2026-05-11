@@ -146,14 +146,14 @@ Key responsibilities implemented in `weft/core/manager.py`:
    pipeline task on the spawn queue.
 7. **Managed services** – The manager reconciles autostarts, heartbeat, and
    `TaskMonitorTask` through one deterministic manager-owned service path. The
-   canonical dispatch owner for `weft.spawn.requests` supervises built-in
-   internal singleton services; scoped managers may still reconcile their own
-   autostart manifests. The built-in heartbeat service is desired only when an
-   enabled internal dependent needs it. The internal `TaskMonitorTask` is an
-   `ensure` service when `WEFT_TASK_MONITOR_ENABLED` is true. The manager uses the same
-   dispatch-ownership/election view that gates child launches; non-leaders,
-   draining managers, and dispatch-suspended managers do not start or restart
-   singleton services. Live ownership can be proved by a tracked child, a live
+   live public managers may supervise built-in internal singleton services;
+   correctness is enforced by manager-owned metadata and the singleton reducer,
+   not by a global dispatch-owner fence. Scoped managers may still reconcile
+   their own autostart manifests. The built-in heartbeat service is desired
+   only when an enabled internal dependent needs it. The internal
+   `TaskMonitorTask` is an `ensure` service when `WEFT_TASK_MONITOR_ENABLED` is
+   true. Draining or stopped managers do not start or restart singleton
+   services. Live service ownership can be proved by a tracked child, a live
    runtime handle, including the task-process host handle published in TID
    mappings, manager-authored internal runtime envelope/class evidence,
    manager-authored autostart metadata, or a matched keyed `PING`/`PONG`;
@@ -198,41 +198,23 @@ _Implementation mapping_:
 - [MA-1.6a] Managed internal service supervision — `Manager._run_managed_service_convergence`, `Manager._reconcile_managed_services`, `Manager._tick_internal_services`, `Manager._tick_managed_service`, `Manager._service_supervision_allowed`, `Manager._build_heartbeat_spawn_payload`, `Manager._build_task_monitor_spawn_payload`, `Manager._pending_service_keys`, `Manager._trusted_service_key_from_metadata`, `Manager._service_key_for_child`, `Manager._observed_service_candidates_by_key`, `Manager._service_candidate_from_task_log`, `Manager._candidate_force_kill_pids`, `Manager._runtime_handle_force_kill_pids`, `Manager._enqueue_managed_service_request`, `Manager._drain_internal_spawn_requests`, `Manager._cleanup_children`, `Manager.wait_for_activity`, and `Manager._user_work_children`; public submission sanitization lives in `weft/core/spawn_requests.py::submit_spawn_request`; shared service models and `reduce_managed_service_state` live in `weft/core/manager_services.py`, runtime TaskMonitor behavior lives in `weft/core/tasks/task_monitor.py`, and processor contracts live in `weft/core/task_monitoring.py`. Implementation plan: [`2026-05-10-control-and-service-convergence-state-machine-plan.md`](../plans/2026-05-10-control-and-service-convergence-state-machine-plan.md) and hardening plan: [`2026-05-10-manager-service-authority-boundary-hardening-plan.md`](../plans/2026-05-10-manager-service-authority-boundary-hardening-plan.md).
 - [MA-1.7] Control channel — inherited from `BaseTask._handle_control_command` (`weft/core/tasks/base.py`) and extended by `Manager._control_snapshot_fields` (`weft/core/manager.py`); structured PING/PONG snapshots, STOP, STATUS, KILL handling.
 
-Current ownership-fence rules:
+Current leadership-view rules:
 
-- `self` means this manager is still positively dispatch-eligible
+- `self` means this manager is the lowest live canonical registry claimant
 - `other` means a lower-TID canonical manager is positively proved
-- `none` means the registry replay succeeded, but no canonical dispatch owner
-  is positively visible, including this manager
+- `none` means the registry replay succeeded, but no canonical manager is
+  positively visible
 - `unknown` means runtime state could not be read confidently enough to choose
   among the other outcomes
-- `other` prevents launch, marks this manager non-dispatching for later loop
-  iterations, and attempts an exact-message move of the reserved spawn request
-  back to `weft.spawn.requests`
-- `none` and `unknown` prevent launch and place the manager into
-  dispatch-suspended mode; while suspended the manager may still handle
-  control, supervise existing children, and re-check ownership, but it must
-  not reserve or launch later spawn requests
-- while a fenced exact request is still pending recovery in the manager's
-  private reserved queue, the manager must not leadership-yield, idle-exit, or
-  run ensure-style autostart scans that enqueue more undispatchable work
-- if ownership later resolves back to `self`, the manager must exact-message
-  requeue the older fenced request back to `weft.spawn.requests` before later
-  inbox work resumes
-- dispatch eligibility and child supervision may diverge after supersession:
-  a manager may keep supervising already-launched persistent children while
-  refusing all new dispatch
-
-Current fence diagnostics:
-
-- `manager_spawn_fenced_requeued` with required fields `child_tid`,
-  `leader_tid`, `reserved_queue`, and `message_id`
-- `manager_spawn_fenced_stranded` with required fields `child_tid`,
-  `leader_tid`, `reserved_queue`, and `message_id`
-- `manager_spawn_fence_suspended` with required fields `child_tid`,
-  `reserved_queue`, `message_id`, and `ownership_state`
-
-These are manager-scoped diagnostics, not spawn rejection signals.
+- these outcomes inform status, manager selection, and voluntary duplicate
+  manager yield, but they do not block a manager that has atomically reserved
+  public or manager-owned internal spawn work
+- a manager may keep supervising already-launched persistent children after a
+  lower-TID leader appears
+- a manager treats its own active canonical registry row as live while it has
+  not unregistered and is not stopping; host/PONG liveness probes are for other
+  processes, and the manager refreshes its own registry row periodically so
+  external readers have current evidence
 
 ## TID Correlation [MA-2]
 

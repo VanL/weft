@@ -56,7 +56,7 @@ from weft.core.tasks import (
     PipelineTask,
     TaskMonitorTask,
 )
-from weft.core.tasks.multiqueue_watcher import QueueMessageContext, QueueMode
+from weft.core.tasks.multiqueue_watcher import QueueMessageContext
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 from weft.helpers import ContainerRuntimeDetection
 
@@ -952,7 +952,7 @@ def test_task_monitor_spawn_payload_uses_manager_owned_envelope(
     assert child_spec.metadata[INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY] == "ensure"
 
 
-def test_manager_skips_task_monitor_when_not_dispatch_owner(
+def test_manager_task_monitor_supervision_ignores_dispatch_ownership(
     manager_setup,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -962,12 +962,24 @@ def test_manager_skips_task_monitor_when_not_dispatch_owner(
     monkeypatch.setattr(
         manager,
         "_evaluate_dispatch_ownership",
-        lambda: DispatchOwnership(state="other", leader_tid=str(int(manager.tid) - 1)),
+        lambda: (_ for _ in ()).throw(
+            AssertionError("task monitor supervision should not check ownership")
+        ),
     )
 
     manager._tick_task_monitor(force=True)
 
-    assert drain(make_queue(WEFT_SPAWN_REQUESTS_QUEUE)) == []
+    payloads = [
+        json.loads(item) for item in drain(make_queue(WEFT_SPAWN_REQUESTS_QUEUE))
+    ]
+    service_keys = {
+        payload["taskspec"]["metadata"][INTERNAL_SERVICE_KEY_METADATA_KEY]
+        for payload in payloads
+    }
+    assert service_keys == {
+        INTERNAL_SERVICE_KEY_HEARTBEAT,
+        INTERNAL_SERVICE_KEY_TASK_MONITOR,
+    }
 
 
 def test_manager_restarts_dead_task_monitor_after_backoff(
@@ -3261,17 +3273,26 @@ def test_manager_service_convergence_advances_without_dispatch_ownership(
 
 
 def test_manager_self_registry_record_is_live_without_external_liveness_probe(
-    manager_setup,
+    broker_env,
+    unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    manager, _make_queue = manager_setup
+    db_path, _make_queue = broker_env
+    config = load_config({"WEFT_TASK_MONITOR_ENABLED": "0"})
+    manager = Manager(db_path, make_manager_spec(unique_tid), config=config)
     monkeypatch.setattr(
         manager_mod,
         "handle_has_live_host_process",
-        lambda _handle: False,
+        lambda _handle: (_ for _ in ()).throw(
+            AssertionError("self liveness must not use external probes")
+        ),
     )
 
-    active = manager._read_active_manager_records()
+    try:
+        active = manager._read_active_manager_records()
+    finally:
+        manager.stop(join=False)
+        manager.cleanup()
 
     assert active is not None
     assert manager.tid in active
