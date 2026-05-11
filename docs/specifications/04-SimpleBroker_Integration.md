@@ -96,6 +96,17 @@ Current behavior:
 This backend-neutral path is why the current CLI uses per-command context
 selection rather than a root-level `--dir` / `--file` targeting model.
 
+Postgres operational contract: a long-lived Weft watcher should share one
+backend activity-wait/listen path across its watched queues within a process.
+Weft must not regress to one Postgres listener connection per watched queue.
+Operators should still size Postgres for the number of concurrent Weft
+processes, plus short-lived CLI/startup spikes. Production deployments should
+give Weft a separate Postgres connection budget from the application pool, with
+200-300 allowed connections as a practical starting range for bursty
+multi-process workloads. If an external pooler is used, it must preserve the
+backend notification semantics required by `LISTEN`/`NOTIFY`; pooling modes
+that discard listener state are outside Weft's broker contract.
+
 ### Runtime Endpoint Registry State [SB-0.5]
 
 Named endpoint discovery is stored as Weft-owned runtime state on ordinary

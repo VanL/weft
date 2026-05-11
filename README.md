@@ -450,6 +450,23 @@ install hint for `uv add 'weft[pg]'`.
 SQLite is the right default for most users. Switch to Postgres when you need
 multi-host task submission or high write concurrency.
 
+#### Postgres Connection Budget
+
+Weft uses SimpleBroker's multi-queue activity waiter API, so a long-lived
+watcher shares one backend wait/listen path across the queues it watches
+inside that process. It does not open one Postgres `LISTEN` connection per
+watched queue. The important operational limit is therefore the number of
+concurrent Weft processes, plus short-lived command and startup spikes.
+
+For production Postgres deployments, give Weft its own connection budget rather
+than relying on the application's normal database pool. A practical starting
+point is a Postgres `max_connections` budget in the 200-300 range when Weft can
+run many managers, consumers, CLI commands, or agents concurrently, then tune
+from observed peak usage. If you put a pooler such as PgBouncer in front of
+Postgres, make sure its mode preserves the notification behavior required by
+`LISTEN`/`NOTIFY`; transaction-pooling modes that do not preserve listener
+state are not a substitute for listener headroom.
+
 ### Task IDs (TIDs)
 
 Every task receives a unique 64-bit SimpleBroker timestamp (hybrid microseconds + logical counter), typically 19 digits:
