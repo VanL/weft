@@ -200,29 +200,33 @@ _Implementation mapping_: `weft/core/manager.py`,
 - **MANAGER.7**: managers obey the same control semantics as other tasks, with
   graceful drain on normal termination signals
 - **MANAGER.8**: live canonical managers converge on one lowest-TID leader per
-  context; non-leaders yield or drain once they no longer need to protect
-  persistent children. Keyed PONG liveness may help decide which canonical
-  records are live, but it is not a lease, election vote, or substitute for
-  lowest-TID ownership reduction.
-- **MANAGER.9**: only positive `self` ownership authorizes child launch from a
-  reserved spawn request; `none` and `unknown` are not launch authority
-- **MANAGER.10**: if a lower-TID canonical owner is positively proved after
-  reservation but before launch, the manager must keep the exact work item
-  durable by either exact-message requeue to the original spawn source queue or
-  visibly stranded reserved state
-- **MANAGER.11**: manager-scoped fence diagnostics
-  (`manager_spawn_fenced_requeued`, `manager_spawn_fenced_stranded`,
-  `manager_spawn_fence_suspended`) must not be reused as spawn rejection
-  signals
-- **MANAGER.12**: dispatch suspension blocks later spawn reservation and launch
-  until ownership is re-established, while still allowing control handling and
-  supervision of already-running children
-- **MANAGER.13**: a manager that still owns a fenced exact spawn request in its
-  private reserved queue must not leadership-yield, idle-exit, or enqueue new
-  ensure-mode autostart work before that exact request is recovered
-- **MANAGER.14**: if dispatch ownership returns to `self` after suspension, the
-  exact fenced spawn request is requeued to the original spawn source queue
-  before later inbox work resumes
+  context for status, manager selection, and voluntary duplicate-manager
+  cleanup; non-leaders yield or drain once they have no actionable queue work
+  and no persistent children to protect. Keyed PONG liveness may help decide
+  which canonical records are live, but it is not a lease, election vote, or
+  substitute for lowest-TID ownership reduction.
+- **MANAGER.9**: public spawn dispatch is work-stealing. Atomic reservation of
+  a `weft.spawn.requests` message authorizes that manager to attempt the child
+  launch for that exact message; registry `self`, `other`, `none`, or
+  `unknown` ownership is not launch authority for public work.
+- **MANAGER.10**: after a manager reserves a public or internal spawn request,
+  STOP/KILL control and drain state are the pre-launch safety fence. A draining
+  or stopped manager must not launch the reserved child.
+- **MANAGER.11**: a successful manager child launch deletes exactly the
+  reserved spawn message after the launch side effect succeeds. Invalid payload
+  handling, pre-launch failure, and shutdown continue to use the manager's
+  reserved-queue policy and visible reserved queues.
+- **MANAGER.12**: registry leadership must not block a manager from draining
+  already-reserved public or manager-owned internal spawn work. Leadership
+  yield is advisory and idle-biased: it must not preempt actionable control,
+  spawn, reserved, or child-supervision work.
+- **MANAGER.13**: manager-owned singleton service correctness is enforced at
+  the service boundary, not by a global public dispatch fence. Manager-authored
+  service metadata and the service reducer decide when to start, wait, or
+  terminate duplicates.
+- **MANAGER.14**: stale or ambiguous manager registry proof must degrade status
+  and selection confidence, not halt public spawn dispatch or manager-owned
+  service convergence.
 - **MANAGER.15**: manager-owned singleton services reduce all pending-spawn,
   live, terminal, and uncertain evidence through one deterministic transition
   table before Manager applies side effects. Terminal proof for a TID wins over
@@ -246,9 +250,10 @@ _Implementation mapping_: `weft/core/manager.py`,
   force-reap only PIDs tied to the current scoped authority that proved the
   non-canonical owner live, such as a tracked child process or a `host-pid`
   runtime handle.
-- **MANAGER.16**: canonical managers must drain manager-owned internal spawn
-  work before ordinary public spawn work whenever both are pending and launch is
-  otherwise authorized. Manager-authored singleton-service spawn requests must
+- **MANAGER.16**: managers must drain manager-owned internal spawn work before
+  ordinary public spawn work whenever both are pending and launch is otherwise
+  authorized by local control/drain state. Manager-authored singleton-service
+  spawn requests must
   force the next scheduler drain to probe inactive queues and must advance to a
   launch attempt in the same manager turn without consuming ordinary public
   spawn work; they must not wait for the periodic broad-probe interval or a
@@ -334,6 +339,7 @@ doc:
 - [`docs/plans/2026-05-10-manager-service-authority-boundary-hardening-plan.md`](../plans/2026-05-10-manager-service-authority-boundary-hardening-plan.md)
 - [`docs/plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md`](../plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md)
 - [`docs/plans/2026-04-17-canonical-owner-fence-plan.md`](../plans/2026-04-17-canonical-owner-fence-plan.md)
+- [`docs/plans/2026-05-11-manager-work-stealing-dispatch-plan.md`](../plans/2026-05-11-manager-work-stealing-dispatch-plan.md)
 
 ## Related Documents
 

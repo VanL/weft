@@ -589,23 +589,6 @@ INTERNAL_SERVICE_KEY_HEARTBEAT: Final[str] = "_weft.service.heartbeat"
 INTERNAL_SERVICE_KEY_TASK_MONITOR: Final[str] = "_weft.service.task_monitor"
 """Manager-supervised singleton key for the built-in task monitor service."""
 
-MANAGER_SPAWN_FENCED_REQUEUED_EVENT: Final[str] = "manager_spawn_fenced_requeued"
-"""Manager event emitted when a fenced spawn request is requeued exactly."""
-
-MANAGER_SPAWN_FENCED_STRANDED_EVENT: Final[str] = "manager_spawn_fenced_stranded"
-"""Manager event emitted when a fenced spawn request remains stranded in reserved."""
-
-MANAGER_SPAWN_FENCE_SUSPENDED_EVENT: Final[str] = "manager_spawn_fence_suspended"
-"""Manager event emitted when dispatch is suspended awaiting ownership recovery."""
-
-MANAGER_SPAWN_FENCE_RECOVERY_EXHAUSTED_EVENT: Final[str] = (
-    "manager_spawn_fence_recovery_exhausted"
-)
-"""Manager event emitted when fenced reserved-work recovery reaches its ceiling."""
-
-MANAGER_DISPATCH_RECOVERY_MAX_ATTEMPTS: Final[int] = 5
-"""Maximum exact-requeue attempts before a fenced spawn request is left stranded."""
-
 HEARTBEAT_MIN_INTERVAL_SECONDS: Final[int] = 60
 """Minimum interval accepted by the first-slice heartbeat service."""
 

@@ -416,39 +416,25 @@ Current submission-reconciliation rules:
 - if none of those surfaces prove success or rollback, the CLI reports an
   explicit unknown submission outcome keyed by TID
 
-Current manager-dispatch fence rules:
+Current manager-dispatch rules:
 
-- after reserving a spawn request and building the child TaskSpec, the manager
-  performs one final ownership check before `_launch_child_task()`
-- only positive `self` ownership permits launch
-- on positive `other` ownership proof, the manager must not launch the child;
-  it becomes non-dispatching for later loop iterations before attempting to
-  move the exact reserved message back to the original spawn source queue
-- if that exact-message move succeeds, the manager emits
-  `manager_spawn_fenced_requeued` with required fields `child_tid`,
-  `leader_tid`, `source_queue`, `reserved_queue`, and `message_id`
-- if that exact-message move fails, the manager leaves the exact request in
-  reserved and emits `manager_spawn_fenced_stranded` with required fields
-  `child_tid`, `leader_tid`, `source_queue`, `reserved_queue`, and `message_id`
-- on `none` or `unknown`, the manager must not launch and must not requeue on
-  guesswork; it leaves the exact request in reserved, emits
-  `manager_spawn_fence_suspended` with required fields `child_tid`,
-  `source_queue`, `reserved_queue`, `message_id`, and `ownership_state`, and
-  enters manager-wide dispatch suspension
-- while dispatch-suspended, the manager may continue control handling and child
-  supervision, but it must not reserve or launch later spawn requests until a
-  later ownership check resolves to `self` or `other`
-- while a fenced exact request is still pending recovery in the manager's
-  private reserved queue, the manager must not leadership-yield, idle-exit, or
-  run ensure-style autostart scans that enqueue more undispatchable work
-- if ownership later resolves back to `self`, the manager exact-message
-  requeues the older fenced request back to its original spawn source queue
-  before later inbox work resumes
-- exact-message requeue recovery is bounded by
-  `MANAGER_DISPATCH_RECOVERY_MAX_ATTEMPTS`; when the ceiling is reached, the
-  manager emits `manager_spawn_fence_recovery_exhausted` with required fields
-  `child_tid`, `leader_tid`, `source_queue`, `reserved_queue`, `message_id`,
-  `ownership_state`, and `attempts`
+- public spawn dispatch is work-stealing: a manager that atomically reserves a
+  message from `weft.spawn.requests` owns that exact launch attempt
+- manager-owned internal spawn dispatch uses the same launch path and remains
+  strict-priority over public spawn work
+- registry leadership is advisory for status, startup selection, and voluntary
+  duplicate-manager convergence; stale or ambiguous registry proof must not
+  block a manager that already reserved public or internal spawn work
+- after a successful launch, the manager deletes the exact reserved message; if
+  child launch fails before that point, the message remains governed by the
+  manager's reserved-queue policy and visible reserved state
+- STOP/KILL control that arrives after reservation but before launch still wins:
+  a draining or stopped manager must not start a new child from the in-flight
+  reserved request
+- singleton services do not rely on global manager dispatch ownership for
+  correctness; manager-authored service metadata, pending-spawn evidence,
+  live/terminal evidence, and duplicate cleanup converge through the
+  manager-owned service reducer
 - exhausted recovery never deletes the reserved message and never emits
   `task_spawn_rejected`; it leaves the stranded work operator-visible in the
   reserved queue
@@ -475,10 +461,8 @@ queue, and ensure-mode manifests are rescanned immediately after a tracked
 autostart child exits.
 
 _Implementation mapping_: `weft/core/manager.py` — `Manager._handle_work_message`,
-`Manager._build_child_spec`, `Manager._apply_final_dispatch_fence`,
-`Manager._requeue_reserved_spawn_request`,
-`Manager._record_dispatch_recovery_failure`,
-`Manager._control_allows_child_launch`, `Manager._tick_managed_service`,
+`Manager._build_child_spec`, `Manager._control_allows_child_launch`,
+`Manager._tick_managed_service`,
 `Manager._enqueue_managed_service_request`, `Manager.process_once`;
 `weft/core/manager_services.py`;
 `weft/core/spawn_requests.py`;
@@ -763,3 +747,4 @@ management live in the companion doc:
 - [`docs/plans/2026-05-09-runtime-liveness-probe-registry-plan.md`](../plans/2026-05-09-runtime-liveness-probe-registry-plan.md)
 - [`docs/plans/2026-05-09-prune-path-unification-plan.md`](../plans/2026-05-09-prune-path-unification-plan.md)
 - [`docs/plans/2026-05-10-manager-service-authority-boundary-hardening-plan.md`](../plans/2026-05-10-manager-service-authority-boundary-hardening-plan.md)
+- [`docs/plans/2026-05-11-manager-work-stealing-dispatch-plan.md`](../plans/2026-05-11-manager-work-stealing-dispatch-plan.md)

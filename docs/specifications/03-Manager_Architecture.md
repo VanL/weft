@@ -49,6 +49,7 @@ always be rolled back from the public request queue.
 - [Prune Path Unification Plan](../plans/2026-05-09-prune-path-unification-plan.md) – draft plan to make CLI pruning and manager-supervised TaskMonitor cleanup share one core prune engine.
 - [Service Liveness And Health Convergence Plan](../plans/2026-05-09-service-liveness-and-health-convergence-plan.md) – draft plan to make manager ownership, heartbeat supersession, singleton restart timing, and status liveness diagnostics share one interpretation path.
 - [Manager Service Authority Boundary Hardening Plan](../plans/2026-05-10-manager-service-authority-boundary-hardening-plan.md) – tighten manager-owned singleton evidence authority, duplicate PID force-kill authority, and service-key helper structure.
+- [Manager Work-Stealing Dispatch Plan](../plans/2026-05-11-manager-work-stealing-dispatch-plan.md) – draft plan to make atomic spawn-request reservation the public dispatch authority while keeping singleton service correctness in the manager-owned reducer.
 
 ## Conceptual Model: Everything is a Task [MA-0]
 
@@ -69,19 +70,20 @@ _Implementation mapping_:
 
 Key responsibilities implemented in `weft/core/manager.py`:
 
-1. **Spawn queue consumption** – A canonical manager’s public inbox is bound to
-   `weft.spawn.requests`, and it also monitors `weft.spawn.internal` for
-   manager-owned internal service spawn requests. Internal spawn work has
-   strict priority: when internal and public work are both pending, the manager
-   drains internal spawn work before public work. Each message contains a
-   serialized child TaskSpec and an optional `inbox_message`. Messages are
-   reserved into source-specific reserved queues, parsed, and acknowledged via
-   the standard manager launch path. The manager performs a final
-   dispatch-ownership check immediately before child launch side effects. Only
-   positive `self` ownership preserves the normal launch path. When the manager
-   enqueues one of its own singleton-service spawn requests, that write forces
-   the next scheduling drain to probe inactive queues so convergence does not
-   depend on the periodic broad-probe interval. Internal singleton-service
+1. **Spawn queue consumption** – Managers bind their public inbox to
+   `weft.spawn.requests`, and canonical public managers also monitor
+   `weft.spawn.internal` for manager-owned internal service spawn requests.
+   Internal spawn work has strict priority: when internal and public work are
+   both pending, the manager drains internal spawn work before public work.
+   Each message contains a serialized child TaskSpec and an optional
+   `inbox_message`. Messages are reserved into source-specific reserved queues,
+   parsed, launched, and acknowledged via the standard manager launch path.
+   Atomic reservation is the dispatch authority for public spawn work: multiple
+   live managers may compete for public messages, and exactly one manager owns a
+   message once the broker moves it into that manager's reserved queue. When the
+   manager enqueues one of its own singleton-service spawn requests, that write
+   forces the next scheduling drain to probe inactive queues so convergence does
+   not depend on the periodic broad-probe interval. Internal singleton-service
    spawn requests are advanced to a launch attempt in the same manager turn
    without consuming ordinary public spawn work. Successful child launch emits
    durable `task_spawned` evidence with the child TID, child TaskSpec, and
@@ -114,10 +116,9 @@ Key responsibilities implemented in `weft/core/manager.py`:
    PONG from the same TID can rescue the row as positive liveness evidence for
    selection; an absent, malformed, or non-matching PONG is not negative proof
    and does not authorize unsafe takeover by itself. Canonical ownership is
-   lowest-live-TID among canonical claimants for `weft.spawn.requests`.
-   Manager dispatch keeps four
-   runtime-owned outcomes distinct:
-   `self`, `other`, `none`, and `unknown`.
+   lowest-live-TID among canonical claimants for status, selection, and
+   duplicate-manager convergence. It is advisory for public dispatch because
+   atomic queue reservation owns public spawn exclusivity.
    Task-list/status read models use the same selected active-manager view. A
    historical manager task-log row is not enough to publish that manager as
    `running` after a different active manager has been selected.
@@ -191,7 +192,7 @@ _Implementation mapping_:
 - [MA-1.1] Spawn queue consumption — `Manager._build_queue_configs`, `Manager._handle_work_message`, `Manager._build_child_spec`.
 - [MA-1.2] Child process launch — `Manager._launch_child_task`, `launch_task_process` (`weft/core/launcher.py`).
 - [MA-1.3] Initial payload delivery — `Manager._launch_child_task` (inbox seeding block).
-- [MA-1.4] Registry heartbeat and leadership view — `Manager._register_manager`, `Manager._unregister_manager`, `Manager._atexit_unregister`, `Manager._read_active_manager_records`, `Manager._active_manager_records`, `Manager._leader_tid`, `Manager._evaluate_dispatch_ownership`, `Manager._refresh_dispatch_suspension`, `Manager._maybe_yield_leadership`, `weft/commands/system.py::_collect_task_snapshot_records`, plus `weft/helpers.py::is_canonical_manager_record` and `weft/helpers.py::canonical_owner_tid`.
+- [MA-1.4] Registry heartbeat and leadership view — `Manager._register_manager`, `Manager._unregister_manager`, `Manager._atexit_unregister`, `Manager._read_active_manager_records`, `Manager._active_manager_records`, `Manager._leader_tid`, `Manager._evaluate_dispatch_ownership`, `Manager._maybe_yield_leadership`, `weft/commands/system.py::_collect_task_snapshot_records`, plus `weft/helpers.py::is_canonical_manager_record` and `weft/helpers.py::canonical_owner_tid`.
 - [MA-1.5] Idle timeout — `Manager.process_once` (idle-timeout check), `Manager._read_broker_timestamp`, `Manager._update_idle_activity_from_broker`.
 - [MA-1.6] Autostart manifests — `Manager._reconcile_managed_services`, `Manager._tick_autostart`, `Manager._desired_autostart_services`, `Manager._mark_autostart_enqueued`, `Manager._prune_autostart_state`, `Manager._build_autostart_spawn_payload`, `Manager._load_autostart_manifest`, `Manager._load_autostart_taskspec`, `Manager._load_autostart_pipeline`, `Manager._active_autostart_sources`, `Manager._cleanup_children`, plus `weft/core/pipelines.py::compile_linear_pipeline` for stored pipeline targets. Autostarts share `weft/core/manager_services.py` metadata/state primitives and `reduce_managed_service_state` transition selection with built-in singleton services.
 - [MA-1.6a] Managed internal service supervision — `Manager._run_managed_service_convergence`, `Manager._reconcile_managed_services`, `Manager._tick_internal_services`, `Manager._tick_managed_service`, `Manager._service_supervision_allowed`, `Manager._build_heartbeat_spawn_payload`, `Manager._build_task_monitor_spawn_payload`, `Manager._pending_service_keys`, `Manager._trusted_service_key_from_metadata`, `Manager._service_key_for_child`, `Manager._observed_service_candidates_by_key`, `Manager._service_candidate_from_task_log`, `Manager._candidate_force_kill_pids`, `Manager._runtime_handle_force_kill_pids`, `Manager._enqueue_managed_service_request`, `Manager._drain_internal_spawn_requests`, `Manager._cleanup_children`, `Manager.wait_for_activity`, and `Manager._user_work_children`; public submission sanitization lives in `weft/core/spawn_requests.py::submit_spawn_request`; shared service models and `reduce_managed_service_state` live in `weft/core/manager_services.py`, runtime TaskMonitor behavior lives in `weft/core/tasks/task_monitor.py`, and processor contracts live in `weft/core/task_monitoring.py`. Implementation plan: [`2026-05-10-control-and-service-convergence-state-machine-plan.md`](../plans/2026-05-10-control-and-service-convergence-state-machine-plan.md) and hardening plan: [`2026-05-10-manager-service-authority-boundary-hardening-plan.md`](../plans/2026-05-10-manager-service-authority-boundary-hardening-plan.md).
@@ -285,7 +286,7 @@ _Implementation mapping_:
 - Detached bootstrap launcher — `weft/manager_detached_launcher.py` :: `main` (short-lived wrapper that starts the real manager runtime in a detached session/process-group boundary and reports early launch status back to `_start_manager`).
 - Manager process launch — `weft/core/manager_runtime.py` :: `_start_manager` (builds manager TaskSpec, launches the detached wrapper, requires matching pid-plus-registry readiness before success, treats post-proof acknowledgement cleanup as best effort, and reports early bootstrap diagnostics on failure).
 - Manager process entry point — `weft/manager_process.py` :: `run_manager_process`, `main` (shared runtime helper plus standalone module invoked via `python -m weft.manager_process`).
-- Leadership election and ownership fencing — `weft/core/manager.py` :: `Manager._maybe_yield_leadership`, `Manager._leader_tid`, `Manager._read_active_manager_records`, `Manager._active_manager_records`, `Manager._evaluate_dispatch_ownership`, `Manager._refresh_dispatch_suspension`, `Manager._apply_final_dispatch_fence`, `Manager._requeue_reserved_spawn_request`; `weft/helpers.py::is_canonical_manager_record`; `weft/helpers.py::canonical_owner_tid` (lowest-TID canonical manager wins; non-leaders yield, requeue, or suspend according to the final ownership proof).
+- Leadership election and advisory dispatch view — `weft/core/manager.py` :: `Manager._maybe_yield_leadership`, `Manager._leader_tid`, `Manager._read_active_manager_records`, `Manager._active_manager_records`, `Manager._evaluate_dispatch_ownership`; `weft/helpers.py::is_canonical_manager_record`; `weft/helpers.py::canonical_owner_tid` (lowest-TID canonical manager wins for status and eventual duplicate-manager convergence, while public spawn dispatch itself is work-stealing by atomic reservation).
 - Internal runtime submission envelope — `weft/core/spawn_requests.py`
   `submit_spawn_request` carries internal runtime selectors on the manager-owned
   spawn envelope, and `weft/core/manager.py` `Manager._build_child_spec`
