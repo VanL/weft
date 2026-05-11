@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import json
 import multiprocessing
 import os
@@ -3208,6 +3209,53 @@ def test_manager_leadership_yield_waits_until_actionable_public_work_advances(
         launched.append(child_spec.tid)
         return True
 
+    monkeypatch.setattr(manager, "_leader_tid", lambda: lower_leader_tid)
+    monkeypatch.setattr(manager, "_launch_child_task", _record_launch)
+
+    try:
+        manager.process_once()
+    finally:
+        manager.stop(join=False)
+        manager.cleanup()
+
+    assert launched == [str(message_id)]
+    assert spawn_queue.peek_one(exact_timestamp=message_id) is None
+    assert reserved_queue.peek_one(exact_timestamp=message_id) is None
+
+
+def test_manager_pending_precheck_forces_inactive_public_queue_probe(
+    broker_env,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    config = load_config({"WEFT_TASK_MONITOR_ENABLED": "0"})
+    manager = Manager(db_path, make_manager_spec(unique_tid), config=config)
+    spawn_queue = make_queue(WEFT_SPAWN_REQUESTS_QUEUE)
+    reserved_queue = make_queue(manager._queue_names["reserved"])
+    drain(spawn_queue)
+
+    payload = {
+        "name": "inactive-public-queue",
+        "spec": {
+            "type": "function",
+            "function_target": "tests.tasks.sample_targets:echo_payload",
+        },
+    }
+    spawn_queue.write(json.dumps(payload))
+    message_id = pending_timestamps(spawn_queue)[0]
+    lower_leader_tid = str(int(manager.tid) - 1)
+    launched: list[str] = []
+
+    def _record_launch(child_spec: TaskSpec, *_args: object, **_kwargs: object) -> bool:
+        assert child_spec.tid is not None
+        launched.append(child_spec.tid)
+        return True
+
+    manager._active_queues = []
+    manager._queue_iterator = itertools.cycle([])
+    manager._check_counter = 1
+    manager._pending_messages_precheck_confirmed = False
     monkeypatch.setattr(manager, "_leader_tid", lambda: lower_leader_tid)
     monkeypatch.setattr(manager, "_launch_child_task", _record_launch)
 

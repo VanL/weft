@@ -1572,13 +1572,19 @@ class Manager(BaseTask):
         return super()._queue_has_pending(queue)
 
     def _has_pending_messages(self) -> bool:
-        """Return pending work, excluding temporarily stalled manager control."""
+        """Return pending work, excluding temporarily stalled manager control.
+
+        This is a scheduler precheck as well as a predicate. When it proves
+        non-control work exists, the next queue drain must probe all queues so
+        pending public work cannot wait behind the periodic active-queue scan.
+        """
 
         ctrl_name = self._queue_names.get("ctrl_in")
         for name, config in self._queues.items():
             if name == ctrl_name:
                 continue
             if self._queue_has_pending(config.queue):
+                self._mark_pending_messages_prechecked()
                 return True
         return self._manager_control_pending_is_actionable()
 
