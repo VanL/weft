@@ -50,6 +50,7 @@ always be rolled back from the public request queue.
 - [Service Liveness And Health Convergence Plan](../plans/2026-05-09-service-liveness-and-health-convergence-plan.md) – draft plan to make manager ownership, heartbeat supersession, singleton restart timing, and status liveness diagnostics share one interpretation path.
 - [Manager Service Authority Boundary Hardening Plan](../plans/2026-05-10-manager-service-authority-boundary-hardening-plan.md) – tighten manager-owned singleton evidence authority, duplicate PID force-kill authority, and service-key helper structure.
 - [Manager Work-Stealing Dispatch Plan](../plans/2026-05-11-manager-work-stealing-dispatch-plan.md) – draft plan to make atomic spawn-request reservation the public dispatch authority while keeping singleton service correctness in the manager-owned reducer.
+- [Manager Serve Operational Log Plan](../plans/2026-05-11-manager-serve-operational-log-plan.md) – draft plan for level-controlled foreground `manager serve` operational logs that expose registry, loop, service-convergence, spawn, and TaskMonitor decisions without writing lifecycle state.
 
 ## Conceptual Model: Everything is a Task [MA-0]
 
@@ -248,7 +249,12 @@ managers explicitly via `weft manager start|stop|list|status` and
 same bootstrap helper as `weft run`; it does not accept an arbitrary manager
 TaskSpec. `weft manager serve` uses that same canonical manager TaskSpec but
 runs it in the foreground for `systemd`, `launchd`, or `supervisord` style
-supervision, forcing `idle_timeout=0.0` for that invocation only. The canonical
+supervision, forcing `idle_timeout=0.0` for that invocation only. That
+foreground command may enable a level-controlled structured operational JSONL
+stream on the process log for registry, ownership, service-convergence, spawn,
+and TaskMonitor diagnostics. These records are supervisor diagnostics only;
+they are not lifecycle truth and are not written to `weft.log.tasks` or any
+task-local queue. The canonical
 manager for bootstrap and leadership is the live canonical manager registered
 for `weft.spawn.requests`. Canonical records are the live `role="manager"`
 entries whose `requests` field points at `weft.spawn.requests`; leadership
@@ -275,7 +281,7 @@ _Implementation mapping_:
   re-applies them when materializing the child TaskSpec.
 - External signal handling — `weft/core/manager.py` :: `Manager.handle_termination_signal` (TERM/INT drain, SIGUSR1 kill).
 - CLI management — `weft/commands/manager.py` :: `start_command`, `stop_command`, `list_command`, `status_command`; these commands are thin wrappers over the shared lifecycle helper. `weft/commands/status.py` :: `_collect_manager_records` reuses the same lifecycle reader for manager views.
-- Foreground supervision command — `weft/commands/serve.py` :: `serve_command`, registered in `weft/cli/app.py` as `weft manager serve`.
+- Foreground supervision command and process-log diagnostics — `weft/commands/serve.py` :: `serve_command`, registered in `weft/cli/app.py` as `weft manager serve`; structured process-log emission lives in `weft/core/serve_log.py`, `weft/core/manager.py`, and `weft/core/tasks/task_monitor.py`.
 
 ## Scope Boundary [MA-4]
 

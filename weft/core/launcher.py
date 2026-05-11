@@ -161,6 +161,7 @@ def launch_task_process(
     *,
     config: dict[str, Any] | None = None,
     poll_interval: float = TASK_PROCESS_POLL_INTERVAL,
+    detach_stdio: bool = True,
 ) -> BaseProcess:
     """Launch *task_cls* in a new spawn-process and return the Process object.
 
@@ -184,7 +185,7 @@ def launch_task_process(
             config,
             poll_interval,
             True,
-            True,
+            detach_stdio,
         ),
         daemon=False,
     )

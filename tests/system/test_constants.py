@@ -40,6 +40,7 @@ from weft._constants import (
     MANAGER_COMPETING_STARTUP_GRACE_SECONDS,
     MANAGER_PID_LIVENESS_RECHECK_INTERVAL,
     MANAGER_REGISTRY_POLL_INTERVAL,
+    MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY,
     MANAGER_STARTUP_TIMEOUT_SECONDS,
     MAX_CPU_LIMIT,
     MIN_CONNECTIONS_LIMIT,
@@ -75,6 +76,8 @@ from weft._constants import (
     WEFT_DIRECTORY_NAME_DEFAULT,
     WEFT_MANAGER_LIFETIME_TIMEOUT,
     WEFT_MANAGER_REUSE_ENABLED,
+    WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS_DEFAULT,
+    WEFT_MANAGER_SERVE_LOG_LEVEL_DEFAULT,
     WEFT_TASK_MONITOR_BATCH_SIZE_DEFAULT,
     WEFT_TASK_MONITOR_ENABLED_DEFAULT,
     WEFT_TASK_MONITOR_INTERVAL_SECONDS_DEFAULT,
@@ -345,6 +348,14 @@ class TestLoadConfig:
 
             # Logging
             assert config["WEFT_LOGGING_ENABLED"] is False
+            assert (
+                config["WEFT_MANAGER_SERVE_LOG_LEVEL"]
+                == WEFT_MANAGER_SERVE_LOG_LEVEL_DEFAULT
+            )
+            assert (
+                config["WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS"]
+                == WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS_DEFAULT
+            )
 
             # Weft project directory
             assert config["WEFT_DIRECTORY_NAME"] == WEFT_DIRECTORY_NAME_DEFAULT
@@ -436,6 +447,53 @@ class TestLoadConfig:
         ):
             with pytest.raises(ValueError, match="WEFT_TASK_MONITOR_BATCH_SIZE"):
                 load_config()
+
+    @pytest.mark.parametrize("level", ["off", "info", "debug", "trace"])
+    def test_manager_serve_log_level_env(self, level: str) -> None:
+        with patch.dict(
+            os.environ,
+            {"WEFT_MANAGER_SERVE_LOG_LEVEL": level},
+            clear=True,
+        ):
+            config = load_config()
+
+        assert config["WEFT_MANAGER_SERVE_LOG_LEVEL"] == level
+
+    def test_manager_serve_log_level_rejects_unknown(self) -> None:
+        with (
+            patch.dict(
+                os.environ,
+                {"WEFT_MANAGER_SERVE_LOG_LEVEL": "verbose"},
+                clear=True,
+            ),
+            pytest.raises(ValueError, match="WEFT_MANAGER_SERVE_LOG_LEVEL"),
+        ):
+            load_config()
+
+    @pytest.mark.parametrize("value", ["0", "-1", "not-a-number"])
+    def test_manager_serve_log_interval_rejects_invalid(self, value: str) -> None:
+        with (
+            patch.dict(
+                os.environ,
+                {"WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS": value},
+                clear=True,
+            ),
+            pytest.raises(ValueError, match="WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS"),
+        ):
+            load_config()
+
+    def test_manager_serve_log_overrides_normalize(self) -> None:
+        config = compile_config(
+            {
+                MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY: "true",
+                "WEFT_MANAGER_SERVE_LOG_LEVEL": "debug",
+                "WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS": 0.25,
+            }
+        )
+
+        assert config[MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY] is True
+        assert config["WEFT_MANAGER_SERVE_LOG_LEVEL"] == "debug"
+        assert config["WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS"] == 0.25
 
     def test_debug_setting(self) -> None:
         """Test debug environment variable."""

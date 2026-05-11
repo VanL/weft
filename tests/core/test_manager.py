@@ -36,6 +36,7 @@ from weft._constants import (
     INTERNAL_SERVICE_KEY_METADATA_KEY,
     INTERNAL_SERVICE_KEY_TASK_MONITOR,
     INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY,
+    MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY,
     PIPELINE_RUNTIME_METADATA_KEY,
     TERMINAL_ENVELOPE_TYPE,
     WEFT_GLOBAL_LOG_QUEUE,
@@ -77,6 +78,14 @@ def drain(queue):
             break
         items.append(value)
     return items
+
+
+def serve_log_events(capsys: pytest.CaptureFixture[str]) -> list[dict[str, object]]:
+    return [
+        json.loads(line)
+        for line in capsys.readouterr().err.splitlines()
+        if line.strip()
+    ]
 
 
 def pending_timestamps(queue) -> list[int]:
@@ -731,6 +740,138 @@ def test_manager_service_enqueue_forces_next_internal_queue_probe(
         manager.cleanup()
 
     assert seen == ["task-monitor"]
+
+
+def test_manager_operational_log_emits_metadata_and_honors_level(
+    broker_env,
+    unique_tid,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    db_path, _make_queue = broker_env
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "0",
+            MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY: True,
+            "WEFT_MANAGER_SERVE_LOG_LEVEL": "debug",
+            "WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS": 0.1,
+        }
+    )
+    manager = Manager(db_path, make_manager_spec(unique_tid), config=config)
+    capsys.readouterr()
+    try:
+        manager._emit_serve_log(
+            "manager_loop_summary",
+            component="manager",
+            required_level="info",
+            child_count=0,
+        )
+        manager._emit_serve_log(
+            "trace_only",
+            component="manager",
+            required_level="trace",
+        )
+    finally:
+        manager.cleanup()
+
+    events = serve_log_events(capsys)
+    assert [event["event"] for event in events] == ["manager_loop_summary"]
+    event = events[0]
+    assert event["schema"] == "weft.manager_serve_log"
+    assert event["schema_version"] == 1
+    assert event["manager_tid"] == unique_tid
+    assert event["configured_level"] == "debug"
+    assert event["required_level"] == "info"
+    assert event["component"] == "manager"
+    assert isinstance(event["timestamp_ns"], int)
+
+
+def test_manager_operational_log_off_is_silent(
+    broker_env,
+    unique_tid,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    db_path, _make_queue = broker_env
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "0",
+            MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY: True,
+            "WEFT_MANAGER_SERVE_LOG_LEVEL": "off",
+        }
+    )
+    manager = Manager(db_path, make_manager_spec(unique_tid), config=config)
+    try:
+        manager._emit_serve_log(
+            "manager_loop_summary",
+            component="manager",
+            required_level="info",
+        )
+    finally:
+        manager.cleanup()
+
+    assert serve_log_events(capsys) == []
+
+
+def test_manager_operational_log_env_without_serve_active_is_silent(
+    broker_env,
+    unique_tid,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    db_path, _make_queue = broker_env
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "0",
+            "WEFT_MANAGER_SERVE_LOG_LEVEL": "debug",
+        }
+    )
+    manager = Manager(db_path, make_manager_spec(unique_tid), config=config)
+    try:
+        manager._emit_serve_log(
+            "manager_loop_summary",
+            component="manager",
+            required_level="info",
+        )
+    finally:
+        manager.cleanup()
+
+    assert serve_log_events(capsys) == []
+
+
+def test_manager_service_convergence_operational_log_shows_task_monitor_start(
+    broker_env,
+    unique_tid,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    db_path, _make_queue = broker_env
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY: True,
+            "WEFT_MANAGER_SERVE_LOG_LEVEL": "debug",
+        }
+    )
+    manager = Manager(db_path, make_manager_spec(unique_tid), config=config)
+    try:
+        events = serve_log_events(capsys)
+    finally:
+        manager.cleanup()
+
+    decisions = [
+        event
+        for event in events
+        if event.get("event") == "managed_service_decision"
+        and event.get("service_key") == INTERNAL_SERVICE_KEY_TASK_MONITOR
+    ]
+    assert any(event.get("action") == "start_now" for event in decisions)
+    assert any(
+        event.get("enqueue_queue") == WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE
+        for event in decisions
+    )
+    assert any(
+        event.get("event") == "managed_service_enqueue"
+        and event.get("service_key") == INTERNAL_SERVICE_KEY_TASK_MONITOR
+        and event.get("enqueue_queue") == WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE
+        for event in events
+    )
 
 
 def test_manager_does_not_enqueue_task_monitor_when_disabled(

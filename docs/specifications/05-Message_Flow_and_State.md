@@ -268,11 +268,16 @@ Current flow:
 Task lifecycle events -> weft.log.tasks -> status/result reconstruction
 Task lifecycle events -> weft.log.tasks -> task-monitor JSONL logs
 TaskMonitor heartbeat wake -> T{monitor_tid}.inbox -> bounded processor cycle
+manager serve operational events -> process stderr/stdout only
 ```
 
 Current rules:
 
 - `weft.log.tasks` is the durable lifecycle log
+- opt-in `weft manager serve` operational JSONL records are process-log
+  diagnostics only. They must not be written to `weft.log.tasks`, per-task
+  queues, control queues, or runtime-state queues, and they must not be used as
+  lifecycle truth, pruning evidence, or status/result reconstruction input.
 - CLI status surfaces reconstruct task snapshots from that log plus the latest
   `weft.state.tid_mappings` entries and live runtime liveness where needed; they
   do not depend on a separate state database
@@ -388,6 +393,7 @@ collection;
 `weft/commands/runtime_prune.py` explicit runtime-only prune reports and
 exact-message deletion;
 `weft/commands/_result_wait.py`;
+`weft/core/serve_log.py` manager-serve process-log record construction;
 `weft/commands/_task_history.py`;
 `weft/commands/_streaming.py`.
 
@@ -748,3 +754,4 @@ management live in the companion doc:
 - [`docs/plans/2026-05-09-prune-path-unification-plan.md`](../plans/2026-05-09-prune-path-unification-plan.md)
 - [`docs/plans/2026-05-10-manager-service-authority-boundary-hardening-plan.md`](../plans/2026-05-10-manager-service-authority-boundary-hardening-plan.md)
 - [`docs/plans/2026-05-11-manager-work-stealing-dispatch-plan.md`](../plans/2026-05-11-manager-work-stealing-dispatch-plan.md)
+- [`docs/plans/2026-05-11-manager-serve-operational-log-plan.md`](../plans/2026-05-11-manager-serve-operational-log-plan.md)

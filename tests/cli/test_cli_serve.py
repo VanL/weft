@@ -20,6 +20,7 @@ from weft._constants import (
     INTERNAL_SERVICE_KEY_HEARTBEAT,
     INTERNAL_SERVICE_KEY_METADATA_KEY,
     INTERNAL_SERVICE_KEY_TASK_MONITOR,
+    MANAGER_SERVE_LOG_SCHEMA,
     TERMINAL_TASK_STATUSES,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MANAGERS_REGISTRY_QUEUE,
@@ -320,6 +321,18 @@ def _stop_process(
     return stdout, stderr
 
 
+def _operational_log_events(output: str) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    for line in output.splitlines():
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if payload.get("schema") == MANAGER_SERVE_LOG_SCHEMA:
+            events.append(payload)
+    return events
+
+
 def test_serve_runs_in_foreground_and_reuses_single_manager(
     workdir, weft_harness: WeftTestHarness
 ) -> None:
@@ -371,6 +384,140 @@ def test_serve_runs_in_foreground_and_reuses_single_manager(
         stdout, stderr = _stop_process(process)
         assert process.returncode == 0
         assert stdout == ""
+        assert stderr == ""
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            _stop_process(process)
+
+
+def test_serve_help_includes_operational_log_options(
+    workdir,
+    weft_harness: WeftTestHarness,
+) -> None:
+    rc, out, err = run_cli(
+        "manager",
+        "serve",
+        "--help",
+        cwd=workdir,
+        harness=weft_harness,
+    )
+
+    assert rc == 0
+    assert err == ""
+    assert "--level" in out
+    assert "--log-interval" in out
+
+
+def test_serve_level_info_emits_process_operational_log(
+    workdir,
+    weft_harness: WeftTestHarness,
+) -> None:
+    context_root = workdir
+    context = build_context(spec_context=context_root)
+
+    process = _popen_cli(
+        "manager",
+        "serve",
+        "--level",
+        "info",
+        "--log-interval",
+        "0.1",
+        "--context",
+        context_root,
+        cwd=workdir,
+    )
+    weft_harness.register_pid(process.pid, kind="owner")
+
+    try:
+        record = _wait_for_active_canonical_manager(context, process=process)
+        weft_harness.register_manager_tid(record["tid"])
+
+        rc, out, err = run_cli(
+            "manager",
+            "stop",
+            record["tid"],
+            "--context",
+            context_root,
+            cwd=workdir,
+            harness=weft_harness,
+        )
+        assert rc == 0
+        assert out == ""
+        assert err == ""
+
+        stdout, stderr = _stop_process(process)
+        assert process.returncode == 0
+        assert stdout == ""
+        events = _operational_log_events(stderr)
+        assert events
+        first = events[0]
+        assert first["schema"] == MANAGER_SERVE_LOG_SCHEMA
+        assert first["schema_version"] == 1
+        assert first["manager_tid"] == record["tid"]
+        assert first["configured_level"] == "info"
+        assert first["event"] in {
+            "manager_loop_summary",
+            "manager_registry_snapshot",
+            "managed_service_decision",
+            "task_monitor_config",
+            "task_monitor_cycle",
+        }
+
+        log_queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
+        try:
+            task_log_rows = list(iter_queue_json_entries(log_queue))
+        finally:
+            log_queue.close()
+        assert not any(
+            MANAGER_SERVE_LOG_SCHEMA in json.dumps(row) for row, _ts in task_log_rows
+        )
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            _stop_process(process)
+
+
+def test_serve_level_off_suppresses_env_operational_log(
+    workdir,
+    weft_harness: WeftTestHarness,
+) -> None:
+    context_root = workdir
+    context = build_context(spec_context=context_root)
+
+    process = _popen_cli(
+        "manager",
+        "serve",
+        "--level",
+        "off",
+        "--context",
+        context_root,
+        cwd=workdir,
+        env={"WEFT_MANAGER_SERVE_LOG_LEVEL": "debug"},
+    )
+    weft_harness.register_pid(process.pid, kind="owner")
+
+    try:
+        record = _wait_for_active_canonical_manager(context, process=process)
+        weft_harness.register_manager_tid(record["tid"])
+
+        rc, out, err = run_cli(
+            "manager",
+            "stop",
+            record["tid"],
+            "--context",
+            context_root,
+            cwd=workdir,
+            harness=weft_harness,
+        )
+        assert rc == 0
+        assert out == ""
+        assert err == ""
+
+        stdout, stderr = _stop_process(process)
+        assert process.returncode == 0
+        assert stdout == ""
+        assert _operational_log_events(stderr) == []
         assert stderr == ""
     finally:
         if process.poll() is None:

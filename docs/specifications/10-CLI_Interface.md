@@ -267,9 +267,16 @@ Current behavior:
   yields leadership and drains
 - exits with code `1` if another live canonical manager already exists for the
   same context
+- accepts `--level off|info|debug|trace` to control opt-in structured
+  operational JSONL output for this foreground serve process only. The default
+  is `off`.
+- accepts `--log-interval SECONDS` to rate-limit repeated operational-log
+  summaries while preserving state-change events
 
 This exists so operators can supervise Weft under tools like `systemd`,
 `launchd`, or `supervisord` without a separate runtime entrypoint.
+Operational-log records are written to the manager process log, are bounded
+diagnostics, and are not `weft.log.tasks` lifecycle records or status truth.
 
 Detached manager bootstrap for `weft run` and `weft manager start` remains a
 separate contract from `manager serve`: it starts the canonical manager through
@@ -604,6 +611,17 @@ The CLI should not imply that runtime broker configuration lives in a
 SQLite-only metadata-directory broker-db flag model. That is why the current contract uses
 context discovery plus backend-aware broker resolution.
 
+Current manager-serve operational-log configuration:
+
+- `WEFT_MANAGER_SERVE_LOG_LEVEL` defaults the foreground serve operational log
+  level to `off`, `info`, `debug`, or `trace`.
+- `WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS` defaults the minimum interval for
+  repeated state-stable operational-log summaries.
+- explicit `weft manager serve --level` and `--log-interval` values override
+  those environment defaults for that serve invocation only.
+- these settings do not affect `weft manager start`, `weft run`, task
+  lifecycle logging, or task-monitor foreground command output.
+
 Related plan:
 - `docs/plans/2026-04-16-configurable-weft-directory-name-plan.md`
 
@@ -716,6 +734,7 @@ flags, and future queue or control ergonomics live in the companion doc:
 - [`docs/plans/2026-04-15-spec-aware-run-help-plan.md`](../plans/2026-04-15-spec-aware-run-help-plan.md)
 - [`docs/plans/2026-04-16-autostart-hardening-and-contract-alignment-plan.md`](../plans/2026-04-16-autostart-hardening-and-contract-alignment-plan.md)
 - [`docs/plans/2026-04-16-pipeline-autostart-extension-plan.md`](../plans/2026-04-16-pipeline-autostart-extension-plan.md)
+- [`docs/plans/2026-05-11-manager-serve-operational-log-plan.md`](../plans/2026-05-11-manager-serve-operational-log-plan.md)
 
 ## Related Documents
 

@@ -56,6 +56,7 @@ from weft._constants import (
     MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS,
     MANAGER_PID_LIVENESS_RECHECK_INTERVAL,
     MANAGER_REGISTRY_HEARTBEAT_INTERVAL_SECONDS,
+    MANAGER_SERVE_LOG_CHILD_LIMIT,
     MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS,
     MANAGER_STALLED_CONTROL_LOG_INTERVAL_SECONDS,
     MANAGER_STALLED_CONTROL_RETRY_SECONDS,
@@ -72,6 +73,8 @@ from weft._constants import (
     WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
     WEFT_MANAGER_LIFETIME_TIMEOUT,
     WEFT_MANAGER_RUNTIME_HANDLE_JSON_ENV,
+    WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS,
+    WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS_DEFAULT,
     WEFT_MANAGERS_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
     WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS_DEFAULT,
@@ -115,6 +118,13 @@ from .pipelines import (
     PipelineCompilationContext,
     compile_linear_pipeline,
     load_pipeline_spec_payload,
+)
+from .serve_log import (
+    build_serve_log_record,
+    emit_serve_log_record,
+    serve_log_allows,
+    serve_log_level,
+    truncate_serve_log_value,
 )
 from .spec_store import resolve_named_spec_from_root
 from .tasks import Consumer
@@ -207,6 +217,10 @@ class Manager(BaseTask):
         self._stalled_control_retry_after_ns = 0
         self._stalled_control_last_log_ns = 0
         self._pending_termination_signal: int | None = None
+        self._loop_iteration = 0
+        self._serve_log_last_emit_ns: dict[str, int] = {}
+        self._serve_log_last_state: dict[str, str] = {}
+        self._serve_log_runtime_handle_id = self._resolve_serve_log_runtime_handle_id()
         self._autostart_enabled = bool(self._config.get("WEFT_AUTOSTART_TASKS", True))
         autostart_dir = self._config.get("WEFT_AUTOSTART_DIR")
         self._autostart_dir = Path(autostart_dir) if autostart_dir else None
@@ -245,6 +259,7 @@ class Manager(BaseTask):
         self.taskspec.mark_running(pid=multiprocessing.current_process().pid)
         self._update_process_title("running")
         self._report_state_change(event="task_started")
+        self._emit_manager_loop_summary(force=True)
         self._reconcile_managed_services(force=True)
         self._managed_service_duplicate_scan_pending.clear()
         self._managed_internal_spawn_enqueued = False
@@ -256,6 +271,195 @@ class Manager(BaseTask):
         return self._managed_service_state.setdefault(
             service_key,
             ManagedServiceState(),
+        )
+
+    def _manager_log_enabled(self) -> bool:
+        """Return whether foreground manager operational logging is enabled."""
+
+        return serve_log_level(self._config) != "off"
+
+    def _manager_log_allows(self, required_level: str) -> bool:
+        """Return whether a foreground manager operational-log event is allowed."""
+
+        return serve_log_allows(self._config, required_level)
+
+    def _resolve_serve_log_runtime_handle_id(self) -> str | None:
+        """Return a stable runtime handle id for operational-log indexing."""
+
+        try:
+            return self._manager_runtime_handle().id
+        except (TypeError, ValueError, RuntimeError):
+            return None
+
+    def _serve_log_context_path(self) -> str | None:
+        value = getattr(self.taskspec.spec, "weft_context", None)
+        return str(value) if value is not None else None
+
+    def _emit_serve_log(
+        self,
+        event: str,
+        *,
+        component: str,
+        required_level: str,
+        severity: str = "info",
+        **fields: Any,
+    ) -> None:
+        """Emit one best-effort bounded JSONL operational-log event."""
+
+        if not self._manager_log_allows(required_level):
+            return
+        try:
+            record = build_serve_log_record(
+                config=self._config,
+                event=event,
+                component=component,
+                manager_tid=self.tid,
+                manager_tid_short=self.tid_short,
+                required_level=required_level,
+                severity=severity,
+                weft_context=self._serve_log_context_path(),
+                runtime_handle_id=self._serve_log_runtime_handle_id,
+                pid=os.getpid(),
+                loop_iteration=self._loop_iteration,
+                fields=fields,
+            )
+            emit_serve_log_record(record)
+        except Exception:  # pragma: no cover - diagnostics must not affect runtime
+            logger.debug("Failed to emit manager operational log", exc_info=True)
+
+    def _emit_serve_log_rate_limited(
+        self,
+        event: str,
+        *,
+        component: str,
+        required_level: str,
+        severity: str = "info",
+        key: str | None = None,
+        state: Mapping[str, Any] | None = None,
+        force: bool = False,
+        log_fields: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Emit an operational-log event on state change or interval expiry."""
+
+        if not self._manager_log_allows(required_level):
+            return
+        fields = dict(log_fields or {})
+        log_key = key or event
+        now_ns = time.time_ns()
+        interval_seconds = float(
+            self._config.get(
+                WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS,
+                WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS_DEFAULT,
+            )
+        )
+        interval_ns = int(interval_seconds * 1_000_000_000)
+        state_key = json.dumps(
+            truncate_serve_log_value(dict(state or fields)),
+            sort_keys=True,
+            default=str,
+        )
+        last_state = self._serve_log_last_state.get(log_key)
+        last_emit_ns = self._serve_log_last_emit_ns.get(log_key, 0)
+        if (
+            not force
+            and last_state == state_key
+            and now_ns - last_emit_ns < interval_ns
+        ):
+            return
+        self._serve_log_last_state[log_key] = state_key
+        self._serve_log_last_emit_ns[log_key] = now_ns
+        self._emit_serve_log(
+            event,
+            component=component,
+            required_level=required_level,
+            severity=severity,
+            **fields,
+        )
+
+    def _queue_pending_for_log(self, queue_name: str | None) -> bool:
+        if not queue_name:
+            return False
+        try:
+            return self._queue(queue_name).has_pending()
+        except (BrokerError, OSError, RuntimeError):
+            return False
+
+    def _child_summaries_for_log(self) -> list[dict[str, Any]]:
+        summaries: list[dict[str, Any]] = []
+        for tid, child in sorted(self._child_processes.items())[
+            :MANAGER_SERVE_LOG_CHILD_LIMIT
+        ]:
+            summaries.append(
+                {
+                    "tid": tid,
+                    "pid": child.process.pid,
+                    "alive": child.process.is_alive(),
+                    "persistent": child.persistent,
+                    "internal_role": child.internal_role,
+                    "service_key": child.service_key,
+                }
+            )
+        if len(self._child_processes) > MANAGER_SERVE_LOG_CHILD_LIMIT:
+            summaries.append(
+                {
+                    "truncated_count": len(self._child_processes)
+                    - MANAGER_SERVE_LOG_CHILD_LIMIT
+                }
+            )
+        return summaries
+
+    def _service_state_for_log(self, state: ManagedServiceState) -> dict[str, Any]:
+        return {
+            "spawn_pending": state.spawn_pending,
+            "active_tid": state.active_tid,
+            "next_allowed_ns": state.next_allowed_ns,
+            "launched_once": state.launched_once,
+            "restarts": state.restarts,
+            "uncertain_attempts": state.uncertain_attempts,
+            "uncertain_since_ns": state.uncertain_since_ns,
+            "last_uncertain_reason": state.last_uncertain_reason,
+        }
+
+    @staticmethod
+    def _service_candidates_for_log(
+        candidates: Sequence[ServiceCandidate],
+    ) -> list[dict[str, Any]]:
+        return [
+            {
+                "tid": candidate.tid,
+                "state": candidate.state,
+                "source": candidate.source,
+                "reason": candidate.reason,
+            }
+            for candidate in candidates
+        ]
+
+    def _emit_manager_loop_summary(self, *, force: bool = False) -> None:
+        if not self._manager_log_allows("info"):
+            return
+        fields = {
+            "child_count": len(self._child_processes),
+            "children": self._child_summaries_for_log(),
+            "pending_public": self._queue_pending_for_log(
+                self._queue_names.get("inbox")
+            ),
+            "pending_internal": self._queue_pending_for_log(
+                self._queue_names.get("internal_inbox")
+            ),
+            "pending_control": self._queue_pending_for_log(
+                self._queue_names.get("ctrl_in")
+            ),
+            "draining": self._draining,
+            "should_stop": self.should_stop,
+        }
+        self._emit_serve_log_rate_limited(
+            "manager_loop_summary",
+            component="manager",
+            required_level="info",
+            key="manager_loop_summary",
+            state=fields,
+            force=force,
+            log_fields=fields,
         )
 
     @property
@@ -422,6 +626,16 @@ class Manager(BaseTask):
                 child_spec.tid,
                 self.tid,
             )
+            self._emit_serve_log(
+                "child_launch_result",
+                component="spawn",
+                required_level="debug",
+                severity="warning",
+                child_tid=child_spec.tid,
+                child_name=child_spec.name,
+                success=False,
+                reason="manager_draining",
+            )
             return False
 
         inbox_name = child_spec.io.inputs.get("inbox")
@@ -454,6 +668,17 @@ class Manager(BaseTask):
                 child_tid=child_spec.tid,
                 error=str(exc),
             )
+            self._emit_serve_log(
+                "child_launch_result",
+                component="spawn",
+                required_level="debug",
+                severity="warning",
+                child_tid=child_spec.tid,
+                child_name=child_spec.name,
+                success=False,
+                reason="unknown_internal_runtime_class",
+                error=str(exc),
+            )
             return False
 
         internal_role = child_spec.metadata.get(INTERNAL_RUNTIME_TASK_CLASS_KEY)
@@ -469,6 +694,10 @@ class Manager(BaseTask):
             self._db_path,
             child_spec,
             config=self._config,
+            detach_stdio=not (
+                self._manager_log_enabled()
+                and internal_role == INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR
+            ),
         )
         assert child_spec.tid is not None
         self._child_processes[child_spec.tid] = ManagedChild(
@@ -509,6 +738,18 @@ class Manager(BaseTask):
             event_payload["service_key"] = service_key
 
         self._report_state_change(event="task_spawned", **event_payload)
+        self._emit_serve_log(
+            "child_launch_result",
+            component="spawn",
+            required_level="debug",
+            child_tid=child_spec.tid,
+            child_name=child_spec.name,
+            child_pid=process.pid,
+            internal_runtime_class=internal_role,
+            service_key=service_key,
+            autostart_source=autostart_source,
+            success=True,
+        )
         return True
 
     def _seed_child_inbox(
@@ -543,6 +784,17 @@ class Manager(BaseTask):
         self._report_state_change(
             event="task_spawn_rejected",
             child_tid=child_spec.tid,
+            error=error,
+        )
+        self._emit_serve_log(
+            "child_launch_result",
+            component="spawn",
+            required_level="debug",
+            severity="error",
+            child_tid=child_spec.tid,
+            child_name=child_spec.name,
+            success=False,
+            reason="seed_child_inbox_failed",
             error=error,
         )
         return False
@@ -900,6 +1152,16 @@ class Manager(BaseTask):
                 or time.time_ns() - own_timestamp >= interval_ns
             ):
                 self._refresh_manager_registration(force=True)
+                self._emit_serve_log(
+                    "manager_registry_snapshot",
+                    component="registry",
+                    required_level="debug",
+                    event_reason="own_registration_refreshed",
+                    own_record_present=own_record is not None,
+                    own_record_status=own_record.get("status")
+                    if isinstance(own_record, dict)
+                    else None,
+                )
                 latest = self._latest_registry_entry(queue, self.tid)
                 if latest is not None:
                     payload, timestamp = latest
@@ -928,6 +1190,27 @@ class Manager(BaseTask):
             except (BrokerError, OSError, RuntimeError):
                 logger.debug("Failed to prune stale manager record", exc_info=True)
 
+        active_tids = sorted(active)
+        leader_tid = canonical_owner_tid(active)
+        required_level = (
+            "info" if stale_timestamps or len(active_tids) != 1 else "debug"
+        )
+        severity = "warning" if stale_timestamps or not active_tids else "info"
+        fields = {
+            "active_manager_tids": active_tids,
+            "active_manager_count": len(active_tids),
+            "leader_tid": leader_tid,
+            "stale_pruned_count": len(stale_timestamps),
+        }
+        self._emit_serve_log_rate_limited(
+            "manager_registry_snapshot",
+            component="registry",
+            required_level=required_level,
+            severity=severity,
+            key="manager_registry_snapshot",
+            state=fields,
+            log_fields=fields,
+        )
         return active
 
     def _active_manager_records(self) -> dict[str, dict[str, Any]]:
@@ -947,18 +1230,45 @@ class Manager(BaseTask):
         """
 
         if self._queue_names["inbox"] != WEFT_SPAWN_REQUESTS_QUEUE:
-            return DispatchOwnership(state="self", leader_tid=self.tid)
+            ownership = DispatchOwnership(state="self", leader_tid=self.tid)
+            self._emit_manager_ownership_decision(ownership)
+            return ownership
 
         active = self._read_active_manager_records()
         if active is None:
-            return DispatchOwnership(state="unknown")
+            ownership = DispatchOwnership(state="unknown")
+            self._emit_manager_ownership_decision(ownership)
+            return ownership
 
         leader_tid = canonical_owner_tid(active)
         if leader_tid is None:
-            return DispatchOwnership(state="none")
+            ownership = DispatchOwnership(state="none")
+            self._emit_manager_ownership_decision(ownership)
+            return ownership
         if leader_tid == self.tid and self.tid in active:
-            return DispatchOwnership(state="self", leader_tid=leader_tid)
-        return DispatchOwnership(state="other", leader_tid=leader_tid)
+            ownership = DispatchOwnership(state="self", leader_tid=leader_tid)
+            self._emit_manager_ownership_decision(ownership)
+            return ownership
+        ownership = DispatchOwnership(state="other", leader_tid=leader_tid)
+        self._emit_manager_ownership_decision(ownership)
+        return ownership
+
+    def _emit_manager_ownership_decision(
+        self, ownership: DispatchOwnership, *, reason: str | None = None
+    ) -> None:
+        fields = {
+            "ownership_state": ownership.state,
+            "leader_tid": ownership.leader_tid,
+            "reason": reason,
+        }
+        self._emit_serve_log_rate_limited(
+            "manager_ownership_decision",
+            component="ownership",
+            required_level="debug",
+            key="manager_ownership_decision",
+            state=fields,
+            log_fields=fields,
+        )
 
     def _has_actionable_leadership_work(self) -> bool:
         """Return whether this manager should work before yielding leadership.
@@ -975,7 +1285,14 @@ class Manager(BaseTask):
             return True
         if self._managed_internal_spawn_enqueued:
             return True
-        return self._has_pending_messages()
+        ctrl_name = self._queue_names.get("ctrl_in")
+        for name, config in self._queues.items():
+            if name == ctrl_name:
+                continue
+            if self._queue_has_pending(config.queue):
+                self._mark_pending_messages_prechecked()
+                return True
+        return self._manager_control_pending_is_actionable()
 
     def _maybe_yield_leadership(self, *, force: bool = False) -> bool:
         """Check whether this manager should yield leadership and act on it.
@@ -1033,6 +1350,17 @@ class Manager(BaseTask):
         self._last_leader_check_ns = now_ns
 
         leader_tid = self._leader_tid()
+        ownership_state: DispatchOwnershipState
+        if leader_tid is None:
+            ownership_state = "none"
+        elif leader_tid == self.tid:
+            ownership_state = "self"
+        else:
+            ownership_state = "other"
+        self._emit_manager_ownership_decision(
+            DispatchOwnership(state=ownership_state, leader_tid=leader_tid),
+            reason="leadership_yield_check",
+        )
         if leader_tid is None or leader_tid == self.tid:
             return False
 
@@ -1866,6 +2194,14 @@ class Manager(BaseTask):
         self._cleanup_children()
         source_queue = context.queue_name
         reserved_queue = context.reserved_queue_name or self._queue_names["reserved"]
+        self._emit_serve_log(
+            "spawn_reserved",
+            component="spawn",
+            required_level="trace",
+            source_queue=source_queue,
+            reserved_queue=reserved_queue,
+            message_timestamp=timestamp,
+        )
         if not self._control_allows_child_launch():
             return
 
@@ -1873,6 +2209,16 @@ class Manager(BaseTask):
             payload = json.loads(message) if message else {}
         except json.JSONDecodeError:
             logger.warning("Manager received non-JSON spawn request: %s", message)
+            self._emit_serve_log(
+                "spawn_spec_validation_failed",
+                component="spawn",
+                required_level="debug",
+                severity="warning",
+                source_queue=source_queue,
+                reserved_queue=reserved_queue,
+                message_timestamp=timestamp,
+                error="spawn request is not JSON",
+            )
             policy = self.taskspec.spec.reserved_policy_on_error
             self._apply_spawn_reserved_policy(
                 policy,
@@ -1887,6 +2233,17 @@ class Manager(BaseTask):
 
         child_spec = self._build_child_spec(payload, timestamp)
         if child_spec is None:
+            self._emit_serve_log(
+                "spawn_spec_validation_failed",
+                component="spawn",
+                required_level="debug",
+                severity="warning",
+                source_queue=source_queue,
+                reserved_queue=reserved_queue,
+                message_timestamp=timestamp,
+                service_key=service_key_from_metadata(payload.get("metadata")),
+                error="child TaskSpec validation failed",
+            )
             policy = self.taskspec.spec.reserved_policy_on_error
             self._apply_spawn_reserved_policy(
                 policy,
@@ -1915,9 +2272,30 @@ class Manager(BaseTask):
 
         try:
             self._queue(reserved_queue).delete(message_id=timestamp)
+            self._emit_serve_log(
+                "spawn_ack_result",
+                component="spawn",
+                required_level="trace",
+                source_queue=source_queue,
+                reserved_queue=reserved_queue,
+                message_timestamp=timestamp,
+                child_tid=child_spec.tid,
+                success=True,
+            )
         except (BrokerError, OSError, RuntimeError):
             logger.debug(
                 "Failed to acknowledge manager message %s", timestamp, exc_info=True
+            )
+            self._emit_serve_log(
+                "spawn_ack_result",
+                component="spawn",
+                required_level="debug",
+                severity="warning",
+                source_queue=source_queue,
+                reserved_queue=reserved_queue,
+                message_timestamp=timestamp,
+                child_tid=child_spec.tid,
+                success=False,
             )
 
     def _build_child_spec(
@@ -1931,6 +2309,14 @@ class Manager(BaseTask):
             spec_section = payload.get("spec")
             if spec_section is None:
                 logger.warning("Spawn request missing 'spec' field: %s", payload)
+                self._emit_serve_log(
+                    "spawn_spec_validation_failed",
+                    component="spawn",
+                    required_level="debug",
+                    severity="warning",
+                    message_timestamp=timestamp,
+                    error="spawn request missing spec field",
+                )
                 return None
             candidate = {
                 "tid": payload.get("tid"),
@@ -1975,6 +2361,14 @@ class Manager(BaseTask):
         except (TypeError, ValueError, ValidationError):
             logger.exception(
                 "Failed to validate child TaskSpec from payload %s", payload
+            )
+            self._emit_serve_log(
+                "spawn_spec_validation_failed",
+                component="spawn",
+                required_level="debug",
+                severity="warning",
+                message_timestamp=timestamp,
+                error="failed to validate child TaskSpec",
             )
             return None
 
@@ -2104,10 +2498,27 @@ class Manager(BaseTask):
             logger.warning(
                 "Failed to enqueue managed service %s", service.key, exc_info=True
             )
+            self._emit_serve_log(
+                "managed_service_enqueue",
+                component="service",
+                required_level="info",
+                severity="error",
+                service_key=service.key,
+                enqueue_queue=queue_name,
+                success=False,
+            )
             return False
         state = self._service_state(service.key)
         state.spawn_pending = True
         state.launched_once = True
+        self._emit_serve_log(
+            "managed_service_enqueue",
+            component="service",
+            required_level="debug",
+            service_key=service.key,
+            enqueue_queue=queue_name,
+            success=True,
+        )
         return True
 
     def _enqueue_task_monitor_request(self) -> bool:
@@ -2754,6 +3165,7 @@ class Manager(BaseTask):
 
         now_ns = time.time_ns()
         launched_before = state.launched_once
+        state_before = self._service_state_for_log(state)
         decision = reduce_managed_service_state(
             service,
             state,
@@ -2764,6 +3176,36 @@ class Manager(BaseTask):
             now_ns=now_ns,
         )
         self._apply_managed_service_decision_state(state, decision)
+        enqueue_queue = self._managed_service_spawn_queue_name(service)
+        decision_level = (
+            "info"
+            if decision.action
+            in {
+                "start_now",
+                "schedule_restart",
+                "degraded_wait",
+                "suppress_max_restarts",
+            }
+            else "debug"
+        )
+        self._emit_serve_log(
+            "managed_service_decision",
+            component="service",
+            required_level=decision_level,
+            severity="warning" if decision.action == "degraded_wait" else "info",
+            service_key=service.key,
+            lifecycle=service.lifecycle,
+            action=decision.action,
+            reason=decision.reason,
+            pending_spawn=service.key in pending_keys,
+            enqueue_queue=enqueue_queue if decision.action == "start_now" else None,
+            canonical_live_tid=decision.canonical_live.tid
+            if decision.canonical_live is not None
+            else None,
+            candidates=self._service_candidates_for_log(candidates),
+            state_before=state_before,
+            state_after=self._service_state_for_log(state),
+        )
 
         if decision.canonical_live is not None:
             self._terminate_duplicate_service_candidates(
@@ -2838,6 +3280,17 @@ class Manager(BaseTask):
                 continue
             keys_needing_evidence.add(service.key)
 
+        self._emit_serve_log(
+            "managed_service_reconcile",
+            component="service",
+            required_level="debug",
+            desired_keys=sorted(desired_keys),
+            pending_keys=sorted(pending_keys),
+            keys_needing_evidence=sorted(keys_needing_evidence),
+            include_internal=include_internal,
+            include_autostart=include_autostart,
+            force=force,
+        )
         candidates_by_key = (
             self._observed_service_candidates_by_key(keys_needing_evidence)
             if keys_needing_evidence
@@ -3385,10 +3838,25 @@ class Manager(BaseTask):
             and self._last_managed_service_convergence_ns
             and now_ns - self._last_managed_service_convergence_ns < interval_ns
         ):
+            fields = {
+                "active": active,
+                "interval_seconds": interval_seconds,
+                "include_autostart": include_autostart,
+                "force": force,
+                "skipped": True,
+            }
+            self._emit_serve_log_rate_limited(
+                "managed_service_convergence",
+                component="service",
+                required_level="trace",
+                key="managed_service_convergence_throttled",
+                state=fields,
+                log_fields=fields,
+            )
             return
         self._last_managed_service_convergence_ns = now_ns
 
-        for _pass_index in range(max_passes):
+        for pass_index in range(max_passes):
             child_exited = self._cleanup_children()
             if self.should_stop or self._draining:
                 return
@@ -3398,6 +3866,20 @@ class Manager(BaseTask):
             self._managed_internal_spawn_enqueued = False
             drained = (
                 self._drain_internal_spawn_requests() if should_drain_internal else 0
+            )
+            self._emit_serve_log(
+                "managed_service_convergence",
+                component="service",
+                required_level="debug",
+                active=active,
+                interval_seconds=interval_seconds,
+                include_autostart=include_autostart,
+                force=force,
+                pass_index=pass_index,
+                child_exited=child_exited,
+                internal_drain_attempted=should_drain_internal,
+                internal_drain_count=drained,
+                child_count=len(self._child_processes),
             )
             if drained:
                 self._last_activity_ns = time.time_ns()
@@ -3432,6 +3914,26 @@ class Manager(BaseTask):
             return
         if self._has_pending_messages():
             self._mark_pending_messages_prechecked()
+            if self._manager_log_allows("trace"):
+                fields = {
+                    "pending_public": self._queue_pending_for_log(
+                        self._queue_names.get("inbox")
+                    ),
+                    "pending_internal": self._queue_pending_for_log(
+                        self._queue_names.get("internal_inbox")
+                    ),
+                    "pending_control": self._queue_pending_for_log(
+                        self._queue_names.get("ctrl_in")
+                    ),
+                }
+                self._emit_serve_log_rate_limited(
+                    "manager_wait_immediate_wake",
+                    component="manager",
+                    required_level="trace",
+                    key="manager_wait_immediate_wake",
+                    state=fields,
+                    log_fields=fields,
+                )
             return
         if self._stop_event is not None:
             self._stop_event.wait(timeout)
@@ -3439,6 +3941,8 @@ class Manager(BaseTask):
         time.sleep(timeout)
 
     def process_once(self) -> None:
+        self._loop_iteration += 1
+        self._emit_manager_loop_summary()
         self._process_pending_termination_signal()
         if self.should_stop:
             return
@@ -3513,7 +4017,9 @@ class Manager(BaseTask):
         if internal_inbox is None:
             return 0
         total_processed = 0
+        attempted = False
         for _ in range(4):
+            attempted = True
             try:
                 if not self._queue(internal_inbox).has_pending():
                     break
@@ -3528,6 +4034,14 @@ class Manager(BaseTask):
             total_processed += processed
             if processed == 0:
                 break
+        self._emit_serve_log(
+            "internal_spawn_drain",
+            component="service",
+            required_level="debug",
+            internal_queue=internal_inbox,
+            attempted=attempted,
+            processed=total_processed,
+        )
         return total_processed
 
     def _continue_shutdown_drain(self) -> None:

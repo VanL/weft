@@ -13,6 +13,7 @@ Spec references:
 
 from __future__ import annotations
 
+import json
 import os
 import threading
 import time
@@ -34,6 +35,8 @@ from weft._constants import (
     TASK_MONITOR_ACTIVITY_WAIT_CAP_SECONDS,
     TASK_MONITOR_HEARTBEAT_STARTUP_TIMEOUT_SECONDS,
     WEFT_GLOBAL_LOG_QUEUE,
+    WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS,
+    WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS_DEFAULT,
 )
 from weft.context import WeftContext, build_context
 from weft.core.heartbeat import cancel_heartbeat, upsert_heartbeat
@@ -42,6 +45,13 @@ from weft.core.pruning.retention import (
     run_retention_prune_for_context,
 )
 from weft.core.pruning.runtime import RuntimePruneConfig, run_runtime_prune_for_context
+from weft.core.serve_log import (
+    build_serve_log_record,
+    emit_serve_log_record,
+    serve_log_allows,
+    serve_log_level,
+    truncate_serve_log_value,
+)
 from weft.core.task_monitoring import (
     TaskMonitorCandidate,
     TaskMonitorProcessorRequest,
@@ -132,10 +142,108 @@ class TaskMonitorTask(BaseTask):
         self._heartbeat_id = f"task-monitor:{taskspec.tid}"
         self._next_heartbeat_registration_attempt_monotonic = 0.0
         self._next_cycle_due_monotonic = 0.0
+        self._serve_log_config_emitted = False
+        self._serve_log_last_emit_ns: dict[str, int] = {}
+        self._serve_log_last_state: dict[str, str] = {}
         super().__init__(db=db, taskspec=taskspec, stop_event=stop_event, config=config)
         self._monitor_config = TaskMonitorRuntimeConfig.from_config(self._config)
         if self._persistent_service:
             self._activate_monitor()
+
+    def _manager_tid_for_log(self) -> str:
+        parent_tid = self.taskspec.metadata.get("parent_tid")
+        return parent_tid if isinstance(parent_tid, str) and parent_tid else self.tid
+
+    def _emit_task_monitor_log(
+        self,
+        event: str,
+        *,
+        required_level: str,
+        severity: str = "info",
+        **fields: Any,
+    ) -> None:
+        if not serve_log_allows(self._config, required_level):
+            return
+        manager_tid = self._manager_tid_for_log()
+        try:
+            record = build_serve_log_record(
+                config=self._config,
+                event=event,
+                component="task_monitor",
+                manager_tid=manager_tid,
+                manager_tid_short=manager_tid[-10:],
+                required_level=required_level,
+                severity=severity,
+                weft_context=str(self._monitor_context().root),
+                runtime_handle_id=self._runtime_handle.id
+                if self._runtime_handle is not None
+                else None,
+                pid=os.getpid(),
+                loop_iteration=None,
+                fields={"task_tid": self.tid, **fields},
+            )
+            emit_serve_log_record(record)
+        except Exception:  # pragma: no cover - diagnostics must not affect monitor
+            return
+
+    def _emit_task_monitor_log_rate_limited(
+        self,
+        event: str,
+        *,
+        required_level: str,
+        severity: str = "info",
+        key: str | None = None,
+        state: Mapping[str, Any] | None = None,
+        force: bool = False,
+        log_fields: Mapping[str, Any] | None = None,
+    ) -> None:
+        if not serve_log_allows(self._config, required_level):
+            return
+        fields = dict(log_fields or {})
+        log_key = key or event
+        now_ns = time.time_ns()
+        interval_seconds = float(
+            self._config.get(
+                WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS,
+                WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS_DEFAULT,
+            )
+        )
+        interval_ns = int(interval_seconds * 1_000_000_000)
+        state_key = json.dumps(
+            truncate_serve_log_value(dict(state or fields)),
+            sort_keys=True,
+            default=str,
+        )
+        last_state = self._serve_log_last_state.get(log_key)
+        last_emit_ns = self._serve_log_last_emit_ns.get(log_key, 0)
+        if (
+            not force
+            and last_state == state_key
+            and now_ns - last_emit_ns < interval_ns
+        ):
+            return
+        self._serve_log_last_state[log_key] = state_key
+        self._serve_log_last_emit_ns[log_key] = now_ns
+        self._emit_task_monitor_log(
+            event,
+            required_level=required_level,
+            severity=severity,
+            **fields,
+        )
+
+    def _emit_task_monitor_config_once(self) -> None:
+        if self._serve_log_config_emitted or serve_log_level(self._config) == "off":
+            return
+        self._serve_log_config_emitted = True
+        self._emit_task_monitor_log(
+            "task_monitor_config",
+            required_level="info",
+            enabled=self._monitor_config.enabled,
+            interval_seconds=self._monitor_config.interval_seconds,
+            batch_size=self._monitor_config.batch_size,
+            processor=self._monitor_config.processor,
+            log_sink=self._monitor_config.log_sink,
+        )
 
     def _activate_monitor(self) -> None:
         """Publish the running lifecycle for the persistent monitor service."""
@@ -232,6 +340,7 @@ class TaskMonitorTask(BaseTask):
 
         if self.should_stop:
             return
+        self._emit_task_monitor_config_once()
         if not self._monitor_config.enabled:
             self._set_activity("disabled", waiting_on=None)
             self._maybe_emit_poll_report()
@@ -411,6 +520,40 @@ class TaskMonitorTask(BaseTask):
         )
         if events_scanned == 0 and result.success:
             self._last_error = self._heartbeat_error
+        cycle_fields = {
+            "processor": self._monitor_config.processor,
+            "enabled": self._monitor_config.enabled,
+            "interval_seconds": self._monitor_config.interval_seconds,
+            "batch_size": self._monitor_config.batch_size,
+            "events_scanned": events_scanned,
+            "candidate_count": len(candidates),
+            "safe_to_delete_count": self._last_safe_to_delete_candidates,
+            "processed": result.processed,
+            "deleted": result.deleted,
+            "reported": result.reported,
+            "success": result.success,
+            "checkpoint_advanced": result.success and last_timestamp is not None,
+            "last_checkpoint": self._last_checkpoint,
+            "warnings": result.warnings,
+            "errors": result.errors,
+            "next_interval_seconds": self._monitor_config.interval_seconds,
+        }
+        self._emit_task_monitor_log_rate_limited(
+            "task_monitor_cycle",
+            required_level="info",
+            severity="info" if result.success else "warning",
+            key="task_monitor_cycle",
+            state=cycle_fields,
+            log_fields=cycle_fields,
+        )
+        if not result.success and result.errors:
+            self._emit_task_monitor_log(
+                "task_monitor_processor_error",
+                required_level="info",
+                severity="error",
+                processor=self._monitor_config.processor,
+                errors=result.errors,
+            )
 
     def _process_monitor_candidates(
         self,
@@ -435,6 +578,13 @@ class TaskMonitorTask(BaseTask):
             processor = resolve_task_monitor_processor(self._monitor_config.processor)
             return processor(request)
         except Exception as exc:  # pragma: no cover - custom processor boundary
+            self._emit_task_monitor_log(
+                "task_monitor_processor_error",
+                required_level="info",
+                severity="error",
+                processor=self._monitor_config.processor,
+                errors=(str(exc),),
+            )
             return TaskMonitorProcessorResult(success=False, errors=(str(exc),))
 
     def _run_canonical_prune_cycle(self, *, apply: bool) -> TaskMonitorProcessorResult:

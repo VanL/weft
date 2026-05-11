@@ -11,6 +11,7 @@ import pytest
 import weft.core.task_monitoring as task_monitoring_mod
 from weft._constants import (
     HEARTBEAT_MIN_INTERVAL_SECONDS,
+    MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MANAGERS_REGISTRY_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
@@ -31,6 +32,7 @@ from weft.core.task_monitoring import (
     resolve_task_monitor_processor,
     task_log_seen_candidate,
 )
+from weft.core.tasks.task_monitor import TaskMonitorTask, make_task_monitor_taskspec
 from weft.helpers import iter_queue_entries
 
 pytestmark = [pytest.mark.shared]
@@ -48,6 +50,14 @@ def custom_processor(
 
 def noop(_request: TaskMonitorProcessorRequest) -> TaskMonitorProcessorResult:
     return TaskMonitorProcessorResult(success=True)
+
+
+def serve_log_events(capsys: pytest.CaptureFixture[str]) -> list[dict[str, object]]:
+    return [
+        json.loads(line)
+        for line in capsys.readouterr().err.splitlines()
+        if line.strip()
+    ]
 
 
 def _taskspec_payload(
@@ -154,6 +164,102 @@ def test_runtime_config_defaults_to_delete_processor() -> None:
     runtime_config = TaskMonitorRuntimeConfig.from_config(load_config({}))
 
     assert runtime_config.processor == "delete"
+
+
+def test_task_monitor_operational_log_emits_config_and_cycle(
+    weft_harness,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = dict(weft_harness.context.config)
+    config.update(
+        {
+            MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY: True,
+            "WEFT_MANAGER_SERVE_LOG_LEVEL": "info",
+            "WEFT_TASK_MONITOR_ENABLED": True,
+            "WEFT_TASK_MONITOR_PROCESSOR": "report_only",
+            "WEFT_TASK_MONITOR_BATCH_SIZE": 5,
+        }
+    )
+    spec = make_task_monitor_taskspec("1778089999999999001")
+    spec.metadata["parent_tid"] = "1778089999999999000"
+    monitor = TaskMonitorTask(
+        weft_harness.context.broker_target,
+        spec,
+        config=config,
+    )
+    try:
+        monitor.process_once()
+    finally:
+        monitor.cleanup()
+
+    events = serve_log_events(capsys)
+    assert any(event.get("event") == "task_monitor_config" for event in events)
+    cycle = next(
+        event for event in events if event.get("event") == "task_monitor_cycle"
+    )
+    assert cycle["manager_tid"] == "1778089999999999000"
+    assert cycle["component"] == "task_monitor"
+    assert cycle["processor"] == "report_only"
+    assert "events_scanned" in cycle
+
+
+def test_task_monitor_operational_log_off_is_silent(
+    weft_harness,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = dict(weft_harness.context.config)
+    config.update(
+        {
+            MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY: True,
+            "WEFT_MANAGER_SERVE_LOG_LEVEL": "off",
+            "WEFT_TASK_MONITOR_ENABLED": True,
+            "WEFT_TASK_MONITOR_PROCESSOR": "report_only",
+        }
+    )
+    spec = make_task_monitor_taskspec("1778089999999999002")
+    monitor = TaskMonitorTask(
+        weft_harness.context.broker_target,
+        spec,
+        config=config,
+    )
+    try:
+        monitor.process_once()
+    finally:
+        monitor.cleanup()
+
+    assert serve_log_events(capsys) == []
+
+
+def test_task_monitor_operational_log_reports_processor_error(
+    weft_harness,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = dict(weft_harness.context.config)
+    config.update(
+        {
+            MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY: True,
+            "WEFT_MANAGER_SERVE_LOG_LEVEL": "info",
+            "WEFT_TASK_MONITOR_ENABLED": True,
+            "WEFT_TASK_MONITOR_PROCESSOR": "jsonl_then_delete",
+        }
+    )
+    spec = make_task_monitor_taskspec("1778089999999999003")
+    monitor = TaskMonitorTask(
+        weft_harness.context.broker_target,
+        spec,
+        config=config,
+    )
+    try:
+        monitor.process_once()
+    finally:
+        monitor.cleanup()
+
+    events = serve_log_events(capsys)
+    assert any(
+        event.get("event") == "task_monitor_processor_error"
+        and event.get("processor") == "jsonl_then_delete"
+        for event in events
+    )
 
 
 def test_resolve_report_only_processor() -> None:

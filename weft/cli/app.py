@@ -1465,10 +1465,28 @@ def manager_serve_command(
         Path | None,
         typer.Option("--context", help="Weft project directory"),
     ] = None,
+    level: Annotated[
+        str | None,
+        typer.Option(
+            "--level",
+            help="Operational log level: off, info, debug, or trace",
+        ),
+    ] = None,
+    log_interval: Annotated[
+        float | None,
+        typer.Option(
+            "--log-interval",
+            help="Seconds between repeated operational log events",
+        ),
+    ] = None,
 ) -> None:
     """Run the canonical manager in the foreground."""
 
-    exit_code, payload = serve_cmd.serve_command(context_path=context)
+    exit_code, payload = serve_cmd.serve_command(
+        context_path=context,
+        level=level,
+        log_interval=log_interval,
+    )
     if payload:
         typer.echo(payload)
     raise typer.Exit(code=exit_code)

@@ -299,6 +299,63 @@ WEFT_TASK_MONITOR_LOG_SINKS: Final[frozenset[str]] = frozenset(
 WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS_DEFAULT: Final[float] = 60.0
 """Default manager restart backoff for the supervised task monitor."""
 
+MANAGER_SERVE_LOG_SCHEMA: Final[str] = "weft.manager_serve_log"
+"""JSONL schema name for foreground manager operational log records."""
+
+MANAGER_SERVE_LOG_SCHEMA_VERSION: Final[int] = 1
+"""JSONL schema version for foreground manager operational log records."""
+
+MANAGER_SERVE_LOG_EVENT_MAX_CHARS: Final[int] = 500
+"""Maximum string length for one manager operational-log field value."""
+
+MANAGER_SERVE_LOG_CANDIDATE_LIMIT: Final[int] = 8
+"""Maximum service candidates included in one manager operational-log event."""
+
+MANAGER_SERVE_LOG_CHILD_LIMIT: Final[int] = 8
+"""Maximum tracked child summaries included in one manager operational-log event."""
+
+MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY: Final[str] = "_WEFT_MANAGER_SERVE_LOG_ACTIVE"
+"""Internal config key proving the current process is a foreground serve invocation."""
+
+WEFT_MANAGER_SERVE_LOG_LEVEL: Final[str] = "WEFT_MANAGER_SERVE_LOG_LEVEL"
+"""Environment/config key selecting foreground manager operational-log verbosity."""
+
+WEFT_MANAGER_SERVE_LOG_LEVEL_DEFAULT: Final[str] = "off"
+"""Default foreground manager operational-log level."""
+
+WEFT_MANAGER_SERVE_LOG_LEVELS: Final[frozenset[str]] = frozenset(
+    {"off", "info", "debug", "trace"}
+)
+"""Allowed foreground manager operational-log levels."""
+
+MANAGER_SERVE_LOG_LEVEL_ORDER: Final[Mapping[str, int]] = {
+    "off": 0,
+    "info": 1,
+    "debug": 2,
+    "trace": 3,
+}
+"""Ordering used to compare foreground manager operational-log levels."""
+
+WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS: Final[str] = (
+    "WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS"
+)
+"""Environment/config key selecting foreground manager operational-log throttle."""
+
+WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS_DEFAULT: Final[float] = 5.0
+"""Default interval for repeated foreground manager operational-log events."""
+
+MANAGER_SERVE_LOG_COMPONENTS: Final[frozenset[str]] = frozenset(
+    {
+        "manager",
+        "registry",
+        "ownership",
+        "service",
+        "spawn",
+        "task_monitor",
+    }
+)
+"""Allowed foreground manager operational-log component labels."""
+
 TASK_MONITOR_ACTIVITY_WAIT_CAP_SECONDS: Final[float] = 1.0
 """Maximum launcher wait for TaskMonitor when no queue wake is observed."""
 
@@ -1241,6 +1298,25 @@ def _parse_task_monitor_restart_backoff_seconds(value: str) -> float:
     )
 
 
+def _parse_manager_serve_log_level(value: str) -> str:
+    """Parse the foreground manager operational-log level."""
+
+    parsed = value.strip().lower()
+    if parsed not in WEFT_MANAGER_SERVE_LOG_LEVELS:
+        allowed = ", ".join(sorted(WEFT_MANAGER_SERVE_LOG_LEVELS))
+        raise ValueError(f"WEFT_MANAGER_SERVE_LOG_LEVEL must be one of: {allowed}")
+    return parsed
+
+
+def _parse_manager_serve_log_interval(value: str) -> float:
+    """Parse the foreground manager operational-log rate-limit interval."""
+
+    return _parse_positive_float(
+        value,
+        name="WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS",
+    )
+
+
 def _parse_weft_directory_name(value: str) -> str:
     """Parse the configurable Weft metadata directory name.
 
@@ -1406,6 +1482,16 @@ def _load_weft_env_vars() -> dict[str, Any]:
             default=WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS_DEFAULT,
             parser=_parse_task_monitor_restart_backoff_seconds,
         ),
+        WEFT_MANAGER_SERVE_LOG_LEVEL: _load_weft_env_value(
+            WEFT_MANAGER_SERVE_LOG_LEVEL,
+            default=WEFT_MANAGER_SERVE_LOG_LEVEL_DEFAULT,
+            parser=_parse_manager_serve_log_level,
+        ),
+        WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS: _load_weft_env_value(
+            WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS,
+            default=WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS_DEFAULT,
+            parser=_parse_manager_serve_log_interval,
+        ),
     }
     for weft_key in SIMPLEBROKER_ENV_MAPPING:
         if weft_key in env_vars:
@@ -1502,6 +1588,21 @@ def _normalize_weft_override_value(name: str, value: Any) -> Any:
             "WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS override must be int, "
             "float, or str"
         )
+    if name == WEFT_MANAGER_SERVE_LOG_LEVEL:
+        if isinstance(value, str):
+            return _parse_manager_serve_log_level(value)
+        raise TypeError("WEFT_MANAGER_SERVE_LOG_LEVEL override must be str")
+    if name == WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS:
+        if isinstance(value, str):
+            return _parse_manager_serve_log_interval(value)
+        if isinstance(value, int | float):
+            return _parse_manager_serve_log_interval(str(float(value)))
+        raise TypeError(
+            "WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS override must be int, "
+            "float, or str"
+        )
+    if name == MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY:
+        return _parse_bool(value) if isinstance(value, str) else bool(value)
     return value
 
 
@@ -1536,6 +1637,14 @@ def load_environment() -> dict[str, Any]:
                 Set to "1" to enable logging throughout Weft.
                 When enabled, logs will be written using Python's logging module.
                 Configure logging levels and handlers in your application as needed.
+
+            WEFT_MANAGER_SERVE_LOG_LEVEL (str): Enable structured JSONL
+                operational logs for `weft manager serve`.
+                Default: "off"; allowed: "off", "info", "debug", "trace".
+
+            WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS (float): Minimum interval
+                for repeated foreground manager operational-log events.
+                Default: 5.0.
 
         SimpleBroker integration:
             BROKER_* keys translated from WEFT_* environment variables
