@@ -66,6 +66,8 @@ from weft.helpers import ContainerRuntimeDetection
 
 AUTOSTART_PIPELINE_RESULT_TIMEOUT = 30.0
 
+_DRAIN_BACKLOG: dict[int, list[Any]] = {}
+
 
 @pytest.fixture
 def unique_tid() -> str:
@@ -73,13 +75,24 @@ def unique_tid() -> str:
 
 
 def drain(queue):
-    items = []
+    queue_key = id(queue)
+    items = _DRAIN_BACKLOG.pop(queue_key, [])
     while True:
         value = queue.read_one()
         if value is None:
             break
         items.append(value)
     return items
+
+
+def _return_drained_items(queue, items: list[Any]) -> None:
+    """Preserve unread tail items after a batched queue drain."""
+
+    if not items:
+        return
+    queue_key = id(queue)
+    existing = _DRAIN_BACKLOG.get(queue_key, [])
+    _DRAIN_BACKLOG[queue_key] = items + existing
 
 
 def pending_timestamps(queue) -> list[int]:
@@ -408,11 +421,13 @@ def wait_for_log_event(
     event_tail: list[dict[str, object]] = []
     while time.monotonic() < deadline:
         manager.process_once()
-        for item in drain(log_queue):
+        drained = drain(log_queue)
+        for index, item in enumerate(drained):
             event = json.loads(item)
             event_tail.append(event)
             event_tail = event_tail[-10:]
             if predicate(event):
+                _return_drained_items(log_queue, drained[index + 1 :])
                 return event
         time.sleep(0.05)
     child_snapshot = {
