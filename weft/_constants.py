@@ -34,7 +34,7 @@ from simplebroker import resolve_config as resolve_broker_config
 # VERSION INFORMATION
 # ==============================================================================
 
-__version__: Final[str] = "0.9.27"
+__version__: Final[str] = "0.9.28"
 """Current version of Weft."""
 
 # ==============================================================================
