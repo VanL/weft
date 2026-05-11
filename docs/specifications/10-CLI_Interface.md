@@ -314,9 +314,15 @@ Current behavior:
 
 - summarizes the active context
 - shows manager registry information and task snapshots
+- shows manager-owned service snapshots for heartbeat and TaskMonitor
 - can emit JSON
 - uses task-log replay plus manager/task registry queues rather than a separate
   state database
+- JSON status output includes an additive top-level `services` list. Each
+  service row reports the service key, display name, desired/enabled flags,
+  status, winning evidence source, and optional TID, manager TID, queue, PID,
+  timestamp, and reconciliation details. Service rows reduce existing queue
+  evidence; they are not a second state store.
 - JSON task snapshots may include an additive `reconciliation` object when
   lifecycle evidence and runtime liveness disagree; the public `status` remains
   one of the normal lifecycle states
@@ -350,6 +356,7 @@ Implementation plan backlinks:
 - `docs/plans/2026-05-06-terminal-publication-hardening-plan.md`
 - `docs/plans/2026-05-07-extended-ping-pong-state-probe-plan.md`
 - `docs/plans/2026-05-07-result-evidence-and-superseded-manager-reconciliation-plan.md`
+- `docs/plans/2026-05-11-internal-service-observability-plan.md`
 
 ### `result` - Read task output [CLI-1.2]
 

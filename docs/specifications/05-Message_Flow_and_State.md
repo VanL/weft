@@ -408,6 +408,16 @@ and are drained before public spawn requests whenever both queues are pending.
 Both queues share the same validation, TaskSpec expansion, child launch, initial
 inbox seeding, and acknowledgement path.
 
+Internal service observability has two publication phases. A successful manager
+launch first appears as a manager-authored `task_spawned` row with `child_tid`,
+`child_taskspec`, and optionally `child_pid`; the child later emits its own
+task-log rows and TID mapping. Ops status may report heartbeat or TaskMonitor
+as launched from the manager row before child-local lifecycle rows exist.
+Child-local terminal evidence and TID-mapping/runtime evidence override the
+manager launch hint when they are present. An empty `weft.spawn.internal` queue
+means only that no unclaimed internal spawn request is waiting there; it is not
+evidence that the internal service is absent.
+
 Current submission-reconciliation rules:
 
 - if the submitted TID is already visible through task logs or TID mappings,
@@ -475,8 +485,9 @@ _Implementation mapping_: `weft/core/manager.py` — `Manager._handle_work_messa
 `weft/cli/run.py`; `weft/commands/_spawn_submission.py` —
 `_inspect_task_log_for_tid`, `_reconcile_submitted_spawn_once`.
 
-Implementation plan backlink:
-[`2026-04-21-run-boundary-dispatch-fence-control-contract-plan.md`](../plans/2026-04-21-run-boundary-dispatch-fence-control-contract-plan.md).
+Implementation plan backlinks:
+[`2026-04-21-run-boundary-dispatch-fence-control-contract-plan.md`](../plans/2026-04-21-run-boundary-dispatch-fence-control-contract-plan.md);
+[`2026-05-11-internal-service-observability-plan.md`](../plans/2026-05-11-internal-service-observability-plan.md).
 
 ### 7. Manager Bootstrap Flow [MF-7]
 

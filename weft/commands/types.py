@@ -20,6 +20,7 @@ __all__ = [
     "QueueAckTarget",
     "QueueEntry",
     "RunExecutionResult",
+    "ServiceSnapshot",
     "SpecRecord",
     "SpecValidationResult",
     "SubmittedTaskReceipt",
@@ -93,6 +94,24 @@ class TaskResult:
     stdout: str | None
     stderr: str | None
     error: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ServiceSnapshot:
+    """Public current-state view for one manager-owned service."""
+
+    key: str
+    name: str
+    desired: bool
+    enabled: bool
+    status: str
+    evidence: str
+    tid: str | None = None
+    manager_tid: str | None = None
+    queue: str | None = None
+    pid: int | None = None
+    updated_at: int | None = None
+    reconciliation: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,6 +264,7 @@ class SystemStatusSnapshot:
     broker: dict[str, Any]
     managers: list[ManagerSnapshot]
     tasks: list[TaskSnapshot]
+    services: list[ServiceSnapshot] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from tests.helpers.test_backend import prepare_project_root
+from weft._constants import MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY
 from weft.context import build_context
 from weft.core import manager_runtime as core_manager_runtime
 
@@ -19,8 +20,13 @@ def test_serve_command_delegates_to_shared_foreground_helper(
     context_root = prepare_project_root(tmp_path / "proj")
     context = build_context(context_root)
     calls: list[str] = []
+    context_calls: list[tuple[object, object]] = []
 
-    monkeypatch.setattr(serve_cmd, "build_context", lambda spec_context=None: context)
+    def fake_build_context(spec_context=None, *, config=None):
+        context_calls.append((spec_context, config))
+        return context
+
+    monkeypatch.setattr(serve_cmd, "build_context", fake_build_context)
 
     def fake_serve_manager(context_arg):
         assert context_arg is context
@@ -34,6 +40,9 @@ def test_serve_command_delegates_to_shared_foreground_helper(
     assert exit_code == 0
     assert message is None
     assert calls == ["serve"]
+    assert context_calls
+    assert context_calls[0][0] == context_root
+    assert context_calls[0][1][MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY] is True
 
 
 def test_serve_command_returns_preflight_message(tmp_path, monkeypatch) -> None:
@@ -42,7 +51,11 @@ def test_serve_command_returns_preflight_message(tmp_path, monkeypatch) -> None:
     context_root = prepare_project_root(tmp_path / "proj")
     context = build_context(context_root)
 
-    monkeypatch.setattr(serve_cmd, "build_context", lambda spec_context=None: context)
+    monkeypatch.setattr(
+        serve_cmd,
+        "build_context",
+        lambda spec_context=None, *, config=None: context,
+    )
     monkeypatch.setattr(
         serve_cmd,
         "_serve_manager_foreground",

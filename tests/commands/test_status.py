@@ -12,6 +12,12 @@ import pytest
 
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import (
+    INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY,
+    INTERNAL_RUNTIME_TASK_CLASS_KEY,
+    INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR,
+    INTERNAL_SERVICE_KEY_METADATA_KEY,
+    INTERNAL_SERVICE_KEY_TASK_MONITOR,
+    INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY,
     WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
     WEFT_MANAGERS_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
@@ -99,6 +105,77 @@ def _write_task_log_entry(
         payload["runner_diagnostics"] = runner_diagnostics
     log_queue = ctx.queue("weft.log.tasks", persistent=False)
     log_queue.write(json.dumps(payload))
+
+
+def _task_monitor_taskspec_payload(
+    tid: str,
+    *,
+    status: str = "running",
+    started_at: int | None = None,
+    completed_at: int | None = None,
+) -> dict[str, Any]:
+    return {
+        "tid": tid,
+        "name": "task-monitor",
+        "spec": {
+            "type": "function",
+            "function_target": "weft.core.tasks.task_monitor:runtime",
+            "persistent": True,
+            "runner": {"name": "host", "options": {}},
+        },
+        "io": {
+            "inputs": {"inbox": f"T{tid}.inbox"},
+            "outputs": {"outbox": f"T{tid}.outbox"},
+            "control": {
+                "ctrl_in": f"T{tid}.ctrl_in",
+                "ctrl_out": f"T{tid}.ctrl_out",
+            },
+        },
+        "state": {
+            "status": status,
+            "started_at": started_at,
+            "completed_at": completed_at,
+        },
+        "metadata": {
+            "internal": True,
+            "role": "task_monitor",
+            INTERNAL_RUNTIME_TASK_CLASS_KEY: INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR,
+            INTERNAL_SERVICE_KEY_METADATA_KEY: INTERNAL_SERVICE_KEY_TASK_MONITOR,
+            INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY: "ensure",
+        },
+    }
+
+
+def _write_manager_spawned_task_monitor(
+    *,
+    ctx: Any,
+    manager_tid: str,
+    child_tid: str,
+    child_pid: int,
+) -> None:
+    log_queue = ctx.queue("weft.log.tasks", persistent=False)
+    log_queue.write(
+        json.dumps(
+            {
+                "event": "task_spawned",
+                "tid": manager_tid,
+                "tid_short": manager_tid[-10:],
+                "status": "running",
+                "timestamp": time.time_ns(),
+                "taskspec": {
+                    "tid": manager_tid,
+                    "name": "manager",
+                    "spec": {"runner": {"name": "host", "options": {}}},
+                    "state": {"status": "running", "started_at": time.time_ns()},
+                    "metadata": {"role": "manager"},
+                },
+                "child_tid": child_tid,
+                "child_pid": child_pid,
+                "child_taskspec": _task_monitor_taskspec_payload(child_tid),
+                "service_key": INTERNAL_SERVICE_KEY_TASK_MONITOR,
+            }
+        )
+    )
 
 
 def _write_pipeline_log_entry(
@@ -204,6 +281,125 @@ def test_system_status_manager_snapshot_includes_internal_spawn_queues(
     assert manager.internal_reserved == internal_reserved
 
 
+def test_status_services_include_manager_spawned_task_monitor_before_child_log(
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    manager_tid = "1779000000000000101"
+    child_tid = "1779000000000000102"
+    _write_manager_spawned_task_monitor(
+        ctx=ctx,
+        manager_tid=manager_tid,
+        child_tid=child_tid,
+        child_pid=os.getpid(),
+    )
+
+    exit_code, payload = cmd_status(json_output=True, spec_context=root)
+
+    assert exit_code == 0
+    assert payload is not None
+    services = json.loads(payload)["services"]
+    monitor = next(
+        service
+        for service in services
+        if service["key"] == INTERNAL_SERVICE_KEY_TASK_MONITOR
+    )
+    assert monitor["status"] == "launched"
+    assert monitor["tid"] == child_tid
+    assert monitor["manager_tid"] == manager_tid
+    assert monitor["evidence"] == "manager-task-spawned"
+    assert monitor["pid"] == os.getpid()
+
+
+def test_status_services_child_terminal_evidence_overrides_manager_spawn(
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    manager_tid = "1779000000000000201"
+    child_tid = "1779000000000000202"
+    now = time.time_ns()
+    _write_manager_spawned_task_monitor(
+        ctx=ctx,
+        manager_tid=manager_tid,
+        child_tid=child_tid,
+        child_pid=os.getpid(),
+    )
+    _write_task_log_entry(
+        ctx=ctx,
+        tid=child_tid,
+        event="work_completed",
+        status="completed",
+        started_at=now - 10_000,
+        completed_at=now,
+        name="task-monitor",
+        metadata={
+            "internal": True,
+            "role": "task_monitor",
+            INTERNAL_RUNTIME_TASK_CLASS_KEY: INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR,
+            INTERNAL_SERVICE_KEY_METADATA_KEY: INTERNAL_SERVICE_KEY_TASK_MONITOR,
+            INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY: "ensure",
+        },
+    )
+
+    exit_code, payload = cmd_status(json_output=True, spec_context=root)
+
+    assert exit_code == 0
+    assert payload is not None
+    services = json.loads(payload)["services"]
+    monitor = next(
+        service
+        for service in services
+        if service["key"] == INTERNAL_SERVICE_KEY_TASK_MONITOR
+    )
+    assert monitor["status"] == "terminal"
+    assert monitor["tid"] == child_tid
+    assert monitor["evidence"] == "child-task-log"
+    assert monitor["reconciliation"]["lifecycle_status"] == "completed"
+
+
+def test_status_services_report_pending_internal_spawn_request(
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    pending_queue = ctx.queue(WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE, persistent=False)
+    pending_queue.write(
+        json.dumps(
+            {
+                "taskspec": {
+                    "name": "task-monitor",
+                    "spec": {"type": "function", "persistent": True},
+                    "metadata": {
+                        "internal": True,
+                        "role": "task_monitor",
+                        INTERNAL_SERVICE_KEY_METADATA_KEY: (
+                            INTERNAL_SERVICE_KEY_TASK_MONITOR
+                        ),
+                        INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY: "ensure",
+                    },
+                },
+                "inbox_message": None,
+                INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY: (
+                    INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR
+                ),
+            }
+        )
+    )
+
+    snapshot = status_cmd.system_status(ctx)
+
+    monitor = next(
+        service
+        for service in snapshot.services
+        if service.key == INTERNAL_SERVICE_KEY_TASK_MONITOR
+    )
+    assert monitor.status == "pending"
+    assert monitor.evidence == "internal-spawn-pending"
+    assert monitor.queue == WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE
+
+
 def test_cmd_status_text_output(tmp_path):
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
@@ -224,6 +420,7 @@ def test_cmd_status_text_output(tmp_path):
     size_line = next(line for line in lines if line.startswith("db_size: "))
     assert "bytes" in size_line
     assert "(" in size_line
+    assert "Services:" in lines
 
 
 def test_cmd_status_json_output(tmp_path):
@@ -240,6 +437,7 @@ def test_cmd_status_json_output(tmp_path):
     assert data["broker"]["total_messages"] >= 1
     assert "db_size" in data["broker"]
     assert isinstance(data["managers"], list)
+    assert isinstance(data["services"], list)
 
 
 def test_cmd_status_json_includes_runner_runtime_details(

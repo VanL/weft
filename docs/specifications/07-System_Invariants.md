@@ -224,6 +224,11 @@ _Implementation mapping_: `weft/core/manager.py`,
   already-reserved public or manager-owned internal spawn work. Leadership
   yield is advisory and idle-biased: it must not preempt actionable control,
   spawn, reserved, or child-supervision work.
+- **MANAGER.12a**: pending public spawn backlog is not owned manager work. A
+  manager may service a public spawn request it successfully reserved, but
+  unreserved messages still in `weft.spawn.requests` must not by themselves
+  prevent a higher-TID manager from yielding to the lower-TID live canonical
+  manager.
 - **MANAGER.13**: manager-owned singleton service correctness is enforced at
   the service boundary, not by a global public dispatch fence. Manager-authored
   service metadata and the service reducer decide when to start, wait, or

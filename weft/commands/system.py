@@ -21,6 +21,13 @@ from typing import Any, cast
 from simplebroker import Queue
 from simplebroker.ext import BrokerError
 from weft._constants import (
+    INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY,
+    INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
+    INTERNAL_RUNTIME_TASK_CLASS_KEY,
+    INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR,
+    INTERNAL_SERVICE_KEY_HEARTBEAT,
+    INTERNAL_SERVICE_KEY_METADATA_KEY,
+    INTERNAL_SERVICE_KEY_TASK_MONITOR,
     NON_LIVE_RUNTIME_STATES,
     STATUS_RUNTIMELESS_STALE_AFTER_SECONDS,
     STATUS_WATCH_MIN_INTERVAL,
@@ -28,6 +35,7 @@ from weft._constants import (
     TERMINAL_TASK_EVENTS,
     TERMINAL_TASK_STATUSES,
     WEFT_GLOBAL_LOG_QUEUE,
+    WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
 )
@@ -36,6 +44,7 @@ from weft.builtins import builtin_task_catalog
 from weft.commands.manager import _list_manager_records, _select_active_manager
 from weft.commands.types import (
     ManagerSnapshot,
+    ServiceSnapshot,
     SystemLoadResult,
     SystemStatusSnapshot,
     SystemTidyResult,
@@ -177,6 +186,23 @@ class CollectedTaskSnapshot:
 
     snapshot: TaskSnapshot
     taskspec_payload: dict[str, Any] | None
+
+
+@dataclass(frozen=True, slots=True)
+class _ServiceEvidence:
+    """One queue-derived observation for a manager-owned service."""
+
+    key: str
+    name: str
+    status: str
+    evidence: str
+    rank: int
+    tid: str | None = None
+    manager_tid: str | None = None
+    queue: str | None = None
+    pid: int | None = None
+    updated_at: int | None = None
+    reconciliation: dict[str, Any] | None = None
 
 
 def _resolve_context(
@@ -480,6 +506,90 @@ def _is_internal_service_record(record: Mapping[str, Any]) -> bool:
         return True
     service_key = metadata.get("_weft_service_key")
     return isinstance(service_key, str) and service_key.startswith("_weft.service.")
+
+
+def _service_display_name(key: str) -> str:
+    if key == INTERNAL_SERVICE_KEY_HEARTBEAT:
+        return "heartbeat-service"
+    if key == INTERNAL_SERVICE_KEY_TASK_MONITOR:
+        return "task-monitor"
+    return key.rsplit(".", 1)[-1] or key
+
+
+def _known_internal_service_keys() -> tuple[str, str]:
+    return (INTERNAL_SERVICE_KEY_HEARTBEAT, INTERNAL_SERVICE_KEY_TASK_MONITOR)
+
+
+def _metadata_claims_internal_service(
+    metadata: Mapping[str, Any],
+    key: str,
+) -> bool:
+    if metadata.get(INTERNAL_SERVICE_KEY_METADATA_KEY) != key:
+        return False
+    if metadata.get("internal") is True:
+        return True
+    role = metadata.get("role")
+    if key == INTERNAL_SERVICE_KEY_HEARTBEAT and role == "heartbeat_service":
+        return True
+    if key == INTERNAL_SERVICE_KEY_TASK_MONITOR and role == "task_monitor":
+        return True
+    runtime_class = metadata.get(INTERNAL_RUNTIME_TASK_CLASS_KEY)
+    return (
+        key == INTERNAL_SERVICE_KEY_HEARTBEAT
+        and runtime_class == INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT
+    ) or (
+        key == INTERNAL_SERVICE_KEY_TASK_MONITOR
+        and runtime_class == INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR
+    )
+
+
+def _service_key_from_taskspec_payload(
+    taskspec_payload: Mapping[str, Any],
+) -> str | None:
+    metadata = taskspec_payload.get("metadata")
+    if not isinstance(metadata, Mapping):
+        return None
+    key = metadata.get(INTERNAL_SERVICE_KEY_METADATA_KEY)
+    if not isinstance(key, str) or key not in _known_internal_service_keys():
+        return None
+    if not _metadata_claims_internal_service(metadata, key):
+        return None
+    return key
+
+
+def _service_key_from_spawn_payload(payload: Mapping[str, Any]) -> str | None:
+    taskspec_payload = payload.get("taskspec")
+    if isinstance(taskspec_payload, Mapping):
+        key = _service_key_from_taskspec_payload(taskspec_payload)
+        if key is not None:
+            return key
+
+    runtime_class = payload.get(INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY)
+    if runtime_class == INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT:
+        return INTERNAL_SERVICE_KEY_HEARTBEAT
+    if runtime_class == INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR:
+        return INTERNAL_SERVICE_KEY_TASK_MONITOR
+    return None
+
+
+def _iter_queue_json_messages(queue: Queue) -> Iterable[tuple[dict[str, Any], int]]:
+    try:
+        iterator_raw = queue.peek_generator(with_timestamps=True)
+    except TypeError:  # pragma: no cover - backend compatibility
+        iterator_raw = queue.peek_generator()
+    for item in iterator_raw:
+        if isinstance(item, tuple) and len(item) == 2:
+            raw, timestamp = item
+        else:
+            raw, timestamp = item, 0
+        if not isinstance(raw, str):
+            continue
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            yield payload, int(timestamp)
 
 
 def _effective_public_status(
@@ -1044,6 +1154,300 @@ def _collect_task_snapshot_records(
     return result
 
 
+def _service_evidence_from_child_task(
+    record: CollectedTaskSnapshot,
+) -> _ServiceEvidence | None:
+    if record.taskspec_payload is None:
+        return None
+    key = _service_key_from_taskspec_payload(record.taskspec_payload)
+    if key is None:
+        return None
+    snapshot = record.snapshot
+    if snapshot.status in TERMINAL_TASK_STATUSES:
+        return _ServiceEvidence(
+            key=key,
+            name=snapshot.name or _service_display_name(key),
+            status="terminal",
+            evidence="child-task-log",
+            rank=100,
+            tid=snapshot.tid,
+            updated_at=snapshot.last_timestamp,
+            reconciliation={"lifecycle_status": snapshot.status},
+        )
+    return _ServiceEvidence(
+        key=key,
+        name=snapshot.name or _service_display_name(key),
+        status="running",
+        evidence="child-task-log",
+        rank=90,
+        tid=snapshot.tid,
+        updated_at=snapshot.last_timestamp,
+        reconciliation=snapshot.reconciliation,
+    )
+
+
+def _service_evidence_from_manager_spawned(
+    payload: Mapping[str, Any],
+    timestamp: int,
+) -> _ServiceEvidence | None:
+    if payload.get("event") != "task_spawned":
+        return None
+    child_tid = payload.get("child_tid")
+    child_taskspec = payload.get("child_taskspec")
+    if not isinstance(child_tid, str) or not isinstance(child_taskspec, Mapping):
+        return None
+    key = _service_key_from_taskspec_payload(child_taskspec)
+    if key is None:
+        payload_key = payload.get("service_key")
+        if (
+            isinstance(payload_key, str)
+            and payload_key in _known_internal_service_keys()
+        ):
+            key = payload_key
+        else:
+            return None
+
+    child_pid = payload.get("child_pid")
+    pid = (
+        child_pid
+        if isinstance(child_pid, int) and not isinstance(child_pid, bool)
+        else None
+    )
+    pid_live = pid is not None and pid_is_live(pid)
+    manager_tid = payload.get("tid")
+    return _ServiceEvidence(
+        key=key,
+        name=str(child_taskspec.get("name") or _service_display_name(key)),
+        status="launched" if pid_live else "uncertain",
+        evidence="manager-task-spawned",
+        rank=80 if pid_live else 50,
+        tid=child_tid,
+        manager_tid=manager_tid if isinstance(manager_tid, str) else None,
+        pid=pid,
+        updated_at=timestamp,
+        reconciliation=None
+        if pid_live
+        else {
+            "classification": "service_liveness_uncertain",
+            "reason": "manager_spawned_pid_not_live",
+        },
+    )
+
+
+def _service_evidence_from_spawn_payload(
+    payload: Mapping[str, Any],
+    *,
+    timestamp: int,
+    queue_name: str,
+    status: str,
+    evidence: str,
+    rank: int,
+) -> _ServiceEvidence | None:
+    key = _service_key_from_spawn_payload(payload)
+    if key is None:
+        return None
+    taskspec_payload = payload.get("taskspec")
+    raw_name = (
+        taskspec_payload.get("name") if isinstance(taskspec_payload, Mapping) else None
+    )
+    name = raw_name if isinstance(raw_name, str) else _service_display_name(key)
+    tid = payload.get("tid")
+    return _ServiceEvidence(
+        key=key,
+        name=name,
+        status=status,
+        evidence=evidence,
+        rank=rank,
+        tid=tid if isinstance(tid, str) else str(timestamp) if timestamp else None,
+        queue=queue_name,
+        updated_at=timestamp,
+    )
+
+
+def _collect_internal_spawn_queue_evidence(
+    ctx: WeftContext,
+    *,
+    queue_name: str,
+    status: str,
+    evidence: str,
+    rank: int,
+) -> list[_ServiceEvidence]:
+    queue = _queue(ctx, queue_name)
+    try:
+        return [
+            candidate
+            for payload, timestamp in _iter_queue_json_messages(queue)
+            if (
+                candidate := _service_evidence_from_spawn_payload(
+                    payload,
+                    timestamp=timestamp,
+                    queue_name=queue_name,
+                    status=status,
+                    evidence=evidence,
+                    rank=rank,
+                )
+            )
+            is not None
+        ]
+    except (BrokerError, OSError, RuntimeError):
+        return []
+    finally:
+        queue.close()
+
+
+def _service_enabled(ctx: WeftContext, key: str) -> bool:
+    task_monitor_enabled = bool(ctx.config.get("WEFT_TASK_MONITOR_ENABLED", True))
+    if key == INTERNAL_SERVICE_KEY_TASK_MONITOR:
+        return task_monitor_enabled
+    if key == INTERNAL_SERVICE_KEY_HEARTBEAT:
+        return task_monitor_enabled
+    return False
+
+
+def _active_canonical_manager_records(
+    managers: Sequence[Mapping[str, Any]],
+) -> list[Mapping[str, Any]]:
+    return [
+        manager
+        for manager in managers
+        if manager.get("status") == "active"
+        and manager.get("requests", WEFT_SPAWN_REQUESTS_QUEUE)
+        == WEFT_SPAWN_REQUESTS_QUEUE
+    ]
+
+
+def _best_service_evidence(
+    candidates: Sequence[_ServiceEvidence],
+) -> _ServiceEvidence | None:
+    if not candidates:
+        return None
+    return max(
+        candidates,
+        key=lambda candidate: (
+            candidate.rank,
+            candidate.updated_at or 0,
+            candidate.tid or "",
+        ),
+    )
+
+
+def _service_snapshot_from_evidence(
+    *,
+    ctx: WeftContext,
+    key: str,
+    desired: bool,
+    evidence: _ServiceEvidence | None,
+) -> ServiceSnapshot:
+    enabled = _service_enabled(ctx, key)
+    if not enabled:
+        return ServiceSnapshot(
+            key=key,
+            name=_service_display_name(key),
+            desired=False,
+            enabled=False,
+            status="disabled",
+            evidence="config-disabled",
+        )
+    if evidence is None:
+        return ServiceSnapshot(
+            key=key,
+            name=_service_display_name(key),
+            desired=desired,
+            enabled=True,
+            status="unknown",
+            evidence="none",
+        )
+    return ServiceSnapshot(
+        key=key,
+        name=evidence.name,
+        desired=desired,
+        enabled=True,
+        status=evidence.status,
+        evidence=evidence.evidence,
+        tid=evidence.tid,
+        manager_tid=evidence.manager_tid,
+        queue=evidence.queue,
+        pid=evidence.pid,
+        updated_at=evidence.updated_at,
+        reconciliation=evidence.reconciliation,
+    )
+
+
+def _collect_internal_service_snapshots(
+    ctx: WeftContext,
+    *,
+    managers: Sequence[Mapping[str, Any]],
+    task_records: Sequence[CollectedTaskSnapshot],
+) -> list[ServiceSnapshot]:
+    """Return queue-derived status for manager-owned internal services."""
+
+    candidates_by_key: dict[str, list[_ServiceEvidence]] = {
+        key: [] for key in _known_internal_service_keys()
+    }
+    for record in task_records:
+        candidate = _service_evidence_from_child_task(record)
+        if candidate is not None:
+            candidates_by_key.setdefault(candidate.key, []).append(candidate)
+
+    log_queue = _queue(ctx, WEFT_GLOBAL_LOG_QUEUE)
+    try:
+        for payload, timestamp in _iter_log_events(log_queue):
+            candidate = _service_evidence_from_manager_spawned(payload, timestamp)
+            if candidate is not None:
+                candidates_by_key.setdefault(candidate.key, []).append(candidate)
+    finally:
+        log_queue.close()
+
+    for candidate in _collect_internal_spawn_queue_evidence(
+        ctx,
+        queue_name=WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
+        status="pending",
+        evidence="internal-spawn-pending",
+        rank=30,
+    ):
+        candidates_by_key.setdefault(candidate.key, []).append(candidate)
+
+    for manager in managers:
+        reserved_queue = manager.get("internal_reserved")
+        if not isinstance(reserved_queue, str) or not reserved_queue:
+            continue
+        for candidate in _collect_internal_spawn_queue_evidence(
+            ctx,
+            queue_name=reserved_queue,
+            status="reserved",
+            evidence="internal-spawn-reserved",
+            rank=40,
+        ):
+            manager_tid = manager.get("tid")
+            candidates_by_key.setdefault(candidate.key, []).append(
+                _ServiceEvidence(
+                    key=candidate.key,
+                    name=candidate.name,
+                    status=candidate.status,
+                    evidence=candidate.evidence,
+                    rank=candidate.rank,
+                    tid=candidate.tid,
+                    manager_tid=manager_tid if isinstance(manager_tid, str) else None,
+                    queue=candidate.queue,
+                    pid=candidate.pid,
+                    updated_at=candidate.updated_at,
+                    reconciliation=candidate.reconciliation,
+                )
+            )
+
+    active_managers = _active_canonical_manager_records(managers)
+    desired = bool(active_managers)
+    return [
+        _service_snapshot_from_evidence(
+            ctx=ctx,
+            key=key,
+            desired=desired,
+            evidence=_best_service_evidence(candidates_by_key.get(key, ())),
+        )
+        for key in _known_internal_service_keys()
+    ]
+
+
 def _collect_task_snapshots(
     ctx: WeftContext,
     *,
@@ -1115,14 +1519,51 @@ def _format_task_summary(snapshots: Sequence[TaskSnapshot]) -> str:
     return "\n".join(lines)
 
 
+def _format_service_summary(snapshots: Sequence[ServiceSnapshot]) -> str:
+    if not snapshots:
+        return "Services: none"
+
+    lines = ["Services:"]
+    for snap in snapshots:
+        parts = [f"  {snap.name:<18}", f"{snap.status:<10}"]
+        if snap.tid is not None:
+            parts.append(f"tid={snap.tid}")
+        parts.append(f"evidence={snap.evidence}")
+        if snap.queue is not None:
+            parts.append(f"queue={snap.queue}")
+        lines.append(" ".join(parts))
+    return "\n".join(lines)
+
+
+def _service_snapshot_to_dict(snapshot: ServiceSnapshot) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "key": snapshot.key,
+        "name": snapshot.name,
+        "desired": snapshot.desired,
+        "enabled": snapshot.enabled,
+        "status": snapshot.status,
+        "evidence": snapshot.evidence,
+        "tid": snapshot.tid,
+        "manager_tid": snapshot.manager_tid,
+        "queue": snapshot.queue,
+        "pid": snapshot.pid,
+        "updated_at": snapshot.updated_at,
+    }
+    if snapshot.reconciliation is not None:
+        payload["reconciliation"] = snapshot.reconciliation
+    return payload
+
+
 def _render_json_payload(
     broker: BrokerStatusSnapshot,
     managers: list[dict[str, Any]],
+    services: Sequence[ServiceSnapshot],
     tasks: Sequence[TaskSnapshot],
 ) -> str:
     payload = {
         "broker": broker.to_dict(),
         "managers": managers,
+        "services": [_service_snapshot_to_dict(snap) for snap in services],
         "tasks": [snap.to_dict() for snap in tasks],
     }
     return json.dumps(payload, ensure_ascii=False)
@@ -1237,10 +1678,25 @@ def cmd_status(
         )
         return exit_code, None
 
-    tasks = _collect_task_snapshots(
+    all_task_records = _collect_task_snapshot_records(
         context,
-        include_terminal=include_terminal,
+        include_terminal=True,
         tid_filters=tid_filters,
+    )
+    task_records = (
+        all_task_records
+        if include_terminal
+        else [
+            record
+            for record in all_task_records
+            if record.snapshot.status not in TERMINAL_TASK_STATUSES
+        ]
+    )
+    tasks = [record.snapshot for record in task_records]
+    services = _collect_internal_service_snapshots(
+        context,
+        managers=managers,
+        task_records=all_task_records,
     )
     if status_filter:
         tasks = [snap for snap in tasks if snap.status == status_filter]
@@ -1249,12 +1705,13 @@ def cmd_status(
         return 2, f"weft: task {tid} not found"
 
     if json_output:
-        payload = _render_json_payload(broker_snapshot, managers, tasks)
+        payload = _render_json_payload(broker_snapshot, managers, services, tasks)
     else:
         payload = "\n".join(
             (
                 broker_snapshot.to_text(),
                 _format_manager_summary(managers),
+                _format_service_summary(services),
                 _format_task_summary(tasks),
             )
         )
@@ -1379,19 +1836,22 @@ def _public_task_snapshot(snapshot: TaskSnapshot) -> PublicTaskSnapshot:
 def system_status(context: WeftContext) -> SystemStatusSnapshot:
     """Return the top-level broker, manager, and task status view."""
 
+    managers = _collect_manager_records(context)
+    task_records = _collect_task_snapshot_records(
+        context,
+        include_terminal=True,
+        tid_filters=None,
+    )
+    services = _collect_internal_service_snapshots(
+        context,
+        managers=managers,
+        task_records=task_records,
+    )
     return SystemStatusSnapshot(
         broker=collect_broker_status(context).to_dict(),
-        managers=[
-            _manager_snapshot(record) for record in _collect_manager_records(context)
-        ],
-        tasks=[
-            _public_task_snapshot(snapshot)
-            for snapshot in _collect_task_snapshots(
-                context,
-                include_terminal=True,
-                tid_filters=None,
-            )
-        ],
+        managers=[_manager_snapshot(record) for record in managers],
+        tasks=[_public_task_snapshot(record.snapshot) for record in task_records],
+        services=services,
     )
 
 

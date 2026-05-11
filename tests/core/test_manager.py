@@ -58,7 +58,7 @@ from weft.core.tasks import (
     PipelineTask,
     TaskMonitorTask,
 )
-from weft.core.tasks.multiqueue_watcher import QueueMessageContext
+from weft.core.tasks.multiqueue_watcher import QueueMessageContext, QueueMode
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 from weft.helpers import ContainerRuntimeDetection
 
@@ -3321,7 +3321,7 @@ def test_manager_public_dispatch_steals_work_when_registry_ownership_is_unproved
     )
 
 
-def test_manager_leadership_yield_waits_until_actionable_public_work_advances(
+def test_manager_leadership_yields_when_only_public_backlog_is_pending(
     broker_env,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -3331,10 +3331,12 @@ def test_manager_leadership_yield_waits_until_actionable_public_work_advances(
     manager = Manager(db_path, make_manager_spec(unique_tid), config=config)
     spawn_queue = make_queue(WEFT_SPAWN_REQUESTS_QUEUE)
     reserved_queue = make_queue(manager._queue_names["reserved"])
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     drain(spawn_queue)
+    drain(log_queue)
 
     payload = {
-        "name": "lower-leader-work",
+        "name": "unowned-public-backlog",
         "spec": {
             "type": "function",
             "function_target": "tests.tasks.sample_targets:echo_payload",
@@ -3354,13 +3356,120 @@ def test_manager_leadership_yield_waits_until_actionable_public_work_advances(
     monkeypatch.setattr(manager, "_launch_child_task", _record_launch)
 
     try:
-        manager.process_once()
+        yielded = manager._maybe_yield_leadership(force=True)
     finally:
         manager.stop(join=False)
         manager.cleanup()
 
+    assert yielded is True
+    assert launched == []
+    assert manager.should_stop is True
+    assert spawn_queue.peek_one(exact_timestamp=message_id) is not None
+    assert reserved_queue.peek_one(exact_timestamp=message_id) is None
+    events = [json.loads(item) for item in drain(log_queue)]
+    yield_event = next(
+        event for event in events if event.get("event") == "manager_leadership_yielded"
+    )
+    assert yield_event["leader_tid"] == lower_leader_tid
+
+
+def test_manager_leadership_waits_when_reserved_public_work_exists(
+    broker_env,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    config = load_config({"WEFT_TASK_MONITOR_ENABLED": "0"})
+    manager = Manager(db_path, make_manager_spec(unique_tid), config=config)
+    spawn_queue = make_queue(WEFT_SPAWN_REQUESTS_QUEUE)
+    reserved_queue = make_queue(manager._queue_names["reserved"])
+    drain(spawn_queue)
+    drain(reserved_queue)
+
+    payload = {
+        "name": "owned-public-reserved",
+        "spec": {
+            "type": "function",
+            "function_target": "tests.tasks.sample_targets:echo_payload",
+        },
+    }
+    spawn_queue.write(json.dumps(payload))
+    message_id = pending_timestamps(spawn_queue)[0]
+    moved = spawn_queue.move_one(
+        reserved_queue.name,
+        exact_timestamp=message_id,
+        with_timestamps=True,
+    )
+    lower_leader_tid = str(int(manager.tid) - 1)
+
+    monkeypatch.setattr(manager, "_leader_tid", lambda: lower_leader_tid)
+
+    try:
+        yielded = manager._maybe_yield_leadership(force=True)
+    finally:
+        manager.stop(join=False)
+        manager.cleanup()
+
+    assert moved == (json.dumps(payload), message_id)
+    assert yielded is False
+    assert manager.should_stop is False
+    assert reserved_queue.peek_one(exact_timestamp=message_id) is not None
+
+
+def test_manager_services_successfully_reserved_public_work(
+    broker_env,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    config = load_config({"WEFT_TASK_MONITOR_ENABLED": "0"})
+    manager = Manager(db_path, make_manager_spec(unique_tid), config=config)
+    spawn_queue = make_queue(WEFT_SPAWN_REQUESTS_QUEUE)
+    reserved_queue = make_queue(manager._queue_names["reserved"])
+    drain(spawn_queue)
+    drain(reserved_queue)
+
+    payload = {
+        "name": "owned-public-reserved",
+        "spec": {
+            "type": "function",
+            "function_target": "tests.tasks.sample_targets:echo_payload",
+        },
+    }
+    spawn_queue.write(json.dumps(payload))
+    message_id = pending_timestamps(spawn_queue)[0]
+    moved = spawn_queue.move_one(
+        reserved_queue.name,
+        exact_timestamp=message_id,
+        with_timestamps=True,
+    )
+    launched: list[str] = []
+
+    def _record_launch(child_spec: TaskSpec, *_args: object, **_kwargs: object) -> bool:
+        assert child_spec.tid is not None
+        launched.append(child_spec.tid)
+        return True
+
+    monkeypatch.setattr(manager, "_launch_child_task", _record_launch)
+
+    try:
+        manager._handle_work_message(
+            json.dumps(payload),
+            message_id,
+            QueueMessageContext(
+                queue_name=WEFT_SPAWN_REQUESTS_QUEUE,
+                queue=make_queue(WEFT_SPAWN_REQUESTS_QUEUE),
+                mode=QueueMode.RESERVE,
+                timestamp=message_id,
+                reserved_queue_name=reserved_queue.name,
+            ),
+        )
+    finally:
+        manager.stop(join=False)
+        manager.cleanup()
+
+    assert moved == (json.dumps(payload), message_id)
     assert launched == [str(message_id)]
-    assert spawn_queue.peek_one(exact_timestamp=message_id) is None
     assert reserved_queue.peek_one(exact_timestamp=message_id) is None
 
 
@@ -3385,7 +3494,6 @@ def test_manager_pending_precheck_forces_inactive_public_queue_probe(
     }
     spawn_queue.write(json.dumps(payload))
     message_id = pending_timestamps(spawn_queue)[0]
-    lower_leader_tid = str(int(manager.tid) - 1)
     launched: list[str] = []
 
     def _record_launch(child_spec: TaskSpec, *_args: object, **_kwargs: object) -> bool:
@@ -3397,7 +3505,7 @@ def test_manager_pending_precheck_forces_inactive_public_queue_probe(
     manager._queue_iterator = itertools.cycle([])
     manager._check_counter = 1
     manager._pending_messages_precheck_confirmed = False
-    monkeypatch.setattr(manager, "_leader_tid", lambda: lower_leader_tid)
+    monkeypatch.setattr(manager, "_leader_tid", lambda: manager.tid)
     monkeypatch.setattr(manager, "_launch_child_task", _record_launch)
 
     try:

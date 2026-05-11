@@ -1271,12 +1271,13 @@ class Manager(BaseTask):
         )
 
     def _has_actionable_leadership_work(self) -> bool:
-        """Return whether this manager should work before yielding leadership.
+        """Return whether this manager owns work that must run before yield.
 
         Registry leadership is advisory for public dispatch. A non-leader may
-        still help drain public spawn work because broker reservation owns
-        exclusivity for each message. Yield only when this process is idle
-        enough that exiting cannot strand useful local work.
+        launch public spawn work that it has already reserved, because broker
+        reservation owns exclusivity for that exact message. Pending public
+        backlog is not owned work and must not by itself block duplicate-manager
+        convergence.
 
         Spec: [MA-1.4], [MF-6]
         """
@@ -1285,9 +1286,15 @@ class Manager(BaseTask):
             return True
         if self._managed_internal_spawn_enqueued:
             return True
+        reserved_names = {
+            reserved_queue
+            for reserved_queue, _source_queue in self._spawn_reserved_queue_pairs()
+        }
         ctrl_name = self._queue_names.get("ctrl_in")
         for name, config in self._queues.items():
             if name == ctrl_name:
+                continue
+            if name not in reserved_names:
                 continue
             if self._queue_has_pending(config.queue):
                 self._mark_pending_messages_prechecked()
