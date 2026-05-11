@@ -3695,7 +3695,7 @@ def test_build_child_spec_propagates_unexpected_resolution_error(
         manager._build_child_spec(make_child_spec(), int(time.time_ns()))
 
 
-def test_manager_idle_timeout_force_refreshes_cached_broker_activity_before_shutdown(
+def test_manager_idle_timeout_ignores_unrelated_broker_activity(
     broker_env,
     unique_tid,
 ) -> None:
@@ -3712,25 +3712,17 @@ def test_manager_idle_timeout_force_refreshes_cached_broker_activity_before_shut
     )
     manager = Manager(db_path, spec)
     try:
-        previous_activity = time.time_ns() - 1_000_000_000
-        broker_queue = manager._get_connected_queue()
-        cached_timestamp = broker_queue.last_ts or 0
-        manager._last_activity_ns = previous_activity
-        manager._last_broker_timestamp = cached_timestamp
-        manager._last_broker_probe_ns = time.time_ns()
+        manager._last_activity_ns = time.time_ns() - 1_000_000_000
 
         activity_queue = make_queue("manager.activity")
         activity_queue.write("ping")
-        activity_timestamp = activity_queue.last_ts
-        assert isinstance(activity_timestamp, int)
-        assert activity_timestamp > cached_timestamp
-        assert broker_queue.last_ts == cached_timestamp
 
-        manager.process_once()
+        start = time.time()
+        while not manager.should_stop and time.time() - start < 2.0:
+            manager.process_once()
+            time.sleep(0.05)
 
-        assert manager.should_stop is False
-        assert manager._last_broker_timestamp >= activity_timestamp
-        assert manager._last_activity_ns > previous_activity
+        assert manager.should_stop is True
     finally:
         manager.cleanup()
 

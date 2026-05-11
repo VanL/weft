@@ -232,15 +232,9 @@ class Manager(BaseTask):
         )
         self._leader_check_interval_ns = 100_000_000
         self._last_leader_check_ns = 0
-        self._broker_activity_queue: Queue | None = None
         self._broker_probe_interval_ns = 1_000_000_000  # probe at most once per second
         self._last_broker_probe_ns = 0
         self._last_registry_heartbeat_ns = 0
-        try:
-            # Reuse any connected queue so watcher-driven updates also refresh last_ts.
-            self._broker_activity_queue = self._get_connected_queue()
-        except (BrokerError, OSError, RuntimeError):
-            logger.debug("Failed to prime broker activity queue", exc_info=True)
         self._last_broker_timestamp = self._read_broker_timestamp(force=True)
         self._register_manager()
         if self._maybe_yield_leadership(force=True):
@@ -322,6 +316,16 @@ class Manager(BaseTask):
         if internal_reserved is not None and internal_inbox is not None:
             pairs.insert(0, (internal_reserved, internal_inbox))
         return tuple(dict.fromkeys(pairs))
+
+    def _idle_activity_queue_names(self) -> tuple[str, ...]:
+        """Return manager-owned queues whose pending work should reset idle time."""
+
+        queue_names = list(self._spawn_inbox_queue_names())
+        queue_names.extend(
+            reserved_queue
+            for reserved_queue, _source in self._spawn_reserved_queue_pairs()
+        )
+        return tuple(dict.fromkeys(queue_names))
 
     def _build_queue_configs(self) -> dict[str, dict[str, Any]]:
         """Configure inbox reserve mode and control peek mode for the manager.
@@ -1625,6 +1629,7 @@ class Manager(BaseTask):
                 timestamp=timestamp,
             )
             self._handle_control_message(str(body), timestamp, context)
+            self._last_activity_ns = time.time_ns()
             handled += 1
             if self._draining or self.should_stop:
                 return
@@ -1656,6 +1661,13 @@ class Manager(BaseTask):
         return not self._draining and not self.should_stop
 
     def _read_broker_timestamp(self, *, force: bool = False) -> int:
+        """Return newest pending manager-owned input timestamp for idle tracking.
+
+        SimpleBroker's backend-wide ``last_ts`` is intentionally not used here:
+        under the Postgres backend, unrelated queues in the same database may
+        advance that value and would keep an idle manager alive under load.
+        """
+
         last_known = getattr(self, "_last_broker_timestamp", 0)
         now_ns = time.time_ns()
         if not force:
@@ -1665,43 +1677,26 @@ class Manager(BaseTask):
                 return last_known
 
         self._last_broker_probe_ns = now_ns
-
-        queue = getattr(self, "_broker_activity_queue", None)
-        if queue is None:
+        latest = last_known
+        for queue_name in self._idle_activity_queue_names():
             try:
-                queue = self._get_connected_queue()
+                pending = self._queue(queue_name).peek_one(with_timestamps=True)
             except (BrokerError, OSError, RuntimeError):
                 logger.debug(
-                    "Broker activity queue unavailable for idle tracking",
+                    "Manager activity queue %s unavailable for idle tracking",
+                    queue_name,
                     exc_info=True,
                 )
-                return last_known
-            else:
-                self._broker_activity_queue = queue
+                continue
+            timestamp = self._peeked_message_timestamp(pending)
+            if timestamp is not None:
+                latest = max(latest, timestamp)
 
-        try:
-            if force and hasattr(queue, "refresh_last_ts"):
-                candidate = queue.refresh_last_ts()
-            else:
-                candidate = queue.last_ts
-        except (BrokerError, OSError, RuntimeError):
-            logger.debug(
-                "Failed to refresh broker activity timestamp",
-                exc_info=True,
-            )
-            return last_known
-        if candidate is None:
-            return last_known
-
-        if not isinstance(candidate, int):
-            try:
-                candidate = int(candidate)
-            except (TypeError, ValueError):
-                return last_known
-
-        return candidate
+        return latest
 
     def _update_idle_activity_from_broker(self, *, force: bool = False) -> None:
+        """Refresh idle activity from manager-owned input queues only."""
+
         previous_timestamp = self._last_broker_timestamp
         new_timestamp = self._read_broker_timestamp(force=force)
         if new_timestamp > previous_timestamp:
@@ -1861,6 +1856,7 @@ class Manager(BaseTask):
 
         Spec: [MA-1.1], [MA-2], [MF-6]
         """
+        self._last_activity_ns = time.time_ns()
         self._cleanup_children()
         source_queue = context.queue_name
         reserved_queue = context.reserved_queue_name or self._queue_names["reserved"]
@@ -3492,9 +3488,9 @@ class Manager(BaseTask):
             logger.debug(
                 "Failed to inspect inbox queue for pending work", exc_info=True
             )
-        # Re-check broker activity without the periodic throttle before deciding the
-        # manager is idle. Short manager lifetimes can otherwise race with a freshly
-        # submitted spawn request that arrives between ordinary polls.
+        # Re-check manager-owned queue activity without the periodic throttle before
+        # deciding the manager is idle. Short manager lifetimes can otherwise race
+        # with a freshly submitted spawn request that arrives between ordinary polls.
         self._update_idle_activity_from_broker(force=True)
         now_ns = time.time_ns()
         if now_ns - self._last_activity_ns >= idle_timeout_ns:
