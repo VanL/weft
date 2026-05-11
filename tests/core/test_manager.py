@@ -19,6 +19,7 @@ import weft.core.manager as manager_mod
 from simplebroker.ext import BrokerError
 from weft._constants import (
     CONTROL_KILL,
+    CONTROL_PING,
     CONTROL_STOP,
     INTERNAL_AUTOSTART_ENABLED_METADATA_KEY,
     INTERNAL_AUTOSTART_SOURCE_METADATA_KEY,
@@ -4020,6 +4021,61 @@ def test_manager_autostart_templates(tmp_path: Path, broker_env, unique_tid) -> 
         ), "autostart launch should be logged"
     finally:
         manager.cleanup()
+
+
+def test_manager_control_drain_yields_when_peek_message_does_not_advance(
+    manager_setup,
+) -> None:
+    manager, make_queue = manager_setup
+    ctrl_name = manager._queue_names["ctrl_in"]
+    ctrl_out = make_queue(manager._queue_names["ctrl_out"])
+    stuck_timestamp = 1777000000000005000
+
+    class StuckControlQueue:
+        name = ctrl_name
+
+        def __init__(self) -> None:
+            self.delete_calls = 0
+
+        def peek_one(self, *, with_timestamps: bool = False):
+            payload = json.dumps(
+                {"command": CONTROL_PING, "request_id": "stuck-control"}
+            )
+            if with_timestamps:
+                return payload, stuck_timestamp
+            return payload
+
+        def delete(self, *, message_id: int | None = None) -> bool:
+            assert message_id == stuck_timestamp
+            self.delete_calls += 1
+            return False
+
+        def has_pending(self) -> bool:
+            return True
+
+        def close(self) -> None:
+            pass
+
+    stuck_queue = StuckControlQueue()
+    manager._queue_cache[ctrl_name] = stuck_queue
+    manager._queues[ctrl_name].queue = stuck_queue
+
+    start = time.monotonic()
+    manager._drain_control_queue_first()
+
+    assert time.monotonic() - start < 0.5
+    assert stuck_queue.delete_calls == 1
+    response = json.loads(ctrl_out.read_one())
+    assert response["command"] == CONTROL_PING
+    assert response["request_id"] == "stuck-control"
+    assert manager._stalled_control_message_id == stuck_timestamp
+
+    manager._drain_control_queue_first()
+
+    assert stuck_queue.delete_calls == 1
+    assert ctrl_out.read_one() is None
+    assert manager._has_pending_messages() is False
+    assert manager._control_allows_child_launch() is True
 
 
 def test_manager_idle_shutdown(broker_env, unique_tid) -> None:

@@ -149,6 +149,15 @@ MANAGER_PID_LIVENESS_RECHECK_INTERVAL: Final[float] = 0.5
 MANAGER_CHILD_EXIT_POLL_INTERVAL: Final[float] = 0.05
 """Polling interval while the Manager waits for tracked child processes to exit."""
 
+MANAGER_CONTROL_DRAIN_MAX_MESSAGES: Final[int] = 32
+"""Maximum manager control messages handled before yielding a manager turn."""
+
+MANAGER_STALLED_CONTROL_LOG_INTERVAL_SECONDS: Final[float] = 5.0
+"""Minimum interval between repeated stalled manager-control warnings."""
+
+MANAGER_STALLED_CONTROL_RETRY_SECONDS: Final[float] = 1.0
+"""Delay before retrying a manager control message that did not acknowledge."""
+
 MANAGER_CHILD_STARTUP_LIVENESS_GRACE_SECONDS: Final[float] = 1.0
 """Grace window before negative liveness can reap a just-launched Manager child."""
 

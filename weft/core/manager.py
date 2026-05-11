@@ -52,6 +52,7 @@ from weft._constants import (
     MANAGED_SERVICE_STABLE_AUDIT_INTERVAL_SECONDS,
     MANAGER_CHILD_EXIT_POLL_INTERVAL,
     MANAGER_CHILD_STARTUP_LIVENESS_GRACE_SECONDS,
+    MANAGER_CONTROL_DRAIN_MAX_MESSAGES,
     MANAGER_DISPATCH_RECOVERY_MAX_ATTEMPTS,
     MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS,
     MANAGER_PID_LIVENESS_RECHECK_INTERVAL,
@@ -61,6 +62,8 @@ from weft._constants import (
     MANAGER_SPAWN_FENCE_SUSPENDED_EVENT,
     MANAGER_SPAWN_FENCED_REQUEUED_EVENT,
     MANAGER_SPAWN_FENCED_STRANDED_EVENT,
+    MANAGER_STALLED_CONTROL_LOG_INTERVAL_SECONDS,
+    MANAGER_STALLED_CONTROL_RETRY_SECONDS,
     QUEUE_CTRL_IN_SUFFIX,
     QUEUE_CTRL_OUT_SUFFIX,
     QUEUE_INTERNAL_RESERVED_SUFFIX,
@@ -234,6 +237,9 @@ class Manager(BaseTask):
         self._drain_signaled_children: set[str] = set()
         self._drain_signal_started_ns: dict[str, int] = {}
         self._drain_started_ns: int | None = None
+        self._stalled_control_message_id: int | None = None
+        self._stalled_control_retry_after_ns = 0
+        self._stalled_control_last_log_ns = 0
         self._pending_termination_signal: int | None = None
         self._dispatch_suspension: DispatchSuspension | None = None
         self._autostart_enabled = bool(self._config.get("WEFT_AUTOSTART_TASKS", True))
@@ -1647,6 +1653,76 @@ class Manager(BaseTask):
     def _send_stop_command(self, queue_name: str) -> None:
         self._send_child_control_command(queue_name, CONTROL_STOP)
 
+    @staticmethod
+    def _peeked_message_timestamp(pending: object) -> int | None:
+        if isinstance(pending, tuple) and len(pending) == 2:
+            _body, timestamp = pending
+            return timestamp if isinstance(timestamp, int) else None
+        return None
+
+    def _clear_stalled_control_message(self) -> None:
+        self._stalled_control_message_id = None
+        self._stalled_control_retry_after_ns = 0
+
+    def _stalled_control_retry_active(self, timestamp: int) -> bool:
+        return (
+            self._stalled_control_message_id == timestamp
+            and time.time_ns() < self._stalled_control_retry_after_ns
+        )
+
+    def _mark_stalled_control_message(self, *, queue_name: str, timestamp: int) -> None:
+        now_ns = time.time_ns()
+        retry_ns = int(MANAGER_STALLED_CONTROL_RETRY_SECONDS * 1_000_000_000)
+        log_interval_ns = int(
+            MANAGER_STALLED_CONTROL_LOG_INTERVAL_SECONDS * 1_000_000_000
+        )
+        should_log = (
+            self._stalled_control_message_id != timestamp
+            or now_ns - self._stalled_control_last_log_ns >= log_interval_ns
+        )
+        self._stalled_control_message_id = timestamp
+        self._stalled_control_retry_after_ns = now_ns + retry_ns
+        if should_log:
+            logger.warning(
+                "Manager control message %s on %s did not advance after handling; "
+                "yielding this manager turn",
+                timestamp,
+                queue_name,
+            )
+            self._stalled_control_last_log_ns = now_ns
+
+    def _manager_control_pending_is_actionable(self) -> bool:
+        ctrl_name = self._queue_names.get("ctrl_in")
+        if not ctrl_name:
+            return False
+        pending = self._queue(ctrl_name).peek_one(with_timestamps=True)
+        if pending is None:
+            self._clear_stalled_control_message()
+            return False
+        timestamp = self._peeked_message_timestamp(pending)
+        if timestamp is None:
+            return True
+        if self._stalled_control_retry_active(timestamp):
+            return False
+        return True
+
+    def _queue_has_pending(self, queue: Queue) -> bool:
+        ctrl_name = self._queue_names.get("ctrl_in")
+        if ctrl_name and getattr(queue, "name", None) == ctrl_name:
+            return self._manager_control_pending_is_actionable()
+        return super()._queue_has_pending(queue)
+
+    def _has_pending_messages(self) -> bool:
+        """Return pending work, excluding temporarily stalled manager control."""
+
+        ctrl_name = self._queue_names.get("ctrl_in")
+        for name, config in self._queues.items():
+            if name == ctrl_name:
+                continue
+            if self._queue_has_pending(config.queue):
+                return True
+        return self._manager_control_pending_is_actionable()
+
     def _drain_control_queue_first(self) -> None:
         """Handle pending manager control messages before new spawn work.
 
@@ -1657,10 +1733,13 @@ class Manager(BaseTask):
 
         ctrl_name = self._queue_names["ctrl_in"]
         ctrl_queue = self._queue(ctrl_name)
+        handled = 0
+        seen_timestamps: set[int] = set()
 
-        while True:
+        while handled < MANAGER_CONTROL_DRAIN_MAX_MESSAGES:
             pending = ctrl_queue.peek_one(with_timestamps=True)
             if pending is None:
+                self._clear_stalled_control_message()
                 return
 
             if isinstance(pending, tuple) and len(pending) == 2:
@@ -1670,6 +1749,19 @@ class Manager(BaseTask):
 
             if not isinstance(timestamp, int):
                 return
+            if self._stalled_control_retry_active(timestamp):
+                return
+            if timestamp in seen_timestamps:
+                self._mark_stalled_control_message(
+                    queue_name=ctrl_name,
+                    timestamp=timestamp,
+                )
+                return
+            if (
+                self._stalled_control_message_id is not None
+                and self._stalled_control_message_id != timestamp
+            ):
+                self._clear_stalled_control_message()
 
             context = QueueMessageContext(
                 queue_name=ctrl_name,
@@ -1678,8 +1770,22 @@ class Manager(BaseTask):
                 timestamp=timestamp,
             )
             self._handle_control_message(str(body), timestamp, context)
+            handled += 1
             if self._draining or self.should_stop:
                 return
+            seen_timestamps.add(timestamp)
+            next_pending = ctrl_queue.peek_one(with_timestamps=True)
+            if self._peeked_message_timestamp(next_pending) == timestamp:
+                self._mark_stalled_control_message(
+                    queue_name=ctrl_name,
+                    timestamp=timestamp,
+                )
+                return
+
+        logger.warning(
+            "Manager yielded after handling %s control messages in one turn",
+            MANAGER_CONTROL_DRAIN_MAX_MESSAGES,
+        )
 
     def _control_allows_child_launch(self) -> bool:
         """Return whether spawn work may still launch a new child.

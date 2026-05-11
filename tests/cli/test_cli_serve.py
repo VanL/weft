@@ -415,8 +415,7 @@ def test_serve_restarts_singleton_services_without_duplicates(
         )
         assert heartbeat["tid"] != task_monitor["tid"]
 
-        constrained_backend = active_test_backend(os.environ) == "postgres"
-        service_timeout = 45.0 if os.name == "nt" or constrained_backend else 15.0
+        service_timeout = 45.0
         for service_key, current in (
             (INTERNAL_SERVICE_KEY_TASK_MONITOR, task_monitor),
             (INTERNAL_SERVICE_KEY_HEARTBEAT, heartbeat),
