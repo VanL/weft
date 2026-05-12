@@ -168,13 +168,14 @@ MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS: Final[float] = 5.0
 """Maximum time a Manager drain waits before forcefully reaping child processes."""
 
 MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS: Final[float] = (
-    MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS + 5.0
+    MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS + 40.0
 )
 """Default caller-side budget for observing Manager STOP completion.
 
-This must stay greater than ``MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS`` because
-the Manager may use the full drain window before it forcefully reaps tracked
-children and publishes its stopped registry record.
+This must stay materially greater than ``MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS``
+because the Manager may use the full drain window before it forcefully reaps
+tracked children, then needs backend and scheduler margin to publish and expose
+its stopped registry record.
 """
 
 MANAGER_COMPETING_STARTUP_GRACE_SECONDS: Final[float] = 0.5

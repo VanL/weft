@@ -281,8 +281,10 @@ manager drain has a bounded child-exit window; if child tasks do not exit after
 STOP is broadcast and the drain window expires, the Manager forcefully reaps
 tracked child process trees before publishing its drained terminal event.
 `SIGUSR1` retains immediate kill semantics. Caller-facing manager stop defaults
-must be longer than the internal manager drain window, because a Manager may use
-the full drain budget before publishing its stopped registry record.
+must be materially longer than the internal manager drain window, because a
+Manager may use the full drain budget before publishing its stopped registry
+record, and slower broker backends can add observable registry propagation and
+scheduler delay under release-load parallelism.
 
 _Implementation mapping_:
 - Shared manager lifecycle owner — `weft/core/manager_runtime.py` :: `_build_manager_runtime_invocation`, `_select_active_manager`, `_ensure_manager`, `_start_manager`, `_serve_manager_foreground`, `_list_manager_records`, `_manager_record`, `_stop_manager`; `weft/runtime_liveness.py` :: `runtime_liveness_from_registered_probe`; plus `weft/core/control_probe.py` :: `send_keyed_ping_probe` (owns canonical manager bootstrap, foreground serve, normalized registry replay, extension-provided supervised-manager stale checks, bounded manager PONG liveness probes, and graceful/forced stop observation).

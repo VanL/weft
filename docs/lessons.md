@@ -208,6 +208,10 @@ runbook needs to become stricter.
   internal child-drain budget. If both clocks are the same length, PG-backed
   xdist runs can time out exactly as the Manager finishes force-reaping
   children and publishing its stopped registry record.
+- The observation margin must be large enough for release-load backend and
+  scheduler pressure, not just barely larger than the internal drain window.
+  A 5-second caller margin was still narrow enough for PG CLI release gates to
+  report a false manager-stop failure after successful service convergence.
 - Broker timestamps are ordering evidence, not scheduling clocks. Manager-owned
   service restart backoff should use the manager's observation time; otherwise
   backend clock skew or future broker timestamps can make an ensure-mode

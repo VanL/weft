@@ -197,7 +197,7 @@ def test_stop_command_default_timeout_exceeds_manager_drain_budget(
     assert calls == [MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS]
     assert (
         MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS
-        > MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS
+        >= MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS + 40.0
     )
 
 
@@ -230,7 +230,7 @@ def test_stop_manager_default_timeout_exceeds_manager_drain_budget(
     assert calls == [MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS]
     assert (
         MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS
-        > MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS
+        >= MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS + 40.0
     )
 
 
