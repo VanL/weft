@@ -10,6 +10,7 @@ import weft.core.tasks.base as base_task
 from tests.tasks import sample_targets as targets  # noqa: F401
 from tests.tasks.test_task_execution import make_function_taskspec
 from weft._constants import (
+    PONG_EXTENSION_KEY,
     QUEUE_RESERVED_SUFFIX,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MANAGER_OUTBOX_QUEUE,
@@ -221,6 +222,50 @@ def test_structured_ping_echoes_request_id_and_snapshot(broker_env, unique_tid):
     assert ping_response["paused"] is False
     assert ping_response["should_stop"] is False
     assert ping_response["runner"]
+
+
+def test_task_can_register_pong_extension_provider(broker_env, unique_tid):
+    db_path, make_queue = broker_env
+    spec = make_function_taskspec(unique_tid, "tests.tasks.sample_targets:echo_payload")
+    task = Consumer(db_path, spec)
+
+    ctrl_in = make_queue(spec.io.control["ctrl_in"])
+    ctrl_out = task._ctrl_out_queue  # type: ignore[attr-defined]
+    task.register_pong_extension_provider(
+        lambda: {"queue_depth": 3, "notes": {"mode": "diagnostic"}}
+    )
+
+    ctrl_in.write(json.dumps({"command": "PING", "request_id": "extended-ping"}))
+    task.process_once()
+
+    responses = [json.loads(msg) for msg in _read_all(ctrl_out)]
+    ping_response = next(r for r in responses if r.get("command") == "PING")
+    assert ping_response["message"] == "PONG"
+    assert ping_response[PONG_EXTENSION_KEY] == {
+        "queue_depth": 3,
+        "notes": {"mode": "diagnostic"},
+    }
+    assert ping_response["request_id"] == "extended-ping"
+    assert ping_response["task_status"] == task.taskspec.state.status
+
+
+def test_bad_pong_extension_provider_error_stays_nested(broker_env, unique_tid):
+    db_path, make_queue = broker_env
+    spec = make_function_taskspec(unique_tid, "tests.tasks.sample_targets:echo_payload")
+    task = Consumer(db_path, spec)
+
+    ctrl_in = make_queue(spec.io.control["ctrl_in"])
+    ctrl_out = task._ctrl_out_queue  # type: ignore[attr-defined]
+    task.register_pong_extension_provider(lambda: {"bad": {object()}})
+
+    ctrl_in.write("PING")
+    task.process_once()
+
+    responses = [json.loads(msg) for msg in _read_all(ctrl_out)]
+    ping_response = next(r for r in responses if r.get("command") == "PING")
+    assert "error" in ping_response[PONG_EXTENSION_KEY]
+    assert ping_response["message"] == "PONG"
+    assert ping_response["task_status"] == task.taskspec.state.status
 
 
 def test_manager_ping_includes_manager_selection_fields(broker_env, unique_tid):

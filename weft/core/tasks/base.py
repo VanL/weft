@@ -49,6 +49,7 @@ from weft._constants import (
     INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
     INTERNAL_RUNTIME_TASK_CLASS_KEY,
     PIPELINE_OWNER_METADATA_KEY,
+    PONG_EXTENSION_KEY,
     QUEUE_CTRL_IN_SUFFIX,
     QUEUE_CTRL_OUT_SUFFIX,
     QUEUE_INBOX_SUFFIX,
@@ -116,6 +117,9 @@ class ControlRequest:
     command: str
     request_id: str | None = None
     raw: str | None = None
+
+
+PongExtensionProvider = Callable[[], Mapping[str, Any] | None]
 
 
 def _merge_host_process_observations(
@@ -201,6 +205,7 @@ class BaseTask(MultiQueueWatcher, ABC):
         self._last_reported_status: str | None = None
         self._activity: str | None = None
         self._waiting_on: str | None = None
+        self._pong_extension_provider: PongExtensionProvider | None = None
 
         self._queue_names = self._resolve_queue_names()
         queue_configs = self._build_queue_configs()
@@ -719,9 +724,56 @@ class BaseTask(MultiQueueWatcher, ABC):
 
         payload = self._control_snapshot_fields()
         payload.update(extra)
+        if extra.get("message") == "PONG":
+            payload.update(self._pong_extension_fields())
         if request.request_id is not None:
             payload["request_id"] = request.request_id
         return payload
+
+    def register_pong_extension_provider(
+        self,
+        provider: PongExtensionProvider | None,
+    ) -> None:
+        """Register optional JSON fields added to future PONG responses.
+
+        Provider output is nested under the optional ``extended`` key so core
+        control-protocol fields remain stable.
+
+        Spec: [CC-2.4], [MF-3]
+        """
+
+        self._pong_extension_provider = provider
+
+    def unregister_pong_extension_provider(self) -> None:
+        """Remove any optional PONG extension provider registered on this task."""
+
+        self._pong_extension_provider = None
+
+    def _pong_extension_fields(self) -> dict[str, Any]:
+        """Return guarded provider fields for a PONG response."""
+
+        provider = self._pong_extension_provider
+        if provider is None:
+            return {}
+        try:
+            provided = provider()
+        except Exception as exc:  # pragma: no cover - defensive extension boundary
+            return {PONG_EXTENSION_KEY: {"error": str(exc)}}
+        if provided is None:
+            return {}
+        if not isinstance(provided, Mapping):
+            return {
+                PONG_EXTENSION_KEY: {
+                    "error": "PONG extension provider must return a mapping or None"
+                }
+            }
+
+        fields = {str(key): value for key, value in provided.items()}
+        try:
+            json.dumps(fields)
+        except (TypeError, ValueError) as exc:
+            return {PONG_EXTENSION_KEY: {"error": str(exc)}}
+        return {PONG_EXTENSION_KEY: fields}
 
     def _control_snapshot_fields(self) -> dict[str, Any]:
         """Return a small task-local status snapshot for control responses."""

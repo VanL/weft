@@ -17,6 +17,9 @@ from weft._constants import (
     RUNTIME_PRUNE_CLASS_SUPERSEDED_TID_MAPPING,
     RUNTIME_PRUNE_CLASS_UNSUPPORTED_PIPELINE,
     SERVICE_OWNER_SCHEMA,
+    SERVICE_STATUS_ACTIVE,
+    SERVICE_STATUS_TERMINAL,
+    SERVICE_TYPE_MANAGED,
     WEFT_ENDPOINTS_REGISTRY_QUEUE,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MANAGER_OUTBOX_QUEUE,
@@ -32,7 +35,10 @@ from weft.commands.runtime_prune import (
 )
 from weft.context import build_context
 from weft.core.endpoints import build_endpoint_record_payload
-from weft.core.service_convergence import build_manager_service_payload
+from weft.core.service_convergence import (
+    build_manager_service_payload,
+    build_service_owner_payload,
+)
 from weft.ext import RunnerHandle
 from weft.helpers import iter_queue_json_entries
 
@@ -78,6 +84,37 @@ def _manager_service_payload(
             "outbox": WEFT_MANAGER_OUTBOX_QUEUE,
         },
         runtime_handle=runtime_handle or {},
+    )
+
+
+def _managed_service_payload(
+    *,
+    service_key: str,
+    tid: str,
+    status: str = SERVICE_STATUS_ACTIVE,
+) -> dict[str, object]:
+    return build_service_owner_payload(
+        service_key=service_key,
+        service_type=SERVICE_TYPE_MANAGED,
+        owner_tid=tid,
+        status=status,
+        name="heartbeat-service"
+        if status == SERVICE_STATUS_ACTIVE
+        else "managed-service",
+        queues={
+            "ctrl_in": f"T{tid}.ctrl_in",
+            "ctrl_out": f"T{tid}.ctrl_out",
+            "inbox": f"T{tid}.inbox",
+            "outbox": f"T{tid}.outbox",
+        },
+        runtime_handle={
+            "runner": "host",
+            "kind": "process",
+            "id": tid[-4:],
+            "control": {"authority": "host-pid"},
+            "observations": {"host_pids": [int(tid[-4:])]},
+        },
+        metadata={"internal_role": "heartbeat"},
     )
 
 
@@ -272,6 +309,59 @@ def test_manager_prune_reports_malformed_service_owner_rows(tmp_path) -> None:
     )
     assert candidate.classification == RUNTIME_PRUNE_CLASS_STALE_MANAGER
     assert candidate.reason == "malformed_service_owner_row"
+
+
+def test_services_prune_deletes_superseded_managed_service_history(tmp_path) -> None:
+    ctx = _context(tmp_path)
+    service_key = "_weft.service.heartbeat"
+    first_active = _write_json(
+        ctx,
+        WEFT_SERVICES_REGISTRY_QUEUE,
+        _managed_service_payload(
+            service_key=service_key,
+            tid="1770000000000000100",
+            status=SERVICE_STATUS_ACTIVE,
+        ),
+    )
+    first_terminal = _write_json(
+        ctx,
+        WEFT_SERVICES_REGISTRY_QUEUE,
+        _managed_service_payload(
+            service_key=service_key,
+            tid="1770000000000000100",
+            status=SERVICE_STATUS_TERMINAL,
+        ),
+    )
+    second_active = _write_json(
+        ctx,
+        WEFT_SERVICES_REGISTRY_QUEUE,
+        _managed_service_payload(
+            service_key=service_key,
+            tid="1770000000000000101",
+            status=SERVICE_STATUS_ACTIVE,
+        ),
+    )
+
+    result = run_runtime_prune(
+        RuntimePruneConfig(
+            context_path=ctx.root,
+            queues=("services",),
+            min_age_seconds=0,
+            apply=True,
+        )
+    )
+
+    assert result.exit_code == 0
+    assert result.deleted == 2
+    deleted_ids = {candidate.message_id for candidate in result.applied_candidates}
+    assert deleted_ids == {first_active, first_terminal}
+    remaining_ids = {
+        message_id
+        for _payload, message_id in _read_rows(ctx, WEFT_SERVICES_REGISTRY_QUEUE)
+    }
+    assert first_active not in remaining_ids
+    assert first_terminal not in remaining_ids
+    assert second_active in remaining_ids
 
 
 def test_streaming_prune_deletes_terminal_owner_marker_only(tmp_path) -> None:

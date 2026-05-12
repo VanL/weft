@@ -31,6 +31,7 @@ from weft._constants import (
     RUNTIME_PRUNE_CLASS_STALE_STREAMING,
     RUNTIME_PRUNE_CLASS_SUPERSEDED_ENDPOINT,
     RUNTIME_PRUNE_CLASS_SUPERSEDED_MANAGER,
+    RUNTIME_PRUNE_CLASS_SUPERSEDED_SERVICE,
     RUNTIME_PRUNE_CLASS_SUPERSEDED_TID_MAPPING,
     RUNTIME_PRUNE_CLASS_UNSUPPORTED_PIPELINE,
     RUNTIME_PRUNE_DEFAULT_KEEP_RECENT_PER_KEY,
@@ -39,6 +40,7 @@ from weft._constants import (
     RUNTIME_PRUNE_REPORT_ONLY_CLASSIFICATIONS,
     RUNTIME_PRUNE_SCHEMA_VERSION,
     RUNTIME_PRUNE_SUPPORTED_QUEUE_GROUPS,
+    SERVICE_TYPE_MANAGED,
     TERMINAL_TASK_STATUSES,
     WEFT_ENDPOINTS_REGISTRY_QUEUE,
     WEFT_GLOBAL_LOG_QUEUE,
@@ -59,12 +61,16 @@ from weft.core.manager_runtime import (
     normalize_manager_registry_record,
 )
 from weft.core.pruning.apply import apply_exact_prune_candidates
-from weft.core.service_convergence import parse_service_owner_row
+from weft.core.service_convergence import (
+    parse_service_owner_row,
+    plan_service_owner_history_prune,
+)
 from weft.helpers import iter_queue_json_entries
 
 RuntimeQueueName = Literal[
     "tid-mappings",
     "managers",
+    "services",
     "streaming",
     "endpoints",
     "pipelines",
@@ -80,6 +86,7 @@ class RuntimePruneConfig:
     queues: tuple[RuntimeQueueName, ...] = (
         "tid-mappings",
         "managers",
+        "services",
         "streaming",
         "endpoints",
         "pipelines",
@@ -414,6 +421,7 @@ def _build_candidates(
     builders = {
         "tid-mappings": _tid_mapping_candidates,
         "managers": _manager_candidates,
+        "services": _service_candidates,
         "streaming": _streaming_candidates,
         "endpoints": _endpoint_candidates,
         "pipelines": _pipeline_candidates,
@@ -477,6 +485,9 @@ def _payload_excerpt(payload: Mapping[str, Any]) -> dict[str, Any]:
         "role",
         "queue",
         "session_id",
+        "service_key",
+        "service_type",
+        "owner_tid",
     }
     return {key: payload[key] for key in allowed if key in payload}
 
@@ -621,6 +632,55 @@ def _manager_candidates(
                     key=tid,
                     classification=RUNTIME_PRUNE_CLASS_SUPERSEDED_MANAGER,
                     reason="older_than_min_age_and_not_latest_for_manager_tid",
+                    now_ns=now_ns,
+                    payload=candidate_payload,
+                )
+            )
+    return candidates, scanned
+
+
+def _service_candidates(
+    ctx: WeftContext,
+    config: RuntimePruneConfig,
+    now_ns: int,
+) -> tuple[list[RuntimePruneCandidate], int]:
+    entries, scanned = _read_runtime_queue(ctx, WEFT_SERVICES_REGISTRY_QUEUE)
+    payload_by_id = {message_id: payload for payload, message_id in entries}
+    managed_records = []
+    candidates: list[RuntimePruneCandidate] = []
+    for payload, message_id in entries:
+        parse_result = parse_service_owner_row(payload, timestamp=message_id)
+        if parse_result.record is None:
+            continue
+        if parse_result.record.service_type != SERVICE_TYPE_MANAGED:
+            continue
+        managed_records.append(parse_result.record)
+
+    service_keys = sorted({record.service_key for record in managed_records})
+    for service_key in service_keys:
+        prune_ids = set(
+            plan_service_owner_history_prune(
+                managed_records,
+                service_key=service_key,
+                now_ns=now_ns,
+                ttl_ns=-1,
+                keep_recent_per_key=config.keep_recent_per_key,
+            )
+        )
+        for message_id in sorted(prune_ids):
+            candidate_payload = payload_by_id.get(message_id)
+            if candidate_payload is None:
+                continue
+            if not _is_old_enough(message_id, now_ns, config.min_age_seconds):
+                continue
+            candidates.append(
+                _candidate(
+                    queue=WEFT_SERVICES_REGISTRY_QUEUE,
+                    queue_group="services",
+                    message_id=message_id,
+                    key=service_key,
+                    classification=RUNTIME_PRUNE_CLASS_SUPERSEDED_SERVICE,
+                    reason="older_than_min_age_and_not_latest_for_service_key",
                     now_ns=now_ns,
                     payload=candidate_payload,
                 )

@@ -141,6 +141,7 @@ from .service_convergence import (
     collect_service_owner_records,
     manager_service_key,
     parse_service_owner_record,
+    plan_service_owner_history_prune,
     project_manager_service_record,
     reduce_service_ownership,
 )
@@ -1209,7 +1210,13 @@ class Manager(BaseTask):
                 if not isinstance(payload, dict):
                     continue
                 record = parse_service_owner_record(payload, timestamp=timestamp)
-                if record is None or record.owner_tid != self.tid:
+                if (
+                    record is None
+                    or record.owner_tid != self.tid
+                    or record.service_type != SERVICE_TYPE_MANAGER
+                    or record.service_key
+                    != manager_service_key(self._manager_context())
+                ):
                     continue
                 self_timestamps.append(timestamp)
                 if latest_ts is None or timestamp > latest_ts:
@@ -3624,6 +3631,15 @@ class Manager(BaseTask):
         )
         now_ns = time.time_ns()
         for service_key in desired_keys:
+            self._prune_managed_service_registry_history(
+                queue,
+                plan_service_owner_history_prune(
+                    read.records,
+                    service_key=service_key,
+                    now_ns=now_ns,
+                    ttl_ns=self._manager_registry_retention_ns(),
+                ),
+            )
             decision = reduce_service_ownership(
                 service_key,
                 read.records,
@@ -3651,6 +3667,22 @@ class Manager(BaseTask):
                     self._service_candidate_from_service_owner_record(record)
                 )
         return candidates_by_key
+
+    def _prune_managed_service_registry_history(
+        self,
+        queue: Queue,
+        message_ids: Sequence[int],
+    ) -> None:
+        """Delete exact superseded managed-service registry rows."""
+
+        for message_id in message_ids:
+            try:
+                queue.delete(message_id=message_id)
+            except (BrokerError, OSError, RuntimeError):
+                logger.debug(
+                    "Failed to prune managed service registry history",
+                    exc_info=True,
+                )
 
     def _observed_service_candidates(self, service_key: str) -> list[ServiceCandidate]:
         return self._observed_service_candidates_by_key({service_key}).get(

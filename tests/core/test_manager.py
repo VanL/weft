@@ -142,6 +142,20 @@ def _write_managed_service_owner(
     )
 
 
+def _managed_service_owner_rows(
+    make_queue: Callable[[str], Any],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for raw in make_queue(WEFT_SERVICES_REGISTRY_QUEUE).peek_generator():
+        try:
+            payload = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict):
+            rows.append(payload)
+    return rows
+
+
 def _manager_service_payload(
     manager: Manager,
     *,
@@ -1652,6 +1666,41 @@ def test_task_monitor_recent_log_without_liveness_blocks_duplicate_restart(
     manager._tick_task_monitor(force=True)
 
     assert enqueued == [INTERNAL_SERVICE_KEY_HEARTBEAT]
+
+
+def test_managed_service_observation_prunes_superseded_service_history(
+    manager_setup,
+) -> None:
+    manager, make_queue = manager_setup
+    first_tid = "1777000000000000600"
+    second_tid = "1777000000000000601"
+    _write_managed_service_owner(
+        make_queue,
+        service_key=INTERNAL_SERVICE_KEY_HEARTBEAT,
+        tid=first_tid,
+    )
+    _write_managed_service_owner(
+        make_queue,
+        service_key=INTERNAL_SERVICE_KEY_HEARTBEAT,
+        tid=first_tid,
+        status="terminal",
+    )
+    _write_managed_service_owner(
+        make_queue,
+        service_key=INTERNAL_SERVICE_KEY_HEARTBEAT,
+        tid=second_tid,
+    )
+
+    manager._observed_service_candidates_by_key({INTERNAL_SERVICE_KEY_HEARTBEAT})
+
+    rows = [
+        payload
+        for payload in _managed_service_owner_rows(make_queue)
+        if payload.get("service_key") == INTERNAL_SERVICE_KEY_HEARTBEAT
+    ]
+    assert [(row.get("owner_tid"), row.get("status")) for row in rows] == [
+        (second_tid, "active")
+    ]
 
 
 def test_task_monitor_duplicate_live_candidates_get_kill_signal(

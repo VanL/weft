@@ -251,6 +251,45 @@ def plan_service_registry_prune(
     return expired, tuple(older_self)
 
 
+def plan_service_owner_history_prune(
+    records: Sequence[ServiceOwnerRecord],
+    *,
+    service_key: str,
+    now_ns: int,
+    ttl_ns: int,
+    keep_recent_per_key: int = 1,
+) -> tuple[int, ...]:
+    """Return service-owner history rows that are safe to prune exactly."""
+
+    scoped = tuple(record for record in records if record.service_key == service_key)
+    if not scoped:
+        return ()
+
+    expired = {
+        record.timestamp
+        for record in scoped
+        if timestamp_is_expired(record.timestamp, now_ns, ttl_ns)
+    }
+    latest_by_owner = reduce_latest_by_service_owner(scoped)
+    latest_ids = {record.timestamp for record in latest_by_owner}
+    superseded_owner_rows = {
+        record.timestamp for record in scoped if record.timestamp not in latest_ids
+    }
+
+    retainable = [
+        record for record in latest_by_owner if record.timestamp not in expired
+    ]
+    ordered = sorted(retainable, key=lambda record: record.timestamp, reverse=True)
+    keep_count = max(0, keep_recent_per_key)
+    protected = {record.timestamp for record in ordered[:keep_count]}
+    older_service_rows = {
+        record.timestamp
+        for record in ordered[keep_count:]
+        if record.timestamp not in protected
+    }
+    return tuple(sorted(expired | superseded_owner_rows | older_service_rows))
+
+
 def has_recent_lower_live_owner(
     records: Sequence[ServiceOwnerRecord],
     *,

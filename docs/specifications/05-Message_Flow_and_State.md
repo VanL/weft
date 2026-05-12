@@ -127,6 +127,10 @@ The control plane is explicit:
   handle/plugin description contract, such as Docker's
   `RunnerRuntimeDescription`; failure to collect those details must not
   suppress the core PONG response
+- tasks may register an optional PONG extension provider; when present, its
+  JSON-serializable mapping is nested under the `extended` key, and extension
+  failures are reported under that same key without suppressing the core PONG
+  response
 - terminal task-local notifications must be typed JSON envelopes with
   `type="terminal"`, `source="task"` or `source="manager"`, `tid`, `status`,
   and `timestamp`; optional fields include `error` and `return_code`

@@ -402,6 +402,10 @@ Current behavior:
   reconciliation classification plus best-effort runner-specific `runtime`
   details, including Docker details from `RunnerRuntimeDescription` when the
   task runs under Docker
+- `weft task ping TID` sends the same keyed PING probe and emits JSON with
+  `timed_out`, `error`, `observed_at`, and the matched raw `pong` payload; any
+  task-registered extension data remains nested inside the PONG's `extended`
+  key
 - `weft task tid` resolves short TIDs, PID lookups, or reverse lookups via the
   TID-mapping queue
 - `weft task stop` and `weft task kill` can act on one task, all active tasks,
@@ -419,6 +423,7 @@ Current task-control surfaces:
 
 - `weft task stop TID`
 - `weft task kill TID`
+- `weft task ping TID`
 
 `weft task kill` reports a killed count only when the command helper observes
 terminal `killed` evidence, controlled host-process death after a kill action,

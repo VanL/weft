@@ -24,6 +24,7 @@ from weft._constants import (
     CONTROL_SURFACE_WAIT_INTERVAL,
     CONTROL_SURFACE_WAIT_TIMEOUT,
     QUEUE_CTRL_IN_SUFFIX,
+    TASK_PING_TIMEOUT_SECONDS,
     TASKSPEC_TID_SHORT_LENGTH,
     TERMINAL_ENVELOPE_TYPE,
     WEFT_GLOBAL_LOG_QUEUE,
@@ -34,6 +35,7 @@ from weft._runner_plugins import require_runner_plugin
 from weft.commands.types import TaskSnapshot as PublicTaskSnapshot
 from weft.commands.types import TaskTerminalSnapshot
 from weft.context import WeftContext, build_context
+from weft.core.control_probe import send_keyed_ping_probe
 from weft.core.queue_wait import QueueChangeMonitor
 from weft.helpers import (
     iter_queue_json_entries,
@@ -487,6 +489,48 @@ def task_status(
     if pipeline_snapshot is not None and base_snapshot is not None:
         base_snapshot = replace(base_snapshot, pipeline_status=pipeline_snapshot)
     return base_snapshot
+
+
+def task_ping(
+    tid: str,
+    *,
+    timeout: float = TASK_PING_TIMEOUT_SECONDS,
+    context: WeftContext | None = None,
+    context_path: str | os.PathLike[str] | None = None,
+) -> dict[str, Any]:
+    """Send a keyed PING and return the matched extended PONG payload.
+
+    Spec: docs/specifications/10-CLI_Interface.md [CLI-1.3]
+    """
+
+    ctx = (
+        context
+        if context is not None
+        else build_context(spec_context=context_path, create_database=False)
+    )
+    full_tid = resolve_full_tid(ctx, tid) or tid.strip().lstrip("T")
+    taskspec_payload = (
+        load_latest_taskspec_payload(ctx, full_tid)
+        if full_tid.isdigit() and len(full_tid) == 19
+        else None
+    )
+    ctrl_in_name, ctrl_out_name = task_evidence.control_queue_names_for_tid(
+        full_tid,
+        taskspec_payload,
+    )
+    result = send_keyed_ping_probe(
+        ctx,
+        tid=full_tid,
+        ctrl_in_name=ctrl_in_name,
+        ctrl_out_name=ctrl_out_name,
+        timeout=timeout,
+    )
+    return {
+        "timed_out": result.timed_out,
+        "error": result.error,
+        "observed_at": result.matched.observed_at if result.matched else None,
+        "pong": result.matched.payload if result.matched else None,
+    }
 
 
 def _task_snapshot_from_live_pong(

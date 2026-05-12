@@ -113,7 +113,7 @@ State transitions and rules live in `05-Message_Flow_and_State.md`.
 | `STOP` | Graceful shutdown (task cancels and reports) |
 | `KILL` | Force terminate the task |
 | `STATUS` | Emit current task-local status on `ctrl_out` |
-| `PING` | Health check; responds `PONG` with a live task-local status snapshot, echoes `request_id` for structured requests, and includes manager-selection fields for Manager tasks |
+| `PING` | Health check; responds `PONG` with a live task-local status snapshot, echoes `request_id` for structured requests, includes manager-selection fields for Manager tasks, and may include task-registered extension data under `extended` |
 | `PAUSE` | Pause task processing |
 | `RESUME` | Resume a paused task |
 

@@ -21,6 +21,7 @@ from weft.core import (
     TaskSpec,
     launch_task_process,
 )
+from weft.core.control_probe import ControlProbeResult, MatchedPong
 from weft.core.tasks import Consumer
 from weft.ext import RunnerHandle
 from weft.helpers import iter_queue_json_entries, kill_process_tree
@@ -188,6 +189,98 @@ def test_ack_terminal_snapshot_deletes_exact_message_only(tmp_path) -> None:
     remaining = ctrl_out.peek_many(limit=10)
     assert len(remaining) == 2
     assert all("terminal" not in message for message in remaining)
+
+
+def test_task_ping_returns_probe_payload(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    calls: list[dict[str, Any]] = []
+
+    def _fake_probe(ctx_arg, *, tid, ctrl_in_name, ctrl_out_name, timeout):
+        calls.append(
+            {
+                "ctx": ctx_arg,
+                "tid": tid,
+                "ctrl_in_name": ctrl_in_name,
+                "ctrl_out_name": ctrl_out_name,
+                "timeout": timeout,
+            }
+        )
+        payload = {
+            "command": "PING",
+            "status": "ok",
+            "message": "PONG",
+            "tid": tid,
+            "request_id": "req-1",
+            "task_status": "running",
+            "extended": {"depth": 2},
+        }
+        return ControlProbeResult(
+            request_id="req-1",
+            matched=MatchedPong(
+                payload=payload,
+                observed_at=123,
+                request_id="req-1",
+            ),
+        )
+
+    monkeypatch.setattr(task_cmd, "send_keyed_ping_probe", _fake_probe)
+
+    payload = task_cmd.task_ping(tid, timeout=0.25, context=ctx)
+
+    assert payload == {
+        "timed_out": False,
+        "error": None,
+        "observed_at": 123,
+        "pong": {
+            "command": "PING",
+            "status": "ok",
+            "message": "PONG",
+            "tid": tid,
+            "request_id": "req-1",
+            "task_status": "running",
+            "extended": {"depth": 2},
+        },
+    }
+    assert calls == [
+        {
+            "ctx": ctx,
+            "tid": tid,
+            "ctrl_in_name": f"T{tid}.ctrl_in",
+            "ctrl_out_name": f"T{tid}.ctrl_out",
+            "timeout": 0.25,
+        }
+    ]
+
+
+def test_task_ping_reports_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    monkeypatch.setattr(
+        task_cmd,
+        "send_keyed_ping_probe",
+        lambda *_args, **_kwargs: ControlProbeResult(
+            request_id="req-timeout",
+            timed_out=True,
+        ),
+    )
+
+    payload = task_cmd.task_ping(tid, timeout=0.0, context=ctx)
+
+    assert payload == {
+        "timed_out": True,
+        "error": None,
+        "observed_at": None,
+        "pong": None,
+    }
 
 
 def _wait_for_registered_worker_pid(ctx, tid: str, timeout: float = 15.0) -> int | None:

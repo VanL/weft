@@ -98,6 +98,12 @@ MANAGER_POLL_INTERVAL: Final[float] = TASK_PROCESS_POLL_INTERVAL
 CONTROL_SURFACE_WAIT_TIMEOUT: Final[float] = 2.0
 """Maximum time to wait for durable terminal task state before CLI fallback."""
 
+PONG_EXTENSION_KEY: Final[str] = "extended"
+"""Optional PONG payload key for task-registered extension data."""
+
+TASK_PING_TIMEOUT_SECONDS: Final[float] = 10.0
+"""Default seconds `weft task ping` waits for a keyed PONG response."""
+
 CONTROL_SURFACE_WAIT_INTERVAL: Final[float] = 0.05
 """Polling interval while waiting for task terminal state in CLI control flows."""
 
@@ -434,6 +440,9 @@ RUNTIME_PRUNE_CLASS_STALE_MANAGER: Final[str] = "stale_manager_registry"
 
 RUNTIME_PRUNE_CLASS_SUPERSEDED_MANAGER: Final[str] = "superseded_manager_registry"
 """Runtime-prune classification for older duplicate manager registry rows."""
+
+RUNTIME_PRUNE_CLASS_SUPERSEDED_SERVICE: Final[str] = "superseded_service_registry"
+"""Runtime-prune classification for older managed-service registry rows."""
 
 RUNTIME_PRUNE_CLASS_STALE_STREAMING: Final[str] = "stale_streaming_session"
 """Runtime-prune classification for stale streaming session markers."""

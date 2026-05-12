@@ -56,3 +56,37 @@ def test_task_tid_reverse(workdir, weft_harness) -> None:
     assert rc == 0
     assert out.strip() == tid[-10:]
     assert err == ""
+
+
+def test_task_ping_outputs_extended_pong_json(workdir, weft_harness) -> None:
+    rc, out, err = run_cli(
+        "run",
+        "--no-wait",
+        "--function",
+        "tests.tasks.sample_targets:simulate_work",
+        "--kw",
+        "duration=2",
+        "--kw",
+        "result=done",
+        cwd=workdir,
+        harness=weft_harness,
+    )
+    assert rc == 0
+    assert err == ""
+    tid = out.strip()
+    assert tid
+    weft_harness.register_tid(tid)
+
+    rc, out, err = run_cli("task", "ping", tid, "--timeout", "10", cwd=workdir)
+
+    assert rc == 0
+    assert err == ""
+    payload = json.loads(out)
+    assert payload["timed_out"] is False
+    assert payload["error"] is None
+    assert isinstance(payload["observed_at"], int)
+    assert payload["pong"]["command"] == "PING"
+    assert payload["pong"]["message"] == "PONG"
+    assert payload["pong"]["tid"] == tid
+    assert payload["pong"]["task_status"] == "running"
+    assert payload["pong"]["request_id"]

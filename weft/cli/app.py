@@ -749,6 +749,26 @@ def task_status(
         typer.echo(f"host_pids: {managed} live_host_pids: {live_managed}")
 
 
+@task_app.command("ping")
+def task_ping(
+    tid: Annotated[str, typer.Argument(help="Task ID or short ID")],
+    timeout: Annotated[
+        float,
+        typer.Option("--timeout", help="Seconds to wait for a matching PONG"),
+    ] = task_cmd.TASK_PING_TIMEOUT_SECONDS,
+    context_dir: Annotated[
+        Path | None,
+        typer.Option("--context", help="Project root (defaults to auto-discovery)"),
+    ] = None,
+) -> None:
+    payload = task_cmd.task_ping(
+        tid,
+        timeout=timeout,
+        context_path=context_dir,
+    )
+    typer.echo(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+
+
 @task_app.command("stop")
 def task_stop(
     tid: Annotated[

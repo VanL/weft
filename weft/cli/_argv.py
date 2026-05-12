@@ -113,6 +113,7 @@ def rearrange_args(argv: list[str]) -> list[str]:
         "task",
         "task list",
         "task status",
+        "task ping",
         "task stop",
         "task kill",
         "task tid",
