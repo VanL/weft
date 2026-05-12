@@ -1,9 +1,9 @@
 """Task monitor task primitive.
 
 This module provides the task-shaped non-consuming scanner used by the
-foreground task monitor command and the manager-supervised non-destructive
-TaskMonitor service. Classification and destructive cleanup stay outside this
-part-1 runtime loop.
+foreground task monitor command and the manager-supervised TaskMonitor service.
+Built-in destructive cleanup runs through bounded queue policies under
+``weft.core.pruning``.
 
 Spec references:
 - docs/specifications/01-Core_Components.md [CC-2.1], [CC-2.3]
@@ -40,11 +40,10 @@ from weft._constants import (
 )
 from weft.context import WeftContext, build_context
 from weft.core.heartbeat import cancel_heartbeat, upsert_heartbeat
-from weft.core.pruning.retention import (
-    RetentionPruneConfig,
-    run_retention_prune_for_context,
+from weft.core.pruning.bounded_cleanup import (
+    BoundedCleanupConfig,
+    run_bounded_task_monitor_cleanup,
 )
-from weft.core.pruning.runtime import RuntimePruneConfig, run_runtime_prune_for_context
 from weft.core.serve_log import (
     build_serve_log_record,
     emit_serve_log_record,
@@ -108,7 +107,9 @@ class TaskMonitorTask(BaseTask):
     The foreground command still owns summary construction and
     log/checkpoint writes via ``scan_once()``. The persistent task path wakes
     on its own inbox, scans task-log history by generator/high-water reads,
-    and calls the configured processor without deleting broker evidence.
+    and calls the configured processor. Built-in cleanup processors use the
+    bounded exact-delete path; custom processors receive non-consuming
+    task-log candidates.
     """
 
     def __init__(
@@ -137,6 +138,7 @@ class TaskMonitorTask(BaseTask):
         self._last_warnings: tuple[str, ...] = ()
         self._last_errors: tuple[str, ...] = ()
         self._last_prune_records_scanned = 0
+        self._last_cleanup_queue_stats: tuple[dict[str, Any], ...] = ()
         self._heartbeat_registered = False
         self._heartbeat_error: str | None = None
         self._heartbeat_id = f"task-monitor:{taskspec.tid}"
@@ -407,6 +409,7 @@ class TaskMonitorTask(BaseTask):
                 "last_warnings": list(self._last_warnings),
                 "last_errors": list(self._last_errors),
                 "last_prune_records_scanned": self._last_prune_records_scanned,
+                "last_cleanup_queue_stats": list(self._last_cleanup_queue_stats),
             }
         )
         return payload
@@ -528,6 +531,8 @@ class TaskMonitorTask(BaseTask):
             "events_scanned": events_scanned,
             "candidate_count": len(candidates),
             "safe_to_delete_count": self._last_safe_to_delete_candidates,
+            "cleanup_records_scanned": self._last_prune_records_scanned,
+            "cleanup_queue_stats": self._last_cleanup_queue_stats,
             "processed": result.processed,
             "deleted": result.deleted,
             "reported": result.reported,
@@ -562,7 +567,7 @@ class TaskMonitorTask(BaseTask):
         now_ns: int,
     ) -> TaskMonitorProcessorResult:
         if self._monitor_config.processor in {"delete", "report_only"}:
-            return self._run_canonical_prune_cycle(
+            return self._run_bounded_cleanup_cycle(
                 apply=self._monitor_config.processor == "delete"
             )
 
@@ -587,57 +592,27 @@ class TaskMonitorTask(BaseTask):
             )
             return TaskMonitorProcessorResult(success=False, errors=(str(exc),))
 
-    def _run_canonical_prune_cycle(self, *, apply: bool) -> TaskMonitorProcessorResult:
+    def _run_bounded_cleanup_cycle(self, *, apply: bool) -> TaskMonitorProcessorResult:
         ctx = self._monitor_context()
         self._set_activity("cleanup_scanning", waiting_on=WEFT_GLOBAL_LOG_QUEUE)
-        runtime = run_runtime_prune_for_context(
+        cleanup = run_bounded_task_monitor_cleanup(
             ctx,
-            RuntimePruneConfig(
-                context_path=ctx.root,
-                apply=apply,
-                limit=self._monitor_config.batch_size,
+            BoundedCleanupConfig(
+                batch_size=self._monitor_config.batch_size,
             ),
+            apply=apply,
+            exclude_tids=(self.tid,),
         )
-        retention = run_retention_prune_for_context(
-            ctx,
-            RetentionPruneConfig(
-                context_path=ctx.root,
-                family="retention",
-                apply=apply,
-                force=False,
-                limit=self._monitor_config.batch_size,
-                exclude_tids=(self.tid,),
-                archive_path=None,
-                require_archive=False,
-            ),
-        )
-        self._last_prune_records_scanned = (
-            runtime.records_scanned + retention.records_scanned
-        )
-        errors = (*runtime.errors, *retention.errors)
-        warnings = retention.warnings
-        processed = len(runtime.candidates) + len(retention.candidates)
-        deleted = runtime.deleted + retention.deleted
-        reported = 0 if apply else processed
+        self._last_prune_records_scanned = cleanup.records_scanned
+        self._last_cleanup_queue_stats = cleanup.queue_stats_summary()
+        reported = 0 if apply else cleanup.processed
         return TaskMonitorProcessorResult(
-            success=not errors and runtime.failed == 0 and retention.failed == 0,
-            processed=processed,
-            deleted=deleted,
+            success=cleanup.success,
+            processed=cleanup.processed,
+            deleted=cleanup.deleted,
             reported=reported,
-            errors=(
-                *errors,
-                *(
-                    candidate.error or "runtime prune candidate failed"
-                    for candidate in runtime.applied_candidates
-                    if candidate.error
-                ),
-                *(
-                    candidate.error or "retention prune candidate failed"
-                    for candidate in retention.applied_candidates
-                    if candidate.error
-                ),
-            ),
-            warnings=warnings,
+            errors=cleanup.errors,
+            warnings=cleanup.warnings,
         )
 
     def _cleanup_reserved_if_needed(self) -> None:

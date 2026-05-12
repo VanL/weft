@@ -135,9 +135,15 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
   operational: its lifecycle classifications, cleanup-candidate
   classifications, processor results, and checkpoints do not change public
   lifecycle reconstruction. If configured with the built-in `delete`
-  processor, it may delete exact safe cleanup candidate rows only. It must not
-  delete active, ambiguous, claimed, malformed, unknown, inbox/reserved, or
-  non-exact lifecycle evidence.
+  processor, it may delete exact cleanup candidate rows selected by explicit
+  bounded policies only. Malformed rows are deletable only from Weft-owned
+  schema queues whose policy says malformed rows are disposable, such as
+  `weft.log.tasks` and `weft.state.tid_mappings`. It must not delete active
+  work, ambiguous task-local evidence, claimed outbox residue, user payload
+  rows, unknown rows outside an explicit cleanup policy, inbox/reserved work,
+  or non-exact lifecycle evidence. Task-log collation summaries emitted by the
+  monitor are operational evidence about cleanup work performed; they are not
+  durable task lifecycle truth or archival records.
 - **OBS.14**: claimed outbox residue is recovery evidence, not decoded result
   evidence. Status/result readers may surface
   `claimed_result_without_terminal`, but they must not delete, unclaim, or
@@ -319,8 +325,12 @@ Current invariant visibility comes from:
 There is now a manager-supervised `TaskMonitorTask` in addition to the
 foreground `weft system task-monitor` command. In the current contract it is
 operational only. The default processor is `delete`, which may delete exact
-safe cleanup candidates. Those deletes do not make task-monitor output
-lifecycle truth or result authority. `report_only` remains available as a
+rows selected by bounded cleanup policies. Task-log cleanup must collate
+completed lifecycle groups before broad older-than deletion, and collation
+summaries remain operational TaskMonitor output only. Those deletes and
+summaries do not make task-monitor output lifecycle truth or result authority.
+`weft.log.tasks` remains runtime lifecycle evidence while retained, not audit,
+forensic, or legal-retention evidence. `report_only` remains available as a
 non-destructive override.
 
 ## Scope Boundary
@@ -350,6 +360,7 @@ doc:
 - [`docs/plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md`](../plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md)
 - [`docs/plans/2026-04-17-canonical-owner-fence-plan.md`](../plans/2026-04-17-canonical-owner-fence-plan.md)
 - [`docs/plans/2026-05-11-manager-work-stealing-dispatch-plan.md`](../plans/2026-05-11-manager-work-stealing-dispatch-plan.md)
+- [`docs/plans/2026-05-12-bounded-task-monitor-cleanup-policy-plan.md`](../plans/2026-05-12-bounded-task-monitor-cleanup-policy-plan.md)
 
 ## Related Documents
 

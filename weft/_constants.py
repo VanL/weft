@@ -816,6 +816,11 @@ WEFT_MANAGER_LIFETIME_TIMEOUT: Final[float] = 600.0
 STATUS_RUNTIMELESS_STALE_AFTER_SECONDS: Final[float] = WEFT_MANAGER_LIFETIME_TIMEOUT * 2
 """Age after which a running host task with no runtime proof is treated as stale."""
 
+TASK_MONITOR_TID_MAPPING_CLEANUP_MIN_AGE_SECONDS: Final[float] = (
+    STATUS_RUNTIMELESS_STALE_AFTER_SECONDS * 2
+)
+"""Default minimum age before TaskMonitor deletes stale TID mapping rows."""
+
 WEFT_MANAGER_REUSE_ENABLED: Final[bool] = True
 """Whether a Manager started by the CLI should remain running after a task completes."""
 

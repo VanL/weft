@@ -30,7 +30,7 @@ Global queues:
 
 | Name | Purpose | Persisted in dump? |
 |------|---------|--------------------|
-| `weft.log.tasks` | Global task log / state events | Yes |
+| `weft.log.tasks` | Runtime task lifecycle evidence / state events | Yes |
 | `weft.spawn.requests` | Manager spawn requests | Yes |
 | `weft.spawn.internal` | Manager-owned internal service spawn requests | Yes |
 | `weft.manager.ctrl_in` | Manager control input | Yes |
@@ -44,6 +44,9 @@ Global queues:
 
 Notes:
 - `weft.state.*` queues are runtime state and are excluded from dumps by default.
+- `weft.log.tasks` is runtime evidence used by Weft status, result, and
+  debugging surfaces while retained. It is not legal, forensic, or audit
+  evidence; retention is an operational policy.
 - `weft system prune` can explicitly dry-run or apply exact-message pruning.
   It defaults to runtime-only `weft.state.*` pruning. Retention families can
   also prune selected `weft.log.tasks` and task-local `T{tid}.*` rows with
@@ -85,7 +88,8 @@ Current top-level verbs and subcommands:
 Notes:
 - Task monitor log files, retention prune archive files, reports, and
   checkpoints are operational outputs, not lifecycle truth. Status and result
-  commands reconstruct state from broker evidence, not from these files.
+  commands reconstruct state from broker runtime evidence, not from these
+  files.
 
 ## Task States
 
@@ -131,8 +135,8 @@ Format rules and sanitization live in `01-Core_Components.md`.
 | `WEFT_AUTOSTART_TASKS` | Whether manager boot should consider autostart manifests under the active Weft metadata directory. |
 | `WEFT_TASK_MONITOR_ENABLED` | Whether the canonical manager supervises the internal `TaskMonitorTask`. Defaults to true. |
 | `WEFT_TASK_MONITOR_INTERVAL_SECONDS` | Heartbeat wake interval for the supervised task monitor. Must be at least the heartbeat minimum. |
-| `WEFT_TASK_MONITOR_BATCH_SIZE` | Maximum task-log rows scanned by one supervised monitor cycle. |
-| `WEFT_TASK_MONITOR_PROCESSOR` | Task-monitor processor name. Defaults to `delete`. Built-ins are `report_only`, `delete`, and `jsonl_then_delete`; `delete` removes exact safe cleanup candidates only, while `jsonl_then_delete` remains fail-closed until the logging callback lands. Custom values use `module:function`. |
+| `WEFT_TASK_MONITOR_BATCH_SIZE` | Maximum rows scanned per bounded supervised monitor cleanup queue and maximum task-log rows scanned by one lifecycle snapshot. |
+| `WEFT_TASK_MONITOR_PROCESSOR` | Task-monitor processor name. Defaults to `delete`. Built-ins are `report_only`, `delete`, and `jsonl_then_delete`; `delete` removes exact rows selected by explicit bounded cleanup policies, with task-log collate running before broad older-than deletion and reporting operational collation summaries, while `jsonl_then_delete` remains fail-closed until the logging callback lands. Custom values use `module:function`. |
 | `WEFT_TASK_MONITOR_LOG_SINK` | Operational output sink selector for monitor processors: `stdout`, `disk`, or `none`. |
 | `WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS` | Manager restart backoff after the supervised monitor exits. |
 | `WEFT_DIRECTORY_NAME` | Name of the Weft metadata directory. Defaults to `.weft` and is used before project discovery. |

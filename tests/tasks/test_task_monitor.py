@@ -136,6 +136,79 @@ def test_task_monitor_process_once_calls_processor_without_consuming_task_log(
     assert payloads[1] in remaining
 
 
+def test_task_monitor_builtin_delete_removes_bounded_cleanup_rows(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
+            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+        }
+    )
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    log_queue.write("{not-json")
+
+    task = TaskMonitorTask(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999986"),
+        config=config,
+    )
+    try:
+        task.process_once()
+    finally:
+        task.stop()
+
+    assert "{not-json" not in list(log_queue.peek_generator())
+    assert task._last_processor_success is True
+    assert task._last_processed == 1
+    assert task._last_deleted == 1
+    assert task._last_prune_records_scanned >= 1
+    assert task._last_cleanup_queue_stats
+
+
+def test_task_monitor_builtin_report_only_keeps_bounded_cleanup_rows(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
+            "WEFT_TASK_MONITOR_PROCESSOR": "report_only",
+        }
+    )
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    log_queue.write("{not-json")
+
+    task = TaskMonitorTask(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999985"),
+        config=config,
+    )
+    try:
+        task.process_once()
+    finally:
+        task.stop()
+
+    assert "{not-json" in list(log_queue.peek_generator())
+    assert task._last_processor_success is True
+    assert task._last_processed == 1
+    assert task._last_deleted == 0
+    assert task._last_reported == 1
+
+
 def test_task_monitor_next_wait_timeout_is_capped_after_cycle(
     broker_env,
     monkeypatch: pytest.MonkeyPatch,

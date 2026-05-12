@@ -110,8 +110,9 @@ The control plane is explicit:
 - `ctrl_in` receives raw commands such as `STOP`, `STATUS`, and `PING`, plus
   structured JSON command envelopes for keyed `PING`/`STATUS` style probes
 - `ctrl_out` carries task-local replies and terminal notifications
-- `weft.log.tasks` remains the durable audit trail rather than the interactive
-  reply channel
+- `weft.log.tasks` remains the runtime lifecycle evidence stream rather than
+  the interactive reply channel. It is durable while retained, but it is not
+  legal, forensic, or audit-retention evidence.
 - `PING` replies with a JSON `PONG` control response containing `tid`,
   `timestamp`, `task_status`, `paused`, `should_stop`, `runner`, optional
   `activity`, optional `waiting_on`, and optional best-effort `runtime`
@@ -277,7 +278,9 @@ manager serve operational events -> process stderr/stdout only
 
 Current rules:
 
-- `weft.log.tasks` is the durable lifecycle log
+- `weft.log.tasks` is runtime lifecycle evidence. Status, result, and debugging
+  surfaces may use it while retained, but it is not legal, forensic, or audit
+  evidence. Its retention requirements are operational.
 - opt-in `weft manager serve` operational JSONL records are process-log
   diagnostics only. They must not be written to `weft.log.tasks`, per-task
   queues, control queues, or runtime-state queues, and they must not be used as
@@ -301,21 +304,20 @@ Current rules:
 - task-monitor log records and processor summaries are operational output only
   in the current release. The monitor may mark broker messages as lifecycle or
   cleanup candidates. With the default `delete` processor it may delete exact
-  safe cleanup candidates only. With the built-in `report_only` processor it
-  does not delete, reserve, move, prune, reap, acknowledge, or unclaim them.
-  The `jsonl_then_delete` processor remains fail-closed until the operational
+  rows selected by explicit bounded cleanup policies from supported Weft-owned
+  cleanup queues. Those policies may delete malformed rows only from queues
+  whose schema is owned by Weft, such as `weft.log.tasks` and
+  `weft.state.tid_mappings`. With the built-in `report_only` processor it does
+  not delete, reserve, move, prune, reap, acknowledge, or unclaim rows. The
+  `jsonl_then_delete` processor remains fail-closed until the operational
   logging callback lands.
 - when enabled, the canonical manager supervises one internal
-  `TaskMonitorTask`. The supervised monitor reads the same task-log evidence by
-  generator/high-water cursor, reduces lifecycle rows by TID, builds
-  candidate classes such as `domain_failure`,
-  `result_without_terminal`, `claimed_result_without_terminal`,
-  `runtime_conflict`, `superseded_tid_mapping`, `stale_manager_registry`, and
-  task-log/task-local retention classes for superseded logs and terminal
-  outbox/ctrl_out rows with independent terminal-log proof, calls the
-  configured processor, and advances its operational checkpoint only after a
-  successful processor result. The manager owns only child supervision; it does
-  not scan lifecycle queues.
+  `TaskMonitorTask`. The supervised monitor reads task-log lifecycle evidence by
+  generator/high-water cursor for observation and custom processors. For the
+  built-in `delete` and `report_only` processors, cleanup uses a separate
+  bounded FIFO policy pass over supported cleanup queues, collects exact message
+  IDs, and applies deletes only after the scan window is complete. The manager
+  owns only child supervision; it does not scan lifecycle queues.
 - `weft system prune` is a separate foreground maintenance command.
   `--family runtime-state` reports or deletes exact message IDs from supported
   `weft.state.*` queues after conservative live/recent checks.
@@ -384,7 +386,7 @@ Current rules:
 
 _Implementation mapping_: `weft/core/tasks/base.py` `_report_state_change`;
 `weft/core/tasks/task_monitor.py` foreground monitor scan primitive and
-supervised non-destructive monitor task;
+supervised monitor task;
 `weft/core/task_monitoring.py` task-monitor runtime config, candidate, and
 processor contract;
 `weft/core/task_evidence.py` shared lifecycle/result evidence classification;
@@ -666,12 +668,21 @@ system pruning:
 
 - task-owned cleanup may remove spilled output when `cleanup_on_exit` is enabled
 - there is no built-in age-based output sweeper in the current contract
-- the supervised task monitor exists in the current contract. It classifies
-  lifecycle and cleanup candidates. Its default `delete` processor may delete
-  exact safe cleanup candidates from runtime-state, task-log, and task-local
-  queues. It must not delete active work, ambiguous evidence, claimed outbox
-  residue, malformed/unknown rows, or candidates without exact message IDs.
-  `report_only` remains available as a non-destructive override.
+- the supervised task monitor exists in the current contract. Its default
+  `delete` processor may delete exact message IDs selected by bounded
+  queue-specific cleanup policies from supported Weft-owned cleanup queues.
+  First-slice policies cover malformed rows, age-based runtime evidence cleanup
+  for `weft.state.tid_mappings`, and age-gated task-log collate/delete or
+  older-than cleanup for `weft.log.tasks`. Task-log collate runs before broad
+  older-than cleanup, repeats for completed lifecycle groups in the bounded
+  scan window, may skip old nonterminal TIDs for the current pass, and only
+  falls back to broad older-than task-log deletion when it did not collate any
+  completed lifecycle group. Per-cycle collation summaries are operational
+  TaskMonitor evidence only, not durable archive records. The monitor must not
+  delete active work, ambiguous task-local evidence, claimed outbox residue,
+  user payload rows, spawn requests, manager control rows, or candidates
+  without exact message IDs. `report_only` remains available as a
+  non-destructive override.
 - `weft system prune --family task-log|task-local|retention` is an explicit
   operator action, not a background sweeper. Ordinary apply mode requires an
   archive artifact before deletion. Force apply mode is a human override for
@@ -705,7 +716,8 @@ Current rules:
   durable application history
 - `weft system prune` defaults to dry-run and applies only with
   `--apply`; apply mode deletes exact candidate message IDs only
-- runtime pruning must preserve recent rows, malformed or unknown-shape rows,
+- foreground runtime pruning must preserve recent rows, malformed or
+  unknown-shape rows,
   and rows whose live owner remains active or ambiguous under existing
   liveness rules
 - runtime-state pruning must not delete from `weft.log.tasks`,
@@ -717,13 +729,17 @@ Current rules:
   claimed outbox residue, malformed/unknown-shape rows, and inbox/reserved work
   unless the class is safe for ordinary deletion. `--force --apply` is the
   explicit human override for those ordinary protections.
-- the manager-supervised `TaskMonitorTask` reports and deletes through the same
-  canonical `weft/core/pruning/` candidate and exact-delete path used by
-  foreground `weft system prune`, with monitor-safe policy arguments. If
-  configured with `WEFT_TASK_MONITOR_PROCESSOR=delete`, it may delete exact safe
-  candidate message IDs only. It must not apply archive side effects,
-  force-only retention cleanup, or logging-before-delete behavior in this
-  slice.
+- the manager-supervised `TaskMonitorTask` reports and deletes through a
+  bounded cleanup runner under `weft/core/pruning/`. The runner shares the
+  canonical exact-delete helper with foreground `weft system prune`, but it
+  does not reuse the foreground global candidate builders. If configured with
+  `WEFT_TASK_MONITOR_PROCESSOR=delete`, it may delete exact candidate message
+  IDs selected by its bounded policies only. It must not apply archive side
+  effects, force-only retention cleanup, task-local retention cleanup, or
+  logging-before-delete behavior in this slice. Its task-log policy order is
+  malformed first, collate completed lifecycle groups second, broad older-than
+  last. Collate may emit operational per-cycle summaries before exact deletion
+  so operators can observe steady-state lifecycle reduction.
 - `weft system tidy` handles backend-native cleanup of empty queues and broker
   maintenance
 - autonomous destructive queue lifecycle is limited to the supervised
@@ -770,3 +786,4 @@ management live in the companion doc:
 - [`docs/plans/2026-05-10-manager-service-authority-boundary-hardening-plan.md`](../plans/2026-05-10-manager-service-authority-boundary-hardening-plan.md)
 - [`docs/plans/2026-05-11-manager-work-stealing-dispatch-plan.md`](../plans/2026-05-11-manager-work-stealing-dispatch-plan.md)
 - [`docs/plans/2026-05-11-manager-serve-operational-log-plan.md`](../plans/2026-05-11-manager-serve-operational-log-plan.md)
+- [`docs/plans/2026-05-12-bounded-task-monitor-cleanup-policy-plan.md`](../plans/2026-05-12-bounded-task-monitor-cleanup-policy-plan.md)

@@ -236,7 +236,7 @@ Queue-plane mental model:
   snapshots
 - `P{pipeline_tid}.events` is the private owner-coordination plane between the
   pipeline task and its child stage/edge tasks
-- `weft.log.tasks` is the durable audit plane
+- `weft.log.tasks` is the runtime lifecycle evidence plane while retained
 
 This is why pipeline child tasks do **not** report to `ctrl_out`. `ctrl_out`
 is public and observer-facing for control replies. Child-to-owner coordination
@@ -255,7 +255,8 @@ Target state:
   pipeline run as a unit
 - `weft.state.pipelines` carries the active pipeline registry used to record
   owned children and bindings for live inspection and future recovery
-- `weft.log.tasks` remains the audit trail, not the primary live status path
+- `weft.log.tasks` remains the runtime lifecycle evidence stream while
+  retained, not the primary live status path
 - child stage and edge tasks remain visible as ordinary tasks for deeper
   inspection
 
@@ -275,8 +276,8 @@ Weft follows the same shape. `outbox` stays pure data. `ctrl_out` stays the
 control reply surface. Pipelines get one additional public observability
 surface, `P{pipeline_tid}.status`, because orchestration is a higher-order
 object and retained public status is clearer than asking callers to peek or
-drain `ctrl_out`. `weft.log.tasks` remains the durable audit trail underneath
-it.
+drain `ctrl_out`. `weft.log.tasks` remains runtime lifecycle evidence
+underneath it while retained, not legal, forensic, or audit-retention evidence.
 
 ## Pipeline Spec Shape [PL-2]
 
@@ -862,15 +863,16 @@ Cleanup rule:
 - if the process crashes before cleanup, the stale record is intentional and is
   the breadcrumb used for orphan inspection and later replay work
 
-### Audit events [PL-5.5]
+### Lifecycle events [PL-5.5]
 
 Pipeline runs should emit ordinary task lifecycle events for the pipeline run
 itself and additional stage-progress events that make child-stage progress
 explicit.
 
 The exact event names may evolve during implementation, but the product
-requirement is stable: logs must remain a durable audit trail. They are not the
-primary recovery substrate for pipelines.
+requirement is stable: logs must remain runtime lifecycle evidence while
+retained. They are not the primary recovery substrate for pipelines and are
+governed by operational retention, not audit-retention policy.
 
 ### Debuggability rule [PL-5.6]
 
@@ -934,6 +936,7 @@ before it has a solid, first-class, linear, task-shaped pipeline run.
 - [`docs/plans/2026-04-13-pipeline-spec-expansion-plan.md`](../plans/2026-04-13-pipeline-spec-expansion-plan.md)
 - [`docs/plans/2026-04-13-pipeline-first-class-runtime-implementation-plan.md`](../plans/2026-04-13-pipeline-first-class-runtime-implementation-plan.md)
 - [`docs/plans/2026-04-16-pipeline-autostart-extension-plan.md`](../plans/2026-04-16-pipeline-autostart-extension-plan.md)
+- [`docs/plans/2026-05-12-bounded-task-monitor-cleanup-policy-plan.md`](../plans/2026-05-12-bounded-task-monitor-cleanup-policy-plan.md)
 
 ## Related Documents
 

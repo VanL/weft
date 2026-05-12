@@ -8,5 +8,15 @@ Spec references:
 from __future__ import annotations
 
 from .apply import apply_exact_prune_candidates
+from .bounded_cleanup import (
+    BoundedCleanupConfig,
+    BoundedCleanupResult,
+    run_bounded_task_monitor_cleanup,
+)
 
-__all__ = ["apply_exact_prune_candidates"]
+__all__ = [
+    "BoundedCleanupConfig",
+    "BoundedCleanupResult",
+    "apply_exact_prune_candidates",
+    "run_bounded_task_monitor_cleanup",
+]
