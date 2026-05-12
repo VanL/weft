@@ -6,11 +6,10 @@ import json
 import os
 import subprocess
 import sys
-import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
-from typing import Any, Final
+from typing import Any
 
 import pytest
 
@@ -60,20 +59,12 @@ from weft.commands.run import (
 )
 from weft.context import build_context
 from weft.core import manager_runtime as core_manager_runtime
+from weft.core.control_probe import ControlProbeResult, MatchedPong
 from weft.core.service_convergence import build_manager_service_payload
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 from weft.helpers import iter_queue_json_entries
 
 pytestmark = [pytest.mark.shared]
-
-MANAGER_SELECTION_TEST_PROBE_TIMEOUT_SECONDS: Final[float] = 5.0
-"""Test-only budget for selector probes that a helper thread must answer.
-
-The production default is intentionally short. These tests are not exercising
-that timeout; they are exercising how a matched PONG affects selection. The
-Postgres backend can spend enough of the production budget opening queues that
-the responder thread races the selector instead of the behavior under test.
-"""
 
 
 def _host_runtime_handle(pid: int) -> dict[str, Any]:
@@ -164,72 +155,53 @@ def _select_active_manager_while_answering_probe(
     monkeypatch: pytest.MonkeyPatch,
     pong_fields: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    result: dict[str, dict[str, Any] | None] = {}
-    errors: list[BaseException] = []
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "runtime_liveness_from_registered_probe",
+        lambda handle: "unknown",
+    )
+    target_tid = tid
 
-    ctrl_in_name = f"T{tid}.ctrl_in"
-    ctrl_out_name = f"T{tid}.ctrl_out"
-    ctrl_in = ctx.queue(ctrl_in_name, persistent=True)
-    ctrl_out = ctx.queue(ctrl_out_name, persistent=False)
-
-    def _select() -> None:
-        try:
-            result["record"] = core_manager_runtime._select_active_manager(
-                ctx,
-                probe_stale=True,
-            )
-        except BaseException as exc:  # pragma: no cover - thread handoff
-            errors.append(exc)
-
-    thread = threading.Thread(target=_select)
-    try:
-        monkeypatch.setattr(
-            core_manager_runtime,
-            "MANAGER_COMPETING_STARTUP_GRACE_SECONDS",
-            max(
-                core_manager_runtime.MANAGER_COMPETING_STARTUP_GRACE_SECONDS,
-                MANAGER_SELECTION_TEST_PROBE_TIMEOUT_SECONDS,
+    def _fake_probe(
+        _ctx,
+        *,
+        tid: str,
+        ctrl_in_name: str,
+        ctrl_out_name: str,
+        timeout: float,
+        request_id: str | None = None,
+    ) -> ControlProbeResult:
+        del _ctx, timeout
+        probe_request_id = request_id or "test-probe"
+        if tid != target_tid:
+            return ControlProbeResult(request_id=probe_request_id, timed_out=True)
+        pong_payload = {
+            "command": "PING",
+            "status": "ok",
+            "message": "PONG",
+            "tid": tid,
+            "request_id": probe_request_id,
+            "task_status": "running",
+            "role": "manager",
+            "requests": WEFT_SPAWN_REQUESTS_QUEUE,
+            "ctrl_in": ctrl_in_name,
+            "ctrl_out": ctrl_out_name,
+            "outbox": WEFT_MANAGER_OUTBOX_QUEUE,
+        }
+        if pong_fields is not None:
+            pong_payload.update(pong_fields)
+        return ControlProbeResult(
+            request_id=probe_request_id,
+            matched=MatchedPong(
+                payload=pong_payload,
+                observed_at=time.time_ns(),
+                request_id=probe_request_id,
             ),
         )
-        monkeypatch.setattr(
-            core_manager_runtime,
-            "runtime_liveness_from_registered_probe",
-            lambda handle: "unknown",
-        )
-        thread.start()
-        deadline = time.monotonic() + MANAGER_SELECTION_TEST_PROBE_TIMEOUT_SECONDS
-        while thread.is_alive() and time.monotonic() < deadline:
-            raw = ctrl_in.read_one()
-            if raw is None:
-                time.sleep(0.01)
-                continue
-            payload = json.loads(str(raw))
-            pong_payload = {
-                "command": "PING",
-                "status": "ok",
-                "message": "PONG",
-                "tid": tid,
-                "request_id": payload["request_id"],
-                "task_status": "running",
-                "role": "manager",
-                "requests": WEFT_SPAWN_REQUESTS_QUEUE,
-                "ctrl_in": ctrl_in_name,
-                "ctrl_out": ctrl_out_name,
-                "outbox": WEFT_MANAGER_OUTBOX_QUEUE,
-            }
-            if pong_fields is not None:
-                pong_payload.update(pong_fields)
-            ctrl_out.write(json.dumps(pong_payload))
-            break
-    finally:
-        ctrl_in.close()
-        ctrl_out.close()
 
-    thread.join(timeout=MANAGER_SELECTION_TEST_PROBE_TIMEOUT_SECONDS)
-    assert not thread.is_alive(), "manager selection probe did not finish"
-    if errors:
-        raise errors[0]
-    return result.get("record")
+    monkeypatch.setattr(core_manager_runtime, "send_keyed_ping_probe", _fake_probe)
+
+    return core_manager_runtime._select_active_manager(ctx, probe_stale=True)
 
 
 def _read_all_queue_messages(

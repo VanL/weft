@@ -91,12 +91,11 @@ Key responsibilities implemented in `weft/core/manager.py`:
    spawn lane once the top-level pipeline task has already been accepted from
    public dispatch; those child requests are implementation work for that
    accepted task, not new public backlog.
-   When the manager enqueues one of its own singleton-service spawn requests,
-   that write forces the next scheduling drain to probe inactive queues so
-   convergence does not depend on the periodic broad-probe interval. Internal
-   singleton-service spawn requests are advanced to a launch attempt in the
-   same manager turn without consuming ordinary public spawn work. Successful
-   child launch emits
+   Pending internal spawn work is manager-owned convergence work: it forces the
+   next scheduling drain to probe inactive queues so convergence does not
+   depend on the periodic broad-probe interval. Internal spawn requests are
+   advanced with a bounded per-turn drain without consuming ordinary public
+   spawn work. Successful child launch emits
    durable `task_spawned` evidence with the child TID, child TaskSpec, and
    child PID so manager-owned singleton convergence can observe a live
    replacement before the child has completed its own initialization log writes.
@@ -180,8 +179,10 @@ Key responsibilities implemented in `weft/core/manager.py`:
    through one pure transition table before applying queue or process side
    effects. Each manager turn advances service convergence with bounded passes
    over child reap, service reconciliation, and manager-owned internal spawn
-   drain; backend activity waiters are hints, not the clock that drives
-   service supervision. Recent nonterminal service rows without live proof are
+   drain; pending internal spawn work bypasses the stable-service throttle
+   because it is accepted-task work, not background audit work. Backend
+   activity waiters are hints, not the clock that drives service supervision.
+   Recent nonterminal service rows without live proof are
    uncertain evidence, not terminal proof, so short probe misses cannot clear a
    freshly launched singleton and start duplicates. If multiple live owners
    are visible, the reducer selects the canonical live owner and the manager

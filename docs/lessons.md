@@ -714,3 +714,8 @@ runbook needs to become stricter.
   stage and edge spawn requests back through the public spawn backlog can leave
   a pipeline partially bootstrapped under load; use the internal spawn lane and
   dependency-friendly launch order once the top-level pipeline task is running.
+- Internal spawn convergence must be triggered by pending internal work itself,
+  not only by the manager setting a singleton-service flag. Pipeline children
+  and other accepted-task runtime helpers can write that lane from task
+  processes, so the manager must drain it with a bounded per-turn budget even
+  when no service enqueue occurred in that manager turn.

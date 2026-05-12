@@ -54,6 +54,7 @@ from weft._constants import (
     MANAGER_CHILD_STARTUP_LIVENESS_GRACE_SECONDS,
     MANAGER_CONTROL_DRAIN_MAX_MESSAGES,
     MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS,
+    MANAGER_INTERNAL_SPAWN_DRAIN_MAX_MESSAGES,
     MANAGER_PID_LIVENESS_RECHECK_INTERVAL,
     MANAGER_REGISTRY_HEARTBEAT_INTERVAL_SECONDS,
     MANAGER_SERVE_LOG_CHILD_LIMIT,
@@ -1701,6 +1702,9 @@ class Manager(BaseTask):
         if any(child.persistent for child in self._user_work_children().values()):
             return True
         if self._managed_internal_spawn_enqueued:
+            return True
+        if self._internal_spawn_pending():
+            self._mark_pending_messages_prechecked()
             return True
         reserved_names = {
             reserved_queue
@@ -4307,9 +4311,11 @@ class Manager(BaseTask):
         )
 
     def _managed_service_convergence_active(self, *, include_autostart: bool) -> bool:
-        """Return whether singleton convergence has non-stable work to advance."""
+        """Return whether manager-owned convergence has non-stable work to advance."""
 
         if self._managed_internal_spawn_enqueued:
+            return True
+        if self._internal_spawn_pending():
             return True
         if self._managed_service_duplicate_scan_pending:
             return True
@@ -4345,16 +4351,18 @@ class Manager(BaseTask):
         max_passes: int = 3,
         force: bool = False,
     ) -> None:
-        """Advance Manager-owned services toward a fixed point.
+        """Advance Manager-owned work toward a fixed point.
 
         Each pass reaps locally tracked children, reconciles desired singleton
-        service state, and drains only the manager's internal spawn inbox. This
-        keeps restart convergence independent from public work queue traffic.
+        service state, and drains the manager-owned internal spawn inbox. This
+        keeps service and pipeline bootstrap convergence independent from public
+        work queue traffic.
 
         Spec: [MA-1.4], [MA-1.6a], [MANAGER.15], [MANAGER.16]
         """
 
         now_ns = time.time_ns()
+        internal_spawn_pending = self._internal_spawn_pending()
         active = self._managed_service_convergence_active(
             include_autostart=include_autostart
         )
@@ -4367,6 +4375,7 @@ class Manager(BaseTask):
         if (
             not force
             and not self._managed_internal_spawn_enqueued
+            and not internal_spawn_pending
             and self._last_managed_service_convergence_ns
             and now_ns - self._last_managed_service_convergence_ns < interval_ns
         ):
@@ -4394,7 +4403,9 @@ class Manager(BaseTask):
                 return
 
             self._reconcile_managed_services(include_autostart=include_autostart)
-            should_drain_internal = self._managed_internal_spawn_enqueued
+            should_drain_internal = (
+                self._managed_internal_spawn_enqueued or self._internal_spawn_pending()
+            )
             self._managed_internal_spawn_enqueued = False
             drained = (
                 self._drain_internal_spawn_requests() if should_drain_internal else 0
@@ -4542,6 +4553,21 @@ class Manager(BaseTask):
                 self._idle_shutdown_logged = True
             self.should_stop = True
 
+    def _internal_spawn_pending(self) -> bool:
+        """Return whether the manager-owned internal spawn inbox has work."""
+
+        internal_inbox = self._queue_names.get("internal_inbox")
+        if internal_inbox is None:
+            return False
+        try:
+            return self._queue(internal_inbox).has_pending()
+        except (BrokerError, OSError, RuntimeError):
+            logger.debug(
+                "Failed to inspect internal spawn inbox pending state",
+                exc_info=True,
+            )
+            return False
+
     def _drain_internal_spawn_requests(self) -> int:
         """Drain manager-owned internal spawn work without consuming public work."""
 
@@ -4550,22 +4576,20 @@ class Manager(BaseTask):
             return 0
         total_processed = 0
         attempted = False
-        for _ in range(4):
+        for _ in range(MANAGER_INTERNAL_SPAWN_DRAIN_MAX_MESSAGES):
             attempted = True
-            try:
-                if not self._queue(internal_inbox).has_pending():
-                    break
-            except (BrokerError, OSError, RuntimeError):
-                logger.debug(
-                    "Failed to inspect internal spawn inbox pending state",
-                    exc_info=True,
-                )
+            if not self._internal_spawn_pending():
                 break
             self._active_queues = [internal_inbox]
             processed = self._drain_round_robin_pass(queue_names=[internal_inbox])
             total_processed += processed
             if processed == 0:
                 break
+        if total_processed >= MANAGER_INTERNAL_SPAWN_DRAIN_MAX_MESSAGES:
+            logger.warning(
+                "Manager yielded after draining %s internal spawn messages in one turn",
+                MANAGER_INTERNAL_SPAWN_DRAIN_MAX_MESSAGES,
+            )
         self._emit_serve_log(
             "internal_spawn_drain",
             component="service",
@@ -4573,6 +4597,7 @@ class Manager(BaseTask):
             internal_queue=internal_inbox,
             attempted=attempted,
             processed=total_processed,
+            max_messages=MANAGER_INTERNAL_SPAWN_DRAIN_MAX_MESSAGES,
         )
         return total_processed
 

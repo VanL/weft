@@ -804,6 +804,54 @@ def test_manager_service_enqueue_forces_next_internal_queue_probe(
     assert seen == ["task-monitor"]
 
 
+def test_manager_convergence_drains_pending_internal_spawn_work(
+    broker_env,
+    unique_tid,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    config = load_config({"WEFT_TASK_MONITOR_ENABLED": "0"})
+    spec = make_manager_spec(unique_tid, idle_timeout=0.0)
+    manager = Manager(db_path, spec, config=config)
+    internal_queue = make_queue(WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE)
+    internal_reserved = make_queue(manager._queue_names["internal_reserved"])
+    launched: list[str] = []
+
+    def record_launch(child_spec: TaskSpec, *_args: object, **_kwargs: object) -> bool:
+        launched.append(child_spec.name)
+        return True
+
+    try:
+        drain(internal_queue)
+        drain(internal_reserved)
+        monkeypatch.setattr(manager, "_reconcile_managed_services", lambda **_: None)
+        monkeypatch.setattr(manager, "_launch_child_task", record_launch)
+        manager._last_managed_service_convergence_ns = time.time_ns()
+        for index in range(5):
+            internal_queue.write(
+                json.dumps(
+                    {
+                        "name": f"internal-{index}",
+                        "spec": {
+                            "type": "function",
+                            "function_target": (
+                                "tests.tasks.sample_targets:echo_payload"
+                            ),
+                        },
+                    }
+                )
+            )
+
+        manager._run_managed_service_convergence()
+    finally:
+        manager.stop(join=False)
+        manager.cleanup()
+
+    assert launched == [f"internal-{index}" for index in range(5)]
+    assert internal_queue.peek_one() is None
+    assert internal_reserved.peek_one() is None
+
+
 def test_manager_operational_log_emits_metadata_and_honors_level(
     broker_env,
     unique_tid,

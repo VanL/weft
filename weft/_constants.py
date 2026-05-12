@@ -152,6 +152,9 @@ MANAGER_CHILD_EXIT_POLL_INTERVAL: Final[float] = 0.05
 MANAGER_CONTROL_DRAIN_MAX_MESSAGES: Final[int] = 32
 """Maximum manager control messages handled before yielding a manager turn."""
 
+MANAGER_INTERNAL_SPAWN_DRAIN_MAX_MESSAGES: Final[int] = 128
+"""Maximum internal spawn requests drained before yielding a manager turn."""
+
 MANAGER_STALLED_CONTROL_LOG_INTERVAL_SECONDS: Final[float] = 5.0
 """Minimum interval between repeated stalled manager-control warnings."""
 

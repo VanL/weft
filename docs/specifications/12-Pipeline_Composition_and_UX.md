@@ -445,7 +445,9 @@ Requirements:
 - generated edge tasks are spawned as ordinary child tasks
 - stage and edge bootstrap requests may use the manager-owned internal spawn
   lane after the top-level pipeline task has started, so accepted pipeline work
-  can converge without competing with unrelated public spawn backlog
+  can converge without competing with unrelated public spawn backlog; managers
+  must drain pending internal spawn work as accepted-task convergence, not only
+  when singleton services enqueue that work themselves
 - stage and edge child tasks may be started at pipeline startup and remain idle
   while waiting for work
 - child spawn identity must be stable enough that later replay can be
