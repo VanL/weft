@@ -308,7 +308,7 @@ def test_task_monitor_cleanup_repeats_collate_for_multiple_terminal_tids(
     tmp_path: Path,
 ) -> None:
     ctx = _context(tmp_path)
-    start_id = _write_json(
+    _write_json(
         ctx,
         WEFT_GLOBAL_LOG_QUEUE,
         {"event": "work_started", "tid": "1778000000000000001"},
@@ -328,7 +328,7 @@ def test_task_monitor_cleanup_repeats_collate_for_multiple_terminal_tids(
         WEFT_GLOBAL_LOG_QUEUE,
         {"event": "work_completed", "tid": "1778000000000000002"},
     )
-    _write_json(
+    last_id = _write_json(
         ctx,
         WEFT_GLOBAL_LOG_QUEUE,
         {"event": "work_started", "tid": "1778000000000000003"},
@@ -338,7 +338,9 @@ def test_task_monitor_cleanup_repeats_collate_for_multiple_terminal_tids(
         ctx,
         TaskMonitorCleanupConfig(batch_size=10, task_log_min_age_seconds=1.0),
         apply=True,
-        now_ns=_now_after(start_id, 2.0),
+        # Anchor after the final row so the assertion is independent of slow
+        # queue writes on loaded Windows CI runners.
+        now_ns=_now_after(last_id, 2.0),
     )
 
     assert result.success

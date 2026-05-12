@@ -732,3 +732,8 @@ runbook needs to become stricter.
   and other accepted-task runtime helpers can write that lane from task
   processes, so the manager must drain it with a bounded per-turn budget even
   when no service enqueue occurred in that manager turn.
+- Tests that simulate age-gated cleanup with real broker message IDs must
+  anchor their synthetic `now_ns` after the newest row whose age matters, not
+  after the first row in the scenario. On slow Windows CI, real queue writes in
+  a single test can be far enough apart that later rows are correctly too young
+  for the cleanup floor, turning a test-clock shortcut into a false failure.
