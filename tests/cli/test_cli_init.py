@@ -48,6 +48,12 @@ def _write_broker_project_config(
     return config_path
 
 
+def _clear_backend_part_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for prefix in ("WEFT", "BROKER"):
+        for suffix in ("HOST", "PORT", "USER", "PASSWORD", "DATABASE"):
+            monkeypatch.delenv(f"{prefix}_BACKEND_{suffix}", raising=False)
+
+
 def test_cli_init_creates_project(workdir: Path, weft_harness) -> None:
     project_root = workdir / "project"
 
@@ -313,6 +319,7 @@ def test_cmd_init_prefers_project_postgres_target_over_env_target(
         target="postgresql://toml-user@toml-host/toml-db",
         schema="toml_schema",
     )
+    _clear_backend_part_env(monkeypatch)
     monkeypatch.setenv("WEFT_BACKEND", "postgres")
     monkeypatch.setenv("WEFT_BACKEND_TARGET", "postgresql://env-user@env-host/env-db")
     monkeypatch.setenv("WEFT_BACKEND_SCHEMA", "env_schema")

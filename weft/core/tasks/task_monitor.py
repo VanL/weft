@@ -2,8 +2,8 @@
 
 This module provides the task-shaped non-consuming scanner used by the
 foreground task monitor command and the manager-supervised TaskMonitor service.
-Built-in destructive cleanup runs through bounded queue policies under
-``weft.core.pruning``.
+Built-in destructive cleanup is orchestrated by the TaskMonitor boundary and
+uses reusable pruning policies for row eligibility.
 
 Spec references:
 - docs/specifications/01-Core_Components.md [CC-2.1], [CC-2.3]
@@ -37,13 +37,10 @@ from weft._constants import (
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS,
     WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS_DEFAULT,
+    WEFT_TASK_MONITOR_PROCESSOR_BUILTINS,
 )
 from weft.context import WeftContext, build_context
 from weft.core.heartbeat import cancel_heartbeat, upsert_heartbeat
-from weft.core.pruning.bounded_cleanup import (
-    BoundedCleanupConfig,
-    run_bounded_task_monitor_cleanup,
-)
 from weft.core.serve_log import (
     build_serve_log_record,
     emit_serve_log_record,
@@ -61,6 +58,10 @@ from weft.core.task_monitoring import (
     task_monitor_candidate_class_counts,
 )
 from weft.core.tasks.base import ControlRequest
+from weft.core.tasks.task_monitor_cleanup import (
+    TaskMonitorCleanupConfig,
+    run_task_monitor_cleanup,
+)
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 from weft.helpers import iter_queue_entries
 
@@ -489,16 +490,30 @@ class TaskMonitorTask(BaseTask):
 
     def _run_monitor_cycle(self) -> None:
         now_ns = time.time_ns()
-        self._set_activity("scanning", waiting_on=WEFT_GLOBAL_LOG_QUEUE)
-        candidates, last_timestamp, events_scanned = self._scan_task_log_candidates()
         self._last_cycle_at = now_ns
-        self._last_candidates_seen = len(candidates)
-        self._last_candidate_class_counts = task_monitor_candidate_class_counts(
-            candidates
-        )
-        self._last_safe_to_delete_candidates = sum(
-            1 for candidate in candidates if candidate.safe_to_delete
-        )
+        if self._monitor_config.processor in WEFT_TASK_MONITOR_PROCESSOR_BUILTINS:
+            candidates: tuple[TaskMonitorCandidate, ...] = ()
+            last_timestamp = None
+            events_scanned = 0
+            self._last_candidates_seen = 0
+            self._last_candidate_class_counts = {}
+            self._last_safe_to_delete_candidates = 0
+            self._last_prune_records_scanned = 0
+            self._last_cleanup_queue_stats = ()
+        else:
+            self._set_activity("scanning", waiting_on=WEFT_GLOBAL_LOG_QUEUE)
+            candidates, last_timestamp, events_scanned = (
+                self._scan_task_log_candidates()
+            )
+            self._last_candidates_seen = len(candidates)
+            self._last_candidate_class_counts = task_monitor_candidate_class_counts(
+                candidates
+            )
+            self._last_safe_to_delete_candidates = sum(
+                1 for candidate in candidates if candidate.safe_to_delete
+            )
+            self._last_prune_records_scanned = 0
+            self._last_cleanup_queue_stats = ()
 
         result = self._process_monitor_candidates(candidates, now_ns=now_ns)
 
@@ -567,8 +582,16 @@ class TaskMonitorTask(BaseTask):
         now_ns: int,
     ) -> TaskMonitorProcessorResult:
         if self._monitor_config.processor in {"delete", "report_only"}:
-            return self._run_bounded_cleanup_cycle(
+            return self._run_task_monitor_cleanup_cycle(
                 apply=self._monitor_config.processor == "delete"
+            )
+        if self._monitor_config.processor == "jsonl_then_delete":
+            return TaskMonitorProcessorResult(
+                success=False,
+                errors=(
+                    "jsonl_then_delete task-monitor processor is reserved until "
+                    "the logging callback is implemented",
+                ),
             )
 
         request = TaskMonitorProcessorRequest(
@@ -592,12 +615,16 @@ class TaskMonitorTask(BaseTask):
             )
             return TaskMonitorProcessorResult(success=False, errors=(str(exc),))
 
-    def _run_bounded_cleanup_cycle(self, *, apply: bool) -> TaskMonitorProcessorResult:
+    def _run_task_monitor_cleanup_cycle(
+        self,
+        *,
+        apply: bool,
+    ) -> TaskMonitorProcessorResult:
         ctx = self._monitor_context()
         self._set_activity("cleanup_scanning", waiting_on=WEFT_GLOBAL_LOG_QUEUE)
-        cleanup = run_bounded_task_monitor_cleanup(
+        cleanup = run_task_monitor_cleanup(
             ctx,
-            BoundedCleanupConfig(
+            TaskMonitorCleanupConfig(
                 batch_size=self._monitor_config.batch_size,
             ),
             apply=apply,
@@ -605,12 +632,11 @@ class TaskMonitorTask(BaseTask):
         )
         self._last_prune_records_scanned = cleanup.records_scanned
         self._last_cleanup_queue_stats = cleanup.queue_stats_summary()
-        reported = 0 if apply else cleanup.processed
         return TaskMonitorProcessorResult(
             success=cleanup.success,
             processed=cleanup.processed,
             deleted=cleanup.deleted,
-            reported=reported,
+            reported=cleanup.reported,
             errors=cleanup.errors,
             warnings=cleanup.warnings,
         )

@@ -3,7 +3,8 @@
 This module contains the command-neutral pieces used by the supervised
 ``TaskMonitorTask``. It deliberately stays below the command and CLI layers:
 processors receive typed candidates plus a context, not manager or command
-objects.
+objects. Built-in processor names are handled by ``TaskMonitorTask`` and are
+not resolved through the custom ``module:function`` processor hook.
 
 Spec references:
 - docs/specifications/01-Core_Components.md [CC-2.3]
@@ -25,23 +26,11 @@ from typing import Any, Protocol, cast
 from simplebroker.ext import BrokerError
 from weft._constants import (
     HEARTBEAT_MIN_INTERVAL_SECONDS,
-    RETENTION_PRUNE_CLASS_NONTERMINAL_TASK_LOG_SUPERSEDED,
-    RETENTION_PRUNE_CLASS_TERMINAL_CTRL_OUT_ARCHIVED,
-    RETENTION_PRUNE_CLASS_TERMINAL_RESULT_OUTBOX_ARCHIVED,
-    RETENTION_PRUNE_CLASS_TERMINAL_TASK_LOG_SUPERSEDED,
-    RETENTION_PRUNE_DEFAULT_KEEP_RECENT_PER_TASK,
-    RETENTION_PRUNE_DEFAULT_MIN_AGE_SECONDS,
-    RUNTIME_PRUNE_CLASS_STALE_MANAGER,
-    RUNTIME_PRUNE_CLASS_SUPERSEDED_MANAGER,
-    RUNTIME_PRUNE_CLASS_SUPERSEDED_TID_MAPPING,
-    RUNTIME_PRUNE_DEFAULT_KEEP_RECENT_PER_KEY,
-    RUNTIME_PRUNE_DEFAULT_MIN_AGE_SECONDS,
     STATUS_RUNTIMELESS_STALE_AFTER_SECONDS,
     TASK_MONITOR_WEFT_ANOMALY_CLASSIFICATIONS,
     TERMINAL_TASK_EVENTS,
     TERMINAL_TASK_STATUSES,
     WEFT_GLOBAL_LOG_QUEUE,
-    WEFT_SERVICES_REGISTRY_QUEUE,
     WEFT_TASK_MONITOR_BATCH_SIZE_DEFAULT,
     WEFT_TASK_MONITOR_ENABLED_DEFAULT,
     WEFT_TASK_MONITOR_INTERVAL_SECONDS_DEFAULT,
@@ -50,16 +39,9 @@ from weft._constants import (
     WEFT_TASK_MONITOR_PROCESSOR_BUILTINS,
     WEFT_TASK_MONITOR_PROCESSOR_DEFAULT,
     WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS_DEFAULT,
-    WEFT_TID_MAPPINGS_QUEUE,
 )
 from weft.context import WeftContext
 from weft.core import task_evidence
-from weft.core.manager_runtime import (
-    manager_registry_record_is_stale,
-    normalize_manager_registry_record,
-)
-from weft.core.pruning.apply import apply_exact_prune_candidates
-from weft.core.service_convergence import parse_service_owner_row
 from weft.helpers import iter_queue_entries
 
 TaskLogObserver = Callable[[str, str, int], None]
@@ -202,14 +184,6 @@ class TaskMonitorProcessor(Protocol):
         """Process one monitor cycle."""
 
 
-@dataclass(frozen=True, slots=True)
-class _ExactTaskMonitorDeleteCandidate:
-    candidate: TaskMonitorCandidate
-    queue: str
-    message_id: int
-    report_only: bool = False
-
-
 @dataclass(slots=True)
 class TaskLogRow:
     """One decoded task-log row retained for exact candidate construction."""
@@ -249,115 +223,20 @@ class TaskMonitorCycleSnapshot:
     tids_seen: int
 
 
-def report_only_processor(
-    request: TaskMonitorProcessorRequest,
-) -> TaskMonitorProcessorResult:
-    """Built-in non-destructive processor for phase 7 part 1."""
+def resolve_task_monitor_processor(name: str) -> TaskMonitorProcessor:
+    """Resolve a custom ``module:function`` processor reference.
 
-    candidate_count = len(request.candidates)
-    return TaskMonitorProcessorResult(
-        success=True,
-        processed=candidate_count,
-        reported=candidate_count,
-    )
-
-
-def delete_processor(
-    request: TaskMonitorProcessorRequest,
-) -> TaskMonitorProcessorResult:
-    """Delete exact safe task-monitor candidates from broker queues.
-
-    Unsafe, ambiguous, and non-exact candidates are left untouched. Missing
-    exact rows are treated as idempotent skips so concurrent cleanup does not
-    turn a successful monitor cycle into a failure.
-
-    Spec: [CC-2.3], [MF-5]
+    Built-in processors are handled directly by ``TaskMonitorTask`` so the
+    supervised monitor has one cleanup path.
     """
 
-    warnings: list[str] = []
-    exact_candidates: list[_ExactTaskMonitorDeleteCandidate] = []
-
-    for candidate in request.candidates:
-        if not candidate.safe_to_delete:
-            continue
-        if candidate.queue is None or candidate.message_id is None:
-            warnings.append(
-                "safe task-monitor candidate lacks exact queue/message id: "
-                f"{candidate.candidate_id}"
-            )
-            continue
-        exact_candidates.append(
-            _ExactTaskMonitorDeleteCandidate(
-                candidate=candidate,
-                queue=candidate.queue,
-                message_id=candidate.message_id,
-            )
+    if name in WEFT_TASK_MONITOR_PROCESSOR_BUILTINS:
+        raise ValueError(
+            "built-in task-monitor processors are handled by TaskMonitorTask"
         )
-
-    applied = apply_exact_prune_candidates(
-        request.context,
-        exact_candidates,
-        apply_result=lambda candidate, removed, error: (candidate, removed, error),
-    )
-    errors: list[str] = []
-    for exact_candidate, _removed, error in applied:
-        if error is None:
-            continue
-        errors.append(
-            "failed to delete task-monitor candidate "
-            f"{exact_candidate.candidate.candidate_id} from {exact_candidate.queue} "
-            f"at {exact_candidate.message_id}: {error}"
-        )
-    deleted = 0
-    for exact_candidate, removed, error in applied:
-        if error is not None:
-            continue
-        if removed:
-            deleted += 1
-        else:
-            warnings.append(
-                "task-monitor candidate was already absent: "
-                f"{exact_candidate.candidate.candidate_id}"
-            )
-
-    return TaskMonitorProcessorResult(
-        success=not errors,
-        processed=len(request.candidates),
-        deleted=deleted,
-        errors=tuple(errors),
-        warnings=tuple(warnings),
-    )
-
-
-def _unsupported_logging_delete_processor(
-    request: TaskMonitorProcessorRequest,
-) -> TaskMonitorProcessorResult:
-    """Return a fail-closed result for logging delete reserved for later."""
-
-    del request
-    return TaskMonitorProcessorResult(
-        success=False,
-        errors=(
-            "jsonl_then_delete task-monitor processor is reserved until the "
-            "logging callback is implemented",
-        ),
-    )
-
-
-def resolve_task_monitor_processor(name: str) -> TaskMonitorProcessor:
-    """Resolve a built-in or ``module:function`` processor reference."""
-
-    if name == "report_only":
-        return report_only_processor
-    if name == "delete":
-        return delete_processor
-    if name == "jsonl_then_delete":
-        return _unsupported_logging_delete_processor
 
     if ":" not in name:
-        raise ValueError(
-            "task-monitor processor must be a built-in name or module:function"
-        )
+        raise ValueError("task-monitor processor must be a module:function reference")
     module_name, function_name = name.split(":", 1)
     if not module_name or not function_name:
         raise ValueError("task-monitor processor reference is malformed")
@@ -467,24 +346,7 @@ def build_task_monitor_cycle_snapshot(
         )
         if candidate is not None
     ]
-    cleanup_candidates = [
-        candidate
-        for candidate in _task_log_retention_candidates(scan.rows, now_ns=now_ns)
-        if candidate.tid != monitor_tid
-    ]
-    task_local_candidates = [
-        candidate
-        for reduced in scan.reduced.values()
-        if reduced.tid != monitor_tid
-        for candidate in _task_local_retention_candidates(ctx, reduced, now_ns=now_ns)
-    ]
-    runtime_candidates = _runtime_state_candidates(ctx, now_ns=now_ns)
-    candidates = [
-        *lifecycle_candidates,
-        *cleanup_candidates,
-        *task_local_candidates,
-        *runtime_candidates,
-    ]
+    candidates = [*lifecycle_candidates]
     candidates.sort(key=lambda item: (item.tid or "", item.candidate_class))
     return TaskMonitorCycleSnapshot(
         candidates=tuple(candidates),
@@ -652,346 +514,6 @@ def _candidate_for_reduced(
         failure_owner=failure_owner,
         now_ns=now_ns,
     )
-
-
-def _task_log_retention_candidates(
-    rows: Iterable[TaskLogRow],
-    *,
-    now_ns: int,
-) -> tuple[TaskMonitorCandidate, ...]:
-    grouped: dict[str, list[TaskLogRow]] = defaultdict(list)
-    for row in rows:
-        grouped[row.tid].append(row)
-
-    candidates: list[TaskMonitorCandidate] = []
-    for tid, task_rows in grouped.items():
-        ordered = sorted(task_rows, key=lambda item: item.message_id, reverse=True)
-        protected = {
-            row.message_id
-            for row in ordered[:RETENTION_PRUNE_DEFAULT_KEEP_RECENT_PER_TASK]
-        }
-        terminal_rows = [row for row in ordered if row.terminal]
-        newest_terminal = terminal_rows[0].message_id if terminal_rows else None
-        has_terminal = newest_terminal is not None
-        for row in ordered:
-            if row.message_id in protected or row.message_id == newest_terminal:
-                continue
-            if not _is_old_enough(
-                row.message_id,
-                now_ns,
-                RETENTION_PRUNE_DEFAULT_MIN_AGE_SECONDS,
-            ):
-                continue
-            if not has_terminal and row.status not in TERMINAL_TASK_STATUSES:
-                continue
-            candidate_class = (
-                RETENTION_PRUNE_CLASS_TERMINAL_TASK_LOG_SUPERSEDED
-                if row.terminal
-                else RETENTION_PRUNE_CLASS_NONTERMINAL_TASK_LOG_SUPERSEDED
-            )
-            candidates.append(
-                _candidate_from_metadata(
-                    tid=tid,
-                    queue_name=WEFT_GLOBAL_LOG_QUEUE,
-                    message_id=row.message_id,
-                    candidate_class=candidate_class,
-                    reason="older_task_log_row_with_retained_newer_evidence",
-                    safe_to_delete=True,
-                    raw_payload=row.raw_message,
-                    metadata={
-                        "source": "log",
-                        "status": row.status,
-                        "event": _event_from_payload(row.payload),
-                        "terminal": row.terminal,
-                        "cleanup_candidate": True,
-                        "failure_owner": None,
-                    },
-                )
-            )
-    return tuple(candidates)
-
-
-def _task_local_retention_candidates(
-    ctx: WeftContext,
-    reduced: ReducedTaskLog,
-    *,
-    now_ns: int,
-) -> tuple[TaskMonitorCandidate, ...]:
-    if reduced.terminal_timestamp is None:
-        return ()
-    outbox_name, ctrl_out_name = task_evidence.queue_names_for_tid(
-        reduced.tid,
-        reduced.taskspec_payload,
-    )
-    candidates: list[TaskMonitorCandidate] = []
-    ctrl_snapshot = task_evidence.peek_terminal_ctrl_out_evidence(
-        ctx,
-        tid=reduced.tid,
-        ctrl_out_name=ctrl_out_name,
-        taskspec_payload=reduced.taskspec_payload,
-    )
-    if ctrl_snapshot is not None:
-        candidates.extend(
-            _task_local_candidates_from_ack_targets(
-                reduced,
-                snapshot=ctrl_snapshot,
-                candidate_class=RETENTION_PRUNE_CLASS_TERMINAL_CTRL_OUT_ARCHIVED,
-                reason="terminal_ctrl_out_has_retained_terminal_log",
-                now_ns=now_ns,
-            )
-        )
-
-    outbox_snapshot = task_evidence.peek_final_outbox_evidence(
-        ctx,
-        tid=reduced.tid,
-        outbox_name=outbox_name,
-        taskspec_payload=reduced.taskspec_payload,
-    )
-    if outbox_snapshot is not None:
-        candidates.extend(
-            _task_local_candidates_from_ack_targets(
-                reduced,
-                snapshot=outbox_snapshot,
-                candidate_class=RETENTION_PRUNE_CLASS_TERMINAL_RESULT_OUTBOX_ARCHIVED,
-                reason="terminal_result_outbox_has_retained_terminal_log",
-                now_ns=now_ns,
-            )
-        )
-    return tuple(candidates)
-
-
-def _task_local_candidates_from_ack_targets(
-    reduced: ReducedTaskLog,
-    *,
-    snapshot: task_evidence.TaskEvidenceSnapshot,
-    candidate_class: str,
-    reason: str,
-    now_ns: int,
-) -> tuple[TaskMonitorCandidate, ...]:
-    candidates: list[TaskMonitorCandidate] = []
-    for target in snapshot.ack_targets:
-        if not _is_old_enough(
-            target.message_id,
-            now_ns,
-            RETENTION_PRUNE_DEFAULT_MIN_AGE_SECONDS,
-        ):
-            continue
-        candidates.append(
-            _candidate_from_metadata(
-                tid=reduced.tid,
-                queue_name=target.queue,
-                message_id=target.message_id,
-                candidate_class=candidate_class,
-                reason=reason,
-                safe_to_delete=True,
-                raw_payload=None,
-                metadata={
-                    "source": snapshot.source,
-                    "status": snapshot.status,
-                    "event": snapshot.event,
-                    "terminal": snapshot.terminal,
-                    "cleanup_candidate": True,
-                    "failure_owner": None,
-                    "retained_terminal_log_message_id": reduced.terminal_timestamp,
-                },
-            )
-        )
-    return tuple(candidates)
-
-
-def _runtime_state_candidates(
-    ctx: WeftContext,
-    *,
-    now_ns: int,
-) -> tuple[TaskMonitorCandidate, ...]:
-    return (
-        *_tid_mapping_candidates(ctx, now_ns=now_ns),
-        *_manager_registry_candidates(ctx, now_ns=now_ns),
-    )
-
-
-def _tid_mapping_candidates(
-    ctx: WeftContext,
-    *,
-    now_ns: int,
-) -> tuple[TaskMonitorCandidate, ...]:
-    rows = _read_json_queue(ctx, WEFT_TID_MAPPINGS_QUEUE)
-    grouped: dict[str, list[tuple[dict[str, Any], int, str]]] = defaultdict(list)
-    for payload, message_id, raw_message in rows:
-        full = payload.get("full")
-        if isinstance(full, str) and full:
-            grouped[full].append((payload, message_id, raw_message))
-
-    candidates: list[TaskMonitorCandidate] = []
-    for full, records in grouped.items():
-        ordered = sorted(records, key=lambda item: item[1], reverse=True)
-        for payload, message_id, raw_message in ordered[
-            RUNTIME_PRUNE_DEFAULT_KEEP_RECENT_PER_KEY:
-        ]:
-            if not _is_old_enough(
-                message_id,
-                now_ns,
-                RUNTIME_PRUNE_DEFAULT_MIN_AGE_SECONDS,
-            ):
-                continue
-            short = payload.get("short")
-            candidates.append(
-                _candidate_from_metadata(
-                    tid=full,
-                    queue_name=WEFT_TID_MAPPINGS_QUEUE,
-                    message_id=message_id,
-                    candidate_class=RUNTIME_PRUNE_CLASS_SUPERSEDED_TID_MAPPING,
-                    reason="older_than_min_age_and_not_latest_for_tid",
-                    safe_to_delete=True,
-                    raw_payload=raw_message,
-                    metadata={
-                        "source": "runtime_state",
-                        "queue_group": "tid-mappings",
-                        "key": full,
-                        "short": short if isinstance(short, str) else None,
-                        "cleanup_candidate": True,
-                    },
-                )
-            )
-    return tuple(candidates)
-
-
-def _manager_registry_candidates(
-    ctx: WeftContext,
-    *,
-    now_ns: int,
-) -> tuple[TaskMonitorCandidate, ...]:
-    rows = _read_json_queue(ctx, WEFT_SERVICES_REGISTRY_QUEUE)
-    payload_by_id = {message_id: payload for payload, message_id, _raw in rows}
-    raw_by_id = {message_id: raw for _payload, message_id, raw in rows}
-    record_by_id: dict[int, dict[str, Any]] = {}
-    grouped: dict[str, list[int]] = defaultdict(list)
-    candidates: list[TaskMonitorCandidate] = []
-    for payload, message_id, raw_message in rows:
-        parse_result = parse_service_owner_row(payload, timestamp=message_id)
-        if parse_result.disposition == "malformed":
-            if _is_old_enough(
-                message_id,
-                now_ns,
-                RUNTIME_PRUNE_DEFAULT_MIN_AGE_SECONDS,
-            ):
-                candidates.append(
-                    _runtime_candidate(
-                        tid=str(payload.get("owner_tid") or payload.get("tid") or ""),
-                        queue_name=WEFT_SERVICES_REGISTRY_QUEUE,
-                        message_id=message_id,
-                        candidate_class=RUNTIME_PRUNE_CLASS_STALE_MANAGER,
-                        reason="malformed_service_owner_row",
-                        raw_message=raw_message,
-                        payload=payload,
-                    )
-                )
-            continue
-        record = normalize_manager_registry_record(
-            ctx,
-            payload,
-            timestamp=message_id,
-        )
-        if record is None:
-            continue
-        tid = record.get("tid")
-        if not isinstance(tid, str) or not tid:
-            continue
-        record_by_id[message_id] = record
-        grouped[tid].append(message_id)
-
-    for tid, message_ids in grouped.items():
-        ordered = sorted(message_ids, reverse=True)
-        protected = set(ordered[:RUNTIME_PRUNE_DEFAULT_KEEP_RECENT_PER_KEY])
-        for message_id in ordered:
-            record = record_by_id.get(message_id)
-            candidate_payload = payload_by_id.get(message_id)
-            candidate_raw_message = raw_by_id.get(message_id)
-            if (
-                record is None
-                or candidate_payload is None
-                or candidate_raw_message is None
-            ):
-                continue
-            if not _is_old_enough(
-                message_id,
-                now_ns,
-                RUNTIME_PRUNE_DEFAULT_MIN_AGE_SECONDS,
-            ):
-                continue
-            if record.get("status") == "active" and manager_registry_record_is_stale(
-                record
-            ):
-                candidates.append(
-                    _runtime_candidate(
-                        tid=tid,
-                        queue_name=WEFT_SERVICES_REGISTRY_QUEUE,
-                        message_id=message_id,
-                        candidate_class=RUNTIME_PRUNE_CLASS_STALE_MANAGER,
-                        reason="active_manager_runtime_handle_not_live",
-                        raw_message=candidate_raw_message,
-                        payload=candidate_payload,
-                    )
-                )
-                continue
-            if message_id in protected:
-                continue
-            candidates.append(
-                _runtime_candidate(
-                    tid=tid,
-                    queue_name=WEFT_SERVICES_REGISTRY_QUEUE,
-                    message_id=message_id,
-                    candidate_class=RUNTIME_PRUNE_CLASS_SUPERSEDED_MANAGER,
-                    reason="older_than_min_age_and_not_latest_for_manager_tid",
-                    raw_message=candidate_raw_message,
-                    payload=candidate_payload,
-                )
-            )
-    return tuple(candidates)
-
-
-def _runtime_candidate(
-    *,
-    tid: str,
-    queue_name: str,
-    message_id: int,
-    candidate_class: str,
-    reason: str,
-    raw_message: str,
-    payload: Mapping[str, Any],
-) -> TaskMonitorCandidate:
-    return _candidate_from_metadata(
-        tid=tid,
-        queue_name=queue_name,
-        message_id=message_id,
-        candidate_class=candidate_class,
-        reason=reason,
-        safe_to_delete=True,
-        raw_payload=raw_message,
-        metadata={
-            "source": "runtime_state",
-            "queue_group": "managers",
-            "status": payload.get("status"),
-            "role": payload.get("role"),
-            "cleanup_candidate": True,
-        },
-    )
-
-
-def _read_json_queue(
-    ctx: WeftContext,
-    queue_name: str,
-) -> tuple[tuple[dict[str, Any], int, str], ...]:
-    queue = ctx.queue(queue_name, persistent=False)
-    rows: list[tuple[dict[str, Any], int, str]] = []
-    try:
-        for raw_message, message_id in iter_queue_entries(queue):
-            payload = _json_object(raw_message)
-            if payload is not None:
-                rows.append((payload, int(message_id), raw_message))
-    finally:
-        queue.close()
-    return tuple(rows)
 
 
 def _queue_message_counts_by_name(
@@ -1301,12 +823,6 @@ def _is_stale(timestamp: int, now_ns: int) -> bool:
     return now_ns - timestamp > stale_ns
 
 
-def _is_old_enough(message_id: int, now_ns: int, min_age_seconds: float) -> bool:
-    if min_age_seconds <= 0:
-        return True
-    return (now_ns - int(message_id)) / 1_000_000_000 >= min_age_seconds
-
-
 def _extract_state_timestamp(payload: dict[str, Any], key: str) -> int | None:
     taskspec = payload.get("taskspec")
     if not isinstance(taskspec, dict):
@@ -1357,8 +873,6 @@ __all__ = [
     "TaskMonitorProcessorResult",
     "TaskMonitorRuntimeConfig",
     "build_task_monitor_cycle_snapshot",
-    "delete_processor",
-    "report_only_processor",
     "reduce_task_log_messages",
     "resolve_task_monitor_processor",
     "task_log_seen_candidate",

@@ -729,10 +729,13 @@ Current rules:
   claimed outbox residue, malformed/unknown-shape rows, and inbox/reserved work
   unless the class is safe for ordinary deletion. `--force --apply` is the
   explicit human override for those ordinary protections.
-- the manager-supervised `TaskMonitorTask` reports and deletes through a
-  bounded cleanup runner under `weft/core/pruning/`. The runner shares the
-  canonical exact-delete helper with foreground `weft system prune`, but it
-  does not reuse the foreground global candidate builders. If configured with
+- the manager-supervised `TaskMonitorTask` reports and deletes through the
+  TaskMonitor-owned cleanup runner in `weft/core/tasks/task_monitor_cleanup.py`.
+  The runner uses neutral queue-window rows from `weft/core/queue_window.py`,
+  task-log grouping from `weft/core/task_log_collation.py`, reusable pruning
+  policies under `weft/core/pruning/policies/`, and the canonical exact-delete
+  helper shared with foreground `weft system prune`. It does not reuse the
+  foreground global candidate builders. If configured with
   `WEFT_TASK_MONITOR_PROCESSOR=delete`, it may delete exact candidate message
   IDs selected by its bounded policies only. It must not apply archive side
   effects, force-only retention cleanup, task-local retention cleanup, or
@@ -787,3 +790,4 @@ management live in the companion doc:
 - [`docs/plans/2026-05-11-manager-work-stealing-dispatch-plan.md`](../plans/2026-05-11-manager-work-stealing-dispatch-plan.md)
 - [`docs/plans/2026-05-11-manager-serve-operational-log-plan.md`](../plans/2026-05-11-manager-serve-operational-log-plan.md)
 - [`docs/plans/2026-05-12-bounded-task-monitor-cleanup-policy-plan.md`](../plans/2026-05-12-bounded-task-monitor-cleanup-policy-plan.md)
+- [`docs/plans/2026-05-12-task-monitor-cleanup-composition-refactor-plan.md`](../plans/2026-05-12-task-monitor-cleanup-composition-refactor-plan.md)

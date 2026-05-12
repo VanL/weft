@@ -1,4 +1,4 @@
-"""Tests for bounded TaskMonitor cleanup policies."""
+"""Tests for TaskMonitor cleanup composition."""
 
 from __future__ import annotations
 
@@ -11,9 +11,12 @@ import pytest
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import WEFT_GLOBAL_LOG_QUEUE, WEFT_TID_MAPPINGS_QUEUE
 from weft.context import WeftContext, build_context
-from weft.core.pruning.bounded_cleanup import (
-    BoundedCleanupConfig,
-    run_bounded_task_monitor_cleanup,
+from weft.core.pruning.policies import malformed_row_candidates, older_than_candidates
+from weft.core.queue_window import DecodedQueueWindowRow, QueueWindowRow
+from weft.core.task_log_collation import collate_next_task_log_group
+from weft.core.tasks.task_monitor_cleanup import (
+    TaskMonitorCleanupConfig,
+    run_task_monitor_cleanup,
 )
 from weft.helpers import iter_queue_entries
 
@@ -55,7 +58,102 @@ def _now_after(message_id: int, seconds: float) -> int:
     return message_id + int(seconds * 1_000_000_000) + 1
 
 
-def test_bounded_cleanup_deletes_malformed_task_log(tmp_path: Path) -> None:
+def _decoded_row(
+    queue_name: str,
+    message_id: int,
+    payload: dict[str, Any] | None,
+    *,
+    malformed_reason: str | None = None,
+) -> DecodedQueueWindowRow:
+    body = json.dumps(payload) if payload is not None else "{bad-json"
+    return DecodedQueueWindowRow(
+        raw=QueueWindowRow(queue=queue_name, body=body, message_id=message_id),
+        payload=payload,
+        malformed_reason=malformed_reason,
+    )
+
+
+def test_malformed_policy_selects_only_explicitly_malformed_rows() -> None:
+    rows = (
+        _decoded_row("owned.queue", 100, None, malformed_reason="invalid_json"),
+        _decoded_row("owned.queue", 101, {"tid": "1778000000000000001"}),
+    )
+
+    candidates = malformed_row_candidates(
+        rows,
+        candidate_class="malformed_owned_queue",
+    )
+
+    assert [candidate.message_id for candidate in candidates] == [100]
+    assert candidates[0].candidate_class == "malformed_owned_queue"
+    assert candidates[0].reason == "invalid_json"
+
+
+def test_older_than_policy_skips_claimed_rows_and_stops_at_young_fifo_row() -> None:
+    rows = (
+        _decoded_row("owned.queue", 1_000_000_000, {"tid": "claimed"}),
+        _decoded_row("owned.queue", 2_000_000_000, {"tid": "old"}),
+        _decoded_row("owned.queue", 3_000_000_000, {"tid": "young"}),
+    )
+
+    selection = older_than_candidates(
+        rows,
+        now_ns=3_500_000_000,
+        min_age_seconds=1.0,
+        candidate_class="old_owned_row",
+        reason="older_than_policy",
+        stop_reason="first_owned_row_too_young",
+        claimed_ids={1_000_000_000},
+    )
+
+    assert [candidate.tid for candidate in selection.candidates] == ["old"]
+    assert selection.stop_reason == "first_owned_row_too_young"
+
+
+def test_task_log_collation_skips_nonterminal_anchor_for_later_terminal() -> None:
+    rows = (
+        _decoded_row(
+            WEFT_GLOBAL_LOG_QUEUE,
+            1_000_000_000,
+            {"event": "work_started", "tid": "1778000000000000001"},
+        ),
+        _decoded_row(
+            WEFT_GLOBAL_LOG_QUEUE,
+            2_000_000_000,
+            {"event": "work_started", "tid": "1778000000000000002"},
+        ),
+        _decoded_row(
+            WEFT_GLOBAL_LOG_QUEUE,
+            3_000_000_000,
+            {"event": "work_completed", "tid": "1778000000000000002"},
+        ),
+    )
+    first = collate_next_task_log_group(
+        rows,
+        now_ns=4_500_000_000,
+        min_age_seconds=1.0,
+        exclude_tids=set(),
+        claimed_ids=set(),
+        skipped_tids=set(),
+    )
+
+    second = collate_next_task_log_group(
+        rows,
+        now_ns=4_500_000_000,
+        min_age_seconds=1.0,
+        exclude_tids=set(),
+        claimed_ids=set(),
+        skipped_tids={first.skipped_tid or ""},
+    )
+
+    assert first.group is None
+    assert first.skipped_tid == "1778000000000000001"
+    assert second.group is not None
+    assert second.group.tid == "1778000000000000002"
+    assert second.group.message_ids == (2_000_000_000, 3_000_000_000)
+
+
+def test_task_monitor_cleanup_deletes_malformed_task_log(tmp_path: Path) -> None:
     ctx = _context(tmp_path)
     bad_id = _write_raw(ctx, WEFT_GLOBAL_LOG_QUEUE, "{not json")
     _write_json(
@@ -64,9 +162,9 @@ def test_bounded_cleanup_deletes_malformed_task_log(tmp_path: Path) -> None:
         {"event": "work_started", "tid": "1778000000000000001"},
     )
 
-    result = run_bounded_task_monitor_cleanup(
+    result = run_task_monitor_cleanup(
         ctx,
-        BoundedCleanupConfig(batch_size=10, task_log_min_age_seconds=60.0),
+        TaskMonitorCleanupConfig(batch_size=10, task_log_min_age_seconds=60.0),
         apply=True,
         now_ns=bad_id,
     )
@@ -81,7 +179,7 @@ def test_bounded_cleanup_deletes_malformed_task_log(tmp_path: Path) -> None:
     ]
 
 
-def test_bounded_cleanup_deletes_malformed_tid_mapping(tmp_path: Path) -> None:
+def test_task_monitor_cleanup_deletes_malformed_tid_mapping(tmp_path: Path) -> None:
     ctx = _context(tmp_path)
     bad_id = _write_raw(ctx, WEFT_TID_MAPPINGS_QUEUE, json.dumps({"short": "bad"}))
     _write_json(
@@ -90,9 +188,9 @@ def test_bounded_cleanup_deletes_malformed_tid_mapping(tmp_path: Path) -> None:
         {"short": "0000000001", "full": "1778000000000000001"},
     )
 
-    result = run_bounded_task_monitor_cleanup(
+    result = run_task_monitor_cleanup(
         ctx,
-        BoundedCleanupConfig(batch_size=10, tid_mapping_min_age_seconds=60.0),
+        TaskMonitorCleanupConfig(batch_size=10, tid_mapping_min_age_seconds=60.0),
         apply=True,
         now_ns=bad_id,
     )
@@ -107,13 +205,13 @@ def test_bounded_cleanup_deletes_malformed_tid_mapping(tmp_path: Path) -> None:
     assert json.loads(rows[0][0])["full"] == "1778000000000000001"
 
 
-def test_bounded_cleanup_report_only_keeps_selected_rows(tmp_path: Path) -> None:
+def test_task_monitor_cleanup_report_only_keeps_selected_rows(tmp_path: Path) -> None:
     ctx = _context(tmp_path)
     _write_raw(ctx, WEFT_GLOBAL_LOG_QUEUE, "[1, 2, 3]")
 
-    result = run_bounded_task_monitor_cleanup(
+    result = run_task_monitor_cleanup(
         ctx,
-        BoundedCleanupConfig(batch_size=10),
+        TaskMonitorCleanupConfig(batch_size=10),
         apply=False,
     )
 
@@ -124,7 +222,7 @@ def test_bounded_cleanup_report_only_keeps_selected_rows(tmp_path: Path) -> None
     assert len(_read_rows(ctx, WEFT_GLOBAL_LOG_QUEUE)) == 1
 
 
-def test_bounded_cleanup_deletes_old_tid_mapping(tmp_path: Path) -> None:
+def test_task_monitor_cleanup_deletes_old_tid_mapping(tmp_path: Path) -> None:
     ctx = _context(tmp_path)
     mapping_id = _write_json(
         ctx,
@@ -132,9 +230,9 @@ def test_bounded_cleanup_deletes_old_tid_mapping(tmp_path: Path) -> None:
         {"short": "0000000001", "full": "1778000000000000001"},
     )
 
-    result = run_bounded_task_monitor_cleanup(
+    result = run_task_monitor_cleanup(
         ctx,
-        BoundedCleanupConfig(batch_size=10, tid_mapping_min_age_seconds=1.0),
+        TaskMonitorCleanupConfig(batch_size=10, tid_mapping_min_age_seconds=1.0),
         apply=True,
         now_ns=_now_after(mapping_id, 2.0),
     )
@@ -147,7 +245,7 @@ def test_bounded_cleanup_deletes_old_tid_mapping(tmp_path: Path) -> None:
     assert _read_rows(ctx, WEFT_TID_MAPPINGS_QUEUE) == []
 
 
-def test_bounded_cleanup_preserves_young_tid_mapping(tmp_path: Path) -> None:
+def test_task_monitor_cleanup_preserves_young_tid_mapping(tmp_path: Path) -> None:
     ctx = _context(tmp_path)
     mapping_id = _write_json(
         ctx,
@@ -155,9 +253,9 @@ def test_bounded_cleanup_preserves_young_tid_mapping(tmp_path: Path) -> None:
         {"short": "0000000001", "full": "1778000000000000001"},
     )
 
-    result = run_bounded_task_monitor_cleanup(
+    result = run_task_monitor_cleanup(
         ctx,
-        BoundedCleanupConfig(batch_size=10, tid_mapping_min_age_seconds=60.0),
+        TaskMonitorCleanupConfig(batch_size=10, tid_mapping_min_age_seconds=60.0),
         apply=True,
         now_ns=_now_after(mapping_id, 1.0),
     )
@@ -168,7 +266,7 @@ def test_bounded_cleanup_preserves_young_tid_mapping(tmp_path: Path) -> None:
     assert len(_read_rows(ctx, WEFT_TID_MAPPINGS_QUEUE)) == 1
 
 
-def test_bounded_cleanup_collates_terminal_task_log_for_anchor_tid(
+def test_task_monitor_cleanup_collates_terminal_task_log_for_anchor_tid(
     tmp_path: Path,
 ) -> None:
     ctx = _context(tmp_path)
@@ -188,9 +286,9 @@ def test_bounded_cleanup_collates_terminal_task_log_for_anchor_tid(
         {"event": "work_completed", "tid": "1778000000000000001"},
     )
 
-    result = run_bounded_task_monitor_cleanup(
+    result = run_task_monitor_cleanup(
         ctx,
-        BoundedCleanupConfig(batch_size=10, task_log_min_age_seconds=1.0),
+        TaskMonitorCleanupConfig(batch_size=10, task_log_min_age_seconds=1.0),
         apply=True,
         now_ns=_now_after(start_id, 2.0),
     )
@@ -206,7 +304,7 @@ def test_bounded_cleanup_collates_terminal_task_log_for_anchor_tid(
     assert remaining == [{"event": "work_started", "tid": "1778000000000000002"}]
 
 
-def test_bounded_cleanup_repeats_collate_for_multiple_terminal_tids(
+def test_task_monitor_cleanup_repeats_collate_for_multiple_terminal_tids(
     tmp_path: Path,
 ) -> None:
     ctx = _context(tmp_path)
@@ -236,9 +334,9 @@ def test_bounded_cleanup_repeats_collate_for_multiple_terminal_tids(
         {"event": "work_started", "tid": "1778000000000000003"},
     )
 
-    result = run_bounded_task_monitor_cleanup(
+    result = run_task_monitor_cleanup(
         ctx,
-        BoundedCleanupConfig(batch_size=10, task_log_min_age_seconds=1.0),
+        TaskMonitorCleanupConfig(batch_size=10, task_log_min_age_seconds=1.0),
         apply=True,
         now_ns=_now_after(start_id, 2.0),
     )
@@ -258,7 +356,7 @@ def test_bounded_cleanup_repeats_collate_for_multiple_terminal_tids(
     ] == [{"event": "work_started", "tid": "1778000000000000003"}]
 
 
-def test_bounded_cleanup_nonterminal_anchor_does_not_block_later_collate(
+def test_task_monitor_cleanup_nonterminal_anchor_does_not_block_later_collate(
     tmp_path: Path,
 ) -> None:
     ctx = _context(tmp_path)
@@ -278,9 +376,9 @@ def test_bounded_cleanup_nonterminal_anchor_does_not_block_later_collate(
         {"event": "work_completed", "tid": "1778000000000000002"},
     )
 
-    result = run_bounded_task_monitor_cleanup(
+    result = run_task_monitor_cleanup(
         ctx,
-        BoundedCleanupConfig(batch_size=10, task_log_min_age_seconds=1.0),
+        TaskMonitorCleanupConfig(batch_size=10, task_log_min_age_seconds=1.0),
         apply=True,
         now_ns=_now_after(start_id, 2.0),
     )
@@ -292,7 +390,7 @@ def test_bounded_cleanup_nonterminal_anchor_does_not_block_later_collate(
     ] == [{"event": "work_started", "tid": "1778000000000000001"}]
 
 
-def test_bounded_cleanup_does_not_collate_young_terminal_task_log(
+def test_task_monitor_cleanup_does_not_collate_young_terminal_task_log(
     tmp_path: Path,
 ) -> None:
     ctx = _context(tmp_path)
@@ -307,9 +405,9 @@ def test_bounded_cleanup_does_not_collate_young_terminal_task_log(
         {"event": "work_completed", "tid": "1778000000000000001"},
     )
 
-    result = run_bounded_task_monitor_cleanup(
+    result = run_task_monitor_cleanup(
         ctx,
-        BoundedCleanupConfig(batch_size=10, task_log_min_age_seconds=60.0),
+        TaskMonitorCleanupConfig(batch_size=10, task_log_min_age_seconds=60.0),
         apply=True,
         now_ns=_now_after(start_id, 1.0),
     )
@@ -319,7 +417,7 @@ def test_bounded_cleanup_does_not_collate_young_terminal_task_log(
     assert len(_read_rows(ctx, WEFT_GLOBAL_LOG_QUEUE)) == 2
 
 
-def test_bounded_cleanup_without_terminal_falls_back_to_older_than(
+def test_task_monitor_cleanup_without_terminal_falls_back_to_older_than(
     tmp_path: Path,
 ) -> None:
     ctx = _context(tmp_path)
@@ -329,9 +427,9 @@ def test_bounded_cleanup_without_terminal_falls_back_to_older_than(
         {"event": "work_started", "tid": "1778000000000000001"},
     )
 
-    result = run_bounded_task_monitor_cleanup(
+    result = run_task_monitor_cleanup(
         ctx,
-        BoundedCleanupConfig(batch_size=10, task_log_min_age_seconds=1.0),
+        TaskMonitorCleanupConfig(batch_size=10, task_log_min_age_seconds=1.0),
         apply=True,
         now_ns=_now_after(start_id, 2.0),
     )
@@ -344,15 +442,15 @@ def test_bounded_cleanup_without_terminal_falls_back_to_older_than(
     assert _read_rows(ctx, WEFT_GLOBAL_LOG_QUEUE) == []
 
 
-def test_bounded_cleanup_policy_order_classifies_malformed_before_age(
+def test_task_monitor_cleanup_policy_order_classifies_malformed_before_age(
     tmp_path: Path,
 ) -> None:
     ctx = _context(tmp_path)
     bad_id = _write_raw(ctx, WEFT_GLOBAL_LOG_QUEUE, "null")
 
-    result = run_bounded_task_monitor_cleanup(
+    result = run_task_monitor_cleanup(
         ctx,
-        BoundedCleanupConfig(batch_size=10, task_log_min_age_seconds=0.0),
+        TaskMonitorCleanupConfig(batch_size=10, task_log_min_age_seconds=0.0),
         apply=True,
         now_ns=_now_after(bad_id, 10.0),
     )
@@ -363,16 +461,16 @@ def test_bounded_cleanup_policy_order_classifies_malformed_before_age(
     ]
 
 
-def test_bounded_cleanup_scan_budget_and_followup_delete_do_not_skip(
+def test_task_monitor_cleanup_scan_budget_and_followup_delete_do_not_skip(
     tmp_path: Path,
 ) -> None:
     ctx = _context(tmp_path)
     for index in range(5):
         _write_raw(ctx, WEFT_GLOBAL_LOG_QUEUE, f"bad-{index}")
 
-    config = BoundedCleanupConfig(batch_size=2)
-    first = run_bounded_task_monitor_cleanup(ctx, config, apply=True)
-    second = run_bounded_task_monitor_cleanup(ctx, config, apply=True)
+    config = TaskMonitorCleanupConfig(batch_size=2)
+    first = run_task_monitor_cleanup(ctx, config, apply=True)
+    second = run_task_monitor_cleanup(ctx, config, apply=True)
 
     assert first.records_scanned == 2
     assert first.deleted == 2

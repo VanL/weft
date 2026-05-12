@@ -1,8 +1,9 @@
 """Canonical task-local and task-log retention pruning engine.
 
 This module implements retention candidate selection for task-local queues and
-selected lifecycle-log rows. Command wrappers and TaskMonitor cleanup both use
-this core path so candidate semantics and exact deletion stay unified.
+selected lifecycle-log rows. Command wrappers use this foreground maintenance
+path; the manager-supervised TaskMonitor uses a separate cleanup runner for
+its background pass.
 
 Spec references:
 - docs/specifications/05-Message_Flow_and_State.md [MF-5]

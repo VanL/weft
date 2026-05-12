@@ -52,6 +52,12 @@ def _write_broker_project_config(
     return config_path
 
 
+def _clear_backend_part_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for prefix in ("WEFT", "BROKER"):
+        for suffix in ("HOST", "PORT", "USER", "PASSWORD", "DATABASE"):
+            monkeypatch.delenv(f"{prefix}_BACKEND_{suffix}", raising=False)
+
+
 def test_service_context_key_strips_non_file_backend_password(tmp_path: Path) -> None:
     target = BrokerTarget(
         backend_name="postgres",
@@ -191,6 +197,7 @@ def test_build_context_discovery_prefers_existing_sqlite_project_over_env_backen
     root_ctx = build_context(spec_context=root)
     nested_dir = root / "nested" / "child"
     nested_dir.mkdir(parents=True)
+    _clear_backend_part_env(monkeypatch)
     monkeypatch.setenv("WEFT_BACKEND", "postgres")
     monkeypatch.setenv("WEFT_BACKEND_TARGET", "postgresql://env-user@env-host/env-db")
     monkeypatch.setenv("WEFT_BACKEND_SCHEMA", "env_schema")
@@ -409,6 +416,7 @@ def test_build_context_uses_weft_scoped_project_postgres_target_when_config_exis
         target="postgresql://toml-user@toml-host/toml-db",
         schema="toml_schema",
     )
+    _clear_backend_part_env(monkeypatch)
     monkeypatch.setenv("WEFT_BACKEND", "postgres")
     monkeypatch.setenv("WEFT_BACKEND_TARGET", "postgresql://env-user@env-host/env-db")
     monkeypatch.setenv("WEFT_BACKEND_SCHEMA", "env_schema")
@@ -438,6 +446,7 @@ def test_build_context_discovery_uses_weft_scoped_project_postgres_target(
     )
     nested_dir = root / "a" / "b"
     nested_dir.mkdir(parents=True)
+    _clear_backend_part_env(monkeypatch)
     monkeypatch.setenv("WEFT_BACKEND", "postgres")
     monkeypatch.setenv("WEFT_BACKEND_TARGET", "postgresql://env-user@env-host/env-db")
     monkeypatch.setenv("WEFT_BACKEND_SCHEMA", "env_schema")

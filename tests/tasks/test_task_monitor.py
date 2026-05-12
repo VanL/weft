@@ -136,7 +136,7 @@ def test_task_monitor_process_once_calls_processor_without_consuming_task_log(
     assert payloads[1] in remaining
 
 
-def test_task_monitor_builtin_delete_removes_bounded_cleanup_rows(
+def test_task_monitor_builtin_delete_removes_cleanup_rows(
     broker_env,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -173,7 +173,7 @@ def test_task_monitor_builtin_delete_removes_bounded_cleanup_rows(
     assert task._last_cleanup_queue_stats
 
 
-def test_task_monitor_builtin_report_only_keeps_bounded_cleanup_rows(
+def test_task_monitor_builtin_report_only_keeps_cleanup_rows(
     broker_env,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -313,8 +313,9 @@ def test_task_monitor_ping_includes_health_and_preserves_task_log(
     assert pong["processor"] == "report_only"
     assert pong["interval_seconds"] == 60
     assert pong["batch_size"] == 10
-    assert pong["last_candidate_class_counts"] == {"active": 1}
+    assert pong["last_candidate_class_counts"] == {}
     assert pong["last_safe_to_delete_candidates"] == 0
+    assert pong["last_cleanup_queue_stats"]
     assert log_queue.peek_one() is not None
 
 

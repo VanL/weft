@@ -331,7 +331,11 @@ summaries remain operational TaskMonitor output only. Those deletes and
 summaries do not make task-monitor output lifecycle truth or result authority.
 `weft.log.tasks` remains runtime lifecycle evidence while retained, not audit,
 forensic, or legal-retention evidence. `report_only` remains available as a
-non-destructive override.
+non-destructive override. Cleanup orchestration lives in
+`weft/core/tasks/task_monitor_cleanup.py`; reusable row policies live under
+`weft/core/pruning/policies/`; task-log grouping lives in
+`weft/core/task_log_collation.py`; exact deletion still goes through
+`weft/core/pruning/apply.py`.
 
 ## Scope Boundary
 
@@ -361,6 +365,7 @@ doc:
 - [`docs/plans/2026-04-17-canonical-owner-fence-plan.md`](../plans/2026-04-17-canonical-owner-fence-plan.md)
 - [`docs/plans/2026-05-11-manager-work-stealing-dispatch-plan.md`](../plans/2026-05-11-manager-work-stealing-dispatch-plan.md)
 - [`docs/plans/2026-05-12-bounded-task-monitor-cleanup-policy-plan.md`](../plans/2026-05-12-bounded-task-monitor-cleanup-policy-plan.md)
+- [`docs/plans/2026-05-12-task-monitor-cleanup-composition-refactor-plan.md`](../plans/2026-05-12-task-monitor-cleanup-composition-refactor-plan.md)
 
 ## Related Documents
 
