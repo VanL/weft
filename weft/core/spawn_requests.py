@@ -20,6 +20,7 @@ from weft._constants import (
     INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY,
     INTERNAL_RUNTIME_TASK_CLASS_KEY,
     PUBLIC_RESERVED_SERVICE_METADATA_KEYS,
+    WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
     WORK_ENVELOPE_START,
 )
@@ -126,8 +127,15 @@ def submit_spawn_request(
     inherited_weft_context: str | None = None,
     seed_start_envelope: bool = True,
     allow_internal_runtime: bool = False,
+    spawn_queue_name: str = WEFT_SPAWN_REQUESTS_QUEUE,
 ) -> int:
     """Write a manager spawn request using exact-timestamp TID correlation."""
+
+    if spawn_queue_name not in {
+        WEFT_SPAWN_REQUESTS_QUEUE,
+        WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
+    }:
+        raise ValueError(f"unsupported spawn queue {spawn_queue_name!r}")
 
     resolved_tid = (
         str(tid)
@@ -180,7 +188,7 @@ def submit_spawn_request(
 
     queue_config = dict(config) if config is not None else None
     queue = Queue(
-        WEFT_SPAWN_REQUESTS_QUEUE,
+        spawn_queue_name,
         db_path=_normalize_broker_target(broker_target),
         persistent=False,
         config=queue_config,
@@ -189,7 +197,7 @@ def submit_spawn_request(
         with queue.get_connection() as db:
             db._run_with_retry(
                 lambda: db._do_write_transaction(
-                    WEFT_SPAWN_REQUESTS_QUEUE,
+                    spawn_queue_name,
                     message_json,
                     message_timestamp,
                 )

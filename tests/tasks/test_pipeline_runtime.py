@@ -15,6 +15,7 @@ from weft._constants import (
     CONTROL_STOP,
     PIPELINE_EDGE_RUNTIME_METADATA_KEY,
     PIPELINE_OWNER_METADATA_KEY,
+    WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
     WEFT_PIPELINES_STATE_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
 )
@@ -347,9 +348,17 @@ def test_pipeline_task_bootstraps_all_children_before_any_stage_runs(
 
     task.process_once()
 
-    spawn_queue = ctx.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=False)
+    spawn_queue = ctx.queue(WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE, persistent=False)
     spawned = _drain_json(spawn_queue)
     assert len(spawned) == len(compiled.runtime.stages) + len(compiled.runtime.edges)
+    assert [item["taskspec"]["tid"] for item in spawned] == [
+        compiled.runtime.edges[0].tid,
+        compiled.runtime.stages[0].tid,
+        compiled.runtime.edges[1].tid,
+        compiled.runtime.stages[1].tid,
+        compiled.runtime.edges[2].tid,
+    ]
+    assert _drain_json(ctx.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=False)) == []
     assert ctx.queue(compiled.runtime.queues.events, persistent=True).read_one() is None
 
 
@@ -417,10 +426,10 @@ def test_pipeline_task_publishes_initial_waiting_activity_snapshot(
     ]
     assert latest["stages"][0]["status"] == "created"
     assert latest["stages"][0]["activity"] == "queued"
-    assert latest["stages"][0]["waiting_on"] == WEFT_SPAWN_REQUESTS_QUEUE
+    assert latest["stages"][0]["waiting_on"] == WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE
     assert latest["edges"][0]["status"] == "created"
     assert latest["edges"][0]["activity"] == "queued"
-    assert latest["edges"][0]["waiting_on"] == WEFT_SPAWN_REQUESTS_QUEUE
+    assert latest["edges"][0]["waiting_on"] == WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE
 
 
 def test_pipeline_task_updates_child_status_from_started_owner_events(

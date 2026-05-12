@@ -19,6 +19,7 @@ from weft._constants import (
     INTERNAL_SERVICE_KEY_HEARTBEAT,
     INTERNAL_SERVICE_KEY_METADATA_KEY,
     WEFT_GLOBAL_LOG_QUEUE,
+    WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
 )
@@ -400,4 +401,38 @@ def test_internal_submit_spawn_request_preserves_internal_runtime_envelope(
     assert (
         payload[INTERNAL_RUNTIME_ENVELOPE_ENDPOINT_NAME_KEY]
         == INTERNAL_HEARTBEAT_ENDPOINT_NAME
+    )
+
+
+def test_internal_submit_spawn_request_can_target_internal_queue(
+    tmp_path: Path,
+) -> None:
+    context = build_context(spec_context=tmp_path)
+    tid = str(time.time_ns())
+
+    submit_spawn_request(
+        context.broker_target,
+        taskspec=_heartbeat_service_taskspec(tid, tmp_path),
+        work_payload=None,
+        config=context.broker_config,
+        tid=tid,
+        inherited_weft_context=str(context.root),
+        allow_internal_runtime=True,
+        spawn_queue_name=WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
+    )
+
+    internal_queue = context.queue(WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE, persistent=False)
+    public_queue = context.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=False)
+    try:
+        assert public_queue.read_one() is None
+        raw_message = internal_queue.read_one()
+    finally:
+        internal_queue.close()
+        public_queue.close()
+
+    assert isinstance(raw_message, str)
+    payload = json.loads(raw_message)
+    assert (
+        payload[INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY]
+        == INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT
     )

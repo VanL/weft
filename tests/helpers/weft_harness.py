@@ -20,8 +20,10 @@ from weft._constants import (
     MANAGER_STARTUP_LOG_DIRNAME,
     QUEUE_OUTBOX_SUFFIX,
     WEFT_GLOBAL_LOG_QUEUE,
+    WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
     WEFT_MANAGER_RUNTIME_HANDLE_JSON_ENV,
     WEFT_SERVICES_REGISTRY_QUEUE,
+    WEFT_SPAWN_REQUESTS_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
 )
 from weft.commands import manager as manager_cmd
@@ -40,6 +42,8 @@ from weft.helpers import (
 )
 
 DEFAULT_TASK_COMPLETION_TIMEOUT = 60.0
+COMPLETION_WAIT_REORDER_WINDOW_NS: Final[int] = 10_000_000_000
+"""Timestamp overlap for PG commit-order skew while polling task logs."""
 TERMINAL_TASK_EVENTS = {
     "work_completed",
     "work_failed",
@@ -319,6 +323,23 @@ class WeftTestHarness:
         if outbox_message is not None:
             lines.append(f"  outbox_head={self._format_debug_payload(outbox_message)}")
 
+        lines.append("  spawn_queue_tail:")
+        lines.extend(
+            self._peek_queue_lines(
+                WEFT_SPAWN_REQUESTS_QUEUE, persistent=False, limit=10
+            )
+            or ["    <empty>"]
+        )
+        lines.append("  internal_spawn_queue_tail:")
+        lines.extend(
+            self._peek_queue_lines(
+                WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
+                persistent=False,
+                limit=10,
+            )
+            or ["    <empty>"]
+        )
+
         lines.append("  task_log_tail:")
         lines.extend(self._task_log_tail_lines(tid, limit=10) or ["    <empty>"])
 
@@ -376,20 +397,26 @@ class WeftTestHarness:
                 config=self.context.broker_config,
             )
             deadline = time.time() + timeout
-            last_seen: int | None = int(tid) - 1 if tid.isdigit() else None
+            cursor_floor: int | None = int(tid) - 1 if tid.isdigit() else None
+            high_watermark: int | None = cursor_floor
             try:
                 while time.time() < deadline:
                     iterations += 1
-                    next_last_seen = last_seen
+                    scan_since = high_watermark
+                    if high_watermark is not None:
+                        scan_since = high_watermark - COMPLETION_WAIT_REORDER_WINDOW_NS
+                        if cursor_floor is not None:
+                            scan_since = max(cursor_floor, scan_since)
                     for data, ts in iter_queue_json_entries(
                         log_queue,
-                        since_timestamp=last_seen,
+                        since_timestamp=scan_since,
                     ):
-                        if last_seen is not None and ts <= last_seen:
+                        if scan_since is not None and ts <= scan_since:
                             continue
+                        if high_watermark is None or ts > high_watermark:
+                            high_watermark = ts
                         if data.get("tid") != tid:
                             continue
-                        next_last_seen = ts
                         event = data.get("event")
                         if event == "work_completed":
                             return
@@ -403,7 +430,6 @@ class WeftTestHarness:
                             "task_signal_kill",
                         }:
                             raise RuntimeError(f"Task {tid} reported {event}")
-                    last_seen = next_last_seen
                     # SimpleBroker has no blocking read-with-timeout API.
                     # Polling iter_queue_json_entries is the only mechanism
                     # short of a QueueWatcher (which polls internally). 50 ms

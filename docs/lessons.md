@@ -706,3 +706,11 @@ runbook needs to become stricter.
   target task's events. Under Postgres load, an unrelated event with a newer
   timestamp can become visible before an older target event commits; a global
   cursor can then skip the target terminal proof even though it exists.
+- The target-task cursor rule still needs a bounded overlap, not an unbounded
+  replay of every non-target event after the last target event. Otherwise a
+  test-side waiter can create enough Postgres read pressure to starve the
+  in-process manager it is waiting on.
+- Pipeline child bootstrap is accepted-task internal work. Sending generated
+  stage and edge spawn requests back through the public spawn backlog can leave
+  a pipeline partially bootstrapped under load; use the internal spawn lane and
+  dependency-friendly launch order once the top-level pipeline task is running.

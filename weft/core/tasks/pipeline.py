@@ -27,8 +27,8 @@ from weft._constants import (
     FAILURE_LIKE_TASK_STATUSES,
     PIPELINE_EDGE_RUNTIME_METADATA_KEY,
     PIPELINE_RUNTIME_METADATA_KEY,
+    WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
     WEFT_PIPELINES_STATE_QUEUE,
-    WEFT_SPAWN_REQUESTS_QUEUE,
 )
 from weft.core.pipelines import (
     CompiledPipelineEdge,
@@ -291,7 +291,7 @@ class PipelineTask(BaseTask):
                     "child_tid": stage.tid,
                     "status": "created",
                     "activity": "queued",
-                    "waiting_on": WEFT_SPAWN_REQUESTS_QUEUE,
+                    "waiting_on": WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
                 }
                 for stage in self._runtime.stages
             ],
@@ -301,7 +301,7 @@ class PipelineTask(BaseTask):
                     "child_tid": edge.tid,
                     "status": "created",
                     "activity": "queued",
-                    "waiting_on": WEFT_SPAWN_REQUESTS_QUEUE,
+                    "waiting_on": WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
                     "source_queue": edge.source_queue,
                     "target_queue": edge.target_queue,
                     "upstream_stage": edge.upstream_stage,
@@ -345,9 +345,7 @@ class PipelineTask(BaseTask):
         submitted_ctrl_queues: list[str] = []
         self._write_pipeline_registry_record()
         try:
-            for taskspec_payload in self._runtime.stage_taskspecs:
-                submitted_ctrl_queues.append(self._submit_child_spawn(taskspec_payload))
-            for taskspec_payload in self._runtime.edge_taskspecs:
+            for taskspec_payload in self._ordered_child_taskspec_payloads():
                 submitted_ctrl_queues.append(self._submit_child_spawn(taskspec_payload))
         except Exception as exc:  # pragma: no cover - bootstrap failure surface
             self._broadcast_control(CONTROL_STOP, ctrl_queues=submitted_ctrl_queues)
@@ -363,6 +361,49 @@ class PipelineTask(BaseTask):
         self._set_activity("waiting")
         self._publish_pipeline_snapshot()
 
+    def _ordered_child_taskspec_payloads(self) -> list[dict[str, Any]]:
+        """Return child specs in dependency-friendly launch order."""
+
+        stage_payloads = {
+            str(payload.get("tid")): payload
+            for payload in self._runtime.stage_taskspecs
+            if payload.get("tid") is not None
+        }
+        edge_payloads = {
+            str(payload.get("tid")): payload
+            for payload in self._runtime.edge_taskspecs
+            if payload.get("tid") is not None
+        }
+
+        ordered: list[dict[str, Any]] = []
+        seen: set[str] = set()
+
+        def append_once(
+            tid: str | None, payloads: Mapping[str, dict[str, Any]]
+        ) -> None:
+            if tid is None or tid in seen:
+                return
+            payload = payloads.get(tid)
+            if payload is None:
+                return
+            ordered.append(payload)
+            seen.add(tid)
+
+        for edge in self._runtime.edges:
+            append_once(edge.tid, edge_payloads)
+            append_once(edge.downstream_tid, stage_payloads)
+
+        for payload in self._runtime.stage_taskspecs:
+            append_once(
+                str(payload.get("tid")) if payload.get("tid") else None, stage_payloads
+            )
+        for payload in self._runtime.edge_taskspecs:
+            append_once(
+                str(payload.get("tid")) if payload.get("tid") else None, edge_payloads
+            )
+
+        return ordered
+
     def _submit_child_spawn(self, taskspec_payload: Mapping[str, Any]) -> str:
         ctrl_queue = (
             taskspec_payload.get("io", {}).get("control", {}).get("ctrl_in", "")
@@ -375,6 +416,7 @@ class PipelineTask(BaseTask):
             tid=taskspec_payload.get("tid"),
             seed_start_envelope=False,
             allow_internal_runtime=True,
+            spawn_queue_name=WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
         )
         return str(ctrl_queue)
 

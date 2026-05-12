@@ -87,6 +87,10 @@ Key responsibilities implemented in `weft/core/manager.py`:
    advisory registry leadership. Pending messages still sitting in
    `weft.spawn.requests` are unowned backlog and must not by themselves block a
    superseded manager from yielding to the lower-TID live canonical manager.
+   Pipeline-owned runtime child bootstrap is also eligible for the internal
+   spawn lane once the top-level pipeline task has already been accepted from
+   public dispatch; those child requests are implementation work for that
+   accepted task, not new public backlog.
    When the manager enqueues one of its own singleton-service spawn requests,
    that write forces the next scheduling drain to probe inactive queues so
    convergence does not depend on the periodic broad-probe interval. Internal
