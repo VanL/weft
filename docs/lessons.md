@@ -242,6 +242,10 @@ runbook needs to become stricter.
   are scheduling hints, not correctness boundaries; a live manager should make a
   bounded direct reservation attempt so a missed pending hint cannot leave an
   accepted `weft run --no-wait` request unclaimed.
+- CLI control waiters should treat task-local typed terminal `ctrl_out`
+  envelopes as first-class terminal proof. Replaying the global task log after
+  a terminal control envelope is already visible adds avoidable SQLite
+  contention in long mixed-workload release gates.
 
 ## 2026-04-08 Zombie PID Liveness
 

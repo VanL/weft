@@ -136,6 +136,10 @@ The control plane is explicit:
   JSON, and other `ctrl_out` payloads when looking for terminal state
 - the shared task-evidence reader may use a typed terminal `ctrl_out` envelope
   as terminal observation proof when task-log terminal proof is missing
+- CLI control waiters may accept a typed terminal `ctrl_out` envelope as
+  sufficient stop/kill completion proof for that task without replaying the
+  global task log first; ordinary control acknowledgements remain progress
+  evidence only
 - manager-authored terminal envelopes are supervisor observations for child
   wrapper death only; they must be written to the child `ctrl_out` queue, never
   to outbox, and only when task-owned terminal proof is not already visible

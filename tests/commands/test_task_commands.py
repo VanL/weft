@@ -370,6 +370,57 @@ def test_await_control_surface_does_not_promote_kill_ack_to_terminal(
     assert snapshot.event == "task_started"
 
 
+def test_await_control_surface_accepts_terminal_ctrl_out_without_log_replay(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    ctrl_out = ctx.queue(f"T{tid}.ctrl_out", persistent=False)
+    ctrl_out.write(
+        json.dumps(
+            {
+                "type": "terminal",
+                "source": "task",
+                "tid": tid,
+                "status": "cancelled",
+                "timestamp": time.time_ns(),
+            }
+        )
+    )
+
+    monkeypatch.setattr(task_cmd, "QueueChangeMonitor", _FakeQueueChangeMonitor)
+    monkeypatch.setattr(task_cmd, "mapping_for_tid", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        task_cmd,
+        "load_latest_taskspec_payload",
+        lambda *_args, **_kwargs: {
+            "tid": tid,
+            "name": "terminal-proof",
+            "spec": {"runner": {"name": "host"}},
+            "state": {"status": "running"},
+            "metadata": {"kind": "test"},
+        },
+    )
+    monkeypatch.setattr(
+        task_cmd,
+        "task_status",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("terminal ctrl_out should be sufficient")
+        ),
+    )
+
+    entry, snapshot = task_cmd._await_control_surface(ctx, tid)
+
+    assert entry is None
+    assert snapshot is not None
+    assert snapshot.status == "cancelled"
+    assert snapshot.event == "ctrl_out_terminal"
+    assert snapshot.name == "terminal-proof"
+    assert snapshot.metadata == {"kind": "test"}
+
+
 def test_kill_tasks_terminates_active_process_tree(tmp_path) -> None:
     spec, process, worker_pid = _launch_running_task(tmp_path)
     try:

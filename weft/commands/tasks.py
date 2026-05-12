@@ -25,6 +25,7 @@ from weft._constants import (
     CONTROL_SURFACE_WAIT_TIMEOUT,
     QUEUE_CTRL_IN_SUFFIX,
     TASKSPEC_TID_SHORT_LENGTH,
+    TERMINAL_ENVELOPE_TYPE,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
 )
@@ -964,6 +965,56 @@ def _pid_exists(pid: int | None) -> bool:
     return True
 
 
+def _snapshot_from_terminal_ctrl_out(
+    *,
+    tid: str,
+    payload: dict[str, Any],
+    taskspec_payload: dict[str, Any],
+) -> status_cmd.TaskSnapshot | None:
+    """Build a terminal snapshot from task-local ctrl_out evidence."""
+
+    if payload.get("type") != TERMINAL_ENVELOPE_TYPE:
+        return None
+    if payload.get("tid") != tid:
+        return None
+    status = payload.get("status")
+    if not isinstance(status, str) or status not in status_cmd.TERMINAL_TASK_STATUSES:
+        return None
+    timestamp_raw = payload.get("timestamp")
+    timestamp = timestamp_raw if isinstance(timestamp_raw, int) else time.time_ns()
+    state_raw = taskspec_payload.get("state")
+    state = state_raw if isinstance(state_raw, dict) else {}
+    metadata_raw = taskspec_payload.get("metadata")
+    metadata = metadata_raw if isinstance(metadata_raw, dict) else {}
+    spec_raw = taskspec_payload.get("spec")
+    spec = spec_raw if isinstance(spec_raw, dict) else {}
+    return_code = payload.get("return_code")
+    error = payload.get("error")
+    return status_cmd.TaskSnapshot(
+        tid=tid,
+        tid_short=tid[-TASKSPEC_TID_SHORT_LENGTH:],
+        name=str(taskspec_payload.get("name") or tid),
+        status=status,
+        event="ctrl_out_terminal",
+        activity=None,
+        waiting_on=None,
+        started_at=state.get("started_at")
+        if isinstance(state.get("started_at"), int)
+        else None,
+        completed_at=state.get("completed_at")
+        if isinstance(state.get("completed_at"), int)
+        else timestamp,
+        last_timestamp=timestamp,
+        duration_seconds=None,
+        runner=_runner_name_from_taskspec(spec),
+        runtime_handle=None,
+        runtime=None,
+        metadata=dict(metadata),
+        return_code=return_code if isinstance(return_code, int) else None,
+        error=error if isinstance(error, str) else None,
+    )
+
+
 def _await_control_surface(
     ctx: WeftContext,
     tid: str,
@@ -1045,6 +1096,15 @@ def _await_control_surface(
                     continue
                 if not isinstance(payload, dict):
                     continue
+                terminal_snapshot = _snapshot_from_terminal_ctrl_out(
+                    tid=tid,
+                    payload=payload,
+                    taskspec_payload=taskspec_payload
+                    if isinstance(taskspec_payload, dict)
+                    else {},
+                )
+                if terminal_snapshot is not None:
+                    return latest_entry, terminal_snapshot
                 if ("command" in payload and "status" in payload) or (
                     payload.get("type") == "terminal"
                     and isinstance(payload.get("status"), str)
