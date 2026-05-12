@@ -353,6 +353,11 @@ def test_cmd_init_ignores_root_simplebroker_config(
 ) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()
+    _clear_backend_part_env(monkeypatch)
+    monkeypatch.delenv("WEFT_BACKEND", raising=False)
+    monkeypatch.delenv("WEFT_BACKEND_TARGET", raising=False)
+    monkeypatch.delenv("BROKER_BACKEND", raising=False)
+    monkeypatch.delenv("BROKER_BACKEND_TARGET", raising=False)
     _write_broker_project_config(
         project_root,
         backend="postgres",
