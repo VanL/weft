@@ -68,6 +68,7 @@ from weft_django import (
 )
 from weft_django.client import get_core_client
 from weft_django.conf import (
+    CORE_CONTEXT_OVERRIDE_ENV_KEYS,
     get_realtime_transport,
     resolve_context_override,
 )
@@ -109,6 +110,11 @@ def _fixture_weft_settings(**overrides: Any) -> dict[str, Any]:
             continue
         settings_dict[key] = value
     return settings_dict
+
+
+def _clear_core_context_override_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key in CORE_CONTEXT_OVERRIDE_ENV_KEYS:
+        monkeypatch.delenv(key, raising=False)
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> Path:
@@ -430,6 +436,7 @@ def test_context_override_ignores_unrelated_weft_env(
     other_dir = TEST_ROOT / "other-dir-context"
     base_dir.mkdir(parents=True, exist_ok=True)
     other_dir.mkdir(parents=True, exist_ok=True)
+    _clear_core_context_override_env(monkeypatch)
     monkeypatch.setenv("WEFT_DEBUG", "1")
     monkeypatch.chdir(other_dir)
 

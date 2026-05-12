@@ -1434,7 +1434,7 @@ def _config_has_non_default_postgres_part(
 
     if not _config_has_non_empty_value(config, key):
         return False
-    return config.get(key) != POSTGRES_BACKEND_PART_DEFAULTS[key]
+    return bool(config.get(key) != POSTGRES_BACKEND_PART_DEFAULTS[key])
 
 
 def _validate_postgres_backend_config_shape(config: Mapping[str, Any]) -> None:

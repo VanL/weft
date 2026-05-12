@@ -46,10 +46,10 @@ def make_heartbeat_taskspec(tid: str, root: Path) -> TaskSpec:
     )
 
 
-def test_heartbeat_service_accepts_upsert_and_cancel(tmp_path: Path) -> None:
-    context = build_context(spec_context=tmp_path)
+def test_heartbeat_service_accepts_upsert_and_cancel(workdir: Path) -> None:
+    context = build_context(spec_context=workdir)
     tid = str(time.time_ns())
-    task = HeartbeatTask(context.broker_target, make_heartbeat_taskspec(tid, tmp_path))
+    task = HeartbeatTask(context.broker_target, make_heartbeat_taskspec(tid, workdir))
     inbox = context.queue(f"T{tid}.inbox", persistent=False)
 
     try:
@@ -79,11 +79,11 @@ def test_heartbeat_service_accepts_upsert_and_cancel(tmp_path: Path) -> None:
 
 
 def test_heartbeat_duplicate_upsert_replaces_existing_registration(
-    tmp_path: Path,
+    workdir: Path,
 ) -> None:
-    context = build_context(spec_context=tmp_path)
+    context = build_context(spec_context=workdir)
     tid = str(time.time_ns())
-    task = HeartbeatTask(context.broker_target, make_heartbeat_taskspec(tid, tmp_path))
+    task = HeartbeatTask(context.broker_target, make_heartbeat_taskspec(tid, workdir))
     inbox = context.queue(f"T{tid}.inbox", persistent=False)
 
     try:
@@ -125,10 +125,10 @@ def test_heartbeat_duplicate_upsert_replaces_existing_registration(
         inbox.close()
 
 
-def test_heartbeat_late_wake_coalesces_to_one_emit(tmp_path: Path) -> None:
-    context = build_context(spec_context=tmp_path)
+def test_heartbeat_late_wake_coalesces_to_one_emit(workdir: Path) -> None:
+    context = build_context(spec_context=workdir)
     tid = str(time.time_ns())
-    task = HeartbeatTask(context.broker_target, make_heartbeat_taskspec(tid, tmp_path))
+    task = HeartbeatTask(context.broker_target, make_heartbeat_taskspec(tid, workdir))
     inbox = context.queue(f"T{tid}.inbox", persistent=False)
     destination = context.queue("build.queue", persistent=False)
 
@@ -165,10 +165,10 @@ def test_heartbeat_late_wake_coalesces_to_one_emit(tmp_path: Path) -> None:
         destination.close()
 
 
-def test_heartbeat_serializes_structured_payloads_on_emit(tmp_path: Path) -> None:
-    context = build_context(spec_context=tmp_path)
+def test_heartbeat_serializes_structured_payloads_on_emit(workdir: Path) -> None:
+    context = build_context(spec_context=workdir)
     tid = str(time.time_ns())
-    task = HeartbeatTask(context.broker_target, make_heartbeat_taskspec(tid, tmp_path))
+    task = HeartbeatTask(context.broker_target, make_heartbeat_taskspec(tid, workdir))
     inbox = context.queue(f"T{tid}.inbox", persistent=False)
     destination = context.queue("build.queue", persistent=False)
 
@@ -202,17 +202,17 @@ def test_heartbeat_serializes_structured_payloads_on_emit(tmp_path: Path) -> Non
         destination.close()
 
 
-def test_duplicate_heartbeat_services_converge_by_loser_exit(tmp_path: Path) -> None:
-    context = build_context(spec_context=tmp_path)
+def test_duplicate_heartbeat_services_converge_by_loser_exit(workdir: Path) -> None:
+    context = build_context(spec_context=workdir)
     low_tid = str(time.time_ns())
     high_tid = str(int(low_tid) + 1)
     low_task = HeartbeatTask(
         context.broker_target,
-        make_heartbeat_taskspec(low_tid, tmp_path),
+        make_heartbeat_taskspec(low_tid, workdir),
     )
     high_task = HeartbeatTask(
         context.broker_target,
-        make_heartbeat_taskspec(high_tid, tmp_path),
+        make_heartbeat_taskspec(high_tid, workdir),
     )
 
     try:
@@ -229,12 +229,12 @@ def test_duplicate_heartbeat_services_converge_by_loser_exit(tmp_path: Path) -> 
 
 
 def test_heartbeat_wait_uses_bounded_activity_seam(
-    tmp_path: Path,
+    workdir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    context = build_context(spec_context=tmp_path)
+    context = build_context(spec_context=workdir)
     tid = str(time.time_ns())
-    task = HeartbeatTask(context.broker_target, make_heartbeat_taskspec(tid, tmp_path))
+    task = HeartbeatTask(context.broker_target, make_heartbeat_taskspec(tid, workdir))
     wait_calls: list[float | None] = []
 
     def fake_wait_for_activity(timeout: float | None) -> None:
@@ -254,12 +254,12 @@ def test_heartbeat_wait_uses_bounded_activity_seam(
 
 
 def test_heartbeat_pending_input_returns_before_activity_wait(
-    tmp_path: Path,
+    workdir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    context = build_context(spec_context=tmp_path)
+    context = build_context(spec_context=workdir)
     tid = str(time.time_ns())
-    task = HeartbeatTask(context.broker_target, make_heartbeat_taskspec(tid, tmp_path))
+    task = HeartbeatTask(context.broker_target, make_heartbeat_taskspec(tid, workdir))
     wait_calls: list[float | None] = []
 
     monkeypatch.setattr(
