@@ -194,10 +194,14 @@ def test_build_context_discovery_prefers_existing_sqlite_project_over_env_backen
 
     root = (tmp_path / "existing-project").resolve()
     root.mkdir(parents=True)
+    _clear_backend_part_env(monkeypatch)
+    monkeypatch.delenv("WEFT_BACKEND", raising=False)
+    monkeypatch.delenv("WEFT_BACKEND_TARGET", raising=False)
+    monkeypatch.delenv("BROKER_BACKEND", raising=False)
+    monkeypatch.delenv("BROKER_BACKEND_TARGET", raising=False)
     root_ctx = build_context(spec_context=root)
     nested_dir = root / "nested" / "child"
     nested_dir.mkdir(parents=True)
-    _clear_backend_part_env(monkeypatch)
     monkeypatch.setenv("WEFT_BACKEND", "postgres")
     monkeypatch.setenv("WEFT_BACKEND_TARGET", "postgresql://env-user@env-host/env-db")
     monkeypatch.setenv("WEFT_BACKEND_SCHEMA", "env_schema")
