@@ -148,9 +148,9 @@ class HeartbeatTask(BaseTask):
         while not self.should_stop:
             if self._drain_one_control_message():
                 return
-            if self._exit_if_superseded():
-                return
             if self._drain_one_registration_message():
+                return
+            if self._exit_if_superseded():
                 return
             if not self._paused and self._emit_due_registrations():
                 return
