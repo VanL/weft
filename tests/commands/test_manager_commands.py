@@ -14,10 +14,11 @@ from tests.helpers.test_backend import prepare_project_root
 from weft._constants import (
     MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS,
     MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
-    WEFT_MANAGERS_REGISTRY_QUEUE,
+    WEFT_SERVICES_REGISTRY_QUEUE,
 )
 from weft.commands import manager as manager_cmd
 from weft.context import build_context
+from weft.core.service_convergence import build_manager_service_payload
 from weft.helpers import iter_queue_json_entries
 
 pytestmark = [pytest.mark.shared]
@@ -43,6 +44,32 @@ def _external_supervisor_runtime_handle() -> dict[str, object]:
         "observations": {"container_pid": 1, "container_name": "weft-manager-1"},
         "metadata": {},
     }
+
+
+def _manager_service_payload(
+    context,
+    tid: str,
+    *,
+    status: str = "active",
+    name: str = "manager",
+    runtime_handle: dict[str, object] | None = None,
+    ctrl_in: str | None = None,
+    ctrl_out: str | None = None,
+    outbox: str = "weft.manager.outbox",
+) -> dict[str, object]:
+    return build_manager_service_payload(
+        context=context,
+        tid=tid,
+        name=name,
+        status=status,
+        queues={
+            "requests": "weft.spawn.requests",
+            "ctrl_in": ctrl_in or f"T{tid}.ctrl_in",
+            "ctrl_out": ctrl_out or f"T{tid}.ctrl_out",
+            "outbox": outbox,
+        },
+        runtime_handle=runtime_handle or {},
+    )
 
 
 def test_start_command_delegates_to_shared_bootstrap(tmp_path, monkeypatch):
@@ -238,12 +265,20 @@ def test_stop_command_writes_stop_for_active_manager(tmp_path):
     tid = "1761000000000000001"
 
     registry_queue = Queue(
-        WEFT_MANAGERS_REGISTRY_QUEUE,
+        WEFT_SERVICES_REGISTRY_QUEUE,
         db_path=context.broker_target,
         persistent=False,
         config=context.config,
     )
-    registry_queue.write(json.dumps({"tid": tid, "status": "active"}))
+    registry_queue.write(
+        json.dumps(
+            _manager_service_payload(
+                context,
+                tid,
+                runtime_handle=_host_runtime_handle(os.getpid()),
+            )
+        )
+    )
 
     exit_code, message = manager_cmd.stop_command(
         tid=tid,
@@ -270,12 +305,14 @@ def test_stop_command_noops_for_stopped_manager(tmp_path):
     tid = "1761000000000000002"
 
     registry_queue = Queue(
-        WEFT_MANAGERS_REGISTRY_QUEUE,
+        WEFT_SERVICES_REGISTRY_QUEUE,
         db_path=context.broker_target,
         persistent=False,
         config=context.config,
     )
-    registry_queue.write(json.dumps({"tid": tid, "status": "stopped"}))
+    registry_queue.write(
+        json.dumps(_manager_service_payload(context, tid, status="stopped"))
+    )
 
     exit_code, message = manager_cmd.stop_command(
         tid=tid,
@@ -301,19 +338,19 @@ def test_stop_command_uses_registry_control_queue(tmp_path):
     tid = "1761000000000000003"
 
     registry_queue = Queue(
-        WEFT_MANAGERS_REGISTRY_QUEUE,
+        WEFT_SERVICES_REGISTRY_QUEUE,
         db_path=context.broker_target,
         persistent=False,
         config=context.config,
     )
     registry_queue.write(
         json.dumps(
-            {
-                "tid": tid,
-                "status": "active",
-                "runtime_handle": _host_runtime_handle(os.getpid()),
-                "ctrl_in": f"manager.{tid}.ctrl_in",
-            }
+            _manager_service_payload(
+                context,
+                tid,
+                runtime_handle=_host_runtime_handle(os.getpid()),
+                ctrl_in=f"manager.{tid}.ctrl_in",
+            )
         )
     )
 
@@ -393,7 +430,7 @@ def test_list_command_omits_stale_active_manager(tmp_path) -> None:
     try:
         process.wait(timeout=2.0)
         registry_queue = Queue(
-            WEFT_MANAGERS_REGISTRY_QUEUE,
+            WEFT_SERVICES_REGISTRY_QUEUE,
             db_path=context.broker_target,
             persistent=False,
             config=context.config,
@@ -433,7 +470,7 @@ def test_list_command_omits_stale_external_supervisor_manager(
         -1.0,
     )
     registry_queue = Queue(
-        WEFT_MANAGERS_REGISTRY_QUEUE,
+        WEFT_SERVICES_REGISTRY_QUEUE,
         db_path=context.broker_target,
         persistent=False,
         config=context.config,
@@ -475,24 +512,19 @@ def test_stop_command_force_reports_fresh_external_supervisor_without_host_pid(
         60.0,
     )
     registry_queue = Queue(
-        WEFT_MANAGERS_REGISTRY_QUEUE,
+        WEFT_SERVICES_REGISTRY_QUEUE,
         db_path=context.broker_target,
         persistent=False,
         config=context.config,
     )
     registry_queue.write(
         json.dumps(
-            {
-                "tid": tid,
-                "status": "active",
-                "name": "fresh-supervised-manager",
-                "runtime_handle": _external_supervisor_runtime_handle(),
-                "role": "manager",
-                "requests": "weft.spawn.requests",
-                "ctrl_in": f"T{tid}.ctrl_in",
-                "ctrl_out": f"T{tid}.ctrl_out",
-                "outbox": "weft.manager.outbox",
-            }
+            _manager_service_payload(
+                context,
+                tid,
+                name="fresh-supervised-manager",
+                runtime_handle=_external_supervisor_runtime_handle(),
+            )
         )
     )
 
@@ -518,7 +550,7 @@ def test_stop_command_force_ignores_registry_only_pid_without_mapping(
     tid = "1761000000000000007"
 
     registry_queue = Queue(
-        WEFT_MANAGERS_REGISTRY_QUEUE,
+        WEFT_SERVICES_REGISTRY_QUEUE,
         db_path=context.broker_target,
         persistent=False,
         config=context.config,
@@ -565,7 +597,7 @@ def test_stop_command_force_replaces_active_registry_record(
     kill_pid = 8765
 
     registry_queue = Queue(
-        WEFT_MANAGERS_REGISTRY_QUEUE,
+        WEFT_SERVICES_REGISTRY_QUEUE,
         db_path=context.broker_target,
         persistent=False,
         config=context.config,
@@ -573,17 +605,11 @@ def test_stop_command_force_replaces_active_registry_record(
     try:
         registry_queue.write(
             json.dumps(
-                {
-                    "tid": tid,
-                    "status": "active",
-                    "name": "manager",
-                    "runtime_handle": _host_runtime_handle(kill_pid),
-                    "role": "manager",
-                    "requests": "weft.spawn.requests",
-                    "ctrl_in": f"T{tid}.ctrl_in",
-                    "ctrl_out": f"T{tid}.ctrl_out",
-                    "outbox": "weft.manager.outbox",
-                }
+                _manager_service_payload(
+                    context,
+                    tid,
+                    runtime_handle=_host_runtime_handle(kill_pid),
+                )
             )
         )
     finally:
@@ -613,7 +639,7 @@ def test_stop_command_force_replaces_active_registry_record(
     assert message is None
 
     reader = Queue(
-        WEFT_MANAGERS_REGISTRY_QUEUE,
+        WEFT_SERVICES_REGISTRY_QUEUE,
         db_path=context.broker_target,
         persistent=False,
         config=context.config,
@@ -632,19 +658,19 @@ def test_list_command_returns_table(tmp_path):
     context_root = prepare_project_root(tmp_path / "ctx")
     context = build_context(context_root)
     registry_queue = Queue(
-        WEFT_MANAGERS_REGISTRY_QUEUE,
+        WEFT_SERVICES_REGISTRY_QUEUE,
         db_path=context.broker_target,
         persistent=False,
         config=context.config,
     )
     registry_queue.write(
         json.dumps(
-            {
-                "tid": "1",
-                "status": "active",
-                "name": "alpha",
-                "runtime_handle": _host_runtime_handle(os.getpid()),
-            }
+            _manager_service_payload(
+                context,
+                "1",
+                name="alpha",
+                runtime_handle=_host_runtime_handle(os.getpid()),
+            )
         )
     )
 

@@ -321,6 +321,32 @@ MANAGER_SERVE_LOG_CANDIDATE_LIMIT: Final[int] = 8
 MANAGER_SERVE_LOG_CHILD_LIMIT: Final[int] = 8
 """Maximum tracked child summaries included in one manager operational-log event."""
 
+SERVICE_OWNER_SCHEMA: Final[str] = "weft.service_owner.v1"
+"""Runtime service-owner registry row schema."""
+
+SERVICE_TYPE_MANAGER: Final[str] = "manager"
+"""Service-owner type for the public spawn manager service."""
+
+SERVICE_TYPE_MANAGED: Final[str] = "managed"
+"""Service-owner type for manager-supervised internal/autostart services."""
+
+SERVICE_STATUS_ACTIVE: Final[str] = "active"
+"""Service-owner status for a live active service owner."""
+
+SERVICE_STATUS_DRAINING: Final[str] = "draining"
+"""Service-owner status for an owner that is still visible while draining."""
+
+SERVICE_STATUS_STOPPED: Final[str] = "stopped"
+"""Service-owner status for a stopped manager/service owner."""
+
+SERVICE_STATUS_TERMINAL: Final[str] = "terminal"
+"""Service-owner status for terminal managed-service evidence."""
+
+LIVE_SERVICE_STATUSES: Final[frozenset[str]] = frozenset(
+    {SERVICE_STATUS_ACTIVE, SERVICE_STATUS_DRAINING}
+)
+"""Service-owner statuses that count as live convergence evidence."""
+
 MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY: Final[str] = "_WEFT_MANAGER_SERVE_LOG_ACTIVE"
 """Internal config key proving the current process is a foreground serve invocation."""
 
@@ -434,8 +460,8 @@ TASK_MONITOR_WEFT_ANOMALY_CLASSIFICATIONS: Final[frozenset[str]] = frozenset(
 WEFT_TID_MAPPINGS_QUEUE: Final[str] = "weft.state.tid_mappings"
 """Global queue for TID short->full mappings for process management."""
 
-WEFT_MANAGERS_REGISTRY_QUEUE: Final[str] = "weft.state.managers"
-"""Queue where managers register their capabilities and status."""
+WEFT_SERVICES_REGISTRY_QUEUE: Final[str] = "weft.state.services"
+"""Runtime queue where convergent services publish ownership evidence."""
 
 WEFT_STREAMING_SESSIONS_QUEUE: Final[str] = "weft.state.streaming"
 """Queue tracking active streaming sessions (interactive/streaming outputs)."""
@@ -462,7 +488,8 @@ WEFT_STATE_QUEUE_PREFIX: Final[str] = "weft.state."
 
 RUNTIME_PRUNE_SUPPORTED_QUEUE_GROUPS: Final[Mapping[str, str]] = {
     "tid-mappings": WEFT_TID_MAPPINGS_QUEUE,
-    "managers": WEFT_MANAGERS_REGISTRY_QUEUE,
+    "managers": WEFT_SERVICES_REGISTRY_QUEUE,
+    "services": WEFT_SERVICES_REGISTRY_QUEUE,
     "streaming": WEFT_STREAMING_SESSIONS_QUEUE,
     "endpoints": WEFT_ENDPOINTS_REGISTRY_QUEUE,
     "pipelines": WEFT_PIPELINES_STATE_QUEUE,

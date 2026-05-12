@@ -21,7 +21,7 @@ from weft._constants import (
     QUEUE_OUTBOX_SUFFIX,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MANAGER_RUNTIME_HANDLE_JSON_ENV,
-    WEFT_MANAGERS_REGISTRY_QUEUE,
+    WEFT_SERVICES_REGISTRY_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
 )
 from weft.commands import manager as manager_cmd
@@ -344,7 +344,7 @@ class WeftTestHarness:
         lines.append(f"  database_path={context.database_path}")
 
         registry_dump = self._peek_queue_lines(
-            WEFT_MANAGERS_REGISTRY_QUEUE,
+            WEFT_SERVICES_REGISTRY_QUEUE,
             persistent=False,
             limit=10,
         )
@@ -677,7 +677,7 @@ class WeftTestHarness:
 
     def _list_active_manager_records(self) -> list[dict[str, object]]:
         queue = Queue(
-            WEFT_MANAGERS_REGISTRY_QUEUE,
+            WEFT_SERVICES_REGISTRY_QUEUE,
             db_path=self.context.broker_target,
             persistent=False,
             config=self.context.broker_config,
@@ -889,7 +889,7 @@ class WeftTestHarness:
 
     def _drain_registry_queue(self) -> None:
         queue = Queue(
-            WEFT_MANAGERS_REGISTRY_QUEUE,
+            WEFT_SERVICES_REGISTRY_QUEUE,
             db_path=self.context.broker_target,
             persistent=False,
             config=self.context.broker_config,

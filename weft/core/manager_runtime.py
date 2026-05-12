@@ -38,7 +38,7 @@ from weft._constants import (
     TASK_PROCESS_POLL_INTERVAL,
     WEFT_MANAGER_LIFETIME_TIMEOUT,
     WEFT_MANAGER_OUTBOX_QUEUE,
-    WEFT_MANAGERS_REGISTRY_QUEUE,
+    WEFT_SERVICES_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
 )
@@ -58,6 +58,15 @@ from weft.helpers import (
 from weft.runtime_liveness import runtime_liveness_from_registered_probe
 
 from .queue_wait import QueueChangeMonitor
+from .service_convergence import (
+    ServiceOwnerRecord,
+    build_manager_service_payload,
+    collect_service_owner_records,
+    manager_service_key,
+    project_manager_service_record,
+    reduce_service_ownership,
+    sync_manager_service_payload_top_level_queues,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -111,30 +120,36 @@ def _generate_tid(context: WeftContext) -> str:
 
 
 def _registry_queue(context: WeftContext) -> Queue:
-    return context.queue(WEFT_MANAGERS_REGISTRY_QUEUE, persistent=False)
+    return context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
 
 
 def _normalize_manager_record(
+    context: WeftContext,
     payload: dict[str, Any],
     *,
     timestamp: int,
-) -> dict[str, Any]:
-    record = dict(payload)
-    record.pop("_timestamp", None)
-    record["timestamp"] = int(timestamp)
-    record.setdefault("requests", WEFT_SPAWN_REQUESTS_QUEUE)
-    record.setdefault("role", "manager")
-    return record
+) -> dict[str, Any] | None:
+    projected = project_manager_service_record(
+        payload,
+        timestamp=timestamp,
+        service_key=manager_service_key(context),
+    )
+    if projected is not None:
+        projected.setdefault("requests", WEFT_SPAWN_REQUESTS_QUEUE)
+        projected.setdefault("role", "manager")
+        return projected
+    return None
 
 
 def normalize_manager_registry_record(
+    context: WeftContext,
     payload: dict[str, Any],
     *,
     timestamp: int,
-) -> dict[str, Any]:
+) -> dict[str, Any] | None:
     """Normalize one manager registry payload for command-layer readers."""
 
-    return _normalize_manager_record(payload, timestamp=timestamp)
+    return _normalize_manager_record(context, payload, timestamp=timestamp)
 
 
 def _snapshot_registry(
@@ -151,10 +166,12 @@ def _snapshot_registry(
     stale_timestamps: list[int] = []
     try:
         for data, timestamp in iter_queue_json_entries(registry_queue):
-            tid = data.get("tid")
+            record = _normalize_manager_record(context, data, timestamp=timestamp)
+            if record is None:
+                continue
+            tid = record.get("tid")
             if not tid:
                 continue
-            record = _normalize_manager_record(data, timestamp=timestamp)
             if prune_stale and record.get("status") == "active":
                 is_stale, definitive_stale = _manager_record_stale_status(record)
                 if is_stale:
@@ -193,9 +210,12 @@ def _snapshot_registry(
 
 
 def _select_active_manager_from_snapshot(
+    context: WeftContext,
     snapshot: dict[str, dict[str, Any]],
 ) -> dict[str, Any] | None:
-    candidates = []
+    service_key = manager_service_key(context)
+    records: list[ServiceOwnerRecord] = []
+    projected_by_timestamp: dict[int, dict[str, Any]] = {}
     for record in snapshot.values():
         if not is_canonical_manager_record(record):
             continue
@@ -204,13 +224,30 @@ def _select_active_manager_from_snapshot(
         if not _manager_record_is_stale(record) or _manager_record_has_pong_live(
             record
         ):
-            candidates.append(record)
-    if not candidates:
-        return None
-    return min(
-        candidates,
-        key=lambda rec: (int(rec.get("tid", 0)), rec.get("timestamp", 0)),
+            payload = record.get("_service_owner_payload")
+            timestamp = _manager_record_timestamp(record)
+            if not isinstance(payload, dict) or timestamp is None:
+                continue
+            read = collect_service_owner_records(
+                ((payload, timestamp),),
+                service_key=service_key,
+                service_type="manager",
+            )
+            if not read.records:
+                continue
+            owner_record = read.records[0]
+            records.append(owner_record)
+            projected_by_timestamp[owner_record.timestamp] = record
+    decision = reduce_service_ownership(
+        service_key,
+        records,
+        own_tid=None,
+        now_ns=time.time_ns(),
+        ttl_ns=int(MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS * 1_000_000_000),
     )
+    if decision.canonical_live is None:
+        return None
+    return projected_by_timestamp.get(decision.canonical_live.timestamp)
 
 
 def _registry_view(
@@ -231,7 +268,7 @@ def _registry_view(
     )
     return _ManagerRegistryView(
         records=snapshot,
-        active_manager=_select_active_manager_from_snapshot(snapshot),
+        active_manager=_select_active_manager_from_snapshot(context, snapshot),
         target_record=snapshot.get(target_tid) if target_tid is not None else None,
     )
 
@@ -506,15 +543,18 @@ def _mark_manager_stopped(
         latest_record = record
         delete_timestamps: list[int] = []
         for data, timestamp in iter_queue_json_entries(registry_queue):
-            if data.get("tid") != tid:
+            normalized = _normalize_manager_record(context, data, timestamp=timestamp)
+            if normalized is None:
+                continue
+            if normalized.get("tid") != tid:
                 continue
             delete_timestamps.append(timestamp)
             if latest_record is None:
-                latest_record = _normalize_manager_record(data, timestamp=timestamp)
+                latest_record = normalized
                 continue
             existing_ts = _manager_record_timestamp(latest_record) or -1
             if existing_ts < timestamp:
-                latest_record = _normalize_manager_record(data, timestamp=timestamp)
+                latest_record = normalized
 
         for timestamp in delete_timestamps:
             try:
@@ -530,37 +570,46 @@ def _mark_manager_stopped(
                     exc_info=True,
                 )
 
-        stopped_timestamp = registry_queue.generate_timestamp()
-        payload = {
-            "tid": tid,
-            "name": "manager",
-            "capabilities": [],
-            "status": "stopped",
-            "timestamp": stopped_timestamp,
+        queues = {
             "requests": WEFT_SPAWN_REQUESTS_QUEUE,
             "ctrl_in": _manager_ctrl_queue_name(tid, latest_record),
             "ctrl_out": f"T{tid}.{QUEUE_CTRL_OUT_SUFFIX}",
             "outbox": WEFT_MANAGER_OUTBOX_QUEUE,
-            "role": "manager",
         }
+        payload = build_manager_service_payload(
+            context=context,
+            tid=tid,
+            name="manager",
+            status="stopped",
+            queues=queues,
+            runtime_handle={},
+        )
         if isinstance(latest_record, dict):
             for key in (
                 "name",
                 "capabilities",
                 "runtime_handle",
-                "inbox",
-                "requests",
-                "ctrl_in",
-                "ctrl_out",
-                "outbox",
                 "role",
             ):
                 value = latest_record.get(key)
                 if value is not None:
                     payload[key] = value
+            queues_payload = payload.setdefault("queues", {})
+            if isinstance(queues_payload, dict):
+                for source_key, target_key in (
+                    ("requests", "requests"),
+                    ("ctrl_in", "ctrl_in"),
+                    ("ctrl_out", "ctrl_out"),
+                    ("outbox", "outbox"),
+                    ("internal_requests", "internal_requests"),
+                    ("internal_reserved", "internal_reserved"),
+                ):
+                    value = latest_record.get(source_key)
+                    if isinstance(value, str) and value:
+                        queues_payload[target_key] = value
+                sync_manager_service_payload_top_level_queues(payload)
 
         payload["status"] = "stopped"
-        payload["timestamp"] = stopped_timestamp
         try:
             registry_queue.write(json.dumps(payload))
         except (

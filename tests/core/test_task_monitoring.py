@@ -13,7 +13,9 @@ from weft._constants import (
     HEARTBEAT_MIN_INTERVAL_SECONDS,
     MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY,
     WEFT_GLOBAL_LOG_QUEUE,
-    WEFT_MANAGERS_REGISTRY_QUEUE,
+    WEFT_MANAGER_OUTBOX_QUEUE,
+    WEFT_SERVICES_REGISTRY_QUEUE,
+    WEFT_SPAWN_REQUESTS_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
     load_config,
 )
@@ -21,6 +23,7 @@ from weft.core.pruning.retention import (
     RetentionPruneConfig,
     run_retention_prune_for_context,
 )
+from weft.core.service_convergence import build_manager_service_payload
 from weft.core.task_monitoring import (
     TaskMonitorCandidate,
     TaskMonitorProcessorRequest,
@@ -101,6 +104,22 @@ def _write_log(ctx: Any, payload: dict[str, Any]) -> None:
 
 def _write_json(ctx: Any, queue_name: str, payload: dict[str, Any]) -> int:
     return _write_raw(ctx, queue_name, json.dumps(payload), persistent=False)
+
+
+def _manager_service_payload(ctx: Any, *, tid: str) -> dict[str, Any]:
+    return build_manager_service_payload(
+        context=ctx,
+        tid=tid,
+        name="manager",
+        status="active",
+        queues={
+            "requests": WEFT_SPAWN_REQUESTS_QUEUE,
+            "ctrl_in": f"T{tid}.ctrl_in",
+            "ctrl_out": f"T{tid}.ctrl_out",
+            "outbox": WEFT_MANAGER_OUTBOX_QUEUE,
+        },
+        runtime_handle={},
+    )
 
 
 def _write_raw(
@@ -831,8 +850,8 @@ def test_cycle_snapshot_reports_runtime_state_cleanup_candidates(
     stale_manager_tid = "1778084345905438727"
     _write_json(
         ctx,
-        WEFT_MANAGERS_REGISTRY_QUEUE,
-        {"tid": stale_manager_tid, "status": "active", "name": "manager"},
+        WEFT_SERVICES_REGISTRY_QUEUE,
+        _manager_service_payload(ctx, tid=stale_manager_tid),
     )
 
     snapshot = build_task_monitor_cycle_snapshot(ctx, since_timestamp=0)
@@ -845,5 +864,5 @@ def test_cycle_snapshot_reports_runtime_state_cleanup_candidates(
     stale_manager = classes_by_tid[(stale_manager_tid, "stale_manager_registry")]
     assert superseded_mapping.queue == WEFT_TID_MAPPINGS_QUEUE
     assert superseded_mapping.safe_to_delete is True
-    assert stale_manager.queue == WEFT_MANAGERS_REGISTRY_QUEUE
+    assert stale_manager.queue == WEFT_SERVICES_REGISTRY_QUEUE
     assert stale_manager.safe_to_delete is True

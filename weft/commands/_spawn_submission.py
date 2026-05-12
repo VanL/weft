@@ -18,7 +18,7 @@ from weft._constants import (
     QUEUE_RESERVED_SUFFIX,
     SPAWN_SUBMISSION_RECONCILIATION_TIMEOUT,
     WEFT_GLOBAL_LOG_QUEUE,
-    WEFT_MANAGERS_REGISTRY_QUEUE,
+    WEFT_SERVICES_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
 )
@@ -32,7 +32,7 @@ _spawn_reconciliation_static_queue_specs: Final[tuple[tuple[str, bool], ...]] = 
     (WEFT_TID_MAPPINGS_QUEUE, False),
     (WEFT_GLOBAL_LOG_QUEUE, False),
     (WEFT_SPAWN_REQUESTS_QUEUE, False),
-    (WEFT_MANAGERS_REGISTRY_QUEUE, False),
+    (WEFT_SERVICES_REGISTRY_QUEUE, False),
 )
 
 

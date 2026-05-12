@@ -23,7 +23,7 @@ from weft._constants import (
     MANAGER_SERVE_LOG_SCHEMA,
     TERMINAL_TASK_STATUSES,
     WEFT_GLOBAL_LOG_QUEUE,
-    WEFT_MANAGERS_REGISTRY_QUEUE,
+    WEFT_SERVICES_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
 )
 from weft.context import build_context
@@ -76,7 +76,7 @@ def _popen_cli(
 
 
 def _manager_records(context) -> list[dict[str, Any]]:
-    queue = context.queue(WEFT_MANAGERS_REGISTRY_QUEUE, persistent=False)
+    queue = context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
     try:
         snapshot: dict[str, dict[str, Any]] = {}
         for data, ts in iter_queue_json_entries(queue):

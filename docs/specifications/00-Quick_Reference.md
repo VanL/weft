@@ -36,7 +36,7 @@ Global queues:
 | `weft.manager.ctrl_in` | Manager control input | Yes |
 | `weft.manager.ctrl_out` | Manager control output | Yes |
 | `weft.manager.outbox` | Manager informational output | Yes |
-| `weft.state.managers` | Active manager registry | No (runtime state) |
+| `weft.state.services` | Runtime service-owner registry, including managers | No (runtime state) |
 | `weft.state.tid_mappings` | Short→full TID mappings | No (runtime state) |
 | `weft.state.endpoints` | Active named endpoint registry | No (runtime state) |
 | `weft.state.streaming` | Active streaming sessions | No (runtime state) |
@@ -147,7 +147,7 @@ Format rules and sanitization live in `01-Core_Components.md`.
 ## Spec Breaking Notes
 
 - Queue renames: `weft.tasks.log` → `weft.log.tasks`, `weft.workers.registry` →
-  `weft.state.managers`, `weft.state.process.tid_mappings` →
+  `weft.state.services`, `weft.state.process.tid_mappings` →
   `weft.state.tid_mappings`, `weft.state.streaming.sessions` →
   `weft.state.streaming`.
 - Task state peak metrics renamed: `max_*` → `peak_*`.

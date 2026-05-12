@@ -50,6 +50,7 @@ target object that can be passed straight back to SimpleBroker. The optional
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import time
@@ -58,6 +59,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from simplebroker import (
     BrokerTarget,
@@ -84,6 +86,7 @@ __all__ = [
     "get_context",
     "normalize_backend_resolution_error",
     "resolve_context_broker_target",
+    "service_context_key",
     "update_project_config",
 ]
 
@@ -164,6 +167,50 @@ class WeftContext:
         """Whether the resolved broker target is backed by a filesystem path."""
 
         return self.database_path is not None
+
+
+def service_context_key(context: WeftContext) -> str:
+    """Return the stable service-registry context key for a resolved context."""
+
+    if context.database_path is not None:
+        return f"{context.backend_name}:{context.database_path.resolve(strict=False)}"
+    # Service keys are persisted in runtime queues and may be shown in
+    # diagnostics, so non-file backend targets must not expose credentials.
+    target = _strip_backend_target_secret(context.broker_target.target)
+    identity = {
+        "backend": context.backend_name,
+        "target": target,
+        "options": context.broker_target.backend_options,
+    }
+    digest = hashlib.sha256(
+        json.dumps(identity, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()[:24]
+    return f"{context.backend_name}:{digest}"
+
+
+def _strip_backend_target_secret(target: str) -> str:
+    """Return a backend target string with URL password material removed."""
+
+    parsed = urlsplit(target)
+    if not parsed.scheme or not parsed.netloc:
+        return target
+    hostname = parsed.hostname or ""
+    username = parsed.username or ""
+    userinfo = username if username else ""
+    if parsed.port is not None:
+        hostinfo = f"{hostname}:{parsed.port}"
+    else:
+        hostinfo = hostname
+    netloc = f"{userinfo}@{hostinfo}" if userinfo else hostinfo
+    return urlunsplit(
+        (
+            parsed.scheme,
+            netloc,
+            parsed.path,
+            parsed.query,
+            parsed.fragment,
+        )
+    )
 
 
 def build_context(

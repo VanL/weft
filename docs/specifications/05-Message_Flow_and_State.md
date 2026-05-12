@@ -359,7 +359,7 @@ Current rules:
   still proves a manager task is active. Stale liveness alone is not terminal
   failure proof.
 - manager task snapshots must respect the selected active manager from
-  `weft.state.managers`; a historical non-terminal manager task row must not be
+  `weft.state.services`; a historical non-terminal manager task row must not be
   published as `running` when a different active manager has been selected
 - shared waiters use the same terminal-state interpretation for `weft run` and
   `weft result`
@@ -695,7 +695,7 @@ Current rules:
 
 - queue creation is implicit on first write
 - task cleanup closes task-owned handles
-- `weft.state.managers`, `weft.state.tid_mappings`, `weft.state.streaming`,
+- `weft.state.services`, `weft.state.tid_mappings`, `weft.state.streaming`,
   `weft.state.endpoints`, and `weft.state.pipelines` are runtime-only
   bookkeeping queues; they may be read for live reconciliation but are not
   durable application history

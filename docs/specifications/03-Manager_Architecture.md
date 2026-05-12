@@ -58,8 +58,8 @@ always be rolled back from the public request queue.
 - **No special cases** – Managers inherit from `BaseTask`, so they use the same
   queue wiring, process-title formatting, and control semantics as regular
   tasks.
-- **Uniform observability** – Managers register themselves in
-  `weft.state.managers`, participate in the task log, and respond on the
+- **Uniform observability** – Managers publish manager service-owner rows in
+  `weft.state.services`, participate in the task log, and respond on the
   control channel (`STOP`, `PING`, `STATUS`).
 - **Self-hosting** – Managers spawn child Consumers by writing back into the
   same SimpleBroker database they are monitoring.
@@ -102,14 +102,14 @@ Key responsibilities implemented in `weft/core/manager.py`:
 3. **Initial payload delivery** – If the spawn payload includes
    `inbox_message`, the manager writes it into the child’s inbox queue before the
    child starts processing.
-4. **Registry heartbeat** – Managers publish an `active` record to
-   `weft.state.managers` on startup (including queue names, PID, role, and
+4. **Registry heartbeat** – Managers publish an `active` service-owner record to
+   `weft.state.services` on startup (including queue names, PID, role, and
    capabilities), refresh that active record periodically while healthy, and
    replace it with a `stopped` record during shutdown. The active record is
    pruned when the manager exits cleanly. The registry is read as a live queue:
-   callers reduce to the latest relevant record per TID, prune dead or expired
-   active records, and then filter to canonical live managers before treating
-   the result as the active-manager view. Host-managed records use scoped host
+   callers reduce to the latest relevant record per service key and owner TID,
+   prune dead or expired active records, and then filter to canonical live
+   managers before treating the result as the active-manager view. Host-managed records use scoped host
    process identity: a PID is live only when it still matches the recorded
    process creation time when that identity is available. Externally supervised
    records use the process-local runtime liveness probe registry when an
@@ -204,7 +204,7 @@ _Implementation mapping_:
 - [MA-1.1] Spawn queue consumption — `Manager._build_queue_configs`, `Manager._handle_work_message`, `Manager._build_child_spec`.
 - [MA-1.2] Child process launch — `Manager._launch_child_task`, `launch_task_process` (`weft/core/launcher.py`).
 - [MA-1.3] Initial payload delivery — `Manager._launch_child_task` (inbox seeding block).
-- [MA-1.4] Registry heartbeat and leadership view — `Manager._register_manager`, `Manager._unregister_manager`, `Manager._atexit_unregister`, `Manager._read_active_manager_records`, `Manager._active_manager_records`, `Manager._leader_tid`, `Manager._evaluate_dispatch_ownership`, `Manager._maybe_yield_leadership`, `weft/commands/system.py::_collect_task_snapshot_records`, plus `weft/helpers.py::is_canonical_manager_record` and `weft/helpers.py::canonical_owner_tid`.
+- [MA-1.4] Registry heartbeat and leadership view — `weft/core/service_convergence.py`, `Manager._register_manager`, `Manager._unregister_manager`, `Manager._atexit_unregister`, `Manager._read_active_manager_records`, `Manager._active_manager_records`, `Manager._leader_tid`, `Manager._evaluate_dispatch_ownership`, `Manager._maybe_yield_leadership`, `weft/commands/system.py::_collect_task_snapshot_records`, plus manager-record projection in `weft/core/manager_runtime.py`.
 - [MA-1.5] Idle timeout — `Manager.process_once` (idle-timeout check), `Manager._read_broker_timestamp`, `Manager._update_idle_activity_from_broker`.
 - [MA-1.6] Autostart manifests — `Manager._reconcile_managed_services`, `Manager._tick_autostart`, `Manager._desired_autostart_services`, `Manager._mark_autostart_enqueued`, `Manager._prune_autostart_state`, `Manager._build_autostart_spawn_payload`, `Manager._load_autostart_manifest`, `Manager._load_autostart_taskspec`, `Manager._load_autostart_pipeline`, `Manager._active_autostart_sources`, `Manager._cleanup_children`, plus `weft/core/pipelines.py::compile_linear_pipeline` for stored pipeline targets. Autostarts share `weft/core/manager_services.py` metadata/state primitives and `reduce_managed_service_state` transition selection with built-in singleton services.
 - [MA-1.6a] Managed internal service supervision — `Manager._run_managed_service_convergence`, `Manager._reconcile_managed_services`, `Manager._tick_internal_services`, `Manager._tick_managed_service`, `Manager._service_supervision_allowed`, `Manager._build_heartbeat_spawn_payload`, `Manager._build_task_monitor_spawn_payload`, `Manager._pending_service_keys`, `Manager._trusted_service_key_from_metadata`, `Manager._service_key_for_child`, `Manager._observed_service_candidates_by_key`, `Manager._service_candidate_from_task_log`, `Manager._candidate_force_kill_pids`, `Manager._runtime_handle_force_kill_pids`, `Manager._enqueue_managed_service_request`, `Manager._drain_internal_spawn_requests`, `Manager._cleanup_children`, `Manager.wait_for_activity`, and `Manager._user_work_children`; public submission sanitization lives in `weft/core/spawn_requests.py::submit_spawn_request`; shared service models and `reduce_managed_service_state` live in `weft/core/manager_services.py`, runtime TaskMonitor behavior lives in `weft/core/tasks/task_monitor.py`, processor contracts live in `weft/core/task_monitoring.py`, and ops service status reduction lives in `weft/commands/system.py::_collect_internal_service_snapshots`. Implementation plans: [`2026-05-10-control-and-service-convergence-state-machine-plan.md`](../plans/2026-05-10-control-and-service-convergence-state-machine-plan.md), [`2026-05-11-internal-service-observability-plan.md`](../plans/2026-05-11-internal-service-observability-plan.md); hardening plan: [`2026-05-10-manager-service-authority-boundary-hardening-plan.md`](../plans/2026-05-10-manager-service-authority-boundary-hardening-plan.md).
@@ -252,7 +252,7 @@ acknowledgement and startup-log cleanup happen after that proof and are
 best-effort diagnostics cleanup, not the startup truth boundary. This keeps
 startup proof tied to current manager readiness rather than a fixed sleep
 window. Queue-backed parts of that wait use broker-native queue waiting on
-`weft.state.managers`; only PID/process-exit checks remain as bounded
+`weft.state.services`; only PID/process-exit checks remain as bounded
 non-queue fallbacks. Early bootstrap failures surface the detached child exit status and
 startup stderr context instead of discarding them. Operators can also manage
 managers explicitly via `weft manager start|stop|list|status` and

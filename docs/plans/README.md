@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 87 plan files in this directory.
+There are currently 89 plan files in this directory.
 
 ## Curation Policy
 
@@ -22,6 +22,8 @@ There are currently 87 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-05-11-canonical-service-reducer-fix-plan.md`](./2026-05-11-canonical-service-reducer-fix-plan.md) | Canonical Service Reducer Fix Plan | `draft` | none |
+| [`2026-05-11-service-convergence-and-manager-registry-bounding-plan.md`](./2026-05-11-service-convergence-and-manager-registry-bounding-plan.md) | Service Convergence And Manager Registry Bounding Plan | `draft` | none |
 | [`2026-05-11-internal-service-observability-plan.md`](./2026-05-11-internal-service-observability-plan.md) | Internal Service Observability Plan | `draft` | none |
 | [`2026-05-11-manager-serve-operational-log-plan.md`](./2026-05-11-manager-serve-operational-log-plan.md) | Manager Serve Operational Log Plan | `draft` | none |
 | [`2026-05-11-manager-work-stealing-dispatch-plan.md`](./2026-05-11-manager-work-stealing-dispatch-plan.md) | Manager Work-Stealing Dispatch Plan | `draft` | none |

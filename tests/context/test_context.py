@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from simplebroker import BrokerTarget
 from tests.helpers.test_backend import prepare_project_root
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -17,7 +18,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from weft._constants import compile_config  # noqa: E402
-from weft.context import build_context  # noqa: E402
+from weft.context import WeftContext, build_context, service_context_key  # noqa: E402
 
 pytestmark = [pytest.mark.shared]
 
@@ -49,6 +50,35 @@ def _write_broker_project_config(
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text("\n".join(lines), encoding="utf-8")
     return config_path
+
+
+def test_service_context_key_strips_non_file_backend_password(tmp_path: Path) -> None:
+    target = BrokerTarget(
+        backend_name="postgres",
+        target="postgresql://weft:s3cr3t@example.test:5432/weft",
+        backend_options={"schema": "weft_state"},
+    )
+    ctx = WeftContext(
+        root=tmp_path,
+        weft_dir=tmp_path / ".weft",
+        outputs_dir=tmp_path / ".weft" / "outputs",
+        logs_dir=tmp_path / ".weft" / "logs",
+        config_path=tmp_path / ".weft" / "config.json",
+        broker_target=target,
+        database_path=None,
+        config={},
+        broker_config={},
+        project_config={},
+        discovered=True,
+        autostart_dir=tmp_path / ".weft" / "autostart",
+        autostart_enabled=True,
+    )
+
+    key = service_context_key(ctx)
+
+    assert key.startswith("postgres:")
+    assert "s3cr3t" not in key
+    assert "example.test" not in key
 
 
 def test_build_context_creates_structure(tmp_path: Path) -> None:

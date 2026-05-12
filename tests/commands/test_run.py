@@ -35,7 +35,7 @@ from weft._constants import (
     MANAGER_LAUNCHER_SIGNAL_SUCCESS,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MANAGER_OUTBOX_QUEUE,
-    WEFT_MANAGERS_REGISTRY_QUEUE,
+    WEFT_SERVICES_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
 )
@@ -60,6 +60,7 @@ from weft.commands.run import (
 )
 from weft.context import build_context
 from weft.core import manager_runtime as core_manager_runtime
+from weft.core.service_convergence import build_manager_service_payload
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 from weft.helpers import iter_queue_json_entries
 
@@ -108,26 +109,52 @@ def _write_active_manager_registry_record(
     runtime_handle: dict[str, Any],
     requests: str = WEFT_SPAWN_REQUESTS_QUEUE,
 ) -> None:
-    registry = ctx.queue(WEFT_MANAGERS_REGISTRY_QUEUE, persistent=False)
+    registry = ctx.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
     try:
         registry.write(
             json.dumps(
-                {
-                    "tid": tid,
-                    "name": "manager",
-                    "status": "active",
-                    "runtime_handle": runtime_handle,
-                    "timestamp": registry.generate_timestamp(),
-                    "requests": requests,
-                    "ctrl_in": f"T{tid}.ctrl_in",
-                    "ctrl_out": f"T{tid}.ctrl_out",
-                    "outbox": WEFT_MANAGER_OUTBOX_QUEUE,
-                    "role": "manager",
-                }
+                _manager_service_payload(
+                    ctx,
+                    tid=tid,
+                    status="active",
+                    runtime_handle=runtime_handle,
+                    requests=requests,
+                )
             )
         )
     finally:
         registry.close()
+
+
+def _manager_service_payload(
+    ctx,
+    *,
+    tid: str,
+    status: str = "active",
+    name: str = "manager",
+    runtime_handle: dict[str, Any] | None = None,
+    requests: str = WEFT_SPAWN_REQUESTS_QUEUE,
+    ctrl_in: str | None = None,
+    ctrl_out: str | None = None,
+    outbox: str = WEFT_MANAGER_OUTBOX_QUEUE,
+    service_key: str | None = None,
+) -> dict[str, Any]:
+    payload = build_manager_service_payload(
+        context=ctx,
+        tid=tid,
+        name=name,
+        status=status,
+        queues={
+            "requests": requests,
+            "ctrl_in": ctrl_in or f"T{tid}.ctrl_in",
+            "ctrl_out": ctrl_out or f"T{tid}.ctrl_out",
+            "outbox": outbox,
+        },
+        runtime_handle=runtime_handle,
+    )
+    if service_key is not None:
+        payload["service_key"] = service_key
+    return payload
 
 
 def _select_active_manager_while_answering_probe(
@@ -1542,17 +1569,15 @@ def test_reconcile_submitted_spawn_reports_reserved_for_claimed_request(
     root = prepare_project_root(tmp_path)
     context = build_context(spec_context=root)
     manager_tid = "1776000000000000001"
-    registry = context.queue(WEFT_MANAGERS_REGISTRY_QUEUE, persistent=False)
+    registry = context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
     try:
         registry.write(
             json.dumps(
-                {
-                    "tid": manager_tid,
-                    "status": "active",
-                    "pid": 424242,
-                    "requests": WEFT_SPAWN_REQUESTS_QUEUE,
-                    "role": "manager",
-                }
+                _manager_service_payload(
+                    context,
+                    tid=manager_tid,
+                    runtime_handle=_host_runtime_handle(424242),
+                )
             )
         )
     finally:
@@ -1618,7 +1643,7 @@ def test_reconcile_submitted_spawn_can_wait_past_reserved_claim(
             (WEFT_TID_MAPPINGS_QUEUE, False),
             (WEFT_GLOBAL_LOG_QUEUE, False),
             (WEFT_SPAWN_REQUESTS_QUEUE, False),
-            (WEFT_MANAGERS_REGISTRY_QUEUE, False),
+            (WEFT_SERVICES_REGISTRY_QUEUE, False),
             ("T1776000000000000001.reserved", False),
         ),
     )
@@ -1702,7 +1727,7 @@ def test_reconcile_submitted_spawn_uses_queue_monitor(
             (WEFT_TID_MAPPINGS_QUEUE, False),
             (WEFT_GLOBAL_LOG_QUEUE, False),
             (WEFT_SPAWN_REQUESTS_QUEUE, False),
-            (WEFT_MANAGERS_REGISTRY_QUEUE, False),
+            (WEFT_SERVICES_REGISTRY_QUEUE, False),
         ),
     )
 
@@ -1717,7 +1742,7 @@ def test_reconcile_submitted_spawn_uses_queue_monitor(
         WEFT_TID_MAPPINGS_QUEUE,
         WEFT_GLOBAL_LOG_QUEUE,
         WEFT_SPAWN_REQUESTS_QUEUE,
-        WEFT_MANAGERS_REGISTRY_QUEUE,
+        WEFT_SERVICES_REGISTRY_QUEUE,
     ]
     assert created_monitors[0].wait_calls
 
@@ -1747,20 +1772,20 @@ def test_reconcile_submitted_spawn_rebuilds_monitor_when_reserved_queues_change(
                 (WEFT_TID_MAPPINGS_QUEUE, False),
                 (WEFT_GLOBAL_LOG_QUEUE, False),
                 (WEFT_SPAWN_REQUESTS_QUEUE, False),
-                (WEFT_MANAGERS_REGISTRY_QUEUE, False),
+                (WEFT_SERVICES_REGISTRY_QUEUE, False),
             ),
             (
                 (WEFT_TID_MAPPINGS_QUEUE, False),
                 (WEFT_GLOBAL_LOG_QUEUE, False),
                 (WEFT_SPAWN_REQUESTS_QUEUE, False),
-                (WEFT_MANAGERS_REGISTRY_QUEUE, False),
+                (WEFT_SERVICES_REGISTRY_QUEUE, False),
                 ("T1776000000000000001.reserved", False),
             ),
             (
                 (WEFT_TID_MAPPINGS_QUEUE, False),
                 (WEFT_GLOBAL_LOG_QUEUE, False),
                 (WEFT_SPAWN_REQUESTS_QUEUE, False),
-                (WEFT_MANAGERS_REGISTRY_QUEUE, False),
+                (WEFT_SERVICES_REGISTRY_QUEUE, False),
                 ("T1776000000000000001.reserved", False),
             ),
         ]
@@ -1795,13 +1820,13 @@ def test_reconcile_submitted_spawn_rebuilds_monitor_when_reserved_queues_change(
         WEFT_TID_MAPPINGS_QUEUE,
         WEFT_GLOBAL_LOG_QUEUE,
         WEFT_SPAWN_REQUESTS_QUEUE,
-        WEFT_MANAGERS_REGISTRY_QUEUE,
+        WEFT_SERVICES_REGISTRY_QUEUE,
     ]
     assert created_monitors[1].queue_names == [
         WEFT_TID_MAPPINGS_QUEUE,
         WEFT_GLOBAL_LOG_QUEUE,
         WEFT_SPAWN_REQUESTS_QUEUE,
-        WEFT_MANAGERS_REGISTRY_QUEUE,
+        WEFT_SERVICES_REGISTRY_QUEUE,
         "T1776000000000000001.reserved",
     ]
 
@@ -2326,23 +2351,15 @@ def test_select_active_manager_ignores_zombie_registry_pid(
     process = subprocess.Popen([sys.executable, "-c", "import os; os._exit(0)"])
     try:
         process.wait(timeout=2.0)
-        registry = ctx.queue(WEFT_MANAGERS_REGISTRY_QUEUE, persistent=False)
+        registry = ctx.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
         try:
             registry.write(
                 json.dumps(
-                    {
-                        "tid": "1775622400000000001",
-                        "name": "manager",
-                        "status": "active",
-                        "pid": process.pid,
-                        "timestamp": registry.generate_timestamp(),
-                        "inbox": "weft.spawn.requests",
-                        "requests": "weft.spawn.requests",
-                        "ctrl_in": "weft.manager.ctrl_in",
-                        "ctrl_out": "weft.manager.ctrl_out",
-                        "outbox": "weft.manager.outbox",
-                        "role": "manager",
-                    }
+                    _manager_service_payload(
+                        ctx,
+                        tid="1775622400000000001",
+                        runtime_handle=_host_runtime_handle(process.pid),
+                    )
                 )
             )
         finally:
@@ -2358,25 +2375,19 @@ def test_select_active_manager_ignores_noncanonical_request_queue(
 ) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
-    registry = ctx.queue(WEFT_MANAGERS_REGISTRY_QUEUE, persistent=False)
+    registry = ctx.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
     try:
-        registry.write(
-            json.dumps(
-                {
-                    "tid": "1775622400000000002",
-                    "name": "manager",
-                    "status": "active",
-                    "pid": os.getpid(),
-                    "timestamp": registry.generate_timestamp(),
-                    "inbox": "custom.manager.requests",
-                    "requests": "custom.manager.requests",
-                    "ctrl_in": "custom.manager.ctrl_in",
-                    "ctrl_out": "custom.manager.ctrl_out",
-                    "outbox": "custom.manager.outbox",
-                    "role": "manager",
-                }
-            )
+        payload = _manager_service_payload(
+            ctx,
+            tid="1775622400000000002",
+            runtime_handle=_host_runtime_handle(os.getpid()),
+            requests="custom.manager.requests",
+            ctrl_in="custom.manager.ctrl_in",
+            ctrl_out="custom.manager.ctrl_out",
+            outbox="custom.manager.outbox",
+            service_key="manager:custom.manager.requests:test",
         )
+        registry.write(json.dumps(payload))
     finally:
         registry.close()
 
@@ -2673,7 +2684,7 @@ def test_list_manager_records_prunes_dead_active_and_preserves_stopped_history(
 ) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
-    registry = ctx.queue(WEFT_MANAGERS_REGISTRY_QUEUE, persistent=False)
+    registry = ctx.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
     dead_tid = "1775622400000000003"
     stopped_tid = "1775622400000000004"
 
@@ -2682,34 +2693,24 @@ def test_list_manager_records_prunes_dead_active_and_preserves_stopped_history(
         dead_process.wait(timeout=2.0)
         registry.write(
             json.dumps(
-                {
-                    "tid": dead_tid,
-                    "name": "dead-manager",
-                    "status": "active",
-                    "pid": dead_process.pid,
-                    "timestamp": registry.generate_timestamp(),
-                    "requests": "custom.manager.requests",
-                    "ctrl_in": "custom.manager.ctrl_in",
-                    "ctrl_out": "custom.manager.ctrl_out",
-                    "outbox": "custom.manager.outbox",
-                    "role": "manager",
-                }
+                _manager_service_payload(
+                    ctx,
+                    tid=dead_tid,
+                    name="dead-manager",
+                    status="active",
+                    runtime_handle=_host_runtime_handle(dead_process.pid),
+                )
             )
         )
         registry.write(
             json.dumps(
-                {
-                    "tid": stopped_tid,
-                    "name": "stopped-manager",
-                    "status": "stopped",
-                    "pid": dead_process.pid,
-                    "timestamp": registry.generate_timestamp(),
-                    "requests": WEFT_SPAWN_REQUESTS_QUEUE,
-                    "ctrl_in": f"T{stopped_tid}.ctrl_in",
-                    "ctrl_out": f"T{stopped_tid}.ctrl_out",
-                    "outbox": "weft.manager.outbox",
-                    "role": "manager",
-                }
+                _manager_service_payload(
+                    ctx,
+                    tid=stopped_tid,
+                    name="stopped-manager",
+                    status="stopped",
+                    runtime_handle=_host_runtime_handle(dead_process.pid),
+                )
             )
         )
     finally:
@@ -2729,7 +2730,7 @@ def test_list_manager_records_prunes_dead_active_and_preserves_stopped_history(
     assert {record["tid"] for record in first} == {stopped_tid}
     assert {record["tid"] for record in second} == {stopped_tid}
 
-    registry_reader = ctx.queue(WEFT_MANAGERS_REGISTRY_QUEUE, persistent=False)
+    registry_reader = ctx.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
     try:
         entries = [
             payload for payload, _timestamp in iter_queue_json_entries(registry_reader)
@@ -2746,18 +2747,19 @@ def test_list_manager_records_prunes_host_pid_identity_mismatch(
 ) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
-    registry = ctx.queue(WEFT_MANAGERS_REGISTRY_QUEUE, persistent=False)
+    registry = ctx.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
     stale_tid = "17756224000000000045"
 
     monkeypatch.setattr("weft.helpers.process_create_time", lambda pid: 222.0)
     try:
         registry.write(
             json.dumps(
-                {
-                    "tid": stale_tid,
-                    "name": "stale-container-manager",
-                    "status": "active",
-                    "runtime_handle": {
+                _manager_service_payload(
+                    ctx,
+                    tid=stale_tid,
+                    name="stale-container-manager",
+                    status="active",
+                    runtime_handle={
                         "runner": "host",
                         "kind": "process",
                         "id": "1",
@@ -2768,13 +2770,7 @@ def test_list_manager_records_prunes_host_pid_identity_mismatch(
                         },
                         "metadata": {},
                     },
-                    "timestamp": registry.generate_timestamp(),
-                    "requests": WEFT_SPAWN_REQUESTS_QUEUE,
-                    "ctrl_in": f"T{stale_tid}.ctrl_in",
-                    "ctrl_out": f"T{stale_tid}.ctrl_out",
-                    "outbox": "weft.manager.outbox",
-                    "role": "manager",
-                }
+                )
             )
         )
     finally:
@@ -2789,7 +2785,7 @@ def test_list_manager_records_prunes_host_pid_identity_mismatch(
         == []
     )
 
-    registry_reader = ctx.queue(WEFT_MANAGERS_REGISTRY_QUEUE, persistent=False)
+    registry_reader = ctx.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
     try:
         entries = [
             payload for payload, _timestamp in iter_queue_json_entries(registry_reader)

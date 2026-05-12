@@ -16,11 +16,13 @@ from tests.conftest import run_cli
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import (
     WEFT_GLOBAL_LOG_QUEUE,
-    WEFT_MANAGERS_REGISTRY_QUEUE,
+    WEFT_MANAGER_OUTBOX_QUEUE,
+    WEFT_SERVICES_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
 )
 from weft.context import build_context
+from weft.core.service_convergence import build_manager_service_payload
 from weft.helpers import iter_queue_json_entries
 
 pytestmark = [pytest.mark.shared]
@@ -48,6 +50,30 @@ def _host_pid_from_handle(payload: dict[str, Any]) -> int | None:
     if not isinstance(host_pids, list):
         return None
     return next((pid for pid in host_pids if isinstance(pid, int) and pid > 0), None)
+
+
+def _manager_service_payload(
+    context,
+    *,
+    tid: str,
+    status: str = "active",
+    name: str = "manager",
+    runtime_handle: dict[str, Any] | None = None,
+    requests: str = WEFT_SPAWN_REQUESTS_QUEUE,
+) -> dict[str, Any]:
+    return build_manager_service_payload(
+        context=context,
+        tid=tid,
+        name=name,
+        status=status,
+        queues={
+            "requests": requests,
+            "ctrl_in": f"T{tid}.ctrl_in",
+            "ctrl_out": f"T{tid}.ctrl_out",
+            "outbox": WEFT_MANAGER_OUTBOX_QUEUE,
+        },
+        runtime_handle=runtime_handle or {},
+    )
 
 
 def _parse_started_manager(output: str) -> str:
@@ -259,7 +285,7 @@ def test_manager_list_and_status_agree_on_stale_active_manager(workdir):
     process = subprocess.Popen([sys.executable, "-c", "import os; os._exit(0)"])
     try:
         process.wait(timeout=2.0)
-        registry_queue = context.queue(WEFT_MANAGERS_REGISTRY_QUEUE, persistent=False)
+        registry_queue = context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
         registry_queue.write(
             json.dumps(
                 {
@@ -311,20 +337,15 @@ def test_manager_start_replaces_stale_active_manager(workdir):
     process = subprocess.Popen([sys.executable, "-c", "import os; os._exit(0)"])
     try:
         process.wait(timeout=2.0)
-        registry_queue = context.queue(WEFT_MANAGERS_REGISTRY_QUEUE, persistent=False)
+        registry_queue = context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
         registry_queue.write(
             json.dumps(
-                {
-                    "tid": stale_tid,
-                    "status": "active",
-                    "name": "stale-manager",
-                    "runtime_handle": _host_runtime_handle(process.pid),
-                    "role": "manager",
-                    "requests": WEFT_SPAWN_REQUESTS_QUEUE,
-                    "ctrl_in": f"T{stale_tid}.ctrl_in",
-                    "ctrl_out": f"T{stale_tid}.ctrl_out",
-                    "outbox": "weft.manager.outbox",
-                }
+                _manager_service_payload(
+                    context,
+                    tid=stale_tid,
+                    name="stale-manager",
+                    runtime_handle=_host_runtime_handle(process.pid),
+                )
             )
         )
     finally:
@@ -360,7 +381,7 @@ def test_manager_start_replaces_stale_active_manager(workdir):
         ]
         assert {record["tid"] for record in active} == {started_tid}
 
-        registry_reader = context.queue(WEFT_MANAGERS_REGISTRY_QUEUE, persistent=False)
+        registry_reader = context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
         try:
             payloads = [
                 json.loads(item)

@@ -65,6 +65,9 @@ from weft._constants import (
     QUEUE_INTERNAL_RESERVED_SUFFIX,
     QUEUE_PRIORITY_INTERNAL,
     QUEUE_PRIORITY_NORMAL,
+    SERVICE_STATUS_TERMINAL,
+    SERVICE_TYPE_MANAGED,
+    SERVICE_TYPE_MANAGER,
     SPEC_TYPE_PIPELINE,
     SPEC_TYPE_TASK,
     TERMINAL_ENVELOPE_TYPE,
@@ -75,7 +78,7 @@ from weft._constants import (
     WEFT_MANAGER_RUNTIME_HANDLE_JSON_ENV,
     WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS,
     WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS_DEFAULT,
-    WEFT_MANAGERS_REGISTRY_QUEUE,
+    WEFT_SERVICES_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
     WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS_DEFAULT,
     WEFT_TID_MAPPINGS_QUEUE,
@@ -125,6 +128,16 @@ from .serve_log import (
     serve_log_allows,
     serve_log_level,
     truncate_serve_log_value,
+)
+from .service_convergence import (
+    ServiceOwnerRecord,
+    build_manager_service_payload,
+    build_service_owner_payload,
+    collect_service_owner_records,
+    manager_service_key,
+    parse_service_owner_record,
+    project_manager_service_record,
+    reduce_service_ownership,
 )
 from .spec_store import resolve_named_spec_from_root
 from .tasks import Consumer
@@ -711,6 +724,12 @@ class Manager(BaseTask):
             launched_ns=time.time_ns(),
         )
         if service_key is not None:
+            self._register_managed_service_owner(
+                child_spec,
+                service_key=service_key,
+                process=process,
+                status="active",
+            )
             state = self._service_state(service_key)
             state.active_tid = child_spec.tid
             state.spawn_pending = False
@@ -751,6 +770,105 @@ class Manager(BaseTask):
             success=True,
         )
         return True
+
+    def _child_runtime_handle(self, process: BaseProcess) -> dict[str, Any]:
+        """Return runtime evidence for a locally launched child process."""
+
+        pid = process.pid
+        if not isinstance(pid, int) or pid <= 0:
+            return {}
+        return RunnerHandle(
+            runner="host",
+            kind="process",
+            id=str(pid),
+            control={"authority": "host-pid"},
+            observations={
+                "host_pids": [pid],
+                "host_processes": [
+                    {"pid": pid, "create_time": process_create_time(pid)}
+                ],
+            },
+            metadata={"manager_tid": self.tid},
+        ).to_dict()
+
+    def _register_managed_service_owner(
+        self,
+        child_spec: TaskSpec,
+        *,
+        service_key: str,
+        process: BaseProcess,
+        status: Literal["active", "terminal"],
+    ) -> None:
+        """Publish manager-owned singleton service ownership."""
+
+        if child_spec.tid is None:
+            return
+        queues = {
+            "ctrl_in": child_spec.io.control.get("ctrl_in"),
+            "ctrl_out": child_spec.io.control.get("ctrl_out"),
+            "inbox": child_spec.io.inputs.get("inbox"),
+            "outbox": child_spec.io.outputs.get("outbox"),
+        }
+        metadata = {
+            "manager_tid": self.tid,
+            "internal_role": child_spec.metadata.get(INTERNAL_RUNTIME_TASK_CLASS_KEY),
+            "autostart_source": child_spec.metadata.get(
+                INTERNAL_AUTOSTART_SOURCE_METADATA_KEY
+            ),
+        }
+        payload = build_service_owner_payload(
+            service_key=service_key,
+            service_type=SERVICE_TYPE_MANAGED,
+            owner_tid=child_spec.tid,
+            status=status,
+            name=child_spec.name,
+            queues=queues,
+            runtime_handle=self._child_runtime_handle(process),
+            metadata={key: value for key, value in metadata.items() if value},
+        )
+        try:
+            self._queue(WEFT_SERVICES_REGISTRY_QUEUE).write(json.dumps(payload))
+        except (BrokerError, OSError, RuntimeError):
+            logger.debug(
+                "Failed to publish managed service owner %s", service_key, exc_info=True
+            )
+
+    def _register_terminal_managed_service_owner(
+        self,
+        tid: str,
+        child: ManagedChild,
+        *,
+        service_key: str,
+    ) -> None:
+        """Publish terminal ownership for a reaped manager-owned service."""
+
+        queues = {
+            "ctrl_in": child.ctrl_queue,
+            "ctrl_out": child.ctrl_out_queue,
+        }
+        metadata = {
+            "manager_tid": self.tid,
+            "internal_role": child.internal_role,
+            "autostart_source": child.autostart_source,
+        }
+        payload = build_service_owner_payload(
+            service_key=service_key,
+            service_type=SERVICE_TYPE_MANAGED,
+            owner_tid=tid,
+            status="terminal",
+            name="managed-service",
+            queues=queues,
+            runtime_handle=self._child_runtime_handle(child.process),
+            metadata={key: value for key, value in metadata.items() if value},
+        )
+        try:
+            self._queue(WEFT_SERVICES_REGISTRY_QUEUE).write(json.dumps(payload))
+        except (BrokerError, OSError, RuntimeError):
+            logger.debug(
+                "Failed to publish terminal managed service owner %s",
+                service_key,
+                exc_info=True,
+            )
 
     def _seed_child_inbox(
         self,
@@ -844,29 +962,42 @@ class Manager(BaseTask):
         }
 
     def _register_manager(self) -> None:
-        """Publish an active record to the manager registry (Spec: [MA-1.4], [MF-7])."""
-        registry_queue = self._queue(WEFT_MANAGERS_REGISTRY_QUEUE)
-        timestamp = registry_queue.generate_timestamp()
+        """Publish active manager service ownership (Spec: [MA-1.4], [MF-7])."""
+        registry_queue = self._queue(WEFT_SERVICES_REGISTRY_QUEUE)
+        now_ns = time.time_ns()
+        self._prune_expired_manager_registry_entries(registry_queue, now_ns=now_ns)
+        if (
+            self._recent_lower_canonical_manager_exists(registry_queue, now_ns=now_ns)
+            and not self._has_actionable_leadership_work()
+        ):
+            self._prune_older_self_registry_entries(registry_queue)
+            self._last_registry_heartbeat_ns = time.time_ns()
+            return
+
         runtime_handle = self._manager_runtime_handle()
         previous_message_id = self._registry_message_id
-
-        payload = {
-            "tid": self.tid,
-            "name": self.taskspec.name,
-            "capabilities": self.taskspec.metadata.get("capabilities", []),
-            "status": "active",
-            "runtime_handle": runtime_handle.to_dict(),
-            "timestamp": timestamp,
-            "inbox": self._queue_names["inbox"],
+        queues = {
             "requests": self._queue_names["inbox"],
+            "reserved": self._queue_names.get("reserved"),
             "ctrl_in": self._queue_names["ctrl_in"],
             "ctrl_out": self._queue_names["ctrl_out"],
             "outbox": self._queue_names["outbox"],
-            "role": self.taskspec.metadata.get("role", "manager"),
         }
         if self._internal_spawn_queue_attached():
-            payload["internal_requests"] = self._queue_names["internal_inbox"]
-            payload["internal_reserved"] = self._queue_names["internal_reserved"]
+            queues["internal_requests"] = self._queue_names["internal_inbox"]
+            queues["internal_reserved"] = self._queue_names["internal_reserved"]
+        payload = build_manager_service_payload(
+            context=self._manager_context(),
+            tid=self.tid,
+            name=self.taskspec.name,
+            status="active",
+            queues=queues,
+            runtime_handle=runtime_handle.to_dict(),
+            capabilities=self.taskspec.metadata.get("capabilities", []),
+            metadata={
+                "legacy_role": self.taskspec.metadata.get("role", "manager"),
+            },
+        )
         serialized_payload = json.dumps(payload)
         try:
             message_id = cast(int | None, registry_queue.write(serialized_payload))
@@ -879,6 +1010,7 @@ class Manager(BaseTask):
             else:
                 self._registry_message_id = message_id
             self._last_registry_heartbeat_ns = time.time_ns()
+            self._prune_older_self_registry_entries(registry_queue)
             if (
                 previous_message_id is not None
                 and self._registry_message_id is not None
@@ -892,6 +1024,152 @@ class Manager(BaseTask):
                         exc_info=True,
                     )
 
+    @staticmethod
+    def _manager_registry_retention_ns() -> int:
+        return int(MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS * 1_000_000_000)
+
+    def _registry_entry_is_expired(self, timestamp: int, *, now_ns: int) -> bool:
+        retention_ns = self._manager_registry_retention_ns()
+        if retention_ns < 0:
+            return True
+        return now_ns - timestamp > retention_ns
+
+    def _prune_expired_manager_registry_entries(
+        self, queue: Queue, *, now_ns: int | None = None
+    ) -> None:
+        """Delete manager registry rows older than the runtime-state window."""
+
+        observed_now_ns = time.time_ns() if now_ns is None else now_ns
+        expired_timestamps: list[int] = []
+        try:
+            entries = queue.peek_generator(with_timestamps=True)
+        except (BrokerError, OSError, RuntimeError):
+            logger.debug("Failed to inspect manager registry for expiry", exc_info=True)
+            return
+
+        try:
+            for entry in entries:
+                if not isinstance(entry, tuple) or len(entry) != 2:
+                    continue
+                _body, timestamp = entry
+                if isinstance(timestamp, int) and self._registry_entry_is_expired(
+                    timestamp,
+                    now_ns=observed_now_ns,
+                ):
+                    expired_timestamps.append(timestamp)
+        except (BrokerError, OSError, RuntimeError):
+            logger.debug("Failed to replay manager registry for expiry", exc_info=True)
+            return
+
+        for timestamp in expired_timestamps:
+            try:
+                queue.delete(message_id=timestamp)
+            except (BrokerError, OSError, RuntimeError):
+                logger.debug(
+                    "Failed to prune expired manager registry entry",
+                    exc_info=True,
+                )
+
+    def _recent_lower_canonical_manager_exists(
+        self, queue: Queue, *, now_ns: int | None = None
+    ) -> bool:
+        """Return whether a recent lower-TID canonical active row is visible."""
+
+        observed_now_ns = time.time_ns() if now_ns is None else now_ns
+        service_key = manager_service_key(self._manager_context())
+        records = []
+        try:
+            entries = queue.peek_generator(with_timestamps=True)
+        except (BrokerError, OSError, RuntimeError):
+            logger.debug(
+                "Failed to inspect manager registry for lower canonical rows",
+                exc_info=True,
+            )
+            return False
+
+        try:
+            for entry in entries:
+                if not isinstance(entry, tuple) or len(entry) != 2:
+                    continue
+                body, timestamp = entry
+                if not isinstance(timestamp, int) or self._registry_entry_is_expired(
+                    timestamp,
+                    now_ns=observed_now_ns,
+                ):
+                    continue
+                try:
+                    payload = json.loads(body)
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                record = parse_service_owner_record(payload, timestamp=timestamp)
+                if (
+                    record is not None
+                    and record.service_type == SERVICE_TYPE_MANAGER
+                    and record.service_key == service_key
+                ):
+                    records.append(record)
+                continue
+        except (BrokerError, OSError, RuntimeError):
+            logger.debug(
+                "Failed to replay manager registry for lower canonical rows",
+                exc_info=True,
+            )
+        decision = reduce_service_ownership(
+            service_key,
+            records,
+            own_tid=self.tid,
+            now_ns=observed_now_ns,
+            ttl_ns=self._manager_registry_retention_ns(),
+        )
+        return decision.recent_lower_live_owner
+
+    def _prune_older_self_registry_entries(self, queue: Queue) -> None:
+        """Keep only this manager's latest registry row."""
+
+        latest_ts: int | None = None
+        self_timestamps: list[int] = []
+        try:
+            entries = queue.peek_generator(with_timestamps=True)
+        except (AttributeError, BrokerError, OSError, RuntimeError):
+            logger.debug("Failed to inspect self manager registry rows", exc_info=True)
+            return
+
+        try:
+            for entry in entries:
+                if not isinstance(entry, tuple) or len(entry) != 2:
+                    continue
+                body, timestamp = entry
+                if not isinstance(timestamp, int):
+                    continue
+                try:
+                    payload = json.loads(body)
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                record = parse_service_owner_record(payload, timestamp=timestamp)
+                if record is None or record.owner_tid != self.tid:
+                    continue
+                self_timestamps.append(timestamp)
+                if latest_ts is None or timestamp > latest_ts:
+                    latest_ts = timestamp
+        except (BrokerError, OSError, RuntimeError):
+            logger.debug("Failed to replay self manager registry rows", exc_info=True)
+            return
+
+        for timestamp in self_timestamps:
+            if timestamp == latest_ts:
+                continue
+            try:
+                queue.delete(message_id=timestamp)
+            except (BrokerError, OSError, RuntimeError):
+                logger.debug(
+                    "Failed to prune older self manager registry entry",
+                    exc_info=True,
+                )
+
     def _refresh_manager_registration(self, *, force: bool = False) -> None:
         if self._unregistered or self.should_stop:
             return
@@ -902,11 +1180,10 @@ class Manager(BaseTask):
         self._register_manager()
 
     def _unregister_manager(self) -> None:
-        """Replace active record with stopped record on shutdown (Spec: [MA-1.4])."""
+        """Replace active service-owner record with stopped state (Spec: [MA-1.4])."""
         if self._unregistered:
             return
-        registry_queue = self._queue(WEFT_MANAGERS_REGISTRY_QUEUE)
-        stopped_timestamp = registry_queue.generate_timestamp()
+        registry_queue = self._queue(WEFT_SERVICES_REGISTRY_QUEUE)
 
         deletion_performed = False
         if self._registry_message_id is not None:
@@ -932,23 +1209,28 @@ class Manager(BaseTask):
                             exc_info=True,
                         )
 
-        payload = {
-            "tid": self.tid,
-            "name": self.taskspec.name,
-            "capabilities": self.taskspec.metadata.get("capabilities", []),
-            "status": "stopped",
-            "runtime_handle": self._manager_runtime_handle().to_dict(),
-            "timestamp": stopped_timestamp,
-            "inbox": self._queue_names["inbox"],
+        queues = {
             "requests": self._queue_names["inbox"],
+            "reserved": self._queue_names.get("reserved"),
             "ctrl_in": self._queue_names["ctrl_in"],
             "ctrl_out": self._queue_names["ctrl_out"],
             "outbox": self._queue_names["outbox"],
-            "role": self.taskspec.metadata.get("role", "manager"),
         }
         if self._internal_spawn_queue_attached():
-            payload["internal_requests"] = self._queue_names["internal_inbox"]
-            payload["internal_reserved"] = self._queue_names["internal_reserved"]
+            queues["internal_requests"] = self._queue_names["internal_inbox"]
+            queues["internal_reserved"] = self._queue_names["internal_reserved"]
+        payload = build_manager_service_payload(
+            context=self._manager_context(),
+            tid=self.tid,
+            name=self.taskspec.name,
+            status="stopped",
+            queues=queues,
+            runtime_handle=self._manager_runtime_handle().to_dict(),
+            capabilities=self.taskspec.metadata.get("capabilities", []),
+            metadata={
+                "legacy_role": self.taskspec.metadata.get("role", "manager"),
+            },
+        )
         latest_after_prune = self._latest_registry_entry(registry_queue, self.tid)
         if latest_after_prune is not None:
             payload_existing, _ = latest_after_prune
@@ -962,6 +1244,7 @@ class Manager(BaseTask):
         except (BrokerError, OSError, RuntimeError):
             logger.debug("Failed to record stopped manager state", exc_info=True)
 
+        self._prune_older_self_registry_entries(registry_queue)
         self._registry_message_id = None
         self._unregistered = True
 
@@ -1037,7 +1320,12 @@ class Manager(BaseTask):
                 continue
             if not isinstance(payload, dict):
                 continue
-            if payload.get("tid") == tid:
+            projected = project_manager_service_record(
+                payload,
+                timestamp=timestamp,
+                service_key=manager_service_key(self._manager_context()),
+            )
+            if projected is not None and projected.get("tid") == tid:
                 latest = (payload, timestamp)
         return latest
 
@@ -1046,17 +1334,15 @@ class Manager(BaseTask):
         existing: Mapping[str, Any], candidate: Mapping[str, Any]
     ) -> bool:
         keys = {
-            "tid",
+            "owner_tid",
+            "service_key",
+            "service_type",
             "status",
             "runtime_handle",
             "name",
             "capabilities",
-            "inbox",
-            "requests",
-            "ctrl_in",
-            "ctrl_out",
-            "outbox",
             "role",
+            "queues",
         }
         for key in keys:
             if existing.get(key) != candidate.get(key):
@@ -1099,9 +1385,10 @@ class Manager(BaseTask):
         Spec: [MA-1.4], [MA-3]
         """
 
-        queue = self._queue(WEFT_MANAGERS_REGISTRY_QUEUE)
+        queue = self._queue(WEFT_SERVICES_REGISTRY_QUEUE)
         snapshot: dict[str, dict[str, Any]] = {}
         stale_timestamps: list[int] = []
+        entries: list[tuple[dict[str, Any], int]] = []
 
         try:
             raw_entries = queue.peek_generator(with_timestamps=True)
@@ -1122,19 +1409,48 @@ class Manager(BaseTask):
                     continue
                 if not isinstance(payload, dict):
                     continue
-                tid = payload.get("tid")
-                if not isinstance(tid, str) or not tid:
-                    continue
-                payload["_timestamp"] = timestamp
-                existing = snapshot.get(tid)
-                existing_timestamp = (
-                    int(existing.get("_timestamp", -1)) if existing else -1
-                )
-                if existing is None or existing_timestamp < timestamp:
-                    snapshot[tid] = payload
+                entries.append((payload, timestamp))
         except (BrokerError, OSError, RuntimeError):
             logger.debug("Failed to replay manager registry", exc_info=True)
             return None
+
+        service_key = manager_service_key(self._manager_context())
+        read = collect_service_owner_records(
+            entries,
+            service_key=service_key,
+            service_type=SERVICE_TYPE_MANAGER,
+        )
+
+        live_records: list[ServiceOwnerRecord] = []
+        projected_by_timestamp: dict[int, dict[str, Any]] = {}
+        for record in read.records:
+            payload = record.payload
+            if not isinstance(payload, dict):
+                continue
+            projected = project_manager_service_record(
+                payload,
+                timestamp=record.timestamp,
+                service_key=service_key,
+            )
+            if projected is None:
+                continue
+            tid = projected.get("tid")
+            if not isinstance(tid, str) or not tid:
+                continue
+            projected["_timestamp"] = record.timestamp
+            if projected.get("status") == "active":
+                if tid == self.tid and not self._unregistered:
+                    live_records.append(record)
+                elif self._manager_record_is_live(projected):
+                    live_records.append(record)
+                else:
+                    stale_timestamps.append(record.timestamp)
+                    continue
+            projected_by_timestamp[record.timestamp] = projected
+            existing = snapshot.get(tid)
+            existing_timestamp = int(existing.get("_timestamp", -1)) if existing else -1
+            if existing is None or existing_timestamp < record.timestamp:
+                snapshot[tid] = projected
 
         if not self._unregistered and not self.should_stop:
             own_record = snapshot.get(self.tid)
@@ -1165,24 +1481,40 @@ class Manager(BaseTask):
                 latest = self._latest_registry_entry(queue, self.tid)
                 if latest is not None:
                     payload, timestamp = latest
-                    payload["_timestamp"] = timestamp
-                    snapshot[self.tid] = payload
+                    projected = project_manager_service_record(
+                        payload,
+                        timestamp=timestamp,
+                        service_key=manager_service_key(self._manager_context()),
+                    )
+                    if projected is not None:
+                        projected["_timestamp"] = timestamp
+                        snapshot[self.tid] = projected
+                        refreshed = parse_service_owner_record(
+                            payload,
+                            timestamp=timestamp,
+                        )
+                        if refreshed is not None:
+                            live_records.append(refreshed)
+                            projected_by_timestamp[timestamp] = projected
 
+        decision = reduce_service_ownership(
+            service_key,
+            live_records,
+            own_tid=self.tid,
+            now_ns=time.time_ns(),
+            ttl_ns=self._manager_registry_retention_ns(),
+            read_failed=read.read_failed,
+        )
         active: dict[str, dict[str, Any]] = {}
-        for tid, record in snapshot.items():
-            if record.get("status") != "active":
+        for record in decision.records:
+            if record.status != "active":
                 continue
-            if not is_canonical_manager_record(record):
+            projected = projected_by_timestamp.get(record.timestamp)
+            if projected is None:
                 continue
-            if tid == self.tid and not self._unregistered:
-                active[tid] = record
-                continue
-            if not self._manager_record_is_live(record):
-                stale_timestamp = record.get("_timestamp")
-                if isinstance(stale_timestamp, int):
-                    stale_timestamps.append(stale_timestamp)
-                continue
-            active[tid] = record
+            tid = projected.get("tid")
+            if isinstance(tid, str) and is_canonical_manager_record(projected):
+                active[tid] = projected
 
         for timestamp in stale_timestamps:
             try:
@@ -1579,6 +1911,11 @@ class Manager(BaseTask):
                     autostart_child_exited = True
                 service_key = self._service_key_for_child(child)
                 if service_key:
+                    self._register_terminal_managed_service_owner(
+                        tid,
+                        child,
+                        service_key=service_key,
+                    )
                     state = self._service_state(service_key)
                     state.locally_terminal_tids.add(tid)
                     self._managed_service_duplicate_scan_pending.add(service_key)
@@ -2811,6 +3148,109 @@ class Manager(BaseTask):
             metadata=candidate_metadata,
         )
 
+    def _service_candidate_from_service_owner_record(
+        self,
+        record: ServiceOwnerRecord,
+    ) -> ServiceCandidate:
+        """Project one service-owner row into managed-service evidence."""
+
+        payload = record.payload
+        metadata: dict[str, Any] = {}
+        queues = payload.get("queues")
+        if isinstance(queues, Mapping):
+            ctrl_in_name = queues.get("ctrl_in")
+            ctrl_out_name = queues.get("ctrl_out")
+            if isinstance(ctrl_in_name, str) and isinstance(ctrl_out_name, str):
+                metadata["ctrl_in"] = ctrl_in_name
+                metadata["ctrl_out"] = ctrl_out_name
+        handle_payload = payload.get("runtime_handle")
+        runtime_handle: RunnerHandle | None = None
+        if isinstance(handle_payload, Mapping):
+            try:
+                runtime_handle = RunnerHandle.from_dict(handle_payload)
+            except ValueError:
+                runtime_handle = None
+        if runtime_handle is not None:
+            pids = self._runtime_handle_force_kill_pids(runtime_handle)
+            if pids:
+                metadata["force_kill_pids"] = list(pids)
+
+        if record.status in {SERVICE_STATUS_TERMINAL, "stopped"}:
+            return ServiceCandidate(
+                key=record.service_key,
+                tid=record.owner_tid,
+                state="terminal",
+                source="service-registry",
+                timestamp=record.timestamp,
+                reason=record.status,
+                metadata=metadata,
+            )
+
+        if runtime_handle is not None and handle_has_live_host_process(runtime_handle):
+            return ServiceCandidate(
+                key=record.service_key,
+                tid=record.owner_tid,
+                state="live",
+                source="service-registry",
+                timestamp=record.timestamp,
+                metadata=metadata,
+            )
+
+        if "ctrl_in" in metadata and "ctrl_out" in metadata:
+            probe = send_keyed_ping_probe(
+                self._manager_context(),
+                tid=record.owner_tid,
+                ctrl_in_name=metadata["ctrl_in"],
+                ctrl_out_name=metadata["ctrl_out"],
+                timeout=MANAGED_SERVICE_PING_TIMEOUT_SECONDS,
+            )
+            if probe.matched is not None:
+                return ServiceCandidate(
+                    key=record.service_key,
+                    tid=record.owner_tid,
+                    state="live",
+                    source="service-registry-pong",
+                    timestamp=record.timestamp,
+                    metadata=metadata,
+                )
+            if probe.error:
+                return ServiceCandidate(
+                    key=record.service_key,
+                    tid=record.owner_tid,
+                    state="uncertain",
+                    source="service-registry-pong",
+                    timestamp=record.timestamp,
+                    reason=probe.error,
+                    metadata=metadata,
+                )
+
+        recent_grace_ns = int(
+            MANAGED_SERVICE_RECENT_EVIDENCE_GRACE_SECONDS * 1_000_000_000
+        )
+        if (
+            record.owner_tid.isdigit()
+            and time.time_ns() - int(record.owner_tid) <= recent_grace_ns
+        ):
+            return ServiceCandidate(
+                key=record.service_key,
+                tid=record.owner_tid,
+                state="uncertain",
+                source="service-registry",
+                timestamp=record.timestamp,
+                reason="recent active owner without live runtime proof or PONG",
+                metadata=metadata,
+            )
+
+        return ServiceCandidate(
+            key=record.service_key,
+            tid=record.owner_tid,
+            state="terminal",
+            source="service-registry",
+            timestamp=record.timestamp,
+            reason="stale active owner without live runtime proof or PONG",
+            metadata=metadata,
+        )
+
     @staticmethod
     def _trusted_internal_service_key(
         metadata: Mapping[str, Any],
@@ -3012,8 +3452,9 @@ class Manager(BaseTask):
 
     def _manager_context(self) -> WeftContext:
         spec_context = getattr(self.taskspec.spec, "weft_context", None)
-        ctx = build_context(spec_context=spec_context, config=self._config)
-        broker_target = self._db_path
+        config = getattr(self, "_config", {})
+        ctx = build_context(spec_context=spec_context, config=config)
+        broker_target = getattr(self, "_db_path", None)
         if isinstance(broker_target, BrokerTarget):
             return replace(
                 ctx,
@@ -3021,7 +3462,7 @@ class Manager(BaseTask):
                 database_path=broker_target.target_path,
                 broker_config={
                     key: value
-                    for key, value in self._config.items()
+                    for key, value in config.items()
                     if key.startswith("BROKER_")
                 },
             )
@@ -3038,88 +3479,40 @@ class Manager(BaseTask):
             if tracked is not None:
                 candidates_by_key[service_key].append(tracked)
 
-        latest_by_tid: dict[str, tuple[str, Mapping[str, Any], int]] = {}
-        queue = self._queue(WEFT_GLOBAL_LOG_QUEUE)
-        for payload, timestamp in iter_queue_json_entries(queue):
-            tid: Any
-            taskspec_dump: Any
-            child_tid = payload.get("child_tid")
-            child_taskspec = payload.get("child_taskspec")
-            if (
-                payload.get("event") == "task_spawned"
-                and isinstance(child_tid, str)
-                and isinstance(child_taskspec, dict)
-            ):
-                tid = child_tid
-                taskspec_dump = child_taskspec
-            else:
-                tid = payload.get("tid")
-                taskspec_dump = payload.get("taskspec")
-            if not isinstance(tid, str) or not tid:
-                continue
-            if not isinstance(taskspec_dump, dict):
-                continue
-            metadata = taskspec_dump.get("metadata") or {}
-            if not isinstance(metadata, dict):
-                continue
-            runtime_class = metadata.get(INTERNAL_RUNTIME_TASK_CLASS_KEY)
-            manager_event_autostart_source = (
-                payload.get(INTERNAL_AUTOSTART_SOURCE_METADATA_KEY)
-                if payload.get("event") == "task_spawned"
-                else None
+        queue = self._queue(WEFT_SERVICES_REGISTRY_QUEUE)
+        registry_entries = tuple(iter_queue_json_entries(queue))
+        read = collect_service_owner_records(
+            registry_entries,
+            service_type=SERVICE_TYPE_MANAGED,
+        )
+        now_ns = time.time_ns()
+        for service_key in desired_keys:
+            decision = reduce_service_ownership(
+                service_key,
+                read.records,
+                own_tid=None,
+                now_ns=now_ns,
+                ttl_ns=self._manager_registry_retention_ns(),
+                read_failed=read.read_failed,
             )
-            candidate_key = self._trusted_service_key_from_metadata(
-                metadata,
-                desired_keys=desired_keys,
-                runtime_class=runtime_class if isinstance(runtime_class, str) else None,
-                manager_event_autostart_source=manager_event_autostart_source
-                if isinstance(manager_event_autostart_source, str)
-                else None,
-            )
-            if candidate_key is None:
-                continue
-            existing = latest_by_tid.get(tid)
-            if existing is None or existing[2] <= timestamp:
-                latest_by_tid[tid] = (candidate_key, payload, timestamp)
-
-        runtime_handles = self._latest_tid_runtime_handles(set(latest_by_tid))
-        for tid, (service_key, logged_payload, timestamp) in latest_by_tid.items():
-            state = self._service_state(service_key)
-            if tid in state.locally_terminal_tids:
-                candidates_by_key.setdefault(service_key, []).append(
-                    ServiceCandidate(
-                        key=service_key,
-                        tid=tid,
-                        state="terminal",
-                        source="manager-local",
-                        timestamp=timestamp,
-                        reason="locally reaped child process",
-                    )
-                )
-                continue
-            if logged_payload.get("event") == "task_spawned":
-                child_pid = logged_payload.get("child_pid")
-                if isinstance(child_pid, int) and self._pid_alive(child_pid):
-                    candidates_by_key.setdefault(service_key, []).append(
+            for record in decision.records:
+                state = self._service_state(record.service_key)
+                tid = record.owner_tid
+                if tid in state.locally_terminal_tids:
+                    candidates_by_key.setdefault(record.service_key, []).append(
                         ServiceCandidate(
-                            key=service_key,
+                            key=record.service_key,
                             tid=tid,
-                            state="live",
-                            source="manager-spawned-pid",
-                            timestamp=timestamp,
-                            metadata=self._service_candidate_metadata(logged_payload),
+                            state="terminal",
+                            source="manager-local",
+                            timestamp=record.timestamp,
+                            reason="locally reaped child process",
                         )
                     )
                     continue
-            candidates_by_key.setdefault(service_key, []).append(
-                self._service_candidate_from_task_log(
-                    service_key=service_key,
-                    tid=tid,
-                    payload=logged_payload,
-                    timestamp=timestamp,
-                    runtime_handle=runtime_handles.get(tid),
+                candidates_by_key.setdefault(record.service_key, []).append(
+                    self._service_candidate_from_service_owner_record(record)
                 )
-            )
         return candidates_by_key
 
     def _observed_service_candidates(self, service_key: str) -> list[ServiceCandidate]:

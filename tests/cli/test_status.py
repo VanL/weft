@@ -12,10 +12,12 @@ import pytest
 from tests.conftest import run_cli
 from weft._constants import (
     WEFT_GLOBAL_LOG_QUEUE,
-    WEFT_MANAGERS_REGISTRY_QUEUE,
+    WEFT_MANAGER_OUTBOX_QUEUE,
+    WEFT_SERVICES_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
 )
 from weft.context import build_context
+from weft.core.service_convergence import build_manager_service_payload
 
 pytestmark = [pytest.mark.shared]
 
@@ -36,6 +38,30 @@ def _host_runtime_handle(pid: int) -> dict[str, Any]:
     }
 
 
+def _manager_service_payload(
+    context,
+    *,
+    tid: str,
+    status: str = "active",
+    name: str = "manager",
+    runtime_handle: dict[str, Any] | None = None,
+    requests: str = WEFT_SPAWN_REQUESTS_QUEUE,
+) -> dict[str, Any]:
+    return build_manager_service_payload(
+        context=context,
+        tid=tid,
+        name=name,
+        status=status,
+        queues={
+            "requests": requests,
+            "ctrl_in": f"T{tid}.ctrl_in",
+            "ctrl_out": f"T{tid}.ctrl_out",
+            "outbox": WEFT_MANAGER_OUTBOX_QUEUE,
+        },
+        runtime_handle=runtime_handle or {},
+    )
+
+
 def test_status_reports_no_managers(workdir) -> None:
     rc, out, err = run_cli("status", cwd=workdir)
 
@@ -47,17 +73,14 @@ def test_status_reports_no_managers(workdir) -> None:
 
 def test_status_json_includes_manager_records(workdir) -> None:
     context = build_context(spec_context=workdir)
-    registry = context.queue(WEFT_MANAGERS_REGISTRY_QUEUE, persistent=False)
+    registry = context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
 
-    record = {
-        "tid": "1762000000000000999",
-        "name": "cli-manager",
-        "status": "active",
-        "runtime_handle": _host_runtime_handle(os.getpid()),
-        "role": "manager",
-        "requests": WEFT_SPAWN_REQUESTS_QUEUE,
-        "timestamp": 1762000000000001999,
-    }
+    record = _manager_service_payload(
+        context,
+        tid="1762000000000000999",
+        name="cli-manager",
+        runtime_handle=_host_runtime_handle(os.getpid()),
+    )
 
     registry.write(json.dumps(record))
 
@@ -78,19 +101,18 @@ def test_status_json_includes_manager_records(workdir) -> None:
         registry.read_many(limit=100)
 
 
-def test_status_json_includes_noncanonical_manager_records(workdir) -> None:
+def test_status_json_excludes_wrong_service_key_manager_records(workdir) -> None:
     context = build_context(spec_context=workdir)
-    registry = context.queue(WEFT_MANAGERS_REGISTRY_QUEUE, persistent=False)
+    registry = context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
 
-    record = {
-        "tid": "1762000000000000888",
-        "name": "legacy-manager",
-        "status": "active",
-        "runtime_handle": _host_runtime_handle(os.getpid()),
-        "role": "manager",
-        "requests": "custom.manager.requests",
-        "timestamp": 1762000000000002888,
-    }
+    record = _manager_service_payload(
+        context,
+        tid="1762000000000000888",
+        name="custom-manager",
+        runtime_handle=_host_runtime_handle(os.getpid()),
+        requests="custom.manager.requests",
+    )
+    record["service_key"] = "manager:custom.manager.requests:test"
 
     registry.write(json.dumps(record))
 
@@ -102,27 +124,21 @@ def test_status_json_includes_noncanonical_manager_records(workdir) -> None:
 
         payload = json.loads(out)
         managers = payload["managers"]
-        assert any(item.get("tid") == record["tid"] for item in managers)
-        entry = next(item for item in managers if item.get("tid") == record["tid"])
-        assert entry["requests"] == "custom.manager.requests"
-        assert entry["runtime_handle"] == record["runtime_handle"]
+        assert not any(item.get("tid") == record["tid"] for item in managers)
     finally:
         registry.read_many(limit=100)
 
 
 def test_status_filters_stopped_managers_by_default(workdir) -> None:
     context = build_context(spec_context=workdir)
-    registry = context.queue(WEFT_MANAGERS_REGISTRY_QUEUE, persistent=False)
+    registry = context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
 
-    stopped_record = {
-        "tid": "1762000000000000123",
-        "name": "old-manager",
-        "status": "stopped",
-        "pid": 11111,
-        "role": "manager",
-        "requests": WEFT_SPAWN_REQUESTS_QUEUE,
-        "timestamp": 1762000000000002222,
-    }
+    stopped_record = _manager_service_payload(
+        context,
+        tid="1762000000000000123",
+        name="old-manager",
+        status="stopped",
+    )
 
     registry.write(json.dumps(stopped_record))
 

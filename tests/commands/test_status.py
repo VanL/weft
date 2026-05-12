@@ -19,7 +19,8 @@ from weft._constants import (
     INTERNAL_SERVICE_KEY_TASK_MONITOR,
     INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY,
     WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
-    WEFT_MANAGERS_REGISTRY_QUEUE,
+    WEFT_MANAGER_OUTBOX_QUEUE,
+    WEFT_SERVICES_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
 )
 from weft.commands import system as status_cmd
@@ -27,6 +28,7 @@ from weft.commands import tasks as task_cmd
 from weft.commands.status import cmd_status, collect_status
 from weft.context import build_context
 from weft.core.runners import host as host_runner
+from weft.core.service_convergence import build_manager_service_payload
 from weft.ext import RunnerRuntimeDescription
 
 pytestmark = [pytest.mark.shared]
@@ -53,6 +55,33 @@ def _runtime_handle(
         "observations": observed,
         "metadata": metadata or {},
     }
+
+
+def _manager_service_payload(
+    ctx,
+    *,
+    tid: str,
+    name: str = "manager",
+    status: str = "active",
+    runtime_handle: dict[str, Any] | None = None,
+    internal_requests: str | None = None,
+    internal_reserved: str | None = None,
+) -> dict[str, Any]:
+    return build_manager_service_payload(
+        context=ctx,
+        tid=tid,
+        name=name,
+        status=status,
+        queues={
+            "requests": WEFT_SPAWN_REQUESTS_QUEUE,
+            "internal_requests": internal_requests,
+            "internal_reserved": internal_reserved,
+            "outbox": WEFT_MANAGER_OUTBOX_QUEUE,
+            "ctrl_in": f"T{tid}.ctrl_in",
+            "ctrl_out": f"T{tid}.ctrl_out",
+        },
+        runtime_handle=runtime_handle or {},
+    )
 
 
 class _FakeQueueChangeMonitor:
@@ -244,30 +273,23 @@ def test_system_status_manager_snapshot_includes_internal_spawn_queues(
 ) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
-    registry = ctx.queue(WEFT_MANAGERS_REGISTRY_QUEUE, persistent=False)
+    registry = ctx.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
     tid = "1779000000000000001"
     internal_reserved = f"T{tid}.internal_reserved"
     try:
         registry.write(
             json.dumps(
-                {
-                    "tid": tid,
-                    "status": "active",
-                    "name": "manager",
-                    "timestamp": time.time_ns(),
-                    "role": "manager",
-                    "requests": WEFT_SPAWN_REQUESTS_QUEUE,
-                    "internal_requests": WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
-                    "internal_reserved": internal_reserved,
-                    "outbox": "weft.manager.outbox",
-                    "ctrl_in": f"T{tid}.ctrl_in",
-                    "ctrl_out": f"T{tid}.ctrl_out",
-                    "runtime_handle": _runtime_handle(
+                _manager_service_payload(
+                    ctx,
+                    tid=tid,
+                    internal_requests=WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
+                    internal_reserved=internal_reserved,
+                    runtime_handle=_runtime_handle(
                         "host",
                         str(os.getpid()),
                         host_pids=[os.getpid()],
                     ),
-                }
+                )
             )
         )
     finally:
@@ -729,21 +751,18 @@ def test_status_preserves_active_manager_while_terminal_manager_row_stays_termin
     started = 1_762_000_000_000_000_000
     completed = started + 1_000_000_000
 
-    ctx.queue(WEFT_MANAGERS_REGISTRY_QUEUE, persistent=False).write(
+    ctx.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False).write(
         json.dumps(
-            {
-                "tid": active_tid,
-                "name": "manager",
-                "status": "active",
-                "runtime_handle": _runtime_handle(
+            _manager_service_payload(
+                ctx,
+                tid=active_tid,
+                runtime_handle=_runtime_handle(
                     "manager-supervisor",
                     "supervisor-active",
                     kind="supervised-process",
                     authority="external-supervisor",
                 ),
-                "role": "manager",
-                "requests": WEFT_SPAWN_REQUESTS_QUEUE,
-            }
+            )
         )
     )
     _write_task_log_entry(
@@ -1264,7 +1283,7 @@ def test_cmd_status_keeps_runtime_less_manager_running_when_registry_is_live(
         completed_at=None,
         name="live-manager",
     )
-    ctx.queue(WEFT_MANAGERS_REGISTRY_QUEUE, persistent=False).write(
+    ctx.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False).write(
         json.dumps(
             {
                 "tid": tid,
@@ -1324,20 +1343,18 @@ def test_cmd_status_marks_superseded_manager_record_failed(
         name="active-manager",
         metadata={"role": "manager"},
     )
-    ctx.queue(WEFT_MANAGERS_REGISTRY_QUEUE, persistent=False).write(
+    ctx.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False).write(
         json.dumps(
-            {
-                "tid": active_tid,
-                "name": "active-manager",
-                "status": "active",
-                "runtime_handle": _runtime_handle(
+            _manager_service_payload(
+                ctx,
+                tid=active_tid,
+                name="active-manager",
+                runtime_handle=_runtime_handle(
                     "host",
                     str(os.getpid()),
                     host_pids=[os.getpid()],
                 ),
-                "role": "manager",
-                "requests": WEFT_SPAWN_REQUESTS_QUEUE,
-            }
+            )
         )
     )
 

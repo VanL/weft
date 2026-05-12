@@ -25,13 +25,15 @@ from tests.taskspec import fixtures as taskspec_fixtures
 from weft._constants import (
     TERMINAL_TASK_STATUSES,
     WEFT_GLOBAL_LOG_QUEUE,
-    WEFT_MANAGERS_REGISTRY_QUEUE,
+    WEFT_MANAGER_OUTBOX_QUEUE,
+    WEFT_SERVICES_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
 )
 from weft.commands import manager as manager_cmd
 from weft.commands import tasks as task_cmd
 from weft.context import WeftContext, build_context
 from weft.core.endpoints import resolve_endpoint
+from weft.core.service_convergence import build_manager_service_payload
 from weft.helpers import pid_is_live
 
 PROCESS_SCRIPT = Path(__file__).resolve().parents[1] / "tasks" / "process_target.py"
@@ -56,6 +58,39 @@ def _write_queue_message(
         queue.write(payload)
     finally:
         queue.close()
+
+
+def _host_runtime_handle(pid: int) -> dict[str, Any]:
+    return {
+        "runner": "host",
+        "kind": "process",
+        "id": str(pid),
+        "control": {"authority": "host-pid"},
+        "observations": {"host_pids": [pid]},
+        "metadata": {},
+    }
+
+
+def _manager_service_payload(
+    context: WeftContext,
+    *,
+    tid: str,
+    name: str = "manager",
+    runtime_handle: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return build_manager_service_payload(
+        context=context,
+        tid=tid,
+        name=name,
+        status="active",
+        queues={
+            "requests": WEFT_SPAWN_REQUESTS_QUEUE,
+            "ctrl_in": f"T{tid}.ctrl_in",
+            "ctrl_out": f"T{tid}.ctrl_out",
+            "outbox": WEFT_MANAGER_OUTBOX_QUEUE,
+        },
+        runtime_handle=runtime_handle or {},
+    )
 
 
 def _wait_for_endpoint_claim(
@@ -2364,19 +2399,17 @@ def test_cli_run_wait_returns_timeout_exit_code(workdir, weft_harness) -> None:
 def test_cli_run_prunes_stale_manager(workdir, weft_harness) -> None:
     weft_harness.ensure_foreground_manager()
     context = weft_harness.context
-    registry = context.queue(WEFT_MANAGERS_REGISTRY_QUEUE, persistent=False)
+    registry = context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
     try:
         stale_pid = 999_999
         registry.write(
             json.dumps(
-                {
-                    "tid": "1762000000000000000",
-                    "name": "stale-manager",
-                    "status": "active",
-                    "pid": stale_pid,
-                    "role": "manager",
-                    "requests": WEFT_SPAWN_REQUESTS_QUEUE,
-                }
+                _manager_service_payload(
+                    context,
+                    tid="1762000000000000000",
+                    name="stale-manager",
+                    runtime_handle=_host_runtime_handle(stale_pid),
+                )
             )
         )
 
@@ -2395,7 +2428,13 @@ def test_cli_run_prunes_stale_manager(workdir, weft_harness) -> None:
             json.loads(item)
             for item, _ in registry.peek_many(limit=100, with_timestamps=True)
         ]
-        assert all(record.get("pid") != stale_pid for record in payloads)
+        assert all(
+            stale_pid
+            not in record.get("runtime_handle", {})
+            .get("observations", {})
+            .get("host_pids", [])
+            for record in payloads
+        )
         assert any(record.get("role") == "manager" for record in payloads)
     finally:
         registry.close()

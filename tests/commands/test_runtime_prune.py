@@ -18,8 +18,10 @@ from weft._constants import (
     RUNTIME_PRUNE_CLASS_UNSUPPORTED_PIPELINE,
     WEFT_ENDPOINTS_REGISTRY_QUEUE,
     WEFT_GLOBAL_LOG_QUEUE,
-    WEFT_MANAGERS_REGISTRY_QUEUE,
+    WEFT_MANAGER_OUTBOX_QUEUE,
     WEFT_PIPELINES_STATE_QUEUE,
+    WEFT_SERVICES_REGISTRY_QUEUE,
+    WEFT_SPAWN_REQUESTS_QUEUE,
     WEFT_STREAMING_SESSIONS_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
 )
@@ -29,6 +31,7 @@ from weft.commands.runtime_prune import (
 )
 from weft.context import build_context
 from weft.core.endpoints import build_endpoint_record_payload
+from weft.core.service_convergence import build_manager_service_payload
 from weft.ext import RunnerHandle
 from weft.helpers import iter_queue_json_entries
 
@@ -52,6 +55,29 @@ def _write_json(ctx, queue_name: str, payload: dict[str, object]) -> int:
         return latest
     finally:
         queue.close()
+
+
+def _manager_service_payload(
+    ctx,
+    *,
+    tid: str,
+    status: str = "active",
+    name: str = "manager",
+    runtime_handle: dict[str, object] | None = None,
+) -> dict[str, object]:
+    return build_manager_service_payload(
+        context=ctx,
+        tid=tid,
+        name=name,
+        status=status,
+        queues={
+            "requests": WEFT_SPAWN_REQUESTS_QUEUE,
+            "ctrl_in": f"T{tid}.ctrl_in",
+            "ctrl_out": f"T{tid}.ctrl_out",
+            "outbox": WEFT_MANAGER_OUTBOX_QUEUE,
+        },
+        runtime_handle=runtime_handle or {},
+    )
 
 
 def _read_rows(ctx, queue_name: str) -> list[tuple[dict[str, object], int]]:
@@ -127,18 +153,26 @@ def test_manager_prune_reports_superseded_and_stale_active_rows(tmp_path) -> Non
     ctx = _context(tmp_path)
     old_stopped = _write_json(
         ctx,
-        WEFT_MANAGERS_REGISTRY_QUEUE,
-        {"tid": "1770000000000000010", "status": "stopped", "name": "manager"},
+        WEFT_SERVICES_REGISTRY_QUEUE,
+        _manager_service_payload(
+            ctx,
+            tid="1770000000000000010",
+            status="stopped",
+        ),
     )
     _write_json(
         ctx,
-        WEFT_MANAGERS_REGISTRY_QUEUE,
-        {"tid": "1770000000000000010", "status": "stopped", "name": "manager"},
+        WEFT_SERVICES_REGISTRY_QUEUE,
+        _manager_service_payload(
+            ctx,
+            tid="1770000000000000010",
+            status="stopped",
+        ),
     )
     stale_active = _write_json(
         ctx,
-        WEFT_MANAGERS_REGISTRY_QUEUE,
-        {"tid": "1770000000000000011", "status": "active", "name": "manager"},
+        WEFT_SERVICES_REGISTRY_QUEUE,
+        _manager_service_payload(ctx, tid="1770000000000000011"),
     )
     live_handle = RunnerHandle(
         runner="host",
@@ -149,13 +183,12 @@ def test_manager_prune_reports_superseded_and_stale_active_rows(tmp_path) -> Non
     )
     live_active = _write_json(
         ctx,
-        WEFT_MANAGERS_REGISTRY_QUEUE,
-        {
-            "tid": "1770000000000000012",
-            "status": "active",
-            "name": "manager",
-            "runtime_handle": live_handle.to_dict(),
-        },
+        WEFT_SERVICES_REGISTRY_QUEUE,
+        _manager_service_payload(
+            ctx,
+            tid="1770000000000000012",
+            runtime_handle=live_handle.to_dict(),
+        ),
     )
 
     result = run_runtime_prune(

@@ -30,27 +30,30 @@ from weft._constants import (
     INTERNAL_RUNTIME_TASK_CLASS_PIPELINE,
     INTERNAL_RUNTIME_TASK_CLASS_PIPELINE_EDGE,
     INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR,
-    INTERNAL_SERVICE_AUTHORITY_MANAGER,
-    INTERNAL_SERVICE_AUTHORITY_METADATA_KEY,
     INTERNAL_SERVICE_KEY_HEARTBEAT,
     INTERNAL_SERVICE_KEY_METADATA_KEY,
     INTERNAL_SERVICE_KEY_TASK_MONITOR,
     INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY,
     MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY,
     PIPELINE_RUNTIME_METADATA_KEY,
+    SERVICE_TYPE_MANAGED,
     TERMINAL_ENVELOPE_TYPE,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
     WEFT_MANAGER_CTRL_IN_QUEUE,
     WEFT_MANAGER_CTRL_OUT_QUEUE,
     WEFT_MANAGER_OUTBOX_QUEUE,
-    WEFT_MANAGERS_REGISTRY_QUEUE,
+    WEFT_SERVICES_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
     WRAPPER_LOST_ERROR,
     load_config,
 )
 from weft.core.manager import DispatchOwnership, ManagedChild, Manager
+from weft.core.service_convergence import (
+    build_manager_service_payload,
+    build_service_owner_payload,
+)
 from weft.core.tasks import (
     Consumer,
     HeartbeatTask,
@@ -108,6 +111,61 @@ def _host_runtime_handle(pid: int) -> dict[str, object]:
         "observations": {"host_pids": [pid]},
         "metadata": {},
     }
+
+
+def _write_managed_service_owner(
+    make_queue: Callable[[str], Any],
+    *,
+    service_key: str,
+    tid: str,
+    runtime_handle: dict[str, object] | None = None,
+    status: str = "active",
+    ctrl_in: str | None = None,
+    ctrl_out: str | None = None,
+) -> None:
+    make_queue(WEFT_SERVICES_REGISTRY_QUEUE).write(
+        json.dumps(
+            build_service_owner_payload(
+                service_key=service_key,
+                service_type=SERVICE_TYPE_MANAGED,
+                owner_tid=tid,
+                status=status,
+                name="managed-service",
+                queues={
+                    "ctrl_in": ctrl_in or f"T{tid}.ctrl_in",
+                    "ctrl_out": ctrl_out or f"T{tid}.ctrl_out",
+                },
+                runtime_handle=runtime_handle,
+            )
+        )
+    )
+
+
+def _manager_service_payload(
+    manager: Manager,
+    *,
+    tid: str,
+    name: str = "manager",
+    status: str = "active",
+    runtime_handle: dict[str, object] | None = None,
+    requests: str = WEFT_SPAWN_REQUESTS_QUEUE,
+    ctrl_in: str | None = None,
+    ctrl_out: str | None = None,
+    outbox: str = WEFT_MANAGER_OUTBOX_QUEUE,
+) -> dict[str, object]:
+    return build_manager_service_payload(
+        context=manager._manager_context(),
+        tid=tid,
+        name=name,
+        status=status,
+        queues={
+            "requests": requests,
+            "ctrl_in": ctrl_in or WEFT_MANAGER_CTRL_IN_QUEUE,
+            "ctrl_out": ctrl_out or WEFT_MANAGER_CTRL_OUT_QUEUE,
+            "outbox": outbox,
+        },
+        runtime_handle=runtime_handle or {},
+    )
 
 
 def _external_supervisor_runtime_handle() -> dict[str, object]:
@@ -1356,35 +1414,11 @@ def test_task_monitor_manager_spawned_pid_counts_as_live_owner(
     manager._task_monitor_enabled = True
     manager._queue_names["inbox"] = WEFT_SPAWN_REQUESTS_QUEUE
     child_tid = "1777000000000000053"
-    make_queue(WEFT_GLOBAL_LOG_QUEUE).write(
-        json.dumps(
-            {
-                "tid": manager.tid,
-                "event": "task_spawned",
-                "status": "running",
-                "child_tid": child_tid,
-                "child_pid": os.getpid(),
-                "child_taskspec": {
-                    "tid": child_tid,
-                    "metadata": {
-                        "internal": True,
-                        "role": "task_monitor",
-                        INTERNAL_RUNTIME_TASK_CLASS_KEY: (
-                            INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR
-                        ),
-                        INTERNAL_SERVICE_KEY_METADATA_KEY: (
-                            INTERNAL_SERVICE_KEY_TASK_MONITOR
-                        ),
-                    },
-                    "io": {
-                        "control": {
-                            "ctrl_in": f"T{child_tid}.ctrl_in",
-                            "ctrl_out": f"T{child_tid}.ctrl_out",
-                        }
-                    },
-                },
-            }
-        )
+    _write_managed_service_owner(
+        make_queue,
+        service_key=INTERNAL_SERVICE_KEY_TASK_MONITOR,
+        tid=child_tid,
+        runtime_handle=_host_runtime_handle(os.getpid()),
     )
     monkeypatch.setattr(
         manager,
@@ -1541,31 +1575,10 @@ def test_task_monitor_recent_log_without_liveness_blocks_duplicate_restart(
     manager._task_monitor_enabled = True
     manager._queue_names["inbox"] = WEFT_SPAWN_REQUESTS_QUEUE
     recent_tid = str(time.time_ns())
-    make_queue(WEFT_GLOBAL_LOG_QUEUE).write(
-        json.dumps(
-            {
-                "tid": recent_tid,
-                "status": "running",
-                "taskspec": {
-                    "metadata": {
-                        "internal": True,
-                        "role": "task_monitor",
-                        INTERNAL_RUNTIME_TASK_CLASS_KEY: (
-                            INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR
-                        ),
-                        INTERNAL_SERVICE_KEY_METADATA_KEY: (
-                            INTERNAL_SERVICE_KEY_TASK_MONITOR
-                        ),
-                    },
-                    "io": {
-                        "control": {
-                            "ctrl_in": f"T{recent_tid}.ctrl_in",
-                            "ctrl_out": f"T{recent_tid}.ctrl_out",
-                        }
-                    },
-                },
-            }
-        )
+    _write_managed_service_owner(
+        make_queue,
+        service_key=INTERNAL_SERVICE_KEY_TASK_MONITOR,
+        tid=recent_tid,
     )
     monkeypatch.setattr(
         manager,
@@ -1599,33 +1612,10 @@ def test_task_monitor_duplicate_live_candidates_get_kill_signal(
     canonical_tid = "1777000000000000200"
     duplicate_tid = "1777000000000000300"
     for tid in (canonical_tid, duplicate_tid):
-        pid = 424200 if tid == canonical_tid else 424201
-        make_queue(WEFT_GLOBAL_LOG_QUEUE).write(
-            json.dumps(
-                {
-                    "tid": tid,
-                    "status": "running",
-                    "taskspec": {
-                        "metadata": {
-                            "internal": True,
-                            "role": "task_monitor",
-                            INTERNAL_RUNTIME_TASK_CLASS_KEY: (
-                                INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR
-                            ),
-                            INTERNAL_SERVICE_KEY_METADATA_KEY: (
-                                INTERNAL_SERVICE_KEY_TASK_MONITOR
-                            ),
-                        },
-                        "state": {"pid": pid},
-                        "io": {
-                            "control": {
-                                "ctrl_in": f"T{tid}.ctrl_in",
-                                "ctrl_out": f"T{tid}.ctrl_out",
-                            }
-                        },
-                    },
-                }
-            )
+        _write_managed_service_owner(
+            make_queue,
+            service_key=INTERNAL_SERVICE_KEY_TASK_MONITOR,
+            tid=tid,
         )
     monkeypatch.setattr(
         manager,
@@ -1669,42 +1659,21 @@ def test_task_monitor_duplicate_manager_spawned_candidates_do_not_force_kill_raw
     duplicate_tid = "1777000000000000500"
     canonical_pid = 424200
     duplicate_pid = 424201
-    for tid, pid in (
+    for tid, _pid in (
         (canonical_tid, canonical_pid),
         (duplicate_tid, duplicate_pid),
     ):
-        make_queue(WEFT_GLOBAL_LOG_QUEUE).write(
-            json.dumps(
-                {
-                    "tid": manager.tid,
-                    "event": "task_spawned",
-                    "status": "running",
-                    "child_tid": tid,
-                    "child_pid": pid,
-                    "child_taskspec": {
-                        "tid": tid,
-                        "metadata": {
-                            "internal": True,
-                            "role": "task_monitor",
-                            INTERNAL_RUNTIME_TASK_CLASS_KEY: (
-                                INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR
-                            ),
-                            INTERNAL_SERVICE_KEY_METADATA_KEY: (
-                                INTERNAL_SERVICE_KEY_TASK_MONITOR
-                            ),
-                        },
-                        "state": {"pid": pid},
-                        "io": {
-                            "control": {
-                                "ctrl_in": f"T{tid}.ctrl_in",
-                                "ctrl_out": f"T{tid}.ctrl_out",
-                            }
-                        },
-                    },
-                }
-            )
+        _write_managed_service_owner(
+            make_queue,
+            service_key=INTERNAL_SERVICE_KEY_TASK_MONITOR,
+            tid=tid,
         )
     monkeypatch.setattr(manager, "_pid_alive", lambda pid: pid is not None)
+    monkeypatch.setattr(
+        manager_mod,
+        "send_keyed_ping_probe",
+        lambda *args, **kwargs: SimpleNamespace(matched=object(), error=None),
+    )
     monkeypatch.setattr(
         manager,
         "_evaluate_dispatch_ownership",
@@ -1805,43 +1774,13 @@ def test_task_monitor_duplicate_runtime_handle_force_kills_scoped_host_pid(
     duplicate_tid = "1777000000000000900"
     duplicate_pid = 424901
     for tid in (canonical_tid, duplicate_tid):
-        make_queue(WEFT_GLOBAL_LOG_QUEUE).write(
-            json.dumps(
-                {
-                    "tid": tid,
-                    "status": "running",
-                    "taskspec": {
-                        "metadata": {
-                            "internal": True,
-                            "role": "task_monitor",
-                            INTERNAL_RUNTIME_TASK_CLASS_KEY: (
-                                INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR
-                            ),
-                            INTERNAL_SERVICE_KEY_METADATA_KEY: (
-                                INTERNAL_SERVICE_KEY_TASK_MONITOR
-                            ),
-                        },
-                        "io": {
-                            "control": {
-                                "ctrl_in": f"T{tid}.ctrl_in",
-                                "ctrl_out": f"T{tid}.ctrl_out",
-                            }
-                        },
-                    },
-                }
-            )
-        )
-        make_queue(WEFT_TID_MAPPINGS_QUEUE).write(
-            json.dumps(
-                {
-                    "short": tid[-8:],
-                    "full": tid,
-                    "role": "task",
-                    "runtime_handle": _host_runtime_handle(duplicate_pid)
-                    if tid == duplicate_tid
-                    else _host_runtime_handle(424900),
-                }
-            )
+        _write_managed_service_owner(
+            make_queue,
+            service_key=INTERNAL_SERVICE_KEY_TASK_MONITOR,
+            tid=tid,
+            runtime_handle=_host_runtime_handle(duplicate_pid)
+            if tid == duplicate_tid
+            else _host_runtime_handle(424900),
         )
     monkeypatch.setattr(
         manager,
@@ -2221,31 +2160,10 @@ def test_task_monitor_matching_pong_blocks_duplicate_restart(
     manager._task_monitor_enabled = True
     manager._queue_names["inbox"] = WEFT_SPAWN_REQUESTS_QUEUE
     old_tid = "1777000000000000200"
-    make_queue(WEFT_GLOBAL_LOG_QUEUE).write(
-        json.dumps(
-            {
-                "tid": old_tid,
-                "status": "running",
-                "taskspec": {
-                    "metadata": {
-                        "internal": True,
-                        "role": "task_monitor",
-                        INTERNAL_RUNTIME_TASK_CLASS_KEY: (
-                            INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR
-                        ),
-                        INTERNAL_SERVICE_KEY_METADATA_KEY: (
-                            INTERNAL_SERVICE_KEY_TASK_MONITOR
-                        ),
-                    },
-                    "io": {
-                        "control": {
-                            "ctrl_in": f"T{old_tid}.ctrl_in",
-                            "ctrl_out": f"T{old_tid}.ctrl_out",
-                        }
-                    },
-                },
-            }
-        )
+    _write_managed_service_owner(
+        make_queue,
+        service_key=INTERNAL_SERVICE_KEY_TASK_MONITOR,
+        tid=old_tid,
     )
     monkeypatch.setattr(
         manager,
@@ -2512,7 +2430,7 @@ def test_manager_terminal_envelope_skips_when_task_terminal_proof_exists(
 
 def test_manager_registry_entries(manager_setup) -> None:
     manager, make_queue = manager_setup
-    registry_queue = make_queue(WEFT_MANAGERS_REGISTRY_QUEUE)
+    registry_queue = make_queue(WEFT_SERVICES_REGISTRY_QUEUE)
     entries = [json.loads(item) for item in drain(registry_queue)]
     relevant = [entry for entry in entries if entry.get("tid") == manager.tid]
     assert len(relevant) == 1
@@ -2529,7 +2447,7 @@ def test_manager_refreshes_active_registry_heartbeat(
     monkeypatch,
 ) -> None:
     manager, make_queue = manager_setup
-    registry_queue = make_queue(WEFT_MANAGERS_REGISTRY_QUEUE)
+    registry_queue = make_queue(WEFT_SERVICES_REGISTRY_QUEUE)
     before = pending_timestamps(registry_queue)
 
     monkeypatch.setattr(manager_mod, "MANAGER_REGISTRY_HEARTBEAT_INTERVAL_SECONDS", 0.0)
@@ -2543,6 +2461,65 @@ def test_manager_refreshes_active_registry_heartbeat(
     assert after != before
     assert len(relevant) == 1
     assert relevant[0]["status"] == "active"
+
+
+def test_manager_registry_prunes_expired_rows_on_refresh(
+    manager_setup,
+    monkeypatch,
+) -> None:
+    manager, make_queue = manager_setup
+    registry_queue = make_queue(WEFT_SERVICES_REGISTRY_QUEUE)
+    drain(registry_queue)
+    registry_queue.write(
+        json.dumps(
+            _manager_service_payload(
+                manager,
+                tid=str(int(manager.tid) - 10),
+                name="old-manager",
+                runtime_handle=_host_runtime_handle(os.getpid()),
+            )
+        )
+    )
+
+    monkeypatch.setattr(manager_mod, "MANAGER_REGISTRY_HEARTBEAT_INTERVAL_SECONDS", 0.0)
+    monkeypatch.setattr(manager, "_manager_registry_retention_ns", lambda: 0)
+    monkeypatch.setattr(
+        manager_mod,
+        "MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS",
+        -1.0,
+    )
+    manager._refresh_manager_registration()
+
+    entries = [json.loads(item) for item in drain(registry_queue)]
+    assert all(entry.get("name") != "old-manager" for entry in entries)
+    assert [entry["tid"] for entry in entries if entry.get("tid") == manager.tid] == [
+        manager.tid
+    ]
+
+
+def test_manager_does_not_publish_when_recent_lower_canonical_manager_exists(
+    manager_setup,
+    monkeypatch,
+) -> None:
+    manager, make_queue = manager_setup
+    registry_queue = make_queue(WEFT_SERVICES_REGISTRY_QUEUE)
+    drain(registry_queue)
+    lower_tid = str(int(manager.tid) - 1)
+    registry_queue.write(
+        json.dumps(
+            _manager_service_payload(
+                manager,
+                tid=lower_tid,
+                runtime_handle=_host_runtime_handle(os.getpid()),
+            )
+        )
+    )
+
+    monkeypatch.setattr(manager_mod, "MANAGER_REGISTRY_HEARTBEAT_INTERVAL_SECONDS", 0.0)
+    manager._refresh_manager_registration()
+
+    entries = [json.loads(item) for item in drain(registry_queue)]
+    assert [entry["tid"] for entry in entries] == [lower_tid]
 
 
 def test_manager_liveness_rejects_stale_external_supervisor_record(
@@ -3702,25 +3679,20 @@ def test_manager_leadership_ignores_noncanonical_lower_manager(
     manager_setup,
 ) -> None:
     manager, make_queue = manager_setup
-    registry_queue = make_queue(WEFT_MANAGERS_REGISTRY_QUEUE)
+    registry_queue = make_queue(WEFT_SERVICES_REGISTRY_QUEUE)
     lower_tid = str(int(manager.tid) - 1)
-    registry_queue.write(
-        json.dumps(
-            {
-                "tid": lower_tid,
-                "name": "legacy-manager",
-                "status": "active",
-                "pid": os.getpid(),
-                "timestamp": registry_queue.generate_timestamp(),
-                "inbox": "legacy.requests",
-                "requests": "legacy.requests",
-                "ctrl_in": "legacy.ctrl_in",
-                "ctrl_out": "legacy.ctrl_out",
-                "outbox": "legacy.outbox",
-                "role": "manager",
-            }
-        )
+    payload = _manager_service_payload(
+        manager,
+        tid=lower_tid,
+        name="custom-manager",
+        runtime_handle=_host_runtime_handle(os.getpid()),
+        requests="custom.requests",
+        ctrl_in="custom.ctrl_in",
+        ctrl_out="custom.ctrl_out",
+        outbox="custom.outbox",
     )
+    payload["service_key"] = "manager:custom.requests:test"
+    registry_queue.write(json.dumps(payload))
 
     yielded = manager._maybe_yield_leadership(force=True)
 
@@ -3734,25 +3706,17 @@ def test_manager_leadership_yields_to_canonical_lower_manager(
     manager_setup,
 ) -> None:
     manager, make_queue = manager_setup
-    registry_queue = make_queue(WEFT_MANAGERS_REGISTRY_QUEUE)
+    registry_queue = make_queue(WEFT_SERVICES_REGISTRY_QUEUE)
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     drain(log_queue)
     lower_tid = str(int(manager.tid) - 1)
     registry_queue.write(
         json.dumps(
-            {
-                "tid": lower_tid,
-                "name": "manager",
-                "status": "active",
-                "runtime_handle": _host_runtime_handle(os.getpid()),
-                "timestamp": registry_queue.generate_timestamp(),
-                "inbox": WEFT_SPAWN_REQUESTS_QUEUE,
-                "requests": WEFT_SPAWN_REQUESTS_QUEUE,
-                "ctrl_in": WEFT_MANAGER_CTRL_IN_QUEUE,
-                "ctrl_out": WEFT_MANAGER_CTRL_OUT_QUEUE,
-                "outbox": WEFT_MANAGER_OUTBOX_QUEUE,
-                "role": "manager",
-            }
+            _manager_service_payload(
+                manager,
+                tid=lower_tid,
+                runtime_handle=_host_runtime_handle(os.getpid()),
+            )
         )
     )
 
@@ -4264,35 +4228,11 @@ def test_manager_autostart_skips_active_templates(
         duration=0.1,
     )
 
-    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     active_tid = str(int(unique_tid) - 1)
-    log_queue.write(
-        json.dumps(
-            {
-                "event": "task_spawned",
-                "tid": active_tid,
-                "status": "running",
-                "taskspec": {
-                    "metadata": {
-                        INTERNAL_AUTOSTART_ENABLED_METADATA_KEY: True,
-                        INTERNAL_AUTOSTART_SOURCE_METADATA_KEY: str(
-                            template_path.resolve()
-                        ),
-                        INTERNAL_SERVICE_KEY_METADATA_KEY: str(template_path.resolve()),
-                        INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY: "once",
-                        INTERNAL_SERVICE_AUTHORITY_METADATA_KEY: (
-                            INTERNAL_SERVICE_AUTHORITY_MANAGER
-                        ),
-                    },
-                    "io": {
-                        "control": {
-                            "ctrl_in": f"T{active_tid}.ctrl_in",
-                            "ctrl_out": f"T{active_tid}.ctrl_out",
-                        }
-                    },
-                },
-            }
-        )
+    _write_managed_service_owner(
+        make_queue,
+        service_key=str(template_path.resolve()),
+        tid=active_tid,
     )
     monkeypatch.setattr(
         manager_mod,
