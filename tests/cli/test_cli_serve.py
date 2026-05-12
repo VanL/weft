@@ -363,7 +363,7 @@ def test_serve_runs_in_foreground_and_reuses_single_manager(
         assert rc == 0
         assert err == ""
         assert len(out) == 19 and out.isdigit()
-        weft_harness.wait_for_completion(out, timeout=10.0)
+        weft_harness.wait_for_completion(out)
 
         active_records = _active_canonical_manager_records(context)
         assert [entry["tid"] for entry in active_records] == [manager_tid]
