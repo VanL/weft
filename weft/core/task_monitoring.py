@@ -59,11 +59,7 @@ from weft.core.manager_runtime import (
     normalize_manager_registry_record,
 )
 from weft.core.pruning.apply import apply_exact_prune_candidates
-from weft.core.service_convergence import (
-    collect_service_owner_records,
-    manager_service_key,
-    reduce_service_ownership,
-)
+from weft.core.service_convergence import parse_service_owner_row
 from weft.helpers import iter_queue_entries
 
 TaskLogObserver = Callable[[str, str, int], None]
@@ -866,16 +862,31 @@ def _manager_registry_candidates(
     now_ns: int,
 ) -> tuple[TaskMonitorCandidate, ...]:
     rows = _read_json_queue(ctx, WEFT_SERVICES_REGISTRY_QUEUE)
-    service_key = manager_service_key(ctx)
-    read = collect_service_owner_records(
-        ((payload, message_id) for payload, message_id, _raw_message in rows),
-        service_key=service_key,
-        service_type="manager",
-    )
     payload_by_id = {message_id: payload for payload, message_id, _raw in rows}
     raw_by_id = {message_id: raw for _payload, message_id, raw in rows}
     record_by_id: dict[int, dict[str, Any]] = {}
-    for payload, message_id, _raw_message in rows:
+    grouped: dict[str, list[int]] = defaultdict(list)
+    candidates: list[TaskMonitorCandidate] = []
+    for payload, message_id, raw_message in rows:
+        parse_result = parse_service_owner_row(payload, timestamp=message_id)
+        if parse_result.disposition == "malformed":
+            if _is_old_enough(
+                message_id,
+                now_ns,
+                RUNTIME_PRUNE_DEFAULT_MIN_AGE_SECONDS,
+            ):
+                candidates.append(
+                    _runtime_candidate(
+                        tid=str(payload.get("owner_tid") or payload.get("tid") or ""),
+                        queue_name=WEFT_SERVICES_REGISTRY_QUEUE,
+                        message_id=message_id,
+                        candidate_class=RUNTIME_PRUNE_CLASS_STALE_MANAGER,
+                        reason="malformed_service_owner_row",
+                        raw_message=raw_message,
+                        payload=payload,
+                    )
+                )
+            continue
         record = normalize_manager_registry_record(
             ctx,
             payload,
@@ -887,93 +898,53 @@ def _manager_registry_candidates(
         if not isinstance(tid, str) or not tid:
             continue
         record_by_id[message_id] = record
+        grouped[tid].append(message_id)
 
-    candidates: list[TaskMonitorCandidate] = []
-    candidate_ids: set[int] = set()
-    for owner_tid in sorted({record.owner_tid for record in read.records}):
-        decision = reduce_service_ownership(
-            service_key,
-            read.records,
-            own_tid=owner_tid,
-            now_ns=now_ns,
-            ttl_ns=int(RUNTIME_PRUNE_DEFAULT_MIN_AGE_SECONDS * 1_000_000_000),
-        )
-        candidate_ids.update(decision.older_self_message_ids)
-
-    for message_id in sorted(candidate_ids):
-        candidate_payload = payload_by_id.get(message_id)
-        candidate_raw_message = raw_by_id.get(message_id)
-        candidate_record = record_by_id.get(message_id)
-        if (
-            candidate_payload is None
-            or candidate_raw_message is None
-            or candidate_record is None
-        ):
-            continue
-        if not _is_old_enough(
-            message_id,
-            now_ns,
-            RUNTIME_PRUNE_DEFAULT_MIN_AGE_SECONDS,
-        ):
-            continue
-        tid = candidate_record.get("tid")
-        if not isinstance(tid, str):
-            continue
-        if candidate_record.get(
-            "status"
-        ) == "active" and manager_registry_record_is_stale(candidate_record):
+    for tid, message_ids in grouped.items():
+        ordered = sorted(message_ids, reverse=True)
+        protected = set(ordered[:RUNTIME_PRUNE_DEFAULT_KEEP_RECENT_PER_KEY])
+        for message_id in ordered:
+            record = record_by_id.get(message_id)
+            candidate_payload = payload_by_id.get(message_id)
+            candidate_raw_message = raw_by_id.get(message_id)
+            if (
+                record is None
+                or candidate_payload is None
+                or candidate_raw_message is None
+            ):
+                continue
+            if not _is_old_enough(
+                message_id,
+                now_ns,
+                RUNTIME_PRUNE_DEFAULT_MIN_AGE_SECONDS,
+            ):
+                continue
+            if record.get("status") == "active" and manager_registry_record_is_stale(
+                record
+            ):
+                candidates.append(
+                    _runtime_candidate(
+                        tid=tid,
+                        queue_name=WEFT_SERVICES_REGISTRY_QUEUE,
+                        message_id=message_id,
+                        candidate_class=RUNTIME_PRUNE_CLASS_STALE_MANAGER,
+                        reason="active_manager_runtime_handle_not_live",
+                        raw_message=candidate_raw_message,
+                        payload=candidate_payload,
+                    )
+                )
+                continue
+            if message_id in protected:
+                continue
             candidates.append(
                 _runtime_candidate(
                     tid=tid,
                     queue_name=WEFT_SERVICES_REGISTRY_QUEUE,
                     message_id=message_id,
-                    candidate_class=RUNTIME_PRUNE_CLASS_STALE_MANAGER,
-                    reason="active_manager_runtime_handle_not_live",
+                    candidate_class=RUNTIME_PRUNE_CLASS_SUPERSEDED_MANAGER,
+                    reason="older_than_min_age_and_not_latest_for_manager_tid",
                     raw_message=candidate_raw_message,
                     payload=candidate_payload,
-                )
-            )
-            continue
-        candidates.append(
-            _runtime_candidate(
-                tid=tid,
-                queue_name=WEFT_SERVICES_REGISTRY_QUEUE,
-                message_id=message_id,
-                candidate_class=RUNTIME_PRUNE_CLASS_SUPERSEDED_MANAGER,
-                reason="older_than_min_age_and_not_latest_for_manager_tid",
-                raw_message=candidate_raw_message,
-                payload=candidate_payload,
-            )
-        )
-
-    for message_id, record in record_by_id.items():
-        if message_id in candidate_ids:
-            continue
-        if not _is_old_enough(
-            message_id,
-            now_ns,
-            RUNTIME_PRUNE_DEFAULT_MIN_AGE_SECONDS,
-        ):
-            continue
-        stale_payload = payload_by_id.get(message_id)
-        stale_raw_message = raw_by_id.get(message_id)
-        if stale_payload is None or stale_raw_message is None:
-            continue
-        tid = record.get("tid")
-        if not isinstance(tid, str):
-            continue
-        if record.get("status") == "active" and manager_registry_record_is_stale(
-            record
-        ):
-            candidates.append(
-                _runtime_candidate(
-                    tid=tid,
-                    queue_name=WEFT_SERVICES_REGISTRY_QUEUE,
-                    message_id=message_id,
-                    candidate_class=RUNTIME_PRUNE_CLASS_STALE_MANAGER,
-                    reason="active_manager_runtime_handle_not_live",
-                    raw_message=stale_raw_message,
-                    payload=stale_payload,
                 )
             )
     return tuple(candidates)

@@ -36,6 +36,7 @@ from weft._constants import (
     INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY,
     MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY,
     PIPELINE_RUNTIME_METADATA_KEY,
+    SERVICE_OWNER_SCHEMA,
     SERVICE_TYPE_MANAGED,
     TERMINAL_ENVELOPE_TYPE,
     WEFT_GLOBAL_LOG_QUEUE,
@@ -502,7 +503,10 @@ def _process_running(pid: int) -> bool:
         process = psutil.Process(pid)
     except psutil.Error:
         return False
-    return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
+    try:
+        return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return False
 
 
 def _write_descendant_process_scripts(tmp_path: Path) -> tuple[Path, Path]:
@@ -2480,6 +2484,25 @@ def test_manager_registry_prunes_expired_rows_on_refresh(
             )
         )
     )
+    managed_payload = build_service_owner_payload(
+        service_key=INTERNAL_SERVICE_KEY_TASK_MONITOR,
+        service_type=SERVICE_TYPE_MANAGED,
+        owner_tid=str(int(manager.tid) - 9),
+        status="active",
+        name="task-monitor",
+    )
+    registry_queue.write(json.dumps(managed_payload))
+    registry_queue.write(
+        json.dumps(
+            {
+                "schema": SERVICE_OWNER_SCHEMA,
+                "service_key": "bad",
+                "service_type": "manager",
+                "owner_tid": "not-a-tid",
+                "status": "active",
+            }
+        )
+    )
 
     monkeypatch.setattr(manager_mod, "MANAGER_REGISTRY_HEARTBEAT_INTERVAL_SECONDS", 0.0)
     monkeypatch.setattr(manager, "_manager_registry_retention_ns", lambda: 0)
@@ -2492,6 +2515,8 @@ def test_manager_registry_prunes_expired_rows_on_refresh(
 
     entries = [json.loads(item) for item in drain(registry_queue)]
     assert all(entry.get("name") != "old-manager" for entry in entries)
+    assert any(entry.get("name") == "task-monitor" for entry in entries)
+    assert all(entry.get("owner_tid") != "not-a-tid" for entry in entries)
     assert [entry["tid"] for entry in entries if entry.get("tid") == manager.tid] == [
         manager.tid
     ]
@@ -2520,6 +2545,69 @@ def test_manager_does_not_publish_when_recent_lower_canonical_manager_exists(
 
     entries = [json.loads(item) for item in drain(registry_queue)]
     assert [entry["tid"] for entry in entries] == [lower_tid]
+
+
+def test_manager_registers_when_lower_canonical_manager_is_stale(
+    manager_setup,
+    monkeypatch,
+) -> None:
+    manager, make_queue = manager_setup
+    registry_queue = make_queue(WEFT_SERVICES_REGISTRY_QUEUE)
+    drain(registry_queue)
+    lower_tid = str(int(manager.tid) - 1)
+    registry_queue.write(
+        json.dumps(
+            _manager_service_payload(
+                manager,
+                tid=lower_tid,
+                runtime_handle=_host_runtime_handle(999_999_999),
+            )
+        )
+    )
+
+    monkeypatch.setattr(manager_mod, "MANAGER_REGISTRY_HEARTBEAT_INTERVAL_SECONDS", 0.0)
+    manager._refresh_manager_registration()
+
+    entries = [json.loads(item) for item in drain(registry_queue)]
+    tids = {entry["tid"] for entry in entries}
+    assert lower_tid not in tids
+    assert manager.tid in tids
+
+
+def test_manager_unknown_lower_owner_suppresses_until_half_timeout(
+    manager_setup,
+    monkeypatch,
+) -> None:
+    manager, make_queue = manager_setup
+    registry_queue = make_queue(WEFT_SERVICES_REGISTRY_QUEUE)
+    drain(registry_queue)
+    lower_tid = str(int(manager.tid) - 1)
+    registry_queue.write(
+        json.dumps(
+            _manager_service_payload(
+                manager,
+                tid=lower_tid,
+                runtime_handle=_external_supervisor_runtime_handle(),
+            )
+        )
+    )
+    lower_timestamp = pending_timestamps(registry_queue)[0]
+
+    monkeypatch.setattr(
+        manager_mod,
+        "runtime_liveness_from_registered_probe",
+        lambda handle: "unknown",
+    )
+    monkeypatch.setattr(manager, "_manager_registry_retention_ns", lambda: 1_000)
+
+    assert manager._recent_lower_canonical_manager_exists(
+        registry_queue,
+        now_ns=lower_timestamp + 499,
+    )
+    assert not manager._recent_lower_canonical_manager_exists(
+        registry_queue,
+        now_ns=lower_timestamp + 500,
+    )
 
 
 def test_manager_liveness_rejects_stale_external_supervisor_record(

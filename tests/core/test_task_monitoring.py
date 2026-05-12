@@ -12,6 +12,7 @@ import weft.core.task_monitoring as task_monitoring_mod
 from weft._constants import (
     HEARTBEAT_MIN_INTERVAL_SECONDS,
     MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY,
+    SERVICE_OWNER_SCHEMA,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MANAGER_OUTBOX_QUEUE,
     WEFT_SERVICES_REGISTRY_QUEUE,
@@ -853,6 +854,17 @@ def test_cycle_snapshot_reports_runtime_state_cleanup_candidates(
         WEFT_SERVICES_REGISTRY_QUEUE,
         _manager_service_payload(ctx, tid=stale_manager_tid),
     )
+    malformed_id = _write_json(
+        ctx,
+        WEFT_SERVICES_REGISTRY_QUEUE,
+        {
+            "schema": SERVICE_OWNER_SCHEMA,
+            "service_key": "bad",
+            "service_type": "manager",
+            "owner_tid": "not-a-tid",
+            "status": "active",
+        },
+    )
 
     snapshot = build_task_monitor_cycle_snapshot(ctx, since_timestamp=0)
 
@@ -862,7 +874,14 @@ def test_cycle_snapshot_reports_runtime_state_cleanup_candidates(
     }
     superseded_mapping = classes_by_tid[(tid, "superseded_tid_mapping")]
     stale_manager = classes_by_tid[(stale_manager_tid, "stale_manager_registry")]
+    malformed = next(
+        candidate
+        for candidate in snapshot.candidates
+        if candidate.message_id == malformed_id
+    )
     assert superseded_mapping.queue == WEFT_TID_MAPPINGS_QUEUE
     assert superseded_mapping.safe_to_delete is True
     assert stale_manager.queue == WEFT_SERVICES_REGISTRY_QUEUE
     assert stale_manager.safe_to_delete is True
+    assert malformed.reason == "malformed_service_owner_row"
+    assert malformed.safe_to_delete is True

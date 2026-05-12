@@ -65,6 +65,7 @@ from weft._constants import (
     QUEUE_INTERNAL_RESERVED_SUFFIX,
     QUEUE_PRIORITY_INTERNAL,
     QUEUE_PRIORITY_NORMAL,
+    SERVICE_OWNER_SCHEMA,
     SERVICE_STATUS_TERMINAL,
     SERVICE_TYPE_MANAGED,
     SERVICE_TYPE_MANAGER,
@@ -1037,9 +1038,10 @@ class Manager(BaseTask):
     def _prune_expired_manager_registry_entries(
         self, queue: Queue, *, now_ns: int | None = None
     ) -> None:
-        """Delete manager registry rows older than the runtime-state window."""
+        """Delete canonical manager service-owner rows outside the runtime window."""
 
         observed_now_ns = time.time_ns() if now_ns is None else now_ns
+        service_key = manager_service_key(self._manager_context())
         expired_timestamps: list[int] = []
         try:
             entries = queue.peek_generator(with_timestamps=True)
@@ -1051,7 +1053,28 @@ class Manager(BaseTask):
             for entry in entries:
                 if not isinstance(entry, tuple) or len(entry) != 2:
                     continue
-                _body, timestamp = entry
+                body, timestamp = entry
+                if not isinstance(timestamp, int):
+                    continue
+                try:
+                    payload = json.loads(body)
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                if (
+                    payload.get("schema") == SERVICE_OWNER_SCHEMA
+                    and parse_service_owner_record(payload, timestamp=timestamp) is None
+                ):
+                    expired_timestamps.append(timestamp)
+                    continue
+                projected = project_manager_service_record(
+                    payload,
+                    timestamp=timestamp,
+                    service_key=service_key,
+                )
+                if projected is None:
+                    continue
                 if isinstance(timestamp, int) and self._registry_entry_is_expired(
                     timestamp,
                     now_ns=observed_now_ns,
@@ -1073,11 +1096,14 @@ class Manager(BaseTask):
     def _recent_lower_canonical_manager_exists(
         self, queue: Queue, *, now_ns: int | None = None
     ) -> bool:
-        """Return whether a recent lower-TID canonical active row is visible."""
+        """Return whether a lower-TID canonical manager should suppress publish."""
 
         observed_now_ns = time.time_ns() if now_ns is None else now_ns
         service_key = manager_service_key(self._manager_context())
+        retention_ns = self._manager_registry_retention_ns()
+        half_retention_ns = max(0, retention_ns // 2)
         records = []
+        stale_timestamps: list[int] = []
         try:
             entries = queue.peek_generator(with_timestamps=True)
         except (BrokerError, OSError, RuntimeError):
@@ -1104,18 +1130,46 @@ class Manager(BaseTask):
                 if not isinstance(payload, dict):
                     continue
                 record = parse_service_owner_record(payload, timestamp=timestamp)
-                if (
-                    record is not None
-                    and record.service_type == SERVICE_TYPE_MANAGER
-                    and record.service_key == service_key
-                ):
-                    records.append(record)
-                continue
+                if record is None or record.service_type != SERVICE_TYPE_MANAGER:
+                    continue
+                if record.service_key != service_key:
+                    continue
+                if record.status != "active":
+                    continue
+                try:
+                    if int(record.owner_tid) >= int(self.tid):
+                        continue
+                except ValueError:
+                    continue
+                projected = project_manager_service_record(
+                    payload,
+                    timestamp=timestamp,
+                    service_key=service_key,
+                )
+                if projected is None:
+                    continue
+                projected["_timestamp"] = timestamp
+                liveness = self._manager_record_liveness(projected)
+                if liveness == "stale":
+                    stale_timestamps.append(timestamp)
+                    continue
+                if liveness == "unknown" and retention_ns >= 0:
+                    if observed_now_ns - timestamp >= half_retention_ns:
+                        continue
+                records.append(record)
         except (BrokerError, OSError, RuntimeError):
             logger.debug(
                 "Failed to replay manager registry for lower canonical rows",
                 exc_info=True,
             )
+        for timestamp in stale_timestamps:
+            try:
+                queue.delete(message_id=timestamp)
+            except (BrokerError, OSError, RuntimeError):
+                logger.debug(
+                    "Failed to prune stale lower manager registry row",
+                    exc_info=True,
+                )
         decision = reduce_service_ownership(
             service_key,
             records,
@@ -1354,30 +1408,49 @@ class Manager(BaseTask):
         return pid_is_live(pid)
 
     @staticmethod
-    def _manager_record_is_live(record: Mapping[str, Any]) -> bool:
+    def _manager_record_liveness(
+        record: Mapping[str, Any],
+    ) -> Literal["live", "stale", "unknown"]:
         payload = record.get("runtime_handle")
         if not isinstance(payload, Mapping):
-            return False
+            return "stale"
         try:
             handle = RunnerHandle.from_dict(payload)
         except ValueError:
-            return False
+            return "stale"
         if handle.control.get("authority") == "external-supervisor":
             runtime_liveness = runtime_liveness_from_registered_probe(handle)
             if runtime_liveness == "live":
-                return True
+                return "live"
             if runtime_liveness == "stale":
-                return False
+                return "stale"
             timestamp = record.get("_timestamp")
             if not isinstance(timestamp, int):
-                return True
+                return "unknown"
             stale_after_ns = int(
                 MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS * 1_000_000_000
             )
-            return time.time_ns() - timestamp <= stale_after_ns
+            if stale_after_ns < 0 or time.time_ns() - timestamp > stale_after_ns:
+                return "stale"
+            return "unknown"
         if handle.control.get("authority") == "host-pid":
-            return handle_has_live_host_process(handle)
-        return True
+            return "live" if handle_has_live_host_process(handle) else "stale"
+        return "unknown"
+
+    @staticmethod
+    def _manager_record_is_live(record: Mapping[str, Any]) -> bool:
+        liveness = Manager._manager_record_liveness(record)
+        if liveness == "live":
+            return True
+        if liveness == "stale":
+            return False
+        timestamp = record.get("_timestamp")
+        if not isinstance(timestamp, int):
+            return True
+        stale_after_ns = int(
+            MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS * 1_000_000_000
+        )
+        return stale_after_ns >= 0 and time.time_ns() - timestamp <= stale_after_ns
 
     def _read_active_manager_records(self) -> dict[str, dict[str, Any]] | None:
         """Return the live canonical manager snapshot or ``None`` on read failure.

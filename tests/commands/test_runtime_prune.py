@@ -16,6 +16,7 @@ from weft._constants import (
     RUNTIME_PRUNE_CLASS_SUPERSEDED_MANAGER,
     RUNTIME_PRUNE_CLASS_SUPERSEDED_TID_MAPPING,
     RUNTIME_PRUNE_CLASS_UNSUPPORTED_PIPELINE,
+    SERVICE_OWNER_SCHEMA,
     WEFT_ENDPOINTS_REGISTRY_QUEUE,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MANAGER_OUTBOX_QUEUE,
@@ -206,6 +207,71 @@ def test_manager_prune_reports_superseded_and_stale_active_rows(tmp_path) -> Non
     assert (old_stopped, RUNTIME_PRUNE_CLASS_SUPERSEDED_MANAGER) in classifications
     assert (stale_active, RUNTIME_PRUNE_CLASS_STALE_MANAGER) in classifications
     assert all(candidate.message_id != live_active for candidate in result.candidates)
+
+
+def test_manager_prune_honors_keep_recent_per_key(tmp_path) -> None:
+    ctx = _context(tmp_path)
+    tid = "1770000000000000020"
+    old_id = _write_json(
+        ctx,
+        WEFT_SERVICES_REGISTRY_QUEUE,
+        _manager_service_payload(ctx, tid=tid, status="stopped"),
+    )
+    middle_id = _write_json(
+        ctx,
+        WEFT_SERVICES_REGISTRY_QUEUE,
+        _manager_service_payload(ctx, tid=tid, status="stopped"),
+    )
+    latest_id = _write_json(
+        ctx,
+        WEFT_SERVICES_REGISTRY_QUEUE,
+        _manager_service_payload(ctx, tid=tid, status="stopped"),
+    )
+
+    result = run_runtime_prune(
+        RuntimePruneConfig(
+            context_path=ctx.root,
+            queues=("managers",),
+            min_age_seconds=0,
+            keep_recent_per_key=2,
+        )
+    )
+
+    candidate_ids = {candidate.message_id for candidate in result.candidates}
+    assert old_id in candidate_ids
+    assert middle_id not in candidate_ids
+    assert latest_id not in candidate_ids
+
+
+def test_manager_prune_reports_malformed_service_owner_rows(tmp_path) -> None:
+    ctx = _context(tmp_path)
+    malformed_id = _write_json(
+        ctx,
+        WEFT_SERVICES_REGISTRY_QUEUE,
+        {
+            "schema": SERVICE_OWNER_SCHEMA,
+            "service_key": "bad",
+            "service_type": "manager",
+            "owner_tid": "not-a-tid",
+            "status": "active",
+        },
+    )
+
+    result = run_runtime_prune(
+        RuntimePruneConfig(
+            context_path=ctx.root,
+            queues=("managers",),
+            min_age_seconds=0,
+        )
+    )
+
+    candidate = next(
+        candidate
+        for candidate in result.candidates
+        if candidate.message_id == malformed_id
+    )
+    assert candidate.classification == RUNTIME_PRUNE_CLASS_STALE_MANAGER
+    assert candidate.reason == "malformed_service_owner_row"
 
 
 def test_streaming_prune_deletes_terminal_owner_marker_only(tmp_path) -> None:

@@ -58,11 +58,7 @@ from weft.core.manager_runtime import (
     normalize_manager_registry_record,
 )
 from weft.core.pruning.apply import apply_exact_prune_candidates
-from weft.core.service_convergence import (
-    collect_service_owner_records,
-    manager_service_key,
-    reduce_service_ownership,
-)
+from weft.core.service_convergence import parse_service_owner_row
 from weft.helpers import iter_queue_json_entries
 
 RuntimeQueueName = Literal[
@@ -554,15 +550,27 @@ def _manager_candidates(
     now_ns: int,
 ) -> tuple[list[RuntimePruneCandidate], int]:
     entries, scanned = _read_runtime_queue(ctx, WEFT_SERVICES_REGISTRY_QUEUE)
-    service_key = manager_service_key(ctx)
-    read = collect_service_owner_records(
-        ((payload, message_id) for payload, message_id in entries),
-        service_key=service_key,
-        service_type="manager",
-    )
     payload_by_id = {message_id: payload for payload, message_id in entries}
     record_by_id: dict[int, dict[str, Any]] = {}
+    grouped: dict[str, list[int]] = defaultdict(list)
+    candidates: list[RuntimePruneCandidate] = []
     for payload, message_id in entries:
+        parse_result = parse_service_owner_row(payload, timestamp=message_id)
+        if parse_result.disposition == "malformed":
+            if _is_old_enough(message_id, now_ns, config.min_age_seconds):
+                candidates.append(
+                    _candidate(
+                        queue=WEFT_SERVICES_REGISTRY_QUEUE,
+                        queue_group="managers",
+                        message_id=message_id,
+                        key=str(payload.get("owner_tid") or payload.get("tid") or ""),
+                        classification=RUNTIME_PRUNE_CLASS_STALE_MANAGER,
+                        reason="malformed_service_owner_row",
+                        now_ns=now_ns,
+                        payload=payload,
+                    )
+                )
+            continue
         record = normalize_manager_registry_record(
             ctx,
             payload,
@@ -574,82 +582,46 @@ def _manager_candidates(
         if not isinstance(tid, str) or not tid:
             continue
         record_by_id[message_id] = record
+        grouped[tid].append(message_id)
 
-    candidates: list[RuntimePruneCandidate] = []
-    candidate_ids: set[int] = set()
-    for owner_tid in sorted({record.owner_tid for record in read.records}):
-        decision = reduce_service_ownership(
-            service_key,
-            read.records,
-            own_tid=owner_tid,
-            now_ns=now_ns,
-            ttl_ns=int(config.min_age_seconds * 1_000_000_000),
-        )
-        candidate_ids.update(decision.older_self_message_ids)
-
-    for message_id in sorted(candidate_ids):
-        candidate_payload = payload_by_id.get(message_id)
-        candidate_record = record_by_id.get(message_id)
-        if candidate_payload is None or candidate_record is None:
-            continue
-        if not _is_old_enough(message_id, now_ns, config.min_age_seconds):
-            continue
-        tid = candidate_record.get("tid")
-        if not isinstance(tid, str):
-            continue
-        if candidate_record.get(
-            "status"
-        ) == "active" and manager_registry_record_is_stale(candidate_record):
+    for tid, message_ids in grouped.items():
+        ordered = sorted(message_ids, reverse=True)
+        protected_ids = set(ordered[: config.keep_recent_per_key])
+        for message_id in ordered:
+            record = record_by_id.get(message_id)
+            candidate_payload = payload_by_id.get(message_id)
+            if record is None or candidate_payload is None:
+                continue
+            if not _is_old_enough(message_id, now_ns, config.min_age_seconds):
+                continue
+            if record.get("status") == "active" and manager_registry_record_is_stale(
+                record
+            ):
+                candidates.append(
+                    _candidate(
+                        queue=WEFT_SERVICES_REGISTRY_QUEUE,
+                        queue_group="managers",
+                        message_id=message_id,
+                        key=tid,
+                        classification=RUNTIME_PRUNE_CLASS_STALE_MANAGER,
+                        reason="active_manager_runtime_handle_not_live",
+                        now_ns=now_ns,
+                        payload=candidate_payload,
+                    )
+                )
+                continue
+            if message_id in protected_ids:
+                continue
             candidates.append(
                 _candidate(
                     queue=WEFT_SERVICES_REGISTRY_QUEUE,
                     queue_group="managers",
                     message_id=message_id,
                     key=tid,
-                    classification=RUNTIME_PRUNE_CLASS_STALE_MANAGER,
-                    reason="active_manager_runtime_handle_not_live",
+                    classification=RUNTIME_PRUNE_CLASS_SUPERSEDED_MANAGER,
+                    reason="older_than_min_age_and_not_latest_for_manager_tid",
                     now_ns=now_ns,
                     payload=candidate_payload,
-                )
-            )
-            continue
-        candidates.append(
-            _candidate(
-                queue=WEFT_SERVICES_REGISTRY_QUEUE,
-                queue_group="managers",
-                message_id=message_id,
-                key=tid,
-                classification=RUNTIME_PRUNE_CLASS_SUPERSEDED_MANAGER,
-                reason="older_than_min_age_and_not_latest_for_manager_tid",
-                now_ns=now_ns,
-                payload=candidate_payload,
-            )
-        )
-
-    for message_id, record in record_by_id.items():
-        if message_id in candidate_ids:
-            continue
-        if not _is_old_enough(message_id, now_ns, config.min_age_seconds):
-            continue
-        stale_payload = payload_by_id.get(message_id)
-        if stale_payload is None:
-            continue
-        tid = record.get("tid")
-        if not isinstance(tid, str):
-            continue
-        if record.get("status") == "active" and manager_registry_record_is_stale(
-            record
-        ):
-            candidates.append(
-                _candidate(
-                    queue=WEFT_SERVICES_REGISTRY_QUEUE,
-                    queue_group="managers",
-                    message_id=message_id,
-                    key=tid,
-                    classification=RUNTIME_PRUNE_CLASS_STALE_MANAGER,
-                    reason="active_manager_runtime_handle_not_live",
-                    now_ns=now_ns,
-                    payload=stale_payload,
                 )
             )
     return candidates, scanned
