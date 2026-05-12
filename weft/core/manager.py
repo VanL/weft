@@ -66,6 +66,8 @@ from weft._constants import (
     QUEUE_PRIORITY_INTERNAL,
     QUEUE_PRIORITY_NORMAL,
     SERVICE_OWNER_SCHEMA,
+    SERVICE_STATUS_DRAINING,
+    SERVICE_STATUS_STOPPED,
     SERVICE_STATUS_TERMINAL,
     SERVICE_TYPE_MANAGED,
     SERVICE_TYPE_MANAGER,
@@ -219,6 +221,7 @@ class Manager(BaseTask):
         self._last_activity_ns = time.time_ns()
         self._idle_shutdown_logged = False
         self._unregistered = False
+        self._unregistered_status: Literal["draining", "stopped"] | None = None
         self._registry_message_id: int | None = None
         self._draining = False
         self._drain_reason: str | None = None
@@ -1233,9 +1236,16 @@ class Manager(BaseTask):
             return
         self._register_manager()
 
-    def _unregister_manager(self) -> None:
-        """Replace active service-owner record with stopped state (Spec: [MA-1.4])."""
-        if self._unregistered:
+    def _unregister_manager(
+        self,
+        *,
+        status: Literal["draining", "stopped"] = "stopped",
+    ) -> None:
+        """Replace active service-owner record with non-active state (Spec: [MA-1.4])."""
+        if self._unregistered and not (
+            self._unregistered_status == SERVICE_STATUS_DRAINING
+            and status == SERVICE_STATUS_STOPPED
+        ):
             return
         registry_queue = self._queue(WEFT_SERVICES_REGISTRY_QUEUE)
 
@@ -1253,7 +1263,7 @@ class Manager(BaseTask):
             latest = self._latest_registry_entry(registry_queue, self.tid)
             if latest is not None:
                 payload, latest_ts = latest
-                if payload.get("status") == "active":
+                if payload.get("status") in {"active", SERVICE_STATUS_DRAINING}:
                     try:
                         registry_queue.delete(message_id=latest_ts)
                     except (BrokerError, OSError, RuntimeError):
@@ -1277,7 +1287,7 @@ class Manager(BaseTask):
             context=self._manager_context(),
             tid=self.tid,
             name=self.taskspec.name,
-            status="stopped",
+            status=status,
             queues=queues,
             runtime_handle=self._manager_runtime_handle().to_dict(),
             capabilities=self.taskspec.metadata.get("capabilities", []),
@@ -1301,6 +1311,7 @@ class Manager(BaseTask):
         self._prune_older_self_registry_entries(registry_queue)
         self._registry_message_id = None
         self._unregistered = True
+        self._unregistered_status = status
 
     def _manager_runtime_handle(self) -> RunnerHandle:
         config = getattr(self, "_config", {})
@@ -2165,7 +2176,7 @@ class Manager(BaseTask):
             draining=True,
         )
         self._update_process_title("draining")
-        self._unregister_manager()
+        self._unregister_manager(status="draining")
 
     def _finish_graceful_shutdown(self) -> None:
         if self.taskspec.state.status not in {"completed", "cancelled"}:

@@ -35,6 +35,8 @@ from weft._constants import (
     MANAGER_TASK_CLASS_PATH,
     QUEUE_CTRL_IN_SUFFIX,
     QUEUE_CTRL_OUT_SUFFIX,
+    SERVICE_STATUS_ACTIVE,
+    SERVICE_STATUS_DRAINING,
     TASK_PROCESS_POLL_INTERVAL,
     WEFT_MANAGER_LIFETIME_TIMEOUT,
     WEFT_MANAGER_OUTBOX_QUEUE,
@@ -1077,7 +1079,7 @@ def _manager_start_record_matches_launch(
     launch_pid: int,
 ) -> bool:
     if (
-        record.get("status") != "active"
+        record.get("status") not in {SERVICE_STATUS_ACTIVE, SERVICE_STATUS_DRAINING}
         or not is_canonical_manager_record(record)
         or not _is_pid_alive(launch_pid)
     ):

@@ -662,9 +662,11 @@ def test_start_manager_does_not_terminate_competing_startup_manager(
     assert terminated is False
 
 
+@pytest.mark.parametrize("launched_status", ["active", "draining"])
 def test_start_manager_detaches_registered_startup_manager_after_losing_selection(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    launched_status: str,
 ) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
@@ -683,7 +685,7 @@ def test_start_manager_detaches_registered_startup_manager_after_losing_selectio
     }
     launched_record = {
         "tid": invocation.tid,
-        "status": "active",
+        "status": launched_status,
         "runtime_handle": _host_runtime_handle(fake_process.pid),
         "requests": WEFT_SPAWN_REQUESTS_QUEUE,
         "role": "manager",

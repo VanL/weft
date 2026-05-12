@@ -3687,11 +3687,13 @@ def test_manager_leadership_yield_drains_nonpersistent_children(
     )
 
     lower_leader_tid = str(int(manager.tid) - 1)
-    unregister_calls: list[bool] = []
+    unregister_calls: list[str] = []
 
     monkeypatch.setattr(manager, "_leader_tid", lambda: lower_leader_tid)
     monkeypatch.setattr(
-        manager, "_unregister_manager", lambda: unregister_calls.append(True)
+        manager,
+        "_unregister_manager",
+        lambda *, status="stopped": unregister_calls.append(status),
     )
 
     yielded = manager._maybe_yield_leadership(force=True)
@@ -3699,7 +3701,7 @@ def test_manager_leadership_yield_drains_nonpersistent_children(
     assert yielded is True
     assert manager._draining is True
     assert manager.should_stop is False
-    assert unregister_calls == [True]
+    assert unregister_calls == ["draining"]
     assert manager.taskspec.state.status == "running"
 
     events = [json.loads(item) for item in drain(log_queue)]

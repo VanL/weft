@@ -697,3 +697,8 @@ runbook needs to become stricter.
   leadership drain, or another shutdown path prevents launch before any child
   side effect, the manager must release the message back to its source queue;
   keeping it in a reserved queue can deadlock dependent work such as pipelines.
+- A manager that loses leadership while it has user children is not stopped;
+  it is draining. Startup reconciliation must treat a live draining launched
+  manager as detached work to leave alone. Aborting that launcher can terminate
+  the manager process tree and send signals to user tasks that were supposed to
+  finish naturally.
