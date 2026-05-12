@@ -1417,6 +1417,26 @@ def _config_has_non_empty_value(config: Mapping[str, Any], *keys: str) -> bool:
     return False
 
 
+POSTGRES_BACKEND_PART_DEFAULTS: Final[dict[str, Any]] = {
+    "BROKER_BACKEND_HOST": "localhost",
+    "BROKER_BACKEND_PORT": 5432,
+    "BROKER_BACKEND_USER": "postgres",
+    "BROKER_BACKEND_DATABASE": "simplebroker",
+}
+"""SimpleBroker's implicit Postgres connection-part defaults."""
+
+
+def _config_has_non_default_postgres_part(
+    config: Mapping[str, Any],
+    key: str,
+) -> bool:
+    """Return whether a Postgres connection part differs from its implicit default."""
+
+    if not _config_has_non_empty_value(config, key):
+        return False
+    return config.get(key) != POSTGRES_BACKEND_PART_DEFAULTS[key]
+
+
 def _validate_postgres_backend_config_shape(config: Mapping[str, Any]) -> None:
     """Reject ambiguous Postgres backend configuration shapes."""
 
@@ -1428,13 +1448,13 @@ def _validate_postgres_backend_config_shape(config: Mapping[str, Any]) -> None:
         return
 
     conflicting_parts: list[str] = []
-    if _config_has_non_empty_value(config, "BROKER_BACKEND_HOST"):
+    if _config_has_non_default_postgres_part(config, "BROKER_BACKEND_HOST"):
         conflicting_parts.append("host")
-    if _config_has_non_empty_value(config, "BROKER_BACKEND_PORT"):
+    if _config_has_non_default_postgres_part(config, "BROKER_BACKEND_PORT"):
         conflicting_parts.append("port")
-    if _config_has_non_empty_value(config, "BROKER_BACKEND_USER"):
+    if _config_has_non_default_postgres_part(config, "BROKER_BACKEND_USER"):
         conflicting_parts.append("user")
-    if _config_has_non_empty_value(config, "BROKER_BACKEND_DATABASE"):
+    if _config_has_non_default_postgres_part(config, "BROKER_BACKEND_DATABASE"):
         conflicting_parts.append("database")
 
     if conflicting_parts:
