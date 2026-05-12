@@ -3633,6 +3633,70 @@ def test_manager_pending_precheck_forces_inactive_public_queue_probe(
     assert reserved_queue.peek_one(exact_timestamp=message_id) is None
 
 
+def test_manager_spawn_drains_do_not_depend_on_pending_hint(
+    broker_env,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    config = load_config({"WEFT_TASK_MONITOR_ENABLED": "0"})
+    manager = Manager(db_path, make_manager_spec(unique_tid), config=config)
+    internal_queue = make_queue(WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE)
+    internal_reserved = make_queue(manager._queue_names["internal_reserved"])
+    spawn_queue = make_queue(WEFT_SPAWN_REQUESTS_QUEUE)
+    reserved_queue = make_queue(manager._queue_names["reserved"])
+    drain(internal_queue)
+    drain(internal_reserved)
+    drain(spawn_queue)
+    drain(reserved_queue)
+    launched: list[str] = []
+
+    def _record_launch(child_spec: TaskSpec, *_args: object, **_kwargs: object) -> bool:
+        launched.append(child_spec.name)
+        return True
+
+    def _missing_pending_hint(_queue: object) -> bool:
+        return False
+
+    monkeypatch.setattr(manager, "_queue_has_pending", _missing_pending_hint)
+    monkeypatch.setattr(manager, "_launch_child_task", _record_launch)
+    internal_queue.write(
+        json.dumps(
+            {
+                "name": "internal-first",
+                "spec": {
+                    "type": "function",
+                    "function_target": "tests.tasks.sample_targets:echo_payload",
+                },
+            }
+        )
+    )
+    for index in range(5):
+        spawn_queue.write(
+            json.dumps(
+                {
+                    "name": f"public-{index}",
+                    "spec": {
+                        "type": "function",
+                        "function_target": "tests.tasks.sample_targets:echo_payload",
+                    },
+                }
+            )
+        )
+
+    try:
+        manager.process_once()
+    finally:
+        manager.stop(join=False)
+        manager.cleanup()
+
+    assert launched == ["internal-first"] + [f"public-{index}" for index in range(5)]
+    assert internal_queue.peek_one() is None
+    assert internal_reserved.peek_one() is None
+    assert spawn_queue.peek_one() is None
+    assert reserved_queue.peek_one() is None
+
+
 def test_manager_service_convergence_advances_without_dispatch_ownership(
     broker_env,
     unique_tid: str,

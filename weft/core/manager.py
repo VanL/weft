@@ -56,6 +56,7 @@ from weft._constants import (
     MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS,
     MANAGER_INTERNAL_SPAWN_DRAIN_MAX_MESSAGES,
     MANAGER_PID_LIVENESS_RECHECK_INTERVAL,
+    MANAGER_PUBLIC_SPAWN_DRAIN_MAX_MESSAGES,
     MANAGER_REGISTRY_HEARTBEAT_INTERVAL_SECONDS,
     MANAGER_SERVE_LOG_CHILD_LIMIT,
     MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS,
@@ -4510,7 +4511,13 @@ class Manager(BaseTask):
             if self._draining:
                 self._continue_shutdown_drain()
                 return
+        internal_drained = self._drain_internal_spawn_requests()
+        if internal_drained:
+            self._last_activity_ns = time.time_ns()
         super().process_once()
+        public_drained = self._drain_public_spawn_requests()
+        if public_drained:
+            self._last_activity_ns = time.time_ns()
         if self._draining:
             self._continue_shutdown_drain()
             return
@@ -4574,31 +4581,73 @@ class Manager(BaseTask):
         internal_inbox = self._queue_names.get("internal_inbox")
         if internal_inbox is None:
             return 0
+        return self._drain_spawn_requests_from_queue(
+            queue_name=internal_inbox,
+            max_messages=MANAGER_INTERNAL_SPAWN_DRAIN_MAX_MESSAGES,
+            event="internal_spawn_drain",
+            component="service",
+        )
+
+    def _drain_public_spawn_requests(self) -> int:
+        """Drain public spawn work using atomic broker reservation as authority."""
+
+        public_inbox = self._queue_names.get("inbox")
+        if public_inbox != WEFT_SPAWN_REQUESTS_QUEUE:
+            return 0
+        if self.should_stop or self._draining:
+            return 0
+        return self._drain_spawn_requests_from_queue(
+            queue_name=public_inbox,
+            max_messages=MANAGER_PUBLIC_SPAWN_DRAIN_MAX_MESSAGES,
+            event="public_spawn_drain",
+            component="spawn",
+        )
+
+    def _drain_spawn_requests_from_queue(
+        self,
+        *,
+        queue_name: str,
+        max_messages: int,
+        event: str,
+        component: str,
+    ) -> int:
+        """Drain one spawn queue without relying on pending-message hints.
+
+        Queue pending checks and activity waiters are useful scheduling hints,
+        but the atomic reservation attempt is the progress authority. A missed
+        hint should at worst cost one extra empty reservation attempt, not leave
+        accepted spawn work stranded.
+        """
+
         total_processed = 0
         attempted = False
-        for _ in range(MANAGER_INTERNAL_SPAWN_DRAIN_MAX_MESSAGES):
+        for _ in range(max_messages):
             attempted = True
-            if not self._internal_spawn_pending():
-                break
-            self._active_queues = [internal_inbox]
-            processed = self._drain_round_robin_pass(queue_names=[internal_inbox])
+            processed = int(
+                self._process_queue_message(queue_name, inactive_candidates=set())
+            )
             total_processed += processed
             if processed == 0:
                 break
-        if total_processed >= MANAGER_INTERNAL_SPAWN_DRAIN_MAX_MESSAGES:
+            if self.should_stop or self._draining:
+                break
+        if total_processed >= max_messages:
             logger.warning(
-                "Manager yielded after draining %s internal spawn messages in one turn",
-                MANAGER_INTERNAL_SPAWN_DRAIN_MAX_MESSAGES,
+                "Manager yielded after draining %s spawn messages from %s in one turn",
+                max_messages,
+                queue_name,
             )
         self._emit_serve_log(
-            "internal_spawn_drain",
-            component="service",
+            event,
+            component=component,
             required_level="debug",
-            internal_queue=internal_inbox,
+            queue=queue_name,
             attempted=attempted,
             processed=total_processed,
-            max_messages=MANAGER_INTERNAL_SPAWN_DRAIN_MAX_MESSAGES,
+            max_messages=max_messages,
         )
+        if total_processed > 0:
+            self._strategy.notify_activity()
         return total_processed
 
     def _continue_shutdown_drain(self) -> None:

@@ -237,6 +237,11 @@ runbook needs to become stricter.
   manager's `task_spawned` child PID as live-owner evidence, or load-heavy
   Python process startup can look like "no replacement" even after launch
   succeeded.
+- Public spawn backlog needs the same progress discipline as internal
+  convergence under release-load backends. `has_pending()` and activity waiters
+  are scheduling hints, not correctness boundaries; a live manager should make a
+  bounded direct reservation attempt so a missed pending hint cannot leave an
+  accepted `weft run --no-wait` request unclaimed.
 
 ## 2026-04-08 Zombie PID Liveness
 

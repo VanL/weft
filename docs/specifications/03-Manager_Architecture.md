@@ -87,6 +87,11 @@ Key responsibilities implemented in `weft/core/manager.py`:
    advisory registry leadership. Pending messages still sitting in
    `weft.spawn.requests` are unowned backlog and must not by themselves block a
    superseded manager from yielding to the lower-TID live canonical manager.
+   A live public manager advances public backlog with a bounded per-turn direct
+   reservation drain after normal watcher scheduling. The drain treats
+   `has_pending()` and backend activity waiters as hints only; an atomic
+   reservation attempt is the progress authority, so missed or stale pending
+   hints cannot strand accepted public spawn work under load.
    Pipeline-owned runtime child bootstrap is also eligible for the internal
    spawn lane once the top-level pipeline task has already been accepted from
    public dispatch; those child requests are implementation work for that
@@ -206,7 +211,7 @@ Key responsibilities implemented in `weft/core/manager.py`:
   responding task without importing command-layer helpers.
 
 _Implementation mapping_:
-- [MA-1.1] Spawn queue consumption — `Manager._build_queue_configs`, `Manager._handle_work_message`, `Manager._build_child_spec`.
+- [MA-1.1] Spawn queue consumption — `Manager._build_queue_configs`, `Manager._handle_work_message`, `Manager._build_child_spec`, `Manager._drain_public_spawn_requests`, `Manager._drain_spawn_requests_from_queue`.
 - [MA-1.2] Child process launch — `Manager._launch_child_task`, `launch_task_process` (`weft/core/launcher.py`).
 - [MA-1.3] Initial payload delivery — `Manager._launch_child_task` (inbox seeding block).
 - [MA-1.4] Registry heartbeat and leadership view — `weft/core/service_convergence.py`, `Manager._register_manager`, `Manager._unregister_manager`, `Manager._atexit_unregister`, `Manager._read_active_manager_records`, `Manager._active_manager_records`, `Manager._leader_tid`, `Manager._evaluate_dispatch_ownership`, `Manager._maybe_yield_leadership`, `weft/commands/system.py::_collect_task_snapshot_records`, plus manager-record projection in `weft/core/manager_runtime.py`.
