@@ -1051,6 +1051,9 @@ def test_manager_enqueues_heartbeat_through_service_path(
         == INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT
     ]
     assert len(heartbeat_payloads) == 1
+    assert (
+        heartbeat_payloads[0]["taskspec"]["metadata"]["heartbeat_idle_timeout"] == 0.0
+    )
     metadata = heartbeat_payloads[0]["taskspec"]["metadata"]
     assert metadata[INTERNAL_SERVICE_KEY_METADATA_KEY] == INTERNAL_SERVICE_KEY_HEARTBEAT
     assert metadata[INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY] == "ensure"
@@ -1701,6 +1704,38 @@ def test_managed_service_observation_prunes_superseded_service_history(
     assert [(row.get("owner_tid"), row.get("status")) for row in rows] == [
         (second_tid, "active")
     ]
+
+
+def test_managed_service_dead_registered_pid_is_terminal_without_recent_grace(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, make_queue = manager_setup
+    recent_tid = str(time.time_ns())
+    _write_managed_service_owner(
+        make_queue,
+        service_key=INTERNAL_SERVICE_KEY_HEARTBEAT,
+        tid=recent_tid,
+        runtime_handle=_host_runtime_handle(15251),
+    )
+    monkeypatch.setattr(
+        manager_mod,
+        "handle_has_live_host_process",
+        lambda handle: False,
+    )
+    monkeypatch.setattr(
+        manager_mod,
+        "send_keyed_ping_probe",
+        lambda *args, **kwargs: SimpleNamespace(matched=None, error=None),
+    )
+
+    candidates = manager._observed_service_candidates_by_key(
+        {INTERNAL_SERVICE_KEY_HEARTBEAT}
+    )[INTERNAL_SERVICE_KEY_HEARTBEAT]
+
+    stale = next(candidate for candidate in candidates if candidate.tid == recent_tid)
+    assert stale.state == "terminal"
+    assert stale.reason == "registered host pid is not live"
 
 
 def test_task_monitor_duplicate_live_candidates_get_kill_signal(

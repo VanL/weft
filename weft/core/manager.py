@@ -2898,6 +2898,7 @@ class Manager(BaseTask):
                     extra={
                         "internal": True,
                         "role": "heartbeat_service",
+                        "heartbeat_idle_timeout": 0.0,
                     },
                 ),
             },
@@ -3330,15 +3331,26 @@ class Manager(BaseTask):
                 metadata=metadata,
             )
 
-        if runtime_handle is not None and handle_has_live_host_process(runtime_handle):
-            return ServiceCandidate(
-                key=record.service_key,
-                tid=record.owner_tid,
-                state="live",
-                source="service-registry",
-                timestamp=record.timestamp,
-                metadata=metadata,
-            )
+        if runtime_handle is not None:
+            if handle_has_live_host_process(runtime_handle):
+                return ServiceCandidate(
+                    key=record.service_key,
+                    tid=record.owner_tid,
+                    state="live",
+                    source="service-registry",
+                    timestamp=record.timestamp,
+                    metadata=metadata,
+                )
+            if runtime_handle.control.get("authority") == "host-pid":
+                return ServiceCandidate(
+                    key=record.service_key,
+                    tid=record.owner_tid,
+                    state="terminal",
+                    source="service-registry",
+                    timestamp=record.timestamp,
+                    reason="registered host pid is not live",
+                    metadata=metadata,
+                )
 
         if "ctrl_in" in metadata and "ctrl_out" in metadata:
             probe = send_keyed_ping_probe(
