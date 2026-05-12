@@ -144,6 +144,37 @@ def test_build_test_env_sets_worker_count(
     assert env["BROKER_TEST_BACKEND"] == "postgres"
 
 
+def test_build_test_env_owns_backend_connection_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ambient backend config should not override the temporary test container."""
+
+    pytest_pg = _load_pytest_pg_module()
+    monkeypatch.setattr(pytest_pg, "_pytest_worker_count", lambda: "17")
+    for prefix in ("BROKER", "WEFT"):
+        monkeypatch.setenv(f"{prefix}_BACKEND", "postgres")
+        monkeypatch.setenv(f"{prefix}_BACKEND_TARGET", "postgresql://stale")
+        monkeypatch.setenv(f"{prefix}_BACKEND_PASSWORD", "wrong-password")
+        monkeypatch.setenv(f"{prefix}_BACKEND_SCHEMA", "stale_schema")
+
+    env = pytest_pg._build_test_env(
+        dsn="postgresql://postgres:postgres@127.0.0.1:33017/simplebroker_test",
+    )
+
+    assert env["BROKER_BACKEND"] == "postgres"
+    assert env["BROKER_BACKEND_TARGET"] == (
+        "postgresql://postgres:postgres@127.0.0.1:33017/simplebroker_test"
+    )
+    assert env["WEFT_BACKEND"] == "postgres"
+    assert env["WEFT_BACKEND_TARGET"] == (
+        "postgresql://postgres:postgres@127.0.0.1:33017/simplebroker_test"
+    )
+    assert "BROKER_BACKEND_PASSWORD" not in env
+    assert "WEFT_BACKEND_PASSWORD" not in env
+    assert "BROKER_BACKEND_SCHEMA" not in env
+    assert "WEFT_BACKEND_SCHEMA" not in env
+
+
 def test_build_test_env_preserves_explicit_worker_count(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

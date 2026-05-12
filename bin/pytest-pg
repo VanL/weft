@@ -17,6 +17,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any, Final, Literal
+from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parents[1]
 PYTEST_WORKER_COUNT_HELPER = ROOT / "bin" / "pytest-worker-count"
@@ -32,6 +33,26 @@ PYTEST_TERMINATE_GRACE_SECONDS: Final[float] = 2.0
 
 PYTEST_WAIT_POLL_SECONDS: Final[float] = 0.2
 """Bounded wait interval so repeated Ctrl-C can escalate promptly."""
+
+BACKEND_ENV_KEYS: Final[tuple[str, ...]] = (
+    "BROKER_BACKEND",
+    "BROKER_BACKEND_HOST",
+    "BROKER_BACKEND_PORT",
+    "BROKER_BACKEND_USER",
+    "BROKER_BACKEND_PASSWORD",
+    "BROKER_BACKEND_DATABASE",
+    "BROKER_BACKEND_SCHEMA",
+    "BROKER_BACKEND_TARGET",
+    "WEFT_BACKEND",
+    "WEFT_BACKEND_HOST",
+    "WEFT_BACKEND_PORT",
+    "WEFT_BACKEND_USER",
+    "WEFT_BACKEND_PASSWORD",
+    "WEFT_BACKEND_DATABASE",
+    "WEFT_BACKEND_SCHEMA",
+    "WEFT_BACKEND_TARGET",
+)
+"""Backend selection variables owned by this wrapper during PG test runs."""
 
 WaitOutcome = Literal["exited", "timeout", "interrupted"]
 
@@ -157,9 +178,12 @@ def _start_postgres_container() -> tuple[str, str]:
         capture_output=True,
     )
     port = _wait_for_postgres(container_name)
+    encoded_user = quote(POSTGRES_USER, safe="")
+    encoded_password = quote(POSTGRES_PASSWORD, safe="")
+    encoded_database = quote(POSTGRES_DB, safe="")
     dsn = (
-        f"postgresql://{POSTGRES_USER}:{POSTGRES_PASSWORD}"
-        f"@127.0.0.1:{port}/{POSTGRES_DB}"
+        f"postgresql://{encoded_user}:{encoded_password}"
+        f"@127.0.0.1:{port}/{encoded_database}"
     )
     return container_name, dsn
 
@@ -168,8 +192,14 @@ def _build_test_env(*, dsn: str) -> dict[str, str]:
     """Build the environment used for PG-backed Weft test runs."""
 
     env = os.environ.copy()
+    for key in BACKEND_ENV_KEYS:
+        env.pop(key, None)
     env["BROKER_TEST_BACKEND"] = "postgres"
     env["SIMPLEBROKER_PG_TEST_DSN"] = dsn
+    env["BROKER_BACKEND"] = "postgres"
+    env["BROKER_BACKEND_TARGET"] = dsn
+    env["WEFT_BACKEND"] = "postgres"
+    env["WEFT_BACKEND_TARGET"] = dsn
     if "PYTEST_XDIST_AUTO_NUM_WORKERS" not in env:
         env["PYTEST_XDIST_AUTO_NUM_WORKERS"] = _pytest_worker_count()
     return env
