@@ -3295,7 +3295,7 @@ def test_manager_drain_reissues_stop_for_child_added_after_stop(
     assert ctrl_queue.read_one() == CONTROL_STOP
 
 
-def test_manager_stop_mid_handler_keeps_reserved_work_unlaunched(
+def test_manager_stop_mid_handler_requeues_reserved_work_unlaunched(
     manager_setup, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     manager, make_queue = manager_setup
@@ -3327,7 +3327,8 @@ def test_manager_stop_mid_handler_keeps_reserved_work_unlaunched(
     manager.process_once()
 
     assert manager._child_processes == {}
-    assert reserved_queue.peek_one() is not None
+    assert reserved_queue.peek_one() is None
+    assert inbox_queue.peek_one() is not None
     assert manager.taskspec.state.status == "cancelled"
 
     events = [json.loads(item) for item in drain(log_queue)]

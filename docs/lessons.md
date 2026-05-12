@@ -692,3 +692,8 @@ runbook needs to become stricter.
   allocation evidence. Do not publish it while Docker still reports the
   container as `created`; either wait until the runtime leaves that transient
   state or fail before exposing misleading status.
+- In the work-stealing manager model, a reserved spawn request is exclusive
+  only while the reserving manager is still able to launch it. If STOP,
+  leadership drain, or another shutdown path prevents launch before any child
+  side effect, the manager must release the message back to its source queue;
+  keeping it in a reserved queue can deadlock dependent work such as pipelines.

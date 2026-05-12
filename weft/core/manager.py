@@ -2620,6 +2620,12 @@ class Manager(BaseTask):
             message_timestamp=timestamp,
         )
         if not self._control_allows_child_launch():
+            self._release_unlaunched_spawn_request(
+                source_queue=source_queue,
+                reserved_queue=reserved_queue,
+                message_timestamp=timestamp,
+                reason="control_disallowed_launch_before_validation",
+            )
             return
 
         try:
@@ -2675,6 +2681,12 @@ class Manager(BaseTask):
 
         inbox_message = payload.get("inbox_message", WORK_ENVELOPE_START)
         if not self._control_allows_child_launch():
+            self._release_unlaunched_spawn_request(
+                source_queue=source_queue,
+                reserved_queue=reserved_queue,
+                message_timestamp=timestamp,
+                reason="control_disallowed_launch_after_validation",
+            )
             return
 
         launched = self._launch_child_task(
@@ -2685,6 +2697,14 @@ class Manager(BaseTask):
             ),
         )
         if not launched:
+            if self._draining or self.should_stop:
+                self._release_unlaunched_spawn_request(
+                    source_queue=source_queue,
+                    reserved_queue=reserved_queue,
+                    message_timestamp=timestamp,
+                    reason="manager_draining_after_launch_attempt",
+                    child_tid=child_spec.tid,
+                )
             return
 
         try:
@@ -2714,6 +2734,34 @@ class Manager(BaseTask):
                 child_tid=child_spec.tid,
                 success=False,
             )
+
+    def _release_unlaunched_spawn_request(
+        self,
+        *,
+        source_queue: str,
+        reserved_queue: str,
+        message_timestamp: int,
+        reason: str,
+        child_tid: str | None = None,
+    ) -> None:
+        """Return an unlaunched reserved spawn request to its source queue."""
+
+        self._apply_spawn_reserved_policy(
+            ReservedPolicy.REQUEUE,
+            source_queue=source_queue,
+            reserved_queue=reserved_queue,
+            message_timestamp=message_timestamp,
+        )
+        self._emit_serve_log(
+            "spawn_reserved_released",
+            component="spawn",
+            required_level="debug",
+            source_queue=source_queue,
+            reserved_queue=reserved_queue,
+            message_timestamp=message_timestamp,
+            child_tid=child_tid,
+            reason=reason,
+        )
 
     def _build_child_spec(
         self, payload: dict[str, Any], timestamp: int
