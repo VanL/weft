@@ -702,3 +702,7 @@ runbook needs to become stricter.
   manager as detached work to leave alone. Aborting that launcher can terminate
   the manager process tree and send signals to user tasks that were supposed to
   finish naturally.
+- Wait helpers that watch a shared task log must advance cursors only on the
+  target task's events. Under Postgres load, an unrelated event with a newer
+  timestamp can become visible before an older target event commits; a global
+  cursor can then skip the target terminal proof even though it exists.

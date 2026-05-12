@@ -376,7 +376,7 @@ class WeftTestHarness:
                 config=self.context.broker_config,
             )
             deadline = time.time() + timeout
-            last_seen: int | None = None
+            last_seen: int | None = int(tid) - 1 if tid.isdigit() else None
             try:
                 while time.time() < deadline:
                     iterations += 1
@@ -387,9 +387,9 @@ class WeftTestHarness:
                     ):
                         if last_seen is not None and ts <= last_seen:
                             continue
-                        next_last_seen = ts
                         if data.get("tid") != tid:
                             continue
+                        next_last_seen = ts
                         event = data.get("event")
                         if event == "work_completed":
                             return
