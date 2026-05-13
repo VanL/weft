@@ -2377,7 +2377,7 @@ def test_cli_run_wait_returns_timeout_exit_code(workdir, weft_harness) -> None:
     weft_harness.ensure_foreground_manager()
     constrained_backend = active_test_backend(os.environ) == "postgres"
     constrained_runtime = sys.platform == "win32" or constrained_backend
-    run_timeout = 45.0 if constrained_runtime else 20.0
+    run_timeout = 120.0 if constrained_runtime else 20.0
     rc, out, err = run_cli(
         "run",
         "--timeout",

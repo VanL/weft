@@ -19,7 +19,13 @@ from tests.helpers.weft_harness import WeftTestHarness
 from weft.ext import RunnerHandle
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_CLI_SUBPROCESS_TIMEOUT = 60.0
+DEFAULT_CLI_SUBPROCESS_TIMEOUT = 120.0 if os.name == "nt" else 60.0
+"""Default outer timeout for CLI subprocess tests.
+
+Windows GitHub runners can spend over a minute in ordinary CLI subprocesses
+under xdist load. This timeout guards stuck tests; it must not be tighter than
+the platform's normal process startup and teardown cost.
+"""
 _PRIORITY_TEST_NODEIDS = (
     "tests/cli/test_cli_long_session.py::"
     "test_cli_long_session_produces_identical_transcript_across_backends",
