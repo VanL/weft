@@ -34,6 +34,7 @@ from weft._constants import (
     QUEUE_OUTBOX_SUFFIX,
     TASK_MONITOR_ACTIVITY_WAIT_CAP_SECONDS,
     TASK_MONITOR_HEARTBEAT_STARTUP_TIMEOUT_SECONDS,
+    TASK_MONITOR_PONG_DETAIL_LIMIT,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS,
     WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS_DEFAULT,
@@ -69,8 +70,6 @@ from .base import BaseTask
 from .multiqueue_watcher import QueueMessageContext
 
 TaskMonitorCallback = Callable[[str, str, int], None]
-TASK_MONITOR_PONG_DETAIL_LIMIT = 20
-"""Maximum list entries included in TaskMonitor extended PONG diagnostics."""
 
 
 def make_task_monitor_taskspec(tid: str | None = None) -> TaskSpec:

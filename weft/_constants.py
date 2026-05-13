@@ -419,6 +419,9 @@ TASK_MONITOR_LOG_SUBDIR: Final[str] = "task-monitor"
 TASK_MONITOR_CHECKPOINT_PATH: Final[str] = "state/task-monitor/default.json"
 """Default task monitor checkpoint path under the Weft metadata directory."""
 
+TASK_MONITOR_PONG_DETAIL_LIMIT: Final[int] = 20
+"""Maximum list entries included in TaskMonitor extended PONG diagnostics."""
+
 WEFT_TASK_MONITOR_ENABLED_DEFAULT: Final[bool] = True
 """Default for manager supervision of the internal task monitor."""
 
