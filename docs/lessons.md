@@ -737,3 +737,22 @@ runbook needs to become stricter.
   after the first row in the scenario. On slow Windows CI, real queue writes in
   a single test can be far enough apart that later rows are correctly too young
   for the cleanup floor, turning a test-clock shortcut into a false failure.
+
+## 2026-05-13 Manager Leadership Liveness
+
+- `external-supervisor` means "delegate liveness proof," not "skip liveness
+  proof." A missing or inconclusive supervisor probe is `unknown`, and unknown
+  evidence must not make a running dispatch-capable manager yield leadership.
+- Manager PONG has two roles that must stay separate: it can prove a task-local
+  control surface is alive, but leadership authority also requires dispatch
+  eligibility. A draining or stopping manager can answer PING and still be the
+  wrong control plane for public spawn work.
+- Voluntary leadership drain must be reversible when replacement proof
+  disappears. STOP/KILL drains are terminal control paths; leadership yield is
+  duplicate-manager convergence and can resume by publishing
+  `manager_leadership_resumed` rather than leaving a live process that no
+  longer drains public work.
+- Manager hot paths should maintain targeted registry and control-probe state.
+  Replaying the whole service registry or running status-style world scans from
+  every leadership turn turns ops recovery into more database pressure exactly
+  when the backend is already under load.

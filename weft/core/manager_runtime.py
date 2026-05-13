@@ -391,6 +391,8 @@ def _manager_record_has_matched_pong(
     )
     if result.matched is None or not _matched_pong_proves_manager_record(
         result.matched.payload,
+        context=context,
+        record=record,
         ctrl_in_name=ctrl_in_name,
         ctrl_out_name=ctrl_out_name,
     ):
@@ -408,9 +410,24 @@ def _manager_record_has_matched_pong(
 def _matched_pong_proves_manager_record(
     payload: dict[str, Any],
     *,
+    context: WeftContext,
+    record: dict[str, Any],
     ctrl_in_name: str,
     ctrl_out_name: str,
 ) -> bool:
+    task_status = payload.get("task_status")
+    if task_status in {
+        SERVICE_STATUS_DRAINING,
+        "stopping",
+        "cancelled",
+        "completed",
+        "failed",
+        "timeout",
+        "killed",
+    }:
+        return False
+    if payload.get("should_stop") is True:
+        return False
     role = payload.get("role")
     if role is not None and role != "manager":
         return False
@@ -422,6 +439,13 @@ def _matched_pong_proves_manager_record(
         return False
     ctrl_out = payload.get("ctrl_out")
     if ctrl_out is not None and ctrl_out != ctrl_out_name:
+        return False
+    weft_context = payload.get("weft_context")
+    record_context = record.get("weft_context")
+    expected_context = (
+        record_context if isinstance(record_context, str) else str(context.root)
+    )
+    if weft_context is not None and weft_context != expected_context:
         return False
     outbox = payload.get("outbox")
     return outbox is None or outbox == WEFT_MANAGER_OUTBOX_QUEUE

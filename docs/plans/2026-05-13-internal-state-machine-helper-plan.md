@@ -63,14 +63,9 @@ Files to create in Phase 1:
 
 - `weft/core/state_machines.py`
 - `tests/core/test_state_machines.py`
-- optional `tests/specs/test_state_machine_contract.py` only if the generic
-  reachability/test-coverage contract deserves a spec-level guard after the
-  helper API stabilizes.
 
 Files to modify in Phase 1:
 
-- `weft/core/__init__.py` only if a local re-export is already normal for core
-  helpers. Prefer no re-export unless an actual caller needs it.
 - `docs/specifications/01-Core_Components.md`
 - `docs/specifications/07-System_Invariants.md`
 - `docs/specifications/08-Testing_Strategy.md`
@@ -112,8 +107,8 @@ Current structure:
   transition coverage.
 - Manager-owned services already use a pure reducer in
   `reduce_managed_service_state()`. That reducer is table-tested but hand-coded;
-  it should be the reference behavior for the generic helper, not the first
-  forced migration target.
+  it is structural prior art for the helper, not proof that the helper can
+  directly own every field in `ManagedServiceState`.
 - CLI control convergence already separates evidence from side effects more
   than it used to, but the command-layer decision space is still encoded as
   imperative branching.
@@ -179,7 +174,10 @@ Failure priorities:
 Rollback:
 
 - Phase 1 rollback is deleting the unused helper module and tests. No runtime
-  behavior should depend on it yet.
+  behavior should depend on it yet. Also revert the Phase 1 doc backlinks and
+  helper-contract notes from `docs/specifications/01-Core_Components.md`,
+  `docs/specifications/07-System_Invariants.md`,
+  `docs/specifications/08-Testing_Strategy.md`, and `docs/plans/README.md`.
 - Each Phase 2 migration must be revertible independently because it should
   preserve public contracts and use the existing side-effect owner.
 - Do not land a broad one-shot migration that makes rollback require reverting
@@ -201,7 +199,7 @@ ActionT = TypeVar("ActionT", bound=str)
 class Transition(Generic[StateT, InputT, ActionT]):
     id: str
     source: StateT | frozenset[StateT]
-    target: StateT | Callable[[StateT, InputT], StateT]
+    target: StateT
     action: ActionT
     predicate: Callable[[StateT, InputT], bool]
     reason: str
@@ -215,7 +213,19 @@ class StateDecision(Generic[StateT, ActionT]):
     reason: str
 
 class StateMachine(Generic[StateT, InputT, ActionT]):
-    ...
+    def __init__(
+        self,
+        *,
+        states: Iterable[StateT],
+        actions: Iterable[ActionT],
+        transitions: Iterable[Transition[StateT, InputT, ActionT]],
+        terminal_states: Iterable[StateT] = (),
+        sink_states: Iterable[StateT] = (),
+        allow_terminal_outgoing: bool = False,
+    ) -> None: ...
+
+    def decide(self, current: StateT, input: InputT) -> StateDecision[StateT, ActionT]:
+        ...
 ```
 
 This exact spelling may change during implementation if type checking requires
@@ -223,29 +233,51 @@ it, but the semantics should not:
 
 - `StateMachine.decide(current, input) -> StateDecision` evaluates matching
   transitions in declaration order and returns exactly one decision.
+- If a transition declares `source` as a `frozenset`, `StateDecision.source`
+  is the actual `current` state that matched, not the whole source set.
 - Transition IDs are required, stable, and unique.
 - States and actions are strings or string-backed literals/enums so assertions
   and JSON-friendly debug output stay simple.
 - The machine validates at construction:
   - non-empty state set
+  - non-empty action set
   - non-empty transition list
   - every transition source and static target is declared
+  - every transition action is declared
   - transition IDs are unique
   - terminal states have no outgoing transitions unless explicitly allowed
-  - at least one transition can match each non-terminal state unless that state
-    is explicitly listed as a sink
+  - every non-terminal, non-sink state appears as a transition source
 - The machine exposes structural proof helpers:
   - `reachable_states(initial_states: Iterable[StateT]) -> frozenset[StateT]`
   - `unreachable_states(initial_states: Iterable[StateT]) -> frozenset[StateT]`
   - `assert_all_states_reachable(initial_states: Iterable[StateT]) -> None`
   - `assert_transition_ids_covered(covered_ids: Iterable[str]) -> None`
   - `assert_states_covered(covered_states: Iterable[StateT]) -> None`
+  - `assert_actions_covered(covered_actions: Iterable[ActionT]) -> None`
 - Structural reachability is graph reachability over declared static targets.
-  Dynamic targets are allowed only if they also declare their possible target
-  states. If that becomes awkward, stop and narrow Phase 1 to static targets.
+  Phase 1 must not support dynamic targets. Add them later only if a concrete
+  migrated Weft reducer proves static targets are inadequate.
 - Test coverage proof is separate from reachability. A state can be reachable
-  but still untested; table tests must collect decision transition IDs and
-  assert coverage.
+  but still untested; table tests must collect decision transition IDs, source
+  and target states, and actions, then assert coverage.
+- Tests collect coverage explicitly. Do not let `StateMachine` retain decision
+  history internally.
+
+Example coverage collection:
+
+```python
+seen_transitions: set[str] = set()
+seen_states: set[str] = set()
+seen_actions: set[str] = set()
+for case in cases:
+    decision = machine.decide(case.current, case.input)
+    seen_transitions.add(decision.transition_id)
+    seen_states.update({decision.source, decision.target})
+    seen_actions.add(decision.action)
+machine.assert_transition_ids_covered(seen_transitions)
+machine.assert_states_covered(seen_states)
+machine.assert_actions_covered(seen_actions)
+```
 - The helper may provide `explain()` or `as_dict()` for failure messages only
   if that stays small and deterministic.
 
@@ -288,6 +320,7 @@ Do not add:
      - structural reachability detects unreachable states
      - transition coverage assertion reports missing transition IDs
      - state coverage assertion reports missing states
+     - action coverage assertion reports missing actions
    - Stop if:
      - the helper starts needing Weft queues, TaskSpec, Manager, or process
        concepts
@@ -302,7 +335,6 @@ Do not add:
      table without changing `TaskSpec` yet.
    - Files to touch:
      - `tests/core/test_state_machines.py`
-     - optional `tests/specs/test_state_machine_contract.py`
    - Read first:
      - `docs/specifications/07-System_Invariants.md [STATE.1]-[STATE.6]`
      - `tests/specs/taskspec/test_state_transitions.py`
@@ -313,6 +345,7 @@ Do not add:
      - table-test representative forbidden transitions
      - assert all lifecycle states are structurally reachable from `created`
      - assert all declared transitions are covered by the table
+     - assert all declared lifecycle actions are covered by the table
    - Stop if:
      - reproducing the lifecycle table requires changing production constants
        before a runtime caller exists
@@ -367,6 +400,14 @@ Do not add:
        domain module such as `weft/core/task_lifecycle.py`
      - keep timestamp and return-code mutation in `TaskSpec`; the helper only
        validates/selects the transition
+     - preserve current same-status behavior explicitly, either as an early
+       return/validation bypass before invoking the helper or as explicit
+       self-edges with covered transition IDs
+     - preserve `mark_running()` from `created` as the same two-step
+       composition it uses today: `created -> spawning`, then
+       `spawning -> running`
+     - `set_status("running")` from `created` must still fail; only
+       `mark_running()` owns the two-call promotion behavior
      - avoid importing command, manager, queue, or task runtime modules into
        TaskSpec
    - Tests:
@@ -382,10 +423,12 @@ Do not add:
      - targeted TaskSpec tests pass
      - no runtime behavior outside state validation changed
 
-6. Phase 2b: migrate or wrap manager-service convergence.
-   - Outcome: `reduce_managed_service_state()` either delegates transition
-     selection to the helper or explicitly remains hand-coded with a coverage
-     harness using the helper's proof utilities.
+6. Phase 2b: add manager-service coverage proof without forcing migration.
+   - Outcome: `reduce_managed_service_state()` keeps its current rich
+     `ManagedServiceState` reducer unless implementation proves a direct
+     helper-backed rewrite is simpler. The required work is stronger table and
+     branch coverage using the helper's coverage-proof pattern, not a forced
+     generic-machine migration.
    - Files to touch:
      - `weft/core/manager_services.py`
      - `tests/core/test_manager_services.py`
@@ -393,8 +436,11 @@ Do not add:
      - preserve the existing public reducer function and dataclasses
      - preserve Manager as the only side-effect owner
      - keep terminal-proof-wins and pending-spawn-blocks-duplicate rules exact
-     - prefer a compatibility wrapper if a direct generic-machine expression
-       would make the current reducer harder to read
+     - treat `StateMachine` as a labeled-state helper; do not pretend the full
+       9-field `ManagedServiceState` is just a string state label
+     - prefer explicit manager-service tests over a compatibility wrapper if a
+       direct generic-machine expression would make the current reducer harder
+       to read
    - Tests:
      - existing reducer tests must stay green
      - add transition-ID or branch coverage checks for manager-service actions
@@ -403,7 +449,9 @@ Do not add:
      - forcing the generic helper makes the reducer less explicit or hides
        domain precedence rules
    - Done when:
-     - manager-service behavior is unchanged and table coverage is stronger
+     - manager-service behavior is unchanged and table/branch coverage is
+       stronger, whether or not `reduce_managed_service_state()` delegates to
+       `StateMachine`
 
 7. Phase 2c: migrate command-layer control convergence.
    - Outcome: STOP/KILL command result classification is expressed as a pure
@@ -416,9 +464,25 @@ Do not add:
      - define an evidence dataclass for command sent, ack seen, terminal
        status, host PID liveness, runner fallback result, and observation
        budget expiry
+     - define the control-convergence state set before editing. Start with:
+       `command_sent`, `accepted`, `terminal_observed`,
+       `runtime_dead_after_control`, `escalating_runner`,
+       `escalating_host`, and `unknown`
      - define actions such as `wait`, `accept_terminal`, `accept_dead_runtime`,
        `escalate_runner`, `escalate_host`, and `report_unknown`
-     - do not let ack-only KILL count as success
+     - do not let ack-only KILL count as success. Ack-only-with-no-terminal
+       should reduce to `accepted` while within the observation budget and to
+       `unknown`/`report_unknown` when the budget expires.
+     - preserve the existing separation between `_await_control_surface()` and
+       `kill_tasks()`: deadline-based loop exit can still happen in
+       `_await_control_surface()`, while `kill_tasks()` remains responsible
+       for counting success only from terminal `killed` proof or controlled
+       runtime death proof.
+     - map current local loop variables explicitly before implementation:
+       `latest_entry` and `latest_snapshot` are observed evidence,
+       `kill_ack_deadline` and `public_signal_deadline` are observation-budget
+       inputs, and fallback runner/host kill results are later evidence
+       snapshots passed back into the reducer.
    - Tests:
      - table-test each action and transition ID
      - preserve existing command tests around terminal `ctrl_out`, ack-only
@@ -451,8 +515,9 @@ Phase 1 tests are pure unit tests:
 
 - `tests/core/test_state_machines.py` for helper construction, decision
   selection, reachability, and test-coverage proof helpers.
-- optional spec-level tests only after the helper API is stable enough to
-  protect as a contract.
+- Do not add a spec-level test in Phase 1. Revisit that only after at least one
+  Phase 2 runtime migration proves the helper API is worth treating as a
+  stable internal contract.
 
 Phase 2 tests are split:
 
@@ -475,6 +540,7 @@ Edge cases that must be covered:
 
 - unreachable state detection
 - missing transition-ID test coverage
+- missing action coverage
 - terminal states rejecting outgoing transitions
 - no matching transition
 - duplicate transition IDs
@@ -533,7 +599,10 @@ Rollout sequence:
 4. After each Phase 2 slice, run targeted tests and an independent review if
    the slice changes control, manager service convergence, or TaskSpec
    lifecycle behavior.
-5. Run the full final gates only after the last migration slice.
+5. Treat Phase 2d as decision-only unless the decision finds a small,
+   clearly useful control-policy reducer. It may produce a follow-up plan
+   instead of a code diff.
+6. Run the full final gates only after the last migration slice.
 
 Independent review:
 
@@ -552,6 +621,18 @@ Prioritize findings with file/section references and concrete fixes.
 
 The author must respond to each review finding by updating the plan, recording
 why the current path is still better, or marking the point out of scope.
+
+Initial review response:
+
+- Claude review completed during plan authoring.
+- Accepted findings: specify the constructor, remove dynamic targets from
+  Phase 1, clarify explicit coverage collection, call out TaskSpec
+  self-transition and `mark_running()` composition, reclassify manager-service
+  work as coverage-first rather than forced migration, name the command-control
+  state set, and include doc rollback.
+- Rejected findings: none. The review's concern that Phase 2 is not yet a
+  single implementation-ready slice is correct; this plan now treats Phase 2
+  as separate migration slices with their own review gates.
 
 Fresh-eyes checklist before implementation:
 

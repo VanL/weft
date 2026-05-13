@@ -521,14 +521,14 @@ Current rules:
   conservative local container detection markers such as `/.dockerenv`,
   `/run/.containerenv`, Kubernetes environment, or cgroup hints to publish an
   `external-supervisor` handle instead of an unsafe host-pid handle
-- external-supervisor manager records are still live records, not permanent
-  truth: the manager refreshes its active registry record periodically, and
-  lifecycle readers treat an expired external-supervisor heartbeat as stale
-  unless an extension has registered a process-local liveness probe that proves
-  the handle live. Lifecycle readers may mark the manager live or stale from
-  that probe. A missing or inconclusive probe falls back to the heartbeat rule.
-  Generic lifecycle readers must not treat supervisor/container-local PID
-  fields as host process identity.
+- external-supervisor manager records are current observations, not permanent
+  truth and not self-proving liveness. The manager refreshes its active registry
+  record periodically. A registered process-local liveness probe may prove the
+  exact handle `live` or `stale`; missing or inconclusive probes are `unknown`.
+  Unknown external-supervisor evidence may delay destructive cleanup or trigger
+  a bounded manager PING, but it must not cause a running dispatch-capable
+  manager to yield leadership. Generic lifecycle readers must not treat
+  supervisor/container-local PID fields as host process identity.
 - host-pid manager records require scoped host-process identity, not just raw
   PID existence; if `observations.host_processes` includes process creation
   times, PID liveness checks must reject records whose current process identity

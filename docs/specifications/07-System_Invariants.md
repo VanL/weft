@@ -215,10 +215,12 @@ _Implementation mapping_: `weft/core/manager.py`,
   graceful drain on normal termination signals
 - **MANAGER.8**: live canonical managers converge on one lowest-TID leader per
   context for status, manager selection, and voluntary duplicate-manager
-  cleanup; non-leaders yield or drain once they have no actionable queue work
-  and no persistent children to protect. Keyed PONG liveness may help decide
-  which canonical records are live, but it is not a lease, election vote, or
-  substitute for lowest-TID ownership reduction.
+  cleanup; non-leaders yield or drain only after a lower-TID manager is
+  positively live and dispatch-eligible, once they have no actionable queue
+  work and no persistent children to protect. Unknown external-supervisor
+  evidence is not voluntary-yield authority. Keyed PONG liveness may help
+  decide which canonical records are live, but it is not a lease, election
+  vote, or substitute for lowest-TID ownership reduction.
 - **MANAGER.9**: public spawn dispatch is work-stealing. Atomic reservation of
   a `weft.spawn.requests` message authorizes that manager to attempt the child
   launch for that exact message; registry `self`, `other`, `none`, or

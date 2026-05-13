@@ -1,6 +1,6 @@
 # Manager Liveness And Leadership Robustness Plan
 
-Status: draft
+Status: completed
 Source specs: docs/specifications/03-Manager_Architecture.md [MA-1.1], [MA-1.4], [MA-1.7], [MA-3]; docs/specifications/05-Message_Flow_and_State.md [MF-3], [MF-7]; docs/specifications/07-System_Invariants.md [MANAGER.6], [MANAGER.8], [MANAGER.9], [MANAGER.12], [MANAGER.13], [MANAGER.15], [MANAGER.16]; docs/specifications/10-CLI_Interface.md [CLI-1.1.2], manager-control surfaces
 Superseded by: none
 

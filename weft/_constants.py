@@ -164,6 +164,9 @@ MANAGER_INTERNAL_SPAWN_DRAIN_MAX_MESSAGES: Final[int] = 128
 MANAGER_PUBLIC_SPAWN_DRAIN_MAX_MESSAGES: Final[int] = 128
 """Maximum public spawn requests drained before yielding a manager turn."""
 
+MANAGER_DISPATCH_STALL_LOG_INTERVAL_SECONDS: Final[float] = 5.0
+"""Minimum interval between public dispatch stalled operational warnings."""
+
 MANAGER_STALLED_CONTROL_LOG_INTERVAL_SECONDS: Final[float] = 5.0
 """Minimum interval between repeated stalled manager-control warnings."""
 
@@ -189,6 +192,15 @@ its stopped registry record.
 
 MANAGER_COMPETING_STARTUP_GRACE_SECONDS: Final[float] = 0.5
 """Grace window for concurrent manager starts to yield to an existing winner."""
+
+MANAGER_LEADERSHIP_PING_TIMEOUT_SECONDS: Final[float] = 0.05
+"""Short PING budget for manager-owned leadership liveness fallback."""
+
+MANAGER_LEADERSHIP_PING_CACHE_TTL_SECONDS: Final[float] = 1.0
+"""How long manager-owned leadership checks reuse a candidate PING outcome."""
+
+MANAGER_LEADERSHIP_DRAIN_REVALIDATE_SECONDS: Final[float] = 1.0
+"""Interval for revalidating leader proof during voluntary leadership drain."""
 
 MANAGER_TASK_CLASS_PATH: Final[str] = "weft.core.manager.Manager"
 """Import path for the runtime-owned Manager task class."""

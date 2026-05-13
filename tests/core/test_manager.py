@@ -2707,7 +2707,7 @@ def test_manager_registers_when_lower_canonical_manager_is_stale(
     assert manager.tid in tids
 
 
-def test_manager_unknown_lower_owner_suppresses_until_half_timeout(
+def test_manager_unknown_lower_owner_does_not_suppress_or_yield(
     manager_setup,
     monkeypatch,
 ) -> None:
@@ -2733,7 +2733,7 @@ def test_manager_unknown_lower_owner_suppresses_until_half_timeout(
     )
     monkeypatch.setattr(manager, "_manager_registry_retention_ns", lambda: 1_000)
 
-    assert manager._recent_lower_canonical_manager_exists(
+    assert not manager._recent_lower_canonical_manager_exists(
         registry_queue,
         now_ns=lower_timestamp + 499,
     )
@@ -2741,6 +2741,79 @@ def test_manager_unknown_lower_owner_suppresses_until_half_timeout(
         registry_queue,
         now_ns=lower_timestamp + 500,
     )
+    assert manager._maybe_yield_leadership(force=True) is False
+    assert manager.should_stop is False
+
+
+def test_manager_strong_live_lower_owner_can_trigger_immediate_yield(
+    manager_setup,
+    monkeypatch,
+) -> None:
+    manager, make_queue = manager_setup
+    registry_queue = make_queue(WEFT_SERVICES_REGISTRY_QUEUE)
+    lower_tid = str(int(manager.tid) - 1)
+    registry_queue.write(
+        json.dumps(
+            _manager_service_payload(
+                manager,
+                tid=lower_tid,
+                runtime_handle=_external_supervisor_runtime_handle(),
+            )
+        )
+    )
+
+    monkeypatch.setattr(
+        manager_mod,
+        "runtime_liveness_from_registered_probe",
+        lambda handle: "live",
+    )
+
+    assert manager._maybe_yield_leadership(force=True) is True
+    assert manager.should_stop is True
+
+
+def test_manager_pong_from_draining_candidate_is_not_dispatch_eligible(
+    manager_setup,
+) -> None:
+    manager, _make_queue = manager_setup
+    record = _manager_service_payload(
+        manager,
+        tid=str(int(manager.tid) - 1),
+        runtime_handle=_external_supervisor_runtime_handle(),
+    )
+    payload = {
+        "tid": str(int(manager.tid) - 1),
+        "task_status": "draining",
+        "message": "PONG",
+        "role": "manager",
+        "requests": WEFT_SPAWN_REQUESTS_QUEUE,
+        "ctrl_in": WEFT_MANAGER_CTRL_IN_QUEUE,
+        "ctrl_out": WEFT_MANAGER_CTRL_OUT_QUEUE,
+        "weft_context": str(manager._manager_context().root),
+    }
+
+    assert not manager._pong_dispatch_eligible(
+        payload,
+        record=record,
+        ctrl_in_name=WEFT_MANAGER_CTRL_IN_QUEUE,
+        ctrl_out_name=WEFT_MANAGER_CTRL_OUT_QUEUE,
+    )
+
+
+def test_manager_leadership_drain_resumes_when_leader_proof_disappears(
+    manager_setup,
+    monkeypatch,
+) -> None:
+    manager, _make_queue = manager_setup
+    lower_tid = str(int(manager.tid) - 1)
+    manager._begin_leadership_drain(leader_tid=lower_tid)
+    monkeypatch.setattr(manager, "_active_dispatch_manager_records", lambda: {})
+
+    manager._continue_shutdown_drain()
+
+    assert manager._draining is False
+    assert manager.should_stop is False
+    assert manager._unregistered is False
 
 
 def test_manager_liveness_rejects_stale_external_supervisor_record(
@@ -3551,7 +3624,16 @@ def test_manager_leadership_yields_when_only_public_backlog_is_pending(
         launched.append(child_spec.tid)
         return True
 
-    monkeypatch.setattr(manager, "_leader_tid", lambda: lower_leader_tid)
+    monkeypatch.setattr(
+        manager,
+        "_read_active_manager_records",
+        lambda: {lower_leader_tid: {"tid": lower_leader_tid}},
+    )
+    monkeypatch.setattr(
+        manager,
+        "_active_dispatch_manager_records",
+        lambda: {lower_leader_tid: {"tid": lower_leader_tid}},
+    )
     monkeypatch.setattr(manager, "_launch_child_task", _record_launch)
 
     try:
@@ -3877,6 +3959,9 @@ def test_manager_leadership_yield_drains_nonpersistent_children(
         def join(self, timeout: float | None = None) -> None:
             return None
 
+        def kill(self) -> None:
+            return None
+
     manager._child_processes["child"] = ManagedChild(
         process=FakeProcess(),
         ctrl_queue=ctrl_queue_name,
@@ -3886,7 +3971,16 @@ def test_manager_leadership_yield_drains_nonpersistent_children(
     lower_leader_tid = str(int(manager.tid) - 1)
     unregister_calls: list[str] = []
 
-    monkeypatch.setattr(manager, "_leader_tid", lambda: lower_leader_tid)
+    monkeypatch.setattr(
+        manager,
+        "_read_active_manager_records",
+        lambda: {lower_leader_tid: {"tid": lower_leader_tid}},
+    )
+    monkeypatch.setattr(
+        manager,
+        "_active_dispatch_manager_records",
+        lambda: {lower_leader_tid: {"tid": lower_leader_tid}},
+    )
     monkeypatch.setattr(
         manager,
         "_unregister_manager",

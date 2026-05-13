@@ -53,8 +53,12 @@ from weft._constants import (
     MANAGER_CHILD_EXIT_POLL_INTERVAL,
     MANAGER_CHILD_STARTUP_LIVENESS_GRACE_SECONDS,
     MANAGER_CONTROL_DRAIN_MAX_MESSAGES,
+    MANAGER_DISPATCH_STALL_LOG_INTERVAL_SECONDS,
     MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS,
     MANAGER_INTERNAL_SPAWN_DRAIN_MAX_MESSAGES,
+    MANAGER_LEADERSHIP_DRAIN_REVALIDATE_SECONDS,
+    MANAGER_LEADERSHIP_PING_CACHE_TTL_SECONDS,
+    MANAGER_LEADERSHIP_PING_TIMEOUT_SECONDS,
     MANAGER_PID_LIVENESS_RECHECK_INTERVAL,
     MANAGER_PUBLIC_SPAWN_DRAIN_MAX_MESSAGES,
     MANAGER_REGISTRY_HEARTBEAT_INTERVAL_SECONDS,
@@ -160,6 +164,7 @@ from .taskspec import (
 logger = logging.getLogger(__name__)
 
 DispatchOwnershipState = Literal["self", "other", "none", "unknown"]
+ManagerLivenessState = Literal["live", "stale", "unknown"]
 
 
 @dataclass
@@ -186,6 +191,16 @@ class DispatchOwnership:
 
     state: DispatchOwnershipState
     leader_tid: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ManagerLeadershipProof:
+    """Liveness and dispatch proof for one candidate manager row."""
+
+    liveness: ManagerLivenessState
+    dispatch_eligible: bool = False
+    source: str = "none"
+    reason: str | None = None
 
 
 class Manager(BaseTask):
@@ -233,6 +248,7 @@ class Manager(BaseTask):
         self._drain_reason: str | None = None
         self._drain_completion_event = "manager_stop_drained"
         self._drain_stops_children = True
+        self._drain_leader_tid: str | None = None
         self._drain_signaled_children: set[str] = set()
         self._drain_signal_started_ns: dict[str, int] = {}
         self._drain_started_ns: int | None = None
@@ -269,6 +285,16 @@ class Manager(BaseTask):
         )
         self._leader_check_interval_ns = 100_000_000
         self._last_leader_check_ns = 0
+        self._manager_registry_snapshot: dict[str, dict[str, Any]] = {}
+        self._manager_registry_last_seen_ts: int | None = None
+        self._manager_registry_initialized = False
+        self._leader_probe_cache: dict[
+            str, tuple[int, int | None, ManagerLeadershipProof]
+        ] = {}
+        self._leader_probe_used_this_turn = False
+        self._last_leadership_drain_revalidate_ns = 0
+        self._last_public_spawn_drained_ns = 0
+        self._last_public_dispatch_stall_log_ns = 0
         self._broker_probe_interval_ns = 1_000_000_000  # probe at most once per second
         self._last_broker_probe_ns = 0
         self._last_registry_heartbeat_ns = 0
@@ -992,6 +1018,27 @@ class Manager(BaseTask):
             return
 
         runtime_handle = self._manager_runtime_handle()
+        if (
+            runtime_handle.control.get("authority") == "external-supervisor"
+            and runtime_handle.id.startswith("docker:")
+            and runtime_handle.metadata.get("foreground_serve") is True
+        ):
+            self._emit_serve_log_rate_limited(
+                "manager_runtime_identity_warning",
+                component="registry",
+                required_level="info",
+                severity="warning",
+                key="manager_runtime_identity_warning",
+                state={
+                    "runtime_handle_id": runtime_handle.id,
+                    "authority": runtime_handle.control.get("authority"),
+                },
+                log_fields={
+                    "reason": "docker_external_supervisor_identity_in_foreground_serve",
+                    "runtime_handle_id": runtime_handle.id,
+                    "authority": runtime_handle.control.get("authority"),
+                },
+            )
         previous_message_id = self._registry_message_id
         queues = {
             "requests": self._queue_names["inbox"],
@@ -1028,6 +1075,14 @@ class Manager(BaseTask):
                 self._registry_message_id = message_id
             self._last_registry_heartbeat_ns = time.time_ns()
             self._prune_older_self_registry_entries(registry_queue)
+            projected = project_manager_service_record(
+                payload,
+                timestamp=self._registry_message_id or time.time_ns(),
+                service_key=manager_service_key(self._manager_context()),
+            )
+            if projected is not None:
+                projected["_timestamp"] = self._registry_message_id or time.time_ns()
+                self._manager_registry_snapshot[self.tid] = projected
             if (
                 previous_message_id is not None
                 and self._registry_message_id is not None
@@ -1113,87 +1168,21 @@ class Manager(BaseTask):
         self, queue: Queue, *, now_ns: int | None = None
     ) -> bool:
         """Return whether a lower-TID canonical manager should suppress publish."""
-
-        observed_now_ns = time.time_ns() if now_ns is None else now_ns
-        service_key = manager_service_key(self._manager_context())
-        retention_ns = self._manager_registry_retention_ns()
-        half_retention_ns = max(0, retention_ns // 2)
-        records = []
-        stale_timestamps: list[int] = []
-        try:
-            entries = queue.peek_generator(with_timestamps=True)
-        except (BrokerError, OSError, RuntimeError):
-            logger.debug(
-                "Failed to inspect manager registry for lower canonical rows",
-                exc_info=True,
-            )
+        del queue, now_ns
+        active = self._active_dispatch_manager_records()
+        if active is None:
             return False
-
         try:
-            for entry in entries:
-                if not isinstance(entry, tuple) or len(entry) != 2:
-                    continue
-                body, timestamp = entry
-                if not isinstance(timestamp, int) or self._registry_entry_is_expired(
-                    timestamp,
-                    now_ns=observed_now_ns,
-                ):
-                    continue
-                try:
-                    payload = json.loads(body)
-                except (TypeError, json.JSONDecodeError):
-                    continue
-                if not isinstance(payload, dict):
-                    continue
-                record = parse_service_owner_record(payload, timestamp=timestamp)
-                if record is None or record.service_type != SERVICE_TYPE_MANAGER:
-                    continue
-                if record.service_key != service_key:
-                    continue
-                if record.status != "active":
-                    continue
-                try:
-                    if int(record.owner_tid) >= int(self.tid):
-                        continue
-                except ValueError:
-                    continue
-                projected = project_manager_service_record(
-                    payload,
-                    timestamp=timestamp,
-                    service_key=service_key,
-                )
-                if projected is None:
-                    continue
-                projected["_timestamp"] = timestamp
-                liveness = self._manager_record_liveness(projected)
-                if liveness == "stale":
-                    stale_timestamps.append(timestamp)
-                    continue
-                if liveness == "unknown" and retention_ns >= 0:
-                    if observed_now_ns - timestamp >= half_retention_ns:
-                        continue
-                records.append(record)
-        except (BrokerError, OSError, RuntimeError):
-            logger.debug(
-                "Failed to replay manager registry for lower canonical rows",
-                exc_info=True,
-            )
-        for timestamp in stale_timestamps:
+            own_tid = int(self.tid)
+        except ValueError:
+            return False
+        for tid in active:
             try:
-                queue.delete(message_id=timestamp)
-            except (BrokerError, OSError, RuntimeError):
-                logger.debug(
-                    "Failed to prune stale lower manager registry row",
-                    exc_info=True,
-                )
-        decision = reduce_service_ownership(
-            service_key,
-            records,
-            own_tid=self.tid,
-            now_ns=observed_now_ns,
-            ttl_ns=self._manager_registry_retention_ns(),
-        )
-        return decision.recent_lower_live_owner
+                if int(tid) < own_tid:
+                    return True
+            except ValueError:
+                continue
+        return False
 
     def _latest_self_registry_status(self, queue: Queue) -> str | None:
         """Return this manager's latest service-owner status, if readable."""
@@ -1372,6 +1361,17 @@ class Manager(BaseTask):
         self._registry_message_id = None
         self._unregistered = True
         self._unregistered_status = status
+        latest = self._latest_registry_entry(registry_queue, self.tid)
+        if latest is not None:
+            latest_payload, latest_ts = latest
+            projected = project_manager_service_record(
+                latest_payload,
+                timestamp=latest_ts,
+                service_key=manager_service_key(self._manager_context()),
+            )
+            if projected is not None:
+                projected["_timestamp"] = latest_ts
+                self._manager_registry_snapshot[self.tid] = projected
 
     def _manager_runtime_handle(self) -> RunnerHandle:
         config = getattr(self, "_config", {})
@@ -1513,153 +1513,242 @@ class Manager(BaseTask):
         liveness = Manager._manager_record_liveness(record)
         if liveness == "live":
             return True
-        if liveness == "stale":
-            return False
-        timestamp = record.get("_timestamp")
-        if not isinstance(timestamp, int):
-            return True
-        stale_after_ns = int(
-            MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS * 1_000_000_000
+        return False
+
+    @staticmethod
+    def _manager_ctrl_queue_name(tid: str, record: Mapping[str, Any]) -> str:
+        value = record.get("ctrl_in")
+        return (
+            value
+            if isinstance(value, str) and value
+            else f"T{tid}.{QUEUE_CTRL_IN_SUFFIX}"
         )
-        return stale_after_ns >= 0 and time.time_ns() - timestamp <= stale_after_ns
 
-    def _read_active_manager_records(self) -> dict[str, dict[str, Any]] | None:
-        """Return the live canonical manager snapshot or ``None`` on read failure.
+    @staticmethod
+    def _manager_ctrl_out_queue_name(tid: str, record: Mapping[str, Any]) -> str:
+        value = record.get("ctrl_out")
+        return (
+            value
+            if isinstance(value, str) and value
+            else f"T{tid}.{QUEUE_CTRL_OUT_SUFFIX}"
+        )
 
-        Spec: [MA-1.4], [MA-3]
-        """
+    def _pong_dispatch_eligible(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        record: Mapping[str, Any],
+        ctrl_in_name: str,
+        ctrl_out_name: str,
+    ) -> bool:
+        task_status = payload.get("task_status")
+        if task_status in {
+            SERVICE_STATUS_DRAINING,
+            "stopping",
+            "cancelled",
+            "completed",
+            "failed",
+            "timeout",
+            "killed",
+        }:
+            return False
+        if payload.get("should_stop") is True:
+            return False
+        role = payload.get("role")
+        if role is not None and role != "manager":
+            return False
+        requests = payload.get("requests")
+        if requests is not None and requests != WEFT_SPAWN_REQUESTS_QUEUE:
+            return False
+        ctrl_in = payload.get("ctrl_in")
+        if ctrl_in is not None and ctrl_in != ctrl_in_name:
+            return False
+        ctrl_out = payload.get("ctrl_out")
+        if ctrl_out is not None and ctrl_out != ctrl_out_name:
+            return False
+        weft_context = payload.get("weft_context")
+        expected_context = str(self._manager_context().root)
+        record_context = record.get("weft_context")
+        if isinstance(record_context, str) and record_context:
+            expected_context = record_context
+        return weft_context is None or weft_context == expected_context
+
+    def _manager_pong_dispatch_proof(
+        self,
+        record: Mapping[str, Any],
+        *,
+        now_ns: int,
+    ) -> ManagerLeadershipProof:
+        tid = record.get("tid")
+        timestamp = record.get("_timestamp", record.get("timestamp"))
+        if not isinstance(tid, str) or not tid:
+            return ManagerLeadershipProof("unknown", reason="missing_tid")
+        row_timestamp = timestamp if isinstance(timestamp, int) else None
+        cache_key = tid
+        cached = self._leader_probe_cache.get(cache_key)
+        cache_ttl_ns = int(MANAGER_LEADERSHIP_PING_CACHE_TTL_SECONDS * 1_000_000_000)
+        if cached is not None:
+            cached_at_ns, cached_row_ts, proof = cached
+            if cached_row_ts == row_timestamp and now_ns - cached_at_ns < cache_ttl_ns:
+                return proof
+        if self._leader_probe_used_this_turn:
+            return ManagerLeadershipProof(
+                "unknown",
+                source="control-pong",
+                reason="leadership_ping_budget_exhausted",
+            )
+        self._leader_probe_used_this_turn = True
+        ctrl_in_name = self._manager_ctrl_queue_name(tid, record)
+        ctrl_out_name = self._manager_ctrl_out_queue_name(tid, record)
+        result = send_keyed_ping_probe(
+            self._manager_context(),
+            tid=tid,
+            ctrl_in_name=ctrl_in_name,
+            ctrl_out_name=ctrl_out_name,
+            timeout=MANAGER_LEADERSHIP_PING_TIMEOUT_SECONDS,
+        )
+        if result.matched is None:
+            proof = ManagerLeadershipProof(
+                "unknown",
+                source="control-pong",
+                reason=result.error or "ping_timeout",
+            )
+        elif self._pong_dispatch_eligible(
+            result.matched.payload,
+            record=record,
+            ctrl_in_name=ctrl_in_name,
+            ctrl_out_name=ctrl_out_name,
+        ):
+            proof = ManagerLeadershipProof(
+                "live",
+                dispatch_eligible=True,
+                source="control-pong",
+            )
+        else:
+            proof = ManagerLeadershipProof(
+                "live",
+                dispatch_eligible=False,
+                source="control-pong",
+                reason="pong_not_dispatch_eligible",
+            )
+        self._leader_probe_cache[cache_key] = (now_ns, row_timestamp, proof)
+        return proof
+
+    def _manager_leadership_proof(
+        self,
+        record: Mapping[str, Any],
+        *,
+        now_ns: int,
+        allow_ping: bool,
+    ) -> ManagerLeadershipProof:
+        if record.get("status") != "active":
+            return ManagerLeadershipProof("stale", reason="not_active")
+        if not is_canonical_manager_record(record):
+            return ManagerLeadershipProof("stale", reason="not_canonical")
+        liveness = self._manager_record_liveness(record)
+        if liveness == "live":
+            return ManagerLeadershipProof(
+                "live",
+                dispatch_eligible=True,
+                source="runtime-handle",
+            )
+        if liveness == "stale":
+            return ManagerLeadershipProof("stale", source="runtime-handle")
+        if allow_ping:
+            return self._manager_pong_dispatch_proof(record, now_ns=now_ns)
+        return ManagerLeadershipProof("unknown", source="runtime-handle")
+
+    def _update_manager_registry_snapshot(
+        self,
+        *,
+        force_full: bool = False,
+    ) -> bool:
+        """Refresh this manager's scoped registry view without broad status reads."""
 
         queue = self._queue(WEFT_SERVICES_REGISTRY_QUEUE)
-        snapshot: dict[str, dict[str, Any]] = {}
-        stale_timestamps: list[int] = []
-        entries: list[tuple[dict[str, Any], int]] = []
-
-        try:
-            raw_entries = queue.peek_generator(with_timestamps=True)
-        except (BrokerError, OSError, RuntimeError):
-            logger.debug("Failed to open manager registry replay", exc_info=True)
-            return None
-
-        try:
-            for entry in raw_entries:
-                if not isinstance(entry, tuple) or len(entry) != 2:
-                    continue
-                body, timestamp = entry
-                if not isinstance(timestamp, int):
-                    continue
-                try:
-                    payload = json.loads(body)
-                except (TypeError, json.JSONDecodeError):
-                    continue
-                if not isinstance(payload, dict):
-                    continue
-                entries.append((payload, timestamp))
-        except (BrokerError, OSError, RuntimeError):
-            logger.debug("Failed to replay manager registry", exc_info=True)
-            return None
-
         service_key = manager_service_key(self._manager_context())
-        read = collect_service_owner_records(
-            entries,
-            service_key=service_key,
-            service_type=SERVICE_TYPE_MANAGER,
+        since_timestamp = (
+            None
+            if force_full or not self._manager_registry_initialized
+            else self._manager_registry_last_seen_ts
         )
-
-        live_records: list[ServiceOwnerRecord] = []
-        projected_by_timestamp: dict[int, dict[str, Any]] = {}
-        for record in read.records:
-            payload = record.payload
-            if not isinstance(payload, dict):
-                continue
-            projected = project_manager_service_record(
-                payload,
-                timestamp=record.timestamp,
-                service_key=service_key,
-            )
-            if projected is None:
-                continue
-            tid = projected.get("tid")
-            if not isinstance(tid, str) or not tid:
-                continue
-            projected["_timestamp"] = record.timestamp
-            if projected.get("status") == "active":
-                if tid == self.tid and not self._unregistered:
-                    live_records.append(record)
-                elif self._manager_record_is_live(projected):
-                    live_records.append(record)
-                else:
-                    stale_timestamps.append(record.timestamp)
-                    continue
-            projected_by_timestamp[record.timestamp] = projected
-            existing = snapshot.get(tid)
-            existing_timestamp = int(existing.get("_timestamp", -1)) if existing else -1
-            if existing is None or existing_timestamp < record.timestamp:
-                snapshot[tid] = projected
-
-        if not self._unregistered and not self.should_stop:
-            own_record = snapshot.get(self.tid)
-            own_timestamp = (
-                int(own_record.get("_timestamp", 0))
-                if isinstance(own_record, dict)
-                else 0
-            )
-            interval_ns = int(
-                MANAGER_REGISTRY_HEARTBEAT_INTERVAL_SECONDS * 1_000_000_000
-            )
-            if (
-                own_record is None
-                or own_record.get("status") != "active"
-                or time.time_ns() - own_timestamp >= interval_ns
-            ):
-                self._refresh_manager_registration(force=True)
-                self._emit_serve_log(
-                    "manager_registry_snapshot",
-                    component="registry",
-                    required_level="debug",
-                    event_reason="own_registration_refreshed",
-                    own_record_present=own_record is not None,
-                    own_record_status=own_record.get("status")
-                    if isinstance(own_record, dict)
-                    else None,
+        try:
+            entries = iter_queue_json_entries(queue, since_timestamp=since_timestamp)
+            saw_entry = False
+            for payload, timestamp in entries:
+                saw_entry = True
+                if (
+                    self._manager_registry_last_seen_ts is None
+                    or timestamp > self._manager_registry_last_seen_ts
+                ):
+                    self._manager_registry_last_seen_ts = timestamp
+                projected = project_manager_service_record(
+                    payload,
+                    timestamp=timestamp,
+                    service_key=service_key,
                 )
-                latest = self._latest_registry_entry(queue, self.tid)
-                if latest is not None:
-                    payload, timestamp = latest
-                    projected = project_manager_service_record(
-                        payload,
-                        timestamp=timestamp,
-                        service_key=manager_service_key(self._manager_context()),
-                    )
-                    if projected is not None:
-                        projected["_timestamp"] = timestamp
-                        snapshot[self.tid] = projected
-                        refreshed = parse_service_owner_record(
-                            payload,
-                            timestamp=timestamp,
-                        )
-                        if refreshed is not None:
-                            live_records.append(refreshed)
-                            projected_by_timestamp[timestamp] = projected
+                if projected is None:
+                    continue
+                tid = projected.get("tid")
+                if not isinstance(tid, str) or not tid:
+                    continue
+                projected["_timestamp"] = timestamp
+                existing = self._manager_registry_snapshot.get(tid)
+                existing_ts = (
+                    int(existing.get("_timestamp", -1))
+                    if isinstance(existing, dict)
+                    else -1
+                )
+                if timestamp >= existing_ts:
+                    self._manager_registry_snapshot[tid] = projected
+            self._manager_registry_initialized = True
+            if force_full and not saw_entry:
+                self._manager_registry_snapshot.clear()
+            return True
+        except (BrokerError, OSError, RuntimeError):
+            logger.debug("Failed to refresh manager registry view", exc_info=True)
+            return False
 
-        decision = reduce_service_ownership(
-            service_key,
-            live_records,
-            own_tid=self.tid,
-            now_ns=time.time_ns(),
-            ttl_ns=self._manager_registry_retention_ns(),
-            read_failed=read.read_failed,
-        )
+    def _active_dispatch_manager_records(self) -> dict[str, dict[str, Any]] | None:
+        now_ns = time.time_ns()
+        if not self._update_manager_registry_snapshot():
+            return None
+
         active: dict[str, dict[str, Any]] = {}
-        for record in decision.records:
-            if record.status != "active":
+        stale_timestamps: list[int] = []
+        unknown_seen = False
+        for tid, record in list(self._manager_registry_snapshot.items()):
+            timestamp = record.get("_timestamp")
+            if isinstance(timestamp, int) and self._registry_entry_is_expired(
+                timestamp,
+                now_ns=now_ns,
+            ):
+                stale_timestamps.append(timestamp)
+                self._manager_registry_snapshot.pop(tid, None)
                 continue
-            projected = projected_by_timestamp.get(record.timestamp)
-            if projected is None:
+            if tid == self.tid and not self._unregistered and not self.should_stop:
+                if record.get("status") == "active" and is_canonical_manager_record(
+                    record
+                ):
+                    active[tid] = record
                 continue
-            tid = projected.get("tid")
-            if isinstance(tid, str) and is_canonical_manager_record(projected):
-                active[tid] = projected
+            proof = self._manager_leadership_proof(
+                record,
+                now_ns=now_ns,
+                allow_ping=True,
+            )
+            if proof.liveness == "stale":
+                if isinstance(timestamp, int):
+                    stale_timestamps.append(timestamp)
+                self._manager_registry_snapshot.pop(tid, None)
+                continue
+            if proof.liveness == "unknown":
+                unknown_seen = True
+                continue
+            if proof.dispatch_eligible:
+                active[tid] = record
 
+        queue = self._queue(WEFT_SERVICES_REGISTRY_QUEUE)
         for timestamp in stale_timestamps:
             try:
                 queue.delete(message_id=timestamp)
@@ -1668,10 +1757,6 @@ class Manager(BaseTask):
 
         active_tids = sorted(active)
         leader_tid = canonical_owner_tid(active)
-        required_level = (
-            "info" if stale_timestamps or len(active_tids) != 1 else "debug"
-        )
-        severity = "warning" if stale_timestamps or not active_tids else "info"
         fields = {
             "active_manager_tids": active_tids,
             "active_manager_count": len(active_tids),
@@ -1681,13 +1766,22 @@ class Manager(BaseTask):
         self._emit_serve_log_rate_limited(
             "manager_registry_snapshot",
             component="registry",
-            required_level=required_level,
-            severity=severity,
+            required_level="debug" if active_tids else "info",
+            severity="info" if active_tids else "warning",
             key="manager_registry_snapshot",
             state=fields,
             log_fields=fields,
         )
+        if unknown_seen and not active:
+            return None
         return active
+
+    def _read_active_manager_records(self) -> dict[str, dict[str, Any]] | None:
+        """Return the live canonical manager snapshot or ``None`` on read failure.
+
+        Spec: [MA-1.4], [MA-3]
+        """
+        return self._active_dispatch_manager_records()
 
     def _active_manager_records(self) -> dict[str, dict[str, Any]]:
         active = self._read_active_manager_records()
@@ -1835,7 +1929,14 @@ class Manager(BaseTask):
             return self.should_stop
         self._last_leader_check_ns = now_ns
 
-        leader_tid = self._leader_tid()
+        active = self._read_active_manager_records()
+        if active is None:
+            self._emit_manager_ownership_decision(
+                DispatchOwnership(state="unknown"),
+                reason="leadership_yield_check",
+            )
+            return False
+        leader_tid = canonical_owner_tid(active)
         ownership_state: DispatchOwnershipState
         if leader_tid is None:
             ownership_state = "none"
@@ -2197,6 +2298,7 @@ class Manager(BaseTask):
         self._drain_reason = reason
         self._drain_completion_event = completion_event
         self._drain_stops_children = True
+        self._drain_leader_tid = None
         if event is not None:
             self._report_state_change(
                 event=event,
@@ -2233,6 +2335,8 @@ class Manager(BaseTask):
         self._drain_reason = f"Superseded by lower-TID manager {leader_tid}"
         self._drain_completion_event = "manager_leadership_drained"
         self._drain_stops_children = False
+        self._drain_leader_tid = leader_tid
+        self._last_leadership_drain_revalidate_ns = 0
         self._report_state_change(
             event="manager_leadership_yielded",
             leader_tid=leader_tid,
@@ -4602,6 +4706,7 @@ class Manager(BaseTask):
 
     def process_once(self) -> None:
         self._loop_iteration += 1
+        self._leader_probe_used_this_turn = False
         self._emit_manager_loop_summary()
         self._process_pending_termination_signal()
         if self.should_stop:
@@ -4712,11 +4817,46 @@ class Manager(BaseTask):
             return 0
         if self.should_stop or self._draining:
             return 0
-        return self._drain_spawn_requests_from_queue(
+        drained = self._drain_spawn_requests_from_queue(
             queue_name=public_inbox,
             max_messages=MANAGER_PUBLIC_SPAWN_DRAIN_MAX_MESSAGES,
             event="public_spawn_drain",
             component="spawn",
+        )
+        if drained > 0:
+            self._last_public_spawn_drained_ns = time.time_ns()
+        else:
+            self._maybe_log_public_dispatch_stall(public_inbox)
+        return drained
+
+    def _maybe_log_public_dispatch_stall(self, public_inbox: str) -> None:
+        if not self._manager_log_allows("info"):
+            return
+        try:
+            backlog_pending = self._queue(public_inbox).has_pending()
+        except (BrokerError, OSError, RuntimeError):
+            backlog_pending = False
+        if not backlog_pending:
+            return
+        now_ns = time.time_ns()
+        interval_ns = int(MANAGER_DISPATCH_STALL_LOG_INTERVAL_SECONDS * 1_000_000_000)
+        if now_ns - self._last_public_dispatch_stall_log_ns < interval_ns:
+            return
+        self._last_public_dispatch_stall_log_ns = now_ns
+        ownership = self._evaluate_dispatch_ownership()
+        self._emit_serve_log(
+            "public_dispatch_stalled",
+            component="spawn",
+            required_level="info",
+            severity="warning",
+            queue=public_inbox,
+            ownership_state=ownership.state,
+            leader_tid=ownership.leader_tid,
+            child_count=len(self._child_processes),
+            manager_reserved_pending=self._queue_pending_for_log(
+                self._queue_names.get("reserved")
+            ),
+            last_public_spawn_drained_ns=self._last_public_spawn_drained_ns,
         )
 
     def _drain_spawn_requests_from_queue(
@@ -4766,7 +4906,62 @@ class Manager(BaseTask):
             self._strategy.notify_activity()
         return total_processed
 
+    def _leadership_drain_leader_still_valid(self) -> bool:
+        leader_tid = self._drain_leader_tid
+        if leader_tid is None:
+            return False
+        active = self._active_dispatch_manager_records()
+        if active is None:
+            return False
+        return canonical_owner_tid(active) == leader_tid
+
+    def _resume_leadership_after_drain_loss(self) -> None:
+        leader_tid = self._drain_leader_tid
+        self._draining = False
+        self._drain_signaled_children.clear()
+        self._drain_signal_started_ns.clear()
+        self._drain_started_ns = None
+        self._drain_reason = None
+        self._drain_completion_event = "manager_stop_drained"
+        self._drain_stops_children = True
+        self._drain_leader_tid = None
+        self._unregistered = False
+        self._unregistered_status = None
+        self._registry_message_id = None
+        self._last_registry_heartbeat_ns = 0
+        self._register_manager()
+        self._update_process_title("running")
+        self._report_state_change(
+            event="manager_leadership_resumed",
+            leader_tid=leader_tid,
+        )
+        self._emit_serve_log(
+            "manager_leadership_resumed",
+            component="ownership",
+            required_level="info",
+            severity="warning",
+            former_leader_tid=leader_tid,
+        )
+
+    def _revalidate_leadership_drain(self) -> bool:
+        if self._drain_stops_children:
+            return True
+        now_ns = time.time_ns()
+        interval_ns = int(MANAGER_LEADERSHIP_DRAIN_REVALIDATE_SECONDS * 1_000_000_000)
+        if (
+            self._last_leadership_drain_revalidate_ns
+            and now_ns - self._last_leadership_drain_revalidate_ns < interval_ns
+        ):
+            return True
+        self._last_leadership_drain_revalidate_ns = now_ns
+        if self._leadership_drain_leader_still_valid():
+            return True
+        self._resume_leadership_after_drain_loss()
+        return False
+
     def _continue_shutdown_drain(self) -> None:
+        if not self._revalidate_leadership_drain():
+            return
         if self._drain_stops_children:
             self._signal_children_to_stop()
         self._cleanup_children()

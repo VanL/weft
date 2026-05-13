@@ -2423,6 +2423,33 @@ def test_select_active_manager_rejects_non_manager_pong_for_stale_record(
     assert record is None
 
 
+def test_select_active_manager_rejects_draining_pong_for_stale_record(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = "1775622400000000209"
+    monkeypatch.setattr(
+        "weft.core.manager_runtime.MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS",
+        -1.0,
+    )
+    _write_active_manager_registry_record(
+        ctx,
+        tid=tid,
+        runtime_handle=_external_supervisor_runtime_handle(),
+    )
+
+    record = _select_active_manager_while_answering_probe(
+        ctx,
+        tid=tid,
+        monkeypatch=monkeypatch,
+        pong_fields={"task_status": "draining"},
+    )
+
+    assert record is None
+
+
 def test_select_active_manager_prunes_stale_record_without_pong(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

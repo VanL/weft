@@ -52,7 +52,7 @@ always be rolled back from the public request queue.
 - [Manager Work-Stealing Dispatch Plan](../plans/2026-05-11-manager-work-stealing-dispatch-plan.md) – draft plan to make atomic spawn-request reservation the public dispatch authority while keeping singleton service correctness in the manager-owned reducer.
 - [Manager Serve Operational Log Plan](../plans/2026-05-11-manager-serve-operational-log-plan.md) – draft plan for level-controlled foreground `manager serve` operational logs that expose registry, loop, service-convergence, spawn, and TaskMonitor decisions without writing lifecycle state.
 - [Manager Replace Start And Serve Plan](../plans/2026-05-13-manager-replace-start-serve-plan.md) – completed plan for explicit `weft manager start --replace` and `weft manager serve --replace` operator replacement semantics using the existing STOP control path.
-- [Manager Liveness And Leadership Robustness Plan](../plans/2026-05-13-manager-liveness-and-leadership-robustness-plan.md) – draft plan to require strong live dispatch-authority proof before leadership yield, keep external-supervisor `unknown` evidence from acting as authority, and bound leadership-drain recovery without broad status scans.
+- [Manager Liveness And Leadership Robustness Plan](../plans/2026-05-13-manager-liveness-and-leadership-robustness-plan.md) – completed plan requiring strong live dispatch-authority proof before leadership yield, keeping external-supervisor `unknown` evidence from acting as authority, and bounding leadership-drain recovery without broad status scans.
 - [Internal State Machine Helper Plan](../plans/2026-05-13-internal-state-machine-helper-plan.md) – draft plan for a reusable pure reducer helper that can express manager-service and other transition tables without moving side effects out of their current owners.
 - [Internal Service Observability Plan](../plans/2026-05-11-internal-service-observability-plan.md) – adds an ops read model that reports heartbeat and TaskMonitor state from manager launch evidence, child task logs, TID mappings, and internal spawn queues.
 
@@ -131,14 +131,23 @@ Key responsibilities implemented in `weft/core/manager.py`:
    extension can prove the handle live or stale. Generic manager readers must
    not reinterpret container-local or supervisor-local PIDs as host process
    identity for these handles. A definitive extension `stale` result is treated
-   as stale immediately; inconclusive or missing probes fall back to the generic
-   registry heartbeat age boundary. When startup or manager selection sees an otherwise
-   canonical active manager row that is stale by PID/time evidence, it may send
-   one bounded keyed PING to that manager's task-local control queue. A matched
-   PONG from the same TID can rescue the row as positive liveness evidence for
-   selection; an absent, malformed, or non-matching PONG is not negative proof
-   and does not authorize unsafe takeover by itself. Canonical ownership is
-   lowest-live-TID among canonical claimants for status, selection, and
+   as stale immediately; inconclusive or missing probes are `unknown` evidence,
+   not leadership authority. Startup and explicit operator replacement may use
+   bounded fallback policy for ambiguous foreground-supervisor rows, but a
+   running dispatch-capable manager must not voluntarily yield to an unknown
+   external-supervisor row. Manager-owned leadership checks keep a scoped
+   in-memory registry view and update it from broker timestamps instead of
+   replaying the full service registry every loop turn. When startup or manager
+   selection sees an otherwise canonical active manager row that lacks strong
+   runtime proof, it may send one bounded keyed PING to that manager's
+   task-local control queue. A matched PONG from the same TID can rescue the row
+   as positive liveness evidence for selection only when its manager-selection
+   fields prove dispatch eligibility: manager role, `weft.spawn.requests`,
+   matching control queues, matching context when present, non-terminal
+   `task_status`, and `should_stop` not true. An absent, malformed,
+   non-matching, draining, or stopping PONG is not negative proof and does not
+   authorize unsafe takeover by itself. Canonical ownership is lowest-live-TID
+   among canonical dispatch-eligible claimants for status, selection, and
    duplicate-manager convergence. It is advisory for public dispatch because
    atomic queue reservation owns public spawn exclusivity.
    Task-list/status read models use the same selected active-manager view. A
@@ -240,6 +249,10 @@ Current leadership-view rules:
   public or manager-owned internal spawn work
 - a manager may keep supervising already-launched persistent children after a
   lower-TID leader appears
+- a manager with non-persistent children that voluntarily yields leadership
+  enters leadership drain and revalidates the replacement; if the replacement
+  becomes stale or unknown, it may publish `manager_leadership_resumed`, restore
+  active ownership, and return to the ordinary manager loop
 - a manager treats its own active canonical registry row as live while it has
   not unregistered and is not stopping; host/PONG liveness probes are for other
   processes, and the manager refreshes its own registry row periodically so
@@ -294,6 +307,10 @@ send STOP to each selected incumbent manager control queue, write a
 manager remains, and then start or serve the replacement. Replacement does not
 wait for stopped confirmation in v1; ordinary `weft manager stop` still waits
 for stopped registry/process evidence. External
+Voluntary leadership drain does not kill user children. It waits for already
+owned non-persistent children while the lower-TID leader remains positively
+proved; if that proof disappears, the manager publishes
+`manager_leadership_resumed`, restores active ownership, and resumes serving.
 `SIGTERM` and `SIGINT` against a Manager enter the same drain path as STOP. A
 manager drain has a bounded child-exit window; if child tasks do not exit after
 STOP is broadcast and the drain window expires, the Manager forcefully reaps
