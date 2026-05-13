@@ -347,11 +347,13 @@ def test_task_monitor_ping_includes_health_and_preserves_task_log(
     assert extended["last_cycle"]["processed"] == pong["last_processed"]
     assert extended["last_cycle"]["deleted"] == pong["last_deleted"]
     assert extended["last_cycle"]["reported"] == pong["last_reported"]
-    assert extended["last_cycle"]["prune_records_scanned"] == (
-        pong["last_prune_records_scanned"]
+    assert (
+        extended["last_cycle"]["prune_records_scanned"]
+        == (pong["last_prune_records_scanned"])
     )
-    assert extended["last_cycle"]["cleanup_queue_stats"] == (
-        pong["last_cleanup_queue_stats"]
+    assert (
+        extended["last_cycle"]["cleanup_queue_stats"]
+        == (pong["last_cleanup_queue_stats"])
     )
     assert extended["last_cycle"]["warnings"] == []
     assert extended["last_cycle"]["errors"] == []

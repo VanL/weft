@@ -445,9 +445,7 @@ class TaskMonitorTask(BaseTask):
                     "registered": self._heartbeat_registered,
                     "id": self._heartbeat_id,
                     "error": self._heartbeat_error,
-                    "next_registration_attempt_in_seconds": (
-                        next_registration_attempt
-                    ),
+                    "next_registration_attempt_in_seconds": (next_registration_attempt),
                 },
                 "schedule": {
                     "first_cycle_pending": self._first_cycle_pending,
@@ -460,12 +458,8 @@ class TaskMonitorTask(BaseTask):
                     "success": self._last_processor_success,
                     "error": self._last_error,
                     "candidates_seen": self._last_candidates_seen,
-                    "candidate_class_counts": dict(
-                        self._last_candidate_class_counts
-                    ),
-                    "safe_to_delete_candidates": (
-                        self._last_safe_to_delete_candidates
-                    ),
+                    "candidate_class_counts": dict(self._last_candidate_class_counts),
+                    "safe_to_delete_candidates": (self._last_safe_to_delete_candidates),
                     "processed": self._last_processed,
                     "deleted": self._last_deleted,
                     "reported": self._last_reported,
@@ -476,9 +470,7 @@ class TaskMonitorTask(BaseTask):
                     "warnings": list(self._last_warnings)[
                         :TASK_MONITOR_PONG_DETAIL_LIMIT
                     ],
-                    "errors": list(self._last_errors)[
-                        :TASK_MONITOR_PONG_DETAIL_LIMIT
-                    ],
+                    "errors": list(self._last_errors)[:TASK_MONITOR_PONG_DETAIL_LIMIT],
                 },
             }
         }

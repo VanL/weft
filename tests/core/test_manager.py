@@ -1428,9 +1428,8 @@ def test_active_managed_service_convergence_uses_active_interval(
 
     assert calls == []
 
-    manager._last_managed_service_convergence_ns = (
-        time.time_ns()
-        - int((MANAGED_SERVICE_CONVERGENCE_INTERVAL_SECONDS + 0.1) * 1_000_000_000)
+    manager._last_managed_service_convergence_ns = time.time_ns() - int(
+        (MANAGED_SERVICE_CONVERGENCE_INTERVAL_SECONDS + 0.1) * 1_000_000_000
     )
     manager._run_managed_service_convergence(include_autostart=False)
 

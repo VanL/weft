@@ -68,7 +68,9 @@ def parse_env_file(text: str, *, path: Path) -> dict[str, str]:
                 line_number=line_number,
             )
 
-        values[key] = _parse_env_value(raw_value.strip(), path=path, line_number=line_number)
+        values[key] = _parse_env_value(
+            raw_value.strip(), path=path, line_number=line_number
+        )
     return values
 
 
