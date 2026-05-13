@@ -13,6 +13,8 @@ See also:
   [`05-Message_Flow_and_State.md`](05-Message_Flow_and_State.md)
 - active service-health convergence plan:
   [`docs/plans/2026-05-09-service-liveness-and-health-convergence-plan.md`](../plans/2026-05-09-service-liveness-and-health-convergence-plan.md)
+- draft internal state-machine helper plan:
+  [`docs/plans/2026-05-13-internal-state-machine-helper-plan.md`](../plans/2026-05-13-internal-state-machine-helper-plan.md)
 
 ## System Invariants
 

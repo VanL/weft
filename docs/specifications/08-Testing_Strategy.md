@@ -101,3 +101,4 @@ Coverage policy:
 - [08A-Testing_Strategy_Planned.md](08A-Testing_Strategy_Planned.md)
 - [07-System_Invariants.md](07-System_Invariants.md)
 - [10-CLI_Interface.md](10-CLI_Interface.md)
+- [Internal State Machine Helper Plan](../plans/2026-05-13-internal-state-machine-helper-plan.md)
