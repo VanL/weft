@@ -239,10 +239,10 @@ def test_replace_active_manager_sends_stop_and_marks_superseded(
 
     replaced, message = core_manager_runtime.replace_active_manager(
         context,
-        timeout=1.0,
+        timeout=MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
     )
 
-    assert replaced is True
+    assert replaced is True, message
     assert message is None
     ctrl_queue = Queue(
         f"manager.{tid}.ctrl_in",
@@ -298,10 +298,10 @@ def test_replace_active_manager_reselects_after_superseding_lower_tid(
 
     replaced, message = core_manager_runtime.replace_active_manager(
         context,
-        timeout=1.0,
+        timeout=MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
     )
 
-    assert replaced is True
+    assert replaced is True, message
     assert message is None
     lower_latest = _latest_manager_record(context, lower_tid)
     higher_latest = _latest_manager_record(context, higher_tid)
