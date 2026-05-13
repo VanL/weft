@@ -331,7 +331,12 @@ def build_task_monitor_cycle_snapshot(
         queue.close()
 
     now_ns = time.time_ns()
-    queue_counts = _queue_message_counts_by_name(ctx)
+    outbox_names = {
+        task_evidence.queue_names_for_tid(reduced.tid, reduced.taskspec_payload)[0]
+        for reduced in scan.reduced.values()
+        if reduced.tid != monitor_tid
+    }
+    queue_counts = _queue_message_counts_by_name(ctx, outbox_names)
     lifecycle_candidates = [
         candidate
         for reduced in scan.reduced.values()
@@ -518,22 +523,24 @@ def _candidate_for_reduced(
 
 def _queue_message_counts_by_name(
     ctx: WeftContext,
+    queue_names: Iterable[str],
 ) -> dict[str, task_evidence.QueueMessageCounts]:
-    try:
-        with ctx.broker() as db:
-            queue_stats = db.get_queue_stats()
-    except (BrokerError, OSError, RuntimeError):  # pragma: no cover - best effort
+    wanted = {name for name in queue_names if name}
+    if not wanted:
         return {}
 
     counts: dict[str, task_evidence.QueueMessageCounts] = {}
-    for name, unclaimed, total in queue_stats:
-        if not isinstance(name, str):
-            continue
-        counts[name] = task_evidence.QueueMessageCounts(
-            queue=name,
-            unclaimed=max(0, int(unclaimed)),
-            total=max(0, int(total)),
-        )
+    try:
+        with ctx.broker() as db:
+            for name in wanted:
+                stats = db.get_queue_stat(name)
+                counts[name] = task_evidence.QueueMessageCounts(
+                    queue=name,
+                    unclaimed=max(0, int(stats.pending)),
+                    total=max(0, int(stats.total)),
+                )
+    except (BrokerError, OSError, RuntimeError):  # pragma: no cover - best effort
+        return {}
     return counts
 
 

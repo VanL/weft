@@ -22,7 +22,7 @@ from urllib.parse import quote
 ROOT = Path(__file__).resolve().parents[1]
 PYTEST_WORKER_COUNT_HELPER = ROOT / "bin" / "pytest-worker-count"
 POSTGRES_IMAGE = os.environ.get("SIMPLEBROKER_PG_TEST_IMAGE", "postgres:18")
-POSTGRES_DB = os.environ.get("SIMPLEBROKER_PG_TEST_DB", "simplebroker_test")
+POSTGRES_DB = os.environ.get("SIMPLEBROKER_PG_TEST_DB", "weft_test")
 POSTGRES_USER = os.environ.get("SIMPLEBROKER_PG_TEST_USER", "postgres")
 POSTGRES_PASSWORD = os.environ.get("SIMPLEBROKER_PG_TEST_PASSWORD", "postgres")
 PYTEST_INTERRUPT_GRACE_SECONDS: Final[float] = 8.0

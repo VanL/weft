@@ -129,6 +129,15 @@ def test_worker_count_helper_writes_github_env(
     )
 
 
+def test_pytest_pg_default_database_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The PG helper should default to the Weft-owned test database name."""
+
+    monkeypatch.delenv("SIMPLEBROKER_PG_TEST_DB", raising=False)
+    pytest_pg = _load_pytest_pg_module()
+
+    assert pytest_pg.POSTGRES_DB == "weft_test"
+
+
 def test_build_test_env_sets_worker_count(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -158,16 +167,16 @@ def test_build_test_env_owns_backend_connection_env(
         monkeypatch.setenv(f"{prefix}_BACKEND_SCHEMA", "stale_schema")
 
     env = pytest_pg._build_test_env(
-        dsn="postgresql://postgres:postgres@127.0.0.1:33017/simplebroker_test",
+        dsn="postgresql://postgres:postgres@127.0.0.1:33017/weft_test",
     )
 
     assert env["BROKER_BACKEND"] == "postgres"
     assert env["BROKER_BACKEND_TARGET"] == (
-        "postgresql://postgres:postgres@127.0.0.1:33017/simplebroker_test"
+        "postgresql://postgres:postgres@127.0.0.1:33017/weft_test"
     )
     assert env["WEFT_BACKEND"] == "postgres"
     assert env["WEFT_BACKEND_TARGET"] == (
-        "postgresql://postgres:postgres@127.0.0.1:33017/simplebroker_test"
+        "postgresql://postgres:postgres@127.0.0.1:33017/weft_test"
     )
     assert "BROKER_BACKEND_PASSWORD" not in env
     assert "WEFT_BACKEND_PASSWORD" not in env

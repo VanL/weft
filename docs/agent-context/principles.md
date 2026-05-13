@@ -58,8 +58,13 @@ Example:
 - Run dependent state-changing commands sequentially when order matters.
 - For risky changes, proof includes rollout or rollback assumptions and
   intended post-deploy observation, not only local test results.
-- Prefer an independent review pass for non-trivial plans and completed work,
-  especially when another agent family is available.
+- Every plan requires a separate fresh-eyes self-review before it is reported
+  complete or implementation-ready. The review must look for latent ambiguity,
+  bad ideas, and whether the plan can be implemented correctly by a
+  zero-context engineer.
+- High-stakes or complicated plans require external review when another
+  reviewer can be used. If the reviewer is a different agent, expect a
+  5-10 minute turnaround and do not skip the review because of that delay.
 
 ## Document Traceability
 

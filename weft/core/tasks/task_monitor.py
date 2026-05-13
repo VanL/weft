@@ -69,6 +69,8 @@ from .base import BaseTask
 from .multiqueue_watcher import QueueMessageContext
 
 TaskMonitorCallback = Callable[[str, str, int], None]
+TASK_MONITOR_PONG_DETAIL_LIMIT = 20
+"""Maximum list entries included in TaskMonitor extended PONG diagnostics."""
 
 
 def make_task_monitor_taskspec(tid: str | None = None) -> TaskSpec:
@@ -150,6 +152,7 @@ class TaskMonitorTask(BaseTask):
         self._serve_log_last_state: dict[str, str] = {}
         super().__init__(db=db, taskspec=taskspec, stop_event=stop_event, config=config)
         self._monitor_config = TaskMonitorRuntimeConfig.from_config(self._config)
+        self.register_pong_extension_provider(self._task_monitor_pong_extension)
         if self._persistent_service:
             self._activate_monitor()
 
@@ -414,6 +417,72 @@ class TaskMonitorTask(BaseTask):
             }
         )
         return payload
+
+    def _task_monitor_pong_extension(self) -> Mapping[str, Any]:
+        """Return cached TaskMonitor diagnostics for the extended PONG payload."""
+
+        now_monotonic = time.monotonic()
+        next_registration_attempt = max(
+            0.0,
+            self._next_heartbeat_registration_attempt_monotonic - now_monotonic,
+        )
+        next_cycle_due = max(0.0, self._next_cycle_due_monotonic - now_monotonic)
+        if (
+            not self._monitor_config.enabled
+            or self._first_cycle_pending
+            or self._wake_requested
+        ):
+            next_cycle_due = 0.0
+
+        return {
+            "task_monitor": {
+                "enabled": self._monitor_config.enabled,
+                "mode": "persistent" if self._persistent_service else "observer",
+                "processor": self._monitor_config.processor,
+                "interval_seconds": self._monitor_config.interval_seconds,
+                "batch_size": self._monitor_config.batch_size,
+                "log_sink": self._monitor_config.log_sink,
+                "heartbeat": {
+                    "registered": self._heartbeat_registered,
+                    "id": self._heartbeat_id,
+                    "error": self._heartbeat_error,
+                    "next_registration_attempt_in_seconds": (
+                        next_registration_attempt
+                    ),
+                },
+                "schedule": {
+                    "first_cycle_pending": self._first_cycle_pending,
+                    "wake_requested": self._wake_requested,
+                    "last_cycle_at": self._last_cycle_at,
+                    "last_checkpoint": self._last_checkpoint,
+                    "next_cycle_due_in_seconds": next_cycle_due,
+                },
+                "last_cycle": {
+                    "success": self._last_processor_success,
+                    "error": self._last_error,
+                    "candidates_seen": self._last_candidates_seen,
+                    "candidate_class_counts": dict(
+                        self._last_candidate_class_counts
+                    ),
+                    "safe_to_delete_candidates": (
+                        self._last_safe_to_delete_candidates
+                    ),
+                    "processed": self._last_processed,
+                    "deleted": self._last_deleted,
+                    "reported": self._last_reported,
+                    "prune_records_scanned": self._last_prune_records_scanned,
+                    "cleanup_queue_stats": list(self._last_cleanup_queue_stats)[
+                        :TASK_MONITOR_PONG_DETAIL_LIMIT
+                    ],
+                    "warnings": list(self._last_warnings)[
+                        :TASK_MONITOR_PONG_DETAIL_LIMIT
+                    ],
+                    "errors": list(self._last_errors)[
+                        :TASK_MONITOR_PONG_DETAIL_LIMIT
+                    ],
+                },
+            }
+        }
 
     def _monitor_context(self) -> WeftContext:
         spec_context = getattr(self.taskspec.spec, "weft_context", None)

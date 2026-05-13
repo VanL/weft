@@ -69,6 +69,9 @@ when relevant:
 13. one-way doors are identified and held to a higher review bar
 14. deferred-processing paths account for queue, temp-file, or input lifecycle
 15. required reading includes comprehension questions for complex areas
+16. the author has completed a separate fresh-eyes self-review after drafting
+17. external review is required for high-stakes or complicated plans, or the
+    plan explains why self-review is enough
 
 ## 1. State Invariants Before Tasks
 
@@ -243,3 +246,5 @@ Stop and revise the plan if:
 - rollback cannot be described cleanly
 - the plan starts depending on a second execution path
 - the testing seam becomes "mock everything" just to make progress
+- fresh-eyes review finds latent ambiguity that a zero-context implementer
+  could reasonably interpret the wrong way

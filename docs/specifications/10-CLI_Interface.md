@@ -608,17 +608,36 @@ _Implementation mapping_: `weft/commands/queue.py` `resolve_command()`,
 
 ## Configuration [CLI-5]
 
-_Implementation mapping_: `weft/_constants.py` `load_config()`,
-`weft/context.py` `build_context()`.
+_Implementation mapping_: `weft/bootstrap.py`, `weft/cli/bootstrap.py`,
+`weft/_constants.py` `load_config()`, `weft/context.py` `build_context()`.
 
 Current configuration domains:
 
+- bootstrap env-file loading through `WEFT_ENV_FILE`, applied before the full
+  CLI imports
 - environment variables for Weft defaults and broker alias translation
 - Weft-scoped `broker.toml` under the configured Weft metadata directory
   (default `.weft/broker.toml`) for project-scoped broker target selection
 - Weft project metadata and agent settings under the configured Weft metadata
   directory (default `.weft/`), including the optional project-local autostart
   default in its `config.json`
+
+`WEFT_ENV_FILE` is a process bootstrap input, not a command option. When set,
+the CLI entry point reads the named UTF-8 dotenv-style file before importing
+the full Typer app or any config-reading helper. The file can fill missing
+environment keys with blank lines, full-line comments, optional `export`, and
+`KEY=VALUE` assignments. Single-quoted and double-quoted values are supported,
+but shell evaluation, command substitution, variable interpolation, includes,
+and multiline values are not. Real process environment values win over values
+from the file. Values inside the file do not trigger recursive env-file
+loading. If an explicitly configured env file is missing, unreadable, or
+malformed, Weft exits before importing the full CLI with exit code `2` and an
+error that names the file path and line number when available without echoing
+the rejected value.
+
+`--env` and TaskSpec `spec.env` are different: they are task-process
+environment overlays and do not participate in Weft process bootstrap, CLI
+import-time config, or broker target resolution.
 
 Current broker resolution precedence:
 
@@ -644,6 +663,12 @@ Current exclusions:
 The CLI should not imply that runtime broker configuration lives in a
 SQLite-only metadata-directory broker-db flag model. That is why the current contract uses
 context discovery plus backend-aware broker resolution.
+
+Operational security note: `WEFT_ENV_FILE` loads secrets into the Weft process
+environment. It is not a secret manager. For supervisor-managed deployments
+with password-bearing env files, `weft manager serve` is preferred over
+detached `weft manager start` because current detached manager startup passes
+resolved config and broker target data through child process arguments.
 
 Current manager-serve operational-log configuration:
 
@@ -764,6 +789,7 @@ flags, and future queue or control ergonomics live in the companion doc:
 - [`docs/plans/2026-04-14-builtin-contract-and-doc-drift-reduction-plan.md`](../plans/2026-04-14-builtin-contract-and-doc-drift-reduction-plan.md)
 - [`docs/plans/2026-04-14-system-builtins-command-plan.md`](../plans/2026-04-14-system-builtins-command-plan.md)
 - [`docs/plans/2026-04-14-docker-agent-images-and-one-shot-provider-cli-plan.md`](../plans/2026-04-14-docker-agent-images-and-one-shot-provider-cli-plan.md)
+- [`docs/plans/2026-05-13-early-env-file-bootstrap-plan.md`](../plans/2026-05-13-early-env-file-bootstrap-plan.md)
 - [`docs/plans/2026-04-15-spec-run-input-adapter-and-declared-args-plan.md`](../plans/2026-04-15-spec-run-input-adapter-and-declared-args-plan.md)
 - [`docs/plans/2026-04-15-spec-aware-run-help-plan.md`](../plans/2026-04-15-spec-aware-run-help-plan.md)
 - [`docs/plans/2026-04-16-autostart-hardening-and-contract-alignment-plan.md`](../plans/2026-04-16-autostart-hardening-and-contract-alignment-plan.md)

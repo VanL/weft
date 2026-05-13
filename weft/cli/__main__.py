@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from .app import app
+import sys
+
+from weft.bootstrap import main
 
 if __name__ == "__main__":
-    app()
+    sys.exit(main())

@@ -4531,15 +4531,23 @@ class Manager(BaseTask):
             include_autostart=True,
         )
 
-    def _managed_service_convergence_active(self, *, include_autostart: bool) -> bool:
-        """Return whether manager-owned convergence has non-stable work to advance."""
+    def _managed_service_convergence_active_reasons(
+        self,
+        *,
+        include_autostart: bool,
+        internal_spawn_pending: bool | None = None,
+    ) -> tuple[str, ...]:
+        """Return why manager-owned service convergence is active."""
 
+        reasons: list[str] = []
         if self._managed_internal_spawn_enqueued:
-            return True
-        if self._internal_spawn_pending():
-            return True
+            reasons.append("internal_spawn_enqueued")
+        if internal_spawn_pending is None:
+            internal_spawn_pending = self._internal_spawn_pending()
+        if internal_spawn_pending:
+            reasons.append("internal_spawn_pending")
         if self._managed_service_duplicate_scan_pending:
-            return True
+            reasons.append("duplicate_scan_pending")
         internal_keys = {
             INTERNAL_SERVICE_KEY_HEARTBEAT,
             INTERNAL_SERVICE_KEY_TASK_MONITOR,
@@ -4547,23 +4555,90 @@ class Manager(BaseTask):
         for service_key, state in self._managed_service_state.items():
             if state.spawn_pending or state.active_tid is None:
                 if state.spawn_pending:
-                    return True
+                    reasons.append("spawn_pending")
                 if (
                     service_key in internal_keys
                     and self._task_monitor_enabled
                     and self._queue_names["inbox"] == WEFT_SPAWN_REQUESTS_QUEUE
                 ):
-                    return True
+                    reasons.append("missing_active_tid")
             if state.uncertain_attempts > 0:
-                return True
+                reasons.append("uncertain_attempts")
         if include_autostart and self._autostart_enabled and self._autostart_dir:
             if self._autostart_last_scan_ns == 0:
-                return True
-            return (
+                reasons.append("autostart_scan_due")
+            elif (
                 time.time_ns() - self._autostart_last_scan_ns
                 >= self._autostart_scan_interval_ns
+            ):
+                reasons.append("autostart_scan_due")
+        return tuple(dict.fromkeys(reasons))
+
+    def _managed_service_convergence_active(self, *, include_autostart: bool) -> bool:
+        """Return whether manager-owned convergence has non-stable work to advance."""
+
+        return bool(
+            self._managed_service_convergence_active_reasons(
+                include_autostart=include_autostart,
             )
-        return False
+        )
+
+    def _managed_service_state_snapshot(self) -> dict[str, dict[str, Any]]:
+        """Return a compact manager-local service state snapshot for diagnostics."""
+
+        return {
+            service_key: self._service_state_for_log(state)
+            for service_key, state in self._managed_service_state.items()
+        }
+
+    @staticmethod
+    def _managed_service_progress_reasons(
+        *,
+        before: Mapping[str, Mapping[str, Any]],
+        after: Mapping[str, Mapping[str, Any]],
+        child_exited: bool,
+        service_request_enqueued: bool,
+        internal_spawn_drained: bool,
+    ) -> tuple[str, ...]:
+        """Return coarse progress reasons for one convergence pass."""
+
+        reasons: list[str] = []
+        if child_exited:
+            reasons.append("child_exited")
+        if service_request_enqueued:
+            reasons.append("service_request_enqueued")
+        if internal_spawn_drained:
+            reasons.append("internal_spawn_drained")
+
+        for service_key in sorted(set(before) | set(after)):
+            before_state = before.get(service_key, {})
+            after_state = after.get(service_key, {})
+            if before_state == after_state:
+                continue
+            if before_state.get("active_tid") != after_state.get("active_tid"):
+                reasons.append("active_tid_changed")
+            if before_state.get("spawn_pending") != after_state.get("spawn_pending"):
+                reasons.append("spawn_pending_changed")
+            uncertain_before = (
+                before_state.get("uncertain_attempts"),
+                before_state.get("uncertain_since_ns"),
+                before_state.get("last_uncertain_reason"),
+            )
+            uncertain_after = (
+                after_state.get("uncertain_attempts"),
+                after_state.get("uncertain_since_ns"),
+                after_state.get("last_uncertain_reason"),
+            )
+            if uncertain_before != uncertain_after:
+                reasons.append("uncertain_state_changed")
+            if (
+                before_state.get("launched_once") != after_state.get("launched_once")
+                or before_state.get("next_allowed_ns")
+                != after_state.get("next_allowed_ns")
+                or before_state.get("restarts") != after_state.get("restarts")
+            ):
+                reasons.append("service_state_changed")
+        return tuple(dict.fromkeys(reasons))
 
     def _run_managed_service_convergence(
         self,
@@ -4584,9 +4659,13 @@ class Manager(BaseTask):
 
         now_ns = time.time_ns()
         internal_spawn_pending = self._internal_spawn_pending()
-        active = self._managed_service_convergence_active(
-            include_autostart=include_autostart
+        active_reasons = self._managed_service_convergence_active_reasons(
+            include_autostart=include_autostart,
+            internal_spawn_pending=internal_spawn_pending,
         )
+        active = bool(active_reasons)
+        if not active_reasons:
+            active_reasons = ("stable_audit",)
         interval_seconds = (
             MANAGED_SERVICE_CONVERGENCE_INTERVAL_SECONDS
             if active
@@ -4602,6 +4681,7 @@ class Manager(BaseTask):
         ):
             fields = {
                 "active": active,
+                "active_reasons": list(active_reasons),
                 "interval_seconds": interval_seconds,
                 "include_autostart": include_autostart,
                 "force": force,
@@ -4623,7 +4703,12 @@ class Manager(BaseTask):
             if self.should_stop or self._draining:
                 return
 
+            state_before = self._managed_service_state_snapshot()
+            enqueued_before = self._managed_internal_spawn_enqueued
             self._reconcile_managed_services(include_autostart=include_autostart)
+            service_request_enqueued = (
+                self._managed_internal_spawn_enqueued and not enqueued_before
+            )
             should_drain_internal = (
                 self._managed_internal_spawn_enqueued or self._internal_spawn_pending()
             )
@@ -4631,11 +4716,20 @@ class Manager(BaseTask):
             drained = (
                 self._drain_internal_spawn_requests() if should_drain_internal else 0
             )
+            state_after = self._managed_service_state_snapshot()
+            progress_reasons = self._managed_service_progress_reasons(
+                before=state_before,
+                after=state_after,
+                child_exited=child_exited,
+                service_request_enqueued=service_request_enqueued,
+                internal_spawn_drained=drained > 0,
+            )
             self._emit_serve_log(
                 "managed_service_convergence",
                 component="service",
                 required_level="debug",
                 active=active,
+                active_reasons=list(active_reasons),
                 interval_seconds=interval_seconds,
                 include_autostart=include_autostart,
                 force=force,
@@ -4643,6 +4737,8 @@ class Manager(BaseTask):
                 child_exited=child_exited,
                 internal_drain_attempted=should_drain_internal,
                 internal_drain_count=drained,
+                progress=bool(progress_reasons),
+                progress_reasons=list(progress_reasons),
                 child_count=len(self._child_processes),
             )
             if drained:

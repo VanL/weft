@@ -19,7 +19,6 @@ import sys
 from collections.abc import Callable, Iterator
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
-from fnmatch import fnmatchcase
 from typing import Any, cast
 
 from simplebroker import commands as sb_commands
@@ -90,6 +89,63 @@ def _context(spec_context: str | None = None) -> WeftContext:
         return build_context(spec_context=env_context)
 
     return build_context(spec_context=os.getcwd())
+
+
+def _read_generator_after(
+    queue: Any,
+    *,
+    with_timestamps: bool,
+    after_timestamp: int | None,
+) -> Iterator[Any]:
+    try:
+        yield from queue.read_generator(
+            with_timestamps=with_timestamps,
+            after_timestamp=after_timestamp,
+        )
+    except TypeError:
+        yield from queue.read_generator(
+            with_timestamps=with_timestamps,
+            since_timestamp=after_timestamp,
+        )
+
+
+def _peek_generator_after(
+    queue: Any,
+    *,
+    with_timestamps: bool,
+    after_timestamp: int | None,
+) -> Iterator[Any]:
+    try:
+        yield from queue.peek_generator(
+            with_timestamps=with_timestamps,
+            after_timestamp=after_timestamp,
+        )
+    except TypeError:
+        yield from queue.peek_generator(
+            with_timestamps=with_timestamps,
+            since_timestamp=after_timestamp,
+        )
+
+
+def _move_generator_after(
+    queue: Any,
+    destination: str,
+    *,
+    with_timestamps: bool,
+    after_timestamp: int | None,
+) -> Iterator[Any]:
+    try:
+        yield from queue.move_generator(
+            destination,
+            with_timestamps=with_timestamps,
+            after_timestamp=after_timestamp,
+        )
+    except TypeError:
+        yield from queue.move_generator(
+            destination,
+            with_timestamps=with_timestamps,
+            since_timestamp=after_timestamp,
+        )
 
 
 def _run_simplebroker_command(
@@ -235,9 +291,10 @@ def read_queue(
                 )
             ]
 
-        iterator = queue.read_generator(
+        iterator = _read_generator_after(
+            queue,
             with_timestamps=True,
-            since_timestamp=since,
+            after_timestamp=since,
         )
         for index, item in enumerate(iterator):
             body, timestamp = cast(tuple[Any, Any], item)
@@ -342,9 +399,10 @@ def peek_queue(
                 )
             ]
 
-        iterator = queue.peek_generator(
+        iterator = _peek_generator_after(
+            queue,
             with_timestamps=True,
-            since_timestamp=since,
+            after_timestamp=since,
         )
         for index, item in enumerate(iterator):
             body, timestamp = cast(tuple[Any, Any], item)
@@ -414,10 +472,11 @@ def move_queue_messages(
                 moved_count=moved_count,
             )
         if not all_messages:
-            iterator = queue.move_generator(
+            iterator = _move_generator_after(
+                queue,
                 destination,
                 with_timestamps=True,
-                since_timestamp=since,
+                after_timestamp=since,
             )
             moved_count = 0
             for _item in iterator:
@@ -429,10 +488,11 @@ def move_queue_messages(
                 moved_count=moved_count,
             )
         moved = list(
-            queue.move_generator(
+            _move_generator_after(
+                queue,
                 destination,
                 with_timestamps=True,
-                since_timestamp=since,
+                after_timestamp=since,
             )
         )
         return QueueMoveReceipt(
@@ -452,21 +512,18 @@ def list_queues(
 ) -> list[QueueInfo]:
     queues: list[QueueInfo] = []
     with ctx.broker() as db:
-        stats = db.get_queue_stats()
+        stats = db.list_queue_stats(pattern=pattern)
 
-    for name, unclaimed, total in stats:
-        if pattern and not fnmatchcase(name, pattern):
-            continue
-
-        unclaimed_count = int(unclaimed)
-        total_count = int(total)
+    for item in stats:
+        unclaimed_count = int(item.pending)
+        total_count = int(item.total)
 
         if not include_stats and unclaimed_count <= 0:
             continue
 
         queues.append(
             QueueInfo(
-                name=name,
+                name=item.queue,
                 unclaimed=unclaimed_count,
                 total=total_count,
             )
@@ -529,20 +586,23 @@ def watch_queue(
 
         while max_messages is None or emitted < max_messages:
             if move_to:
-                generator = queue.move_generator(
+                generator = _move_generator_after(
+                    queue,
                     move_to,
                     with_timestamps=True,
-                    since_timestamp=last_timestamp,
+                    after_timestamp=last_timestamp,
                 )
             elif peek:
-                generator = queue.peek_generator(
+                generator = _peek_generator_after(
+                    queue,
                     with_timestamps=True,
-                    since_timestamp=last_timestamp,
+                    after_timestamp=last_timestamp,
                 )
             else:
-                generator = queue.read_generator(
+                generator = _read_generator_after(
+                    queue,
                     with_timestamps=True,
-                    since_timestamp=last_timestamp,
+                    after_timestamp=last_timestamp,
                 )
 
             found = False
@@ -916,7 +976,7 @@ def watch_command(
             peek=peek,
             json_output=json_output,
             show_timestamps=with_timestamps,
-            since_str=since,
+            after_str=since,
             quiet=quiet,
             move_to=move_to,
         )

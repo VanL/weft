@@ -34,6 +34,7 @@ from weft._constants import (
     INTERNAL_SERVICE_KEY_METADATA_KEY,
     INTERNAL_SERVICE_KEY_TASK_MONITOR,
     INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY,
+    MANAGED_SERVICE_CONVERGENCE_INTERVAL_SECONDS,
     MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY,
     PIPELINE_RUNTIME_METADATA_KEY,
     SERVICE_OWNER_SCHEMA,
@@ -1398,6 +1399,119 @@ def test_stable_managed_service_convergence_uses_audit_interval(
     manager._run_managed_service_convergence(include_autostart=False)
 
     assert calls == ["cleanup", "reconcile:False"]
+
+
+def test_active_managed_service_convergence_uses_active_interval(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _make_queue = manager_setup
+    state = manager._service_state(INTERNAL_SERVICE_KEY_TASK_MONITOR)
+    state.active_tid = "1777000000000000051"
+    state.launched_once = True
+    state.uncertain_attempts = 1
+    manager._last_managed_service_convergence_ns = time.time_ns()
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        manager,
+        "_cleanup_children",
+        lambda: calls.append("cleanup") and False,
+    )
+    monkeypatch.setattr(
+        manager,
+        "_reconcile_managed_services",
+        lambda **_: calls.append("reconcile"),
+    )
+
+    manager._run_managed_service_convergence(include_autostart=False)
+
+    assert calls == []
+
+    manager._last_managed_service_convergence_ns = (
+        time.time_ns()
+        - int((MANAGED_SERVICE_CONVERGENCE_INTERVAL_SECONDS + 0.1) * 1_000_000_000)
+    )
+    manager._run_managed_service_convergence(include_autostart=False)
+
+    assert calls == ["cleanup", "reconcile"]
+
+
+def test_managed_service_convergence_active_reasons_are_stable(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _make_queue = manager_setup
+    heartbeat = manager._service_state(INTERNAL_SERVICE_KEY_HEARTBEAT)
+    heartbeat.active_tid = None
+    task_monitor = manager._service_state(INTERNAL_SERVICE_KEY_TASK_MONITOR)
+    task_monitor.spawn_pending = True
+    task_monitor.uncertain_attempts = 1
+    manager._task_monitor_enabled = True
+    manager._queue_names["inbox"] = WEFT_SPAWN_REQUESTS_QUEUE
+    manager._managed_internal_spawn_enqueued = True
+    manager._managed_service_duplicate_scan_pending.add(
+        INTERNAL_SERVICE_KEY_TASK_MONITOR
+    )
+    monkeypatch.setattr(manager, "_internal_spawn_pending", lambda: True)
+
+    reasons = manager._managed_service_convergence_active_reasons(
+        include_autostart=False
+    )
+
+    assert reasons == (
+        "internal_spawn_enqueued",
+        "internal_spawn_pending",
+        "duplicate_scan_pending",
+        "missing_active_tid",
+        "spawn_pending",
+        "uncertain_attempts",
+    )
+
+
+def test_managed_service_progress_reasons_are_coarse_and_stable() -> None:
+    before = {
+        INTERNAL_SERVICE_KEY_TASK_MONITOR: {
+            "spawn_pending": True,
+            "active_tid": None,
+            "next_allowed_ns": 0,
+            "launched_once": False,
+            "restarts": 0,
+            "uncertain_attempts": 1,
+            "uncertain_since_ns": 100,
+            "last_uncertain_reason": "old",
+        }
+    }
+    after = {
+        INTERNAL_SERVICE_KEY_TASK_MONITOR: {
+            "spawn_pending": False,
+            "active_tid": "1777000000000000051",
+            "next_allowed_ns": 1,
+            "launched_once": True,
+            "restarts": 0,
+            "uncertain_attempts": 0,
+            "uncertain_since_ns": None,
+            "last_uncertain_reason": None,
+        }
+    }
+
+    reasons = Manager._managed_service_progress_reasons(
+        before=before,
+        after=after,
+        child_exited=True,
+        service_request_enqueued=True,
+        internal_spawn_drained=True,
+    )
+
+    assert reasons == (
+        "child_exited",
+        "service_request_enqueued",
+        "internal_spawn_drained",
+        "active_tid_changed",
+        "spawn_pending_changed",
+        "uncertain_state_changed",
+        "service_state_changed",
+    )
 
 
 def test_task_monitor_terminal_log_overrides_tracked_live_child(

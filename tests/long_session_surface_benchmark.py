@@ -14,7 +14,7 @@ Typical usage:
     uv run python -m tests.long_session_surface_benchmark \
         --surfaces cli api \
         --backends sqlite postgres \
-        --pg-dsn postgresql://postgres:postgres@127.0.0.1:32834/simplebroker_test
+        --pg-dsn postgresql://postgres:postgres@127.0.0.1:32834/weft_test
 """
 
 from __future__ import annotations

@@ -355,6 +355,9 @@ DEFAULT_WEFT_CONTEXT: Final[str | None] = None
 WEFT_DIRECTORY_NAME_DEFAULT: Final[str] = ".weft"
 """Default name for the Weft-owned project metadata directory."""
 
+WEFT_ENV_FILE_ENV: Final[str] = "WEFT_ENV_FILE"
+"""Bootstrap env var naming a dotenv-style file to load before CLI import."""
+
 PROVIDER_CLI_VERSION_PROBE_TIMEOUT_SECONDS: Final[float] = 15.0
 """Timeout for basic provider CLI version probes."""
 
@@ -549,7 +552,7 @@ MANAGED_SERVICE_PING_TIMEOUT_SECONDS: Final[float] = 0.15
 MANAGED_SERVICE_RECENT_EVIDENCE_GRACE_SECONDS: Final[float] = 5.0
 """Window where nonterminal service rows without live proof remain uncertain."""
 
-MANAGED_SERVICE_CONVERGENCE_INTERVAL_SECONDS: Final[float] = 0.1
+MANAGED_SERVICE_CONVERGENCE_INTERVAL_SECONDS: Final[float] = 1.0
 """Maximum delay between active singleton convergence turns."""
 
 MANAGED_SERVICE_STABLE_AUDIT_INTERVAL_SECONDS: Final[float] = 5.0

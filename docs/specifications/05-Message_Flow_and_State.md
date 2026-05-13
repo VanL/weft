@@ -251,10 +251,15 @@ Current rules:
   wake messages to its own `T{tid}.inbox`; if registration is temporarily
   unavailable, the monitor records operational health and falls back to its
   bounded local interval
+- the supervised `TaskMonitorTask` includes cached operational diagnostics in
+  PONG extension data under `extended.task_monitor`: configuration, heartbeat
+  registration state, scheduling state, and the previous cycle summary. This
+  extension must not scan queues or recompute cleanup candidates during PING.
 
 _Implementation mapping_: `weft/core/heartbeat.py`;
 `weft/core/tasks/heartbeat.py`; `weft/core/manager.py`;
-`weft/core/manager_services.py`; `weft/core/endpoints.py`.
+`weft/core/manager_services.py`; `weft/core/endpoints.py`;
+`weft/core/tasks/task_monitor.py`.
 
 ### 4. Pipeline Flow [MF-4]
 

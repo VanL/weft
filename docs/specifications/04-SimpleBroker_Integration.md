@@ -237,7 +237,9 @@ Related plan:
 - `docs/plans/2026-04-16-configurable-weft-directory-name-plan.md`
 
 _Implementation mapping_: `weft/context.py` (`build_context`, `get_context`,
-`WeftContext.queue`, `WeftContext.broker`).
+`WeftContext.queue`, `WeftContext.broker`); `weft/bootstrap.py` for
+optional pre-import `WEFT_ENV_FILE` loading before CLI callers reach
+`load_config()`.
 
 Current contract:
 
@@ -247,6 +249,10 @@ Current contract:
 - `load_config(overrides=...)` is the canonical way for an embedding app to
   compile explicit `WEFT_*` and `BROKER_*` overrides into the same canonical
   config shape that CLI and env-driven Weft use
+- CLI entry points honor `WEFT_ENV_FILE` before importing the full CLI, so env
+  values loaded from that file participate in the ordinary `load_config()` and
+  `build_context()` path. The env file fills missing process env values only;
+  it does not override explicit supervisor or shell environment values.
 - `get_context(...)` is a convenience wrapper
 - `WeftContext.queue(name)` returns a queue bound to the resolved broker target
 - `WeftContext.broker()` opens a broker handle for backend-native operations
@@ -322,6 +328,7 @@ connection-pooling designs are tracked in the companion doc:
 - [`docs/plans/2026-04-14-provider-cli-validation-boundary-and-agent-settings-alignment-plan.md`](../plans/2026-04-14-provider-cli-validation-boundary-and-agent-settings-alignment-plan.md)
 - [`docs/plans/2026-04-14-builtin-taskspecs-and-spec-resolution-plan.md`](../plans/2026-04-14-builtin-taskspecs-and-spec-resolution-plan.md)
 - [`docs/plans/2026-05-05-simplebroker-multiqueue-waiter-integration-plan.md`](../plans/2026-05-05-simplebroker-multiqueue-waiter-integration-plan.md)
+- [`docs/plans/2026-05-13-early-env-file-bootstrap-plan.md`](../plans/2026-05-13-early-env-file-bootstrap-plan.md)
 
 ## Related Documents
 

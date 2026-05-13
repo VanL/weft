@@ -24,6 +24,20 @@ implementation-ready until it also satisfies:
 - `docs/agent-context/runbooks/hardening-plans.md`
 - `docs/agent-context/runbooks/review-loops-and-agent-bootstrap.md`
 
+Every plan requires a self-driven fresh-eyes review before the author reports
+it as complete or implementation-ready. This review must look for latent
+ambiguity, bad ideas, missing constraints, and whether a zero-context engineer
+could implement the plan correctly. The plan author may perform this review,
+but it must be a separate pass after the draft is written, with findings
+recorded or explicitly reported.
+
+For high-stakes or complicated plans, request an external reviewer in addition
+to the self-review. External review is warranted when the work is risky,
+crosses subsystems, affects runtime behavior, or could plausibly be
+misimplemented while still looking reasonable. If the reviewer is a different
+agent, expect the review to take 5-10 minutes and do not treat that delay as a
+reason to skip it.
+
 ## Audience Assumptions
 
 - Strong Python engineer, limited or zero Weft and SimpleBroker context.
@@ -78,6 +92,9 @@ the plan as authoritative.
   task breakdown.
 - Required reading should describe the current structure and load-bearing path,
   not only list file names.
+- Before reporting plan work as done, complete and report the required
+  fresh-eyes review status. If external review is warranted but not yet
+  complete, report the plan as draft/review-pending, not implementation-ready.
 
 ## When Hardening Is Mandatory
 
@@ -233,6 +250,8 @@ Also call out any review gates that matter for this slice, for example:
 - no spec drift between touched docs and code
 - no mock-heavy substitute for a real broker/process proof when the real path
   is practical
+- self-driven fresh-eyes review completed before implementation
+- external review required or not required, with the reason
 
 ### 5. Tasks
 

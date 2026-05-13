@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 94 plan files in this directory.
+There are currently 96 plan files in this directory.
 
 ## Curation Policy
 
@@ -22,6 +22,8 @@ There are currently 94 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-05-13-service-convergence-throttle-plan.md`](./2026-05-13-service-convergence-throttle-plan.md) | Service Convergence Throttle Plan | `draft` | none |
+| [`2026-05-13-early-env-file-bootstrap-plan.md`](./2026-05-13-early-env-file-bootstrap-plan.md) | Early Env File Bootstrap Plan | `completed` | none |
 | [`2026-05-13-internal-state-machine-helper-plan.md`](./2026-05-13-internal-state-machine-helper-plan.md) | Internal State Machine Helper Plan | `draft` | none |
 | [`2026-05-13-manager-liveness-and-leadership-robustness-plan.md`](./2026-05-13-manager-liveness-and-leadership-robustness-plan.md) | Manager Liveness And Leadership Robustness Plan | `completed` | none |
 | [`2026-05-13-manager-replace-start-serve-plan.md`](./2026-05-13-manager-replace-start-serve-plan.md) | Manager Replace Start And Serve Plan | `completed` | none |

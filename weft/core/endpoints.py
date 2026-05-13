@@ -396,7 +396,7 @@ def resolve_endpoint(ctx: WeftContext, name: str) -> ResolvedEndpoint | None:
     """Resolve one stable endpoint name to its canonical live owner."""
 
     normalized_name = normalize_endpoint_name(name)
-    for resolved in list_resolved_endpoints(ctx):
+    for resolved in list_resolved_endpoints(ctx, pattern=normalized_name):
         if resolved.record.name == normalized_name:
             return resolved
     return None

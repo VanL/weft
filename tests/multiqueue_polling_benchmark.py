@@ -10,7 +10,7 @@ Typical usage:
     uv run python -m tests.multiqueue_polling_benchmark --backends sqlite
     uv run python -m tests.multiqueue_polling_benchmark \
         --backends sqlite postgres \
-        --pg-dsn postgresql://postgres:postgres@127.0.0.1:32834/simplebroker_test
+        --pg-dsn postgresql://postgres:postgres@127.0.0.1:32834/weft_test
 """
 
 from __future__ import annotations

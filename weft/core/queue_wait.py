@@ -49,7 +49,7 @@ class QueueChangeMonitor:
                 self._handle_queue_activity,
                 stop_event=self._stop_event,
                 peek=True,
-                since_timestamp=queue.last_ts,
+                after_timestamp=queue.last_ts,
                 config=self._config,
             )
             watcher.run_in_thread()

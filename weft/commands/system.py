@@ -354,7 +354,7 @@ def _iter_log_events(
     try:
         iterator_raw = queue.peek_generator(
             with_timestamps=True,
-            since_timestamp=since_timestamp,
+            after_timestamp=since_timestamp,
         )
     except (
         BrokerError,

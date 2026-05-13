@@ -1,23 +1,37 @@
 # Review Loops and Agent Bootstrap
 
-Use this runbook when a plan or completed change is large enough that author
-blindness is a real risk.
+Use this runbook for plan and completed-work reviews. Every plan requires a
+self-driven fresh-eyes review. High-stakes or complicated plans require an
+external reviewer in addition to self-review.
 
 Here, "bootstrap" means discovering which reviewers are available in the
 current environment, not Weft manager or task startup.
 
 ## When To Use It
 
-Treat independent review as required when:
+Treat self-driven fresh-eyes review as always required for plans. The review
+must be a distinct pass after drafting, and it must ask:
+
+- Are there latent ambiguities?
+- Are there bad ideas or unsafe tradeoffs?
+- Could a zero-context engineer implement this confidently and correctly?
+- Does the plan clearly separate what must change from what must not change?
+
+Treat external review as required when:
 
 - the work is risky or boundary-crossing
 - the plan touches multiple subsystems or documentation layers
 - the change introduces a new reusable workflow or contract
 - a zero-context implementer could guess wrong and still produce plausible code
+- the plan changes runtime behavior, cleanup, persistence, queue contracts, or
+  manager/task scheduling
+
+If an external review is requested from a different agent, expect it to take
+5-10 minutes. Do not skip the review just because the wait is inconvenient.
 
 ## Bootstrap the Available Reviewers
 
-Before choosing a reviewer:
+Before choosing an external reviewer:
 
 1. Check which other agent families or review paths are actually available in
    the current environment.
@@ -52,6 +66,20 @@ Give the reviewer:
 - the relevant README or implementation-note paths
 - the touched files or intended file list
 
+## Self-Review Output
+
+The plan author must record or report a self-review result before calling a
+plan complete. Use this structure:
+
+- findings, ordered by severity
+- why each finding matters
+- exact plan section, spec, or code path affected
+- whether the plan was updated
+- whether external review is still required
+
+If the self-review finds no issues, say so directly and state any residual
+risk.
+
 ## Completed-Work Review Prompt
 
 For completed work, keep the stance similar but point at the touched files and
@@ -78,6 +106,9 @@ After review:
 If the reviewer says they could not implement the plan confidently and
 correctly, treat that as a blocker until the ambiguity is fixed or explicitly
 recorded.
+
+Do not report a high-stakes or complicated plan as implementation-ready while
+external review is still pending. Report it as review-pending instead.
 
 ## Slice-Based Review
 

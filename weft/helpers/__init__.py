@@ -249,10 +249,17 @@ def iter_queue_entries(
     """
 
     try:
-        raw_entries = queue.peek_generator(
-            with_timestamps=True,
-            since_timestamp=since_timestamp,
-        )
+        queue_api = cast(Any, queue)
+        try:
+            raw_entries = queue_api.peek_generator(
+                with_timestamps=True,
+                after_timestamp=since_timestamp,
+            )
+        except TypeError:
+            raw_entries = queue_api.peek_generator(
+                with_timestamps=True,
+                since_timestamp=since_timestamp,
+            )
     except (
         BrokerError,
         OSError,

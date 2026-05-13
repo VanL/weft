@@ -574,18 +574,15 @@ def queue_message_counts(
 
     try:
         with ctx.broker() as db:
-            queue_stats = db.get_queue_stats()
+            stats = db.get_queue_stat(queue_name)
     except (BrokerError, OSError, RuntimeError):  # pragma: no cover - best effort
         return None
 
-    for name, unclaimed, total in queue_stats:
-        if name == queue_name:
-            return QueueMessageCounts(
-                queue=queue_name,
-                unclaimed=max(0, int(unclaimed)),
-                total=max(0, int(total)),
-            )
-    return None
+    return QueueMessageCounts(
+        queue=queue_name,
+        unclaimed=max(0, int(stats.pending)),
+        total=max(0, int(stats.total)),
+    )
 
 
 def claimed_outbox_result_evidence(

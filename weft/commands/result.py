@@ -10,7 +10,6 @@ import json
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
-from fnmatch import fnmatchcase
 from typing import Any, cast
 
 from simplebroker import Queue
@@ -134,14 +133,13 @@ def _load_taskspec_payload(context: WeftContext, tid: str) -> dict[str, Any] | N
 def _queue_exists(context: WeftContext, queue_name: str) -> bool:
     with context.broker() as db:
         try:
-            queues = list(db.list_queues())
+            return bool(db.queue_exists(queue_name))
         except (
             BrokerError,
             OSError,
             RuntimeError,
         ):  # pragma: no cover - queue probe best effort
             return False
-    return any(name == queue_name for name, _count in queues)
 
 
 def _queue_names_exist(context: WeftContext, *queue_names: str) -> bool:
@@ -153,14 +151,13 @@ def _queue_names_exist(context: WeftContext, *queue_names: str) -> bool:
 
     with context.broker() as db:
         try:
-            queues = list(db.list_queues())
+            return any(bool(db.queue_exists(name)) for name in wanted)
         except (
             BrokerError,
             OSError,
             RuntimeError,
         ):  # pragma: no cover - queue probe best effort
             return False
-    return any(name in wanted for name, _count in queues)
 
 
 def _result_surface_has_activity(
@@ -171,9 +168,9 @@ def _result_surface_has_activity(
 ) -> bool:
     """Return ``True`` when the default result surface already has messages.
 
-    Queue enumeration can lag behind direct queue reads on some backends. For
+    Queue metadata can lag behind direct queue reads on some backends. For
     the default ``T{tid}`` surface, visible outbox or control-stream traffic is
-    enough to start result collection even when list_queues() and task-log
+    enough to start result collection even when metadata and task-log
     discovery have not caught up yet.
     """
 
@@ -449,15 +446,11 @@ def _collect_all_results(
     """Aggregate results from completed task outboxes (Spec: [CLI-1.1.1])."""
     with context.broker() as db:
         try:
-            queue_stats = db.get_queue_stats()
+            queue_stats = db.list_queue_stats(pattern=f"T*.{QUEUE_OUTBOX_SUFFIX}")
         except Exception as exc:  # pragma: no cover - command error boundary
             return 1, f"weft: failed to enumerate queues: {exc}"
 
-    outbox_names = [
-        name
-        for name, _unclaimed, _total in queue_stats
-        if fnmatchcase(name, f"T*.{QUEUE_OUTBOX_SUFFIX}")
-    ]
+    outbox_names = [stats.queue for stats in queue_stats]
 
     streaming = _active_streaming_queues(context)
 

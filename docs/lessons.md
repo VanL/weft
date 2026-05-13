@@ -247,6 +247,16 @@ runbook needs to become stricter.
   a terminal control envelope is already visible adds avoidable SQLite
   contention in long mixed-workload release gates.
 
+## 2026-05-13 Plan Review Gates
+
+- Metadata-valid plans are not necessarily implementation-ready. Every plan
+  needs a distinct fresh-eyes self-review after drafting, focused on latent
+  ambiguity, bad ideas, and whether a zero-context engineer could implement it
+  correctly.
+- High-stakes or complicated plans need an external reviewer when one is
+  available. Different-agent reviews may take 5-10 minutes; that wait is part
+  of the review cost, not a reason to skip the gate.
+
 ## 2026-04-08 Zombie PID Liveness
 
 - `psutil.Process(pid).is_running()` is not a sufficient liveness check for

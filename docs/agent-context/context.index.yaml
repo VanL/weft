@@ -1,5 +1,5 @@
 schema_version: 1
-updated_at: 2026-05-08
+updated_at: 2026-05-13
 hub: docs/agent-context
 read_order:
   - docs/agent-context/decision-hierarchy.md

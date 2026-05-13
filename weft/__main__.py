@@ -1,6 +1,10 @@
 """Main entry point for running Weft as a module."""
 
-from .cli import app
+from __future__ import annotations
+
+import sys
+
+from .bootstrap import main
 
 if __name__ == "__main__":
-    app()
+    sys.exit(main())

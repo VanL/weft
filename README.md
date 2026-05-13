@@ -427,6 +427,23 @@ export WEFT_BACKEND_TARGET='postgresql://user:pass@host:5432/dbname'
 export WEFT_BACKEND_SCHEMA='weft'
 ```
 
+Sparse launch environments such as cron or systemd can point Weft at a
+dotenv-style file with `WEFT_ENV_FILE`. Weft loads that file before importing
+the full CLI, so values in it participate in normal broker and context
+resolution:
+
+```bash
+WEFT_ENV_FILE=/etc/weft/project.env weft status
+WEFT_ENV_FILE=/etc/weft/project.env weft manager serve --context /srv/project
+```
+
+The file format is intentionally narrow: blank lines, full-line comments,
+optional `export`, and `KEY=VALUE` assignments with unquoted, single-quoted, or
+double-quoted values. It is not a shell script; Weft does not run command
+substitution, variable interpolation, includes, or multiline parsing. Real
+process environment values win over values from the file. `weft run --env` and
+TaskSpec `spec.env` are task-process overlays, not Weft process bootstrap.
+
 When Weft auto-discovers a project from a child directory, an existing local
 broker target still wins over ambient env backend selection. That means
 `.weft/broker.toml` is authoritative, and legacy sqlite project discovery
@@ -1009,6 +1026,10 @@ manager consumes STOP and drains.
 Operational notes:
 
 - Put restart policy in the service manager, not in Weft.
+- For password-bearing env files, prefer `WEFT_ENV_FILE=... weft manager serve`
+  over `weft manager start`. Detached manager startup currently passes
+  resolved config and broker target data through child process arguments, so it
+  should not be treated as a secret-safe launcher.
 - When `weft manager serve` runs inside Docker or another PID namespace while
   sharing a broker with future containers, Weft avoids registering
   container-local PIDs such as `1` as host-scoped process identities when it can
@@ -1032,6 +1053,7 @@ Operational notes:
 
 Environment variables:
 
+- `WEFT_ENV_FILE` - Bootstrap dotenv-style file loaded before full CLI import
 - `WEFT_MANAGER_LIFETIME_TIMEOUT` - Manager idle timeout (default: 600s)
 - `WEFT_MANAGER_REUSE_ENABLED` - Keep manager running (default: true)
 - `WEFT_AUTOSTART_TASKS` - Enable autostart (default: true)

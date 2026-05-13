@@ -7,7 +7,12 @@ import json
 import pytest
 
 import weft.core.tasks.task_monitor as task_monitor_mod
-from weft._constants import CONTROL_PING, WEFT_GLOBAL_LOG_QUEUE, load_config
+from weft._constants import (
+    CONTROL_PING,
+    PONG_EXTENSION_KEY,
+    WEFT_GLOBAL_LOG_QUEUE,
+    load_config,
+)
 from weft.core.task_monitoring import (
     TaskMonitorProcessorRequest,
     TaskMonitorProcessorResult,
@@ -316,6 +321,40 @@ def test_task_monitor_ping_includes_health_and_preserves_task_log(
     assert pong["last_candidate_class_counts"] == {}
     assert pong["last_safe_to_delete_candidates"] == 0
     assert pong["last_cleanup_queue_stats"]
+    extended = pong[PONG_EXTENSION_KEY]["task_monitor"]
+    assert extended["enabled"] is True
+    assert extended["mode"] == "persistent"
+    assert extended["processor"] == "report_only"
+    assert extended["interval_seconds"] == 60
+    assert extended["batch_size"] == 10
+    assert extended["log_sink"] == "stdout"
+    assert extended["heartbeat"] == {
+        "registered": True,
+        "id": "task-monitor:1778089999999999998",
+        "error": None,
+        "next_registration_attempt_in_seconds": 0.0,
+    }
+    assert extended["schedule"]["first_cycle_pending"] is False
+    assert extended["schedule"]["wake_requested"] is False
+    assert extended["schedule"]["last_cycle_at"] == pong["last_cycle_at"]
+    assert extended["schedule"]["last_checkpoint"] == pong["last_checkpoint"]
+    assert 0.0 <= extended["schedule"]["next_cycle_due_in_seconds"] <= 60.0
+    assert extended["last_cycle"]["success"] is True
+    assert extended["last_cycle"]["error"] is None
+    assert extended["last_cycle"]["candidates_seen"] == pong["last_candidates_seen"]
+    assert extended["last_cycle"]["candidate_class_counts"] == {}
+    assert extended["last_cycle"]["safe_to_delete_candidates"] == 0
+    assert extended["last_cycle"]["processed"] == pong["last_processed"]
+    assert extended["last_cycle"]["deleted"] == pong["last_deleted"]
+    assert extended["last_cycle"]["reported"] == pong["last_reported"]
+    assert extended["last_cycle"]["prune_records_scanned"] == (
+        pong["last_prune_records_scanned"]
+    )
+    assert extended["last_cycle"]["cleanup_queue_stats"] == (
+        pong["last_cleanup_queue_stats"]
+    )
+    assert extended["last_cycle"]["warnings"] == []
+    assert extended["last_cycle"]["errors"] == []
     assert log_queue.peek_one() is not None
 
 
