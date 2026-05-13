@@ -736,6 +736,39 @@ def test_harness_cleanup_preserve_database_waits_for_database_release(
 
 
 @pytest.mark.sqlite_only
+def test_harness_cleanup_preserve_database_detaches_tempdir_finalizer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = WeftTestHarness()
+    repo_cwd = os.getcwd()
+    calls: list[str] = []
+
+    class _FinalizerStub:
+        def detach(self) -> None:
+            calls.append("detach")
+
+    class _TempdirStub:
+        _finalizer = _FinalizerStub()
+
+        def cleanup(self) -> None:
+            calls.append("cleanup")
+
+    try:
+        harness.__enter__()
+        monkeypatch.setattr(harness, "_stop_inline_managers", lambda: None)
+        monkeypatch.setattr(harness, "_cleanup_preserving_database", lambda: None)
+        harness._tempdir = cast(Any, _TempdirStub())
+
+        harness.cleanup(preserve_database=True)
+
+        assert calls == ["detach"]
+        assert harness._closed is True
+    finally:
+        os.chdir(repo_cwd)
+        harness._closed = True
+
+
+@pytest.mark.sqlite_only
 def test_harness_cleanup_preserve_database_extends_windows_release_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

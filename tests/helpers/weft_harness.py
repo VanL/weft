@@ -487,6 +487,7 @@ class WeftTestHarness:
             if preserve_database:
                 self._stop_inline_managers()
                 self._cleanup_preserving_database()
+                self._detach_tempdir_finalizer()
                 return
 
             self._stop_active_managers(
