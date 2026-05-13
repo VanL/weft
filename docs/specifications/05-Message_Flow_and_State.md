@@ -680,14 +680,17 @@ system pruning:
   `weft.log.tasks`. Task-log cleanup first deletes malformed rows, then
   repeatedly collates and deletes completed lifecycle groups in the bounded
   scan window, then classifies terminal rows with no visible start event as
-  truncated terminal groups, then applies broad older-than cleanup to remaining
-  rows while preserving TIDs that have visible start evidence but no terminal
-  evidence in the current window. Per-cycle collation summaries are operational
+  truncated terminal groups, deletes old `T{tid}.reserved` rows for collated
+  terminal TIDs when the same pass has terminal task-log proof for that TID,
+  then applies broad older-than cleanup to remaining rows while preserving TIDs
+  that have visible start evidence but no terminal evidence in the current
+  window. Reserved rows without retained terminal log proof remain protected
+  recovery-sensitive evidence. Per-cycle collation summaries are operational
   TaskMonitor evidence only, not durable archive records. The monitor must not
   delete active work, ambiguous task-local evidence, claimed outbox residue,
-  user payload rows, spawn requests, manager control rows, or candidates
-  without exact message IDs. `report_only` remains available as a
-  non-destructive override.
+  user payload rows outside terminal-proven reserved cleanup, spawn requests,
+  manager control rows, or candidates without exact message IDs. `report_only`
+  remains available as a non-destructive override.
 - `weft system prune --family task-log|task-local|retention` is an explicit
   operator action, not a background sweeper. Ordinary apply mode requires an
   archive artifact before deletion. Force apply mode is a human override for
@@ -746,9 +749,12 @@ Current rules:
   effects, force-only retention cleanup, task-local retention cleanup, or
   logging-before-delete behavior in this slice. Its task-log policy order is
   malformed first, completed lifecycle collation second, truncated terminal
-  collation third, and broad older-than deletion last with open-start TIDs
-  protected. Collate may emit operational per-cycle summaries before exact
-  deletion so operators can observe steady-state lifecycle reduction.
+  collation third, terminal-proven reserved cleanup fourth, and broad
+  older-than deletion last with open-start TIDs protected. Reserved cleanup is
+  scoped to `T{tid}.reserved` queues for TIDs collated in the same pass and
+  requires old-enough exact rows plus terminal task-log proof for that TID.
+  Collate may emit operational per-cycle summaries before exact deletion so
+  operators can observe steady-state lifecycle reduction.
 - `weft system tidy` handles backend-native cleanup of empty queues and broker
   maintenance
 - autonomous destructive queue lifecycle is limited to the supervised

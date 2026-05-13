@@ -9,7 +9,11 @@ from typing import Any
 import pytest
 
 from tests.helpers.test_backend import prepare_project_root
-from weft._constants import WEFT_GLOBAL_LOG_QUEUE, WEFT_TID_MAPPINGS_QUEUE
+from weft._constants import (
+    QUEUE_RESERVED_SUFFIX,
+    WEFT_GLOBAL_LOG_QUEUE,
+    WEFT_TID_MAPPINGS_QUEUE,
+)
 from weft.context import WeftContext, build_context
 from weft.core.pruning.policies import malformed_row_candidates, older_than_candidates
 from weft.core.queue_window import DecodedQueueWindowRow, QueueWindowRow
@@ -304,6 +308,68 @@ def test_task_monitor_cleanup_collates_terminal_task_log_for_anchor_tid(
     assert remaining == [{"event": "work_started", "tid": "1778000000000000002"}]
 
 
+def test_task_monitor_cleanup_deletes_reserved_work_with_terminal_log_proof(
+    tmp_path: Path,
+) -> None:
+    ctx = _context(tmp_path)
+    tid = "1778000000000000001"
+    reserved_queue = f"T{tid}.{QUEUE_RESERVED_SUFFIX}"
+    _write_json(ctx, reserved_queue, {"payload": "retained failed work"})
+    start_id = _write_json(
+        ctx,
+        WEFT_GLOBAL_LOG_QUEUE,
+        {"event": "work_started", "tid": tid},
+    )
+    _write_json(
+        ctx,
+        WEFT_GLOBAL_LOG_QUEUE,
+        {"event": "work_failed", "tid": tid, "status": "failed"},
+    )
+
+    result = run_task_monitor_cleanup(
+        ctx,
+        TaskMonitorCleanupConfig(batch_size=10, task_log_min_age_seconds=1.0),
+        apply=True,
+        now_ns=_now_after(start_id, 2.0),
+    )
+
+    assert result.success
+    assert result.deleted == 3
+    assert [candidate.candidate_class for candidate in result.candidates] == [
+        "collated_terminal_task_log",
+        "collated_terminal_task_log",
+        "terminal_reserved_with_log",
+    ]
+    reserved_stats = next(
+        stat for stat in result.queue_stats if stat.queue == reserved_queue
+    )
+    assert reserved_stats.selected == 1
+    assert reserved_stats.deleted == 1
+    assert _read_rows(ctx, reserved_queue) == []
+
+
+def test_task_monitor_cleanup_preserves_reserved_work_without_terminal_log_proof(
+    tmp_path: Path,
+) -> None:
+    ctx = _context(tmp_path)
+    tid = "1778000000000000001"
+    reserved_queue = f"T{tid}.{QUEUE_RESERVED_SUFFIX}"
+    reserved_id = _write_json(ctx, reserved_queue, {"payload": "retained work"})
+
+    result = run_task_monitor_cleanup(
+        ctx,
+        TaskMonitorCleanupConfig(batch_size=10, task_log_min_age_seconds=1.0),
+        apply=True,
+        now_ns=_now_after(reserved_id, 2.0),
+    )
+
+    assert result.success
+    assert result.deleted == 0
+    assert [
+        json.loads(body) for body, _message_id in _read_rows(ctx, reserved_queue)
+    ] == [{"payload": "retained work"}]
+
+
 def test_task_monitor_cleanup_repeats_collate_for_multiple_terminal_tids(
     tmp_path: Path,
 ) -> None:
@@ -348,7 +414,9 @@ def test_task_monitor_cleanup_repeats_collate_for_multiple_terminal_tids(
     task_log_stats = next(
         stat for stat in result.queue_stats if stat.queue == WEFT_GLOBAL_LOG_QUEUE
     )
-    assert [summary.to_summary()["tid"] for summary in task_log_stats.collated_tasks] == [
+    assert [
+        summary.to_summary()["tid"] for summary in task_log_stats.collated_tasks
+    ] == [
         "1778000000000000001",
         "1778000000000000002",
     ]

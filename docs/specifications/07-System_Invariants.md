@@ -140,8 +140,9 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
   schema queues whose policy says malformed rows are disposable, such as
   `weft.log.tasks` and `weft.state.tid_mappings`. It must not delete active
   work, ambiguous task-local evidence, claimed outbox residue, user payload
-  rows, unknown rows outside an explicit cleanup policy, inbox/reserved work,
-  or non-exact lifecycle evidence. Task-log collation summaries emitted by the
+  rows, unknown rows outside an explicit cleanup policy, inbox/reserved work
+  without terminal task-log proof for the same TID in the cleanup pass, or
+  non-exact lifecycle evidence. Task-log collation summaries emitted by the
   monitor are operational evidence about cleanup work performed; they are not
   durable task lifecycle truth or archival records.
 - **OBS.14**: claimed outbox residue is recovery evidence, not decoded result
@@ -327,8 +328,10 @@ foreground `weft system task-monitor` command. In the current contract it is
 operational only. The default processor is `delete`, which may delete exact
 rows selected by bounded cleanup policies. Task-log cleanup must delete
 malformed rows, collate completed lifecycle groups, classify terminal rows
-with no visible start as truncated groups, and only then apply broad
+with no visible start as truncated groups, delete old reserved rows for TIDs
+that were terminal-collated in the same pass, and only then apply broad
 older-than deletion while preserving open-start TIDs in the bounded window.
+Reserved rows without retained terminal log proof stay protected by default.
 Collation summaries remain operational TaskMonitor output only. Those deletes
 and summaries do not make task-monitor output lifecycle truth or result
 authority. `weft.log.tasks` remains runtime lifecycle evidence while retained,

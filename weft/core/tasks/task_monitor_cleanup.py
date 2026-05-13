@@ -20,6 +20,7 @@ from typing import Any
 
 from simplebroker.ext import BrokerError
 from weft._constants import (
+    QUEUE_RESERVED_SUFFIX,
     RETENTION_PRUNE_DEFAULT_MIN_AGE_SECONDS,
     TASK_LOG_START_EVENTS,
     TASK_MONITOR_TID_MAPPING_CLEANUP_MIN_AGE_SECONDS,
@@ -140,6 +141,7 @@ def run_task_monitor_cleanup(
         try:
             rows = scan_queue_window(ctx, queue_name, limit=config.batch_size)
             selected, stats = _select_queue_candidates(
+                ctx,
                 queue_name,
                 rows,
                 config=config,
@@ -150,7 +152,7 @@ def run_task_monitor_cleanup(
             errors.append(f"failed to scan {queue_name}: {exc}")
             continue
         candidates.extend(selected)
-        queue_stats.append(stats)
+        queue_stats.extend(stats)
 
     applied: tuple[AppliedCleanupCandidate, ...] = ()
     if apply and candidates:
@@ -178,23 +180,26 @@ def run_task_monitor_cleanup(
 
 
 def _select_queue_candidates(
+    ctx: WeftContext,
     queue_name: str,
     rows: Sequence[QueueWindowRow],
     *,
     config: TaskMonitorCleanupConfig,
     now_ns: int,
     exclude_tids: set[str],
-) -> tuple[list[CleanupCandidate], CleanupQueueStats]:
+) -> tuple[list[CleanupCandidate], tuple[CleanupQueueStats, ...]]:
     decoded = tuple(_decode_row(row, queue_name=queue_name) for row in rows)
     if queue_name == WEFT_TID_MAPPINGS_QUEUE:
-        return _tid_mapping_candidates(
+        candidates, stats = _tid_mapping_candidates(
             decoded,
             config=config,
             now_ns=now_ns,
             exclude_tids=exclude_tids,
         )
+        return candidates, (stats,)
     if queue_name == WEFT_GLOBAL_LOG_QUEUE:
         return _task_log_candidates(
+            ctx,
             decoded,
             config=config,
             now_ns=now_ns,
@@ -202,11 +207,13 @@ def _select_queue_candidates(
         )
     return (
         [],
-        CleanupQueueStats(
-            queue=queue_name,
-            scanned=len(rows),
-            selected=0,
-            stop_reason="unsupported_queue",
+        (
+            CleanupQueueStats(
+                queue=queue_name,
+                scanned=len(rows),
+                selected=0,
+                stop_reason="unsupported_queue",
+            ),
         ),
     )
 
@@ -288,12 +295,13 @@ def _tid_mapping_candidates(
 
 
 def _task_log_candidates(
+    ctx: WeftContext,
     rows: Sequence[DecodedQueueWindowRow],
     *,
     config: TaskMonitorCleanupConfig,
     now_ns: int,
     exclude_tids: set[str],
-) -> tuple[list[CleanupCandidate], CleanupQueueStats]:
+) -> tuple[list[CleanupCandidate], tuple[CleanupQueueStats, ...]]:
     candidates = malformed_row_candidates(
         rows,
         candidate_class="malformed_task_log",
@@ -350,13 +358,80 @@ def _task_log_candidates(
     )
     candidates.extend(old_rows.candidates)
     stop_reason = stop_reason or old_rows.stop_reason
-    return candidates, cleanup_queue_stats(
+    reserved_candidates, reserved_stats = _terminal_reserved_candidates(
+        ctx,
+        collated_summaries,
+        config=config,
+        now_ns=now_ns,
+    )
+    candidates.extend(reserved_candidates)
+    task_log_candidates = [
+        candidate
+        for candidate in candidates
+        if candidate.queue == WEFT_GLOBAL_LOG_QUEUE
+    ]
+    task_log_stats = cleanup_queue_stats(
         WEFT_GLOBAL_LOG_QUEUE,
         scanned=len(rows),
-        candidates=candidates,
+        candidates=task_log_candidates,
         stop_reason=stop_reason,
         collated_tasks=tuple(collated_summaries),
     )
+    return candidates, (task_log_stats, *reserved_stats)
+
+
+def _terminal_reserved_candidates(
+    ctx: WeftContext,
+    groups: Sequence[CollatedMessageGroup],
+    *,
+    config: TaskMonitorCleanupConfig,
+    now_ns: int,
+) -> tuple[list[CleanupCandidate], tuple[CleanupQueueStats, ...]]:
+    candidates: list[CleanupCandidate] = []
+    stats: list[CleanupQueueStats] = []
+    for group in groups:
+        queue_name = f"T{group.tid}.{QUEUE_RESERVED_SUFFIX}"
+        rows = scan_queue_window(ctx, queue_name, limit=config.batch_size)
+        if not rows:
+            continue
+        decoded = tuple(_decode_reserved_row(row) for row in rows)
+
+        def reserved_tid(
+            _payload: Mapping[str, Any] | None,
+            _row: DecodedQueueWindowRow,
+            tid: str = group.tid,
+        ) -> str:
+            return tid
+
+        selected = older_than_candidates(
+            decoded,
+            now_ns=now_ns,
+            min_age_seconds=config.task_log_min_age_seconds,
+            candidate_class="terminal_reserved_with_log",
+            reason="terminal_task_log_proof_for_reserved_tid",
+            stop_reason="first_reserved_row_too_young",
+            tid_from_row=reserved_tid,
+        )
+        candidates.extend(selected.candidates)
+        stats.append(
+            cleanup_queue_stats(
+                queue_name,
+                scanned=len(rows),
+                candidates=selected.candidates,
+                stop_reason=selected.stop_reason,
+            )
+        )
+    return candidates, tuple(stats)
+
+
+def _decode_reserved_row(row: QueueWindowRow) -> DecodedQueueWindowRow:
+    try:
+        payload = json.loads(row.body)
+    except json.JSONDecodeError:
+        return DecodedQueueWindowRow(raw=row, payload=None)
+    if not isinstance(payload, dict):
+        return DecodedQueueWindowRow(raw=row, payload=None)
+    return DecodedQueueWindowRow(raw=row, payload=payload)
 
 
 def _collated_task_log_candidate_class(
