@@ -761,7 +761,7 @@ def read_command(
         all_messages=all_messages,
         json_output=json_output,
         show_timestamps=with_timestamps,
-        since_str=since,
+        after_str=since,
         message_id_str=message_id,
     )
 
@@ -813,7 +813,7 @@ def peek_command(
         all_messages=all_messages,
         json_output=json_output,
         show_timestamps=with_timestamps,
-        since_str=since,
+        after_str=since,
         message_id_str=message_id,
     )
 
@@ -876,7 +876,7 @@ def move_command(
         json_output=json_output,
         show_timestamps=with_timestamps,
         message_id_str=message_id,
-        since_str=since,
+        after_str=since,
     )
 
 

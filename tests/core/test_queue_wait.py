@@ -85,10 +85,10 @@ def test_queue_change_monitor_falls_back_to_queue_watchers(
             *,
             stop_event,
             peek: bool,
-            since_timestamp: int,
+            after_timestamp: int,
             config,
         ) -> None:
-            del _handler, stop_event, peek, since_timestamp, config
+            del _handler, stop_event, peek, after_timestamp, config
             created.append(queue)
 
         def run_in_thread(self) -> None:
