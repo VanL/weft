@@ -315,12 +315,12 @@ def test_task_monitor_cleanup_deletes_reserved_work_with_terminal_log_proof(
     tid = "1778000000000000001"
     reserved_queue = f"T{tid}.{QUEUE_RESERVED_SUFFIX}"
     _write_json(ctx, reserved_queue, {"payload": "retained failed work"})
-    start_id = _write_json(
+    _write_json(
         ctx,
         WEFT_GLOBAL_LOG_QUEUE,
         {"event": "work_started", "tid": tid},
     )
-    _write_json(
+    terminal_id = _write_json(
         ctx,
         WEFT_GLOBAL_LOG_QUEUE,
         {"event": "work_failed", "tid": tid, "status": "failed"},
@@ -330,7 +330,7 @@ def test_task_monitor_cleanup_deletes_reserved_work_with_terminal_log_proof(
         ctx,
         TaskMonitorCleanupConfig(batch_size=10, task_log_min_age_seconds=1.0),
         apply=True,
-        now_ns=_now_after(start_id, 2.0),
+        now_ns=_now_after(terminal_id, 2.0),
     )
 
     assert result.success
@@ -464,7 +464,7 @@ def test_task_monitor_cleanup_deletes_old_rows_after_collation(
     tmp_path: Path,
 ) -> None:
     ctx = _context(tmp_path)
-    start_id = _write_json(
+    _write_json(
         ctx,
         WEFT_GLOBAL_LOG_QUEUE,
         {"event": "work_started", "tid": "1778000000000000001"},
@@ -474,7 +474,7 @@ def test_task_monitor_cleanup_deletes_old_rows_after_collation(
         WEFT_GLOBAL_LOG_QUEUE,
         {"event": "work_completed", "tid": "1778000000000000001"},
     )
-    _write_json(
+    orphan_id = _write_json(
         ctx,
         WEFT_GLOBAL_LOG_QUEUE,
         {"event": "orphan_observation", "tid": "1778000000000000002"},
@@ -484,7 +484,7 @@ def test_task_monitor_cleanup_deletes_old_rows_after_collation(
         ctx,
         TaskMonitorCleanupConfig(batch_size=10, task_log_min_age_seconds=1.0),
         apply=True,
-        now_ns=_now_after(start_id, 2.0),
+        now_ns=_now_after(orphan_id, 2.0),
     )
 
     assert result.success
@@ -501,12 +501,12 @@ def test_task_monitor_cleanup_preserves_open_start_when_deleting_old_rows(
     tmp_path: Path,
 ) -> None:
     ctx = _context(tmp_path)
-    start_id = _write_json(
+    _write_json(
         ctx,
         WEFT_GLOBAL_LOG_QUEUE,
         {"event": "work_started", "tid": "1778000000000000001"},
     )
-    _write_json(
+    orphan_id = _write_json(
         ctx,
         WEFT_GLOBAL_LOG_QUEUE,
         {"event": "orphan_observation", "tid": "1778000000000000002"},
@@ -516,7 +516,7 @@ def test_task_monitor_cleanup_preserves_open_start_when_deleting_old_rows(
         ctx,
         TaskMonitorCleanupConfig(batch_size=10, task_log_min_age_seconds=1.0),
         apply=True,
-        now_ns=_now_after(start_id, 2.0),
+        now_ns=_now_after(orphan_id, 2.0),
     )
 
     assert result.success
