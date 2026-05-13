@@ -44,6 +44,10 @@ Global queues:
 
 Notes:
 - `weft.state.*` queues are runtime state and are excluded from dumps by default.
+- `weft.state.services` manager/service-owner rows use `active` and `draining`
+  as live convergence evidence. `stopped`, `superseded`, and `terminal` are
+  non-live evidence; a latest `superseded` row excludes that owner TID from
+  manager leadership.
 - `weft.log.tasks` is runtime evidence used by Weft status, result, and
   debugging surfaces while retained. It is not legal, forensic, or audit
   evidence; retention is an operational policy.

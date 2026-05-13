@@ -364,7 +364,7 @@ def _run_parallel_manager_reuse_cycle(
     for _rc, out, _err in results:
         tid = out.strip()
         try:
-            harness.wait_for_completion(tid, timeout=task_completion_timeout)
+            harness.wait_for_terminal_state(tid, timeout=task_completion_timeout)
         except TimeoutError as exc:
             _raise_parallel_manager_reuse_failure(
                 phase="task_completion_timeout",

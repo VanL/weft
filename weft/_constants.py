@@ -352,6 +352,9 @@ SERVICE_STATUS_DRAINING: Final[str] = "draining"
 SERVICE_STATUS_STOPPED: Final[str] = "stopped"
 """Service-owner status for a stopped manager/service owner."""
 
+SERVICE_STATUS_SUPERSEDED: Final[str] = "superseded"
+"""Service-owner status for a replaced manager/service owner."""
+
 SERVICE_STATUS_TERMINAL: Final[str] = "terminal"
 """Service-owner status for terminal managed-service evidence."""
 

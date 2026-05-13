@@ -70,6 +70,7 @@ from weft._constants import (
     SERVICE_OWNER_SCHEMA,
     SERVICE_STATUS_DRAINING,
     SERVICE_STATUS_STOPPED,
+    SERVICE_STATUS_SUPERSEDED,
     SERVICE_STATUS_TERMINAL,
     SERVICE_TYPE_MANAGED,
     SERVICE_TYPE_MANAGER,
@@ -224,7 +225,9 @@ class Manager(BaseTask):
         self._last_activity_ns = time.time_ns()
         self._idle_shutdown_logged = False
         self._unregistered = False
-        self._unregistered_status: Literal["draining", "stopped"] | None = None
+        self._unregistered_status: (
+            Literal["draining", "stopped", "superseded"] | None
+        ) = None
         self._registry_message_id: int | None = None
         self._draining = False
         self._drain_reason: str | None = None
@@ -974,6 +977,13 @@ class Manager(BaseTask):
         now_ns = time.time_ns()
         self._prune_expired_manager_registry_entries(registry_queue, now_ns=now_ns)
         if (
+            self._latest_self_registry_status(registry_queue)
+            == SERVICE_STATUS_SUPERSEDED
+        ):
+            self._begin_superseded_shutdown()
+            self._last_registry_heartbeat_ns = time.time_ns()
+            return
+        if (
             self._recent_lower_canonical_manager_exists(registry_queue, now_ns=now_ns)
             and not self._has_actionable_leadership_work()
         ):
@@ -1184,6 +1194,47 @@ class Manager(BaseTask):
             ttl_ns=self._manager_registry_retention_ns(),
         )
         return decision.recent_lower_live_owner
+
+    def _latest_self_registry_status(self, queue: Queue) -> str | None:
+        """Return this manager's latest service-owner status, if readable."""
+
+        latest_timestamp = -1
+        latest_status: str | None = None
+        service_key = manager_service_key(self._manager_context())
+        try:
+            entries = queue.peek_generator(with_timestamps=True)
+        except (AttributeError, BrokerError, OSError, RuntimeError):
+            logger.debug("Failed to inspect self manager status", exc_info=True)
+            return None
+
+        try:
+            for entry in entries:
+                if not isinstance(entry, tuple) or len(entry) != 2:
+                    continue
+                body, timestamp = entry
+                if not isinstance(timestamp, int):
+                    continue
+                try:
+                    payload = json.loads(body)
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                record = parse_service_owner_record(payload, timestamp=timestamp)
+                if (
+                    record is None
+                    or record.owner_tid != self.tid
+                    or record.service_type != SERVICE_TYPE_MANAGER
+                    or record.service_key != service_key
+                ):
+                    continue
+                if timestamp > latest_timestamp:
+                    latest_timestamp = timestamp
+                    latest_status = record.status
+        except (BrokerError, OSError, RuntimeError):
+            logger.debug("Failed to replay self manager status", exc_info=True)
+            return None
+        return latest_status
 
     def _prune_older_self_registry_entries(self, queue: Queue) -> None:
         """Keep only this manager's latest registry row."""
@@ -2189,6 +2240,27 @@ class Manager(BaseTask):
         )
         self._update_process_title("draining")
         self._unregister_manager(status="draining")
+
+    def _begin_superseded_shutdown(self) -> None:
+        """Stop this manager after observing its own superseded owner row."""
+
+        if self._unregistered or self.should_stop:
+            return
+        self._unregistered = True
+        self._unregistered_status = "superseded"
+        if self._user_work_children():
+            self._begin_shutdown_drain(
+                message_id=None,
+                reason="Superseded by replacement manager",
+                event="manager_superseded",
+                completion_event="manager_superseded_drained",
+            )
+            return
+        if self.taskspec.state.status not in {"completed", "cancelled"}:
+            self.taskspec.mark_cancelled(reason="Superseded by replacement manager")
+            self._report_state_change(event="manager_superseded")
+            self._update_process_title("cancelled")
+        self.should_stop = True
 
     def _finish_graceful_shutdown(self) -> None:
         if self.taskspec.state.status not in {"completed", "cancelled"}:

@@ -8,6 +8,7 @@ from weft.context import build_context
 from weft.core.service_convergence import (
     LIVE_SERVICE_STATUSES,
     SERVICE_OWNER_SCHEMA,
+    SERVICE_STATUS_SUPERSEDED,
     ServiceOwnerRecord,
     build_manager_service_payload,
     collect_service_owner_records,
@@ -47,6 +48,35 @@ def test_select_canonical_live_owner_uses_numeric_tid_order() -> None:
     )
 
     assert select_canonical_live_owner(records).owner_tid == "2"
+
+
+def test_superseded_owner_is_accepted_but_not_live() -> None:
+    record = _record(
+        "2",
+        status=SERVICE_STATUS_SUPERSEDED,
+        timestamp=100,
+    )
+
+    assert record.status == SERVICE_STATUS_SUPERSEDED
+    assert select_canonical_live_owner((record,)) is None
+    assert SERVICE_STATUS_SUPERSEDED not in LIVE_SERVICE_STATUSES
+
+
+def test_latest_superseded_row_excludes_older_active_owner() -> None:
+    decision = reduce_service_ownership(
+        "manager:weft.spawn.requests:file:/tmp/weft.db",
+        (
+            _record("2", status="active", timestamp=100),
+            _record("2", status=SERVICE_STATUS_SUPERSEDED, timestamp=200),
+            _record("5", status="active", timestamp=150),
+        ),
+        own_tid=None,
+        now_ns=1_000,
+        ttl_ns=950,
+    )
+
+    assert decision.canonical_live is not None
+    assert decision.canonical_live.owner_tid == "5"
 
 
 def test_parse_service_owner_rejects_non_numeric_owner_tid() -> None:

@@ -19,6 +19,7 @@ from weft._constants import (
     SERVICE_STATUS_ACTIVE,
     SERVICE_STATUS_DRAINING,
     SERVICE_STATUS_STOPPED,
+    SERVICE_STATUS_SUPERSEDED,
     SERVICE_STATUS_TERMINAL,
     SERVICE_TYPE_MANAGER,
     WEFT_SPAWN_REQUESTS_QUEUE,
@@ -27,7 +28,14 @@ from weft.context import WeftContext, service_context_key
 
 logger = logging.getLogger(__name__)
 
-ServiceOwnerStatus = Literal["active", "draining", "stopped", "terminal", "uncertain"]
+ServiceOwnerStatus = Literal[
+    "active",
+    "draining",
+    "stopped",
+    "superseded",
+    "terminal",
+    "uncertain",
+]
 ServiceRegistryState = Literal["none", "unknown", "known"]
 ServiceOwnerRowDisposition = Literal[
     "accepted",
@@ -139,6 +147,7 @@ def parse_service_owner_row(
             SERVICE_STATUS_ACTIVE,
             SERVICE_STATUS_DRAINING,
             SERVICE_STATUS_STOPPED,
+            SERVICE_STATUS_SUPERSEDED,
             SERVICE_STATUS_TERMINAL,
             "uncertain",
         }
@@ -419,7 +428,7 @@ def build_manager_service_payload(
     context: WeftContext,
     tid: str,
     name: str,
-    status: Literal["active", "draining", "stopped"],
+    status: Literal["active", "draining", "stopped", "superseded"],
     queues: Mapping[str, str | None],
     runtime_handle: Mapping[str, Any],
     capabilities: Sequence[Any] = (),

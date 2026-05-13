@@ -14,10 +14,12 @@ from tests.helpers.test_backend import prepare_project_root
 from weft._constants import (
     MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS,
     MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
+    SERVICE_STATUS_SUPERSEDED,
     WEFT_SERVICES_REGISTRY_QUEUE,
 )
 from weft.commands import manager as manager_cmd
 from weft.context import build_context
+from weft.core import manager_runtime as core_manager_runtime
 from weft.core.service_convergence import build_manager_service_payload
 from weft.helpers import iter_queue_json_entries
 
@@ -70,6 +72,20 @@ def _manager_service_payload(
         },
         runtime_handle=runtime_handle or {},
     )
+
+
+def _latest_manager_record(context, tid: str) -> dict[str, object] | None:
+    queue = context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
+    try:
+        latest: tuple[dict[str, object], int] | None = None
+        for payload, timestamp in iter_queue_json_entries(queue):
+            if payload.get("tid") != tid:
+                continue
+            if latest is None or latest[1] < timestamp:
+                latest = (payload, timestamp)
+        return None if latest is None else latest[0]
+    finally:
+        queue.close()
 
 
 def test_start_command_delegates_to_shared_bootstrap(tmp_path, monkeypatch):
@@ -125,6 +141,176 @@ def test_start_command_reports_existing_manager(tmp_path, monkeypatch):
     assert message == "Manager 1761000000000000001 already running"
 
 
+def test_start_command_replace_supersedes_before_start(tmp_path, monkeypatch):
+    context_root = prepare_project_root(tmp_path / "proj")
+    context = build_context(context_root)
+    calls: list[str] = []
+
+    monkeypatch.setattr(manager_cmd, "build_context", lambda spec_context=None: context)
+
+    def fake_replace(context_arg):
+        assert context_arg is context
+        calls.append("replace")
+        return True, None
+
+    def fake_start(context_arg, *, verbose):
+        assert context_arg is context
+        assert verbose is False
+        calls.append("start")
+        return (
+            {
+                "tid": "1761000000000000002",
+                "runtime_handle": _host_runtime_handle(12345),
+            },
+            True,
+            None,
+        )
+
+    monkeypatch.setattr(manager_cmd, "_replace_active_manager", fake_replace)
+    monkeypatch.setattr(manager_cmd, "_start_manager", fake_start)
+
+    exit_code, message = manager_cmd.start_command(
+        context_path=context_root,
+        replace=True,
+    )
+
+    assert exit_code == 0
+    assert message == "Started manager 1761000000000000002"
+    assert calls == ["replace", "start"]
+
+
+def test_start_command_replace_failure_does_not_start(tmp_path, monkeypatch):
+    context_root = prepare_project_root(tmp_path / "proj")
+    context = build_context(context_root)
+    calls: list[str] = []
+
+    monkeypatch.setattr(manager_cmd, "build_context", lambda spec_context=None: context)
+    monkeypatch.setattr(
+        manager_cmd,
+        "_replace_active_manager",
+        lambda context_arg: (False, "failed to send STOP"),
+    )
+    monkeypatch.setattr(
+        manager_cmd,
+        "_start_manager",
+        lambda *args, **kwargs: calls.append("start"),
+    )
+
+    exit_code, message = manager_cmd.start_command(
+        context_path=context_root,
+        replace=True,
+    )
+
+    assert exit_code == 1
+    assert message == "failed to send STOP"
+    assert calls == []
+
+
+def test_replace_active_manager_sends_stop_and_marks_superseded(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    context_root = prepare_project_root(tmp_path / "ctx")
+    context = build_context(context_root)
+    tid = "1761000000000000010"
+
+    registry_queue = Queue(
+        WEFT_SERVICES_REGISTRY_QUEUE,
+        db_path=context.broker_target,
+        persistent=False,
+        config=context.config,
+    )
+    registry_queue.write(
+        json.dumps(
+            _manager_service_payload(
+                context,
+                tid,
+                runtime_handle=_host_runtime_handle(os.getpid()),
+                ctrl_in=f"manager.{tid}.ctrl_in",
+            )
+        )
+    )
+    registry_queue.close()
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "_await_manager_stop_confirmation",
+        lambda *args, **kwargs: pytest.fail("replacement should not wait"),
+    )
+
+    replaced, message = core_manager_runtime.replace_active_manager(
+        context,
+        timeout=1.0,
+    )
+
+    assert replaced is True
+    assert message is None
+    ctrl_queue = Queue(
+        f"manager.{tid}.ctrl_in",
+        db_path=context.broker_target,
+        persistent=False,
+        config=context.config,
+    )
+    try:
+        assert ctrl_queue.read_one() == "STOP"
+    finally:
+        ctrl_queue.close()
+    latest = _latest_manager_record(context, tid)
+    assert latest is not None
+    assert latest["status"] == SERVICE_STATUS_SUPERSEDED
+    assert core_manager_runtime.select_active_manager(context) is None
+
+
+def test_replace_active_manager_reselects_after_superseding_lower_tid(
+    tmp_path,
+) -> None:
+    context_root = prepare_project_root(tmp_path / "ctx")
+    context = build_context(context_root)
+    lower_tid = "1761000000000000011"
+    higher_tid = "1761000000000000012"
+
+    registry_queue = Queue(
+        WEFT_SERVICES_REGISTRY_QUEUE,
+        db_path=context.broker_target,
+        persistent=False,
+        config=context.config,
+    )
+    try:
+        registry_queue.write(
+            json.dumps(
+                _manager_service_payload(
+                    context,
+                    lower_tid,
+                    runtime_handle=_host_runtime_handle(os.getpid()),
+                )
+            )
+        )
+        registry_queue.write(
+            json.dumps(
+                _manager_service_payload(
+                    context,
+                    higher_tid,
+                    runtime_handle=_host_runtime_handle(os.getpid()),
+                )
+            )
+        )
+    finally:
+        registry_queue.close()
+
+    replaced, message = core_manager_runtime.replace_active_manager(
+        context,
+        timeout=1.0,
+    )
+
+    assert replaced is True
+    assert message is None
+    lower_latest = _latest_manager_record(context, lower_tid)
+    higher_latest = _latest_manager_record(context, higher_tid)
+    assert lower_latest is not None
+    assert higher_latest is not None
+    assert lower_latest["status"] == SERVICE_STATUS_SUPERSEDED
+    assert higher_latest["status"] == SERVICE_STATUS_SUPERSEDED
+
+
 def test_stop_command_delegates_to_shared_lifecycle_helper(tmp_path, monkeypatch):
     context_root = prepare_project_root(tmp_path / "ctx")
     context = build_context(context_root)
@@ -158,6 +344,91 @@ def test_stop_command_delegates_to_shared_lifecycle_helper(tmp_path, monkeypatch
     assert exit_code == 0
     assert message is None
     assert calls == [(context, None, "1761000000000000001", 0.1, False)]
+
+
+def test_stop_command_without_tid_stops_active_manager(tmp_path, monkeypatch):
+    context_root = prepare_project_root(tmp_path / "ctx")
+    context = build_context(context_root)
+    active_record = {
+        "tid": "1761000000000000006",
+        "runtime_handle": _host_runtime_handle(os.getpid()),
+    }
+    select_calls: list[tuple[object, bool, object]] = []
+    stop_calls: list[tuple[object, object, object, object, object]] = []
+
+    monkeypatch.setattr(manager_cmd, "build_context", lambda spec_context=None: context)
+
+    def fake_select_active_manager(
+        context_arg,
+        *,
+        probe_stale=False,
+        probe_cache=None,
+    ):
+        select_calls.append((context_arg, probe_stale, probe_cache))
+        return active_record
+
+    def fake_stop_manager(
+        context_arg,
+        record,
+        process=None,
+        *,
+        tid=None,
+        timeout=MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
+        force=False,
+        stop_if_absent=False,
+    ):
+        del process, stop_if_absent
+        stop_calls.append((context_arg, record, tid, timeout, force))
+        return True, None
+
+    monkeypatch.setattr(
+        manager_cmd, "_select_active_manager", fake_select_active_manager
+    )
+    monkeypatch.setattr(manager_cmd, "_stop_manager", fake_stop_manager)
+
+    exit_code, message = manager_cmd.stop_command(
+        tid=None,
+        force=False,
+        timeout=0.1,
+        context_path=context_root,
+    )
+
+    assert exit_code == 0
+    assert message is None
+    assert select_calls == [(context, True, {})]
+    assert stop_calls == [(context, active_record, "1761000000000000006", 0.1, False)]
+
+
+def test_stop_command_without_tid_noops_when_no_active_manager(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    context_root = prepare_project_root(tmp_path / "ctx")
+    context = build_context(context_root)
+    stop_calls: list[object] = []
+
+    monkeypatch.setattr(manager_cmd, "build_context", lambda spec_context=None: context)
+    monkeypatch.setattr(
+        manager_cmd,
+        "_select_active_manager",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        manager_cmd,
+        "_stop_manager",
+        lambda *args, **kwargs: stop_calls.append(args),
+    )
+
+    exit_code, message = manager_cmd.stop_command(
+        tid=None,
+        force=False,
+        timeout=0.1,
+        context_path=context_root,
+    )
+
+    assert exit_code == 0
+    assert message is None
+    assert stop_calls == []
 
 
 def test_stop_command_default_timeout_exceeds_manager_drain_budget(

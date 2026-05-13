@@ -19,12 +19,16 @@ from weft._constants import (
     CONTROL_STOP,
     MANAGER_STARTUP_LOG_DIRNAME,
     QUEUE_OUTBOX_SUFFIX,
+    TERMINAL_TASK_STATUSES,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
     WEFT_MANAGER_RUNTIME_HANDLE_JSON_ENV,
     WEFT_SERVICES_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
+)
+from weft._constants import (
+    TERMINAL_TASK_EVENTS as CANONICAL_TERMINAL_TASK_EVENTS,
 )
 from weft.commands import manager as manager_cmd
 from weft.commands import tasks as task_cmd
@@ -464,6 +468,86 @@ class WeftTestHarness:
                     "duration": time.monotonic() - started_at,
                 }
             )
+
+    def wait_for_terminal_state(
+        self,
+        tid: str,
+        timeout: float = DEFAULT_TASK_COMPLETION_TIMEOUT,
+        *,
+        expected_status: str = "completed",
+    ) -> None:
+        """Wait until task-log evidence proves *tid* reached a terminal status."""
+
+        iterations = 0
+        started_at = time.monotonic()
+        try:
+            log_queue = Queue(
+                WEFT_GLOBAL_LOG_QUEUE,
+                db_path=self.context.broker_target,
+                persistent=False,
+                config=self.context.broker_config,
+            )
+            deadline = time.time() + timeout
+            cursor_floor: int | None = int(tid) - 1 if tid.isdigit() else None
+            high_watermark: int | None = cursor_floor
+            try:
+                while time.time() < deadline:
+                    iterations += 1
+                    scan_since = high_watermark
+                    if high_watermark is not None:
+                        scan_since = high_watermark - COMPLETION_WAIT_REORDER_WINDOW_NS
+                        if cursor_floor is not None:
+                            scan_since = max(cursor_floor, scan_since)
+                    for data, ts in iter_queue_json_entries(
+                        log_queue,
+                        since_timestamp=scan_since,
+                    ):
+                        if scan_since is not None and ts <= scan_since:
+                            continue
+                        if high_watermark is None or ts > high_watermark:
+                            high_watermark = ts
+                        if data.get("tid") != tid:
+                            continue
+                        status = self._terminal_status_from_task_log(data)
+                        if status is None:
+                            continue
+                        if status == expected_status:
+                            return
+                        raise RuntimeError(
+                            f"Task {tid} reached terminal status {status!r}; "
+                            f"expected {expected_status!r}"
+                        )
+                    time.sleep(0.05)
+            finally:
+                log_queue.close()
+
+            raise TimeoutError(
+                f"Timed out waiting for task {tid} terminal state "
+                f"{expected_status!r}\n{self.dump_completion_timeout_state(tid)}"
+            )
+        finally:
+            self._completion_wait_stats.append(
+                {
+                    "iterations": float(iterations),
+                    "duration": time.monotonic() - started_at,
+                }
+            )
+
+    @staticmethod
+    def _terminal_status_from_task_log(data: dict[str, object]) -> str | None:
+        event = data.get("event")
+        if isinstance(event, str):
+            status = CANONICAL_TERMINAL_TASK_EVENTS.get(event)
+            if status is not None:
+                return status
+        status = data.get("status")
+        if (
+            event == "task_activity"
+            and isinstance(status, str)
+            and status in TERMINAL_TASK_STATUSES
+        ):
+            return status
+        return None
 
     def report_completion_wait_stats(self) -> list[dict[str, float]]:
         """Return polling statistics from prior wait_for_completion calls.

@@ -267,6 +267,16 @@ Current behavior:
   yields leadership and drains
 - exits with code `1` if another live canonical manager already exists for the
   same context
+- accepts `--replace` to send STOP to the selected active manager's `ctrl_in`,
+  write a non-live `superseded` service-owner row for that manager, reselect
+  until no active manager remains, and then serve the replacement. This does
+  not wait for stopped confirmation in v1.
+- when a previous foreground `manager serve` left a fresh
+  external-supervisor registry row without positive live proof, marks that row
+  superseded and continues startup instead of flapping under the supervisor
+  until the generic stale-record timeout expires. A matched manager PING/PONG or
+  registered runtime-liveness `live` result still proves a duplicate and blocks
+  startup.
 - accepts `--level off|info|debug|trace` to control opt-in structured
   operational JSONL output for this foreground serve process only. The default
   is `off`.
@@ -277,6 +287,9 @@ This exists so operators can supervise Weft under tools like `systemd`,
 `launchd`, or `supervisord` without a separate runtime entrypoint.
 Operational-log records are written to the manager process log, are bounded
 diagnostics, and are not `weft.log.tasks` lifecycle records or status truth.
+
+Plan backlink:
+[`2026-05-13-manager-replace-start-serve-plan.md`](../plans/2026-05-13-manager-replace-start-serve-plan.md).
 
 Detached manager bootstrap for `weft run` and `weft manager start` remains a
 separate contract from `manager serve`: it starts the canonical manager through
@@ -442,15 +455,24 @@ Current manager-control surfaces:
 bootstrap helper used by `weft run`. It returns success only after the launched
 manager PID is live and the canonical registry record for the same manager
 TID/PID is present. Detached-launcher acknowledgement after that proof is a
-warning path, not the startup truth boundary. `weft manager serve`
-remains the foreground supervisor path and is not interchangeable with
-`manager start`.
+warning path, not the startup truth boundary. `weft manager start --replace`
+sends STOP to each selected active manager, records that owner as
+`superseded`, reselects until no active manager remains, and then starts a
+detached replacement. It does not wait for stopped confirmation in v1.
+`weft manager serve` remains the foreground supervisor path and is not
+interchangeable with `manager start`.
+
+`weft manager stop <tid>` sends graceful STOP to the named manager and waits for
+stopped registry/process evidence. `weft manager stop` without a TID resolves
+the selected active manager for the current context and stops that manager; if
+no active manager is selected, it exits successfully without sending control.
 
 Pattern-based task stop/kill reuse queue broadcast and control messages rather
 than inventing a second control channel.
 
 Implementation plan backlink:
 [`2026-05-10-control-and-service-convergence-state-machine-plan.md`](../plans/2026-05-10-control-and-service-convergence-state-machine-plan.md).
+[`2026-05-13-manager-replace-start-serve-plan.md`](../plans/2026-05-13-manager-replace-start-serve-plan.md).
 
 ## Spec Management (`weft spec …`) [CLI-1.4]
 

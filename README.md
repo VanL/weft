@@ -586,9 +586,9 @@ weft task tid [TID] [--pid PID] [--reverse FULL_TID] [--context PATH]
 weft task list [--status STATUS] [--all] [--stats] [--json] [--context PATH]
 
 # Manager lifecycle
-weft manager start [--context PATH]
-weft manager serve [--context PATH]
-weft manager stop TID [--force] [--timeout SECONDS] [--context PATH]
+weft manager start [--replace] [--context PATH]
+weft manager serve [--replace] [--context PATH]
+weft manager stop [TID] [--force] [--timeout SECONDS] [--context PATH]
 weft manager list [--all] [--json] [--context PATH]
 weft manager status TID [--json] [--context PATH]
 
@@ -993,6 +993,19 @@ invocation, so the manager does not self-exit for inactivity.
 means the service manager would only supervise the short-lived CLI wrapper, not
 the actual manager process.
 
+Use `--replace` for operator-driven manager handoff:
+
+```bash
+weft manager serve --replace --context /path/to/project
+weft manager start --replace --context /path/to/project
+```
+
+Replacement sends STOP to each selected active manager's `ctrl_in`, records
+that owner as `superseded` in `weft.state.services`, reselects until no active
+manager remains, then starts or serves the replacement. It does not wait for
+stopped confirmation in v1, so there can be a short overlap while the old
+manager consumes STOP and drains.
+
 Operational notes:
 
 - Put restart policy in the service manager, not in Weft.
@@ -1005,9 +1018,12 @@ Operational notes:
   process-local liveness probes that can mark an external-supervisor handle
   stale sooner; missing or inconclusive probes fall back to normal heartbeat
   expiry.
-- `weft manager stop <tid>` still sends a graceful STOP, but an auto-restarting
-  service manager may start the manager again unless the service itself is
-  stopped.
+- `weft manager stop` sends a graceful STOP to the active manager for the
+  current context. `weft manager stop <tid>` targets an exact manager. An
+  auto-restarting service manager may start the manager again unless the
+  service itself is stopped.
+- `weft.state.services` treats `superseded` as non-live service-owner evidence;
+  manager convergence selects the lowest non-superseded live canonical manager.
 - This minimal supervised mode does not add a separate Weft-side drain timeout
   or second-signal escalation. Configure the service manager's stop timeout to
   match the grace period you want for draining child tasks.

@@ -37,6 +37,7 @@ from weft._constants import (
     MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY,
     PIPELINE_RUNTIME_METADATA_KEY,
     SERVICE_OWNER_SCHEMA,
+    SERVICE_STATUS_SUPERSEDED,
     SERVICE_TYPE_MANAGED,
     TERMINAL_ENVELOPE_TYPE,
     WEFT_GLOBAL_LOG_QUEUE,
@@ -4018,6 +4019,32 @@ def test_manager_leadership_yields_to_canonical_lower_manager(
         event for event in events if event.get("event") == "manager_leadership_yielded"
     )
     assert yield_event["leader_tid"] == lower_tid
+
+
+def test_manager_superseded_self_record_stops_without_republishing_active(
+    manager_setup,
+) -> None:
+    manager, make_queue = manager_setup
+    registry_queue = make_queue(WEFT_SERVICES_REGISTRY_QUEUE)
+    registry_queue.write(
+        json.dumps(
+            _manager_service_payload(
+                manager,
+                tid=manager.tid,
+                status=SERVICE_STATUS_SUPERSEDED,
+                runtime_handle=_host_runtime_handle(os.getpid()),
+            )
+        )
+    )
+
+    manager._refresh_manager_registration(force=True)
+
+    assert manager.should_stop is True
+    assert manager.taskspec.state.status == "cancelled"
+    rows = _managed_service_owner_rows(make_queue)
+    own_rows = [row for row in rows if row.get("tid") == manager.tid]
+    assert own_rows
+    assert own_rows[-1]["status"] == SERVICE_STATUS_SUPERSEDED
 
 
 def test_cleanup_children_reaps_os_dead_child_without_mapping_scan(

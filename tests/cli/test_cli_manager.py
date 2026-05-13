@@ -95,6 +95,19 @@ def _task_log_payloads(context, tid: str) -> list[dict[str, Any]]:
         queue.close()
 
 
+def test_manager_start_help_includes_replace(workdir) -> None:
+    rc, out, err = run_cli(
+        "manager",
+        "start",
+        "--help",
+        cwd=workdir,
+    )
+
+    assert rc == 0
+    assert err == ""
+    assert "--replace" in out
+
+
 def test_manager_start_and_status(workdir):
     context_root = prepare_project_root(workdir / "manager-project")
     build_context(spec_context=context_root)
@@ -154,7 +167,6 @@ def test_manager_start_and_status(workdir):
     rc, out, err = run_cli(
         "manager",
         "stop",
-        tid,
         "--context",
         context_root,
         cwd=workdir,
@@ -258,6 +270,23 @@ def test_manager_stop_missing_tid(workdir):
     assert rc == 1
     combined = f"{out}\n{err}".lower()
     assert "did not stop" in combined or "not found" in combined
+
+
+def test_manager_stop_without_tid_noops_when_no_manager(workdir):
+    context_root = prepare_project_root(workdir / "stop-active-empty")
+    build_context(spec_context=context_root)
+
+    rc, out, err = run_cli(
+        "manager",
+        "stop",
+        "--context",
+        context_root,
+        cwd=workdir,
+    )
+
+    assert rc == 0
+    assert out == ""
+    assert err == ""
 
 
 def test_manager_list_empty(workdir):

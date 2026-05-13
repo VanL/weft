@@ -407,6 +407,7 @@ def test_serve_help_includes_operational_log_options(
     assert err == ""
     assert "--level" in out
     assert "--log-interval" in out
+    assert "--replace" in out
 
 
 def test_serve_level_info_emits_process_operational_log(

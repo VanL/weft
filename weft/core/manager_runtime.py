@@ -15,7 +15,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any, Literal, NoReturn
 
 from simplebroker import Queue, serialize_broker_target
 from simplebroker.ext import BrokerError
@@ -37,6 +37,8 @@ from weft._constants import (
     QUEUE_CTRL_OUT_SUFFIX,
     SERVICE_STATUS_ACTIVE,
     SERVICE_STATUS_DRAINING,
+    SERVICE_STATUS_STOPPED,
+    SERVICE_STATUS_SUPERSEDED,
     TASK_PROCESS_POLL_INTERVAL,
     WEFT_MANAGER_LIFETIME_TIMEOUT,
     WEFT_MANAGER_OUTBOX_QUEUE,
@@ -466,7 +468,12 @@ def _list_manager_records(
     if canonical_only:
         records = [record for record in records if is_canonical_manager_record(record)]
     if not include_stopped:
-        records = [record for record in records if record.get("status") != "stopped"]
+        records = [
+            record
+            for record in records
+            if record.get("status")
+            not in {SERVICE_STATUS_STOPPED, SERVICE_STATUS_SUPERSEDED}
+        ]
     records.sort(key=lambda rec: int(rec.get("timestamp", 0)), reverse=True)
     return records
 
@@ -537,8 +544,9 @@ def _mark_manager_stopped(
     tid: str,
     *,
     record: dict[str, Any] | None,
+    status: Literal["stopped", "superseded"] = "stopped",
 ) -> bool:
-    """Replace a manager registry row with stopped state after external control."""
+    """Replace a manager registry row with terminal non-live service evidence."""
 
     registry_queue = _registry_queue(context)
     try:
@@ -582,7 +590,7 @@ def _mark_manager_stopped(
             context=context,
             tid=tid,
             name="manager",
-            status="stopped",
+            status=status,
             queues=queues,
             runtime_handle={},
         )
@@ -611,7 +619,7 @@ def _mark_manager_stopped(
                         queues_payload[target_key] = value
                 sync_manager_service_payload_top_level_queues(payload)
 
-        payload["status"] = "stopped"
+        payload["status"] = status
         try:
             registry_queue.write(json.dumps(payload))
         except (
@@ -1048,6 +1056,29 @@ def _manager_record_is_foreground_serve(record: dict[str, Any] | None) -> bool:
     return handle.metadata.get("foreground_serve") is True
 
 
+def _manager_record_is_unreachable_foreground_supervisor(
+    context: WeftContext,
+    record: dict[str, Any] | None,
+    *,
+    probe_cache: dict[str, int | None],
+) -> bool:
+    """Return whether a foreground supervisor row can be superseded without STOP."""
+
+    if record is None or not _manager_record_is_foreground_serve(record):
+        return False
+    handle = _manager_handle_from_record(record)
+    if handle is None or handle.control.get("authority") != "external-supervisor":
+        return False
+    runtime_liveness = runtime_liveness_from_registered_probe(handle)
+    if runtime_liveness == "live":
+        return False
+    return not _manager_record_has_matched_pong(
+        context,
+        record,
+        probe_cache=probe_cache,
+    )
+
+
 def _fail_manager_start(
     *,
     launch: _DetachedManagerLaunch,
@@ -1429,7 +1460,7 @@ def _run_manager_process_foreground(
 def _serve_manager_foreground(context: WeftContext) -> tuple[int, str | None]:
     """Run the canonical manager in the current process for supervisor use."""
 
-    existing = _select_active_manager(context, probe_stale=True, probe_cache={})
+    existing = _foreground_serve_blocking_manager(context)
     if existing is not None:
         return (
             1,
@@ -1444,6 +1475,45 @@ def _serve_manager_foreground(context: WeftContext) -> tuple[int, str | None]:
         invocation.spec.metadata["foreground_serve"] = True
     _run_manager_process_foreground(invocation, context)
     return 0, None
+
+
+def _foreground_serve_blocking_manager(context: WeftContext) -> dict[str, Any] | None:
+    """Return the active manager that should block foreground serve startup.
+
+    Generic manager selection intentionally treats fresh external-supervisor
+    records as live when no probe can prove otherwise. Foreground serve has a
+    stronger supervisor boundary: if a previous foreground-serve row has no
+    positive live proof, it is a stale deployment artifact, not a reason to
+    make systemd flap until the generic TTL expires.
+    """
+
+    probe_cache: dict[str, int | None] = {}
+    while True:
+        existing = _select_active_manager(
+            context,
+            probe_stale=True,
+            probe_cache=probe_cache,
+        )
+        if existing is None:
+            return None
+
+        if not _manager_record_is_unreachable_foreground_supervisor(
+            context,
+            existing,
+            probe_cache=probe_cache,
+        ):
+            return existing
+
+        tid = existing.get("tid")
+        if not isinstance(tid, str) or not tid:
+            return existing
+        if not _mark_manager_stopped(
+            context,
+            tid,
+            record=existing,
+            status="superseded",
+        ):
+            return existing
 
 
 def _stop_manager(
@@ -1532,6 +1602,53 @@ def _stop_manager(
     return False, f"Manager {target_tid} did not stop within {timeout:.1f}s"
 
 
+def _replace_active_manager(
+    context: WeftContext,
+    *,
+    timeout: float = MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
+) -> tuple[bool, str | None]:
+    """Send STOP and supersede active manager owners before replacement."""
+
+    deadline = time.monotonic() + timeout
+    probe_cache: dict[str, int | None] = {}
+    while True:
+        current = _select_active_manager(
+            context,
+            probe_stale=True,
+            probe_cache=probe_cache,
+        )
+        if current is None:
+            return True, None
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False, f"Manager replacement did not settle within {timeout:.1f}s"
+
+        tid = current.get("tid")
+        if not isinstance(tid, str) or not tid:
+            return False, "Active manager record is missing a TID"
+
+        try:
+            _send_stop(context, tid, record=current)
+        except (
+            BrokerError,
+            OSError,
+            RuntimeError,
+        ):  # pragma: no cover - control queue best effort
+            return False, f"Failed to send STOP to manager {tid}"
+        if not _mark_manager_stopped(
+            context,
+            tid,
+            record=current,
+            status="superseded",
+        ):
+            return (
+                False,
+                f"Manager {tid} STOP sent but supersede registry update failed",
+            )
+        continue
+
+
 def _external_supervisor_record_is_live(record: dict[str, Any] | None) -> bool:
     handle = _manager_handle_from_record(record)
     return (
@@ -1580,10 +1697,19 @@ def list_manager_records(
     )
 
 
-def select_active_manager(context: WeftContext) -> dict[str, Any] | None:
+def select_active_manager(
+    context: WeftContext,
+    *,
+    probe_stale: bool = False,
+    probe_cache: dict[str, int | None] | None = None,
+) -> dict[str, Any] | None:
     """Return the current canonical active manager record, if any."""
 
-    return _select_active_manager(context)
+    return _select_active_manager(
+        context,
+        probe_stale=probe_stale,
+        probe_cache=probe_cache,
+    )
 
 
 def build_manager_spec(
@@ -1627,6 +1753,16 @@ def serve_manager_foreground(context: WeftContext) -> tuple[int, str | None]:
     return _serve_manager_foreground(context)
 
 
+def replace_active_manager(
+    context: WeftContext,
+    *,
+    timeout: float = MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
+) -> tuple[bool, str | None]:
+    """Send STOP to active managers and mark their owner rows superseded."""
+
+    return _replace_active_manager(context, timeout=timeout)
+
+
 def stop_manager(
     context: WeftContext,
     record: dict[str, Any] | None,
@@ -1661,6 +1797,7 @@ __all__ = [
     "manager_record",
     "manager_registry_record_is_stale",
     "normalize_manager_registry_record",
+    "replace_active_manager",
     "select_active_manager",
     "serve_manager_foreground",
     "start_manager",

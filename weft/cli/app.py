@@ -1472,8 +1472,18 @@ def manager_start_command(
         Path | None,
         typer.Option("--context", help="Weft project directory"),
     ] = None,
+    replace: Annotated[
+        bool,
+        typer.Option(
+            "--replace",
+            help="Send STOP to the active manager before starting a replacement",
+        ),
+    ] = False,
 ) -> None:
-    exit_code, payload = manager_cmd.start_command(context_path=context)
+    exit_code, payload = manager_cmd.start_command(
+        context_path=context,
+        replace=replace,
+    )
     if payload:
         typer.echo(payload)
     raise typer.Exit(code=exit_code)
@@ -1499,6 +1509,13 @@ def manager_serve_command(
             help="Seconds between repeated operational log events",
         ),
     ] = None,
+    replace: Annotated[
+        bool,
+        typer.Option(
+            "--replace",
+            help="Send STOP to the active manager before serving a replacement",
+        ),
+    ] = False,
 ) -> None:
     """Run the canonical manager in the foreground."""
 
@@ -1506,6 +1523,7 @@ def manager_serve_command(
         context_path=context,
         level=level,
         log_interval=log_interval,
+        replace=replace,
     )
     if payload:
         typer.echo(payload)
@@ -1514,7 +1532,10 @@ def manager_serve_command(
 
 @manager_app.command("stop")
 def manager_stop_command(
-    tid: Annotated[str, typer.Argument(help="Manager TID")],
+    tid: Annotated[
+        str | None,
+        typer.Argument(help="Manager TID. Defaults to the active manager."),
+    ] = None,
     force: Annotated[
         bool,
         typer.Option("--force", help="Force terminate the manager process"),

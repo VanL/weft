@@ -957,6 +957,74 @@ def test_wait_for_completion_treats_control_stop_as_terminal_event() -> None:
 
 
 @pytest.mark.sqlite_only
+def test_wait_for_terminal_state_accepts_terminal_task_activity() -> None:
+    harness = WeftTestHarness()
+    repo_cwd = os.getcwd()
+    try:
+        harness.__enter__()
+        tid = "1775630560739303424"
+        log_queue = Queue(
+            WEFT_GLOBAL_LOG_QUEUE,
+            db_path=harness.context.broker_target,
+            persistent=False,
+            config=harness.context.broker_config,
+        )
+        try:
+            log_queue.write(
+                json.dumps(
+                    {
+                        "tid": tid,
+                        "event": "task_activity",
+                        "status": "completed",
+                    }
+                )
+            )
+        finally:
+            log_queue.close()
+
+        harness.wait_for_terminal_state(tid, timeout=0.2)
+    finally:
+        os.chdir(repo_cwd)
+        harness.cleanup()
+
+
+@pytest.mark.sqlite_only
+def test_wait_for_terminal_state_rejects_unexpected_terminal_activity() -> None:
+    harness = WeftTestHarness()
+    repo_cwd = os.getcwd()
+    try:
+        harness.__enter__()
+        tid = "1775630560739303424"
+        log_queue = Queue(
+            WEFT_GLOBAL_LOG_QUEUE,
+            db_path=harness.context.broker_target,
+            persistent=False,
+            config=harness.context.broker_config,
+        )
+        try:
+            log_queue.write(
+                json.dumps(
+                    {
+                        "tid": tid,
+                        "event": "task_activity",
+                        "status": "failed",
+                    }
+                )
+            )
+        finally:
+            log_queue.close()
+
+        with pytest.raises(
+            RuntimeError,
+            match=rf"Task {tid} reached terminal status 'failed'",
+        ):
+            harness.wait_for_terminal_state(tid, timeout=0.2)
+    finally:
+        os.chdir(repo_cwd)
+        harness.cleanup()
+
+
+@pytest.mark.sqlite_only
 def test_wait_for_completion_timeout_includes_tid_debug_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

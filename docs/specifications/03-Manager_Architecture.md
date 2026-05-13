@@ -51,6 +51,7 @@ always be rolled back from the public request queue.
 - [Manager Service Authority Boundary Hardening Plan](../plans/2026-05-10-manager-service-authority-boundary-hardening-plan.md) – tighten manager-owned singleton evidence authority, duplicate PID force-kill authority, and service-key helper structure.
 - [Manager Work-Stealing Dispatch Plan](../plans/2026-05-11-manager-work-stealing-dispatch-plan.md) – draft plan to make atomic spawn-request reservation the public dispatch authority while keeping singleton service correctness in the manager-owned reducer.
 - [Manager Serve Operational Log Plan](../plans/2026-05-11-manager-serve-operational-log-plan.md) – draft plan for level-controlled foreground `manager serve` operational logs that expose registry, loop, service-convergence, spawn, and TaskMonitor decisions without writing lifecycle state.
+- [Manager Replace Start And Serve Plan](../plans/2026-05-13-manager-replace-start-serve-plan.md) – completed plan for explicit `weft manager start --replace` and `weft manager serve --replace` operator replacement semantics using the existing STOP control path.
 - [Internal Service Observability Plan](../plans/2026-05-11-internal-service-observability-plan.md) – adds an ops read model that reports heartbeat and TaskMonitor state from manager launch evidence, child task logs, TID mappings, and internal spawn queues.
 
 ## Conceptual Model: Everything is a Task [MA-0]
@@ -113,11 +114,15 @@ Key responsibilities implemented in `weft/core/manager.py`:
 4. **Registry heartbeat** – Managers publish an `active` service-owner record to
    `weft.state.services` on startup (including queue names, PID, role, and
    capabilities), refresh that active record periodically while healthy, and
-   replace it with a `stopped` record during shutdown. The active record is
-   pruned when the manager exits cleanly. The registry is read as a live queue:
-   callers reduce to the latest relevant record per service key and owner TID,
-   prune dead or expired active records, and then filter to canonical live
-   managers before treating the result as the active-manager view. Host-managed records use scoped host
+   replace it with a `stopped` record during shutdown. Operator replacement may
+   replace it with a `superseded` record after sending STOP. The active record
+   refresh path must treat a latest self-owned `superseded` row as a shutdown
+   signal and must not publish a newer `active` row over it. The active record
+   is pruned when the manager exits cleanly. The registry is read as a live
+   queue: callers reduce to the latest relevant record per service key and
+   owner TID, prune dead or expired active records, and then filter to
+   canonical non-superseded live managers before treating the result as the
+   active-manager view. Host-managed records use scoped host
    process identity: a PID is live only when it still matches the recorded
    process creation time when that identity is available. Externally supervised
    records use the process-local runtime liveness probe registry when an
@@ -279,8 +284,14 @@ task-local queue. The canonical
 manager for bootstrap and leadership is the live canonical manager registered
 for `weft.spawn.requests`. Canonical records are the live `role="manager"`
 entries whose `requests` field points at `weft.spawn.requests`; leadership
-chooses the lowest-TID live canonical record. Manager records bound to another
-request queue do not participate in default-manager selection. External
+chooses the lowest-TID non-superseded live canonical record. Manager records
+bound to another request queue do not participate in default-manager selection.
+`weft manager start --replace` and `weft manager serve --replace` explicitly
+send STOP to each selected incumbent manager control queue, write a
+`superseded` manager service-owner row for that owner, reselect until no active
+manager remains, and then start or serve the replacement. Replacement does not
+wait for stopped confirmation in v1; ordinary `weft manager stop` still waits
+for stopped registry/process evidence. External
 `SIGTERM` and `SIGINT` against a Manager enter the same drain path as STOP. A
 manager drain has a bounded child-exit window; if child tasks do not exit after
 STOP is broadcast and the drain window expires, the Manager forcefully reaps
@@ -292,12 +303,12 @@ record, and slower broker backends can add observable registry propagation and
 scheduler delay under release-load parallelism.
 
 _Implementation mapping_:
-- Shared manager lifecycle owner — `weft/core/manager_runtime.py` :: `_build_manager_runtime_invocation`, `_select_active_manager`, `_ensure_manager`, `_start_manager`, `_serve_manager_foreground`, `_list_manager_records`, `_manager_record`, `_stop_manager`; `weft/runtime_liveness.py` :: `runtime_liveness_from_registered_probe`; plus `weft/core/control_probe.py` :: `send_keyed_ping_probe` (owns canonical manager bootstrap, foreground serve, normalized registry replay, extension-provided supervised-manager stale checks, bounded manager PONG liveness probes, and graceful/forced stop observation).
+- Shared manager lifecycle owner — `weft/core/manager_runtime.py` :: `_build_manager_runtime_invocation`, `_select_active_manager`, `_ensure_manager`, `_start_manager`, `_replace_active_manager`, `_serve_manager_foreground`, `_list_manager_records`, `_manager_record`, `_stop_manager`; `weft/runtime_liveness.py` :: `runtime_liveness_from_registered_probe`; plus `weft/core/control_probe.py` :: `send_keyed_ping_probe` (owns canonical manager bootstrap, explicit replacement, foreground serve, normalized registry replay, extension-provided supervised-manager stale checks, bounded manager PONG liveness probes, and graceful/forced stop observation).
 - Command-side capability surface — `weft/commands/manager.py` and `weft/commands/serve.py` (thin manager-facing commands layered over the shared runtime helper).
 - Detached bootstrap launcher — `weft/manager_detached_launcher.py` :: `main` (short-lived wrapper that starts the real manager runtime in a detached session/process-group boundary and reports early launch status back to `_start_manager`).
 - Manager process launch — `weft/core/manager_runtime.py` :: `_start_manager` (builds manager TaskSpec, launches the detached wrapper, requires matching pid-plus-registry readiness before success, treats post-proof acknowledgement cleanup as best effort, and reports early bootstrap diagnostics on failure).
 - Manager process entry point — `weft/manager_process.py` :: `run_manager_process`, `main` (shared runtime helper plus standalone module invoked via `python -m weft.manager_process`).
-- Leadership election and advisory dispatch view — `weft/core/manager.py` :: `Manager._maybe_yield_leadership`, `Manager._leader_tid`, `Manager._read_active_manager_records`, `Manager._active_manager_records`, `Manager._evaluate_dispatch_ownership`; `weft/helpers.py::is_canonical_manager_record`; `weft/helpers.py::canonical_owner_tid` (lowest-TID canonical manager wins for status and eventual duplicate-manager convergence, while public spawn dispatch itself is work-stealing by atomic reservation).
+- Leadership election and advisory dispatch view — `weft/core/manager.py` :: `Manager._maybe_yield_leadership`, `Manager._leader_tid`, `Manager._read_active_manager_records`, `Manager._active_manager_records`, `Manager._evaluate_dispatch_ownership`; `weft/helpers.py::is_canonical_manager_record`; `weft/helpers.py::canonical_owner_tid` (lowest-TID non-superseded canonical manager wins for status and eventual duplicate-manager convergence, while public spawn dispatch itself is work-stealing by atomic reservation).
 - Internal runtime submission envelope — `weft/core/spawn_requests.py`
   `submit_spawn_request` carries internal runtime selectors on the manager-owned
   spawn envelope, and `weft/core/manager.py` `Manager._build_child_spec`

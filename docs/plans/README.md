@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 91 plan files in this directory.
+There are currently 92 plan files in this directory.
 
 ## Curation Policy
 
@@ -22,6 +22,7 @@ There are currently 91 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-05-13-manager-replace-start-serve-plan.md`](./2026-05-13-manager-replace-start-serve-plan.md) | Manager Replace Start And Serve Plan | `completed` | none |
 | [`2026-05-12-task-monitor-cleanup-composition-refactor-plan.md`](./2026-05-12-task-monitor-cleanup-composition-refactor-plan.md) | Task Monitor Cleanup Composition Refactor Plan | `completed` | none |
 | [`2026-05-12-bounded-task-monitor-cleanup-policy-plan.md`](./2026-05-12-bounded-task-monitor-cleanup-policy-plan.md) | Bounded Task Monitor Cleanup Policy Plan | `completed` | none |
 | [`2026-05-11-canonical-service-reducer-fix-plan.md`](./2026-05-11-canonical-service-reducer-fix-plan.md) | Canonical Service Reducer Fix Plan | `draft` | none |

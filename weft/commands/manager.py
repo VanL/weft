@@ -21,6 +21,7 @@ from weft.core.manager_runtime import (
     generate_tid,
     list_manager_records,
     manager_record,
+    replace_active_manager,
     select_active_manager,
     serve_manager_foreground,
 )
@@ -36,6 +37,7 @@ _ensure_manager = ensure_manager
 _generate_tid = generate_tid
 _list_manager_records = list_manager_records
 _manager_record = manager_record
+_replace_active_manager = replace_active_manager
 _select_active_manager = select_active_manager
 _serve_manager_foreground = serve_manager_foreground
 _start_manager = start_manager_runtime
@@ -146,9 +148,19 @@ def manager_status(
     return _manager_snapshot(record)
 
 
-def start_command(*, context_path: Path | None = None) -> tuple[int, str | None]:
+def start_command(
+    *,
+    context_path: Path | None = None,
+    replace: bool = False,
+) -> tuple[int, str | None]:
     context = build_context(context_path)
-    record, started_here, _process_handle = _ensure_manager(context, verbose=False)
+    if replace:
+        replaced, message = _replace_active_manager(context)
+        if not replaced:
+            return 1, message or "Manager replacement failed"
+        record, started_here, _process_handle = _start_manager(context, verbose=False)
+    else:
+        record, started_here, _process_handle = _ensure_manager(context, verbose=False)
     tid = cast(str, record.get("tid"))
 
     if started_here:
@@ -158,16 +170,25 @@ def start_command(*, context_path: Path | None = None) -> tuple[int, str | None]
 
 def stop_command(
     *,
-    tid: str,
+    tid: str | None,
     force: bool,
     timeout: float = MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
     context_path: Path | None = None,
     stop_if_absent: bool = False,
 ) -> tuple[int, str | None]:
     context = build_context(context_path)
+    record: dict[str, Any] | None = None
+    if tid is None:
+        record = _select_active_manager(context, probe_stale=True, probe_cache={})
+        if record is None:
+            return 0, None
+        tid_value = record.get("tid")
+        if not isinstance(tid_value, str) or not tid_value:
+            return 1, "Active manager record is missing a TID"
+        tid = tid_value
     stopped, message = _stop_manager(
         context,
-        None,
+        record,
         tid=tid,
         timeout=timeout,
         force=force,
