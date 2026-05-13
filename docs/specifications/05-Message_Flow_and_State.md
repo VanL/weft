@@ -160,7 +160,8 @@ The control plane is explicit:
 
 _Implementation mapping_: `weft/core/tasks/base.py`,
 `weft/core/tasks/consumer.py`, `weft/core/manager.py`,
-`weft/commands/task_evidence.py`, `weft/commands/tasks.py`.
+`weft/commands/task_evidence.py`, `weft/commands/tasks.py`,
+`weft/commands/control_convergence.py`.
 
 Implementation plan backlinks:
 

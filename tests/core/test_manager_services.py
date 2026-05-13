@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from weft.core.manager_services import (
+    ManagedServiceAction,
     ManagedServiceEvidence,
     ManagedServiceSpec,
     ManagedServiceState,
@@ -257,3 +258,108 @@ def test_candidate_order_does_not_change_decision() -> None:
     assert forward.canonical_live is not None
     assert reversed_order.canonical_live is not None
     assert forward.canonical_live.tid == reversed_order.canonical_live.tid == "20"
+
+
+def test_all_managed_service_actions_have_table_coverage() -> None:
+    """Lock the reducer's action space to explicit evidence cases."""
+
+    cases: tuple[
+        tuple[
+            str,
+            ManagedServiceSpec,
+            ManagedServiceState,
+            ManagedServiceEvidence,
+            ManagedServiceAction,
+            int,
+        ],
+        ...,
+    ] = (
+        (
+            "keep live owner",
+            _service(),
+            ManagedServiceState(),
+            ManagedServiceEvidence(candidates=(_candidate("10", "live"),)),
+            "keep_live",
+            NOW_NS,
+        ),
+        (
+            "wait pending spawn",
+            _service(),
+            ManagedServiceState(),
+            ManagedServiceEvidence(pending_spawn=True),
+            "wait_pending",
+            NOW_NS,
+        ),
+        (
+            "wait uncertain active",
+            _service(),
+            ManagedServiceState(active_tid="10", launched_once=True),
+            ManagedServiceEvidence(),
+            "wait_uncertain",
+            NOW_NS,
+        ),
+        (
+            "degrade uncertain evidence",
+            _service(),
+            ManagedServiceState(uncertain_attempts=1),
+            ManagedServiceEvidence(candidates=(_candidate("10", "uncertain"),)),
+            "degraded_wait",
+            NOW_NS,
+        ),
+        (
+            "schedule restart backoff",
+            _service(),
+            ManagedServiceState(launched_once=True, next_allowed_ns=NOW_NS + 1),
+            ManagedServiceEvidence(),
+            "schedule_restart",
+            NOW_NS,
+        ),
+        (
+            "start now",
+            _service(),
+            ManagedServiceState(),
+            ManagedServiceEvidence(),
+            "start_now",
+            NOW_NS,
+        ),
+        (
+            "suppress once",
+            _service(lifecycle="once"),
+            ManagedServiceState(launched_once=True),
+            ManagedServiceEvidence(),
+            "suppress_once",
+            NOW_NS,
+        ),
+        (
+            "suppress max restarts",
+            _service(max_restarts=1),
+            ManagedServiceState(launched_once=True, restarts=1),
+            ManagedServiceEvidence(),
+            "suppress_max_restarts",
+            NOW_NS,
+        ),
+    )
+    expected_actions: set[ManagedServiceAction] = {
+        "keep_live",
+        "wait_pending",
+        "wait_uncertain",
+        "degraded_wait",
+        "schedule_restart",
+        "start_now",
+        "suppress_once",
+        "suppress_max_restarts",
+    }
+    seen_actions: set[ManagedServiceAction] = set()
+
+    for label, service, state, evidence, expected_action, now_ns in cases:
+        decision = reduce_managed_service_state(
+            service,
+            state,
+            evidence,
+            now_ns=now_ns,
+            uncertain_retry_limit=1,
+        )
+        assert decision.action == expected_action, label
+        seen_actions.add(decision.action)
+
+    assert seen_actions == expected_actions

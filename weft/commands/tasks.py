@@ -46,6 +46,10 @@ from weft.helpers import (
 from . import system as status_cmd
 from . import task_evidence
 from ._task_history import load_latest_taskspec_payload, pipeline_status_queue_name
+from .control_convergence import (
+    ControlConvergenceEvidence,
+    reduce_control_convergence,
+)
 
 
 def _resolve_context(context_path: str | os.PathLike[str] | None) -> WeftContext:
@@ -1323,6 +1327,26 @@ def _kill_success_is_proven(
     return handled_by_runner or task_killed
 
 
+def _control_terminal_status(
+    snapshot: status_cmd.TaskSnapshot | None,
+) -> str | None:
+    if snapshot is None or snapshot.status not in status_cmd.TERMINAL_TASK_STATUSES:
+        return None
+    return snapshot.status
+
+
+def _require_control_action(
+    action: str,
+    allowed: set[str],
+) -> None:
+    if action not in allowed:
+        allowed_values = ", ".join(sorted(allowed))
+        raise RuntimeError(
+            f"Unexpected control convergence action {action!r}; "
+            f"expected one of: {allowed_values}"
+        )
+
+
 def stop_tasks(
     tids: Iterable[str],
     *,
@@ -1348,15 +1372,40 @@ def stop_tasks(
         _send_control(ctx, full, CONTROL_STOP)
         task_entry, snapshot = _await_control_surface(ctx, full)
         handled_by_runner = False
-        if snapshot is None or snapshot.status not in status_cmd.TERMINAL_TASK_STATUSES:
+        fallback_attempted = False
+        decision = reduce_control_convergence(
+            "command_sent",
+            ControlConvergenceEvidence(
+                command=CONTROL_STOP,
+                terminal_status=_control_terminal_status(snapshot),
+                observation_budget_expired=True,
+            ),
+        )
+        _require_control_action(decision.action, {"accept_terminal", "escalate_runner"})
+        if decision.action == "escalate_runner":
             task_entry = _latest_task_entry(ctx, lookup, full, task_entry)
             handled_by_runner = _stop_via_fallback(task_entry)
+            fallback_attempted = True
             task_entry, snapshot = _await_control_surface(ctx, full)
-        elif snapshot.status == "cancelled":
+        elif snapshot is not None and snapshot.status == "cancelled":
             task_entry = _latest_task_entry(ctx, lookup, full, task_entry)
             handled_by_runner = _stop_terminal_host_process(task_entry)
+            fallback_attempted = True
 
-        if snapshot is None or snapshot.status not in status_cmd.TERMINAL_TASK_STATUSES:
+        decision = reduce_control_convergence(
+            "escalating_runner" if fallback_attempted else "command_sent",
+            ControlConvergenceEvidence(
+                command=CONTROL_STOP,
+                terminal_status=_control_terminal_status(snapshot),
+                runner_fallback_attempted=fallback_attempted,
+                observation_budget_expired=True,
+            ),
+        )
+        _require_control_action(
+            decision.action,
+            {"accept_terminal", "escalate_runner", "report_unknown"},
+        )
+        if decision.action in {"escalate_runner", "report_unknown"}:
             if not handled_by_runner:
                 task_entry = _latest_task_entry(ctx, lookup, full, task_entry)
                 _stop_via_fallback(task_entry)
@@ -1408,7 +1457,16 @@ def kill_tasks(
         _send_control(ctx, full, CONTROL_KILL)
         task_entry, snapshot = _await_control_surface(ctx, full)
 
-        if snapshot is not None and snapshot.status == "killed":
+        decision = reduce_control_convergence(
+            "command_sent",
+            ControlConvergenceEvidence(
+                command=CONTROL_KILL,
+                terminal_status=_control_terminal_status(snapshot),
+                observation_budget_expired=True,
+            ),
+        )
+        _require_control_action(decision.action, {"accept_terminal", "escalate_runner"})
+        if decision.action == "accept_terminal":
             killed += 1
             continue
 
@@ -1416,8 +1474,23 @@ def kill_tasks(
         handled_by_runner = _kill_via_fallback(task_entry)
         task_entry, snapshot = _await_control_surface(ctx, full)
 
-        if snapshot is not None and snapshot.status == "killed":
+        decision = reduce_control_convergence(
+            "escalating_runner",
+            ControlConvergenceEvidence(
+                command=CONTROL_KILL,
+                terminal_status=_control_terminal_status(snapshot),
+                runner_fallback_attempted=True,
+                observation_budget_expired=True,
+            ),
+        )
+        _require_control_action(
+            decision.action,
+            {"accept_terminal", "escalate_host", "report_unknown"},
+        )
+        if decision.action == "accept_terminal":
             killed += 1
+            continue
+        if decision.action == "report_unknown":
             continue
 
         task_entry = _latest_task_entry(ctx, lookup, full, task_entry)
@@ -1425,11 +1498,25 @@ def kill_tasks(
         observed_dead = _observed_host_pids_are_dead(task_entry)
         if not handled_by_runner or observed_dead is False:
             task_killed = _force_kill_task_processes(task_entry)
-        if _kill_success_is_proven(
+        success_proven = _kill_success_is_proven(
             task_entry,
             handled_by_runner=handled_by_runner,
             task_killed=task_killed,
-        ):
+        )
+        decision = reduce_control_convergence(
+            "escalating_host",
+            ControlConvergenceEvidence(
+                command=CONTROL_KILL,
+                runtime_dead_after_control=success_proven,
+                runner_fallback_attempted=True,
+                host_fallback_attempted=task_killed,
+                observation_budget_expired=True,
+            ),
+        )
+        _require_control_action(
+            decision.action, {"accept_dead_runtime", "report_unknown"}
+        )
+        if decision.action == "accept_dead_runtime":
             killed += 1
     return killed
 

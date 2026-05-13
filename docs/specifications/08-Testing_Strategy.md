@@ -58,12 +58,15 @@ Coverage policy:
 ## Current Coverage [TS-1]
 
 - `tests/cli/` covers subprocess CLI behavior and operator-visible output.
-- `tests/commands/` covers command-layer helpers, including direct handler paths
-  and queue/output boundaries.
+- `tests/commands/` covers command-layer helpers, including direct handler paths,
+  queue/output boundaries, and command-control reducer tables such as
+  `weft/commands/control_convergence.py`.
 - `tests/context/` covers context discovery and backend-aware project setup.
 - `tests/core/` covers manager behavior, pipelines, agent/runtime code,
   provider CLI adapters, target execution helpers, and related validation
-  surfaces.
+  surfaces. Pure reducer helpers such as `weft/core/state_machines.py` are
+  covered here with table tests that assert structural reachability,
+  transition-ID coverage, state coverage, and action coverage.
 - `tests/specs/` covers spec-level invariants and cross-surface contracts. This
   tree already includes focused subdirectories such as
   `manager_architecture/`, `message_flow/`, `quick_reference/`,

@@ -29,8 +29,8 @@ _Implementation mapping_: `weft/core/taskspec/model.py`.
 
 ### State Machine Invariants
 
-_Implementation mapping_: `weft/core/taskspec/model.py` state validators and
-`TaskSpec.set_status()`.
+_Implementation mapping_: `weft/core/task_lifecycle.py` transition table,
+`weft/core/taskspec/model.py` state validators, and `TaskSpec.set_status()`.
 
 - **STATE.1**: valid transitions are `created -> spawning|failed|cancelled`,
   `spawning -> running|completed|failed|timeout|cancelled|killed`, and
@@ -42,6 +42,26 @@ _Implementation mapping_: `weft/core/taskspec/model.py` state validators and
 - **STATE.6**: public snapshots must not present non-terminal status with
   terminal timestamps; runtime conflicts are diagnostics, not lifecycle
   back-transitions
+
+### Deterministic Reducer Helper Invariants
+
+_Implementation mapping_: `weft/core/state_machines.py`;
+runtime-specific reducer instances live in modules such as
+`weft/core/task_lifecycle.py` and `weft/commands/control_convergence.py`.
+
+- **REDUCER.1**: generic state-machine helpers must be pure. They select
+  decisions from caller-provided state and evidence only, and they must not
+  read queues, inspect processes, mutate domain models, write logs, sleep, or
+  apply side effects.
+- **REDUCER.2**: state-machine decisions name the selected target state,
+  action, transition ID, and reason. Side effects remain with the existing
+  runtime owner that called the reducer.
+- **REDUCER.3**: state-machine construction validates declared states, actions,
+  transition IDs, static transition edges, terminal-state outgoing edges, and
+  non-terminal source coverage. Dynamic transition targets are not supported
+  by the current helper.
+- **REDUCER.4**: reducer tests should prove structural reachability separately
+  from concrete test coverage. A state can be reachable but still untested.
 
 ### Queue Invariants
 
@@ -129,7 +149,10 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
   mutations. A `KILL` ack can shorten the path to fallback control, but it
   must not be reported as terminal `killed` state unless terminal evidence,
   controlled host-process death, or an authoritative no-host-PID runner kill
-  proof is also present.
+  proof is also present. Command-layer result classification is selected by
+  the pure reducer in `weft/commands/control_convergence.py`; queue waits,
+  runner fallback, and process termination remain owned by
+  `weft/commands/tasks.py`.
 - **OBS.13**: task monitor log files, task monitor checkpoints,
   runtime-prune reports, and retention-prune reports/archives are operational
   outputs only. They must not become task lifecycle truth, status authority,

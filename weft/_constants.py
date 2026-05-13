@@ -89,6 +89,126 @@ DEFAULT_POLLING_INTERVAL: Final[float] = 1.0
 ACTIVE_CONTROL_POLL_INTERVAL: Final[float] = 0.05
 """Internal control-loop polling interval for active task execution."""
 
+TASK_LIFECYCLE_STATUS_VALUES: Final[frozenset[str]] = frozenset(
+    (
+        "created",
+        "spawning",
+        "running",
+        "completed",
+        "failed",
+        "timeout",
+        "cancelled",
+        "killed",
+    )
+)
+"""Allowed TaskSpec lifecycle status values."""
+
+TERMINAL_TASK_LIFECYCLE_STATUS_VALUES: Final[frozenset[str]] = frozenset(
+    ("completed", "failed", "timeout", "cancelled", "killed")
+)
+"""TaskSpec lifecycle statuses that cannot transition further."""
+
+TASK_LIFECYCLE_ACTION_VALUES: Final[frozenset[str]] = frozenset(
+    ("begin_spawn", "start_running", "complete", "fail", "timeout", "cancel", "kill")
+)
+"""Pure lifecycle reducer action values."""
+
+TASK_LIFECYCLE_TRANSITION_SPECS: Final[tuple[tuple[str, str, str, str, str], ...]] = (
+    (
+        "created-to-spawning",
+        "created",
+        "spawning",
+        "begin_spawn",
+        "task spawn started",
+    ),
+    ("created-to-failed", "created", "failed", "fail", "task failed before start"),
+    (
+        "created-to-cancelled",
+        "created",
+        "cancelled",
+        "cancel",
+        "task cancelled before start",
+    ),
+    (
+        "spawning-to-running",
+        "spawning",
+        "running",
+        "start_running",
+        "task running",
+    ),
+    (
+        "spawning-to-completed",
+        "spawning",
+        "completed",
+        "complete",
+        "task completed during spawn",
+    ),
+    (
+        "spawning-to-failed",
+        "spawning",
+        "failed",
+        "fail",
+        "task failed during spawn",
+    ),
+    (
+        "spawning-to-timeout",
+        "spawning",
+        "timeout",
+        "timeout",
+        "task timed out during spawn",
+    ),
+    (
+        "spawning-to-cancelled",
+        "spawning",
+        "cancelled",
+        "cancel",
+        "task cancelled during spawn",
+    ),
+    (
+        "spawning-to-killed",
+        "spawning",
+        "killed",
+        "kill",
+        "task killed during spawn",
+    ),
+    ("running-to-completed", "running", "completed", "complete", "task completed"),
+    ("running-to-failed", "running", "failed", "fail", "task failed"),
+    ("running-to-timeout", "running", "timeout", "timeout", "task timed out"),
+    ("running-to-cancelled", "running", "cancelled", "cancel", "task cancelled"),
+    ("running-to-killed", "running", "killed", "kill", "task killed"),
+)
+"""TaskSpec lifecycle transition table as id/source/target/action/reason rows."""
+
+CONTROL_CONVERGENCE_STATE_VALUES: Final[frozenset[str]] = frozenset(
+    (
+        "command_sent",
+        "accepted",
+        "terminal_observed",
+        "runtime_dead_after_control",
+        "escalating_runner",
+        "escalating_host",
+        "unknown",
+    )
+)
+"""Command-control convergence reducer state values."""
+
+TERMINAL_CONTROL_CONVERGENCE_STATE_VALUES: Final[frozenset[str]] = frozenset(
+    ("terminal_observed", "runtime_dead_after_control", "unknown")
+)
+"""Command-control convergence terminal state values."""
+
+CONTROL_CONVERGENCE_ACTION_VALUES: Final[frozenset[str]] = frozenset(
+    (
+        "wait",
+        "accept_terminal",
+        "accept_dead_runtime",
+        "escalate_runner",
+        "escalate_host",
+        "report_unknown",
+    )
+)
+"""Command-control convergence reducer action values."""
+
 TASK_PROCESS_POLL_INTERVAL: Final[float] = 0.05
 """Polling interval for spawned task-process main loops between `process_once` calls."""
 

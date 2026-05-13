@@ -13,6 +13,13 @@ import pytest
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import CONTROL_KILL, WEFT_TID_MAPPINGS_QUEUE
 from weft.commands import tasks as task_cmd
+from weft.commands.control_convergence import (
+    ControlConvergenceAction,
+    ControlConvergenceEvidence,
+    ControlConvergenceState,
+    control_convergence_machine,
+    reduce_control_convergence,
+)
 from weft.context import build_context
 from weft.core import (
     IOSection,
@@ -281,6 +288,191 @@ def test_task_ping_reports_timeout(
         "observed_at": None,
         "pong": None,
     }
+
+
+def test_control_convergence_machine_covers_all_transitions() -> None:
+    cases: tuple[
+        tuple[
+            str,
+            ControlConvergenceState,
+            ControlConvergenceEvidence,
+            ControlConvergenceAction,
+        ],
+        ...,
+    ] = (
+        (
+            "wait for first evidence",
+            "command_sent",
+            ControlConvergenceEvidence(command=CONTROL_KILL),
+            "wait",
+        ),
+        (
+            "kill terminal after command",
+            "command_sent",
+            ControlConvergenceEvidence(
+                command=CONTROL_KILL,
+                terminal_status="killed",
+            ),
+            "accept_terminal",
+        ),
+        (
+            "stop terminal after ack",
+            "accepted",
+            ControlConvergenceEvidence(
+                command="STOP",
+                terminal_status="cancelled",
+            ),
+            "accept_terminal",
+        ),
+        (
+            "kill terminal after runner escalation",
+            "escalating_runner",
+            ControlConvergenceEvidence(
+                command=CONTROL_KILL,
+                terminal_status="killed",
+                runner_fallback_attempted=True,
+            ),
+            "accept_terminal",
+        ),
+        (
+            "kill terminal after host escalation",
+            "escalating_host",
+            ControlConvergenceEvidence(
+                command=CONTROL_KILL,
+                terminal_status="killed",
+                runner_fallback_attempted=True,
+                host_fallback_attempted=True,
+            ),
+            "accept_terminal",
+        ),
+        (
+            "runtime dead after command",
+            "command_sent",
+            ControlConvergenceEvidence(
+                command=CONTROL_KILL,
+                runtime_dead_after_control=True,
+            ),
+            "accept_dead_runtime",
+        ),
+        (
+            "runtime dead after accepted",
+            "accepted",
+            ControlConvergenceEvidence(
+                command=CONTROL_KILL,
+                runtime_dead_after_control=True,
+            ),
+            "accept_dead_runtime",
+        ),
+        (
+            "runtime dead after runner escalation",
+            "escalating_runner",
+            ControlConvergenceEvidence(
+                command=CONTROL_KILL,
+                runtime_dead_after_control=True,
+                runner_fallback_attempted=True,
+            ),
+            "accept_dead_runtime",
+        ),
+        (
+            "runtime dead after host escalation",
+            "escalating_host",
+            ControlConvergenceEvidence(
+                command=CONTROL_KILL,
+                runtime_dead_after_control=True,
+                runner_fallback_attempted=True,
+                host_fallback_attempted=True,
+            ),
+            "accept_dead_runtime",
+        ),
+        (
+            "ack waits",
+            "command_sent",
+            ControlConvergenceEvidence(command=CONTROL_KILL, ack_seen=True),
+            "wait",
+        ),
+        (
+            "accepted ack waits",
+            "accepted",
+            ControlConvergenceEvidence(command=CONTROL_KILL, ack_seen=True),
+            "wait",
+        ),
+        (
+            "command wait expires to runner escalation",
+            "accepted",
+            ControlConvergenceEvidence(
+                command=CONTROL_KILL,
+                ack_seen=True,
+                observation_budget_expired=True,
+            ),
+            "escalate_runner",
+        ),
+        (
+            "runner escalation expires to host escalation",
+            "escalating_runner",
+            ControlConvergenceEvidence(
+                command=CONTROL_KILL,
+                runner_fallback_attempted=True,
+                observation_budget_expired=True,
+            ),
+            "escalate_host",
+        ),
+        (
+            "host escalation expires unknown",
+            "escalating_host",
+            ControlConvergenceEvidence(
+                command=CONTROL_KILL,
+                runner_fallback_attempted=True,
+                host_fallback_attempted=True,
+                observation_budget_expired=True,
+            ),
+            "report_unknown",
+        ),
+        (
+            "stop runner escalation expires unknown",
+            "escalating_runner",
+            ControlConvergenceEvidence(
+                command="STOP",
+                runner_fallback_attempted=True,
+                observation_budget_expired=True,
+            ),
+            "report_unknown",
+        ),
+    )
+    seen_transitions: set[str] = set()
+    seen_states: set[ControlConvergenceState] = set()
+    seen_actions: set[ControlConvergenceAction] = set()
+
+    for label, current, evidence, expected_action in cases:
+        decision = reduce_control_convergence(current, evidence)
+        assert decision.action == expected_action, label
+        seen_transitions.add(decision.transition_id)
+        seen_states.update((decision.source, decision.target))
+        seen_actions.add(decision.action)
+
+    control_convergence_machine.assert_all_states_reachable(("command_sent",))
+    control_convergence_machine.assert_transition_ids_covered(seen_transitions)
+    control_convergence_machine.assert_states_covered(seen_states)
+    control_convergence_machine.assert_actions_covered(seen_actions)
+
+
+def test_control_convergence_does_not_accept_kill_ack_or_wrong_terminal() -> None:
+    ack = reduce_control_convergence(
+        "command_sent",
+        ControlConvergenceEvidence(command=CONTROL_KILL, ack_seen=True),
+    )
+    wrong_terminal = reduce_control_convergence(
+        "command_sent",
+        ControlConvergenceEvidence(
+            command=CONTROL_KILL,
+            terminal_status="failed",
+            observation_budget_expired=True,
+        ),
+    )
+
+    assert ack.target == "accepted"
+    assert ack.action == "wait"
+    assert wrong_terminal.target == "escalating_runner"
+    assert wrong_terminal.action == "escalate_runner"
 
 
 def _wait_for_registered_worker_pid(ctx, tid: str, timeout: float = 15.0) -> int | None:

@@ -38,13 +38,14 @@ See also:
 one validated model while freezing the parts that should not drift after task
 creation.
 
-_Implementation mapping_: `weft/core/taskspec/model.py` — `TaskSpec`, `SpecSection`,
-`IOSection`, `StateSection`, `LimitsSection`, `RunnerSection`, `AgentSection`,
-`FrozenList`, `FrozenDict`, `resolve_taskspec_payload`,
-`apply_bundle_root_to_taskspec_payload`; supporting parameterization and
+_Implementation mapping_: `weft/core/taskspec/model.py` — `TaskSpec`,
+`SpecSection`, `IOSection`, `StateSection`, `LimitsSection`, `RunnerSection`,
+`AgentSection`, `FrozenList`, `FrozenDict`, `resolve_taskspec_payload`,
+`apply_bundle_root_to_taskspec_payload`; task lifecycle transition selection
+lives in `weft/core/task_lifecycle.py`; supporting parameterization and
 run-input validation live in `weft/core/taskspec/parameterization.py` and
-`weft/core/taskspec/run_input.py`, and runner-environment materialization lives in
-`weft/core/environment_profiles.py`.
+`weft/core/taskspec/run_input.py`, and runner-environment materialization lives
+in `weft/core/environment_profiles.py`.
 
 Current contract:
 
@@ -65,6 +66,37 @@ Why this shape exists:
 - it prevents runtime code from mutating execution intent mid-flight
 - it keeps task storage and replay safe
 - it lets the manager resolve runtime-only values once, at the proper boundary
+
+### 1.1 Internal State-Machine Helper (`weft/core/state_machines.py`) [CC-1.1]
+
+**Purpose**: provide a small internal helper for pure reducer-style transition
+tables where the decision can be expressed as current labeled state plus an
+evidence snapshot.
+
+_Implementation mapping_: `weft/core/state_machines.py` — `StateMachine`,
+`Transition`, and `StateDecision`.
+
+Current contract:
+
+- the helper is internal support code, not a public API
+- reducers using it must stay pure: no queue reads, process probes, writes,
+  sleeps, logging-as-correctness, or side effects
+- inputs are caller-built evidence snapshots or simple values, not live handles
+- outputs name selected target state, action, transition ID, and reason; side
+  effects stay in the existing owner such as Manager, command helpers,
+  BaseTask, or Consumer
+- helper construction validates declared states, actions, transition IDs,
+  terminal-state outgoing edges, and non-terminal source coverage
+- tests can assert structural reachability, transition-ID coverage, state
+  coverage, and action coverage explicitly
+
+Why this exists:
+
+- deterministic reducer tables are easier to review and test than scattered
+  branching when multiple evidence sources influence a lifecycle decision
+- the helper gives tests a common way to prove all declared states and actions
+  are reachable and exercised without introducing an external state-machine
+  dependency or a second runtime control plane
 
 ## 2. Task Execution Architecture
 

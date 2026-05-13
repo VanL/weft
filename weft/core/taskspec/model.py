@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import json as json_module
+import time
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import ExitStack, contextmanager
 from enum import StrEnum
@@ -49,6 +50,12 @@ from weft._constants import (
     TASKSPEC_BUNDLE_ROOT_FIELD,
     TASKSPEC_TID_LENGTH,
     TASKSPEC_VERSION,
+)
+from weft.core.task_lifecycle import (
+    task_lifecycle_statuses,
+    terminal_task_lifecycle_statuses,
+    valid_task_status_targets,
+    validate_task_status_transition,
 )
 
 from .parameterization import validate_parameterization_adapter_ref
@@ -1606,38 +1613,24 @@ class TaskSpec(BaseModel):
         Raises:
             ValueError: If the status transition is invalid
         """
-        import time
-
         # Terminal states cannot transition
-        terminal_states = {"completed", "failed", "timeout", "cancelled", "killed"}
+        terminal_states = terminal_task_lifecycle_statuses
         if self.state.status in terminal_states:
             raise ValueError(
                 f"Cannot transition from terminal state '{self.state.status}'"
             )
+        if self.state.status not in task_lifecycle_statuses:
+            raise ValueError(f"Unknown current status: {self.state.status!r}")
 
-        # Validate forward-only transitions
-        valid_transitions = {
-            "created": {"spawning", "failed", "cancelled"},
-            "spawning": {
-                "running",
-                "completed",
-                "failed",
-                "timeout",
-                "cancelled",
-                "killed",
-            },
-            "running": {"completed", "failed", "timeout", "cancelled", "killed"},
-        }
-
-        if self.state.status in valid_transitions:
-            if (
-                status not in valid_transitions[self.state.status]
-                and status != self.state.status
-            ):
+        if status != self.state.status:
+            try:
+                validate_task_status_transition(self.state.status, status)
+            except ValueError:
+                valid_targets = sorted(valid_task_status_targets(self.state.status))
                 raise ValueError(
                     f"Invalid transition from '{self.state.status}' to '{status}'. "
-                    f"Valid transitions: {valid_transitions[self.state.status]}"
-                )
+                    f"Valid transitions: {valid_targets}"
+                ) from None
 
         # Update status
         self.state.status = status

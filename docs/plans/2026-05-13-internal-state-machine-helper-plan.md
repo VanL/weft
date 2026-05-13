@@ -508,6 +508,13 @@ Do not add:
    - Done when:
      - either a small reducer-backed control policy lands with tests, or a
        follow-up note says no migration is justified yet
+   - Follow-up note, 2026-05-13:
+     - no BaseTask/Consumer migration is justified for this slice. The current
+       `TaskControlPolicy` declarations already make subclass STOP/KILL
+       behavior visible, while the concrete handlers own state mutation,
+       reserved-queue policy, control replies, terminal envelopes, and stop
+       events. A generic reducer would either duplicate those declarations or
+       hide side-effect order inside a misleading state label.
 
 ## 7. Testing Plan
 
