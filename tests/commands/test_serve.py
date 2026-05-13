@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -390,7 +391,7 @@ def test_serve_foreground_rechecks_after_replacing_ambiguous_record(
                 _manager_service_payload(
                     context,
                     live_tid,
-                    runtime_handle=_host_runtime_handle(1),
+                    runtime_handle=_host_runtime_handle(os.getpid()),
                 )
             )
         )
