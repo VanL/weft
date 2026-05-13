@@ -751,6 +751,18 @@ TERMINAL_TASK_EVENTS: Final[Mapping[str, str]] = {
 }
 """Task-log events that prove terminal lifecycle status when completion is set."""
 
+TASK_LOG_START_EVENTS: Final[frozenset[str]] = frozenset(
+    {
+        "task_initialized",
+        "task_spawning",
+        "task_started",
+        "work_spawning",
+        "work_started",
+        "work_item_started",
+    }
+)
+"""Task-log events that indicate visible lifecycle start evidence."""
+
 TERMINAL_ENVELOPE_TYPE: Final[str] = "terminal"
 """Typed ctrl_out envelope marker for task-local terminal observations."""
 

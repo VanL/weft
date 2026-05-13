@@ -348,7 +348,7 @@ def test_task_monitor_cleanup_repeats_collate_for_multiple_terminal_tids(
     task_log_stats = next(
         stat for stat in result.queue_stats if stat.queue == WEFT_GLOBAL_LOG_QUEUE
     )
-    assert [summary.tid for summary in task_log_stats.collated_tasks] == [
+    assert [summary.to_summary()["tid"] for summary in task_log_stats.collated_tasks] == [
         "1778000000000000001",
         "1778000000000000002",
     ]
@@ -392,6 +392,100 @@ def test_task_monitor_cleanup_nonterminal_anchor_does_not_block_later_collate(
     ] == [{"event": "work_started", "tid": "1778000000000000001"}]
 
 
+def test_task_monitor_cleanup_deletes_old_rows_after_collation(
+    tmp_path: Path,
+) -> None:
+    ctx = _context(tmp_path)
+    start_id = _write_json(
+        ctx,
+        WEFT_GLOBAL_LOG_QUEUE,
+        {"event": "work_started", "tid": "1778000000000000001"},
+    )
+    _write_json(
+        ctx,
+        WEFT_GLOBAL_LOG_QUEUE,
+        {"event": "work_completed", "tid": "1778000000000000001"},
+    )
+    _write_json(
+        ctx,
+        WEFT_GLOBAL_LOG_QUEUE,
+        {"event": "orphan_observation", "tid": "1778000000000000002"},
+    )
+
+    result = run_task_monitor_cleanup(
+        ctx,
+        TaskMonitorCleanupConfig(batch_size=10, task_log_min_age_seconds=1.0),
+        apply=True,
+        now_ns=_now_after(start_id, 2.0),
+    )
+
+    assert result.success
+    assert result.deleted == 3
+    assert [candidate.candidate_class for candidate in result.candidates] == [
+        "collated_terminal_task_log",
+        "collated_terminal_task_log",
+        "old_task_log",
+    ]
+    assert _read_rows(ctx, WEFT_GLOBAL_LOG_QUEUE) == []
+
+
+def test_task_monitor_cleanup_preserves_open_start_when_deleting_old_rows(
+    tmp_path: Path,
+) -> None:
+    ctx = _context(tmp_path)
+    start_id = _write_json(
+        ctx,
+        WEFT_GLOBAL_LOG_QUEUE,
+        {"event": "work_started", "tid": "1778000000000000001"},
+    )
+    _write_json(
+        ctx,
+        WEFT_GLOBAL_LOG_QUEUE,
+        {"event": "orphan_observation", "tid": "1778000000000000002"},
+    )
+
+    result = run_task_monitor_cleanup(
+        ctx,
+        TaskMonitorCleanupConfig(batch_size=10, task_log_min_age_seconds=1.0),
+        apply=True,
+        now_ns=_now_after(start_id, 2.0),
+    )
+
+    assert result.success
+    assert result.deleted == 1
+    assert [candidate.candidate_class for candidate in result.candidates] == [
+        "old_task_log"
+    ]
+    assert [
+        json.loads(body) for body, _message_id in _read_rows(ctx, WEFT_GLOBAL_LOG_QUEUE)
+    ] == [{"event": "work_started", "tid": "1778000000000000001"}]
+
+
+def test_task_monitor_cleanup_classifies_terminal_without_visible_start_as_truncated(
+    tmp_path: Path,
+) -> None:
+    ctx = _context(tmp_path)
+    terminal_id = _write_json(
+        ctx,
+        WEFT_GLOBAL_LOG_QUEUE,
+        {"event": "work_completed", "tid": "1778000000000000001"},
+    )
+
+    result = run_task_monitor_cleanup(
+        ctx,
+        TaskMonitorCleanupConfig(batch_size=10, task_log_min_age_seconds=1.0),
+        apply=True,
+        now_ns=_now_after(terminal_id, 2.0),
+    )
+
+    assert result.success
+    assert result.deleted == 1
+    assert [candidate.candidate_class for candidate in result.candidates] == [
+        "truncated_terminal_task_log"
+    ]
+    assert _read_rows(ctx, WEFT_GLOBAL_LOG_QUEUE) == []
+
+
 def test_task_monitor_cleanup_does_not_collate_young_terminal_task_log(
     tmp_path: Path,
 ) -> None:
@@ -419,7 +513,7 @@ def test_task_monitor_cleanup_does_not_collate_young_terminal_task_log(
     assert len(_read_rows(ctx, WEFT_GLOBAL_LOG_QUEUE)) == 2
 
 
-def test_task_monitor_cleanup_without_terminal_falls_back_to_older_than(
+def test_task_monitor_cleanup_without_terminal_preserves_open_start(
     tmp_path: Path,
 ) -> None:
     ctx = _context(tmp_path)
@@ -437,11 +531,11 @@ def test_task_monitor_cleanup_without_terminal_falls_back_to_older_than(
     )
 
     assert result.success
-    assert result.deleted == 1
-    assert [candidate.candidate_class for candidate in result.candidates] == [
-        "old_task_log"
-    ]
-    assert _read_rows(ctx, WEFT_GLOBAL_LOG_QUEUE) == []
+    assert result.deleted == 0
+    assert result.candidates == ()
+    assert [
+        json.loads(body) for body, _message_id in _read_rows(ctx, WEFT_GLOBAL_LOG_QUEUE)
+    ] == [{"event": "work_started", "tid": "1778000000000000001"}]
 
 
 def test_task_monitor_cleanup_policy_order_classifies_malformed_before_age(

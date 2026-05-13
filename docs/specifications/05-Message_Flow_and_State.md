@@ -676,12 +676,13 @@ system pruning:
   `delete` processor may delete exact message IDs selected by bounded
   queue-specific cleanup policies from supported Weft-owned cleanup queues.
   First-slice policies cover malformed rows, age-based runtime evidence cleanup
-  for `weft.state.tid_mappings`, and age-gated task-log collate/delete or
-  older-than cleanup for `weft.log.tasks`. Task-log collate runs before broad
-  older-than cleanup, repeats for completed lifecycle groups in the bounded
-  scan window, may skip old nonterminal TIDs for the current pass, and only
-  falls back to broad older-than task-log deletion when it did not collate any
-  completed lifecycle group. Per-cycle collation summaries are operational
+  for `weft.state.tid_mappings`, and age-gated task-log cleanup for
+  `weft.log.tasks`. Task-log cleanup first deletes malformed rows, then
+  repeatedly collates and deletes completed lifecycle groups in the bounded
+  scan window, then classifies terminal rows with no visible start event as
+  truncated terminal groups, then applies broad older-than cleanup to remaining
+  rows while preserving TIDs that have visible start evidence but no terminal
+  evidence in the current window. Per-cycle collation summaries are operational
   TaskMonitor evidence only, not durable archive records. The monitor must not
   delete active work, ambiguous task-local evidence, claimed outbox residue,
   user payload rows, spawn requests, manager control rows, or candidates
@@ -744,9 +745,10 @@ Current rules:
   IDs selected by its bounded policies only. It must not apply archive side
   effects, force-only retention cleanup, task-local retention cleanup, or
   logging-before-delete behavior in this slice. Its task-log policy order is
-  malformed first, collate completed lifecycle groups second, broad older-than
-  last. Collate may emit operational per-cycle summaries before exact deletion
-  so operators can observe steady-state lifecycle reduction.
+  malformed first, completed lifecycle collation second, truncated terminal
+  collation third, and broad older-than deletion last with open-start TIDs
+  protected. Collate may emit operational per-cycle summaries before exact
+  deletion so operators can observe steady-state lifecycle reduction.
 - `weft system tidy` handles backend-native cleanup of empty queues and broker
   maintenance
 - autonomous destructive queue lifecycle is limited to the supervised

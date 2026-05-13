@@ -21,6 +21,7 @@ from typing import Any
 from simplebroker.ext import BrokerError
 from weft._constants import (
     RETENTION_PRUNE_DEFAULT_MIN_AGE_SECONDS,
+    TASK_LOG_START_EVENTS,
     TASK_MONITOR_TID_MAPPING_CLEANUP_MIN_AGE_SECONDS,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_TASK_MONITOR_BATCH_SIZE_DEFAULT,
@@ -49,6 +50,7 @@ from weft.core.queue_window import (
 from weft.core.task_log_collation import (
     CollatedMessageGroup,
     collate_next_task_log_group,
+    is_terminal_task_log,
 )
 
 
@@ -316,11 +318,12 @@ def _task_log_candidates(
                 collate_skipped_tids.add(collated.skipped_tid)
                 continue
             break
+        candidate_class, reason = _collated_task_log_candidate_class(collated.group)
         group_candidates = [
             cleanup_candidate_from_row(
                 row.raw,
-                candidate_class="collated_terminal_task_log",
-                reason="anchor_tid_terminal_event_found_in_window",
+                candidate_class=candidate_class,
+                reason=reason,
                 tid=collated.group.tid,
                 payload=row.payload,
             )
@@ -330,15 +333,11 @@ def _task_log_candidates(
         claimed.update(collated.group.message_ids)
         collated_summaries.append(collated.group)
 
-    if collated_summaries:
-        return candidates, cleanup_queue_stats(
-            WEFT_GLOBAL_LOG_QUEUE,
-            scanned=len(rows),
-            candidates=candidates,
-            stop_reason=stop_reason,
-            collated_tasks=tuple(collated_summaries),
-        )
-
+    protected_tids = _open_started_task_log_tids(
+        rows,
+        claimed_ids=claimed,
+        exclude_tids=exclude_tids,
+    )
     old_rows = older_than_candidates(
         rows,
         now_ns=now_ns,
@@ -347,7 +346,7 @@ def _task_log_candidates(
         reason="older_than_task_log_cleanup_min_age",
         stop_reason="first_task_log_too_young",
         claimed_ids=claimed,
-        exclude_tids=exclude_tids,
+        exclude_tids=exclude_tids | protected_tids,
     )
     candidates.extend(old_rows.candidates)
     stop_reason = stop_reason or old_rows.stop_reason
@@ -358,6 +357,45 @@ def _task_log_candidates(
         stop_reason=stop_reason,
         collated_tasks=tuple(collated_summaries),
     )
+
+
+def _collated_task_log_candidate_class(
+    group: CollatedMessageGroup,
+) -> tuple[str, str]:
+    if _collated_group_has_visible_start(group):
+        return "collated_terminal_task_log", "anchor_tid_terminal_event_found_in_window"
+    return (
+        "truncated_terminal_task_log",
+        "terminal_event_without_visible_start_in_window",
+    )
+
+
+def _collated_group_has_visible_start(group: CollatedMessageGroup) -> bool:
+    return any(
+        payload_string(row.payload, "event") in TASK_LOG_START_EVENTS
+        for row in group.message_rows
+    )
+
+
+def _open_started_task_log_tids(
+    rows: Sequence[DecodedQueueWindowRow],
+    *,
+    claimed_ids: set[int],
+    exclude_tids: set[str],
+) -> set[str]:
+    starts: set[str] = set()
+    terminals: set[str] = set()
+    for row in rows:
+        if row.raw.message_id in claimed_ids or row.malformed_reason is not None:
+            continue
+        tid = row.tid
+        if tid is None or tid in exclude_tids:
+            continue
+        if payload_string(row.payload, "event") in TASK_LOG_START_EVENTS:
+            starts.add(tid)
+        if is_terminal_task_log(row.payload):
+            terminals.add(tid)
+    return starts - terminals
 
 
 def _with_apply_counts(

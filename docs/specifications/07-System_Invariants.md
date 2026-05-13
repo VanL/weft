@@ -325,13 +325,15 @@ Current invariant visibility comes from:
 There is now a manager-supervised `TaskMonitorTask` in addition to the
 foreground `weft system task-monitor` command. In the current contract it is
 operational only. The default processor is `delete`, which may delete exact
-rows selected by bounded cleanup policies. Task-log cleanup must collate
-completed lifecycle groups before broad older-than deletion, and collation
-summaries remain operational TaskMonitor output only. Those deletes and
-summaries do not make task-monitor output lifecycle truth or result authority.
-`weft.log.tasks` remains runtime lifecycle evidence while retained, not audit,
-forensic, or legal-retention evidence. `report_only` remains available as a
-non-destructive override. Cleanup orchestration lives in
+rows selected by bounded cleanup policies. Task-log cleanup must delete
+malformed rows, collate completed lifecycle groups, classify terminal rows
+with no visible start as truncated groups, and only then apply broad
+older-than deletion while preserving open-start TIDs in the bounded window.
+Collation summaries remain operational TaskMonitor output only. Those deletes
+and summaries do not make task-monitor output lifecycle truth or result
+authority. `weft.log.tasks` remains runtime lifecycle evidence while retained,
+not audit, forensic, or legal-retention evidence. `report_only` remains
+available as a non-destructive override. Cleanup orchestration lives in
 `weft/core/tasks/task_monitor_cleanup.py`; reusable row policies live under
 `weft/core/pruning/policies/`; task-log grouping lives in
 `weft/core/task_log_collation.py`; exact deletion still goes through
