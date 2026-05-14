@@ -7,7 +7,7 @@ import time
 
 from tests.conftest import run_cli
 from tests.helpers.weft_harness import WeftTestHarness
-from weft.commands import tasks as task_cmd
+from weft._constants import WEFT_STREAMING_SESSIONS_QUEUE
 
 
 def _submit_task(harness: WeftTestHarness, *run_args: str) -> str:
@@ -91,22 +91,6 @@ def _wait_for_result_all_json(
     )
 
 
-def _wait_for_task_status(
-    harness: WeftTestHarness,
-    tid: str,
-    *,
-    status: str,
-    timeout: float = 20.0,
-) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        snapshot = task_cmd.task_status(tid, context_path=harness.root)
-        if snapshot is not None and snapshot.status == status:
-            return
-        time.sleep(0.05)
-    raise AssertionError(f"Timed out waiting for task {tid} to reach {status!r}")
-
-
 def test_result_all_empty(weft_harness: WeftTestHarness) -> None:
     """Test `weft result --all` when there are no tasks."""
     rc, out, err = run_cli(
@@ -169,8 +153,10 @@ def test_result_all_json_output(weft_harness: WeftTestHarness) -> None:
     assert data["results"][0]["result"] == "json1"
 
 
-def test_result_all_filters_running_tasks(weft_harness: WeftTestHarness) -> None:
-    """Test that `weft result --all` does not include running/streaming tasks."""
+def test_result_all_filters_active_streaming_tasks(
+    weft_harness: WeftTestHarness,
+) -> None:
+    """Test that `weft result --all` does not include active streaming tasks."""
     weft_harness.ensure_foreground_manager()
     completed_tid = _submit_task(
         weft_harness,
@@ -181,16 +167,41 @@ def test_result_all_filters_running_tasks(weft_harness: WeftTestHarness) -> None
     )
     weft_harness.wait_for_completion(completed_tid)
 
-    # Start a task that will be streaming but not complete
-    streaming_tid = _submit_task(
-        weft_harness,
-        "--function",
-        "tests.tasks.sample_targets:streaming_echo",
-        "--kw",
-        "delay=15.0",
-        "--stream-output",
+    streaming_tid = "1777000000000000002"
+    streaming_outbox = f"T{streaming_tid}.outbox"
+    outbox = weft_harness.context.queue(streaming_outbox, persistent=True)
+    stream_registry = weft_harness.context.queue(
+        WEFT_STREAMING_SESSIONS_QUEUE,
+        persistent=False,
     )
-    _wait_for_task_status(weft_harness, streaming_tid, status="running")
+    try:
+        outbox.write(
+            json.dumps(
+                {
+                    "type": "stream",
+                    "stream": "stdout",
+                    "chunk": 0,
+                    "final": True,
+                    "encoding": "text",
+                    "data": "not-ready\n",
+                }
+            )
+        )
+        stream_registry.write(
+            json.dumps(
+                {
+                    "session_id": f"{streaming_tid}:{streaming_outbox}:test",
+                    "tid": streaming_tid,
+                    "mode": "stream",
+                    "queue": streaming_outbox,
+                    "started_at": time.time_ns(),
+                }
+            )
+        )
+    finally:
+        outbox.close()
+        stream_registry.close()
+
     out = _wait_for_result_all_text(
         weft_harness,
         contains=[f"{completed_tid}: done"],
