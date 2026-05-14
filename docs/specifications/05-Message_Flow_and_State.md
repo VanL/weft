@@ -546,7 +546,12 @@ Current rules:
   namespace is stale-looking but not enough by itself to erase a dispatchable
   manager. Startup, selection, and manager-owned leadership checks may rescue
   the row with a bounded keyed PING/PONG when the PONG proves manager role,
-  queue identity, context, and non-terminal status.
+  queue identity, context, and non-terminal status. If the row is fresh but
+  remains namespace-ambiguous, `ensure_manager` must not start a competing
+  manager just because it cannot prove the incumbent live. That suppression is
+  bounded by pending work: if public spawn backlog remains pending past the
+  namespace-ambiguity grace window and the incumbent still lacks PONG/runtime
+  proof, startup may launch another manager to recover progress.
 - detached-launcher acknowledgement and startup-stderr cleanup are best-effort
   post-proof steps; they may warn, but they do not downgrade a successfully
   proven manager start into submission failure

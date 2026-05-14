@@ -149,8 +149,15 @@ Key responsibilities implemented in `weft/core/manager.py`:
    matching context when present, non-terminal `task_status`, and `should_stop`
    not true. An absent, malformed,
    non-matching, draining, or stopping PONG is not negative proof and does not
-   authorize unsafe takeover by itself. Canonical ownership is lowest-live-TID
-   among canonical dispatch-eligible claimants for status, selection, and
+   authorize unsafe takeover by itself. Manager startup must distinguish
+   "no active canonical manager exists" from "a fresh canonical incumbent is
+   namespace-ambiguous"; the latter must not launch another manager merely
+   because the caller cannot prove the incumbent dead from its PID namespace
+   while there is no public spawn backlog. When public spawn backlog remains
+   pending past a short namespace-ambiguity grace window and the incumbent
+   still lacks PONG/runtime proof, startup may launch a helper manager so
+   queued work can make progress. Canonical ownership is lowest-live-TID among
+   canonical dispatch-eligible claimants for status, selection, and
    duplicate-manager convergence. It is advisory for public dispatch because
    atomic queue reservation owns public spawn exclusivity.
    Task-list/status read models use the same selected active-manager view. A

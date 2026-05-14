@@ -25,6 +25,7 @@ from weft._constants import (
     MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS,
     MANAGER_LAUNCHER_SIGNAL_ABORT,
     MANAGER_LAUNCHER_SIGNAL_SUCCESS,
+    MANAGER_NAMESPACE_AMBIGUOUS_BACKLOG_GRACE_SECONDS,
     MANAGER_PID_LIVENESS_RECHECK_INTERVAL,
     MANAGER_POLL_INTERVAL,
     MANAGER_PONG_LIVE_AT_KEY,
@@ -53,6 +54,7 @@ from weft.core.spawn_requests import generate_spawn_request_timestamp
 from weft.core.taskspec import TaskSpec, resolve_taskspec_payload
 from weft.ext import RunnerHandle
 from weft.helpers import (
+    detect_container_runtime,
     is_canonical_manager_record,
     iter_queue_json_entries,
     pid_is_live,
@@ -202,8 +204,16 @@ def _snapshot_registry(
                         )
                     )
                     if not rescued_by_pong:
-                        stale_timestamps.append(timestamp)
-                        continue
+                        namespace_ambiguous = (
+                            _host_pid_visibility_is_namespace_ambiguous(record)
+                        )
+                        if definitive_stale or (
+                            probe_stale and not namespace_ambiguous
+                        ):
+                            stale_timestamps.append(timestamp)
+                            continue
+                        if not namespace_ambiguous:
+                            continue
             existing = snapshot.get(tid)
             existing_ts = int(existing.get("timestamp", -1)) if existing else -1
             if existing is None or existing_ts < timestamp:
@@ -264,6 +274,60 @@ def _select_active_manager_from_snapshot(
     if decision.canonical_live is None:
         return None
     return projected_by_timestamp.get(decision.canonical_live.timestamp)
+
+
+def _record_is_recent_enough_for_uncertain_selection(record: dict[str, Any]) -> bool:
+    timestamp = _manager_record_timestamp(record)
+    if timestamp is None:
+        return False
+    stale_after_ns = int(
+        MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS * 1_000_000_000
+    )
+    return stale_after_ns < 0 or time.time_ns() - timestamp <= stale_after_ns
+
+
+def _select_uncertain_active_manager_from_snapshot(
+    snapshot: dict[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Return a fresh canonical incumbent whose liveness is namespace-ambiguous."""
+
+    candidates = [
+        record
+        for record in snapshot.values()
+        if record.get("status") == SERVICE_STATUS_ACTIVE
+        and is_canonical_manager_record(record)
+        and _host_pid_visibility_is_namespace_ambiguous(record)
+        and _record_is_recent_enough_for_uncertain_selection(record)
+    ]
+    if not candidates:
+        return None
+    return min(candidates, key=lambda record: int(str(record.get("tid", "0"))))
+
+
+def _public_spawn_backlog_pending(context: WeftContext) -> bool:
+    queue = context.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=False)
+    try:
+        return bool(queue.has_pending())
+    except (BrokerError, OSError, RuntimeError):
+        logger.debug("Failed to inspect public spawn backlog", exc_info=True)
+        return False
+    finally:
+        queue.close()
+
+
+def _namespace_ambiguous_incumbent_should_block_start(
+    context: WeftContext,
+    record: dict[str, Any],
+) -> bool:
+    """Return whether an ambiguous incumbent should still suppress startup."""
+
+    if not _public_spawn_backlog_pending(context):
+        return True
+    timestamp = _manager_record_timestamp(record)
+    if timestamp is None:
+        return True
+    grace_ns = int(MANAGER_NAMESPACE_AMBIGUOUS_BACKLOG_GRACE_SECONDS * 1_000_000_000)
+    return grace_ns < 0 or time.time_ns() - timestamp <= grace_ns
 
 
 def _manager_record_diagnostic(
@@ -528,6 +592,17 @@ def _manager_handle_is_stale(handle: RunnerHandle | None) -> bool:
     if handle.control.get("authority") == "host-pid":
         return not _manager_handle_has_live_host_process(handle)
     return False
+
+
+def _host_pid_visibility_is_namespace_ambiguous(
+    record: dict[str, Any] | None,
+) -> bool:
+    handle = _manager_handle_from_record(record)
+    return bool(
+        handle is not None
+        and handle.control.get("authority") == "host-pid"
+        and detect_container_runtime() is not None
+    )
 
 
 def _manager_record_is_stale(record: dict[str, Any] | None) -> bool:
@@ -1665,13 +1740,22 @@ def _ensure_manager(
 ) -> tuple[dict[str, Any], bool, subprocess.Popen[Any] | None]:
     """Guarantee a canonical active manager exists, starting one if necessary."""
     probe_cache: dict[str, int | None] = {}
-    record = _select_active_manager(
+    view = _registry_view(
         context,
         probe_stale=True,
         probe_cache=probe_cache,
     )
+    record = view.active_manager
     if record:
         return record, False, None
+    uncertain_record = _select_uncertain_active_manager_from_snapshot(view.records)
+    if uncertain_record is not None:
+        should_block = _namespace_ambiguous_incumbent_should_block_start(
+            context,
+            uncertain_record,
+        )
+        if should_block:
+            return uncertain_record, False, None
     return _start_manager(context, verbose=verbose)
 
 

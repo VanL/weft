@@ -6,7 +6,7 @@ Superseded by: none
 
 ## 1. Goal
 
-Improve manager liveness checks so a canonical manager row with host-PID proof that is unreachable from the current PID namespace can be rescued by keyed PING/PONG before being pruned or ignored. Add an explicit operator diagnostic mode for `weft manager list` that reports current manager service-owner records without silently reducing the view to only accepted active owners.
+Improve manager liveness checks so a canonical manager row with host-PID proof that is unreachable from the current PID namespace can be rescued by keyed PING/PONG before being pruned or ignored. If the incumbent remains fresh but namespace-ambiguous, `ensure_manager()` must not start another manager while there is no pending public spawn backlog; if backlog stays pending beyond the short ambiguity grace window, startup may launch another manager so work can progress. Add an explicit operator diagnostic mode for `weft manager list` that reports current manager service-owner records without silently reducing the view to only accepted active owners.
 
 ## 2. Source Documents
 
@@ -57,22 +57,32 @@ Comprehension checks before editing:
    - Reuse `_manager_record_has_matched_pong()` and `Manager._manager_pong_dispatch_proof()`.
    - Stop if the implementation treats a missing PONG as proof that a running dispatch-capable manager should yield to an unknown row.
 
-2. Add a diagnostic reducer in `weft/core/manager_runtime.py`.
+2. Make startup conservative around namespace-ambiguous incumbents.
+   - Outcome: `ensure_manager()` returns a fresh active canonical incumbent instead of starting a new manager when host-PID proof is unreachable from the current container namespace and no public spawn backlog is pending.
+   - Files to touch: `weft/core/manager_runtime.py`, `tests/commands/test_manager_commands.py`.
+   - Stop if queue-first submission rollback starts deleting work merely because liveness is uncertain.
+
+3. Add backlog-based escalation for unresolved ambiguity.
+   - Outcome: if public spawn backlog is pending and the namespace-ambiguous incumbent remains unproved past `MANAGER_NAMESPACE_AMBIGUOUS_BACKLOG_GRACE_SECONDS`, `ensure_manager()` may start a helper manager.
+   - Files to touch: `weft/_constants.py`, `weft/core/manager_runtime.py`, `tests/commands/test_manager_commands.py`.
+   - Stop if the escalation ignores backlog or uses the long external-supervisor TTL as the only recovery clock.
+
+4. Add a diagnostic reducer in `weft/core/manager_runtime.py`.
    - Outcome: a new helper returns latest manager records with fields such as `liveness`, `proof_source`, `dispatch_eligible`, and `canonical`.
    - Reuse `_snapshot_registry(prune_stale=False)`, `_manager_handle_from_record()`, `_live_host_processes_from_handle()`, `runtime_liveness_from_registered_probe()`, `_manager_record_has_matched_pong()`, and `is_canonical_manager_record()`.
    - Stop if the implementation starts scanning arbitrary host processes outside the runtime handle.
 
-3. Add command and CLI plumbing.
+5. Add command and CLI plumbing.
    - Outcome: `weft manager list --diagnostic` uses the diagnostic reducer; default list remains unchanged.
    - Files: `weft/commands/manager.py`, `weft/cli/app.py`.
    - Keep table output compact; JSON carries the full diagnostic fields.
 
-4. Add tests.
+6. Add tests.
    - Command tests should use real broker-backed `Queue` writes to `weft.state.services`.
    - CLI tests should prove the new flag is accepted and default output remains compatible.
    - Do not mock SimpleBroker queues or manager registry replay.
 
-5. Update specs and plan index.
+7. Update specs and plan index.
    - Add the CLI flag to `docs/specifications/10-CLI_Interface.md`.
    - Add the plan backlink to `docs/specifications/03-Manager_Architecture.md`.
    - Add this plan to `docs/plans/README.md`.
@@ -98,6 +108,8 @@ Observable proof:
 - A stale active host-pid row appears in diagnostic output with `liveness="stale"` and is not selected canonical.
 - A lower live host-pid row is marked `canonical=true` when multiple live active manager rows exist.
 - A host-pid row that is unreachable by PID but answers a keyed manager PONG remains selectable.
+- A fresh host-pid incumbent that is unreachable from a container namespace and does not answer PONG blocks `ensure_manager()` from launching a competing manager when no public spawn backlog is pending.
+- A pending public spawn backlog can escalate past the short namespace-ambiguity grace window and let `ensure_manager()` start a helper manager.
 - Existing non-diagnostic list behavior still omits stale active rows.
 
 ## 7. Verification and Gates

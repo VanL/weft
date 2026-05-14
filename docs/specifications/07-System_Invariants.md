@@ -248,7 +248,10 @@ _Implementation mapping_: `weft/core/manager.py`,
   evidence is not voluntary-yield authority. Keyed PONG liveness may help
   decide which canonical records are live, including host-PID rows whose PID is
   not visible from the current PID namespace, but it is not a lease, election
-  vote, or substitute for lowest-TID ownership reduction.
+  vote, or substitute for lowest-TID ownership reduction. Startup must not
+  convert a fresh namespace-ambiguous canonical incumbent into permission to
+  launch another manager unless public spawn backlog remains pending past the
+  bounded namespace-ambiguity grace window.
 - **MANAGER.9**: public spawn dispatch is work-stealing. Atomic reservation of
   a `weft.spawn.requests` message authorizes that manager to attempt the child
   launch for that exact message; registry `self`, `other`, `none`, or

@@ -16,6 +16,7 @@ from weft._constants import (
     MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
     SERVICE_STATUS_SUPERSEDED,
     WEFT_SERVICES_REGISTRY_QUEUE,
+    WEFT_SPAWN_REQUESTS_QUEUE,
 )
 from weft.commands import manager as manager_cmd
 from weft.context import build_context
@@ -884,6 +885,113 @@ def test_list_command_rescues_unreachable_host_pid_with_pong(
     assert exit_code == 0
     records = json.loads(payload)
     assert tid in {record["tid"] for record in records}
+
+
+def test_ensure_manager_does_not_start_when_host_pid_incumbent_is_namespace_ambiguous(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    context_root = prepare_project_root(tmp_path / "ctx")
+    context = build_context(context_root)
+    tid = "1761000000000000023"
+
+    registry_queue = context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
+    try:
+        registry_queue.write(
+            json.dumps(
+                _manager_service_payload(
+                    context,
+                    tid,
+                    runtime_handle=_host_runtime_handle(987654321),
+                )
+            )
+        )
+    finally:
+        registry_queue.close()
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "detect_container_runtime",
+        lambda: object(),
+    )
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "_manager_record_has_matched_pong",
+        lambda *args, **kwargs: False,
+    )
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "_start_manager",
+        lambda *args, **kwargs: pytest.fail(
+            "namespace-ambiguous incumbent must block manager startup"
+        ),
+    )
+
+    record, started, process = core_manager_runtime.ensure_manager(
+        context,
+        verbose=False,
+    )
+
+    assert record is not None
+    assert record["tid"] == tid
+    assert started is False
+    assert process is None
+
+
+def test_ensure_manager_starts_when_ambiguous_incumbent_strands_spawn_backlog(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    context_root = prepare_project_root(tmp_path / "ctx")
+    context = build_context(context_root)
+    incumbent_tid = "1761000000000000024"
+    replacement_tid = "1761000000000000025"
+
+    registry_queue = context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
+    spawn_queue = context.queue(WEFT_SPAWN_REQUESTS_QUEUE, persistent=False)
+    try:
+        registry_queue.write(
+            json.dumps(
+                _manager_service_payload(
+                    context,
+                    incumbent_tid,
+                    runtime_handle=_host_runtime_handle(987654321),
+                )
+            )
+        )
+        spawn_queue.write("pending-work")
+    finally:
+        registry_queue.close()
+        spawn_queue.close()
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "MANAGER_NAMESPACE_AMBIGUOUS_BACKLOG_GRACE_SECONDS",
+        0.0,
+    )
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "detect_container_runtime",
+        lambda: object(),
+    )
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "_manager_record_has_matched_pong",
+        lambda *args, **kwargs: False,
+    )
+
+    def _start_replacement(*_args, **_kwargs):
+        return {"tid": replacement_tid, "status": "active"}, True, None
+
+    monkeypatch.setattr(core_manager_runtime, "_start_manager", _start_replacement)
+
+    record, started, process = core_manager_runtime.ensure_manager(
+        context,
+        verbose=False,
+    )
+
+    assert record is not None
+    assert record["tid"] == replacement_tid
+    assert started is True
+    assert process is None
 
 
 def test_stop_command_force_reports_fresh_external_supervisor_without_host_pid(
