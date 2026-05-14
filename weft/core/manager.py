@@ -1009,11 +1009,11 @@ class Manager(BaseTask):
             self._begin_superseded_shutdown()
             self._last_registry_heartbeat_ns = time.time_ns()
             return
-        if (
-            self._recent_lower_canonical_manager_exists(registry_queue, now_ns=now_ns)
-            and not self._has_actionable_leadership_work()
-        ):
-            self._prune_older_self_registry_entries(registry_queue)
+        if self._recent_lower_canonical_manager_exists(registry_queue, now_ns=now_ns):
+            if not self._unregistered:
+                self._unregister_manager(status=SERVICE_STATUS_DRAINING)
+            else:
+                self._prune_older_self_registry_entries(registry_queue)
             self._last_registry_heartbeat_ns = time.time_ns()
             return
 
@@ -1074,6 +1074,40 @@ class Manager(BaseTask):
             else:
                 self._registry_message_id = message_id
             self._last_registry_heartbeat_ns = time.time_ns()
+            superseded_timestamp = self._self_registry_status_timestamp(
+                registry_queue,
+                status=SERVICE_STATUS_SUPERSEDED,
+                since_timestamp=now_ns,
+            )
+            if superseded_timestamp is not None:
+                deleted_active = False
+                if self._registry_message_id is not None:
+                    try:
+                        deleted_active = bool(
+                            registry_queue.delete(message_id=self._registry_message_id)
+                        )
+                    except (BrokerError, OSError, RuntimeError):
+                        logger.debug(
+                            "Failed to prune active registry entry after supersede",
+                            exc_info=True,
+                        )
+                if (
+                    not deleted_active
+                    and self._latest_self_registry_status(registry_queue)
+                    != SERVICE_STATUS_SUPERSEDED
+                ):
+                    inactive_payload = dict(payload)
+                    inactive_payload["status"] = SERVICE_STATUS_SUPERSEDED
+                    try:
+                        registry_queue.write(json.dumps(inactive_payload))
+                    except (BrokerError, OSError, RuntimeError):
+                        logger.debug(
+                            "Failed to restore superseded registry entry",
+                            exc_info=True,
+                        )
+                self._registry_message_id = None
+                self._begin_superseded_shutdown()
+                return
             self._prune_older_self_registry_entries(registry_queue)
             projected = project_manager_service_record(
                 payload,
@@ -1224,6 +1258,54 @@ class Manager(BaseTask):
             logger.debug("Failed to replay self manager status", exc_info=True)
             return None
         return latest_status
+
+    def _self_registry_status_timestamp(
+        self,
+        queue: Queue,
+        *,
+        status: str,
+        since_timestamp: int | None = None,
+    ) -> int | None:
+        """Return latest self-owned row timestamp for a status, if readable."""
+
+        latest_timestamp: int | None = None
+        service_key = manager_service_key(self._manager_context())
+        try:
+            entries = queue.peek_generator(with_timestamps=True)
+        except (AttributeError, BrokerError, OSError, RuntimeError):
+            logger.debug("Failed to inspect self manager status", exc_info=True)
+            return None
+
+        try:
+            for entry in entries:
+                if not isinstance(entry, tuple) or len(entry) != 2:
+                    continue
+                body, timestamp = entry
+                if not isinstance(timestamp, int):
+                    continue
+                if since_timestamp is not None and timestamp < since_timestamp:
+                    continue
+                try:
+                    payload = json.loads(body)
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                record = parse_service_owner_record(payload, timestamp=timestamp)
+                if (
+                    record is None
+                    or record.owner_tid != self.tid
+                    or record.service_type != SERVICE_TYPE_MANAGER
+                    or record.service_key != service_key
+                    or record.status != status
+                ):
+                    continue
+                if latest_timestamp is None or timestamp > latest_timestamp:
+                    latest_timestamp = timestamp
+        except (BrokerError, OSError, RuntimeError):
+            logger.debug("Failed to replay self manager status", exc_info=True)
+            return None
+        return latest_timestamp
 
     def _prune_older_self_registry_entries(self, queue: Queue) -> None:
         """Keep only this manager's latest registry row."""

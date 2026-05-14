@@ -26,6 +26,7 @@ class OlderThanSelection:
 def older_than_candidates(
     rows: Sequence[DecodedQueueWindowRow],
     *,
+    policy: str,
     now_ns: int,
     min_age_seconds: float,
     candidate_class: str,
@@ -50,6 +51,7 @@ def older_than_candidates(
             candidates.append(
                 cleanup_candidate_from_row(
                     row.raw,
+                    policy=policy,
                     candidate_class=candidate_class,
                     reason=reason,
                     tid=tid,

@@ -10,6 +10,7 @@ import weft.core.tasks.task_monitor as task_monitor_mod
 from weft._constants import (
     CONTROL_PING,
     PONG_EXTENSION_KEY,
+    TASK_MONITOR_POLICY_TASK_LOG_DELETE_MALFORMED,
     WEFT_GLOBAL_LOG_QUEUE,
     load_config,
 )
@@ -321,6 +322,7 @@ def test_task_monitor_ping_includes_health_and_preserves_task_log(
     assert pong["last_candidate_class_counts"] == {}
     assert pong["last_safe_to_delete_candidates"] == 0
     assert pong["last_cleanup_queue_stats"]
+    assert pong["last_cleanup_policy_stats"]
     extended = pong[PONG_EXTENSION_KEY]["task_monitor"]
     assert extended["enabled"] is True
     assert extended["mode"] == "persistent"
@@ -355,9 +357,69 @@ def test_task_monitor_ping_includes_health_and_preserves_task_log(
         extended["last_cycle"]["cleanup_queue_stats"]
         == (pong["last_cleanup_queue_stats"])
     )
+    assert (
+        extended["last_cycle"]["cleanup_policy_stats"]
+        == (pong["last_cleanup_policy_stats"])
+    )
+    assert any(
+        stat["policy"] == TASK_MONITOR_POLICY_TASK_LOG_DELETE_MALFORMED
+        for stat in pong["last_cleanup_policy_stats"]
+    )
     assert extended["last_cycle"]["warnings"] == []
     assert extended["last_cycle"]["errors"] == []
     assert log_queue.peek_one() is not None
+
+
+def test_task_monitor_ping_uses_cached_policy_stats_without_cleanup_scan(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
+            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+        }
+    )
+    spec = make_task_monitor_taskspec("1778089999999999994")
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    log_queue.write("{not-json")
+    ctrl_in = make_queue(spec.io.control["ctrl_in"])
+    ctrl_out = make_queue(spec.io.control["ctrl_out"])
+
+    task = TaskMonitorTask(db_path, spec, config=config)
+    try:
+        task.process_once()
+        cached_policy_stats = list(task._last_cleanup_policy_stats)
+        assert cached_policy_stats
+
+        def fail_cleanup(*args: object, **kwargs: object) -> object:
+            del args, kwargs
+            raise AssertionError("PING must not run cleanup")
+
+        monkeypatch.setattr(task_monitor_mod, "run_task_monitor_cleanup", fail_cleanup)
+        ctrl_in.write(json.dumps({"command": CONTROL_PING, "request_id": "cached"}))
+        task.process_once()
+    finally:
+        task.stop()
+
+    responses = [json.loads(item) for item in ctrl_out.peek_generator()]
+    pong = next(
+        response
+        for response in responses
+        if response["command"] == CONTROL_PING
+        and response.get("request_id") == "cached"
+    )
+    assert pong["last_cleanup_policy_stats"] == cached_policy_stats
+    assert (
+        pong[PONG_EXTENSION_KEY]["task_monitor"]["last_cycle"]["cleanup_policy_stats"]
+        == cached_policy_stats
+    )
 
 
 def test_task_monitor_failed_processor_does_not_advance_checkpoint(

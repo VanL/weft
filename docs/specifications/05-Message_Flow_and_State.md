@@ -253,8 +253,11 @@ Current rules:
   bounded local interval
 - the supervised `TaskMonitorTask` includes cached operational diagnostics in
   PONG extension data under `extended.task_monitor`: configuration, heartbeat
-  registration state, scheduling state, and the previous cycle summary. This
-  extension must not scan queues or recompute cleanup candidates during PING.
+  registration state, scheduling state, and the previous cycle summary. For
+  built-in cleanup processors, the summary includes cached queue-level cleanup
+  stats and cached policy-level cleanup stats under
+  `cleanup_policy_stats`. This extension must not scan queues or recompute
+  cleanup candidates during PING.
 
 _Implementation mapping_: `weft/core/heartbeat.py`;
 `weft/core/tasks/heartbeat.py`; `weft/core/manager.py`;
@@ -692,11 +695,14 @@ system pruning:
   that have visible start evidence but no terminal evidence in the current
   window. Reserved rows without retained terminal log proof remain protected
   recovery-sensitive evidence. Per-cycle collation summaries are operational
-  TaskMonitor evidence only, not durable archive records. The monitor must not
-  delete active work, ambiguous task-local evidence, claimed outbox residue,
-  user payload rows outside terminal-proven reserved cleanup, spawn requests,
-  manager control rows, or candidates without exact message IDs. `report_only`
-  remains available as a non-destructive override.
+  TaskMonitor evidence only, not durable archive records. Each cleanup cycle
+  also records cached policy stats for the policies that ran, including
+  zero-selected policy records so PONG can distinguish "ran and selected
+  nothing" from "did not run". The monitor must not delete active work,
+  ambiguous task-local evidence, claimed outbox residue, user payload rows
+  outside terminal-proven reserved cleanup, spawn requests, manager control
+  rows, or candidates without exact message IDs. `report_only` remains
+  available as a non-destructive override.
 - `weft system prune --family task-log|task-local|retention` is an explicit
   operator action, not a background sweeper. Ordinary apply mode requires an
   archive artifact before deletion. Force apply mode is a human override for
@@ -756,10 +762,14 @@ Current rules:
   logging-before-delete behavior in this slice. Its task-log policy order is
   malformed first, completed lifecycle collation second, truncated terminal
   collation third, terminal-proven reserved cleanup fourth, and broad
-  older-than deletion last with open-start TIDs protected. Reserved cleanup is
-  scoped to `T{tid}.reserved` queues for TIDs collated in the same pass and
-  requires old-enough exact rows plus terminal task-log proof for that TID.
-  Collate may emit operational per-cycle summaries before exact deletion so
+  older-than deletion last with open-start TIDs protected. Task-log cleanup uses
+  `WEFT_TASK_MONITOR_TASK_LOG_CUTOFF_SECONDS` as its minimum age cutoff,
+  defaulting to 172800 seconds. Reserved cleanup is scoped to `T{tid}.reserved`
+  queues for TIDs collated in the same pass and requires old-enough exact rows
+  plus terminal task-log proof for that TID.
+  Cleanup candidates carry a policy name so queue summaries and policy
+  summaries are derived from the same selected exact rows. Collate may emit
+  operational per-cycle summaries before exact deletion so
   operators can observe steady-state lifecycle reduction.
 - `weft system tidy` handles backend-native cleanup of empty queues and broker
   maintenance
@@ -811,3 +821,4 @@ management live in the companion doc:
 - [`docs/plans/2026-05-12-task-monitor-cleanup-composition-refactor-plan.md`](../plans/2026-05-12-task-monitor-cleanup-composition-refactor-plan.md)
 - [`docs/plans/2026-05-13-manager-liveness-and-leadership-robustness-plan.md`](../plans/2026-05-13-manager-liveness-and-leadership-robustness-plan.md)
 - [`docs/plans/2026-05-13-internal-state-machine-helper-plan.md`](../plans/2026-05-13-internal-state-machine-helper-plan.md)
+- [`docs/plans/2026-05-13-task-monitor-pong-policy-stats-plan.md`](../plans/2026-05-13-task-monitor-pong-policy-stats-plan.md)

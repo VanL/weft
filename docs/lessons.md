@@ -766,3 +766,8 @@ runbook needs to become stricter.
   Replaying the whole service registry or running status-style world scans from
   every leadership turn turns ops recovery into more database pressure exactly
   when the backend is already under load.
+- Manager replacement tests must model interleavings, not just steady states.
+  An incumbent can pass its self-superseded check before `--replace` writes a
+  `superseded` row, then publish an active heartbeat afterward. That heartbeat
+  must re-check for concurrent supersede before pruning self history, or it can
+  erase the operator's replacement evidence and resurrect itself as active.

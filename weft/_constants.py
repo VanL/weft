@@ -422,14 +422,50 @@ TASK_MONITOR_CHECKPOINT_PATH: Final[str] = "state/task-monitor/default.json"
 TASK_MONITOR_PONG_DETAIL_LIMIT: Final[int] = 20
 """Maximum list entries included in TaskMonitor extended PONG diagnostics."""
 
+TASK_MONITOR_POLICY_TID_MAPPING_DELETE_MALFORMED: Final[str] = (
+    "tid_mapping.delete_malformed"
+)
+"""TaskMonitor cleanup policy for malformed TID mapping runtime rows."""
+
+TASK_MONITOR_POLICY_TID_MAPPING_DELETE_OLDER_THAN: Final[str] = (
+    "tid_mapping.delete_older_than"
+)
+"""TaskMonitor cleanup policy for old TID mapping runtime rows."""
+
+TASK_MONITOR_POLICY_TASK_LOG_DELETE_MALFORMED: Final[str] = "task_log.delete_malformed"
+"""TaskMonitor cleanup policy for malformed task-log runtime rows."""
+
+TASK_MONITOR_POLICY_TASK_LOG_COLLATE_COMPLETE_LIFECYCLE: Final[str] = (
+    "task_log.collate_complete_lifecycle"
+)
+"""TaskMonitor cleanup policy for complete task-log lifecycle groups."""
+
+TASK_MONITOR_POLICY_TASK_LOG_COLLATE_TERMINAL_WITHOUT_START: Final[str] = (
+    "task_log.collate_terminal_without_start"
+)
+"""TaskMonitor cleanup policy for terminal task-log groups without visible start."""
+
+TASK_MONITOR_POLICY_TASK_LOG_DELETE_OLD_WITHOUT_START: Final[str] = (
+    "task_log.delete_old_without_start"
+)
+"""TaskMonitor cleanup policy for old task-log rows without open start evidence."""
+
+TASK_MONITOR_POLICY_RESERVED_DELETE_TERMINAL_PROVEN: Final[str] = (
+    "reserved.delete_terminal_proven"
+)
+"""TaskMonitor cleanup policy for reserved rows proven terminal by task logs."""
+
 WEFT_TASK_MONITOR_ENABLED_DEFAULT: Final[bool] = True
 """Default for manager supervision of the internal task monitor."""
 
 WEFT_TASK_MONITOR_INTERVAL_SECONDS_DEFAULT: Final[int] = 300
 """Default heartbeat wake interval for the supervised task monitor."""
 
-WEFT_TASK_MONITOR_BATCH_SIZE_DEFAULT: Final[int] = 1000
+WEFT_TASK_MONITOR_BATCH_SIZE_DEFAULT: Final[int] = 5000
 """Default maximum task-log rows scanned by one supervised monitor cycle."""
+
+TASK_MONITOR_TASK_LOG_CLEANUP_MIN_AGE_SECONDS: Final[float] = 172800.0
+"""Default minimum age before TaskMonitor deletes task-log rows."""
 
 WEFT_TASK_MONITOR_PROCESSOR_DEFAULT: Final[str] = "delete"
 """Default processor for supervised task-monitor candidates."""
@@ -481,19 +517,19 @@ SERVICE_TYPE_MANAGER: Final[str] = "manager"
 SERVICE_TYPE_MANAGED: Final[str] = "managed"
 """Service-owner type for manager-supervised internal/autostart services."""
 
-SERVICE_STATUS_ACTIVE: Final[str] = "active"
+SERVICE_STATUS_ACTIVE: Final[Literal["active"]] = "active"
 """Service-owner status for a live active service owner."""
 
-SERVICE_STATUS_DRAINING: Final[str] = "draining"
+SERVICE_STATUS_DRAINING: Final[Literal["draining"]] = "draining"
 """Service-owner status for an owner that is still visible while draining."""
 
-SERVICE_STATUS_STOPPED: Final[str] = "stopped"
+SERVICE_STATUS_STOPPED: Final[Literal["stopped"]] = "stopped"
 """Service-owner status for a stopped manager/service owner."""
 
-SERVICE_STATUS_SUPERSEDED: Final[str] = "superseded"
+SERVICE_STATUS_SUPERSEDED: Final[Literal["superseded"]] = "superseded"
 """Service-owner status for a replaced manager/service owner."""
 
-SERVICE_STATUS_TERMINAL: Final[str] = "terminal"
+SERVICE_STATUS_TERMINAL: Final[Literal["terminal"]] = "terminal"
 """Service-owner status for terminal managed-service evidence."""
 
 LIVE_SERVICE_STATUSES: Final[frozenset[str]] = frozenset(
@@ -1466,6 +1502,15 @@ def _parse_task_monitor_batch_size(value: str) -> int:
     return _parse_positive_int(value, name="WEFT_TASK_MONITOR_BATCH_SIZE")
 
 
+def _parse_task_monitor_task_log_cutoff_seconds(value: str) -> float:
+    """Parse the task-monitor task-log cleanup cutoff environment variable."""
+
+    return _parse_positive_float(
+        value,
+        name="WEFT_TASK_MONITOR_TASK_LOG_CUTOFF_SECONDS",
+    )
+
+
 def _parse_task_monitor_processor(value: str) -> str:
     """Parse the task-monitor processor name or dotted callable reference."""
 
@@ -1695,6 +1740,11 @@ def _load_weft_env_vars() -> dict[str, Any]:
             default=WEFT_TASK_MONITOR_BATCH_SIZE_DEFAULT,
             parser=_parse_task_monitor_batch_size,
         ),
+        "WEFT_TASK_MONITOR_TASK_LOG_CUTOFF_SECONDS": _load_weft_env_value(
+            "WEFT_TASK_MONITOR_TASK_LOG_CUTOFF_SECONDS",
+            default=TASK_MONITOR_TASK_LOG_CLEANUP_MIN_AGE_SECONDS,
+            parser=_parse_task_monitor_task_log_cutoff_seconds,
+        ),
         "WEFT_TASK_MONITOR_PROCESSOR": _load_weft_env_value(
             "WEFT_TASK_MONITOR_PROCESSOR",
             default=WEFT_TASK_MONITOR_PROCESSOR_DEFAULT,
@@ -1799,6 +1849,15 @@ def _normalize_weft_override_value(name: str, value: Any) -> Any:
         if isinstance(value, int):
             return _parse_task_monitor_batch_size(str(value))
         raise TypeError("WEFT_TASK_MONITOR_BATCH_SIZE override must be int or str")
+    if name == "WEFT_TASK_MONITOR_TASK_LOG_CUTOFF_SECONDS":
+        if isinstance(value, str):
+            return _parse_task_monitor_task_log_cutoff_seconds(value)
+        if isinstance(value, int | float):
+            return _parse_task_monitor_task_log_cutoff_seconds(str(float(value)))
+        raise TypeError(
+            "WEFT_TASK_MONITOR_TASK_LOG_CUTOFF_SECONDS override must be int, "
+            "float, or str"
+        )
     if name == "WEFT_TASK_MONITOR_PROCESSOR":
         if isinstance(value, str):
             return _parse_task_monitor_processor(value)

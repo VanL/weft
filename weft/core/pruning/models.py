@@ -34,6 +34,7 @@ class CleanupCandidate:
 
     queue: str
     message_id: int
+    policy: str
     candidate_class: str
     reason: str
     tid: str | None = None
@@ -81,9 +82,38 @@ class CleanupQueueStats:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class CleanupPolicyStats:
+    """Summary of one cleanup policy's work in a queue."""
+
+    policy: str
+    queue: str
+    scanned: int
+    selected: int
+    deleted: int = 0
+    reported: int = 0
+    stop_reason: str | None = None
+    reason_counts: Mapping[str, int] = field(default_factory=dict)
+
+    def to_summary(self) -> dict[str, Any]:
+        """Return a JSON-safe operational summary."""
+
+        return {
+            "policy": self.policy,
+            "queue": self.queue,
+            "scanned": self.scanned,
+            "selected": self.selected,
+            "deleted": self.deleted,
+            "reported": self.reported,
+            "stop_reason": self.stop_reason,
+            "reason_counts": dict(self.reason_counts),
+        }
+
+
 def cleanup_candidate_from_row(
     row: QueueWindowRow,
     *,
+    policy: str,
     candidate_class: str,
     reason: str,
     tid: str | None = None,
@@ -103,6 +133,7 @@ def cleanup_candidate_from_row(
     return CleanupCandidate(
         queue=row.queue,
         message_id=row.message_id,
+        policy=policy,
         candidate_class=candidate_class,
         reason=reason,
         tid=tid,
@@ -130,6 +161,27 @@ def cleanup_queue_stats(
         stop_reason=stop_reason,
         reason_counts=dict(reason_counts),
         collated_tasks=collated_tasks,
+    )
+
+
+def cleanup_policy_stats(
+    queue_name: str,
+    *,
+    policy: str,
+    scanned: int,
+    candidates: Sequence[CleanupCandidate],
+    stop_reason: str | None,
+) -> CleanupPolicyStats:
+    """Build cleanup stats for one policy from selected candidates."""
+
+    reason_counts = Counter(candidate.reason for candidate in candidates)
+    return CleanupPolicyStats(
+        policy=policy,
+        queue=queue_name,
+        scanned=scanned,
+        selected=len(candidates),
+        stop_reason=stop_reason,
+        reason_counts=dict(reason_counts),
     )
 
 

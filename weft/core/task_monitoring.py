@@ -27,6 +27,7 @@ from simplebroker.ext import BrokerError
 from weft._constants import (
     HEARTBEAT_MIN_INTERVAL_SECONDS,
     STATUS_RUNTIMELESS_STALE_AFTER_SECONDS,
+    TASK_MONITOR_TASK_LOG_CLEANUP_MIN_AGE_SECONDS,
     TASK_MONITOR_WEFT_ANOMALY_CLASSIFICATIONS,
     TERMINAL_TASK_EVENTS,
     TERMINAL_TASK_STATUSES,
@@ -57,6 +58,7 @@ class TaskMonitorRuntimeConfig:
     enabled: bool = WEFT_TASK_MONITOR_ENABLED_DEFAULT
     interval_seconds: int = WEFT_TASK_MONITOR_INTERVAL_SECONDS_DEFAULT
     batch_size: int = WEFT_TASK_MONITOR_BATCH_SIZE_DEFAULT
+    task_log_cutoff_seconds: float = TASK_MONITOR_TASK_LOG_CLEANUP_MIN_AGE_SECONDS
     processor: str = WEFT_TASK_MONITOR_PROCESSOR_DEFAULT
     log_sink: str = WEFT_TASK_MONITOR_LOG_SINK_DEFAULT
     restart_backoff_seconds: float = WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS_DEFAULT
@@ -88,6 +90,17 @@ class TaskMonitorRuntimeConfig:
         )
         if batch_size <= 0:
             raise ValueError("WEFT_TASK_MONITOR_BATCH_SIZE must be positive")
+
+        task_log_cutoff_seconds = float(
+            config.get(
+                "WEFT_TASK_MONITOR_TASK_LOG_CUTOFF_SECONDS",
+                TASK_MONITOR_TASK_LOG_CLEANUP_MIN_AGE_SECONDS,
+            )
+        )
+        if task_log_cutoff_seconds <= 0:
+            raise ValueError(
+                "WEFT_TASK_MONITOR_TASK_LOG_CUTOFF_SECONDS must be positive"
+            )
 
         processor = str(
             config.get(
@@ -128,6 +141,7 @@ class TaskMonitorRuntimeConfig:
             enabled=enabled,
             interval_seconds=interval_seconds,
             batch_size=batch_size,
+            task_log_cutoff_seconds=task_log_cutoff_seconds,
             processor=processor,
             log_sink=log_sink,
             restart_backoff_seconds=restart_backoff_seconds,

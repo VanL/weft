@@ -121,6 +121,7 @@ def test_runtime_config_reads_loaded_weft_config() -> None:
             "WEFT_TASK_MONITOR_ENABLED": "0",
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": str(HEARTBEAT_MIN_INTERVAL_SECONDS),
             "WEFT_TASK_MONITOR_BATCH_SIZE": 12,
+            "WEFT_TASK_MONITOR_TASK_LOG_CUTOFF_SECONDS": 172800.0,
             "WEFT_TASK_MONITOR_PROCESSOR": "report_only",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
             "WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS": 3.5,
@@ -132,6 +133,7 @@ def test_runtime_config_reads_loaded_weft_config() -> None:
     assert runtime_config.enabled is False
     assert runtime_config.interval_seconds == HEARTBEAT_MIN_INTERVAL_SECONDS
     assert runtime_config.batch_size == 12
+    assert runtime_config.task_log_cutoff_seconds == 172800.0
     assert runtime_config.processor == "report_only"
     assert runtime_config.log_sink == "none"
     assert runtime_config.restart_backoff_seconds == 3.5

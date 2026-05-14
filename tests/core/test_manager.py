@@ -2768,7 +2768,7 @@ def test_manager_registry_prunes_expired_rows_on_refresh(
     ]
 
 
-def test_manager_does_not_publish_when_recent_lower_canonical_manager_exists(
+def test_manager_publishes_inactive_when_recent_lower_canonical_manager_exists(
     manager_setup,
     monkeypatch,
 ) -> None:
@@ -2790,7 +2790,9 @@ def test_manager_does_not_publish_when_recent_lower_canonical_manager_exists(
     manager._refresh_manager_registration()
 
     entries = [json.loads(item) for item in drain(registry_queue)]
-    assert [entry["tid"] for entry in entries] == [lower_tid]
+    assert [entry["tid"] for entry in entries] == [lower_tid, manager.tid]
+    own_entry = entries[-1]
+    assert own_entry["status"] == "draining"
 
 
 def test_manager_registers_when_lower_canonical_manager_is_stale(
@@ -4170,6 +4172,55 @@ def test_manager_leadership_yield_waits_while_persistent_children_exist(
     manager._child_processes.clear()
 
 
+def test_manager_lower_leader_blocks_active_heartbeat_with_persistent_child(
+    manager_setup,
+) -> None:
+    manager, make_queue = manager_setup
+    registry_queue = make_queue(WEFT_SERVICES_REGISTRY_QUEUE)
+    lower_leader_tid = str(int(manager.tid) - 1)
+
+    class FakeProcess:
+        pid = 424245
+        exitcode = None
+
+        def is_alive(self) -> bool:
+            return True
+
+        def join(self, timeout: float | None = None) -> None:
+            return None
+
+    registry_queue.write(
+        json.dumps(
+            _manager_service_payload(
+                manager,
+                tid=lower_leader_tid,
+                runtime_handle=_host_runtime_handle(os.getpid()),
+            )
+        )
+    )
+    manager._child_processes["persistent-child"] = ManagedChild(
+        process=FakeProcess(),
+        ctrl_queue=None,
+        persistent=True,
+    )
+
+    try:
+        manager._refresh_manager_registration(force=True)
+    finally:
+        manager._child_processes.clear()
+
+    rows = _managed_service_owner_rows(make_queue)
+    own_rows = [row for row in rows if row.get("tid") == manager.tid]
+    assert own_rows
+    assert own_rows[-1]["status"] == "draining"
+    assert not any(row.get("status") == "active" for row in own_rows)
+
+    active = manager._active_dispatch_manager_records()
+    assert active is not None
+    assert manager.tid not in active
+    assert lower_leader_tid in active
+
+
 def test_manager_leadership_ignores_noncanonical_lower_manager(
     manager_setup,
 ) -> None:
@@ -4252,6 +4303,68 @@ def test_manager_superseded_self_record_stops_without_republishing_active(
     own_rows = [row for row in rows if row.get("tid") == manager.tid]
     assert own_rows
     assert own_rows[-1]["status"] == SERVICE_STATUS_SUPERSEDED
+
+
+def test_manager_active_heartbeat_race_preserves_superseded_record(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, make_queue = manager_setup
+    registry_queue = make_queue(WEFT_SERVICES_REGISTRY_QUEUE)
+    original_queue = manager._queue
+    superseded_payload = json.dumps(
+        _manager_service_payload(
+            manager,
+            tid=manager.tid,
+            status=SERVICE_STATUS_SUPERSEDED,
+            runtime_handle=_host_runtime_handle(os.getpid()),
+        )
+    )
+
+    class InterleavingRegistryQueue:
+        def __init__(self) -> None:
+            self.injected = False
+
+        def write(self, payload: str) -> int | None:
+            if not self.injected:
+                self.injected = True
+                for raw, timestamp in list(
+                    registry_queue.peek_generator(with_timestamps=True)
+                ):
+                    try:
+                        existing = json.loads(raw)
+                    except (TypeError, json.JSONDecodeError):
+                        continue
+                    if (
+                        isinstance(existing, dict)
+                        and existing.get("tid") == manager.tid
+                    ):
+                        registry_queue.delete(message_id=timestamp)
+                registry_queue.write(superseded_payload)
+            return registry_queue.write(payload)
+
+        def peek_generator(self, *args: object, **kwargs: object) -> object:
+            return registry_queue.peek_generator(*args, **kwargs)
+
+        def delete(self, *args: object, **kwargs: object) -> object:
+            return registry_queue.delete(*args, **kwargs)
+
+    interleaving_queue = InterleavingRegistryQueue()
+
+    def fake_queue(name: str, *args: object, **kwargs: object) -> object:
+        if name == WEFT_SERVICES_REGISTRY_QUEUE:
+            return interleaving_queue
+        return original_queue(name, *args, **kwargs)
+
+    monkeypatch.setattr(manager, "_queue", fake_queue)
+
+    manager._refresh_manager_registration(force=True)
+
+    rows = _managed_service_owner_rows(make_queue)
+    own_rows = [row for row in rows if row.get("tid") == manager.tid]
+    assert [row["status"] for row in own_rows] == [SERVICE_STATUS_SUPERSEDED]
+    assert manager.should_stop is True
+    assert manager.taskspec.state.status == "cancelled"
 
 
 def test_cleanup_children_reaps_os_dead_child_without_mapping_scan(

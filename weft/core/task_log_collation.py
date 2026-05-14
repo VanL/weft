@@ -76,13 +76,19 @@ def collate_next_task_log_group(
     exclude_tids: set[str],
     claimed_ids: set[int],
     skipped_tids: set[str],
+    skipped_message_ids: set[int] | None = None,
 ) -> CollationResult:
     """Return the next completed task-log group from a bounded window."""
 
+    skipped_ids = skipped_message_ids or set()
     anchor_index: int | None = None
     anchor_tid: str | None = None
     for index, row in enumerate(rows):
-        if row.raw.message_id in claimed_ids or row.malformed_reason is not None:
+        if (
+            row.raw.message_id in claimed_ids
+            or row.raw.message_id in skipped_ids
+            or row.malformed_reason is not None
+        ):
             continue
         tid = row.tid
         if tid is None or tid in exclude_tids or tid in skipped_tids:
@@ -100,7 +106,11 @@ def collate_next_task_log_group(
     collected: list[DecodedQueueWindowRow] = []
     terminal_row: DecodedQueueWindowRow | None = None
     for row in rows[anchor_index:]:
-        if row.raw.message_id in claimed_ids or row.malformed_reason is not None:
+        if (
+            row.raw.message_id in claimed_ids
+            or row.raw.message_id in skipped_ids
+            or row.malformed_reason is not None
+        ):
             continue
         if row.tid != anchor_tid:
             continue

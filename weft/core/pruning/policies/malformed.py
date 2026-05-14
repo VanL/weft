@@ -11,6 +11,7 @@ from weft.core.queue_window import DecodedQueueWindowRow
 def malformed_row_candidates(
     rows: Sequence[DecodedQueueWindowRow],
     *,
+    policy: str,
     candidate_class: str,
     claimed_ids: set[int] | None = None,
 ) -> list[CleanupCandidate]:
@@ -24,6 +25,7 @@ def malformed_row_candidates(
         candidates.append(
             cleanup_candidate_from_row(
                 row.raw,
+                policy=policy,
                 candidate_class=candidate_class,
                 reason=row.malformed_reason,
                 tid=row.tid,

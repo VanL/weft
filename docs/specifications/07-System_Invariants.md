@@ -169,7 +169,11 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
   without terminal task-log proof for the same TID in the cleanup pass, or
   non-exact lifecycle evidence. Task-log collation summaries emitted by the
   monitor are operational evidence about cleanup work performed; they are not
-  durable task lifecycle truth or archival records.
+  durable task lifecycle truth or archival records. TaskMonitor PONG cleanup
+  diagnostics are cached from the last cleanup cycle. They may report both
+  queue-level stats and policy-level stats, including zero-selected policy
+  rows, but PONG must not perform queue scans, recompute cleanup candidates, or
+  delete/report rows while answering a liveness request.
 - **OBS.14**: claimed outbox residue is recovery evidence, not decoded result
   evidence. Status/result readers may surface
   `claimed_result_without_terminal`, but they must not delete, unclaim, or
@@ -359,11 +363,12 @@ with no visible start as truncated groups, delete old reserved rows for TIDs
 that were terminal-collated in the same pass, and only then apply broad
 older-than deletion while preserving open-start TIDs in the bounded window.
 Reserved rows without retained terminal log proof stay protected by default.
-Collation summaries remain operational TaskMonitor output only. Those deletes
-and summaries do not make task-monitor output lifecycle truth or result
-authority. `weft.log.tasks` remains runtime lifecycle evidence while retained,
-not audit, forensic, or legal-retention evidence. `report_only` remains
-available as a non-destructive override. Cleanup orchestration lives in
+Collation summaries and cleanup policy stats remain operational TaskMonitor
+output only. Those deletes and summaries do not make task-monitor output
+lifecycle truth or result authority. `weft.log.tasks` remains runtime lifecycle
+evidence while retained, not audit, forensic, or legal-retention evidence.
+`report_only` remains available as a non-destructive override. Cleanup
+orchestration lives in
 `weft/core/tasks/task_monitor_cleanup.py`; reusable row policies live under
 `weft/core/pruning/policies/`; task-log grouping lives in
 `weft/core/task_log_collation.py`; exact deletion still goes through
@@ -398,6 +403,7 @@ doc:
 - [`docs/plans/2026-05-11-manager-work-stealing-dispatch-plan.md`](../plans/2026-05-11-manager-work-stealing-dispatch-plan.md)
 - [`docs/plans/2026-05-12-bounded-task-monitor-cleanup-policy-plan.md`](../plans/2026-05-12-bounded-task-monitor-cleanup-policy-plan.md)
 - [`docs/plans/2026-05-12-task-monitor-cleanup-composition-refactor-plan.md`](../plans/2026-05-12-task-monitor-cleanup-composition-refactor-plan.md)
+- [`docs/plans/2026-05-13-task-monitor-pong-policy-stats-plan.md`](../plans/2026-05-13-task-monitor-pong-policy-stats-plan.md)
 
 ## Related Documents
 

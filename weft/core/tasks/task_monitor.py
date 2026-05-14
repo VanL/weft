@@ -141,6 +141,7 @@ class TaskMonitorTask(BaseTask):
         self._last_errors: tuple[str, ...] = ()
         self._last_prune_records_scanned = 0
         self._last_cleanup_queue_stats: tuple[dict[str, Any], ...] = ()
+        self._last_cleanup_policy_stats: tuple[dict[str, Any], ...] = ()
         self._heartbeat_registered = False
         self._heartbeat_error: str | None = None
         self._heartbeat_id = f"task-monitor:{taskspec.tid}"
@@ -246,6 +247,7 @@ class TaskMonitorTask(BaseTask):
             enabled=self._monitor_config.enabled,
             interval_seconds=self._monitor_config.interval_seconds,
             batch_size=self._monitor_config.batch_size,
+            task_log_cutoff_seconds=self._monitor_config.task_log_cutoff_seconds,
             processor=self._monitor_config.processor,
             log_sink=self._monitor_config.log_sink,
         )
@@ -398,6 +400,9 @@ class TaskMonitorTask(BaseTask):
                 "mode": "persistent",
                 "interval_seconds": self._monitor_config.interval_seconds,
                 "batch_size": self._monitor_config.batch_size,
+                "task_log_cutoff_seconds": (
+                    self._monitor_config.task_log_cutoff_seconds
+                ),
                 "log_sink": self._monitor_config.log_sink,
                 "last_cycle_at": self._last_cycle_at,
                 "last_checkpoint": self._last_checkpoint,
@@ -413,6 +418,7 @@ class TaskMonitorTask(BaseTask):
                 "last_errors": list(self._last_errors),
                 "last_prune_records_scanned": self._last_prune_records_scanned,
                 "last_cleanup_queue_stats": list(self._last_cleanup_queue_stats),
+                "last_cleanup_policy_stats": list(self._last_cleanup_policy_stats),
             }
         )
         return payload
@@ -440,6 +446,9 @@ class TaskMonitorTask(BaseTask):
                 "processor": self._monitor_config.processor,
                 "interval_seconds": self._monitor_config.interval_seconds,
                 "batch_size": self._monitor_config.batch_size,
+                "task_log_cutoff_seconds": (
+                    self._monitor_config.task_log_cutoff_seconds
+                ),
                 "log_sink": self._monitor_config.log_sink,
                 "heartbeat": {
                     "registered": self._heartbeat_registered,
@@ -465,6 +474,9 @@ class TaskMonitorTask(BaseTask):
                     "reported": self._last_reported,
                     "prune_records_scanned": self._last_prune_records_scanned,
                     "cleanup_queue_stats": list(self._last_cleanup_queue_stats)[
+                        :TASK_MONITOR_PONG_DETAIL_LIMIT
+                    ],
+                    "cleanup_policy_stats": list(self._last_cleanup_policy_stats)[
                         :TASK_MONITOR_PONG_DETAIL_LIMIT
                     ],
                     "warnings": list(self._last_warnings)[
@@ -560,6 +572,7 @@ class TaskMonitorTask(BaseTask):
             self._last_safe_to_delete_candidates = 0
             self._last_prune_records_scanned = 0
             self._last_cleanup_queue_stats = ()
+            self._last_cleanup_policy_stats = ()
         else:
             self._set_activity("scanning", waiting_on=WEFT_GLOBAL_LOG_QUEUE)
             candidates, last_timestamp, events_scanned = (
@@ -574,6 +587,7 @@ class TaskMonitorTask(BaseTask):
             )
             self._last_prune_records_scanned = 0
             self._last_cleanup_queue_stats = ()
+            self._last_cleanup_policy_stats = ()
 
         result = self._process_monitor_candidates(candidates, now_ns=now_ns)
 
@@ -608,6 +622,7 @@ class TaskMonitorTask(BaseTask):
             "safe_to_delete_count": self._last_safe_to_delete_candidates,
             "cleanup_records_scanned": self._last_prune_records_scanned,
             "cleanup_queue_stats": self._last_cleanup_queue_stats,
+            "cleanup_policy_stats": self._last_cleanup_policy_stats,
             "processed": result.processed,
             "deleted": result.deleted,
             "reported": result.reported,
@@ -686,12 +701,14 @@ class TaskMonitorTask(BaseTask):
             ctx,
             TaskMonitorCleanupConfig(
                 batch_size=self._monitor_config.batch_size,
+                task_log_min_age_seconds=(self._monitor_config.task_log_cutoff_seconds),
             ),
             apply=apply,
             exclude_tids=(self.tid,),
         )
         self._last_prune_records_scanned = cleanup.records_scanned
         self._last_cleanup_queue_stats = cleanup.queue_stats_summary()
+        self._last_cleanup_policy_stats = cleanup.policy_stats_summary()
         return TaskMonitorProcessorResult(
             success=cleanup.success,
             processed=cleanup.processed,

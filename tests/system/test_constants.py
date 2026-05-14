@@ -409,6 +409,7 @@ class TestLoadConfig:
                     HEARTBEAT_MIN_INTERVAL_SECONDS
                 ),
                 "WEFT_TASK_MONITOR_BATCH_SIZE": "42",
+                "WEFT_TASK_MONITOR_TASK_LOG_CUTOFF_SECONDS": "172800",
                 "WEFT_TASK_MONITOR_PROCESSOR": "tests.core.test_task_monitoring:noop",
                 "WEFT_TASK_MONITOR_LOG_SINK": "disk",
                 "WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS": "2.5",
@@ -422,6 +423,7 @@ class TestLoadConfig:
             HEARTBEAT_MIN_INTERVAL_SECONDS
         )
         assert config["WEFT_TASK_MONITOR_BATCH_SIZE"] == 42
+        assert config["WEFT_TASK_MONITOR_TASK_LOG_CUTOFF_SECONDS"] == 172800.0
         assert (
             config["WEFT_TASK_MONITOR_PROCESSOR"]
             == "tests.core.test_task_monitoring:noop"
@@ -449,6 +451,17 @@ class TestLoadConfig:
             clear=True,
         ):
             with pytest.raises(ValueError, match="WEFT_TASK_MONITOR_BATCH_SIZE"):
+                load_config()
+
+    def test_task_monitor_task_log_cutoff_rejects_zero(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"WEFT_TASK_MONITOR_TASK_LOG_CUTOFF_SECONDS": "0"},
+            clear=True,
+        ):
+            with pytest.raises(
+                ValueError, match="WEFT_TASK_MONITOR_TASK_LOG_CUTOFF_SECONDS"
+            ):
                 load_config()
 
     @pytest.mark.parametrize("level", ["off", "info", "debug", "trace"])
