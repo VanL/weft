@@ -1567,6 +1567,13 @@ def manager_list_command(
         bool,
         typer.Option("--json", help="Output manager statuses as JSON"),
     ] = False,
+    diagnostic: Annotated[
+        bool,
+        typer.Option(
+            "--diagnostic",
+            help="Show explicit registry liveness and canonical-owner diagnostics",
+        ),
+    ] = False,
     context: Annotated[
         Path | None,
         typer.Option("--context", help="Weft project directory"),
@@ -1575,6 +1582,7 @@ def manager_list_command(
     exit_code, payload = manager_cmd.list_command(
         json_output=json_output,
         include_stopped=include_stopped,
+        diagnostic=diagnostic,
         context_path=context,
     )
     if payload:

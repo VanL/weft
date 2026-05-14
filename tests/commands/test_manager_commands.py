@@ -770,6 +770,122 @@ def test_list_command_omits_stale_external_supervisor_manager(
     assert tid not in {record["tid"] for record in json.loads(payload)}
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX only")
+def test_list_command_diagnostic_includes_stale_active_manager(tmp_path) -> None:
+    context_root = prepare_project_root(tmp_path / "ctx")
+    context = build_context(context_root)
+    tid = "1761000000000000018"
+
+    process = subprocess.Popen([sys.executable, "-c", "import os; os._exit(0)"])
+    try:
+        process.wait(timeout=2.0)
+        registry_queue = context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
+        try:
+            registry_queue.write(
+                json.dumps(
+                    _manager_service_payload(
+                        context,
+                        tid,
+                        name="stale-manager",
+                        runtime_handle=_host_runtime_handle(process.pid),
+                    )
+                )
+            )
+        finally:
+            registry_queue.close()
+    finally:
+        process.wait()
+
+    exit_code, payload = manager_cmd.list_command(
+        json_output=True,
+        diagnostic=True,
+        context_path=context_root,
+    )
+
+    assert exit_code == 0
+    records = json.loads(payload)
+    record = next(record for record in records if record["tid"] == tid)
+    assert record["liveness"] == "stale"
+    assert record["proof_source"] == "host-pid"
+    assert record["canonical"] is False
+    assert record["dispatch_eligible"] is False
+
+
+def test_list_command_diagnostic_marks_lowest_live_manager_canonical(
+    tmp_path,
+) -> None:
+    context_root = prepare_project_root(tmp_path / "ctx")
+    context = build_context(context_root)
+    lower_tid = "1761000000000000019"
+    higher_tid = "1761000000000000020"
+
+    registry_queue = context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
+    try:
+        for tid in (higher_tid, lower_tid):
+            registry_queue.write(
+                json.dumps(
+                    _manager_service_payload(
+                        context,
+                        tid,
+                        runtime_handle=_host_runtime_handle(os.getpid()),
+                    )
+                )
+            )
+    finally:
+        registry_queue.close()
+
+    exit_code, payload = manager_cmd.list_command(
+        json_output=True,
+        diagnostic=True,
+        context_path=context_root,
+    )
+
+    assert exit_code == 0
+    records = {record["tid"]: record for record in json.loads(payload)}
+    assert records[lower_tid]["liveness"] == "live"
+    assert records[higher_tid]["liveness"] == "live"
+    assert records[lower_tid]["proof_source"] == "host-pid"
+    assert records[lower_tid]["canonical"] is True
+    assert records[higher_tid]["canonical"] is False
+
+
+def test_list_command_rescues_unreachable_host_pid_with_pong(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    context_root = prepare_project_root(tmp_path / "ctx")
+    context = build_context(context_root)
+    tid = "1761000000000000022"
+
+    registry_queue = context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
+    try:
+        registry_queue.write(
+            json.dumps(
+                _manager_service_payload(
+                    context,
+                    tid,
+                    runtime_handle=_host_runtime_handle(987654321),
+                )
+            )
+        )
+    finally:
+        registry_queue.close()
+    monkeypatch.setattr(
+        core_manager_runtime,
+        "_manager_record_has_matched_pong",
+        lambda *args, **kwargs: True,
+    )
+
+    exit_code, payload = manager_cmd.list_command(
+        json_output=True,
+        context_path=context_root,
+    )
+
+    assert exit_code == 0
+    records = json.loads(payload)
+    assert tid in {record["tid"] for record in records}
+
+
 def test_stop_command_force_reports_fresh_external_supervisor_without_host_pid(
     tmp_path,
     monkeypatch,

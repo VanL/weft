@@ -1735,6 +1735,15 @@ class Manager(BaseTask):
                 source="runtime-handle",
             )
         if liveness == "stale":
+            if allow_ping:
+                proof = self._manager_pong_dispatch_proof(record, now_ns=now_ns)
+                if proof.liveness == "unknown":
+                    return ManagerLeadershipProof(
+                        "stale",
+                        source=proof.source,
+                        reason=proof.reason,
+                    )
+                return proof
             return ManagerLeadershipProof("stale", source="runtime-handle")
         if allow_ping:
             return self._manager_pong_dispatch_proof(record, now_ns=now_ns)

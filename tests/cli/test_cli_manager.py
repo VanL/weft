@@ -357,6 +357,51 @@ def test_manager_list_and_status_agree_on_stale_active_manager(workdir):
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX only")
+def test_manager_list_diagnostic_shows_stale_active_manager(workdir):
+    context_root = prepare_project_root(workdir / "diagnostic-stale-manager")
+    context = build_context(spec_context=context_root)
+    tid = "1761000000000000021"
+
+    process = subprocess.Popen([sys.executable, "-c", "import os; os._exit(0)"])
+    try:
+        process.wait(timeout=2.0)
+        registry_queue = context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
+        try:
+            registry_queue.write(
+                json.dumps(
+                    _manager_service_payload(
+                        context,
+                        tid=tid,
+                        name="stale-manager",
+                        runtime_handle=_host_runtime_handle(process.pid),
+                    )
+                )
+            )
+        finally:
+            registry_queue.close()
+    finally:
+        process.wait()
+
+    rc, out, err = run_cli(
+        "manager",
+        "list",
+        "--diagnostic",
+        "--json",
+        "--context",
+        context_root,
+        cwd=workdir,
+    )
+
+    assert rc == 0
+    assert err == ""
+    records = json.loads(out or "[]")
+    record = next(record for record in records if record["tid"] == tid)
+    assert record["liveness"] == "stale"
+    assert record["proof_source"] == "host-pid"
+    assert record["canonical"] is False
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX only")
 def test_manager_start_replaces_stale_active_manager(workdir):
     context_root = prepare_project_root(workdir / "stale-manager-start")
     context = build_context(spec_context=context_root)

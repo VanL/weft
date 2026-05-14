@@ -542,6 +542,11 @@ Current rules:
   PID existence; if `observations.host_processes` includes process creation
   times, PID liveness checks must reject records whose current process identity
   does not match the recorded one
+- a host-pid manager record whose PID cannot be observed from the current PID
+  namespace is stale-looking but not enough by itself to erase a dispatchable
+  manager. Startup, selection, and manager-owned leadership checks may rescue
+  the row with a bounded keyed PING/PONG when the PONG proves manager role,
+  queue identity, context, and non-terminal status.
 - detached-launcher acknowledgement and startup-stderr cleanup are best-effort
   post-proof steps; they may warn, but they do not downgrade a successfully
   proven manager start into submission failure

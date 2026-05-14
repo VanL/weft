@@ -4279,6 +4279,56 @@ def test_manager_leadership_yields_to_canonical_lower_manager(
     assert yield_event["leader_tid"] == lower_tid
 
 
+def test_manager_leadership_can_rescue_unreachable_host_pid_with_pong(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, make_queue = manager_setup
+    registry_queue = make_queue(WEFT_SERVICES_REGISTRY_QUEUE)
+    lower_tid = str(int(manager.tid) - 1)
+    registry_queue.write(
+        json.dumps(
+            _manager_service_payload(
+                manager,
+                tid=lower_tid,
+                runtime_handle=_host_runtime_handle(987654321),
+            )
+        )
+    )
+    monkeypatch.setattr(
+        manager_mod,
+        "handle_has_live_host_process",
+        lambda _handle: False,
+    )
+
+    def _matched_pong(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            matched=SimpleNamespace(
+                payload={
+                    "tid": lower_tid,
+                    "task_status": "running",
+                    "role": "manager",
+                    "requests": WEFT_SPAWN_REQUESTS_QUEUE,
+                    "ctrl_in": WEFT_MANAGER_CTRL_IN_QUEUE,
+                    "ctrl_out": WEFT_MANAGER_CTRL_OUT_QUEUE,
+                    "should_stop": False,
+                },
+                observed_at=time.time_ns(),
+            ),
+            error=None,
+        )
+
+    monkeypatch.setattr(manager_mod, "send_keyed_ping_probe", _matched_pong)
+
+    active = manager._active_dispatch_manager_records()
+    yielded = manager._maybe_yield_leadership(force=True)
+
+    assert active is not None
+    assert lower_tid in active
+    assert yielded is True
+    assert manager.should_stop is True
+
+
 def test_manager_superseded_self_record_stops_without_republishing_active(
     manager_setup,
 ) -> None:

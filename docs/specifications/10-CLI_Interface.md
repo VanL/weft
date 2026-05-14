@@ -466,6 +466,12 @@ interchangeable with `manager start`.
 stopped registry/process evidence. `weft manager stop` without a TID resolves
 the selected active manager for the current context and stops that manager; if
 no active manager is selected, it exits successfully without sending control.
+`weft manager list --diagnostic` keeps the default manager-list semantics behind
+an explicit operator flag: it reads the latest known manager service-owner rows
+without stale pruning, classifies each row as live/stale/unknown/non-live,
+reports the proof source (`host-pid`, `external-supervisor`, `pong`, or registry
+metadata), and marks the selected canonical live owner. It is a diagnostic view
+of `weft.state.services`, not a fallback process table.
 
 Pattern-based task stop/kill reuse queue broadcast and control messages rather
 than inventing a second control channel.
@@ -473,6 +479,7 @@ than inventing a second control channel.
 Implementation plan backlink:
 [`2026-05-10-control-and-service-convergence-state-machine-plan.md`](../plans/2026-05-10-control-and-service-convergence-state-machine-plan.md).
 [`2026-05-13-manager-replace-start-serve-plan.md`](../plans/2026-05-13-manager-replace-start-serve-plan.md).
+[`2026-05-14-manager-list-diagnostics-plan.md`](../plans/2026-05-14-manager-list-diagnostics-plan.md).
 
 ## Spec Management (`weft spec …`) [CLI-1.4]
 

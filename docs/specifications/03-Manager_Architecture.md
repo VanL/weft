@@ -53,6 +53,7 @@ always be rolled back from the public request queue.
 - [Manager Serve Operational Log Plan](../plans/2026-05-11-manager-serve-operational-log-plan.md) – draft plan for level-controlled foreground `manager serve` operational logs that expose registry, loop, service-convergence, spawn, and TaskMonitor decisions without writing lifecycle state.
 - [Manager Replace Start And Serve Plan](../plans/2026-05-13-manager-replace-start-serve-plan.md) – completed plan for explicit `weft manager start --replace` and `weft manager serve --replace` operator replacement semantics using the existing STOP control path.
 - [Manager Liveness And Leadership Robustness Plan](../plans/2026-05-13-manager-liveness-and-leadership-robustness-plan.md) – completed plan requiring strong live dispatch-authority proof before leadership yield, keeping external-supervisor `unknown` evidence from acting as authority, and bounding leadership-drain recovery without broad status scans.
+- [Manager Liveness And List Diagnostics Plan](../plans/2026-05-14-manager-list-diagnostics-plan.md) – improves cross-namespace manager liveness fallback through keyed PING/PONG and adds an explicit operator diagnostic list mode for manager registry liveness, proof source, and canonical-owner visibility without changing election behavior.
 - [Internal State Machine Helper Plan](../plans/2026-05-13-internal-state-machine-helper-plan.md) – draft plan for a reusable pure reducer helper that can express manager-service and other transition tables without moving side effects out of their current owners.
 - [Internal Service Observability Plan](../plans/2026-05-11-internal-service-observability-plan.md) – adds an ops read model that reports heartbeat and TaskMonitor state from manager launch evidence, child task logs, TID mappings, and internal spawn queues.
 
@@ -137,14 +138,16 @@ Key responsibilities implemented in `weft/core/manager.py`:
    running dispatch-capable manager must not voluntarily yield to an unknown
    external-supervisor row. Manager-owned leadership checks keep a scoped
    in-memory registry view and update it from broker timestamps instead of
-   replaying the full service registry every loop turn. When startup or manager
-   selection sees an otherwise canonical active manager row that lacks strong
-   runtime proof, it may send one bounded keyed PING to that manager's
-   task-local control queue. A matched PONG from the same TID can rescue the row
-   as positive liveness evidence for selection only when its manager-selection
-   fields prove dispatch eligibility: manager role, `weft.spawn.requests`,
-   matching control queues, matching context when present, non-terminal
-   `task_status`, and `should_stop` not true. An absent, malformed,
+   replaying the full service registry every loop turn. When startup, manager
+   selection, or manager-owned leadership convergence sees an otherwise
+   canonical active manager row that lacks strong runtime proof, including a
+   host-PID row whose PID is not visible from the current PID namespace, it may
+   send one bounded keyed PING to that manager's task-local control queue. A
+   matched PONG from the same TID can rescue the row as positive liveness
+   evidence for selection only when its manager-selection fields prove dispatch
+   eligibility: manager role, `weft.spawn.requests`, matching control queues,
+   matching context when present, non-terminal `task_status`, and `should_stop`
+   not true. An absent, malformed,
    non-matching, draining, or stopping PONG is not negative proof and does not
    authorize unsafe takeover by itself. Canonical ownership is lowest-live-TID
    among canonical dispatch-eligible claimants for status, selection, and
@@ -322,7 +325,7 @@ record, and slower broker backends can add observable registry propagation and
 scheduler delay under release-load parallelism.
 
 _Implementation mapping_:
-- Shared manager lifecycle owner — `weft/core/manager_runtime.py` :: `_build_manager_runtime_invocation`, `_select_active_manager`, `_ensure_manager`, `_start_manager`, `_replace_active_manager`, `_serve_manager_foreground`, `_list_manager_records`, `_manager_record`, `_stop_manager`; `weft/runtime_liveness.py` :: `runtime_liveness_from_registered_probe`; plus `weft/core/control_probe.py` :: `send_keyed_ping_probe` (owns canonical manager bootstrap, explicit replacement, foreground serve, normalized registry replay, extension-provided supervised-manager stale checks, bounded manager PONG liveness probes, and graceful/forced stop observation).
+- Shared manager lifecycle owner — `weft/core/manager_runtime.py` :: `_build_manager_runtime_invocation`, `_select_active_manager`, `_ensure_manager`, `_start_manager`, `_replace_active_manager`, `_serve_manager_foreground`, `_list_manager_records`, `_manager_diagnostic_records`, `_manager_record`, `_stop_manager`; `weft/runtime_liveness.py` :: `runtime_liveness_from_registered_probe`; plus `weft/core/control_probe.py` :: `send_keyed_ping_probe` (owns canonical manager bootstrap, explicit replacement, foreground serve, normalized registry replay, explicit manager-list diagnostics, extension-provided supervised-manager stale checks, bounded manager PONG liveness probes, and graceful/forced stop observation).
 - Command-side capability surface — `weft/commands/manager.py` and `weft/commands/serve.py` (thin manager-facing commands layered over the shared runtime helper).
 - Detached bootstrap launcher — `weft/manager_detached_launcher.py` :: `main` (short-lived wrapper that starts the real manager runtime in a detached session/process-group boundary and reports early launch status back to `_start_manager`).
 - Manager process launch — `weft/core/manager_runtime.py` :: `_start_manager` (builds manager TaskSpec, launches the detached wrapper, requires matching pid-plus-registry readiness before success, treats post-proof acknowledgement cleanup as best effort, and reports early bootstrap diagnostics on failure).

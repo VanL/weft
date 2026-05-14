@@ -113,6 +113,18 @@ class _ManagerRegistryView:
     target_record: dict[str, Any] | None
 
 
+@dataclass(frozen=True)
+class _ManagerDiagnostic:
+    """Operator-facing manager registry diagnostic projection."""
+
+    record: dict[str, Any]
+    liveness: Literal["live", "stale", "unknown", "non_live"]
+    proof_source: str
+    proof_detail: str | None
+    dispatch_eligible: bool
+    canonical_candidate: bool
+
+
 def _generate_tid(context: WeftContext) -> str:
     """Generate a unique TID via broker timestamp (Spec: [MA-2])."""
     return str(
@@ -181,7 +193,7 @@ def _snapshot_registry(
                 if is_stale:
                     rescued_by_pong = (
                         not definitive_stale
-                        and probe_stale
+                        and (probe_stale or is_canonical_manager_record(record))
                         and is_canonical_manager_record(record)
                         and _manager_record_has_matched_pong(
                             context,
@@ -252,6 +264,199 @@ def _select_active_manager_from_snapshot(
     if decision.canonical_live is None:
         return None
     return projected_by_timestamp.get(decision.canonical_live.timestamp)
+
+
+def _manager_record_diagnostic(
+    context: WeftContext,
+    record: dict[str, Any],
+    *,
+    probe_cache: dict[str, int | None],
+) -> _ManagerDiagnostic:
+    """Classify one manager row for explicit diagnostics."""
+
+    status = record.get("status")
+    canonical_candidate = is_canonical_manager_record(record)
+    if status not in {SERVICE_STATUS_ACTIVE, SERVICE_STATUS_DRAINING}:
+        return _ManagerDiagnostic(
+            record=record,
+            liveness="non_live",
+            proof_source="status",
+            proof_detail=str(status) if status is not None else None,
+            dispatch_eligible=False,
+            canonical_candidate=canonical_candidate,
+        )
+    if not canonical_candidate:
+        return _ManagerDiagnostic(
+            record=record,
+            liveness="unknown",
+            proof_source="registry",
+            proof_detail="not_canonical_manager_record",
+            dispatch_eligible=False,
+            canonical_candidate=False,
+        )
+
+    handle = _manager_handle_from_record(record)
+    if handle is None:
+        return _ManagerDiagnostic(
+            record=record,
+            liveness="stale",
+            proof_source="runtime-handle",
+            proof_detail="missing_or_invalid",
+            dispatch_eligible=False,
+            canonical_candidate=True,
+        )
+
+    authority = handle.control.get("authority")
+    if authority == "host-pid":
+        live_processes = _live_host_processes_from_handle(handle)
+        if live_processes:
+            pid, _create_time = live_processes[0]
+            return _ManagerDiagnostic(
+                record=record,
+                liveness="live",
+                proof_source="host-pid",
+                proof_detail=str(pid),
+                dispatch_eligible=True,
+                canonical_candidate=True,
+            )
+        if _manager_record_has_matched_pong(
+            context,
+            record,
+            probe_cache=probe_cache,
+        ):
+            return _ManagerDiagnostic(
+                record=record,
+                liveness="live",
+                proof_source="pong",
+                proof_detail=_manager_ctrl_queue_name(str(record.get("tid")), record),
+                dispatch_eligible=True,
+                canonical_candidate=True,
+            )
+        return _ManagerDiagnostic(
+            record=record,
+            liveness="stale",
+            proof_source="host-pid",
+            proof_detail="no_live_scoped_host_process",
+            dispatch_eligible=False,
+            canonical_candidate=True,
+        )
+
+    if authority == "external-supervisor":
+        runtime_liveness = runtime_liveness_from_registered_probe(handle)
+        if runtime_liveness == "live":
+            return _ManagerDiagnostic(
+                record=record,
+                liveness="live",
+                proof_source="external-supervisor",
+                proof_detail=handle.id,
+                dispatch_eligible=True,
+                canonical_candidate=True,
+            )
+        if runtime_liveness == "stale":
+            return _ManagerDiagnostic(
+                record=record,
+                liveness="stale",
+                proof_source="external-supervisor",
+                proof_detail=handle.id,
+                dispatch_eligible=False,
+                canonical_candidate=True,
+            )
+        if _manager_record_has_matched_pong(
+            context,
+            record,
+            probe_cache=probe_cache,
+        ):
+            return _ManagerDiagnostic(
+                record=record,
+                liveness="live",
+                proof_source="pong",
+                proof_detail=_manager_ctrl_queue_name(str(record.get("tid")), record),
+                dispatch_eligible=True,
+                canonical_candidate=True,
+            )
+        timestamp = _manager_record_timestamp(record)
+        if timestamp is not None:
+            stale_after_ns = int(
+                MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS * 1_000_000_000
+            )
+            if stale_after_ns >= 0 and time.time_ns() - timestamp > stale_after_ns:
+                return _ManagerDiagnostic(
+                    record=record,
+                    liveness="stale",
+                    proof_source="registry-heartbeat",
+                    proof_detail="expired",
+                    dispatch_eligible=False,
+                    canonical_candidate=True,
+                )
+        return _ManagerDiagnostic(
+            record=record,
+            liveness="unknown",
+            proof_source="external-supervisor",
+            proof_detail=handle.id,
+            dispatch_eligible=False,
+            canonical_candidate=True,
+        )
+
+    return _ManagerDiagnostic(
+        record=record,
+        liveness="unknown",
+        proof_source="runtime-handle",
+        proof_detail=str(authority) if authority is not None else None,
+        dispatch_eligible=False,
+        canonical_candidate=True,
+    )
+
+
+def _manager_diagnostic_records(
+    context: WeftContext,
+    *,
+    include_stopped: bool = False,
+) -> list[dict[str, Any]]:
+    """Return explicit diagnostic rows for known manager registry owners."""
+
+    snapshot = _snapshot_registry(context, prune_stale=False)
+    probe_cache: dict[str, int | None] = {}
+    diagnostics = [
+        _manager_record_diagnostic(context, record, probe_cache=probe_cache)
+        for record in snapshot.values()
+    ]
+    if not include_stopped:
+        diagnostics = [
+            diagnostic
+            for diagnostic in diagnostics
+            if diagnostic.record.get("status")
+            not in {SERVICE_STATUS_STOPPED, SERVICE_STATUS_SUPERSEDED}
+        ]
+
+    eligible = [
+        diagnostic
+        for diagnostic in diagnostics
+        if diagnostic.liveness == "live"
+        and diagnostic.dispatch_eligible
+        and diagnostic.canonical_candidate
+        and diagnostic.record.get("status") == SERVICE_STATUS_ACTIVE
+    ]
+    canonical_tid: str | None = None
+    if eligible:
+        canonical_tid = min(
+            str(diagnostic.record.get("tid"))
+            for diagnostic in eligible
+            if str(diagnostic.record.get("tid")).isdigit()
+        )
+
+    rows: list[dict[str, Any]] = []
+    for diagnostic in diagnostics:
+        record = dict(diagnostic.record)
+        tid = str(record.get("tid", ""))
+        record["liveness"] = diagnostic.liveness
+        record["proof_source"] = diagnostic.proof_source
+        record["proof_detail"] = diagnostic.proof_detail
+        record["dispatch_eligible"] = diagnostic.dispatch_eligible
+        record["canonical_candidate"] = diagnostic.canonical_candidate
+        record["canonical"] = bool(canonical_tid is not None and tid == canonical_tid)
+        rows.append(record)
+    rows.sort(key=lambda rec: int(rec.get("timestamp", 0)), reverse=True)
+    return rows
 
 
 def _registry_view(
@@ -488,7 +693,14 @@ def _list_manager_records(
     canonical_only: bool = False,
     prune_stale: bool = True,
 ) -> list[dict[str, Any]]:
-    records = list(_snapshot_registry(context, prune_stale=prune_stale).values())
+    records = list(
+        _snapshot_registry(
+            context,
+            prune_stale=prune_stale,
+            probe_stale=prune_stale,
+            probe_cache={},
+        ).values()
+    )
     if canonical_only:
         records = [record for record in records if is_canonical_manager_record(record)]
     if not include_stopped:
@@ -1721,6 +1933,16 @@ def list_manager_records(
     )
 
 
+def manager_diagnostic_records(
+    context: WeftContext,
+    *,
+    include_stopped: bool = False,
+) -> list[dict[str, Any]]:
+    """Return manager registry records with explicit liveness diagnostics."""
+
+    return _manager_diagnostic_records(context, include_stopped=include_stopped)
+
+
 def select_active_manager(
     context: WeftContext,
     *,
@@ -1818,6 +2040,7 @@ __all__ = [
     "ensure_manager",
     "generate_tid",
     "list_manager_records",
+    "manager_diagnostic_records",
     "manager_record",
     "manager_registry_record_is_stale",
     "normalize_manager_registry_record",

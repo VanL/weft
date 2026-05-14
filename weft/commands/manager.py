@@ -20,6 +20,7 @@ from weft.core.manager_runtime import (
     ensure_manager,
     generate_tid,
     list_manager_records,
+    manager_diagnostic_records,
     manager_record,
     replace_active_manager,
     select_active_manager,
@@ -35,6 +36,7 @@ from weft.core.manager_runtime import (
 _build_manager_spec = build_manager_spec
 _ensure_manager = ensure_manager
 _generate_tid = generate_tid
+_manager_diagnostic_records = manager_diagnostic_records
 _list_manager_records = list_manager_records
 _manager_record = manager_record
 _replace_active_manager = replace_active_manager
@@ -205,14 +207,21 @@ def list_command(
     *,
     json_output: bool,
     include_stopped: bool = False,
+    diagnostic: bool = False,
     context_path: Path | None = None,
 ) -> tuple[int, str | None]:
     context = build_context(context_path)
-    records = _list_manager_records(
-        context,
-        include_stopped=include_stopped,
-        canonical_only=False,
-    )
+    if diagnostic:
+        records = _manager_diagnostic_records(
+            context,
+            include_stopped=include_stopped,
+        )
+    else:
+        records = _list_manager_records(
+            context,
+            include_stopped=include_stopped,
+            canonical_only=False,
+        )
 
     if json_output:
         payload = json.dumps(records, indent=2)
@@ -220,6 +229,20 @@ def list_command(
 
     if not records:
         return 0, "No registered managers"
+
+    if diagnostic:
+        lines = ["TID        STATUS    LIVE      CANONICAL  PROOF               NAME"]
+        for data in sorted(records, key=lambda record: str(record.get("tid", ""))):
+            tid = str(data.get("tid", ""))
+            status = str(data.get("status", "unknown"))
+            liveness = str(data.get("liveness", "unknown"))
+            canonical = "yes" if data.get("canonical") is True else "no"
+            proof = str(data.get("proof_source", ""))
+            name = str(data.get("name", ""))
+            lines.append(
+                f"{tid}  {status:<9} {liveness:<9} {canonical:<10} {proof:<19} {name}"
+            )
+        return 0, "\n".join(lines)
 
     lines = ["TID        STATUS    NAME"]
     for data in sorted(records, key=lambda record: str(record.get("tid", ""))):

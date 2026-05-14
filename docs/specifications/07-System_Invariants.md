@@ -246,7 +246,8 @@ _Implementation mapping_: `weft/core/manager.py`,
   positively live and dispatch-eligible, once they have no actionable queue
   work and no persistent children to protect. Unknown external-supervisor
   evidence is not voluntary-yield authority. Keyed PONG liveness may help
-  decide which canonical records are live, but it is not a lease, election
+  decide which canonical records are live, including host-PID rows whose PID is
+  not visible from the current PID namespace, but it is not a lease, election
   vote, or substitute for lowest-TID ownership reduction.
 - **MANAGER.9**: public spawn dispatch is work-stealing. Atomic reservation of
   a `weft.spawn.requests` message authorizes that manager to attempt the child
