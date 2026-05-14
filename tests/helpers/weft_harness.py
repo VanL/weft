@@ -288,8 +288,16 @@ class WeftTestHarness:
             f"  tid={tid}",
         ]
 
-        latest_event = self._latest_task_events().get(tid)
+        latest_task_payload = self._latest_task_payloads().get(tid)
+        latest_event = (
+            latest_task_payload.get("event")
+            if latest_task_payload is not None
+            else None
+        )
         lines.append(f"  latest_task_event={latest_event or '<missing>'}")
+        task_state_pid = self._task_state_pid(latest_task_payload)
+        if task_state_pid is not None:
+            lines.append(f"  latest_task_state_pid={task_state_pid}")
 
         latest_mapping = self._latest_tid_mapping_payloads().get(tid)
         if latest_mapping is None:
@@ -722,22 +730,40 @@ class WeftTestHarness:
         return pid_matches_create_time(pid, create_time)
 
     def _latest_task_events(self) -> dict[str, str]:
+        return {
+            tid: event
+            for tid, payload in self._latest_task_payloads().items()
+            if isinstance(event := payload.get("event"), str)
+        }
+
+    def _latest_task_payloads(self) -> dict[str, dict[str, object]]:
         queue = Queue(
             WEFT_GLOBAL_LOG_QUEUE,
             db_path=self.context.broker_target,
             persistent=False,
             config=self.context.broker_config,
         )
-        latest: dict[str, str] = {}
+        latest: dict[str, dict[str, object]] = {}
         try:
             for data, _timestamp in iter_queue_json_entries(queue):
                 tid = data.get("tid")
-                event = data.get("event")
-                if isinstance(tid, str) and isinstance(event, str):
-                    latest[tid] = event
+                if isinstance(tid, str):
+                    latest[tid] = dict(data)
         finally:
             queue.close()
         return latest
+
+    @staticmethod
+    def _task_state_pid(data: dict[str, object] | None) -> int | None:
+        if data is None:
+            return None
+        state = data.get("state")
+        if not isinstance(state, dict):
+            return None
+        pid = state.get("pid")
+        if isinstance(pid, int):
+            return pid
+        return None
 
     def _live_task_tids_from_mappings(self) -> list[str]:
         live_tids: list[str] = []

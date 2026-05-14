@@ -580,6 +580,21 @@ class Manager(BaseTask):
         )
         return tuple(dict.fromkeys(queue_names))
 
+    def _manager_owned_work_pending(self) -> bool:
+        """Return whether manager-owned inbox or reserved queues still have work."""
+
+        for queue_name in self._idle_activity_queue_names():
+            try:
+                if self._queue(queue_name).has_pending():
+                    return True
+            except (BrokerError, OSError, RuntimeError):
+                logger.debug(
+                    "Failed to inspect manager-owned queue %s for pending work",
+                    queue_name,
+                    exc_info=True,
+                )
+        return False
+
     def _build_queue_configs(self) -> dict[str, dict[str, Any]]:
         """Configure inbox reserve mode and control peek mode for the manager.
 
@@ -4389,6 +4404,39 @@ class Manager(BaseTask):
             )
             return []
 
+    def _autostart_ensure_obligation_pending(self) -> bool:
+        """Return whether an ensure autostart manifest still requires supervision."""
+
+        if not self._autostart_enabled or not self._autostart_dir:
+            return False
+        for manifest_path in self._autostart_manifest_paths():
+            source = self._autostart_manifest_source(manifest_path)
+            manifest = self._load_autostart_manifest(manifest_path)
+            if manifest is None or self._autostart_manifest_mode(manifest) != "ensure":
+                continue
+            policy = manifest.get("policy")
+            max_restarts_value = (
+                policy.get("max_restarts") if isinstance(policy, dict) else None
+            )
+            max_restarts = (
+                int(max_restarts_value)
+                if isinstance(max_restarts_value, int)
+                and not isinstance(max_restarts_value, bool)
+                else None
+            )
+            state = self._autostart_state.get(source)
+            if not isinstance(state, dict):
+                return True
+            if not bool(state.get("launched_once", False)):
+                return True
+            if max_restarts is None:
+                return True
+            restarts = state.get("restarts", 0)
+            if isinstance(restarts, int) and not isinstance(restarts, bool):
+                if restarts < max_restarts:
+                    return True
+        return False
+
     def _active_autostart_sources(self) -> set[str]:
         tracked_sources = {
             child.autostart_source
@@ -4946,16 +4994,18 @@ class Manager(BaseTask):
             return
         if self._idle_timeout <= 0:
             return
-        try:
-            for inbox_name in self._spawn_inbox_queue_names():
-                inbox_queue = self._queue(inbox_name)
-                if inbox_queue.has_pending():
-                    self._last_activity_ns = time.time_ns()
-                    return
-        except (BrokerError, OSError, RuntimeError):  # pragma: no cover - defensive
-            logger.debug(
-                "Failed to inspect inbox queue for pending work", exc_info=True
-            )
+        if self._manager_owned_work_pending():
+            # Pending reserved spawn work is already claimed by this manager.
+            # Keep the manager alive even when the row's timestamp is old; a
+            # slow child launch is still active work, not idle time.
+            self._last_activity_ns = time.time_ns()
+            return
+        if self._autostart_ensure_obligation_pending():
+            # An ``ensure`` autostart manifest with restart budget remaining is a
+            # supervision obligation, even between child exit and the next
+            # scheduled scan/backoff tick.
+            self._last_activity_ns = time.time_ns()
+            return
         # Re-check manager-owned queue activity without the periodic throttle before
         # deciding the manager is idle. Short manager lifetimes can otherwise race
         # with a freshly submitted spawn request that arrives between ordinary polls.

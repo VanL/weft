@@ -76,11 +76,14 @@ def _manager_service_payload(
     )
 
 
-def _parse_started_manager(output: str) -> str:
+def _parse_manager_start_output(output: str) -> tuple[str, bool]:
     match = re.search(r"Started manager (\d+)", output)
+    if match is not None:
+        return match.group(1), True
+    match = re.search(r"Manager (\d+) already running", output)
     if match is None:
         raise AssertionError(f"Unable to parse manager start output: {output!r}")
-    return match.group(1)
+    return match.group(1), False
 
 
 def _task_log_payloads(context, tid: str) -> list[dict[str, Any]]:
@@ -193,6 +196,7 @@ def test_manager_start_and_status(workdir):
 def test_manager_start_detaches_manager_process_group_from_cli_caller(workdir):
     context_root = prepare_project_root(workdir / "detached-manager")
     tid: str | None = None
+    started_by_test = False
 
     try:
         rc, out, err = run_cli(
@@ -204,7 +208,7 @@ def test_manager_start_detaches_manager_process_group_from_cli_caller(workdir):
         )
         assert rc == 0
         assert err == ""
-        tid = _parse_started_manager(out)
+        tid, started_by_test = _parse_manager_start_output(out)
 
         pid: int | None = None
         deadline = time.time() + 10.0
@@ -242,7 +246,7 @@ def test_manager_start_detaches_manager_process_group_from_cli_caller(workdir):
         assert detail.get("status") == "active"
         assert _host_pid_from_handle(detail) == pid
     finally:
-        if tid is not None:
+        if tid is not None and started_by_test:
             run_cli(
                 "manager",
                 "stop",
@@ -436,7 +440,7 @@ def test_manager_start_replaces_stale_active_manager(workdir):
         assert rc == 0
         assert err == ""
 
-        started_tid = _parse_started_manager(out)
+        started_tid, _started_by_test = _parse_manager_start_output(out)
         assert started_tid != stale_tid
 
         rc, out, err = run_cli(

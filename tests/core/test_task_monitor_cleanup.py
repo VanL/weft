@@ -460,7 +460,7 @@ def test_task_monitor_cleanup_repeats_collate_for_multiple_terminal_tids(
         WEFT_GLOBAL_LOG_QUEUE,
         {"event": "work_started", "tid": "1778000000000000002"},
     )
-    _write_json(
+    last_id = _write_json(
         ctx,
         WEFT_GLOBAL_LOG_QUEUE,
         {"event": "work_completed", "tid": "1778000000000000002"},
@@ -501,7 +501,7 @@ def test_task_monitor_cleanup_policy_order_collates_complete_before_truncated(
     tmp_path: Path,
 ) -> None:
     ctx = _context(tmp_path)
-    terminal_id = _write_json(
+    _write_json(
         ctx,
         WEFT_GLOBAL_LOG_QUEUE,
         {"event": "work_completed", "tid": "1778000000000000001"},
@@ -511,7 +511,7 @@ def test_task_monitor_cleanup_policy_order_collates_complete_before_truncated(
         WEFT_GLOBAL_LOG_QUEUE,
         {"event": "work_started", "tid": "1778000000000000002"},
     )
-    _write_json(
+    last_id = _write_json(
         ctx,
         WEFT_GLOBAL_LOG_QUEUE,
         {"event": "work_completed", "tid": "1778000000000000002"},
@@ -521,7 +521,7 @@ def test_task_monitor_cleanup_policy_order_collates_complete_before_truncated(
         ctx,
         TaskMonitorCleanupConfig(batch_size=10, task_log_min_age_seconds=1.0),
         apply=False,
-        now_ns=_now_after(terminal_id, 2.0),
+        now_ns=_now_after(last_id, 2.0),
     )
 
     assert result.success
@@ -536,7 +536,7 @@ def test_task_monitor_cleanup_nonterminal_anchor_does_not_block_later_collate(
     tmp_path: Path,
 ) -> None:
     ctx = _context(tmp_path)
-    start_id = _write_json(
+    _write_json(
         ctx,
         WEFT_GLOBAL_LOG_QUEUE,
         {"event": "work_started", "tid": "1778000000000000001"},
@@ -546,7 +546,7 @@ def test_task_monitor_cleanup_nonterminal_anchor_does_not_block_later_collate(
         WEFT_GLOBAL_LOG_QUEUE,
         {"event": "work_started", "tid": "1778000000000000002"},
     )
-    _write_json(
+    last_id = _write_json(
         ctx,
         WEFT_GLOBAL_LOG_QUEUE,
         {"event": "work_completed", "tid": "1778000000000000002"},
@@ -556,7 +556,7 @@ def test_task_monitor_cleanup_nonterminal_anchor_does_not_block_later_collate(
         ctx,
         TaskMonitorCleanupConfig(batch_size=10, task_log_min_age_seconds=1.0),
         apply=True,
-        now_ns=_now_after(start_id, 2.0),
+        now_ns=_now_after(last_id, 2.0),
     )
 
     assert result.success

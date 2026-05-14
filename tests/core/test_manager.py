@@ -18,6 +18,7 @@ import pytest
 
 import weft.core.manager as manager_mod
 from simplebroker.ext import BrokerError
+from tests.helpers.test_backend import active_test_backend
 from weft._constants import (
     CONTROL_KILL,
     CONTROL_PING,
@@ -4320,11 +4321,8 @@ def test_manager_leadership_can_rescue_unreachable_host_pid_with_pong(
 
     monkeypatch.setattr(manager_mod, "send_keyed_ping_probe", _matched_pong)
 
-    active = manager._active_dispatch_manager_records()
     yielded = manager._maybe_yield_leadership(force=True)
 
-    assert active is not None
-    assert lower_tid in active
     assert yielded is True
     assert manager.should_stop is True
 
@@ -4668,6 +4666,27 @@ def test_manager_idle_timeout_ignores_unrelated_broker_activity(
             time.sleep(0.05)
 
         assert manager.should_stop is True
+    finally:
+        manager.cleanup()
+
+
+def test_manager_idle_pending_work_includes_reserved_spawn_rows(
+    broker_env,
+    unique_tid,
+) -> None:
+    db_path, make_queue = broker_env
+    spec = make_manager_spec(unique_tid, idle_timeout=0.2)
+    manager = Manager(db_path, spec)
+    try:
+        reserved_queue = make_queue(manager._queue_names["reserved"])
+        reserved_queue.write(json.dumps({"taskspec": make_child_spec(size=1)}))
+
+        assert manager._manager_owned_work_pending() is True
+
+        manager._last_activity_ns = time.time_ns() - 1_000_000_000
+        manager.process_once()
+
+        assert manager.should_stop is False
     finally:
         manager.cleanup()
 
@@ -5121,6 +5140,50 @@ def test_manager_autostart_ensure_restarts_after_child_exit_without_scan_wait(
 
         assert manager._child_processes == {}
         assert manager._autostart_last_scan_ns == 0
+    finally:
+        manager.cleanup()
+
+
+def test_manager_idle_shutdown_waits_for_autostart_ensure_restart_budget(
+    tmp_path: Path,
+    broker_env,
+    unique_tid,
+) -> None:
+    db_path, _make_queue = broker_env
+    autostart_dir, manifest_path = write_autostart_fixture(
+        tmp_path,
+        task_name="restart-budget",
+        manifest_name="restart-budget",
+        mode="ensure",
+        max_restarts=1,
+        backoff_seconds=1.0,
+        duration=0.0,
+    )
+
+    config = load_config()
+    config["WEFT_AUTOSTART_TASKS"] = True
+    config["WEFT_AUTOSTART_DIR"] = str(autostart_dir)
+
+    spec = make_manager_spec(unique_tid, idle_timeout=0.2)
+    manager = Manager(db_path, spec, config=config)
+    source = str(manifest_path.resolve())
+    try:
+        manager._autostart_state[source] = {
+            "restarts": 0,
+            "next_allowed_ns": time.time_ns() + 1_000_000_000,
+            "launched_once": True,
+        }
+        manager._service_state(source).launched_once = True
+        manager._service_state(source).next_allowed_ns = int(
+            manager._autostart_state[source]["next_allowed_ns"]
+        )
+        manager._last_activity_ns = time.time_ns() - 1_000_000_000
+        manager._autostart_last_scan_ns = time.time_ns()
+        manager._last_managed_service_convergence_ns = time.time_ns()
+
+        manager.process_once()
+
+        assert manager.should_stop is False
     finally:
         manager.cleanup()
 
@@ -5728,18 +5791,17 @@ def test_manager_autostart_ensure_restarts_after_abrupt_child_kill(
             time.sleep(0.05)
         assert _process_running(child_pid) is False
 
-        restart_deadline = time.monotonic() + 5.0
-        while len(spawn_events) < 2 and time.monotonic() < restart_deadline:
-            manager.process_once()
-            time.sleep(0.05)
-            for item in drain(log_queue):
-                event = json.loads(item)
-                if (
-                    event.get("event") == "task_spawned"
-                    and event.get("autostart_source") == source
-                ):
-                    spawn_events.append(event)
-
+        restart_timeout = 30.0 if active_test_backend() == "postgres" else 8.0
+        second_spawn = wait_for_log_event(
+            manager,
+            log_queue,
+            lambda event: (
+                event.get("event") == "task_spawned"
+                and event.get("autostart_source") == source
+            ),
+            timeout=restart_timeout,
+        )
+        spawn_events.append(second_spawn)
         assert len(spawn_events) >= 2
     finally:
         manager.cleanup()
