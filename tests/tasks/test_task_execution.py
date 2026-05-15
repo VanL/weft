@@ -490,6 +490,56 @@ def test_task_run_until_stopped_waits_through_activity_seam(
     assert wait_calls == [0.25]
 
 
+def test_task_run_until_stopped_uses_next_wait_timeout(
+    broker_env,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, _make_queue = broker_env
+    spec = make_function_taskspec(
+        unique_tid,
+        "tests.tasks.sample_targets:echo_payload",
+    )
+    task = Consumer(db_path, spec)
+    wait_calls: list[float | None] = []
+
+    def fake_wait(timeout: float | None) -> None:
+        wait_calls.append(timeout)
+        task.should_stop = True
+
+    monkeypatch.setattr(task, "next_wait_timeout", lambda: 0.75)
+    monkeypatch.setattr(task, "wait_for_activity", fake_wait)
+
+    task.run_until_stopped(poll_interval=0.25, max_iterations=5)
+
+    assert wait_calls == [0.75]
+
+
+def test_task_run_until_stopped_waits_for_zero_next_timeout(
+    broker_env,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, _make_queue = broker_env
+    spec = make_function_taskspec(
+        unique_tid,
+        "tests.tasks.sample_targets:echo_payload",
+    )
+    task = Consumer(db_path, spec)
+    wait_calls: list[float | None] = []
+
+    def fake_wait(timeout: float | None) -> None:
+        wait_calls.append(timeout)
+        task.should_stop = True
+
+    monkeypatch.setattr(task, "next_wait_timeout", lambda: 0.0)
+    monkeypatch.setattr(task, "wait_for_activity", fake_wait)
+
+    task.run_until_stopped(poll_interval=0.0, max_iterations=5)
+
+    assert wait_calls == [0.0]
+
+
 def test_task_process_entry_waits_through_activity_seam(
     broker_env,
     unique_tid: str,

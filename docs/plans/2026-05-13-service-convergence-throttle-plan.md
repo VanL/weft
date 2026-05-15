@@ -2,7 +2,7 @@
 
 Status: draft
 Source specs: docs/specifications/03-Manager_Architecture.md [MA-1.6a]; docs/specifications/05-Message_Flow_and_State.md [MF-6]; docs/specifications/07-System_Invariants.md [MANAGER.3], [MANAGER.8]
-Superseded by: none
+Superseded by: [2026-05-15-manager-hot-loop-reduction-plan.md](./2026-05-15-manager-hot-loop-reduction-plan.md)
 
 ## 1. Goal
 

@@ -470,8 +470,26 @@ class BaseTask(MultiQueueWatcher, ABC):
             iterations += 1
             if max_iterations is not None and iterations >= max_iterations:
                 break
-            if poll_interval > 0:
-                self.wait_for_activity(timeout=poll_interval)
+            wait_timeout: float | None = poll_interval
+            candidate_timeout = self.next_wait_timeout()
+            if candidate_timeout is not None:
+                wait_timeout = max(0.0, float(candidate_timeout))
+            if wait_timeout is not None and (
+                wait_timeout > 0 or candidate_timeout is not None
+            ):
+                self.wait_for_activity(timeout=wait_timeout)
+
+    def next_wait_timeout(self) -> float | None:
+        """Return an optional wait timeout for the next task-loop turn.
+
+        The default preserves the caller-provided polling interval. Persistent
+        tasks with their own due timers can override this hook so both the
+        launcher loop and ``run_until_stopped()`` use the same reactive contract.
+
+        Spec: [CC-2.5]
+        """
+
+        return None
 
     def process_once(self) -> None:
         """Process a single scheduling round across all queues.

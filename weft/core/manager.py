@@ -292,6 +292,8 @@ class Manager(BaseTask):
             str, tuple[int, int | None, ManagerLeadershipProof]
         ] = {}
         self._leader_probe_used_this_turn = False
+        self._leader_actionable_work_cache: tuple[int, bool] | None = None
+        self._leader_check_turn: int | None = None
         self._last_leadership_drain_revalidate_ns = 0
         self._last_public_spawn_drained_ns = 0
         self._last_public_dispatch_stall_log_ns = 0
@@ -774,6 +776,7 @@ class Manager(BaseTask):
             service_key=service_key,
             launched_ns=time.time_ns(),
         )
+        self._invalidate_leadership_work_cache()
         if service_key is not None:
             self._register_managed_service_owner(
                 child_spec,
@@ -1980,6 +1983,23 @@ class Manager(BaseTask):
                 return True
         return self._manager_control_pending_is_actionable()
 
+    def _invalidate_leadership_work_cache(self) -> None:
+        """Discard per-turn leadership-work proof after local progress."""
+
+        self._leader_actionable_work_cache = None
+        self._leader_check_turn = None
+
+    def _has_actionable_leadership_work_for_turn(self) -> bool:
+        """Return cached actionable-work proof for this manager turn."""
+
+        turn = self._loop_iteration
+        cached = self._leader_actionable_work_cache
+        if cached is not None and cached[0] == turn:
+            return cached[1]
+        result = self._has_actionable_leadership_work()
+        self._leader_actionable_work_cache = (turn, result)
+        return result
+
     def _maybe_yield_leadership(self, *, force: bool = False) -> bool:
         """Check whether this manager should yield leadership and act on it.
 
@@ -2024,16 +2044,24 @@ class Manager(BaseTask):
             as a signal to wind down), ``False`` if this manager is the leader
             or the check interval has not elapsed.
         """
-        if self._has_actionable_leadership_work():
-            return False
-
         now_ns = time.time_ns()
         if (
             not force
             and now_ns - self._last_leader_check_ns < self._leader_check_interval_ns
         ):
             return self.should_stop
+        if not force and self._leader_check_turn == self._loop_iteration:
+            return self.should_stop
         self._last_leader_check_ns = now_ns
+        self._leader_check_turn = self._loop_iteration
+
+        actionable_work = (
+            self._has_actionable_leadership_work()
+            if force
+            else self._has_actionable_leadership_work_for_turn()
+        )
+        if actionable_work:
+            return False
 
         active = self._read_active_manager_records()
         if active is None:
@@ -2289,6 +2317,7 @@ class Manager(BaseTask):
             # Child completion is activity. The manager should only begin its idle
             # countdown after in-flight work has actually finished.
             self._last_activity_ns = time.time_ns()
+            self._invalidate_leadership_work_cache()
         return child_exited
 
     def _terminate_children(self) -> None:
@@ -2686,6 +2715,7 @@ class Manager(BaseTask):
             )
             self._handle_control_message(str(body), timestamp, context)
             self._last_activity_ns = time.time_ns()
+            self._invalidate_leadership_work_cache()
             handled += 1
             if self._draining or self.should_stop:
                 return
@@ -3265,6 +3295,7 @@ class Manager(BaseTask):
             self._mark_pending_messages_prechecked()
             if queue_name == self._queue_names.get("internal_inbox"):
                 self._managed_internal_spawn_enqueued = True
+            self._invalidate_leadership_work_cache()
         except (BrokerError, OSError, RuntimeError):
             logger.warning(
                 "Failed to enqueue managed service %s", service.key, exc_info=True
@@ -3311,7 +3342,12 @@ class Manager(BaseTask):
             return child.autostart_source
         return None
 
-    def _tracked_service_candidate(self, service_key: str) -> ServiceCandidate | None:
+    def _tracked_service_candidate(
+        self,
+        service_key: str,
+        *,
+        scan_terminal_proof: bool = False,
+    ) -> ServiceCandidate | None:
         candidates: list[ServiceCandidate] = []
         for tid, child in list(self._child_processes.items()):
             if self._service_key_for_child(child) != service_key:
@@ -3320,7 +3356,7 @@ class Manager(BaseTask):
                 continue
             pid = child.process.pid
             force_kill_pids = [pid] if isinstance(pid, int) and pid > 0 else []
-            if self._child_terminal_proof_visible(tid, child):
+            if scan_terminal_proof and self._child_terminal_proof_visible(tid, child):
                 candidates.append(
                     ServiceCandidate(
                         key=service_key,
@@ -3907,13 +3943,24 @@ class Manager(BaseTask):
         return ctx
 
     def _observed_service_candidates_by_key(
-        self, desired_keys: set[str]
+        self,
+        desired_keys: set[str],
+        *,
+        tracked_by_key: Mapping[str, ServiceCandidate | None] | None = None,
+        scan_terminal_proof: bool = False,
     ) -> dict[str, list[ServiceCandidate]]:
         candidates_by_key: dict[str, list[ServiceCandidate]] = {
             key: [] for key in desired_keys
         }
+        tracked_by_key = tracked_by_key or {}
         for service_key in desired_keys:
-            tracked = self._tracked_service_candidate(service_key)
+            if service_key in tracked_by_key:
+                tracked = tracked_by_key[service_key]
+            else:
+                tracked = self._tracked_service_candidate(
+                    service_key,
+                    scan_terminal_proof=scan_terminal_proof,
+                )
             if tracked is not None:
                 candidates_by_key[service_key].append(tracked)
 
@@ -4008,6 +4055,7 @@ class Manager(BaseTask):
         force: bool = False,
         pending_keys: set[str] | None = None,
         candidates: list[ServiceCandidate] | None = None,
+        scan_terminal_proof: bool = False,
     ) -> None:
         """Ensure a desired manager-owned service according to its lifecycle."""
 
@@ -4015,16 +4063,16 @@ class Manager(BaseTask):
             return
 
         pending_keys = pending_keys or set()
+        candidates_provided = candidates is not None
         candidates = list(candidates or [])
         state = self._service_state(service.key)
-        tracked = self._tracked_service_candidate(service.key)
-        if tracked is not None and not any(
-            candidate.tid == tracked.tid
-            and candidate.state == tracked.state
-            and candidate.source == tracked.source
-            for candidate in candidates
-        ):
-            candidates.insert(0, tracked)
+        if not candidates_provided:
+            tracked = self._tracked_service_candidate(
+                service.key,
+                scan_terminal_proof=scan_terminal_proof,
+            )
+            if tracked is not None:
+                candidates.insert(0, tracked)
 
         now_ns = time.time_ns()
         launched_before = state.launched_once
@@ -4100,6 +4148,7 @@ class Manager(BaseTask):
         force: bool = False,
         include_internal: bool = True,
         include_autostart: bool = True,
+        scan_terminal_proof: bool = False,
     ) -> None:
         """Reconcile all Manager-owned singleton services through one path."""
 
@@ -4124,10 +4173,17 @@ class Manager(BaseTask):
 
         desired_keys = {service.key for service in services}
         pending_keys = self._pending_service_keys(desired_keys)
+        tracked_by_key = {
+            service.key: self._tracked_service_candidate(
+                service.key,
+                scan_terminal_proof=scan_terminal_proof,
+            )
+            for service in services
+        }
         keys_needing_evidence: set[str] = set()
         for service in services:
             state = self._service_state(service.key)
-            tracked = self._tracked_service_candidate(service.key)
+            tracked = tracked_by_key.get(service.key)
             if tracked is not None and tracked.state == "live":
                 if force or service.key in self._managed_service_duplicate_scan_pending:
                     keys_needing_evidence.add(service.key)
@@ -4155,20 +4211,29 @@ class Manager(BaseTask):
             force=force,
         )
         candidates_by_key = (
-            self._observed_service_candidates_by_key(keys_needing_evidence)
+            self._observed_service_candidates_by_key(
+                keys_needing_evidence,
+                tracked_by_key=tracked_by_key,
+                scan_terminal_proof=scan_terminal_proof,
+            )
             if keys_needing_evidence
             else {}
         )
         for service in services:
+            tracked = tracked_by_key.get(service.key)
+            candidates = (
+                candidates_by_key.get(service.key, [])
+                if service.key in keys_needing_evidence
+                else ([tracked] if tracked is not None else [])
+            )
             self._tick_managed_service(
                 service,
                 force=force,
                 pending_keys=pending_keys,
-                candidates=candidates_by_key.get(service.key, []),
+                candidates=candidates,
+                scan_terminal_proof=scan_terminal_proof,
             )
             if service.key in keys_needing_evidence:
-                state = self._service_state(service.key)
-                tracked = self._tracked_service_candidate(service.key)
                 if tracked is not None and tracked.state == "live":
                     self._managed_service_duplicate_scan_pending.discard(service.key)
 
@@ -4179,6 +4244,7 @@ class Manager(BaseTask):
             force=force,
             include_internal=True,
             include_autostart=False,
+            scan_terminal_proof=True,
         )
 
     def _tick_task_monitor(self, *, force: bool = False) -> None:
@@ -4188,6 +4254,7 @@ class Manager(BaseTask):
             force=force,
             include_internal=True,
             include_autostart=False,
+            scan_terminal_proof=True,
         )
 
     # ------------------------------------------------------------------
@@ -4675,15 +4742,16 @@ class Manager(BaseTask):
         *,
         include_autostart: bool,
         internal_spawn_pending: bool | None = None,
+        include_broker: bool = True,
     ) -> tuple[str, ...]:
         """Return why manager-owned service convergence is active."""
 
         reasons: list[str] = []
         if self._managed_internal_spawn_enqueued:
             reasons.append("internal_spawn_enqueued")
-        if internal_spawn_pending is None:
+        if include_broker and internal_spawn_pending is None:
             internal_spawn_pending = self._internal_spawn_pending()
-        if internal_spawn_pending:
+        if include_broker and internal_spawn_pending:
             reasons.append("internal_spawn_pending")
         if self._managed_service_duplicate_scan_pending:
             reasons.append("duplicate_scan_pending")
@@ -4797,14 +4865,12 @@ class Manager(BaseTask):
         """
 
         now_ns = time.time_ns()
-        internal_spawn_pending = self._internal_spawn_pending()
-        active_reasons = self._managed_service_convergence_active_reasons(
+        local_active_reasons = self._managed_service_convergence_active_reasons(
             include_autostart=include_autostart,
-            internal_spawn_pending=internal_spawn_pending,
+            include_broker=False,
         )
-        active = bool(active_reasons)
-        if not active_reasons:
-            active_reasons = ("stable_audit",)
+        active = bool(local_active_reasons)
+        throttled_reasons = local_active_reasons or ("stable_audit",)
         interval_seconds = (
             MANAGED_SERVICE_CONVERGENCE_INTERVAL_SECONDS
             if active
@@ -4814,13 +4880,12 @@ class Manager(BaseTask):
         if (
             not force
             and not self._managed_internal_spawn_enqueued
-            and not internal_spawn_pending
             and self._last_managed_service_convergence_ns
             and now_ns - self._last_managed_service_convergence_ns < interval_ns
         ):
             fields = {
                 "active": active,
-                "active_reasons": list(active_reasons),
+                "active_reasons": list(throttled_reasons),
                 "interval_seconds": interval_seconds,
                 "include_autostart": include_autostart,
                 "force": force,
@@ -4836,6 +4901,19 @@ class Manager(BaseTask):
             )
             return
         self._last_managed_service_convergence_ns = now_ns
+        internal_spawn_pending = self._internal_spawn_pending()
+        active_reasons = self._managed_service_convergence_active_reasons(
+            include_autostart=include_autostart,
+            internal_spawn_pending=internal_spawn_pending,
+        )
+        active = bool(active_reasons)
+        if not active_reasons:
+            active_reasons = ("stable_audit",)
+        interval_seconds = (
+            MANAGED_SERVICE_CONVERGENCE_INTERVAL_SECONDS
+            if active
+            else MANAGED_SERVICE_STABLE_AUDIT_INTERVAL_SECONDS
+        )
 
         for pass_index in range(max_passes):
             child_exited = self._cleanup_children()
@@ -4897,51 +4975,129 @@ class Manager(BaseTask):
         self._unregister_manager()
         super().cleanup()
 
-    def wait_for_activity(self, timeout: float | None) -> None:
-        """Bound manager sleep independent of backend activity waiters.
+    @staticmethod
+    def _timeout_until_ns(due_ns: int, *, now_ns: int) -> float:
+        """Return seconds until a nanosecond deadline."""
 
-        Service supervision is a deterministic state machine driven by repeated
-        manager turns. Queue waiters are useful hints for user work, but they
-        must not be allowed to extend the manager's supervision tick under PG
-        load.
+        return max(0.0, (due_ns - now_ns) / 1_000_000_000)
+
+    def _interval_timeout(
+        self,
+        last_ns: int,
+        interval_seconds: float,
+        *,
+        now_ns: int,
+    ) -> float:
+        if last_ns <= 0:
+            return 0.0
+        interval_ns = int(interval_seconds * 1_000_000_000)
+        return self._timeout_until_ns(last_ns + interval_ns, now_ns=now_ns)
+
+    def next_wait_timeout(self) -> float | None:
+        """Return the next manager due timer for the shared task loop."""
+
+        now_ns = time.time_ns()
+        timeouts: list[float] = []
+        if self.should_stop or self._draining or self._pending_termination_signal:
+            return 0.0
+        if self._managed_internal_spawn_enqueued:
+            return 0.0
+        if self._stalled_control_retry_after_ns > 0:
+            timeouts.append(
+                self._timeout_until_ns(
+                    self._stalled_control_retry_after_ns,
+                    now_ns=now_ns,
+                )
+            )
+        if self._child_processes:
+            timeouts.append(MANAGER_CHILD_EXIT_POLL_INTERVAL)
+
+        local_active_reasons = self._managed_service_convergence_active_reasons(
+            include_autostart=True,
+            include_broker=False,
+        )
+        service_interval = (
+            MANAGED_SERVICE_CONVERGENCE_INTERVAL_SECONDS
+            if local_active_reasons
+            else MANAGED_SERVICE_STABLE_AUDIT_INTERVAL_SECONDS
+        )
+        timeouts.append(
+            self._interval_timeout(
+                self._last_managed_service_convergence_ns,
+                service_interval,
+                now_ns=now_ns,
+            )
+        )
+        timeouts.append(
+            self._timeout_until_ns(
+                self._last_leader_check_ns + self._leader_check_interval_ns,
+                now_ns=now_ns,
+            )
+            if self._last_leader_check_ns > 0
+            else 0.0
+        )
+        timeouts.append(
+            self._interval_timeout(
+                self._last_registry_heartbeat_ns,
+                MANAGER_REGISTRY_HEARTBEAT_INTERVAL_SECONDS,
+                now_ns=now_ns,
+            )
+        )
+        if self._last_broker_probe_ns > 0:
+            timeouts.append(
+                self._timeout_until_ns(
+                    self._last_broker_probe_ns + self._broker_probe_interval_ns,
+                    now_ns=now_ns,
+                )
+            )
+        if self._idle_timeout > 0:
+            idle_timeout_ns = int(float(self._idle_timeout) * 1_000_000_000)
+            timeouts.append(
+                self._timeout_until_ns(
+                    self._last_activity_ns + idle_timeout_ns,
+                    now_ns=now_ns,
+                )
+            )
+        if self._autostart_enabled and self._autostart_dir:
+            if self._autostart_last_scan_ns <= 0:
+                timeouts.append(0.0)
+            else:
+                timeouts.append(
+                    self._timeout_until_ns(
+                        self._autostart_last_scan_ns + self._autostart_scan_interval_ns,
+                        now_ns=now_ns,
+                    )
+                )
+        if self._manager_log_allows("info") and self._last_public_dispatch_stall_log_ns:
+            interval_ns = int(
+                MANAGER_DISPATCH_STALL_LOG_INTERVAL_SECONDS * 1_000_000_000
+            )
+            timeouts.append(
+                self._timeout_until_ns(
+                    self._last_public_dispatch_stall_log_ns + interval_ns,
+                    now_ns=now_ns,
+                )
+            )
+        return min(timeouts) if timeouts else None
+
+    def wait_for_activity(self, timeout: float | None) -> None:
+        """Wait for queue activity while preserving the manager due-time ceiling.
+
+        Service supervision is driven by explicit due timers from
+        ``next_wait_timeout()``. The SimpleBroker activity waiter can wake the
+        manager early for queue work, but the supplied timeout remains the
+        supervision ceiling.
 
         Spec: [MA-1.4], [MANAGER.15], [MANAGER.16]
         """
 
-        if timeout is None or timeout <= 0:
-            super().wait_for_activity(timeout=timeout)
-            return
-        if self._has_pending_messages():
-            self._mark_pending_messages_prechecked()
-            if self._manager_log_allows("trace"):
-                fields = {
-                    "pending_public": self._queue_pending_for_log(
-                        self._queue_names.get("inbox")
-                    ),
-                    "pending_internal": self._queue_pending_for_log(
-                        self._queue_names.get("internal_inbox")
-                    ),
-                    "pending_control": self._queue_pending_for_log(
-                        self._queue_names.get("ctrl_in")
-                    ),
-                }
-                self._emit_serve_log_rate_limited(
-                    "manager_wait_immediate_wake",
-                    component="manager",
-                    required_level="trace",
-                    key="manager_wait_immediate_wake",
-                    state=fields,
-                    log_fields=fields,
-                )
-            return
-        if self._stop_event is not None:
-            self._stop_event.wait(timeout)
-            return
-        time.sleep(timeout)
+        super().wait_for_activity(timeout=timeout)
 
     def process_once(self) -> None:
         self._loop_iteration += 1
         self._leader_probe_used_this_turn = False
+        self._leader_actionable_work_cache = None
+        self._leader_check_turn = None
         self._emit_manager_loop_summary()
         self._process_pending_termination_signal()
         if self.should_stop:
@@ -5005,6 +5161,8 @@ class Manager(BaseTask):
             # supervision obligation, even between child exit and the next
             # scheduled scan/backoff tick.
             self._last_activity_ns = time.time_ns()
+            return
+        if now_ns - self._last_activity_ns < idle_timeout_ns:
             return
         # Re-check manager-owned queue activity without the periodic throttle before
         # deciding the manager is idle. Short manager lifetimes can otherwise race
@@ -5141,6 +5299,7 @@ class Manager(BaseTask):
         )
         if total_processed > 0:
             self._strategy.notify_activity()
+            self._invalidate_leadership_work_cache()
         return total_processed
 
     def _leadership_drain_leader_still_valid(self) -> bool:

@@ -832,3 +832,4 @@ management live in the companion doc:
 - [`docs/plans/2026-05-13-manager-liveness-and-leadership-robustness-plan.md`](../plans/2026-05-13-manager-liveness-and-leadership-robustness-plan.md)
 - [`docs/plans/2026-05-13-internal-state-machine-helper-plan.md`](../plans/2026-05-13-internal-state-machine-helper-plan.md)
 - [`docs/plans/2026-05-13-task-monitor-pong-policy-stats-plan.md`](../plans/2026-05-13-task-monitor-pong-policy-stats-plan.md)
+- [`docs/plans/2026-05-15-manager-hot-loop-reduction-plan.md`](../plans/2026-05-15-manager-hot-loop-reduction-plan.md)

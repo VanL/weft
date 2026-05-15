@@ -257,6 +257,20 @@ runbook needs to become stricter.
   available. Different-agent reviews may take 5-10 minutes; that wait is part
   of the review cost, not a reason to skip the gate.
 
+## 2026-05-15 Manager Hot Loops
+
+- Rate gates must sit before expensive proof work. A manager loop that checks
+  leadership, service terminal proof, pending service rows, or global task-log
+  evidence before deciding whether that work is due can burn CPU even though
+  the nominal convergence interval looks correct.
+- Reusable task-loop timing belongs at `BaseTask`, not inside one special task.
+  Long-lived tasks should expose due work through `next_wait_timeout()` and let
+  the shared `MultiQueueWatcher` activity path wake them early for queue work.
+- Keep the state-machine boundary clean: collect evidence on a due cadence,
+  then pass that snapshot through the reducer. Do not move lifecycle decisions
+  into timer code, and do not scan global logs just to discover that no reducer
+  turn is due.
+
 ## 2026-04-08 Zombie PID Liveness
 
 - `psutil.Process(pid).is_running()` is not a sufficient liveness check for

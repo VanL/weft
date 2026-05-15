@@ -36,6 +36,9 @@ from weft._constants import (
     INTERNAL_SERVICE_KEY_TASK_MONITOR,
     INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY,
     MANAGED_SERVICE_CONVERGENCE_INTERVAL_SECONDS,
+    MANAGED_SERVICE_STABLE_AUDIT_INTERVAL_SECONDS,
+    MANAGER_CHILD_EXIT_POLL_INTERVAL,
+    MANAGER_REGISTRY_HEARTBEAT_INTERVAL_SECONDS,
     MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY,
     PIPELINE_RUNTIME_METADATA_KEY,
     SERVICE_OWNER_SCHEMA,
@@ -844,6 +847,7 @@ def test_manager_convergence_drains_pending_internal_spawn_work(
         monkeypatch.setattr(manager, "_reconcile_managed_services", lambda **_: None)
         monkeypatch.setattr(manager, "_launch_child_task", record_launch)
         manager._last_managed_service_convergence_ns = time.time_ns()
+        manager._managed_internal_spawn_enqueued = True
         for index in range(5):
             internal_queue.write(
                 json.dumps(
@@ -1467,6 +1471,350 @@ def test_managed_service_convergence_active_reasons_are_stable(
         "spawn_pending",
         "uncertain_attempts",
     )
+
+
+def test_throttled_managed_service_convergence_skips_broker_work(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _make_queue = manager_setup
+    state = manager._service_state(INTERNAL_SERVICE_KEY_TASK_MONITOR)
+    state.active_tid = "1777000000000000051"
+    state.launched_once = True
+    manager._last_managed_service_convergence_ns = time.time_ns()
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        manager,
+        "_internal_spawn_pending",
+        lambda: calls.append("internal_pending") or False,
+    )
+    monkeypatch.setattr(
+        manager,
+        "_cleanup_children",
+        lambda: calls.append("cleanup") or False,
+    )
+    monkeypatch.setattr(
+        manager,
+        "_pending_service_keys",
+        lambda _keys: calls.append("pending_keys") or set(),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_observed_service_candidates_by_key",
+        lambda _keys, **_kwargs: calls.append("observed") or {},
+    )
+
+    manager._run_managed_service_convergence(include_autostart=False)
+
+    assert calls == []
+
+
+def test_manager_leadership_yield_rate_gate_precedes_actionable_work(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _make_queue = manager_setup
+    manager._last_leader_check_ns = time.time_ns()
+
+    monkeypatch.setattr(
+        manager,
+        "_has_actionable_leadership_work",
+        lambda: pytest.fail("actionable work must not run before rate gate"),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_read_active_manager_records",
+        lambda: pytest.fail("registry read must not run before rate gate"),
+    )
+
+    assert manager._maybe_yield_leadership() is False
+
+
+def _prime_manager_next_wait_baseline(manager: Manager, now_ns: int) -> None:
+    manager.should_stop = False
+    manager._draining = False
+    manager._pending_termination_signal = None
+    manager._managed_internal_spawn_enqueued = False
+    manager._stalled_control_retry_after_ns = 0
+    manager._child_processes.clear()
+    manager._managed_service_state.clear()
+    manager._managed_service_duplicate_scan_pending.clear()
+    manager._autostart_enabled = False
+    manager._autostart_dir = None
+    manager._last_public_dispatch_stall_log_ns = 0
+    manager._idle_timeout = 120.0
+    manager._last_activity_ns = now_ns
+    far_future_ns = now_ns + 60_000_000_000
+    manager._last_managed_service_convergence_ns = far_future_ns
+    manager._last_leader_check_ns = far_future_ns
+    manager._last_registry_heartbeat_ns = far_future_ns
+    manager._last_broker_probe_ns = far_future_ns
+
+
+def test_manager_next_wait_timeout_returns_nearest_due_source(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _make_queue = manager_setup
+    now_ns = 2_000_000_000_000
+    monkeypatch.setattr(manager_mod.time, "time_ns", lambda: now_ns)
+
+    _prime_manager_next_wait_baseline(manager, now_ns)
+    manager._last_managed_service_convergence_ns = now_ns - int(
+        (MANAGED_SERVICE_STABLE_AUDIT_INTERVAL_SECONDS - 0.70) * 1_000_000_000
+    )
+    assert manager.next_wait_timeout() == pytest.approx(0.70)
+
+    _prime_manager_next_wait_baseline(manager, now_ns)
+    manager._last_leader_check_ns = (
+        now_ns - manager._leader_check_interval_ns + 50_000_000
+    )
+    assert manager.next_wait_timeout() == pytest.approx(0.05)
+
+    _prime_manager_next_wait_baseline(manager, now_ns)
+    manager._last_registry_heartbeat_ns = now_ns - int(
+        (MANAGER_REGISTRY_HEARTBEAT_INTERVAL_SECONDS - 0.40) * 1_000_000_000
+    )
+    assert manager.next_wait_timeout() == pytest.approx(0.40)
+
+    _prime_manager_next_wait_baseline(manager, now_ns)
+    manager._last_broker_probe_ns = (
+        now_ns - manager._broker_probe_interval_ns + 300_000_000
+    )
+    assert manager.next_wait_timeout() == pytest.approx(0.30)
+
+    _prime_manager_next_wait_baseline(manager, now_ns)
+    manager._last_activity_ns = now_ns - int(
+        (manager._idle_timeout - 0.20) * 1_000_000_000
+    )
+    assert manager.next_wait_timeout() == pytest.approx(0.20)
+
+    _prime_manager_next_wait_baseline(manager, now_ns)
+    manager._autostart_enabled = True
+    manager._autostart_dir = Path("/tmp/weft-autostart-test")
+    manager._autostart_last_scan_ns = (
+        now_ns - manager._autostart_scan_interval_ns + 250_000_000
+    )
+    assert manager.next_wait_timeout() == pytest.approx(0.25)
+
+    _prime_manager_next_wait_baseline(manager, now_ns)
+    manager._stalled_control_retry_after_ns = now_ns + 125_000_000
+    assert manager.next_wait_timeout() == pytest.approx(0.125)
+
+    _prime_manager_next_wait_baseline(manager, now_ns)
+    child = ManagedChild(
+        process=SimpleNamespace(pid=1234),
+        ctrl_queue="Tchild.ctrl_in",
+        ctrl_out_queue="Tchild.ctrl_out",
+        service_key=INTERNAL_SERVICE_KEY_TASK_MONITOR,
+    )
+    manager._child_processes["1777000000000000051"] = child
+    try:
+        assert manager.next_wait_timeout() == pytest.approx(
+            MANAGER_CHILD_EXIT_POLL_INTERVAL
+        )
+    finally:
+        manager._child_processes.pop("1777000000000000051", None)
+
+
+@pytest.mark.parametrize(
+    ("attribute", "value"),
+    [
+        ("should_stop", True),
+        ("_draining", True),
+        ("_pending_termination_signal", signal.SIGTERM),
+        ("_managed_internal_spawn_enqueued", True),
+    ],
+)
+def test_manager_next_wait_timeout_returns_zero_for_immediate_work(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+    attribute: str,
+    value: object,
+) -> None:
+    manager, _make_queue = manager_setup
+    now_ns = 2_000_000_000_000
+    monkeypatch.setattr(manager_mod.time, "time_ns", lambda: now_ns)
+    _prime_manager_next_wait_baseline(manager, now_ns)
+    setattr(manager, attribute, value)
+
+    assert manager.next_wait_timeout() == 0.0
+
+
+def test_manager_wait_for_activity_passes_timeout_to_shared_waiter(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _make_queue = manager_setup
+    timeouts: list[float | None] = []
+
+    class RecordingWaiter:
+        def wait(self, timeout: float | None) -> None:
+            timeouts.append(timeout)
+
+    monkeypatch.setattr(manager, "_has_pending_messages", lambda: False)
+    monkeypatch.setattr(
+        manager,
+        "_ensure_multi_activity_waiter",
+        lambda: RecordingWaiter(),
+    )
+
+    manager.wait_for_activity(timeout=0.2)
+
+    assert timeouts == [0.2]
+
+
+def test_manager_wait_for_activity_fallback_honors_timeout(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _make_queue = manager_setup
+    wait_timeouts: list[float | None] = []
+    reset_calls: list[bool] = []
+
+    class FailingWaiter:
+        def wait(self, timeout: float | None) -> None:
+            raise RuntimeError(f"wait failed after {timeout}")
+
+    class FakeStopEvent:
+        def wait(self, timeout: float | None) -> bool:
+            wait_timeouts.append(timeout)
+            return False
+
+        def is_set(self) -> bool:
+            return False
+
+        def set(self) -> None:
+            pass
+
+    monkeypatch.setattr(manager, "_has_pending_messages", lambda: False)
+    monkeypatch.setattr(
+        manager, "_ensure_multi_activity_waiter", lambda: FailingWaiter()
+    )
+    monkeypatch.setattr(
+        manager, "_reset_multi_activity_waiter", lambda: reset_calls.append(True)
+    )
+    manager._stop_event = FakeStopEvent()
+
+    manager.wait_for_activity(timeout=0.2)
+
+    assert reset_calls == [True]
+    assert wait_timeouts == [0.2]
+
+
+def test_manager_leadership_yield_memoizes_per_turn_until_invalidated(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _make_queue = manager_setup
+    now_ns = 2_000_000_000_000
+    current_ns = {"value": now_ns}
+    actionable_calls = 0
+    registry_calls = 0
+
+    def count_actionable_work() -> bool:
+        nonlocal actionable_calls
+        actionable_calls += 1
+        return False
+
+    def count_registry_reads() -> dict[str, dict[str, object]]:
+        nonlocal registry_calls
+        registry_calls += 1
+        return {manager.tid: {"tid": manager.tid}}
+
+    monkeypatch.setattr(manager_mod.time, "time_ns", lambda: current_ns["value"])
+    monkeypatch.setattr(
+        manager, "_has_actionable_leadership_work", count_actionable_work
+    )
+    monkeypatch.setattr(manager, "_read_active_manager_records", count_registry_reads)
+    manager._loop_iteration = 42
+    manager._leader_check_interval_ns = 100_000_000
+    manager._last_leader_check_ns = now_ns - manager._leader_check_interval_ns - 1
+
+    assert manager._maybe_yield_leadership() is False
+    current_ns["value"] += manager._leader_check_interval_ns + 1
+    assert manager._maybe_yield_leadership() is False
+
+    assert actionable_calls == 1
+    assert registry_calls == 1
+
+    manager._invalidate_leadership_work_cache()
+    current_ns["value"] += manager._leader_check_interval_ns + 1
+
+    assert manager._maybe_yield_leadership() is False
+    assert actionable_calls == 2
+    assert registry_calls == 2
+
+
+def test_tracked_service_candidate_uses_live_child_without_terminal_scan(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _make_queue = manager_setup
+    child = ManagedChild(
+        process=SimpleNamespace(pid=1234),
+        ctrl_queue="Tchild.ctrl_in",
+        ctrl_out_queue="Tchild.ctrl_out",
+        service_key=INTERNAL_SERVICE_KEY_TASK_MONITOR,
+    )
+    manager._child_processes["1777000000000000051"] = child
+    monkeypatch.setattr(manager, "_child_has_exited", lambda _child: False)
+    monkeypatch.setattr(
+        manager,
+        "_child_terminal_proof_visible",
+        lambda *_args: pytest.fail("live child should not scan terminal proof"),
+    )
+
+    try:
+        candidate = manager._tracked_service_candidate(
+            INTERNAL_SERVICE_KEY_TASK_MONITOR
+        )
+    finally:
+        manager._child_processes.pop("1777000000000000051", None)
+
+    assert candidate is not None
+    assert candidate.state == "live"
+    assert candidate.source == "manager-child"
+
+
+def test_reconcile_reuses_tracked_service_candidates(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _make_queue = manager_setup
+    manager._queue_names["inbox"] = WEFT_SPAWN_REQUESTS_QUEUE
+    manager._task_monitor_enabled = True
+    calls: list[str] = []
+
+    def tracked(
+        service_key: str,
+        *,
+        scan_terminal_proof: bool = False,
+    ) -> manager_mod.ServiceCandidate:
+        del scan_terminal_proof
+        calls.append(service_key)
+        return manager_mod.ServiceCandidate(
+            key=service_key,
+            tid=f"17770000000000000{len(calls)}",
+            state="live",
+            source="manager-child",
+        )
+
+    monkeypatch.setattr(manager, "_pending_service_keys", lambda _keys: set())
+    monkeypatch.setattr(manager, "_tracked_service_candidate", tracked)
+    monkeypatch.setattr(
+        manager,
+        "_observed_service_candidates_by_key",
+        lambda _keys, **_kwargs: pytest.fail("live tracked services need no replay"),
+    )
+
+    manager._reconcile_managed_services(include_autostart=False)
+
+    assert calls == [
+        INTERNAL_SERVICE_KEY_HEARTBEAT,
+        INTERNAL_SERVICE_KEY_TASK_MONITOR,
+    ]
 
 
 def test_managed_service_progress_reasons_are_coarse_and_stable() -> None:

@@ -31,6 +31,7 @@ See also:
 - [`docs/plans/2026-05-09-runtime-liveness-probe-registry-plan.md`](../plans/2026-05-09-runtime-liveness-probe-registry-plan.md)
 - [`docs/plans/2026-05-09-prune-path-unification-plan.md`](../plans/2026-05-09-prune-path-unification-plan.md)
 - [`docs/plans/2026-05-13-internal-state-machine-helper-plan.md`](../plans/2026-05-13-internal-state-machine-helper-plan.md)
+- [`docs/plans/2026-05-15-manager-hot-loop-reduction-plan.md`](../plans/2026-05-15-manager-hot-loop-reduction-plan.md)
 
 ## 1. TaskSpec (`weft/core/taskspec/model.py`) [CC-1]
 
@@ -145,7 +146,8 @@ Current responsibilities:
 - maintain TID mappings and process titles
 - own reserved-queue policy application
 - optionally claim and release one stable runtime endpoint name for the live task
-- expose `process_once()` and `run_until_stopped()`
+- expose `process_once()`, `run_until_stopped()`, and `next_wait_timeout()`
+  as the shared task-loop contract
 
 Why this exists:
 
@@ -228,7 +230,9 @@ Why this boundary matters:
 - task-local streaming state should remain explicit and inspectable
 
 _Implementation mapping_: `weft/core/tasks/base.py` owns
-`TaskControlPolicy`, default STOP/KILL behavior, and late-terminal guards;
+`TaskControlPolicy`, default STOP/KILL behavior, late-terminal guards, and the
+shared `process_once()`/`run_until_stopped()`/`next_wait_timeout()` task-loop
+contract;
 specialized policies live on `Manager`, `Consumer`, `PipelineTask`, and
 `Monitor`.
 
@@ -285,9 +289,11 @@ Current high-level flow:
 5. apply control and reserved-policy rules
 6. publish terminal state and cleanup
 
-_Implementation mapping_: `weft/core/tasks/consumer.py` owns work-item
-execution and finalization; `weft/core/tasks/runner.py` owns runner dispatch;
-`weft/cli/run.py` owns CLI submission and wait behavior.
+_Implementation mapping_: `weft/core/tasks/base.py` owns the shared task-loop
+entry points; `weft/core/launcher.py` honors `next_wait_timeout()` for spawned
+task processes; `weft/core/tasks/consumer.py` owns work-item execution and
+finalization; `weft/core/tasks/runner.py` owns runner dispatch; `weft/cli/run.py`
+owns CLI submission and wait behavior.
 
 Why this stays shared:
 
