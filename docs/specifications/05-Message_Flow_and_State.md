@@ -237,6 +237,13 @@ Current rules:
   future slot
 - if a due registration is late, the service coalesces to one emit and does
   not replay every missed slot
+- the heartbeat service is driven by the shared task reactor loop. It handles
+  at most one bounded control/registration/due-emission turn in
+  `process_once()`, exposes the next registration due time or idle shutdown
+  through `next_wait_timeout()`, and leaves all destination queue writes on the
+  main task thread. It does not inspect inbox/control pending state in
+  `next_wait_timeout()`; queue wakeup belongs to `MultiQueueWatcher`, and the
+  heartbeat timer is only the timeout supplied to that same wait path.
 - duplicate heartbeat services converge through the manager-owned singleton
   service contract. Live ownership is proved by tracked child state, a live
   runtime handle, including the task process host handle in TID mappings, or
@@ -245,6 +252,9 @@ Current rules:
   service-candidate evidence and uses the shared singleton summary rules, so
   terminal task-log proof or dead host-process proof for the endpoint TID
   rejects stale endpoint rows even if older endpoint registry data remains.
+  Service status summaries must prefer a separate live singleton owner over a
+  terminal duplicate from another TID, while terminal proof still overrides
+  launch evidence for the same TID.
 - the heartbeat service is an interval emitter, not a scheduler: there is no
   cron syntax, wall-clock scheduling, timezone handling, or missed-run replay
 - the supervised `TaskMonitorTask` uses heartbeat registrations for periodic
@@ -326,11 +336,15 @@ Current rules:
   logging callback lands.
 - when enabled, the canonical manager supervises one internal
   `TaskMonitorTask`. The supervised monitor reads task-log lifecycle evidence by
-  generator/high-water cursor for observation and custom processors. For the
-  built-in `delete` and `report_only` processors, cleanup uses a separate
+  generator/high-water cursor for observation and custom processors. Custom
+  processors run from the resulting candidate snapshot in a broker-free worker
+  lane; the TaskMonitor reactor commits the processor result, checkpoint, and
+  cached diagnostics after the worker returns. For the built-in `delete` and
+  `report_only` processors, cleanup uses a separate
   bounded FIFO policy pass over supported cleanup queues, collects exact message
-  IDs, and applies deletes only after the scan window is complete. The manager
-  owns only child supervision; it does not scan lifecycle queues.
+  IDs, and applies deletes only after the scan window is complete. Built-in
+  cleanup runs on the TaskMonitor reactor, not in a worker. The manager owns
+  only child supervision; it does not scan lifecycle queues.
 - `weft system prune` is a separate foreground maintenance command.
   `--family runtime-state` reports or deletes exact message IDs from supported
   `weft.state.*` queues after conservative live/recent checks.
@@ -427,6 +441,15 @@ and are drained before public spawn requests whenever both queues are pending.
 Both queues share the same validation, TaskSpec expansion, child launch, initial
 inbox seeding, and acknowledgement path.
 
+Child process creation is the only blocking part of the launch path and runs in
+the manager's broker-free child-launch worker lane. The manager reactor owns all
+broker effects: moving the request into a reserved queue, seeding the child
+inbox before worker submission, committing `task_spawned` and service-owner
+state after the worker returns, and deleting or applying reserved policy to the
+exact reserved spawn message. While a launch worker is active, the manager must
+continue to answer task-local control messages such as `PING`, but it must not
+accept another spawn message in the same turn.
+
 Internal service observability has two publication phases. A successful manager
 launch first appears as a manager-authored `task_spawned` row with `child_tid`,
 `child_taskspec`, and optionally `child_pid`; the child later emits its own
@@ -463,6 +486,19 @@ Current manager-dispatch rules:
 - after a successful launch, the manager deletes the exact reserved message; if
   child launch fails before that point, the message remains governed by the
   manager's reserved-queue policy and visible reserved state
+- child-launch workers return only local Python results. They do not touch
+  SimpleBroker queues, mutate TaskSpec state, report task-log events, or send
+  control responses. Those effects belong to the manager reactor.
+- manager-to-manager liveness PINGs are reactor state, not blocking helper
+  calls. The probing manager writes one keyed PING, stores the pending request,
+  and peeks for the matching PONG on later turns until the deadline. Pending
+  probes are unknown evidence; they must not immediately prune or supersede the
+  target manager.
+- service-owner liveness PINGs use the same non-blocking pattern. The manager
+  writes one keyed PING to a candidate service owner, stores the pending probe,
+  and checks for the matching PONG on later service-convergence turns. Pending
+  service probes are uncertain evidence; after timeout, ordinary recent/stale
+  candidate classification resumes.
 - STOP/KILL control that arrives after reservation but before launch still wins:
   a draining or stopped manager must not start a new child from the in-flight
   reserved request
@@ -496,7 +532,9 @@ queue, and ensure-mode manifests are rescanned immediately after a tracked
 autostart child exits.
 
 _Implementation mapping_: `weft/core/manager.py` — `Manager._handle_work_message`,
-`Manager._build_child_spec`, `Manager._control_allows_child_launch`,
+`Manager._build_child_spec`, `Manager._launch_child_task`,
+`Manager._run_child_launch_worker`, `Manager._handle_child_launch_result`,
+`Manager._commit_child_launch_success`, `Manager._control_allows_child_launch`,
 `Manager._tick_managed_service`,
 `Manager._enqueue_managed_service_request`, `Manager.process_once`;
 `weft/core/manager_services.py`;

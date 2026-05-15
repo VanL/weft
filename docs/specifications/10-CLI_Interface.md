@@ -575,6 +575,8 @@ Current queue subcommands:
 - `peek`
 - `move`
 - `list`
+- `exists`
+- `stats`
 - `resolve`
 - `watch`
 - `delete`
@@ -585,6 +587,15 @@ Current queue subcommands:
 
 These commands intentionally stay close to SimpleBroker behavior. Weft adds
 project resolution, aliases, and task/runtime conventions on top.
+
+Current raw queue filters and metadata helpers mirror SimpleBroker 3.6.1:
+
+- `read`, `peek`, and `move` accept `--after` and `--before`
+- `list` accepts `--pattern`, `--prefix`, `--stats`, and `--json`
+- `exists` checks whether a queue exists, including queues with claimed rows
+- `stats` reports pending, claimed, total, and existence counts for one queue
+- command-local JSON output follows SimpleBroker's newline-delimited JSON shape
+  for raw queue commands
 
 ### Named Endpoint Queue Ergonomics [CLI-4.1]
 

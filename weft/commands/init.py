@@ -76,7 +76,7 @@ def cmd_init(
         return EXIT_ERROR
     try:
         broker_target = resolve_context_broker_target(root, config=config)
-        result = int(sb_cmd_init(broker_target, quiet=quiet))
+        result = int(sb_cmd_init(broker_target, quiet=True))
     except Exception as exc:  # pragma: no cover - defensive
         friendly_exc = normalize_backend_resolution_error(exc)
         if not quiet:

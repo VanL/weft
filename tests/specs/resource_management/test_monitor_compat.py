@@ -1,8 +1,7 @@
-"""Spec checks for backward-compatible ResourceMonitor APIs (RM-5.1)."""
+"""Spec checks for ResourceMonitor APIs (RM-5.1)."""
 
 from __future__ import annotations
 
-from weft.core import resource_monitor as resource_monitor_module
 from weft.core.resource_monitor import (
     BaseResourceMonitor,
     PsutilResourceMonitor,
@@ -10,8 +9,8 @@ from weft.core.resource_monitor import (
 )
 
 
-class LegacyMonitor(BaseResourceMonitor):
-    """Legacy-style monitor implementing start/stop/snapshot only."""
+class AlternateMonitor(BaseResourceMonitor):
+    """Monitor using short method names exercised by runner loops."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -40,8 +39,8 @@ class LegacyMonitor(BaseResourceMonitor):
         return None
 
 
-def test_legacy_monitor_methods_are_honored() -> None:
-    monitor = LegacyMonitor()
+def test_short_monitor_methods_are_honored() -> None:
+    monitor = AlternateMonitor()
     monitor.start_monitoring(42)
     assert monitor.started_pid == 42
 
@@ -52,25 +51,9 @@ def test_legacy_monitor_methods_are_honored() -> None:
     assert monitor.stopped is True
 
 
-def test_psutil_monitor_stop_closes_metrics_queue(monkeypatch) -> None:
-    class FakeMetricsQueue:
-        def __init__(self, *_args, **_kwargs) -> None:
-            self.closed = False
-
-        def close(self) -> None:
-            self.closed = True
-
-    created: list[FakeMetricsQueue] = []
-
-    def _fake_queue(*args, **kwargs):
-        queue = FakeMetricsQueue(*args, **kwargs)
-        created.append(queue)
-        return queue
-
-    monkeypatch.setattr(resource_monitor_module, "Queue", _fake_queue)
-
+def test_psutil_monitor_does_not_open_broker_queue_for_metrics() -> None:
     monitor = PsutilResourceMonitor()
-    monitor.stop_monitoring()
+    monitor.close()
+    monitor.close()
 
-    assert created
-    assert created[0].closed is True
+    assert not hasattr(monitor, "metrics_queue")

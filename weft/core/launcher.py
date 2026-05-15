@@ -130,7 +130,13 @@ def _task_process_entry(
                 _request_parent_loss_shutdown(task)
             task.process_once()
             status = task.taskspec.state.status
-            if status in TERMINAL_TASK_STATUSES or task.should_stop:
+            has_worker_activity = getattr(task, "_has_worker_activity", None)
+            worker_activity = (
+                bool(has_worker_activity()) if callable(has_worker_activity) else False
+            )
+            if status in TERMINAL_TASK_STATUSES or (
+                task.should_stop and not worker_activity
+            ):
                 break
             wait_timeout = poll_interval
             next_wait_timeout = getattr(task, "next_wait_timeout", None)

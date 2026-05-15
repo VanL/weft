@@ -47,9 +47,10 @@ class _FakeWatchQueue:
         self,
         *,
         with_timestamps: bool,
-        since_timestamp: int | None = None,
+        after_timestamp: int | None = None,
+        before_timestamp: int | None = None,
     ):
-        del since_timestamp
+        del after_timestamp, before_timestamp
         batch = self._batches.pop(0) if self._batches else []
         if with_timestamps:
             return iter(batch)
@@ -59,11 +60,12 @@ class _FakeWatchQueue:
         self,
         *,
         with_timestamps: bool,
-        since_timestamp: int | None = None,
+        after_timestamp: int | None = None,
+        before_timestamp: int | None = None,
     ):
+        del after_timestamp, before_timestamp
         return self.read_generator(
             with_timestamps=with_timestamps,
-            since_timestamp=since_timestamp,
         )
 
     def move_generator(
@@ -71,11 +73,12 @@ class _FakeWatchQueue:
         _move_to: str,
         *,
         with_timestamps: bool,
-        since_timestamp: int | None = None,
+        after_timestamp: int | None = None,
+        before_timestamp: int | None = None,
     ):
+        del after_timestamp, before_timestamp
         return self.read_generator(
             with_timestamps=with_timestamps,
-            since_timestamp=since_timestamp,
         )
 
     def close(self) -> None:
@@ -124,6 +127,102 @@ def test_list_queues(tmp_path):
     queues = queue_cmd.list_queues(ctx)
     names = {info.name for info in queues}
     assert "list.queue" in names
+
+
+def test_list_queues_supports_prefix(tmp_path):
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    queue_cmd.write_message(ctx, "alpha.one", "item")
+    queue_cmd.write_message(ctx, "beta.one", "item")
+
+    queues = queue_cmd.list_queues(ctx, prefix="alpha.")
+
+    assert [info.name for info in queues] == ["alpha.one"]
+
+
+def test_exists_and_stats_commands_delegate_to_simplebroker(tmp_path) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    queue_cmd.write_message(ctx, "meta.queue", "item")
+
+    exists_result = queue_cmd.exists_command(
+        "meta.queue",
+        json_output=True,
+        spec_context=str(root),
+    )
+    stats_result = queue_cmd.stats_command(
+        "meta.queue",
+        json_output=True,
+        spec_context=str(root),
+    )
+
+    assert exists_result[0] == 0
+    assert json.loads(exists_result[1]) == {"queue": "meta.queue", "exists": True}
+    assert stats_result[0] == 0
+    assert json.loads(stats_result[1]) == {
+        "queue": "meta.queue",
+        "pending": 1,
+        "claimed": 0,
+        "total": 1,
+        "exists": True,
+    }
+
+
+def test_alias_list_command_returns_empty_exit_for_missing_target(tmp_path) -> None:
+    root = prepare_project_root(tmp_path)
+
+    exit_code, stdout, stderr = queue_cmd.alias_list_command(
+        target="missing.queue",
+        spec_context=str(root),
+    )
+
+    assert exit_code == 2
+    assert stdout == ""
+    assert stderr == ""
+
+
+def test_queue_command_filter_validation_matches_simplebroker(tmp_path) -> None:
+    root = prepare_project_root(tmp_path)
+
+    read_result = queue_cmd.read_command(
+        "meta.queue",
+        all_messages=True,
+        message_id="1234567890123456789",
+        spec_context=str(root),
+    )
+    delete_result = queue_cmd.delete_command(
+        "meta.queue",
+        delete_all=False,
+        message_id="123",
+        spec_context=str(root),
+    )
+    watch_result = queue_cmd.watch_command(
+        "meta.queue",
+        limit=1,
+        interval=0.01,
+        with_timestamps=False,
+        json_output=False,
+        peek=False,
+        after="1234567890123456789",
+        move_to="other.queue",
+        spec_context=str(root),
+    )
+
+    assert read_result == (
+        1,
+        "",
+        "--message cannot be used with --all, --after, or --before",
+    )
+    assert delete_result == (
+        1,
+        "",
+        "invalid message ID: expected exactly 19 digits within range",
+    )
+    assert watch_result == (
+        1,
+        "",
+        "--move drains ALL messages from source queue, incompatible with --after filtering",
+    )
 
 
 def test_watch_queue(tmp_path):

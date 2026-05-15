@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 
@@ -19,7 +20,6 @@ from weft._constants import (
 from weft.core.manager import Manager
 from weft.core.tasks import Consumer, Monitor, PipelineTask
 from weft.core.tasks.base import TaskControlPolicy
-from weft.core.tasks.consumer import Monitor as LegacyMonitor
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 from weft.ext import RunnerHandle, RunnerRuntimeDescription
 
@@ -32,6 +32,16 @@ def _read_all(queue):
             break
         messages.append(value)
     return messages
+
+
+def _drive_task_until(task: Consumer, predicate, *, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        task.process_once()
+        if predicate():
+            return
+        task.wait_for_activity(timeout=0.02)
+    raise AssertionError("Task did not reach expected state before timeout")
 
 
 def _make_manager_taskspec(tid: str) -> TaskSpec:
@@ -89,7 +99,7 @@ def test_pause_resume_control_flow(broker_env, unique_tid):
     assert task._paused is False
     all_responses.extend(json.loads(msg) for msg in _read_all(ctrl_out))
 
-    task.process_once()
+    _drive_task_until(task, lambda: outbox.peek_one() is not None)
     all_responses.extend(json.loads(msg) for msg in _read_all(ctrl_out))
 
     assert any(
@@ -166,7 +176,7 @@ def test_late_stop_after_terminal_state_acks_without_state_regression(
 
 
 def test_stop_kill_overrides_declare_control_policy() -> None:
-    overridden_classes = [Manager, PipelineTask, Monitor, LegacyMonitor]
+    overridden_classes = [Manager, PipelineTask, Monitor]
 
     for task_cls in overridden_classes:
         assert "_handle_control_command" in task_cls.__dict__

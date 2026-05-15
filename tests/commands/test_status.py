@@ -13,8 +13,10 @@ import pytest
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import (
     INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY,
+    INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
     INTERNAL_RUNTIME_TASK_CLASS_KEY,
     INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR,
+    INTERNAL_SERVICE_KEY_HEARTBEAT,
     INTERNAL_SERVICE_KEY_METADATA_KEY,
     INTERNAL_SERVICE_KEY_TASK_MONITOR,
     INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY,
@@ -379,6 +381,57 @@ def test_status_services_child_terminal_evidence_overrides_manager_spawn(
     assert monitor["tid"] == child_tid
     assert monitor["evidence"] == "child-task-log"
     assert monitor["reconciliation"]["lifecycle_status"] == "completed"
+
+
+def test_status_services_prefer_live_duplicate_over_terminal_duplicate(
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    live_tid = "1779000000000000301"
+    terminal_tid = "1779000000000000302"
+    now = time.time_ns()
+    heartbeat_metadata = {
+        "internal": True,
+        "role": "heartbeat_service",
+        INTERNAL_RUNTIME_TASK_CLASS_KEY: INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
+        INTERNAL_SERVICE_KEY_METADATA_KEY: INTERNAL_SERVICE_KEY_HEARTBEAT,
+        INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY: "ensure",
+    }
+    _write_task_log_entry(
+        ctx=ctx,
+        tid=live_tid,
+        event="task_started",
+        status="running",
+        started_at=now - 20_000,
+        completed_at=None,
+        name="heartbeat-service",
+        metadata=heartbeat_metadata,
+    )
+    _write_task_log_entry(
+        ctx=ctx,
+        tid=terminal_tid,
+        event="work_completed",
+        status="completed",
+        started_at=now - 10_000,
+        completed_at=now,
+        name="heartbeat-service",
+        metadata=heartbeat_metadata,
+    )
+
+    exit_code, payload = cmd_status(json_output=True, spec_context=root)
+
+    assert exit_code == 0
+    assert payload is not None
+    services = json.loads(payload)["services"]
+    heartbeat = next(
+        service
+        for service in services
+        if service["key"] == INTERNAL_SERVICE_KEY_HEARTBEAT
+    )
+    assert heartbeat["status"] == "running"
+    assert heartbeat["tid"] == live_tid
+    assert heartbeat["evidence"] == "child-task-log"
 
 
 def test_status_services_report_pending_internal_spawn_request(

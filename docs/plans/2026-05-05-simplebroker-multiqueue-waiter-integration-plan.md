@@ -508,8 +508,11 @@ Design:
   self.wait_for_activity(timeout=chunk)
   ```
 
-- Keep `_has_pending_runtime_input()` as the first correctness check. Heartbeat
-  must not rely on a wake hint to prove work exists.
+- Superseded by
+  [`2026-05-15-task-reactor-and-evidence-worker-plan.md`](2026-05-15-task-reactor-and-evidence-worker-plan.md):
+  do not keep task-local `_has_pending_runtime_input()` checks. Queue pending
+  detection belongs to `MultiQueueWatcher.wait_for_activity()`; task
+  `next_wait_timeout()` hooks only expose timer/local-worker deadlines.
 - Let `MultiQueueWatcher` own waiter close/reset lifecycle.
 - Keep fallback bounded by the same timeout budget.
 

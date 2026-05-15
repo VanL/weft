@@ -88,9 +88,16 @@ def queue_read(
         str | None,
         typer.Option("--message", "-m", help="Read specific message by ID"),
     ] = None,
-    since: Annotated[
+    after: Annotated[
         str | None,
-        typer.Option("--since", help="Only return messages newer than timestamp"),
+        typer.Option(
+            "--after",
+            help="Only return messages newer than timestamp",
+        ),
+    ] = None,
+    before: Annotated[
+        str | None,
+        typer.Option("--before", help="Only return messages older than timestamp"),
     ] = None,
 ) -> None:
     _emit_queue_result(
@@ -100,7 +107,8 @@ def queue_read(
             with_timestamps=timestamps,
             json_output=json_output,
             message_id=message_id,
-            since=since,
+            after=after,
+            before=before,
         )
     )
 
@@ -160,9 +168,16 @@ def queue_peek(
         str | None,
         typer.Option("--message", "-m", help="Peek specific message by ID"),
     ] = None,
-    since: Annotated[
+    after: Annotated[
         str | None,
-        typer.Option("--since", help="Only return messages newer than timestamp"),
+        typer.Option(
+            "--after",
+            help="Only return messages newer than timestamp",
+        ),
+    ] = None,
+    before: Annotated[
+        str | None,
+        typer.Option("--before", help="Only return messages older than timestamp"),
     ] = None,
 ) -> None:
     _emit_queue_result(
@@ -172,7 +187,8 @@ def queue_peek(
             with_timestamps=timestamps,
             json_output=json_output,
             message_id=message_id,
-            since=since,
+            after=after,
+            before=before,
         )
     )
 
@@ -201,9 +217,16 @@ def queue_move(
         str | None,
         typer.Option("--message", "-m", help="Move specific message by ID"),
     ] = None,
-    since: Annotated[
+    after: Annotated[
         str | None,
-        typer.Option("--since", help="Only move messages newer than timestamp"),
+        typer.Option(
+            "--after",
+            help="Only move messages newer than timestamp",
+        ),
+    ] = None,
+    before: Annotated[
+        str | None,
+        typer.Option("--before", help="Only move messages older than timestamp"),
     ] = None,
 ) -> None:
     _emit_queue_result(
@@ -215,7 +238,8 @@ def queue_move(
             json_output=json_output,
             with_timestamps=timestamps,
             message_id=message_id,
-            since=since,
+            after=after,
+            before=before,
         )
     )
 
@@ -242,15 +266,48 @@ def queue_list(
             help="fnmatch-style pattern limiting queues in the result",
         ),
     ] = None,
+    prefix: Annotated[
+        str | None,
+        typer.Option(
+            "--prefix",
+            help="Literal prefix limiting queues in the result",
+        ),
+    ] = None,
 ) -> None:
+    if pattern is not None and prefix is not None:
+        raise typer.BadParameter("--pattern and --prefix cannot be used together")
+
     _emit_queue_result(
         queue_cmd.list_command(
             json_output=json_output,
             stats=stats,
             endpoints=endpoints,
             pattern=pattern,
+            prefix=prefix,
         )
     )
+
+
+@queue_app.command("exists")
+def queue_exists(
+    name: Annotated[str, typer.Argument(help="Queue name to check")],
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Output as JSON"),
+    ] = False,
+) -> None:
+    _emit_queue_result(queue_cmd.exists_command(name, json_output=json_output))
+
+
+@queue_app.command("stats")
+def queue_stats(
+    name: Annotated[str, typer.Argument(help="Queue name to inspect")],
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Output as JSON"),
+    ] = False,
+) -> None:
+    _emit_queue_result(queue_cmd.stats_command(name, json_output=json_output))
 
 
 @queue_app.command("resolve")
@@ -289,9 +346,12 @@ def queue_watch(
         bool,
         typer.Option("--peek", help="Monitor without consuming messages"),
     ] = False,
-    since: Annotated[
+    after: Annotated[
         str | None,
-        typer.Option("--since", help="Start watching after timestamp"),
+        typer.Option(
+            "--after",
+            help="Start watching after timestamp",
+        ),
     ] = None,
     quiet: Annotated[
         bool,
@@ -313,7 +373,7 @@ def queue_watch(
             with_timestamps=timestamps,
             json_output=json_output,
             peek=peek,
-            since=since,
+            after=after,
             quiet=quiet,
             move_to=move_to,
         )

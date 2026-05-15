@@ -188,14 +188,16 @@ class QueuesNamespace:
         *,
         all_messages: bool = False,
         message_id: int | None = None,
-        since: int | None = None,
+        after: int | None = None,
+        before: int | None = None,
     ) -> list[QueueEntry]:
         return queues.read_queue(
             self.client.context,
             name,
             all_messages=all_messages,
             message_id=message_id,
-            since=since,
+            after=after,
+            before=before,
         )
 
     def write(self, name: str, message: str) -> QueueWriteReceipt:
@@ -210,14 +212,16 @@ class QueuesNamespace:
         *,
         all_messages: bool = False,
         message_id: int | None = None,
-        since: int | None = None,
+        after: int | None = None,
+        before: int | None = None,
     ) -> list[QueueEntry]:
         return queues.peek_queue(
             self.client.context,
             name,
             all_messages=all_messages,
             message_id=message_id,
-            since=since,
+            after=after,
+            before=before,
         )
 
     def move(
@@ -228,7 +232,8 @@ class QueuesNamespace:
         limit: int | None = None,
         all_messages: bool = False,
         message_id: int | None = None,
-        since: int | None = None,
+        after: int | None = None,
+        before: int | None = None,
     ) -> QueueMoveReceipt:
         return queues.move_queue_messages(
             self.client.context,
@@ -237,22 +242,31 @@ class QueuesNamespace:
             limit=limit,
             all_messages=all_messages,
             message_id=message_id,
-            since=since,
+            after=after,
+            before=before,
         )
 
     def list(
         self,
         *,
         pattern: str | None = None,
+        prefix: str | None = None,
         include_stats: bool = False,
         include_endpoints: bool = False,
     ) -> list[QueueInfo]:
         return queues.list_queue_infos(
             self.client.context,
             pattern=pattern,
+            prefix=prefix,
             include_stats=include_stats,
             include_endpoints=include_endpoints,
         )
+
+    def exists(self, name: str) -> bool:
+        return queues.queue_exists(self.client.context, name)
+
+    def stats(self, name: str) -> QueueInfo:
+        return queues.queue_info(self.client.context, name)
 
     def resolve(self, endpoint_name: str) -> EndpointResolution | None:
         return queues.resolve_queue_endpoint(self.client.context, endpoint_name)
@@ -264,7 +278,8 @@ class QueuesNamespace:
         limit: int | None = None,
         interval: float = 0.5,
         peek: bool = False,
-        since: int | None = None,
+        after: int | None = None,
+        before: int | None = None,
         move_to: str | None = None,
     ) -> Iterator[QueueEntry]:
         yield from queues.watch_queue_entries(
@@ -273,7 +288,8 @@ class QueuesNamespace:
             limit=limit,
             interval=interval,
             peek=peek,
-            since=since,
+            after=after,
+            before=before,
             move_to=move_to,
         )
 

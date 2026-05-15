@@ -136,7 +136,8 @@ handling, and process-title updates.
 
 _Implementation mapping_: `weft/core/tasks/base.py` — queue resolution and
 queue-config helpers, control handling, state reporting, process-title
-formatting, reserved-policy helpers, cleanup, and task-run loops.
+formatting, reserved-policy helpers, cleanup, task-run loops, and the private
+worker-result lane used by reactor-style task implementations.
 
 Current responsibilities:
 
@@ -148,6 +149,10 @@ Current responsibilities:
 - optionally claim and release one stable runtime endpoint name for the live task
 - expose `process_once()`, `run_until_stopped()`, and `next_wait_timeout()`
   as the shared task-loop contract
+- own the broker-free worker-result queue used when a concrete task moves
+  blocking work out of the main task reactor thread; this queue is bounded
+  and drained in bounded batches so worker progress cannot monopolize a
+  reactor turn
 
 Why this exists:
 
@@ -168,7 +173,9 @@ re-exported from `weft/core/tasks/__init__.py`.
 
 Current task families:
 
-- `Consumer`: reserves inbox messages and executes targets
+- `Consumer`: reserves inbox messages on the main task reactor thread, runs
+  blocking target execution in a broker-free worker lane, and commits
+  outbox/state/reserved-policy effects back on the main thread
 - `Observer`: peeks without consuming
 - `SelectiveConsumer`: conditionally consumes based on a selector
 - `Monitor`: forwards while observing
@@ -178,22 +185,30 @@ Current task families:
   monitor service. Its foreground `scan_once()` path scans `weft.log.tasks`
   with generator-based peek semantics. Its persistent path wakes from its own
   `T{tid}.inbox`, scans task-log history by high-water cursor, and calls the
-  configured task-monitor processor. The launcher asks the persistent monitor
-  for its next wait timeout so the monitor sleeps until heartbeat/local due
-  time or task-local input instead of polling at the default task-process
-  interval. The supervised monitor builds lifecycle and cleanup
+  configured task-monitor processor. Custom processors run in the shared
+  broker-free worker lane from a candidate snapshot; the TaskMonitor reactor
+  owns checkpoint advancement, cached diagnostics, and all broker effects.
+  The launcher asks the persistent monitor for its next wait timeout so the
+  monitor sleeps until heartbeat/local due time or task-local input instead of
+  polling at the default task-process interval. The supervised monitor builds
+  lifecycle and cleanup
   candidate snapshots, including Weft lifecycle anomalies, domain failures,
   stale runtime-state rows, and superseded task-log rows. Its default `delete`
   processor may delete exact safe cleanup candidates only through the canonical
   prune implementation under `weft/core/pruning/`; it must not consume,
   reserve, move, unclaim, or delete active, ambiguous, claimed, malformed,
   unknown, or non-exact lifecycle messages. `report_only` remains available as
-  a non-destructive override. `jsonl_then_delete` remains fail-closed until the
-  operational logging callback lands.
+  a non-destructive override. Built-in cleanup processors run on the reactor so
+  exact deletes stay in the canonical prune path. `jsonl_then_delete` remains
+  fail-closed until the operational logging callback lands.
 - `PipelineTask`: internal orchestrator for first-class linear pipelines
 - `PipelineEdgeTask`: generated one-shot edge task for pipeline handoff
 - `HeartbeatTask`: manager-supervised internal interval emitter for
-  runtime-scoped periodic queue writes
+  runtime-scoped periodic queue writes. It exposes registration due time,
+  idle shutdown, and singleton supersession checks through
+  `next_wait_timeout()` and returns from `process_once()` after one bounded
+  reactor turn; it does not run a private inner wait loop or task-local queue
+  pending probe. Queue readiness is owned by `MultiQueueWatcher`.
 - `Debugger`: in-process diagnostic command surface for interactive debugging
 
 Interactive command sessions reuse the same task/runtime conventions rather
@@ -236,8 +251,9 @@ contract;
 specialized policies live on `Manager`, `Consumer`, `PipelineTask`, and
 `Monitor`.
 
-Implementation plan backlink:
-[`2026-04-21-run-boundary-dispatch-fence-control-contract-plan.md`](../plans/2026-04-21-run-boundary-dispatch-fence-control-contract-plan.md).
+Implementation plan backlinks:
+[`2026-04-21-run-boundary-dispatch-fence-control-contract-plan.md`](../plans/2026-04-21-run-boundary-dispatch-fence-control-contract-plan.md);
+[`2026-05-15-task-reactor-and-evidence-worker-plan.md`](../plans/2026-05-15-task-reactor-and-evidence-worker-plan.md).
 
 ### 2.4.1 Runtime Endpoint Registry [CC-2.4.1]
 
@@ -290,10 +306,20 @@ Current high-level flow:
 6. publish terminal state and cleanup
 
 _Implementation mapping_: `weft/core/tasks/base.py` owns the shared task-loop
-entry points; `weft/core/launcher.py` honors `next_wait_timeout()` for spawned
-task processes; `weft/core/tasks/consumer.py` owns work-item execution and
-finalization; `weft/core/tasks/runner.py` owns runner dispatch; `weft/cli/run.py`
-owns CLI submission and wait behavior.
+entry points and worker-result reactor lane. While worker lanes are active,
+`BaseTask.wait_for_activity()` bounds queue waits to the fast task-reactor wake
+cap so child/process completion is observed promptly without task-specific
+poll loops. Worker-result delivery uses a bounded local Python queue and a
+per-turn drain budget; full queues apply backpressure to worker lanes rather
+than growing process memory without bound. `weft/core/tasks/multiqueue_watcher.py`
+owns queue readiness and lets task subclasses narrow what counts as wait
+activity when a queue already contains work owned by the current reactor turn,
+such as a Consumer reserved message while its worker lane is active.
+`weft/core/launcher.py` honors `next_wait_timeout()` and pending worker
+activity for spawned task processes; `weft/core/tasks/consumer.py` owns
+work-item reservation, worker dispatch,
+main-thread finalization, and active control; `weft/core/tasks/runner.py` owns
+runner dispatch; `weft/cli/run.py` owns CLI submission and wait behavior.
 
 Why this stays shared:
 

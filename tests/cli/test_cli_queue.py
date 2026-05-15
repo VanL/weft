@@ -203,6 +203,59 @@ def test_queue_read_with_timestamps(workdir):
     assert message == "payload"
 
 
+def test_queue_read_after_and_before_filters(workdir):
+    build_context(spec_context=workdir)
+    assert run_cli("queue", "write", "range.queue", "first", cwd=workdir)[0] == 0
+    assert run_cli("queue", "write", "range.queue", "second", cwd=workdir)[0] == 0
+    assert run_cli("queue", "write", "range.queue", "third", cwd=workdir)[0] == 0
+
+    rc, out, err = run_cli(
+        "queue",
+        "peek",
+        "range.queue",
+        "--all",
+        "--json",
+        cwd=workdir,
+    )
+    assert rc == 0
+    assert err == ""
+    rows = [json.loads(line) for line in out.splitlines() if line]
+    first_ts = str(rows[0]["timestamp"])
+    third_ts = str(rows[2]["timestamp"])
+
+    rc, out, err = run_cli(
+        "queue",
+        "read",
+        "range.queue",
+        "--all",
+        "--after",
+        first_ts,
+        "--before",
+        third_ts,
+        cwd=workdir,
+    )
+    assert rc == 0
+    assert out.splitlines() == ["second"]
+    assert err == ""
+
+
+def test_queue_since_filter_is_not_accepted(workdir):
+    build_context(spec_context=workdir)
+
+    rc, out, err = run_cli(
+        "queue",
+        "read",
+        "range.queue",
+        "--since",
+        "1",
+        cwd=workdir,
+    )
+
+    assert rc != 0
+    assert out == ""
+    assert "No such option" in err
+
+
 def test_queue_list_json(workdir):
     build_context(spec_context=workdir)
     assert run_cli("queue", "write", "jsonlist.queue", "item", cwd=workdir)[0] == 0
@@ -210,7 +263,7 @@ def test_queue_list_json(workdir):
     rc, out, err = run_cli("queue", "list", "--json", cwd=workdir)
     assert rc == 0
     assert err == ""
-    data = json.loads(out or "[]")
+    data = [json.loads(line) for line in out.splitlines() if line]
     assert any(entry["queue"] == "jsonlist.queue" for entry in data)
 
 
@@ -241,8 +294,26 @@ def test_queue_list_pattern(workdir):
     )
     assert rc == 0
     assert err == ""
-    data = json.loads(out or "[]")
+    data = [json.loads(line) for line in out.splitlines() if line]
     assert all(entry["queue"].startswith("beta") for entry in data)
+
+
+def test_queue_list_prefix(workdir):
+    build_context(spec_context=workdir)
+    assert run_cli("queue", "write", "prefix.alpha", "item", cwd=workdir)[0] == 0
+    assert run_cli("queue", "write", "other.alpha", "item", cwd=workdir)[0] == 0
+
+    rc, out, err = run_cli(
+        "queue",
+        "list",
+        "--prefix",
+        "prefix.",
+        cwd=workdir,
+    )
+    assert rc == 0
+    assert "prefix.alpha" in out
+    assert "other.alpha" not in out
+    assert err == ""
 
 
 def test_queue_list_json_stats_includes_totals(workdir):
@@ -258,10 +329,56 @@ def test_queue_list_json_stats_includes_totals(workdir):
     )
     assert rc == 0
     assert err == ""
-    data = json.loads(out or "[]")
+    data = [json.loads(line) for line in out.splitlines() if line]
     stat_entry = next(entry for entry in data if entry["queue"] == "stat.queue")
-    assert "total_messages" in stat_entry
-    assert "claimed_messages" in stat_entry
+    assert "total" in stat_entry
+    assert "claimed" in stat_entry
+    assert "pending" in stat_entry
+
+
+def test_queue_exists_and_stats(workdir):
+    build_context(spec_context=workdir)
+    assert run_cli("queue", "write", "meta.queue", "item", cwd=workdir)[0] == 0
+
+    rc, out, err = run_cli("queue", "exists", "meta.queue", "--json", cwd=workdir)
+    assert rc == 0
+    assert json.loads(out) == {"queue": "meta.queue", "exists": True}
+    assert err == ""
+
+    rc, out, err = run_cli("queue", "exists", "missing.queue", "--json", cwd=workdir)
+    assert rc == 2
+    assert json.loads(out) == {"queue": "missing.queue", "exists": False}
+    assert err == ""
+
+    rc, out, err = run_cli("queue", "stats", "meta.queue", "--json", cwd=workdir)
+    assert rc == 0
+    assert json.loads(out) == {
+        "queue": "meta.queue",
+        "pending": 1,
+        "claimed": 0,
+        "total": 1,
+        "exists": True,
+    }
+    assert err == ""
+
+
+def test_queue_invalid_message_id_returns_input_error(workdir):
+    build_context(spec_context=workdir)
+
+    rc, out, err = run_cli(
+        "queue",
+        "peek",
+        "any.queue",
+        "--message",
+        "123",
+        "--json",
+        cwd=workdir,
+    )
+
+    assert rc == 1
+    assert out == ""
+    payload = json.loads(err)
+    assert payload["error"] == "INVALID_MESSAGE_ID"
 
 
 def test_queue_resolve_reports_named_endpoint(workdir):

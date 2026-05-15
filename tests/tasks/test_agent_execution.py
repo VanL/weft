@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import time
 
 import pytest
 
@@ -33,6 +34,26 @@ from weft.core.taskspec import (
 )
 
 _MODEL_PROVIDERS = frozenset({"claude_code", "codex", "gemini", "opencode", "qwen"})
+
+
+def _drive_consumer_until(
+    task: Consumer,
+    predicate,
+    *,
+    timeout: float = 30.0,
+) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        task.process_once()
+        if predicate():
+            return
+        task.wait_for_activity(timeout=0.02)
+    raise AssertionError(
+        "Consumer did not reach expected state before timeout "
+        f"(status={task.taskspec.state.status!r}, "
+        f"should_stop={task.should_stop!r}, "
+        f"worker_activity={task._has_worker_activity()!r})"
+    )
 
 
 def test_consumer_agent_execution_payload_falls_back_on_circular_metadata() -> None:
@@ -391,7 +412,7 @@ def test_consumer_processes_agent_and_writes_outbox(
     reserved = make_queue(f"T{unique_tid}.{QUEUE_RESERVED_SUFFIX}")
     inbox.write("hello")
 
-    task._drain_queue()
+    _drive_consumer_until(task, lambda: outbox.peek_one() is not None)
 
     result = outbox.read_one()
     assert result == "text:hello"
@@ -437,7 +458,7 @@ def test_consumer_creates_and_exercises_agent_task_from_payload(
     outbox = make_queue(f"T{unique_tid}.{QUEUE_OUTBOX_SUFFIX}")
     inbox.write("hello")
 
-    task._drain_queue()
+    _drive_consumer_until(task, lambda: outbox.peek_one() is not None)
 
     result = outbox.read_one()
     assert result == "text:hello"
@@ -466,7 +487,7 @@ def test_consumer_persistent_agent_per_message_processes_multiple_messages(
     outbox = make_queue(f"T{unique_tid}.{QUEUE_OUTBOX_SUFFIX}")
 
     inbox.write("inspect_json:first")
-    task._drain_queue()
+    _drive_consumer_until(task, lambda: outbox.peek_one() is not None)
     first = json.loads(outbox.read_one())
 
     assert first["task"] == "first"
@@ -476,7 +497,7 @@ def test_consumer_persistent_agent_per_message_processes_multiple_messages(
     assert task.taskspec.state.status == "running"
 
     inbox.write("inspect_json:second")
-    task._drain_queue()
+    _drive_consumer_until(task, lambda: outbox.peek_one() is not None)
     second = json.loads(outbox.read_one())
 
     assert second["task"] == "second"
@@ -506,14 +527,14 @@ def test_consumer_persistent_agent_per_task_continues_conversation(
     outbox = make_queue(f"T{unique_tid}.{QUEUE_OUTBOX_SUFFIX}")
 
     inbox.write("hello")
-    task._drain_queue()
+    _drive_consumer_until(task, lambda: outbox.peek_one() is not None)
     first = outbox.read_one()
 
     assert first == "text:hello"
     assert task.taskspec.state.status == "running"
 
     inbox.write("__history__")
-    task._drain_queue()
+    _drive_consumer_until(task, lambda: outbox.peek_one() is not None)
     second = outbox.read_one()
 
     assert second == "history:hello"
@@ -539,7 +560,7 @@ def test_consumer_agent_messages_output_writes_json_messages(
     outbox = make_queue(f"T{unique_tid}.{QUEUE_OUTBOX_SUFFIX}")
     inbox.write("hello")
 
-    task._drain_queue()
+    _drive_consumer_until(task, lambda: outbox.peek_one() is not None)
 
     result = json.loads(outbox.read_one())
     assert result == {"role": "assistant", "content": "text:hello"}
@@ -573,7 +594,7 @@ def test_consumer_processes_provider_cli_and_logs_agent_execution(
     log_queue = queue_factory(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
     inbox.write("hello")
 
-    task._drain_queue()
+    _drive_consumer_until(task, lambda: outbox.peek_one() is not None)
 
     payload = json.loads(outbox.read_one())
     assert payload["provider"] == provider_name
@@ -626,7 +647,7 @@ def test_consumer_persistent_provider_cli_per_task_continues_conversation(
     outbox = make_queue(f"T{unique_tid}.{QUEUE_OUTBOX_SUFFIX}")
 
     inbox.write("remember:phase2-token")
-    task._drain_queue()
+    _drive_consumer_until(task, lambda: outbox.peek_one() is not None)
     first = json.loads(outbox.read_one())
 
     assert first["provider"] == provider_name
@@ -634,7 +655,7 @@ def test_consumer_persistent_provider_cli_per_task_continues_conversation(
     assert task.taskspec.state.status == "running"
 
     inbox.write("recall")
-    task._drain_queue()
+    _drive_consumer_until(task, lambda: outbox.peek_one() is not None)
     second = json.loads(outbox.read_one())
 
     assert second["provider"] == provider_name
@@ -677,7 +698,7 @@ def test_consumer_processes_provider_cli_with_explicit_mcp_tool_profile(
     outbox = make_queue(f"T{unique_tid}.{QUEUE_OUTBOX_SUFFIX}")
     inbox.write("use_mcp:phase3-mcp-token")
 
-    task._drain_queue()
+    _drive_consumer_until(task, lambda: outbox.peek_one() is not None)
 
     payload = json.loads(outbox.read_one())
     assert payload["provider"] == "claude_code"
@@ -707,7 +728,7 @@ def test_consumer_applies_reserved_policy_on_agent_failure(
     reserved = make_queue(f"T{unique_tid}.{QUEUE_RESERVED_SUFFIX}")
     inbox.write("hello")
 
-    task._drain_queue()
+    _drive_consumer_until(task, lambda: task.taskspec.state.status == "failed")
 
     assert reserved.peek_one() is not None
     assert task.taskspec.state.status == "failed"
@@ -738,7 +759,7 @@ def test_consumer_applies_reserved_policy_on_provider_cli_failure(
     reserved = make_queue(f"T{unique_tid}.{QUEUE_RESERVED_SUFFIX}")
     inbox.write("fail:provider failed")
 
-    task._drain_queue()
+    _drive_consumer_until(task, lambda: task.taskspec.state.status == "failed")
 
     assert reserved.peek_one() is not None
     assert task.taskspec.state.status == "failed"
@@ -796,7 +817,7 @@ def test_consumer_live_provider_cli_smoke(
     outbox = make_queue(f"T{unique_tid}.{QUEUE_OUTBOX_SUFFIX}")
     inbox.write(prompt)
 
-    task._drain_queue()
+    _drive_consumer_until(task, lambda: outbox.peek_one() is not None, timeout=30.0)
 
     output = outbox.read_one()
     assert isinstance(output, str)
@@ -859,14 +880,14 @@ def test_consumer_live_provider_cli_persistent_smoke(
         "Remember this exact token for the rest of this conversation: "
         f"{remember_token}. Reply with exactly OK."
     )
-    task._drain_queue()
+    _drive_consumer_until(task, lambda: outbox.peek_one() is not None, timeout=30.0)
 
     first_output = outbox.read_one()
     assert isinstance(first_output, str)
     assert task.taskspec.state.status == "running"
 
     inbox.write("Reply with exactly the token I asked you to remember earlier.")
-    task._drain_queue()
+    _drive_consumer_until(task, lambda: outbox.peek_one() is not None, timeout=30.0)
 
     second_output = outbox.read_one()
     assert isinstance(second_output, str)
@@ -934,7 +955,7 @@ def test_consumer_live_provider_cli_mcp_smoke(
     outbox = make_queue(f"T{unique_tid}.{QUEUE_OUTBOX_SUFFIX}")
     inbox.write(prompt)
 
-    task._drain_queue()
+    _drive_consumer_until(task, lambda: outbox.peek_one() is not None, timeout=30.0)
 
     output = outbox.read_one()
     assert isinstance(output, str)

@@ -270,6 +270,36 @@ runbook needs to become stricter.
   then pass that snapshot through the reducer. Do not move lifecycle decisions
   into timer code, and do not scan global logs just to discover that no reducer
   turn is due.
+- Broker-free worker lanes must stay broker-free through the full call graph.
+  Passing broker context into a runner or resource monitor from a worker thread
+  can reintroduce database access indirectly, even when the worker body itself
+  has no queue calls.
+- A worker result committed at the start of a manager turn still counts as
+  launch work for that turn. Do not accept another spawn request before control
+  has had a chance to run; otherwise a fast child-launch worker can recreate a
+  same-turn STOP race.
+- Manager-to-manager liveness probes should be non-blocking reactor state. A
+  stale-looking registry row that has a keyed PING in flight is still unknown
+  until the probe deadline, not stale proof to prune or supersede immediately.
+- Service-owner PING fallback follows the same rule. A candidate with
+  `ping_pending` is uncertain evidence; only after the pending probe expires
+  should normal recent/stale classification decide whether it blocks restart.
+- TaskMonitor custom processors can be worker-lane work only after the reactor
+  has built a complete candidate snapshot. Checkpoint advancement, cached PONG
+  diagnostics, built-in cleanup, and exact deletes must stay on the
+  TaskMonitor reactor.
+- Timer-driven service tasks should not hide private wait loops inside
+  `process_once()`. Put due-time math in `next_wait_timeout()` and let the
+  shared task runner wait, otherwise one task silently bypasses the same
+  control and worker-result wake rules the rest of the runtime uses.
+- Service status is a selected-owner read model, not a latest-event display.
+  When singleton convergence creates a terminal duplicate and a separate live
+  owner, status must report the live owner. Terminal proof should only
+  override launch evidence for the same TID.
+- A reactor worker-result lane needs both a bounded queue and a bounded
+  per-turn drain. Without the queue bound, high-volume live streaming can grow
+  memory without limit; without the drain budget, the reactor can process local
+  worker progress indefinitely before task-local control gets a turn.
 
 ## 2026-04-08 Zombie PID Liveness
 
@@ -761,6 +791,22 @@ runbook needs to become stricter.
   after the first row in the scenario. On slow Windows CI, real queue writes in
   a single test can be far enough apart that later rows are correctly too young
   for the cleanup floor, turning a test-clock shortcut into a false failure.
+- A task's `next_wait_timeout()` is timer ownership, not queue ownership. Do
+  not call `Queue.has_pending()` from task-specific timer code to force a zero
+  timeout; that recreates per-task queue polling and can burn CPU. The shared
+  `MultiQueueWatcher.wait_for_activity()` path must wake immediately when
+  configured queues already have pending work, and timers should only bound
+  that wait.
+- Fast child/process completion belongs in the shared task reactor, not in
+  manager-specific service reconciliation. Use `BaseTask`'s worker-result wake
+  cap for regular task execution and keep singleton service audit timers slower
+  unless there is real accepted work to advance.
+- Reserved work already owned by an active Consumer must not count as new wait
+  activity while the worker lane is still running. Otherwise the shared
+  watcher sees the reserved queue as permanently pending, returns immediately,
+  and turns a correct worker lane into a CPU spin under parallel test or
+  production load. Control queues still count as wait activity during active
+  work.
 
 ## 2026-05-13 Manager Leadership Liveness
 

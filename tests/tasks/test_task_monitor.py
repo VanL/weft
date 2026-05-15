@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 
 import pytest
 
@@ -24,6 +26,8 @@ from weft.core.tasks.task_monitor import make_task_monitor_taskspec
 pytestmark = [pytest.mark.shared]
 
 PROCESSOR_REQUESTS: list[TaskMonitorProcessorRequest] = []
+BLOCKING_PROCESSOR_STARTED = threading.Event()
+BLOCKING_PROCESSOR_RELEASE = threading.Event()
 
 
 def recording_processor(
@@ -47,9 +51,36 @@ def failing_processor(
     )
 
 
+def blocking_processor(
+    request: TaskMonitorProcessorRequest,
+) -> TaskMonitorProcessorResult:
+    BLOCKING_PROCESSOR_STARTED.set()
+    assert BLOCKING_PROCESSOR_RELEASE.wait(timeout=5.0)
+    PROCESSOR_REQUESTS.append(request)
+    return TaskMonitorProcessorResult(
+        success=True,
+        processed=len(request.candidates),
+        reported=len(request.candidates),
+    )
+
+
+def drive_task_monitor_until_idle(
+    task: TaskMonitorTask,
+    *,
+    timeout: float = 5.0,
+) -> None:
+    deadline = time.monotonic() + timeout
+    while task._processor_work_in_flight is not None and time.monotonic() < deadline:
+        task.process_once()
+        task.wait_for_activity(timeout=0.05)
+    assert task._processor_work_in_flight is None
+
+
 @pytest.fixture(autouse=True)
 def clear_processor_requests() -> None:
     PROCESSOR_REQUESTS.clear()
+    BLOCKING_PROCESSOR_STARTED.clear()
+    BLOCKING_PROCESSOR_RELEASE.clear()
 
 
 def test_task_monitor_scan_once_peeks_task_log_without_consuming(
@@ -124,6 +155,7 @@ def test_task_monitor_process_once_calls_processor_without_consuming_task_log(
     )
     try:
         task.process_once()
+        drive_task_monitor_until_idle(task)
     finally:
         task.stop()
 
@@ -237,13 +269,14 @@ def test_task_monitor_next_wait_timeout_is_capped_after_cycle(
     )
     try:
         task.process_once()
+        drive_task_monitor_until_idle(task)
 
         assert 0.0 < task.next_wait_timeout() <= 1.0
     finally:
         task.stop()
 
 
-def test_task_monitor_next_wait_timeout_returns_zero_for_pending_wakeup(
+def test_task_monitor_pending_wakeup_uses_shared_reactor_wait(
     broker_env,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -265,11 +298,60 @@ def test_task_monitor_next_wait_timeout_returns_zero_for_pending_wakeup(
     )
     try:
         task.process_once()
+        drive_task_monitor_until_idle(task)
         make_queue(task.taskspec.io.inputs["inbox"]).write(
             json.dumps({"type": "task_monitor_wakeup"})
         )
 
-        assert task.next_wait_timeout() == 0.0
+        assert task.next_wait_timeout() == pytest.approx(1.0)
+        started_at = time.monotonic()
+        task.wait_for_activity(timeout=task.next_wait_timeout())
+        assert time.monotonic() - started_at < 0.5
+    finally:
+        task.stop()
+
+
+def test_task_monitor_disabled_uses_wait_cap_without_scanning(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod,
+        "build_task_monitor_cycle_snapshot",
+        lambda *args, **kwargs: pytest.fail("disabled monitor must not scan"),
+    )
+    monkeypatch.setattr(
+        task_monitor_mod,
+        "upsert_heartbeat",
+        lambda *args, **kwargs: pytest.fail("disabled monitor must not heartbeat"),
+    )
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": False,
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_PROCESSOR": "tests.tasks.test_task_monitor:recording_processor",
+        }
+    )
+    task = TaskMonitorTask(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999984"),
+        config=config,
+    )
+    try:
+        task.process_once()
+
+        assert task.next_wait_timeout() == 1.0
+
+        make_queue(task.taskspec.io.inputs["inbox"]).write(
+            json.dumps({"type": "task_monitor_wakeup"})
+        )
+        assert task.next_wait_timeout() == 1.0
+        started_at = time.monotonic()
+        task.wait_for_activity(timeout=task.next_wait_timeout())
+        assert time.monotonic() - started_at < 0.5
+        task.process_once()
+        assert task.next_wait_timeout() == 1.0
     finally:
         task.stop()
 
@@ -422,6 +504,74 @@ def test_task_monitor_ping_uses_cached_policy_stats_without_cleanup_scan(
     )
 
 
+def test_task_monitor_slow_custom_processor_does_not_block_ping(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
+            "WEFT_TASK_MONITOR_PROCESSOR": "tests.tasks.test_task_monitor:blocking_processor",
+        }
+    )
+    spec = make_task_monitor_taskspec("1778089999999999993")
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    log_queue.write(json.dumps({"event": "work_started", "tid": "1778084345905438720"}))
+    ctrl_in = make_queue(spec.io.control["ctrl_in"])
+    ctrl_out = make_queue(spec.io.control["ctrl_out"])
+
+    task = TaskMonitorTask(db_path, spec, config=config)
+    try:
+        started_at = time.monotonic()
+        task.process_once()
+        elapsed = time.monotonic() - started_at
+
+        assert elapsed < 1.0
+        assert BLOCKING_PROCESSOR_STARTED.wait(timeout=2.0)
+        assert task._processor_work_in_flight is not None
+
+        ctrl_in.write(json.dumps({"command": CONTROL_PING, "request_id": "during"}))
+        task.process_once()
+
+        responses = [json.loads(item) for item in ctrl_out.peek_generator()]
+        pong = next(
+            response
+            for response in responses
+            if response["command"] == CONTROL_PING
+            and response.get("request_id") == "during"
+        )
+        assert pong["status"] == "ok"
+        assert pong["message"] == "PONG"
+        assert pong["role"] == "task_monitor"
+        assert pong["processor_in_flight"] is True
+        assert (
+            pong[PONG_EXTENSION_KEY]["task_monitor"]["last_cycle"][
+                "processor_in_flight"
+            ]
+            is True
+        )
+        assert task._last_processor_success is None
+
+        BLOCKING_PROCESSOR_RELEASE.set()
+        deadline = time.monotonic() + 5.0
+        while task._processor_work_in_flight is not None and time.monotonic() < deadline:
+            task.process_once()
+            task.wait_for_activity(timeout=0.05)
+
+        assert task._processor_work_in_flight is None
+        assert task._last_processor_success is True
+        assert len(PROCESSOR_REQUESTS) == 1
+    finally:
+        BLOCKING_PROCESSOR_RELEASE.set()
+        task.stop()
+
+
 def test_task_monitor_failed_processor_does_not_advance_checkpoint(
     broker_env,
     monkeypatch: pytest.MonkeyPatch,
@@ -448,6 +598,7 @@ def test_task_monitor_failed_processor_does_not_advance_checkpoint(
     )
     try:
         task.process_once()
+        drive_task_monitor_until_idle(task)
 
         assert task._last_checkpoint is None
         assert task._last_processor_success is False
@@ -485,6 +636,7 @@ def test_task_monitor_heartbeat_failure_records_health_but_still_cycles(
     )
     try:
         task.process_once()
+        drive_task_monitor_until_idle(task)
 
         assert len(PROCESSOR_REQUESTS) == 1
         assert task._last_processor_success is True

@@ -119,6 +119,8 @@ Current responsibilities:
 
 - start and stop monitoring for a live runtime
 - capture the latest resource metrics
+- timestamp metrics locally without opening broker queues from runner or
+  worker threads
 - compare those metrics to configured limits
 - retain recent metrics so the task can publish peak or recent values
 - surface runner-specific stop/kill/describe hooks through the active plugin
@@ -230,6 +232,7 @@ controls stay here only when they are already shipped and observable:
 - [`docs/plans/2026-05-08-agent-session-and-task-startup-observability-plan.md`](../plans/2026-05-08-agent-session-and-task-startup-observability-plan.md)
 - [`docs/plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md`](../plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md)
 - [`docs/plans/2026-04-06-runner-extension-point-plan.md`](../plans/2026-04-06-runner-extension-point-plan.md)
+- [`docs/plans/2026-05-15-task-reactor-and-evidence-worker-plan.md`](../plans/2026-05-15-task-reactor-and-evidence-worker-plan.md)
 
 ## Related Documents
 

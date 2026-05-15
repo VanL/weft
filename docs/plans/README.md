@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 99 plan files in this directory.
+There are currently 100 plan files in this directory.
 
 ## Curation Policy
 
@@ -22,7 +22,8 @@ There are currently 99 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
-| [`2026-05-15-manager-hot-loop-reduction-plan.md`](./2026-05-15-manager-hot-loop-reduction-plan.md) | Manager Hot-Loop Reduction Plan | `draft` | none |
+| [`2026-05-15-task-reactor-and-evidence-worker-plan.md`](./2026-05-15-task-reactor-and-evidence-worker-plan.md) | Task Reactor And Evidence Worker Plan | `completed` | none |
+| [`2026-05-15-manager-hot-loop-reduction-plan.md`](./2026-05-15-manager-hot-loop-reduction-plan.md) | Manager Hot-Loop Reduction Plan | `draft` | [`2026-05-15-task-reactor-and-evidence-worker-plan.md`](./2026-05-15-task-reactor-and-evidence-worker-plan.md) |
 | [`2026-05-14-manager-list-diagnostics-plan.md`](./2026-05-14-manager-list-diagnostics-plan.md) | Manager Liveness And List Diagnostics Plan | `completed` | none |
 | [`2026-05-13-task-monitor-pong-policy-stats-plan.md`](./2026-05-13-task-monitor-pong-policy-stats-plan.md) | Task Monitor PONG Policy Stats Plan | `completed` | none |
 | [`2026-05-13-service-convergence-throttle-plan.md`](./2026-05-13-service-convergence-throttle-plan.md) | Service Convergence Throttle Plan | `draft` | [`2026-05-15-manager-hot-loop-reduction-plan.md`](./2026-05-15-manager-hot-loop-reduction-plan.md) |

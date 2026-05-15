@@ -78,7 +78,7 @@ Current top-level verbs and subcommands:
 | `weft task` | `list`, `status`, `stop`, `kill`, `tid` |
 | `weft manager` | `start`, `serve`, `stop`, `list`, `status` |
 | `weft spec` | `create`, `list`, `show`, `delete`, `validate`, `generate` |
-| `weft queue` | `read`, `write`, `peek`, `move`, `list`, `resolve`, `watch`, `delete`, `broadcast`, `alias add/list/remove` |
+| `weft queue` | `read`, `write`, `peek`, `move`, `list`, `exists`, `stats`, `resolve`, `watch`, `delete`, `broadcast`, `alias add/list/remove` |
 | `weft system` | `tidy`, `dump`, `builtins`, `load`, `task-monitor`, `prune` |
 
 ## Operational Files

@@ -20,6 +20,7 @@ import hashlib
 import json
 import logging
 import os
+import queue as thread_queue
 import re
 import shutil
 import signal
@@ -57,6 +58,9 @@ from weft._constants import (
     QUEUE_RESERVED_SUFFIX,
     STREAM_CHUNK_SIZE_BYTES,
     TASK_PROCESS_POLL_INTERVAL,
+    TASK_REACTOR_WAKEUP_MAX_SECONDS,
+    TASK_WORKER_RESULT_DRAIN_MAX_PER_TURN,
+    TASK_WORKER_RESULT_QUEUE_MAXSIZE,
     TASKSPEC_TID_SHORT_LENGTH,
     TERMINAL_ENVELOPE_TYPE,
     TERMINAL_TASK_STATUSES,
@@ -117,6 +121,22 @@ class ControlRequest:
     command: str
     request_id: str | None = None
     raw: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TaskWorkerResult:
+    """Result envelope sent from a task worker lane to the main task reactor.
+
+    Worker lanes must not touch broker queues or mutable task state. They
+    return values through this local Python queue envelope, and the main task
+    thread decides what durable effects to apply.
+
+    Spec: [CC-2.2], [CC-2.5]
+    """
+
+    lane: str
+    value: Any = None
+    error: BaseException | None = None
 
 
 PongExtensionProvider = Callable[[], Mapping[str, Any] | None]
@@ -206,6 +226,13 @@ class BaseTask(MultiQueueWatcher, ABC):
         self._activity: str | None = None
         self._waiting_on: str | None = None
         self._pong_extension_provider: PongExtensionProvider | None = None
+        self._worker_result_queue: thread_queue.Queue[TaskWorkerResult] = (
+            thread_queue.Queue(maxsize=TASK_WORKER_RESULT_QUEUE_MAXSIZE)
+        )
+        self._worker_result_event = threading.Event()
+        self._worker_threads: set[threading.Thread] = set()
+        self._worker_lock = threading.Lock()
+        self._worker_stopping = threading.Event()
 
         self._queue_names = self._resolve_queue_names()
         queue_configs = self._build_queue_configs()
@@ -390,11 +417,167 @@ class BaseTask(MultiQueueWatcher, ABC):
     # ------------------------------------------------------------------
     # Lifecycle management
     # ------------------------------------------------------------------
+    def _submit_worker_call(
+        self,
+        lane: str,
+        func: Callable[[], Any],
+    ) -> threading.Thread:
+        """Run broker-free work on a background lane and wake the task reactor.
+
+        The callable must not use SimpleBroker queues or mutate TaskSpec state.
+        Results are delivered to ``_handle_worker_result()`` on the main task
+        thread during ``process_once()``.
+
+        Spec: [CC-2.2], [CC-2.5]
+        """
+        if self._worker_stopping.is_set():
+            raise RuntimeError("Task worker lanes are stopping")
+
+        lane_slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", lane).strip("-") or "worker"
+        lane_slug = lane_slug[:32]
+
+        def runner() -> None:
+            result: TaskWorkerResult
+            try:
+                try:
+                    value = func()
+                except BaseException as exc:
+                    result = TaskWorkerResult(lane=lane, error=exc)
+                else:
+                    result = TaskWorkerResult(lane=lane, value=value)
+                self._publish_worker_result(
+                    result.lane,
+                    value=result.value,
+                    error=result.error,
+                )
+            finally:
+                current = threading.current_thread()
+                with self._worker_lock:
+                    self._worker_threads.discard(current)
+
+        thread = threading.Thread(
+            target=runner,
+            name=f"weft-worker-{self.tid_short}-{lane_slug}",
+            daemon=True,
+        )
+        with self._worker_lock:
+            self._worker_threads.add(thread)
+        thread.start()
+        return thread
+
+    def _publish_worker_result(
+        self,
+        lane: str,
+        *,
+        value: Any = None,
+        error: BaseException | None = None,
+    ) -> bool:
+        """Publish a local worker result or progress event to the reactor."""
+        result = TaskWorkerResult(lane=lane, value=value, error=error)
+        while not self._worker_stopping.is_set():
+            self._worker_result_event.set()
+            try:
+                self._worker_result_queue.put(
+                    result,
+                    timeout=TASK_REACTOR_WAKEUP_MAX_SECONDS,
+                )
+            except thread_queue.Full:
+                continue
+            self._worker_result_event.set()
+            return True
+        return False
+
+    def _has_pending_worker_results(self) -> bool:
+        """Return whether a worker lane has queued results for the reactor."""
+        return self._worker_result_event.is_set() or not self._worker_result_queue.empty()
+
+    def _has_worker_activity(self) -> bool:
+        """Return whether worker lanes still need a reactor turn."""
+        return self._has_pending_worker_results() or self._has_active_worker_threads()
+
+    def _has_active_worker_threads(self) -> bool:
+        """Return whether any submitted worker lane is still running."""
+        with self._worker_lock:
+            self._worker_threads = {
+                thread for thread in self._worker_threads if thread.is_alive()
+            }
+            return bool(self._worker_threads)
+
+    def _sync_worker_result_event(self) -> None:
+        """Keep the worker-result wake event aligned with queued local results."""
+        if not self._worker_result_queue.empty():
+            self._worker_result_event.set()
+            return
+
+        self._worker_result_event.clear()
+        if not self._worker_result_queue.empty():
+            self._worker_result_event.set()
+
+    def _drain_worker_results(
+        self,
+        *,
+        max_results: int | None = None,
+    ) -> int:
+        """Apply a bounded batch of worker results on the task reactor thread."""
+        handled = 0
+        budget = max(
+            1,
+            int(
+                TASK_WORKER_RESULT_DRAIN_MAX_PER_TURN
+                if max_results is None
+                else max_results
+            ),
+        )
+        while handled < budget:
+            try:
+                result = self._worker_result_queue.get_nowait()
+            except thread_queue.Empty:
+                self._sync_worker_result_event()
+                if self._worker_result_queue.empty():
+                    return handled
+                continue
+            self._handle_worker_result(result)
+            handled += 1
+        self._sync_worker_result_event()
+        return handled
+
+    def _handle_worker_result(self, result: TaskWorkerResult) -> None:
+        """Handle one worker result on the main task reactor thread.
+
+        Subclasses override this to translate broker-free work results into
+        queue writes, state updates, or control responses.
+
+        Spec: [CC-2.2], [CC-2.5]
+        """
+        if result.error is not None:
+            raise RuntimeError(
+                f"Task worker lane {result.lane!r} failed"
+            ) from result.error
+
+    def _stop_worker_lanes(self, timeout: float = 2.0) -> None:
+        """Best-effort stop/join for worker lanes during task cleanup."""
+        self._worker_stopping.set()
+        deadline = time.monotonic() + max(0.0, timeout)
+        while True:
+            with self._worker_lock:
+                threads = [
+                    thread for thread in self._worker_threads if thread.is_alive()
+                ]
+                self._worker_threads = set(threads)
+            if not threads:
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            for thread in threads:
+                thread.join(timeout=min(remaining, 0.05))
+
     def cleanup(self) -> None:
         """Close cached Queue objects and release backend resources.
 
         Spec: [CC-2.5], [SB-0.1]
         """
+        self._stop_worker_lanes()
         self._reset_multi_activity_waiter()
         self.unregister_endpoint_name()
         self._end_streaming_session()
@@ -463,9 +646,9 @@ class BaseTask(MultiQueueWatcher, ABC):
         """
 
         iterations = 0
-        while not self.should_stop and not (
-            self._stop_event and self._stop_event.is_set()
-        ):
+        while (
+            not self.should_stop or self._has_worker_activity()
+        ) and not (self._stop_event and self._stop_event.is_set()):
             self.process_once()
             iterations += 1
             if max_iterations is not None and iterations >= max_iterations:
@@ -496,8 +679,38 @@ class BaseTask(MultiQueueWatcher, ABC):
 
         Spec: [CC-2.5], [MF-2]
         """
-        self._drain_queue()
+        worker_results_handled = self._drain_worker_results()
+        if not self.should_stop:
+            self._drain_queue()
+        remaining_worker_result_budget = (
+            TASK_WORKER_RESULT_DRAIN_MAX_PER_TURN - worker_results_handled
+        )
+        if remaining_worker_result_budget > 0:
+            self._drain_worker_results(max_results=remaining_worker_result_budget)
         self._maybe_emit_poll_report()
+
+    def wait_for_activity(self, timeout: float | None) -> None:
+        """Wait for queue activity or local worker-result activity.
+
+        ``MultiQueueWatcher`` remains the broker wait owner. This wrapper only
+        adds the local reactor wake rule: if worker lanes are active, bound the
+        wait so completed worker results cannot sit behind an unbounded queue
+        wait.
+
+        Spec: [CC-2.1], [CC-2.5], [SB-0.4]
+        """
+        if self._has_pending_worker_results():
+            return
+
+        wait_timeout = timeout
+        if self._has_active_worker_threads() and (
+            wait_timeout is None or wait_timeout > TASK_REACTOR_WAKEUP_MAX_SECONDS
+        ):
+            wait_timeout = TASK_REACTOR_WAKEUP_MAX_SECONDS
+
+        super().wait_for_activity(timeout=wait_timeout)
+        if self._has_pending_worker_results():
+            return
 
     def _maybe_emit_poll_report(self) -> None:
         """Emit a poll-based state report when reporting_interval == 'poll'.

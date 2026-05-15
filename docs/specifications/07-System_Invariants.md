@@ -200,7 +200,9 @@ _Plan backlink_: [`docs/plans/2026-05-07-task-local-reaper-retention-policy-plan
 
 _Implementation mapping_: `weft/core/tasks/base.py`,
 `weft/core/tasks/consumer.py`, `weft/core/launcher.py`,
-`weft/core/runners/host.py`, `weft/_constants.py`.
+`weft/core/manager.py`, `weft/core/tasks/task_monitor.py`,
+`weft/core/tasks/heartbeat.py`, `weft/core/runners/host.py`,
+`weft/_constants.py`.
 
 - **IMPL.1**: exit code `124` means timeout
 - **IMPL.2**: queue payload size is bounded by the broker's configured message
@@ -215,6 +217,20 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
 - **IMPL.7**: public submission surfaces do not authorize internal runtime
   class selection through stored TaskSpec metadata alone; internal runtime
   selection travels on the manager-owned spawn envelope
+- **IMPL.8**: a task runtime's main task thread is the reactor owner for Weft
+  broker effects. Queue reservation, queue writes/deletes, reserved-policy
+  application, lifecycle state/log publication, endpoint state, and task-local
+  control responses are committed from the owning reactor thread, not from
+  task worker lanes.
+- **IMPL.9**: task worker lanes are broker-free Weft runtime paths. They may
+  run blocking target work, child process launch, or custom processor callables
+  and return local Python results, but Weft must not rely on worker-thread
+  SimpleBroker reads/writes or direct TaskSpec mutation for runtime correctness.
+  The local worker-result channel is bounded, and the reactor drains it in
+  bounded batches so worker progress applies backpressure instead of growing
+  memory or starving queue/control turns. User-supplied Python code may still
+  open its own broker connection; that is outside the Weft-owned worker-lane
+  contract.
 
 ### Manager Invariants
 
@@ -252,6 +268,17 @@ _Implementation mapping_: `weft/core/manager.py`,
   convert a fresh namespace-ambiguous canonical incumbent into permission to
   launch another manager unless public spawn backlog remains pending past the
   bounded namespace-ambiguity grace window.
+- **MANAGER.8a**: a lower-TID live canonical manager may proactively publish a
+  `superseded` manager service-owner row for a higher-TID manager when it
+  observes a newly published canonical `active` row for that higher TID after
+  the lower manager's previous registry watermark. The fresh higher active row
+  is positive writer-liveness evidence because it proves the higher manager is
+  refreshing the same registry it must poll on its 1-second leadership cadence.
+  This does not apply to old rows from initial replay, non-active rows,
+  non-canonical rows, lower-TID rows, or unknown/stale liveness evidence.
+  Non-active manager rows must be ignored for active-manager election but kept
+  visible until normal expiry or owner cleanup so the target manager can observe
+  its `superseded` row.
 - **MANAGER.9**: public spawn dispatch is work-stealing. Atomic reservation of
   a `weft.spawn.requests` message authorizes that manager to attempt the child
   launch for that exact message; registry `self`, `other`, `none`, or

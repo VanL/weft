@@ -16,6 +16,7 @@ import os
 import signal
 import threading
 import time
+import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from multiprocessing.process import BaseProcess
@@ -28,6 +29,7 @@ from simplebroker import BrokerTarget, Queue
 from simplebroker.ext import BrokerError
 from weft._constants import (
     CONTROL_KILL,
+    CONTROL_PING,
     CONTROL_STOP,
     DEFAULT_FUNCTION_TARGET,
     INTERNAL_AUTOSTART_ENABLED_METADATA_KEY,
@@ -51,11 +53,13 @@ from weft._constants import (
     MANAGED_SERVICE_RECENT_EVIDENCE_GRACE_SECONDS,
     MANAGED_SERVICE_STABLE_AUDIT_INTERVAL_SECONDS,
     MANAGER_CHILD_EXIT_POLL_INTERVAL,
+    MANAGER_CHILD_LAUNCH_WORKER_LANE,
     MANAGER_CHILD_STARTUP_LIVENESS_GRACE_SECONDS,
     MANAGER_CONTROL_DRAIN_MAX_MESSAGES,
     MANAGER_DISPATCH_STALL_LOG_INTERVAL_SECONDS,
     MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS,
     MANAGER_INTERNAL_SPAWN_DRAIN_MAX_MESSAGES,
+    MANAGER_LEADERSHIP_CHECK_INTERVAL_SECONDS,
     MANAGER_LEADERSHIP_DRAIN_REVALIDATE_SECONDS,
     MANAGER_LEADERSHIP_PING_CACHE_TTL_SECONDS,
     MANAGER_LEADERSHIP_PING_TIMEOUT_SECONDS,
@@ -72,6 +76,7 @@ from weft._constants import (
     QUEUE_PRIORITY_INTERNAL,
     QUEUE_PRIORITY_NORMAL,
     SERVICE_OWNER_SCHEMA,
+    SERVICE_STATUS_ACTIVE,
     SERVICE_STATUS_DRAINING,
     SERVICE_STATUS_STOPPED,
     SERVICE_STATUS_SUPERSEDED,
@@ -113,7 +118,7 @@ from weft.helpers import (
 )
 from weft.runtime_liveness import runtime_liveness_from_registered_probe
 
-from .control_probe import send_keyed_ping_probe
+from .control_probe import coerce_pong_response
 from .launcher import launch_task_process
 from .manager_services import (
     ManagedServiceDecision,
@@ -152,7 +157,13 @@ from .service_convergence import (
 )
 from .spec_store import resolve_named_spec_from_root
 from .tasks import Consumer
-from .tasks.base import BaseTask, ControlRequest, QueueMessageContext, TaskControlPolicy
+from .tasks.base import (
+    BaseTask,
+    ControlRequest,
+    QueueMessageContext,
+    TaskControlPolicy,
+    TaskWorkerResult,
+)
 from .tasks.multiqueue_watcher import QueueMode
 from .taskspec import (
     ReservedPolicy,
@@ -203,6 +214,58 @@ class ManagerLeadershipProof:
     reason: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _ManagerChildLaunchRequest:
+    """Broker-free child launch request prepared by the manager reactor."""
+
+    child_spec: TaskSpec
+    task_cls: type[Any]
+    internal_role: str | None
+    service_key: str | None
+    autostart_source: str | None
+    detach_stdio: bool
+    source_queue: str | None = None
+    reserved_queue: str | None = None
+    message_timestamp: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _ManagerChildLaunchResult:
+    """Result returned from the child-launch worker lane."""
+
+    request: _ManagerChildLaunchRequest
+    process: BaseProcess | None = None
+    launched_ns: int = 0
+    error: BaseException | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _ManagerPendingPongProbe:
+    """Non-blocking manager-liveness PING awaiting a matching PONG."""
+
+    tid: str
+    row_timestamp: int | None
+    ctrl_in_name: str
+    ctrl_out_name: str
+    request_id: str
+    deadline_ns: int
+
+
+@dataclass(frozen=True, slots=True)
+class _ServicePendingPongProbe:
+    """Non-blocking service-owner PING awaiting a matching PONG."""
+
+    key: str
+    service_key: str
+    tid: str
+    row_timestamp: int | None
+    source: Literal["control-pong", "service-registry-pong"]
+    ctrl_in_name: str
+    ctrl_out_name: str
+    request_id: str
+    deadline_ns: int
+
+
 class Manager(BaseTask):
     """Task that listens for spawn requests and runs child tasks.
 
@@ -228,6 +291,8 @@ class Manager(BaseTask):
         thread_event = cast(threading.Event | None, stop_event)
         super().__init__(db, taskspec, stop_event=thread_event, config=config)
         self._child_processes: dict[str, ManagedChild] = {}
+        self._active_child_launches: dict[str, _ManagerChildLaunchRequest] = {}
+        self._child_launch_started_this_turn = False
         self._idle_timeout: float = float(
             taskspec.metadata.get(
                 "idle_timeout",
@@ -283,7 +348,9 @@ class Manager(BaseTask):
             )
             * 1_000_000_000
         )
-        self._leader_check_interval_ns = 100_000_000
+        self._leader_check_interval_ns = int(
+            MANAGER_LEADERSHIP_CHECK_INTERVAL_SECONDS * 1_000_000_000
+        )
         self._last_leader_check_ns = 0
         self._manager_registry_snapshot: dict[str, dict[str, Any]] = {}
         self._manager_registry_last_seen_ts: int | None = None
@@ -291,6 +358,9 @@ class Manager(BaseTask):
         self._leader_probe_cache: dict[
             str, tuple[int, int | None, ManagerLeadershipProof]
         ] = {}
+        self._leader_probe_pending: dict[str, _ManagerPendingPongProbe] = {}
+        self._service_probe_pending: dict[str, _ServicePendingPongProbe] = {}
+        self._manager_superseded_observed_ts_by_tid: dict[str, int] = {}
         self._leader_probe_used_this_turn = False
         self._leader_actionable_work_cache: tuple[int, bool] | None = None
         self._leader_check_turn: int | None = None
@@ -585,6 +655,8 @@ class Manager(BaseTask):
     def _manager_owned_work_pending(self) -> bool:
         """Return whether manager-owned inbox or reserved queues still have work."""
 
+        if self._has_active_child_launches():
+            return True
         for queue_name in self._idle_activity_queue_names():
             try:
                 if self._queue(queue_name).has_pending():
@@ -663,6 +735,11 @@ class Manager(BaseTask):
             payload["weft_context"] = str(weft_context)
         return payload
 
+    def _has_active_child_launches(self) -> bool:
+        """Return whether child launch work is waiting for main-thread commit."""
+
+        return bool(self._active_child_launches)
+
     def _handle_control_command(
         self, request: ControlRequest, context: QueueMessageContext
     ) -> bool:
@@ -681,8 +758,11 @@ class Manager(BaseTask):
         *,
         autostart_source: str | None = None,
         service_key: str | None = None,
+        source_queue: str | None = None,
+        reserved_queue: str | None = None,
+        message_timestamp: int | None = None,
     ) -> bool:
-        """Seed child inbox, spawn process, and emit task_spawned event.
+        """Seed child inbox and submit broker-free child launch work.
 
         Spec: [MF-1], [MF-6]
         """
@@ -755,40 +835,86 @@ class Manager(BaseTask):
         if service_key is None and autostart_source:
             service_key = autostart_source
 
-        process = launch_task_process(
-            task_cls,
-            self._db_path,
-            child_spec,
-            config=self._config,
+        assert child_spec.tid is not None
+        request = _ManagerChildLaunchRequest(
+            child_spec=child_spec,
+            task_cls=task_cls,
+            internal_role=internal_role,
+            service_key=service_key,
+            autostart_source=autostart_source,
             detach_stdio=not (
                 self._manager_log_enabled()
                 and internal_role == INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR
             ),
+            source_queue=source_queue,
+            reserved_queue=reserved_queue,
+            message_timestamp=message_timestamp,
         )
+        self._active_child_launches[child_spec.tid] = request
+        self._child_launch_started_this_turn = True
+        self._submit_worker_call(
+            MANAGER_CHILD_LAUNCH_WORKER_LANE,
+            lambda: self._run_child_launch_worker(request),
+        )
+        return True
+
+    def _run_child_launch_worker(
+        self,
+        request: _ManagerChildLaunchRequest,
+    ) -> _ManagerChildLaunchResult:
+        """Launch the child process without touching broker queues."""
+
+        try:
+            process = launch_task_process(
+                request.task_cls,
+                self._db_path,
+                request.child_spec,
+                config=self._config,
+                detach_stdio=request.detach_stdio,
+            )
+        except BaseException as exc:
+            return _ManagerChildLaunchResult(request=request, error=exc)
+        return _ManagerChildLaunchResult(
+            request=request,
+            process=process,
+            launched_ns=time.time_ns(),
+        )
+
+    def _commit_child_launch_success(
+        self,
+        result: _ManagerChildLaunchResult,
+    ) -> None:
+        """Record a launched child and publish all durable manager effects."""
+
+        request = result.request
+        child_spec = request.child_spec
+        process = result.process
+        if process is None:
+            raise RuntimeError("child launch worker returned no process")
         assert child_spec.tid is not None
         self._child_processes[child_spec.tid] = ManagedChild(
             process=process,
             ctrl_queue=child_spec.io.control.get("ctrl_in"),
             ctrl_out_queue=child_spec.io.control.get("ctrl_out"),
             persistent=bool(getattr(child_spec.spec, "persistent", False)),
-            autostart_source=autostart_source,
-            internal_role=internal_role,
-            service_key=service_key,
-            launched_ns=time.time_ns(),
+            autostart_source=request.autostart_source,
+            internal_role=request.internal_role,
+            service_key=request.service_key,
+            launched_ns=result.launched_ns or time.time_ns(),
         )
         self._invalidate_leadership_work_cache()
-        if service_key is not None:
+        if request.service_key is not None:
             self._register_managed_service_owner(
                 child_spec,
-                service_key=service_key,
+                service_key=request.service_key,
                 process=process,
                 status="active",
             )
-            state = self._service_state(service_key)
+            state = self._service_state(request.service_key)
             state.active_tid = child_spec.tid
             state.spawn_pending = False
             state.locally_terminal_tids.discard(child_spec.tid)
-            self._managed_service_duplicate_scan_pending.add(service_key)
+            self._managed_service_duplicate_scan_pending.add(request.service_key)
         self._last_activity_ns = time.time_ns()
 
         child_dump = redact_taskspec_dump(
@@ -805,10 +931,10 @@ class Manager(BaseTask):
         }
         if isinstance(process.pid, int):
             event_payload["child_pid"] = process.pid
-        if autostart_source:
-            event_payload["autostart_source"] = autostart_source
-        if service_key:
-            event_payload["service_key"] = service_key
+        if request.autostart_source:
+            event_payload["autostart_source"] = request.autostart_source
+        if request.service_key:
+            event_payload["service_key"] = request.service_key
 
         self._report_state_change(event="task_spawned", **event_payload)
         self._emit_serve_log(
@@ -818,12 +944,114 @@ class Manager(BaseTask):
             child_tid=child_spec.tid,
             child_name=child_spec.name,
             child_pid=process.pid,
-            internal_runtime_class=internal_role,
-            service_key=service_key,
-            autostart_source=autostart_source,
+            internal_runtime_class=request.internal_role,
+            service_key=request.service_key,
+            autostart_source=request.autostart_source,
             success=True,
         )
-        return True
+
+    def _handle_child_launch_failure(
+        self,
+        result: _ManagerChildLaunchResult,
+    ) -> None:
+        """Apply reserved policy after broker-free child launch fails."""
+
+        request = result.request
+        child_spec = request.child_spec
+        error = result.error or RuntimeError("child launch failed")
+        logger.warning("Child launch failed for %s: %s", child_spec.tid, error)
+        self._emit_serve_log(
+            "child_launch_result",
+            component="spawn",
+            required_level="debug",
+            severity="warning",
+            child_tid=child_spec.tid,
+            child_name=child_spec.name,
+            internal_runtime_class=request.internal_role,
+            service_key=request.service_key,
+            autostart_source=request.autostart_source,
+            success=False,
+            reason="launch_worker_failed",
+            error=str(error),
+        )
+        if (
+            request.source_queue is None
+            or request.reserved_queue is None
+            or request.message_timestamp is None
+        ):
+            return
+        policy = self.taskspec.spec.reserved_policy_on_error
+        self._apply_spawn_reserved_policy(
+            policy,
+            source_queue=request.source_queue,
+            reserved_queue=request.reserved_queue,
+            message_timestamp=request.message_timestamp,
+        )
+        if policy is not ReservedPolicy.KEEP:
+            self._ensure_reserved_queue_empty(request.reserved_queue)
+            self._cleanup_reserved_queue_if_needed(request.reserved_queue)
+
+    def _handle_child_launch_result(
+        self,
+        result: _ManagerChildLaunchResult,
+    ) -> None:
+        """Commit one child-launch worker result on the manager reactor."""
+
+        child_tid = result.request.child_spec.tid
+        if child_tid is not None:
+            self._active_child_launches.pop(child_tid, None)
+        self._child_launch_started_this_turn = True
+        if result.error is not None:
+            self._handle_child_launch_failure(result)
+            return
+
+        self._commit_child_launch_success(result)
+        request = result.request
+        if request.reserved_queue is None or request.message_timestamp is None:
+            return
+        try:
+            self._queue(request.reserved_queue).delete(
+                message_id=request.message_timestamp
+            )
+            self._emit_serve_log(
+                "spawn_ack_result",
+                component="spawn",
+                required_level="trace",
+                source_queue=request.source_queue,
+                reserved_queue=request.reserved_queue,
+                message_timestamp=request.message_timestamp,
+                child_tid=child_tid,
+                success=True,
+            )
+        except (BrokerError, OSError, RuntimeError):
+            logger.debug(
+                "Failed to acknowledge manager message %s",
+                request.message_timestamp,
+                exc_info=True,
+            )
+            self._emit_serve_log(
+                "spawn_ack_result",
+                component="spawn",
+                required_level="debug",
+                severity="warning",
+                source_queue=request.source_queue,
+                reserved_queue=request.reserved_queue,
+                message_timestamp=request.message_timestamp,
+                child_tid=child_tid,
+                success=False,
+            )
+
+    def _handle_worker_result(self, result: TaskWorkerResult) -> None:
+        if result.lane == MANAGER_CHILD_LAUNCH_WORKER_LANE:
+            if result.error is not None:
+                raise RuntimeError(
+                    "Manager child launch worker failed"
+                ) from result.error
+            self._handle_child_launch_result(
+                cast(_ManagerChildLaunchResult, result.value)
+            )
+            return
+        super()._handle_worker_result(result)
 
     def _child_runtime_handle(self, process: BaseProcess) -> dict[str, Any]:
         """Return runtime evidence for a locally launched child process."""
@@ -1605,7 +1833,11 @@ class Manager(BaseTask):
                 return "stale"
             return "unknown"
         if handle.control.get("authority") == "host-pid":
-            return "live" if handle_has_live_host_process(handle) else "stale"
+            if handle_has_live_host_process(handle):
+                return "live"
+            if detect_container_runtime() is not None:
+                return "unknown"
+            return "stale"
         return "unknown"
 
     @staticmethod
@@ -1691,6 +1923,15 @@ class Manager(BaseTask):
             cached_at_ns, cached_row_ts, proof = cached
             if cached_row_ts == row_timestamp and now_ns - cached_at_ns < cache_ttl_ns:
                 return proof
+        pending = self._leader_probe_pending.get(cache_key)
+        if pending is not None:
+            if pending.row_timestamp == row_timestamp:
+                return self._advance_manager_pong_probe(
+                    pending,
+                    record=record,
+                    now_ns=now_ns,
+                )
+            self._leader_probe_pending.pop(cache_key, None)
         if self._leader_probe_used_this_turn:
             return ManagerLeadershipProof(
                 "unknown",
@@ -1700,39 +1941,138 @@ class Manager(BaseTask):
         self._leader_probe_used_this_turn = True
         ctrl_in_name = self._manager_ctrl_queue_name(tid, record)
         ctrl_out_name = self._manager_ctrl_out_queue_name(tid, record)
-        result = send_keyed_ping_probe(
-            self._manager_context(),
-            tid=tid,
-            ctrl_in_name=ctrl_in_name,
-            ctrl_out_name=ctrl_out_name,
-            timeout=MANAGER_LEADERSHIP_PING_TIMEOUT_SECONDS,
-        )
-        if result.matched is None:
+        request_id = uuid.uuid4().hex
+        try:
+            ctrl_in = self._manager_context().queue(ctrl_in_name, persistent=True)
+            try:
+                ctrl_in.write(
+                    json.dumps({"command": CONTROL_PING, "request_id": request_id})
+                )
+            finally:
+                ctrl_in.close()
+        except (BrokerError, OSError, RuntimeError) as exc:
             proof = ManagerLeadershipProof(
                 "unknown",
                 source="control-pong",
-                reason=result.error or "ping_timeout",
+                reason=str(exc),
             )
-        elif self._pong_dispatch_eligible(
-            result.matched.payload,
+            self._leader_probe_cache[cache_key] = (now_ns, row_timestamp, proof)
+            return proof
+
+        timeout_ns = int(MANAGER_LEADERSHIP_PING_TIMEOUT_SECONDS * 1_000_000_000)
+        self._leader_probe_pending[cache_key] = _ManagerPendingPongProbe(
+            tid=tid,
+            row_timestamp=row_timestamp,
+            ctrl_in_name=ctrl_in_name,
+            ctrl_out_name=ctrl_out_name,
+            request_id=request_id,
+            deadline_ns=now_ns + max(0, timeout_ns),
+        )
+        return ManagerLeadershipProof(
+            "unknown",
+            source="control-pong",
+            reason="ping_pending",
+        )
+
+    def _advance_manager_pong_probe(
+        self,
+        probe: _ManagerPendingPongProbe,
+        *,
+        record: Mapping[str, Any],
+        now_ns: int,
+    ) -> ManagerLeadershipProof:
+        """Advance one non-blocking manager PING probe without sleeping."""
+
+        try:
+            ctrl_out = self._manager_context().queue(
+                probe.ctrl_out_name,
+                persistent=False,
+            )
+            try:
+                for item in ctrl_out.peek_generator(with_timestamps=True):
+                    if not isinstance(item, tuple) or len(item) != 2:
+                        continue
+                    body, _timestamp = item
+                    payload = coerce_pong_response(
+                        str(body),
+                        tid=probe.tid,
+                        request_id=probe.request_id,
+                    )
+                    if payload is None:
+                        continue
+                    proof = self._manager_pong_payload_proof(
+                        payload,
+                        record=record,
+                        ctrl_in_name=probe.ctrl_in_name,
+                        ctrl_out_name=probe.ctrl_out_name,
+                    )
+                    self._complete_manager_pong_probe(probe, proof, now_ns=now_ns)
+                    return proof
+            finally:
+                ctrl_out.close()
+        except (BrokerError, OSError, RuntimeError) as exc:
+            proof = ManagerLeadershipProof(
+                "unknown",
+                source="control-pong",
+                reason=str(exc),
+            )
+            self._complete_manager_pong_probe(probe, proof, now_ns=now_ns)
+            return proof
+
+        if now_ns >= probe.deadline_ns:
+            proof = ManagerLeadershipProof(
+                "unknown",
+                source="control-pong",
+                reason="ping_timeout",
+            )
+            self._complete_manager_pong_probe(probe, proof, now_ns=now_ns)
+            return proof
+
+        return ManagerLeadershipProof(
+            "unknown",
+            source="control-pong",
+            reason="ping_pending",
+        )
+
+    def _manager_pong_payload_proof(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        record: Mapping[str, Any],
+        ctrl_in_name: str,
+        ctrl_out_name: str,
+    ) -> ManagerLeadershipProof:
+        if self._pong_dispatch_eligible(
+            payload,
             record=record,
             ctrl_in_name=ctrl_in_name,
             ctrl_out_name=ctrl_out_name,
         ):
-            proof = ManagerLeadershipProof(
+            return ManagerLeadershipProof(
                 "live",
                 dispatch_eligible=True,
                 source="control-pong",
             )
-        else:
-            proof = ManagerLeadershipProof(
-                "live",
-                dispatch_eligible=False,
-                source="control-pong",
-                reason="pong_not_dispatch_eligible",
-            )
-        self._leader_probe_cache[cache_key] = (now_ns, row_timestamp, proof)
-        return proof
+        return ManagerLeadershipProof(
+            "live",
+            dispatch_eligible=False,
+            source="control-pong",
+            reason="pong_not_dispatch_eligible",
+        )
+
+    def _complete_manager_pong_probe(
+        self,
+        probe: _ManagerPendingPongProbe,
+        proof: ManagerLeadershipProof,
+        *,
+        now_ns: int,
+    ) -> None:
+        self._leader_probe_pending.pop(probe.tid, None)
+        self._leader_probe_cache[probe.tid] = (
+            now_ns,
+            probe.row_timestamp,
+            proof,
+        )
 
     def _manager_leadership_proof(
         self,
@@ -1755,6 +2095,8 @@ class Manager(BaseTask):
         if liveness == "stale":
             if allow_ping:
                 proof = self._manager_pong_dispatch_proof(record, now_ns=now_ns)
+                if proof.liveness == "unknown" and proof.reason == "ping_pending":
+                    return proof
                 if proof.liveness == "unknown":
                     return ManagerLeadershipProof(
                         "stale",
@@ -1776,11 +2118,13 @@ class Manager(BaseTask):
 
         queue = self._queue(WEFT_SERVICES_REGISTRY_QUEUE)
         service_key = manager_service_key(self._manager_context())
+        previous_last_seen_ts = self._manager_registry_last_seen_ts
         since_timestamp = (
             None
             if force_full or not self._manager_registry_initialized
-            else self._manager_registry_last_seen_ts
+            else previous_last_seen_ts
         )
+        fresh_higher_active: list[tuple[dict[str, Any], int]] = []
         try:
             entries = iter_queue_json_entries(queue, since_timestamp=since_timestamp)
             saw_entry = False
@@ -1810,13 +2154,151 @@ class Manager(BaseTask):
                 )
                 if timestamp >= existing_ts:
                     self._manager_registry_snapshot[tid] = projected
+                if (
+                    since_timestamp is not None
+                    and previous_last_seen_ts is not None
+                    and timestamp > previous_last_seen_ts
+                    and self._manager_record_should_be_superseded(
+                        projected,
+                        observed_timestamp=timestamp,
+                    )
+                ):
+                    fresh_higher_active.append((projected, timestamp))
             self._manager_registry_initialized = True
             if force_full and not saw_entry:
                 self._manager_registry_snapshot.clear()
+            for record, timestamp in fresh_higher_active:
+                self._publish_superseded_manager_record(
+                    queue,
+                    record=record,
+                    observed_timestamp=timestamp,
+                )
             return True
         except (BrokerError, OSError, RuntimeError):
             logger.debug("Failed to refresh manager registry view", exc_info=True)
             return False
+
+    def _manager_record_should_be_superseded(
+        self,
+        record: Mapping[str, Any],
+        *,
+        observed_timestamp: int,
+    ) -> bool:
+        """Return whether a fresh higher active row is supersession proof."""
+
+        if self.should_stop or self._draining or self._unregistered:
+            return False
+        if record.get("status") != SERVICE_STATUS_ACTIVE:
+            return False
+        if not is_canonical_manager_record(record):
+            return False
+        tid = record.get("tid")
+        if not isinstance(tid, str) or not tid:
+            return False
+        try:
+            is_higher_tid = int(tid) > int(self.tid)
+        except ValueError:
+            return False
+        if not is_higher_tid:
+            return False
+        last_superseded = self._manager_superseded_observed_ts_by_tid.get(tid)
+        return last_superseded is None or observed_timestamp > last_superseded
+
+    @staticmethod
+    def _manager_record_queues(record: Mapping[str, Any]) -> dict[str, str]:
+        raw_queues = record.get("queues")
+        queues = {
+            str(key): value
+            for key, value in (
+                raw_queues.items() if isinstance(raw_queues, Mapping) else ()
+            )
+            if isinstance(value, str) and value
+        }
+        for key in (
+            "requests",
+            "reserved",
+            "ctrl_in",
+            "ctrl_out",
+            "outbox",
+            "internal_requests",
+            "internal_reserved",
+        ):
+            value = record.get(key)
+            if isinstance(value, str) and value:
+                queues.setdefault(key, value)
+        inbox = record.get("inbox")
+        if "requests" not in queues and isinstance(inbox, str) and inbox:
+            queues["requests"] = inbox
+        return queues
+
+    def _publish_superseded_manager_record(
+        self,
+        queue: Queue,
+        *,
+        record: Mapping[str, Any],
+        observed_timestamp: int,
+    ) -> None:
+        """Publish a superseded row for a fresh higher-TID active manager row."""
+
+        tid = record.get("tid")
+        if not isinstance(tid, str) or not tid:
+            return
+        raw_runtime_handle = record.get("runtime_handle")
+        runtime_handle = (
+            dict(raw_runtime_handle) if isinstance(raw_runtime_handle, Mapping) else {}
+        )
+        raw_metadata = record.get("metadata")
+        metadata = dict(raw_metadata) if isinstance(raw_metadata, Mapping) else {}
+        metadata.update(
+            {
+                "superseded_by": self.tid,
+                "supersession_reason": "higher_tid_active_refresh_seen",
+                "supersession_observed_timestamp": observed_timestamp,
+                "supersession_proof": "fresh_active_registry_row",
+            }
+        )
+        raw_capabilities = record.get("capabilities")
+        capabilities = (
+            list(raw_capabilities)
+            if isinstance(raw_capabilities, Sequence)
+            and not isinstance(raw_capabilities, (str, bytes))
+            else []
+        )
+        payload = build_manager_service_payload(
+            context=self._manager_context(),
+            tid=tid,
+            name=str(record.get("name") or "manager"),
+            status=SERVICE_STATUS_SUPERSEDED,
+            queues=self._manager_record_queues(record),
+            runtime_handle=runtime_handle,
+            capabilities=capabilities,
+            metadata=metadata,
+        )
+        try:
+            message_id = cast(int | None, queue.write(json.dumps(payload)))
+        except (BrokerError, OSError, RuntimeError):
+            logger.debug("Failed to publish superseded manager record", exc_info=True)
+            return
+
+        projected_timestamp = message_id if message_id is not None else time.time_ns()
+        projected = project_manager_service_record(
+            payload,
+            timestamp=projected_timestamp,
+            service_key=manager_service_key(self._manager_context()),
+        )
+        if projected is not None:
+            projected["_timestamp"] = projected_timestamp
+            self._manager_registry_snapshot[tid] = projected
+        self._manager_superseded_observed_ts_by_tid[tid] = observed_timestamp
+        self._emit_serve_log(
+            "manager_superseded_published",
+            component="registry",
+            required_level="debug",
+            superseded_tid=tid,
+            superseded_by=self.tid,
+            observed_timestamp=observed_timestamp,
+            superseded_message_id=message_id,
+        )
 
     def _active_dispatch_manager_records(self) -> dict[str, dict[str, Any]] | None:
         now_ns = time.time_ns()
@@ -1834,6 +2316,8 @@ class Manager(BaseTask):
             ):
                 stale_timestamps.append(timestamp)
                 self._manager_registry_snapshot.pop(tid, None)
+                continue
+            if record.get("status") != SERVICE_STATUS_ACTIVE:
                 continue
             if tid == self.tid and not self._unregistered and not self.should_stop:
                 if record.get("status") == "active" and is_canonical_manager_record(
@@ -1962,6 +2446,8 @@ class Manager(BaseTask):
         """
 
         if any(child.persistent for child in self._user_work_children().values()):
+            return True
+        if self._has_active_child_launches():
             return True
         if self._managed_internal_spawn_enqueued:
             return True
@@ -3030,6 +3516,9 @@ class Manager(BaseTask):
             autostart_source=child_spec.metadata.get(
                 INTERNAL_AUTOSTART_SOURCE_METADATA_KEY
             ),
+            source_queue=source_queue,
+            reserved_queue=reserved_queue,
+            message_timestamp=timestamp,
         )
         if not launched:
             if self._draining or self.should_stop:
@@ -3040,6 +3529,17 @@ class Manager(BaseTask):
                     reason="manager_draining_after_launch_attempt",
                     child_tid=child_spec.tid,
                 )
+            return
+        active_launch = (
+            self._active_child_launches.get(child_spec.tid)
+            if child_spec.tid is not None
+            else None
+        )
+        if (
+            active_launch is not None
+            and active_launch.reserved_queue == reserved_queue
+            and active_launch.message_timestamp == timestamp
+        ):
             return
 
         try:
@@ -3520,6 +4020,155 @@ class Manager(BaseTask):
                 continue
         return handles
 
+    @staticmethod
+    def _service_probe_key(
+        *,
+        source: str,
+        service_key: str,
+        tid: str,
+        timestamp: int | None,
+    ) -> str:
+        return f"{source}\x1f{service_key}\x1f{tid}\x1f{timestamp or 0}"
+
+    def _service_pong_candidate(
+        self,
+        *,
+        service_key: str,
+        tid: str,
+        timestamp: int | None,
+        metadata: dict[str, Any],
+        ctrl_in_name: str,
+        ctrl_out_name: str,
+        source: Literal["control-pong", "service-registry-pong"],
+    ) -> ServiceCandidate | None:
+        """Advance or start one non-blocking service-owner PING probe.
+
+        A pending probe is unknown service evidence. The caller falls through
+        to normal recent/stale classification only after the probe deadline.
+        """
+
+        key = self._service_probe_key(
+            source=source,
+            service_key=service_key,
+            tid=tid,
+            timestamp=timestamp,
+        )
+        now_ns = time.time_ns()
+        pending = self._service_probe_pending.get(key)
+        if pending is not None:
+            return self._advance_service_pong_probe(
+                pending,
+                timestamp=timestamp,
+                metadata=metadata,
+                now_ns=now_ns,
+            )
+
+        request_id = uuid.uuid4().hex
+        try:
+            ctrl_in = self._manager_context().queue(ctrl_in_name, persistent=True)
+            try:
+                ctrl_in.write(
+                    json.dumps({"command": CONTROL_PING, "request_id": request_id})
+                )
+            finally:
+                ctrl_in.close()
+        except (BrokerError, OSError, RuntimeError) as exc:
+            return ServiceCandidate(
+                key=service_key,
+                tid=tid,
+                state="uncertain",
+                source=source,
+                timestamp=timestamp,
+                reason=str(exc),
+                metadata=metadata,
+            )
+
+        timeout_ns = int(MANAGED_SERVICE_PING_TIMEOUT_SECONDS * 1_000_000_000)
+        self._service_probe_pending[key] = _ServicePendingPongProbe(
+            key=key,
+            service_key=service_key,
+            tid=tid,
+            row_timestamp=timestamp,
+            source=source,
+            ctrl_in_name=ctrl_in_name,
+            ctrl_out_name=ctrl_out_name,
+            request_id=request_id,
+            deadline_ns=now_ns + max(0, timeout_ns),
+        )
+        return ServiceCandidate(
+            key=service_key,
+            tid=tid,
+            state="uncertain",
+            source=source,
+            timestamp=timestamp,
+            reason="ping_pending",
+            metadata=metadata,
+        )
+
+    def _advance_service_pong_probe(
+        self,
+        probe: _ServicePendingPongProbe,
+        *,
+        timestamp: int | None,
+        metadata: dict[str, Any],
+        now_ns: int,
+    ) -> ServiceCandidate | None:
+        """Advance one pending service-owner PING without sleeping."""
+
+        try:
+            ctrl_out = self._manager_context().queue(
+                probe.ctrl_out_name,
+                persistent=False,
+            )
+            try:
+                for item in ctrl_out.peek_generator(with_timestamps=True):
+                    if not isinstance(item, tuple) or len(item) != 2:
+                        continue
+                    body, _message_timestamp = item
+                    payload = coerce_pong_response(
+                        str(body),
+                        tid=probe.tid,
+                        request_id=probe.request_id,
+                    )
+                    if payload is None:
+                        continue
+                    self._service_probe_pending.pop(probe.key, None)
+                    return ServiceCandidate(
+                        key=probe.service_key,
+                        tid=probe.tid,
+                        state="live",
+                        source=probe.source,
+                        timestamp=timestamp,
+                        metadata=metadata,
+                    )
+            finally:
+                ctrl_out.close()
+        except (BrokerError, OSError, RuntimeError) as exc:
+            self._service_probe_pending.pop(probe.key, None)
+            return ServiceCandidate(
+                key=probe.service_key,
+                tid=probe.tid,
+                state="uncertain",
+                source=probe.source,
+                timestamp=timestamp,
+                reason=str(exc),
+                metadata=metadata,
+            )
+
+        if now_ns >= probe.deadline_ns:
+            self._service_probe_pending.pop(probe.key, None)
+            return None
+
+        return ServiceCandidate(
+            key=probe.service_key,
+            tid=probe.tid,
+            state="uncertain",
+            source=probe.source,
+            timestamp=timestamp,
+            reason="ping_pending",
+            metadata=metadata,
+        )
+
     def _service_candidate_from_task_log(
         self,
         *,
@@ -3560,32 +4209,17 @@ class Manager(BaseTask):
 
         if ctrl_queues is not None:
             ctrl_in_name, ctrl_out_name = ctrl_queues
-            probe = send_keyed_ping_probe(
-                self._manager_context(),
+            probe_candidate = self._service_pong_candidate(
+                service_key=service_key,
                 tid=tid,
+                timestamp=timestamp,
+                metadata=candidate_metadata,
                 ctrl_in_name=ctrl_in_name,
                 ctrl_out_name=ctrl_out_name,
-                timeout=MANAGED_SERVICE_PING_TIMEOUT_SECONDS,
+                source="control-pong",
             )
-            if probe.matched is not None:
-                return ServiceCandidate(
-                    key=service_key,
-                    tid=tid,
-                    state="live",
-                    source="control-pong",
-                    timestamp=timestamp,
-                    metadata=candidate_metadata,
-                )
-            if probe.error:
-                return ServiceCandidate(
-                    key=service_key,
-                    tid=tid,
-                    state="uncertain",
-                    source="control-pong",
-                    timestamp=timestamp,
-                    reason=probe.error,
-                    metadata=candidate_metadata,
-                )
+            if probe_candidate is not None:
+                return probe_candidate
 
         recent_grace_ns = int(
             MANAGED_SERVICE_RECENT_EVIDENCE_GRACE_SECONDS * 1_000_000_000
@@ -3671,32 +4305,17 @@ class Manager(BaseTask):
                 )
 
         if "ctrl_in" in metadata and "ctrl_out" in metadata:
-            probe = send_keyed_ping_probe(
-                self._manager_context(),
+            probe_candidate = self._service_pong_candidate(
+                service_key=record.service_key,
                 tid=record.owner_tid,
+                timestamp=record.timestamp,
+                metadata=metadata,
                 ctrl_in_name=metadata["ctrl_in"],
                 ctrl_out_name=metadata["ctrl_out"],
-                timeout=MANAGED_SERVICE_PING_TIMEOUT_SECONDS,
+                source="service-registry-pong",
             )
-            if probe.matched is not None:
-                return ServiceCandidate(
-                    key=record.service_key,
-                    tid=record.owner_tid,
-                    state="live",
-                    source="service-registry-pong",
-                    timestamp=record.timestamp,
-                    metadata=metadata,
-                )
-            if probe.error:
-                return ServiceCandidate(
-                    key=record.service_key,
-                    tid=record.owner_tid,
-                    state="uncertain",
-                    source="service-registry-pong",
-                    timestamp=record.timestamp,
-                    reason=probe.error,
-                    metadata=metadata,
-                )
+            if probe_candidate is not None:
+                return probe_candidate
 
         recent_grace_ns = int(
             MANAGED_SERVICE_RECENT_EVIDENCE_GRACE_SECONDS * 1_000_000_000
@@ -5009,7 +5628,7 @@ class Manager(BaseTask):
                     now_ns=now_ns,
                 )
             )
-        if self._child_processes:
+        if self._user_work_children():
             timeouts.append(MANAGER_CHILD_EXIT_POLL_INTERVAL)
 
         local_active_reasons = self._managed_service_convergence_active_reasons(
@@ -5095,12 +5714,15 @@ class Manager(BaseTask):
 
     def process_once(self) -> None:
         self._loop_iteration += 1
+        self._child_launch_started_this_turn = False
         self._leader_probe_used_this_turn = False
         self._leader_actionable_work_cache = None
         self._leader_check_turn = None
+        self._drain_worker_results()
         self._emit_manager_loop_summary()
         self._process_pending_termination_signal()
         if self.should_stop:
+            self._drain_worker_results()
             return
         self._refresh_manager_registration()
         if self._draining:
@@ -5108,12 +5730,15 @@ class Manager(BaseTask):
             # slow turn can re-enter the yield path and skip the corresponding
             # *_drained completion event once children are gone.
             self._continue_shutdown_drain()
+            self._drain_worker_results()
             return
         if self._maybe_yield_leadership():
+            self._drain_worker_results()
             return
         self._drain_control_queue_first()
         if self._draining:
             self._continue_shutdown_drain()
+            self._drain_worker_results()
             return
         if self._cleanup_children():
             self._run_managed_service_convergence(
@@ -5122,25 +5747,42 @@ class Manager(BaseTask):
             )
             if self._draining:
                 self._continue_shutdown_drain()
+                self._drain_worker_results()
                 return
-        internal_drained = self._drain_internal_spawn_requests()
+        internal_drained = (
+            0 if self._has_active_child_launches() else self._drain_internal_spawn_requests()
+        )
         if internal_drained:
             self._last_activity_ns = time.time_ns()
-        super().process_once()
-        public_drained = self._drain_public_spawn_requests()
+        if not self._has_active_child_launches():
+            super().process_once()
+        else:
+            self._drain_worker_results()
+            self._maybe_emit_poll_report()
+        public_drained = (
+            0
+            if self._has_active_child_launches()
+            or self._child_launch_started_this_turn
+            else self._drain_public_spawn_requests()
+        )
         if public_drained:
             self._last_activity_ns = time.time_ns()
         if self._draining:
             self._continue_shutdown_drain()
+            self._drain_worker_results()
             return
         if self._maybe_yield_leadership():
+            self._drain_worker_results()
             return
         self._run_managed_service_convergence()
         if self._draining:
             self._continue_shutdown_drain()
+            self._drain_worker_results()
             return
         if self._maybe_yield_leadership():
+            self._drain_worker_results()
             return
+        self._drain_worker_results()
         self._update_idle_activity_from_broker()
         now_ns = time.time_ns()
         idle_timeout_ns = int(float(self._idle_timeout) * 1_000_000_000)
@@ -5273,12 +5915,16 @@ class Manager(BaseTask):
         total_processed = 0
         attempted = False
         for _ in range(max_messages):
+            if self._has_active_child_launches() or self._child_launch_started_this_turn:
+                break
             attempted = True
             processed = int(
                 self._process_queue_message(queue_name, inactive_candidates=set())
             )
             total_processed += processed
             if processed == 0:
+                break
+            if self._has_active_child_launches() or self._child_launch_started_this_turn:
                 break
             if self.should_stop or self._draining:
                 break

@@ -7,31 +7,55 @@ import signal
 import threading
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, NoReturn, cast
+from typing import Any, Literal, NoReturn, cast
 
 from simplebroker.ext import BrokerError
 from weft._constants import (
+    CONSUMER_ACTIVE_WORKER_LANE,
+    CONSUMER_WORKER_EVENT_LANE,
     CONTROL_KILL,
     CONTROL_STOP,
     DEFAULT_CLEANUP_ON_EXIT,
     DEFAULT_OUTPUT_SIZE_LIMIT_MB,
+    TERMINAL_TASK_STATUSES,
     WORK_ENVELOPE_START,
 )
 from weft.core.agents.runtime import AgentExecutionResult
 from weft.core.runner_diagnostics import runner_diagnostics
 from weft.core.targets import decode_work_message, serialize_result
 from weft.core.taskspec import ReservedPolicy, TaskSpec
+from weft.ext import RunnerHandle
 from weft.helpers import kill_process_tree, terminate_process_tree
 
-from .base import BaseTask, ControlRequest, TaskControlPolicy
+from .base import BaseTask, TaskControlPolicy, TaskWorkerResult
 from .interactive import InteractiveTaskMixin
-from .multiqueue_watcher import QueueMessageContext, QueueMode
+from .multiqueue_watcher import QueueMessageContext, QueueMode, QueueRuntimeConfig
 from .runner import RunnerOutcome, TaskRunner
 from .sessions import AgentSession
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class _ConsumerWorkerEvent:
+    kind: Literal["worker_started", "runtime_handle", "stream_chunk"]
+    pid: int | None = None
+    runtime_handle: RunnerHandle | None = None
+    stream: Literal["stdout", "stderr"] | None = None
+    chunk: str = ""
+    final: bool = False
+    index: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class _ConsumerWorkResult:
+    timestamp: int | None
+    initial_transition: bool
+    live_command_streaming: bool
+    outcome: RunnerOutcome | None = None
+    exception: BaseException | None = None
 
 
 class Consumer(BaseTask, InteractiveTaskMixin):
@@ -57,7 +81,11 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         self._init_interactive()
         self._active_raw_message: str | None = None
         self._active_message_timestamp: int | None = None
-        self._active_live_command_streaming = False
+        self._active_work_in_flight = False
+        self._in_reactor_turn = False
+        self._direct_work_waiting = False
+        self._direct_work_value: Any = None
+        self._direct_work_exception: BaseException | None = None
         self._agent_session: AgentSession | None = None
         self._deferred_active_control_command: str | None = None
         self._deferred_active_control_timestamp: int | None = None
@@ -77,7 +105,18 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         self._report_state_change(event="task_started")
 
     def process_once(self) -> None:
-        super().process_once()
+        self._in_reactor_turn = True
+        try:
+            if self._active_work_in_flight:
+                self._drain_worker_results()
+                if self._active_work_in_flight:
+                    self._poll_active_control_once()
+                self._drain_worker_results()
+                self._maybe_emit_poll_report()
+            else:
+                super().process_once()
+        finally:
+            self._in_reactor_turn = False
         if self._interactive_mode:
             self._interactive_flush_outputs()
 
@@ -99,6 +138,13 @@ class Consumer(BaseTask, InteractiveTaskMixin):
                 self._handle_reserved_message
             ),
         }
+
+    def _queue_counts_as_wait_activity(self, config: QueueRuntimeConfig) -> bool:
+        """Ignore already-reserved work as fresh wait activity while active."""
+
+        if self._active_work_in_flight:
+            return config.name == self._queue_names["ctrl_in"]
+        return super()._queue_counts_as_wait_activity(config)
 
     def _handle_work_message(
         self, message: str, timestamp: int, context: QueueMessageContext
@@ -132,168 +178,362 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         if self._interactive_maybe_handle_message(message, timestamp, context):
             return
 
+        if self._active_work_in_flight:
+            self._requeue_reserved_message(context, timestamp)
+            return
+
+        self._start_reactor_work_message(message, timestamp)
+
+    def _requeue_reserved_message(
+        self,
+        context: QueueMessageContext,
+        timestamp: int,
+    ) -> None:
+        if context.mode is not QueueMode.RESERVE or not context.reserved_queue_name:
+            return
+        try:
+            reserved_queue = self._queue(context.reserved_queue_name)
+            reserved_queue.move_one(
+                context.queue_name,
+                exact_timestamp=timestamp,
+                require_unclaimed=True,
+                with_timestamps=False,
+            )
+        except (
+            BrokerError,
+            OSError,
+            RuntimeError,
+        ):  # pragma: no cover - broker requeue best effort
+            logger.debug("Failed to requeue message %s", timestamp, exc_info=True)
+
+    def _start_reactor_work_message(self, message: str, timestamp: int) -> None:
         self._active_raw_message = message
         self._active_message_timestamp = timestamp
         try:
             work_item = decode_work_message(message)
+            if self._uses_agent_session() and self._agent_session is None:
+                self._ensure_agent_session()
             initial_transition = self._begin_work_item(timestamp)
-            self._execute_work_item(
-                work_item,
-                timestamp,
-                initial_transition=initial_transition,
+            self._active_work_in_flight = True
+            self._submit_worker_call(
+                CONSUMER_ACTIVE_WORKER_LANE,
+                lambda: self._run_reactor_work_item(
+                    work_item,
+                    timestamp=timestamp,
+                    initial_transition=initial_transition,
+                ),
             )
-        finally:
+        except Exception:
+            self._active_work_in_flight = False
             self._active_raw_message = None
             self._active_message_timestamp = None
+            raise
 
-    def _execute_work_item(
+    def _finalize_work_exception(
         self,
-        work_item: Any,
+        exc: BaseException,
+        timestamp: int | None,
+    ) -> Any:
+        diagnostics = runner_diagnostics(
+            phase="execute",
+            runner=self.taskspec.spec.runner.name,
+            target_type=self.taskspec.spec.type,
+            pid=os.getpid(),
+            alive=True,
+            message=str(exc),
+            exception_type=type(exc).__name__,
+        )
+        self.taskspec.mark_failed(error=str(exc))
+        return self._finalize_terminal_outcome(
+            title_state="failed",
+            title_detail=None,
+            event="work_failed",
+            pipeline_status="failed",
+            timestamp=timestamp,
+            metrics_payload=None,
+            runner_diagnostics=diagnostics,
+            exc=exc,
+        )
+
+    def _commit_work_outcome(
+        self,
+        outcome: RunnerOutcome,
         timestamp: int | None,
         *,
         initial_transition: bool,
+        live_command_streaming: bool,
     ) -> Any:
-        try:
-            outcome = self._run_task(work_item)
-        except Exception as exc:
-            diagnostics = runner_diagnostics(
-                phase="execute",
-                runner=self.taskspec.spec.runner.name,
-                target_type=self.taskspec.spec.type,
-                pid=os.getpid(),
-                alive=True,
-                message=str(exc),
-                exception_type=type(exc).__name__,
-            )
-            self.taskspec.mark_failed(error=str(exc))
-            return self._finalize_terminal_outcome(
-                title_state="failed",
-                title_detail=None,
-                event="work_failed",
-                pipeline_status="failed",
-                timestamp=timestamp,
-                metrics_payload=None,
-                runner_diagnostics=diagnostics,
-                exc=exc,
-            )
-        live_command_streaming = self._active_live_command_streaming
+        self._register_outcome_runtime(outcome)
         metrics_payload = self._extract_metrics(outcome)
         agent_execution = self._build_agent_execution_payload(outcome.value)
-        try:
-            self._ensure_outcome_ok(outcome, timestamp, metrics_payload)
-            if live_command_streaming:
-                result_bytes = self._serialized_result_bytes(outcome.value)
-            else:
-                result_bytes = self._emit_result(outcome.value)
-            self._finalize_message(
-                timestamp,
-                result_bytes,
-                metrics_payload,
-                agent_execution=agent_execution,
-                initial_transition=initial_transition,
-            )
-            return outcome.value
-        finally:
-            self._active_live_command_streaming = False
+        self._ensure_outcome_ok(outcome, timestamp, metrics_payload)
+        if live_command_streaming:
+            result_bytes = self._serialized_result_bytes(outcome.value)
+        else:
+            result_bytes = self._emit_result(outcome.value)
+        self._finalize_message(
+            timestamp,
+            result_bytes,
+            metrics_payload,
+            agent_execution=agent_execution,
+            initial_transition=initial_transition,
+        )
+        return outcome.value
+
+    def _register_outcome_runtime(self, outcome: RunnerOutcome) -> None:
+        self._register_running_worker(outcome.worker_pid)
+        self.register_runtime_handle(outcome.runtime_handle)
 
     def run_work_item(self, work_item: Any) -> Any:
         """Execute *work_item* without relying on queue plumbing."""
         initial_transition = self._begin_work_item(None)
-        return self._execute_work_item(
-            work_item,
-            timestamp=None,
+        self._direct_work_waiting = True
+        self._direct_work_value = None
+        self._direct_work_exception = None
+        self._active_raw_message = None
+        self._active_message_timestamp = None
+        self._active_work_in_flight = True
+        self._submit_worker_call(
+            CONSUMER_ACTIVE_WORKER_LANE,
+            lambda: self._run_reactor_work_item(
+                work_item,
+                timestamp=None,
+                initial_transition=initial_transition,
+            ),
+        )
+        try:
+            while self._active_work_in_flight or self._has_worker_activity():
+                self.process_once()
+                if self._direct_work_exception is not None:
+                    raise self._direct_work_exception
+                if self._active_work_in_flight or self._has_worker_activity():
+                    self.wait_for_activity(timeout=0.05)
+            if self._direct_work_exception is not None:
+                raise self._direct_work_exception
+            return self._direct_work_value
+        finally:
+            self._direct_work_waiting = False
+
+    def _run_reactor_work_item(
+        self,
+        work_item: Any,
+        *,
+        timestamp: int | None,
+        initial_transition: bool,
+    ) -> _ConsumerWorkResult:
+        try:
+            outcome, live_command_streaming = self._run_task_for_reactor(work_item)
+        except Exception as exc:
+            return _ConsumerWorkResult(
+                timestamp=timestamp,
+                initial_transition=initial_transition,
+                live_command_streaming=False,
+                exception=exc,
+            )
+        return _ConsumerWorkResult(
+            timestamp=timestamp,
             initial_transition=initial_transition,
+            live_command_streaming=live_command_streaming,
+            outcome=outcome,
         )
 
-    def _run_task(self, work_item: Any) -> RunnerOutcome:
+    def _run_task_for_reactor(self, work_item: Any) -> tuple[RunnerOutcome, bool]:
         if self._uses_agent_session():
-            self._active_live_command_streaming = False
-            session = self._ensure_agent_session()
+            session = self._agent_session
+            if session is None:
+                raise RuntimeError("Agent session was not started on the task reactor")
             start_time = time.monotonic()
             result = session.execute(
                 work_item,
-                cancel_requested=self._cancel_requested,
+                cancel_requested=self._worker_cancel_requested,
             )
-            return RunnerOutcome(
-                status=result.status,
-                value=result.value,
-                error=result.error,
-                stdout=None,
-                stderr=None,
-                returncode=None,
-                duration=time.monotonic() - start_time,
-                metrics=result.metrics,
-                worker_pid=session.pid,
-                runtime_handle=session.handle,
+            return (
+                RunnerOutcome(
+                    status=result.status,
+                    value=result.value,
+                    error=result.error,
+                    stdout=None,
+                    stderr=None,
+                    returncode=None,
+                    duration=time.monotonic() - start_time,
+                    metrics=result.metrics,
+                    worker_pid=session.pid,
+                    runtime_handle=session.handle,
+                ),
+                False,
             )
 
-        runner = self._make_task_runner()
+        runner = self._make_task_runner(broker_access=False)
         live_command_streaming = (
             self._uses_live_command_streaming() and runner.supports_stream_callbacks()
         )
-        self._active_live_command_streaming = live_command_streaming
-        if live_command_streaming:
-            state = {
-                "started": False,
-                "stdout_index": 0,
-                "stderr_index": 0,
-            }
+        stdout_index = 0
+        stderr_index = 0
 
-            def _ensure_streaming_session() -> None:
-                if state["started"]:
-                    return
-                state["started"] = True
-                self._begin_streaming_session(
-                    mode="stream",
-                    metadata={
-                        "queue": self._queue_names["outbox"],
-                        "ctrl_queue": self._queue_names["ctrl_out"],
-                    },
-                )
-
-            def _on_stdout_chunk(chunk: str, final: bool) -> None:
-                _ensure_streaming_session()
-                envelope = {
-                    "type": "stream",
-                    "stream": "stdout",
-                    "chunk": state["stdout_index"],
-                    "final": final,
-                    "encoding": "text",
-                    "data": chunk,
-                }
-                if final:
-                    envelope["result_transform"] = "strip"
-                self._queue(self._queue_names["outbox"]).write(json.dumps(envelope))
-                state["stdout_index"] += 1
-
-            def _on_stderr_chunk(chunk: str, final: bool) -> None:
-                _ensure_streaming_session()
-                envelope = {
-                    "type": "stream",
-                    "stream": "stderr",
-                    "chunk": state["stderr_index"],
-                    "final": final,
-                    "encoding": "text",
-                    "data": chunk,
-                }
-                self._ctrl_out_queue.write(json.dumps(envelope))
-                state["stderr_index"] += 1
-
-            return runner.run_with_hooks(
-                work_item,
-                cancel_requested=self._cancel_requested,
-                on_worker_started=self._register_running_worker,
-                on_runtime_handle_started=self.register_runtime_handle,
-                on_stdout_chunk=_on_stdout_chunk,
-                on_stderr_chunk=_on_stderr_chunk,
+        def _publish_worker_started(pid: int | None) -> None:
+            self._publish_consumer_worker_event(
+                _ConsumerWorkerEvent(kind="worker_started", pid=pid)
             )
 
-        return runner.run_with_hooks(
-            work_item,
-            cancel_requested=self._cancel_requested,
-            on_worker_started=self._register_running_worker,
-            on_runtime_handle_started=self.register_runtime_handle,
+        def _publish_runtime_handle(handle: RunnerHandle) -> None:
+            self._publish_consumer_worker_event(
+                _ConsumerWorkerEvent(kind="runtime_handle", runtime_handle=handle)
+            )
+
+        def _on_stdout_chunk(chunk: str, final: bool) -> None:
+            nonlocal stdout_index
+            self._publish_consumer_worker_event(
+                _ConsumerWorkerEvent(
+                    kind="stream_chunk",
+                    stream="stdout",
+                    chunk=chunk,
+                    final=final,
+                    index=stdout_index,
+                )
+            )
+            stdout_index += 1
+
+        def _on_stderr_chunk(chunk: str, final: bool) -> None:
+            nonlocal stderr_index
+            self._publish_consumer_worker_event(
+                _ConsumerWorkerEvent(
+                    kind="stream_chunk",
+                    stream="stderr",
+                    chunk=chunk,
+                    final=final,
+                    index=stderr_index,
+                )
+            )
+            stderr_index += 1
+
+        if live_command_streaming:
+            return (
+                runner.run_with_hooks(
+                    work_item,
+                    cancel_requested=self._worker_cancel_requested,
+                    on_worker_started=_publish_worker_started,
+                    on_runtime_handle_started=_publish_runtime_handle,
+                    on_stdout_chunk=_on_stdout_chunk,
+                    on_stderr_chunk=_on_stderr_chunk,
+                ),
+                live_command_streaming,
+            )
+
+        return (
+            runner.run_with_hooks(
+                work_item,
+                cancel_requested=self._worker_cancel_requested,
+                on_worker_started=_publish_worker_started,
+                on_runtime_handle_started=_publish_runtime_handle,
+            ),
+            live_command_streaming,
         )
+
+    def _worker_cancel_requested(self) -> bool:
+        if self.should_stop:
+            return True
+        if self._stop_event is None:
+            return False
+        return self._stop_event.is_set()
+
+    def _publish_consumer_worker_event(self, event: _ConsumerWorkerEvent) -> None:
+        self._publish_worker_result(CONSUMER_WORKER_EVENT_LANE, value=event)
+
+    def _handle_worker_result(self, result: TaskWorkerResult) -> None:
+        if result.lane == CONSUMER_WORKER_EVENT_LANE:
+            if result.error is not None:
+                raise RuntimeError("Consumer worker event failed") from result.error
+            self._handle_consumer_worker_event(cast(_ConsumerWorkerEvent, result.value))
+            return
+
+        if result.lane == CONSUMER_ACTIVE_WORKER_LANE:
+            self._handle_active_work_result(result)
+            return
+
+        super()._handle_worker_result(result)
+
+    def _handle_active_work_result(self, result: TaskWorkerResult) -> None:
+        committed_value: Any = None
+        try:
+            if result.error is not None:
+                self._finalize_work_exception(
+                    result.error,
+                    self._active_message_timestamp,
+                )
+                return
+
+            work_result = cast(_ConsumerWorkResult, result.value)
+            if work_result.exception is not None:
+                self._finalize_work_exception(
+                    work_result.exception,
+                    work_result.timestamp,
+                )
+                return
+            if work_result.outcome is None:
+                raise RuntimeError("Consumer worker produced no outcome")
+
+            committed_value = self._commit_work_outcome(
+                work_result.outcome,
+                work_result.timestamp,
+                initial_transition=work_result.initial_transition,
+                live_command_streaming=work_result.live_command_streaming,
+            )
+        except Exception as exc:
+            if self._direct_work_waiting:
+                self._direct_work_exception = exc
+            elif self.taskspec.state.status in TERMINAL_TASK_STATUSES or self.should_stop:
+                logger.debug(
+                    "Consumer worker result finalized terminal state",
+                    exc_info=True,
+                )
+            else:
+                raise
+        else:
+            if self._direct_work_waiting:
+                self._direct_work_value = committed_value
+        finally:
+            self._active_work_in_flight = False
+            self._active_raw_message = None
+            self._active_message_timestamp = None
+
+    def _handle_consumer_worker_event(self, event: _ConsumerWorkerEvent) -> None:
+        if event.kind == "worker_started":
+            self._register_running_worker(event.pid)
+            return
+        if event.kind == "runtime_handle":
+            self.register_runtime_handle(event.runtime_handle)
+            return
+        if event.kind == "stream_chunk":
+            self._emit_live_stream_chunk(event)
+            return
+        raise RuntimeError(f"Unknown consumer worker event {event.kind!r}")
+
+    def _emit_live_stream_chunk(self, event: _ConsumerWorkerEvent) -> None:
+        stream = event.stream
+        if stream not in {"stdout", "stderr"}:
+            raise RuntimeError("Stream chunk event missing stream name")
+
+        self._begin_streaming_session(
+            mode="stream",
+            metadata={
+                "queue": self._queue_names["outbox"],
+                "ctrl_queue": self._queue_names["ctrl_out"],
+            },
+        )
+        envelope: dict[str, Any] = {
+            "type": "stream",
+            "stream": stream,
+            "chunk": event.index,
+            "final": event.final,
+            "encoding": "text",
+            "data": event.chunk,
+        }
+        if stream == "stdout":
+            if event.final:
+                envelope["result_transform"] = "strip"
+            self._queue(self._queue_names["outbox"]).write(json.dumps(envelope))
+            return
+        self._ctrl_out_queue.write(json.dumps(envelope))
 
     def _uses_live_command_streaming(self) -> bool:
         return bool(
@@ -359,37 +599,35 @@ class Consumer(BaseTask, InteractiveTaskMixin):
 
         Thread-safety pattern
         ---------------------
-        Control messages (STOP/KILL) can arrive on the control-poller thread
-        at any time, including while the main task thread is blocked inside the
-        work runner executing user code.  Applying the full terminal transition
-        from the poller thread would be unsafe because:
+        Control messages (STOP/KILL) are observed by the main task reactor
+        while blocking work runs on the broker-free worker lane. Applying the
+        full terminal transition immediately would still be unsafe because:
 
         1. ``taskspec`` state mutations and reserved-queue operations are not
-           thread-safe.
+           applied until the active runner has unwound.
         2. The reserved-queue policy (keep/requeue/clear) must be applied
-           against ``_active_message_timestamp``, which is owned by the main
-           thread.
+           against ``_active_message_timestamp`` after the worker result comes
+           back to the reactor.
         3. Sending the control acknowledgement response before the runner has
            unwound would create a false ordering: the caller would see an ack
            before the task is actually done.
 
-        Instead, the poller thread does only the minimal work that is safe:
-        it stores the command and its queue timestamp in
+        Instead, the reactor stores the command and its queue timestamp in
         ``_deferred_active_control_command`` /
-        ``_deferred_active_control_timestamp``, then sets ``should_stop``
-        (and ``_kill_requested`` for KILL) so the runner's cancellation
-        callback returns ``True`` on its next poll.  It also deletes the raw
-        control message from the queue so that the BaseTask control handler
-        does not double-process it.
+        ``_deferred_active_control_timestamp``, then sets ``should_stop`` (and
+        ``_kill_requested`` for KILL) so the worker lane's cancellation
+        callback returns ``True`` on its next poll. The raw control message is
+        acknowledged immediately so that the BaseTask control handler does not
+        double-process it.
 
         Handoff to main thread
         ----------------------
         After the runner unwinds (whether due to cancellation, an error, or
         normal completion), the main execution loop calls
         ``_finalize_deferred_active_control``.  That method re-reads the
-        stored command and applies the terminal state transition, reserved-
-        queue policy, and acknowledgement response in the correct order on the
-        main thread, where all shared state is accessible.
+        stored command and applies the terminal state transition,
+        reserved-queue policy, and acknowledgement response in the correct
+        order on the main thread, where all broker and TaskSpec state is owned.
         """
 
         self._deferred_active_control_command = command
@@ -454,7 +692,12 @@ class Consumer(BaseTask, InteractiveTaskMixin):
                 self._cleanup_reserved_if_needed()
             self._send_control_response("KILL", "ack")
 
-    def _make_task_runner(self, *, interactive: bool = False) -> TaskRunner:
+    def _make_task_runner(
+        self,
+        *,
+        interactive: bool = False,
+        broker_access: bool = True,
+    ) -> TaskRunner:
         return TaskRunner(
             target_type=self.taskspec.spec.type,
             tid=self.taskspec.tid,
@@ -483,8 +726,8 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             bundle_root=self.taskspec.get_bundle_root(),
             persistent=self._task_is_persistent(),
             interactive=interactive,
-            db_path=self._db_path,
-            config=self._config,
+            db_path=self._db_path if broker_access else None,
+            config=self._config if broker_access else None,
         )
 
     def _begin_work_item(self, timestamp: int | None) -> bool:
@@ -505,15 +748,6 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         self._update_process_title("running")
         self._report_state_change(event="work_started", message_id=timestamp)
         return True
-
-    def _cancel_requested(self) -> bool:
-        if not self.should_stop:
-            self._poll_active_control_once()
-        if self.should_stop:
-            return True
-        if self._stop_event is None:
-            return False
-        return self._stop_event.is_set()
 
     def _register_running_worker(self, pid: int | None) -> None:
         self.register_managed_pid(pid)
@@ -869,6 +1103,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         if self._interactive_mode:
             self._interactive_shutdown()
 
+        self._stop_worker_lanes()
         self._shutdown_agent_session()
 
         if cleanup_enabled:
@@ -1026,51 +1261,6 @@ class Consumer(BaseTask, InteractiveTaskMixin):
                         )
 
 
-class Observer(BaseTask):
-    """Task that peeks at messages without consuming them (Spec: [CC-2.3], [MF-5])."""
-
-    def __init__(
-        self,
-        db: Path | str | Any,
-        taskspec: TaskSpec,
-        observer: Callable[[str, int], None],
-        *,
-        stop_event: threading.Event | None = None,
-    ) -> None:
-        self._observer = observer
-        super().__init__(db=db, taskspec=taskspec, stop_event=stop_event)
-
-    def _build_queue_configs(self) -> dict[str, dict[str, Any]]:
-        """Peek at inbox and control queues without consuming messages.
-
-        Spec: [CC-2.3], [MF-3]
-        """
-        return {
-            self._queue_names["inbox"]: self._peek_queue_config(
-                self._handle_work_message
-            ),
-            self._queue_names["ctrl_in"]: self._peek_queue_config(
-                self._handle_control_message
-            ),
-        }
-
-    def _handle_work_message(
-        self, message: str, timestamp: int, context: QueueMessageContext
-    ) -> None:
-        """Surface messages to the caller without acknowledging them.
-
-        Spec: [CC-2.3], [MF-5]
-        """
-        self._observer(message, timestamp)
-
-    def _cleanup_reserved_if_needed(self) -> None:
-        """Observers never create reserved messages, so no cleanup is required.
-
-        Spec: [CC-2.3]
-        """
-        return
-
-
 class SelectiveConsumer(BaseTask):
     """Task that peeks and optionally consumes messages based on a selector (Spec: [CC-2.3], [MF-2])."""
 
@@ -1119,119 +1309,3 @@ class SelectiveConsumer(BaseTask):
         Spec: [CC-2.3]
         """
         return
-
-
-class Monitor(BaseTask):
-    """Forward messages to a downstream queue while observing them (Spec: [CC-2.3], [MF-5])."""
-
-    control_policy = TaskControlPolicy(
-        stop="local-cancel",
-        kill="local-kill",
-        reserved_policy="not-applicable",
-        ack="immediate",
-        terminal_state="immediate",
-    )
-
-    def __init__(
-        self,
-        db: Path | str | Any,
-        taskspec: TaskSpec,
-        observer: Callable[[str, int], None],
-        *,
-        downstream_queue: str | None = None,
-        stop_event: threading.Event | None = None,
-    ) -> None:
-        self._observer = observer
-        self._downstream_queue = downstream_queue
-        super().__init__(db=db, taskspec=taskspec, stop_event=stop_event)
-
-    def _build_queue_configs(self) -> dict[str, dict[str, Any]]:
-        """Reserve messages, forwarding them to the downstream queue while observing.
-
-        Spec: [CC-2.3], [MF-2], [MF-5]
-        """
-        target = self._downstream_queue or self._queue_names["outbox"]
-        self._downstream_queue = target
-        return {
-            self._queue_names["inbox"]: self._reserve_queue_config(
-                self._handle_work_message,
-                reserved_queue=target,
-            ),
-            self._queue_names["ctrl_in"]: self._peek_queue_config(
-                self._handle_control_message
-            ),
-        }
-
-    def _handle_work_message(
-        self, message: str, timestamp: int, context: QueueMessageContext
-    ) -> None:
-        """Forward the observed payload while preserving the move performed by reserve mode.
-
-        Spec: [CC-2.3], [MF-2], [MF-5]
-        """
-        self._observer(message, timestamp)
-        # message already moved to downstream queue by the watcher
-
-    def _handle_control_command(
-        self, request: ControlRequest, context: QueueMessageContext
-    ) -> bool:
-        """Allow STOP to cancel the monitor without reserved-queue manipulation.
-
-        Spec: [CC-2.4], [MF-3]
-        """
-        if request.command == CONTROL_STOP:
-            self._handle_stop_request(
-                reason="STOP command received",
-                event="control_stop",
-                message_id=context.timestamp,
-                apply_reserved_policy=False,
-            )
-            self._send_control_response("STOP", "ack")
-            return True
-        if request.command == CONTROL_KILL:
-            self._handle_kill_request(
-                reason="KILL command received",
-                event="control_kill",
-                message_id=context.timestamp,
-                apply_reserved_policy=False,
-            )
-            self._send_control_response("KILL", "ack")
-            return True
-        return super()._handle_control_command(request, context)
-
-    def _cleanup_reserved_if_needed(self) -> None:
-        """Monitor never allocates its own reserved queue so cleanup is unnecessary.
-
-        Spec: [CC-2.3]
-        """
-        return
-
-
-class SamplingObserver(Observer):
-    """Observer that samples messages based on elapsed time (Spec: [CC-2.3], [MF-5])."""
-
-    def __init__(
-        self,
-        db: Path | str | Any,
-        taskspec: TaskSpec,
-        observer: Callable[[str, int], None],
-        *,
-        interval_seconds: float,
-        stop_event: threading.Event | None = None,
-    ) -> None:
-        super().__init__(
-            db=db, taskspec=taskspec, observer=observer, stop_event=stop_event
-        )
-        self._sampling_interval = max(0.0, interval_seconds)
-        self._last_sample_time: float | None = None
-
-    def _handle_work_message(
-        self,
-        message: str,
-        timestamp: int,
-        context: QueueMessageContext,
-    ) -> None:
-        """Forward messages when the configured interval has elapsed since the last sample.
-
-        Spec: [CC-2.3], [MF-5]
-        """

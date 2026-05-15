@@ -23,6 +23,7 @@ from typing import Any, cast
 
 from simplebroker import commands as sb_commands
 from simplebroker._timestamp import TimestampGenerator
+from simplebroker.ext import TimestampError
 from weft.commands.types import (
     EndpointResolution,
     QueueAliasRecord,
@@ -96,17 +97,13 @@ def _read_generator_after(
     *,
     with_timestamps: bool,
     after_timestamp: int | None,
+    before_timestamp: int | None = None,
 ) -> Iterator[Any]:
-    try:
-        yield from queue.read_generator(
-            with_timestamps=with_timestamps,
-            after_timestamp=after_timestamp,
-        )
-    except TypeError:
-        yield from queue.read_generator(
-            with_timestamps=with_timestamps,
-            since_timestamp=after_timestamp,
-        )
+    yield from queue.read_generator(
+        with_timestamps=with_timestamps,
+        after_timestamp=after_timestamp,
+        before_timestamp=before_timestamp,
+    )
 
 
 def _peek_generator_after(
@@ -114,17 +111,13 @@ def _peek_generator_after(
     *,
     with_timestamps: bool,
     after_timestamp: int | None,
+    before_timestamp: int | None = None,
 ) -> Iterator[Any]:
-    try:
-        yield from queue.peek_generator(
-            with_timestamps=with_timestamps,
-            after_timestamp=after_timestamp,
-        )
-    except TypeError:
-        yield from queue.peek_generator(
-            with_timestamps=with_timestamps,
-            since_timestamp=after_timestamp,
-        )
+    yield from queue.peek_generator(
+        with_timestamps=with_timestamps,
+        after_timestamp=after_timestamp,
+        before_timestamp=before_timestamp,
+    )
 
 
 def _move_generator_after(
@@ -133,19 +126,14 @@ def _move_generator_after(
     *,
     with_timestamps: bool,
     after_timestamp: int | None,
+    before_timestamp: int | None = None,
 ) -> Iterator[Any]:
-    try:
-        yield from queue.move_generator(
-            destination,
-            with_timestamps=with_timestamps,
-            after_timestamp=after_timestamp,
-        )
-    except TypeError:
-        yield from queue.move_generator(
-            destination,
-            with_timestamps=with_timestamps,
-            since_timestamp=after_timestamp,
-        )
+    yield from queue.move_generator(
+        destination,
+        with_timestamps=with_timestamps,
+        after_timestamp=after_timestamp,
+        before_timestamp=before_timestamp,
+    )
 
 
 def _run_simplebroker_command(
@@ -194,6 +182,20 @@ def _format_endpoint_list(records: list[ResolvedEndpoint]) -> str:
             line += f"\t({record.live_candidates} live claims)"
         lines.append(line)
     return "\n".join(lines)
+
+
+def _invalid_message_id_error(*, json_output: bool = False) -> str:
+    message = "invalid message ID: expected exactly 19 digits within range"
+    if json_output:
+        return json.dumps(
+            {
+                "error": "INVALID_MESSAGE_ID",
+                "message": message,
+                "retryable": False,
+            },
+            ensure_ascii=False,
+        )
+    return message
 
 
 def _queue_entry(queue_name: str, message: QueueMessage) -> QueueEntry:
@@ -273,7 +275,8 @@ def read_queue(
     *,
     all_messages: bool = False,
     message_id: int | None = None,
-    since: int | None = None,
+    after: int | None = None,
+    before: int | None = None,
 ) -> list[QueueEntry]:
     """Read queue messages as structured entries."""
 
@@ -294,7 +297,8 @@ def read_queue(
         iterator = _read_generator_after(
             queue,
             with_timestamps=True,
-            after_timestamp=since,
+            after_timestamp=after,
+            before_timestamp=before,
         )
         for index, item in enumerate(iterator):
             body, timestamp = cast(tuple[Any, Any], item)
@@ -381,7 +385,8 @@ def peek_queue(
     *,
     all_messages: bool = False,
     message_id: int | None = None,
-    since: int | None = None,
+    after: int | None = None,
+    before: int | None = None,
 ) -> list[QueueEntry]:
     """Peek queue messages as structured entries."""
 
@@ -402,7 +407,8 @@ def peek_queue(
         iterator = _peek_generator_after(
             queue,
             with_timestamps=True,
-            after_timestamp=since,
+            after_timestamp=after,
+            before_timestamp=before,
         )
         for index, item in enumerate(iterator):
             body, timestamp = cast(tuple[Any, Any], item)
@@ -424,6 +430,8 @@ def move_messages(
     destination: str,
     *,
     limit: int | None = None,
+    after: int | None = None,
+    before: int | None = None,
 ) -> int:
     src_queue = ctx.queue(source, persistent=True)
     try:
@@ -431,6 +439,8 @@ def move_messages(
             destination,
             limit=limit or 1000,
             with_timestamps=False,
+            after_timestamp=after,
+            before_timestamp=before,
         )
         return len(moved)
     finally:
@@ -445,7 +455,8 @@ def move_queue_messages(
     limit: int | None = None,
     all_messages: bool = False,
     message_id: int | None = None,
-    since: int | None = None,
+    after: int | None = None,
+    before: int | None = None,
 ) -> QueueMoveReceipt:
     """Move queue messages and return a structured receipt."""
 
@@ -465,7 +476,14 @@ def move_queue_messages(
                 moved_count=len(moved),
             )
         if limit is not None:
-            moved_count = move_messages(ctx, source, destination, limit=limit)
+            moved_count = move_messages(
+                ctx,
+                source,
+                destination,
+                limit=limit,
+                after=after,
+                before=before,
+            )
             return QueueMoveReceipt(
                 source=source,
                 destination=destination,
@@ -476,7 +494,8 @@ def move_queue_messages(
                 queue,
                 destination,
                 with_timestamps=True,
-                after_timestamp=since,
+                after_timestamp=after,
+                before_timestamp=before,
             )
             moved_count = 0
             for _item in iterator:
@@ -492,7 +511,8 @@ def move_queue_messages(
                 queue,
                 destination,
                 with_timestamps=True,
-                after_timestamp=since,
+                after_timestamp=after,
+                before_timestamp=before,
             )
         )
         return QueueMoveReceipt(
@@ -509,10 +529,14 @@ def list_queues(
     *,
     include_stats: bool = False,
     pattern: str | None = None,
+    prefix: str | None = None,
 ) -> list[QueueInfo]:
+    if pattern is not None and prefix is not None:
+        raise ValueError("pattern and prefix cannot both be specified")
+
     queues: list[QueueInfo] = []
     with ctx.broker() as db:
-        stats = db.list_queue_stats(pattern=pattern)
+        stats = db.list_queue_stats(prefix=prefix, pattern=pattern)
 
     for item in stats:
         unclaimed_count = int(item.pending)
@@ -535,10 +559,14 @@ def list_queue_infos(
     ctx: WeftContext,
     *,
     pattern: str | None = None,
+    prefix: str | None = None,
     include_stats: bool = False,
     include_endpoints: bool = False,
 ) -> list[PublicQueueInfo]:
     """Return queue or endpoint listings as structured rows."""
+
+    if pattern is not None and prefix is not None:
+        raise ValueError("pattern and prefix cannot both be specified")
 
     if include_endpoints:
         return [
@@ -560,8 +588,33 @@ def list_queue_infos(
                 else None
             ),
         )
-        for item in list_queues(ctx, include_stats=include_stats, pattern=pattern)
+        for item in list_queues(
+            ctx,
+            include_stats=include_stats,
+            pattern=pattern,
+            prefix=prefix,
+        )
     ]
+
+
+def queue_exists(ctx: WeftContext, queue_name: str) -> bool:
+    """Return whether a queue exists, including queues with claimed rows."""
+
+    with ctx.broker() as db:
+        return bool(db.queue_exists(queue_name))
+
+
+def queue_info(ctx: WeftContext, queue_name: str) -> PublicQueueInfo:
+    """Return detailed queue counts for one queue."""
+
+    with ctx.broker() as db:
+        stats = db.get_queue_stat(queue_name)
+    return PublicQueueInfo(
+        name=stats.queue,
+        messages=int(stats.pending),
+        total_messages=int(stats.total),
+        claimed_messages=int(stats.claimed),
+    )
 
 
 def watch_queue(
@@ -573,7 +626,8 @@ def watch_queue(
     with_timestamps: bool = False,
     json_output: bool = False,
     peek: bool = False,
-    since: int | None = None,
+    after: int | None = None,
+    before: int | None = None,
     move_to: str | None = None,
 ) -> Iterator[QueueMessage]:
     queue = ctx.queue(queue_name, persistent=True)
@@ -582,7 +636,7 @@ def watch_queue(
     try:
         monitor = QueueChangeMonitor([watch_queue], config=ctx.config)
         emitted = 0
-        last_timestamp = since
+        last_timestamp = after
 
         while max_messages is None or emitted < max_messages:
             if move_to:
@@ -591,18 +645,21 @@ def watch_queue(
                     move_to,
                     with_timestamps=True,
                     after_timestamp=last_timestamp,
+                    before_timestamp=before,
                 )
             elif peek:
                 generator = _peek_generator_after(
                     queue,
                     with_timestamps=True,
                     after_timestamp=last_timestamp,
+                    before_timestamp=before,
                 )
             else:
                 generator = _read_generator_after(
                     queue,
                     with_timestamps=True,
                     after_timestamp=last_timestamp,
+                    before_timestamp=before,
                 )
 
             found = False
@@ -637,7 +694,8 @@ def watch_queue_entries(
     limit: int | None = None,
     interval: float = 0.5,
     peek: bool = False,
-    since: int | None = None,
+    after: int | None = None,
+    before: int | None = None,
     move_to: str | None = None,
 ) -> Iterator[QueueEntry]:
     """Yield queue activity as structured entries."""
@@ -650,7 +708,8 @@ def watch_queue_entries(
         with_timestamps=True,
         json_output=False,
         peek=peek,
-        since=since,
+        after=after,
+        before=before,
         move_to=move_to,
     ):
         yield _queue_entry(queue_name, message)
@@ -750,10 +809,15 @@ def read_command(
     with_timestamps: bool = False,
     json_output: bool = False,
     message_id: str | None = None,
-    since: str | None = None,
+    after: str | None = None,
+    before: str | None = None,
     spec_context: str | None = None,
 ) -> tuple[int, str, str]:
     ctx = _context(spec_context)
+    if message_id is not None and (
+        all_messages or after is not None or before is not None
+    ):
+        return 1, "", "--message cannot be used with --all, --after, or --before"
     return _run_simplebroker_command(
         sb_commands.cmd_read,
         ctx.broker_target,
@@ -761,8 +825,9 @@ def read_command(
         all_messages=all_messages,
         json_output=json_output,
         show_timestamps=with_timestamps,
-        after_str=since,
+        after_str=after,
         message_id_str=message_id,
+        before_str=before,
     )
 
 
@@ -802,10 +867,15 @@ def peek_command(
     with_timestamps: bool = False,
     json_output: bool = False,
     message_id: str | None = None,
-    since: str | None = None,
+    after: str | None = None,
+    before: str | None = None,
     spec_context: str | None = None,
 ) -> tuple[int, str, str]:
     ctx = _context(spec_context)
+    if message_id is not None and (
+        all_messages or after is not None or before is not None
+    ):
+        return 1, "", "--message cannot be used with --all, --after, or --before"
     return _run_simplebroker_command(
         sb_commands.cmd_peek,
         ctx.broker_target,
@@ -813,8 +883,9 @@ def peek_command(
         all_messages=all_messages,
         json_output=json_output,
         show_timestamps=with_timestamps,
-        after_str=since,
+        after_str=after,
         message_id_str=message_id,
+        before_str=before,
     )
 
 
@@ -827,42 +898,63 @@ def move_command(
     json_output: bool = False,
     with_timestamps: bool = False,
     message_id: str | None = None,
-    since: str | None = None,
+    after: str | None = None,
+    before: str | None = None,
     spec_context: str | None = None,
 ) -> tuple[int, str, str]:
     ctx = _context(spec_context)
+    if source_queue == destination_queue:
+        return 1, "", "Source and destination queues cannot be the same"
+    if message_id is not None and (after is not None or before is not None):
+        return 1, "", "--message cannot be used with --after or --before"
 
     if limit is not None:
-        moved = move_messages(ctx, source_queue, destination_queue, limit=limit)
-        if moved == 0:
+        try:
+            after_timestamp = (
+                TimestampGenerator.validate(after) if after is not None else None
+            )
+            before_timestamp = (
+                TimestampGenerator.validate(before) if before is not None else None
+            )
+        except (TimestampError, ValueError) as exc:
+            return 1, "", str(exc)
+
+        src_queue = ctx.queue(source_queue, persistent=True)
+        try:
+            moved_items = list(
+                src_queue.move_many(
+                    destination_queue,
+                    limit=limit,
+                    with_timestamps=True,
+                    after_timestamp=after_timestamp,
+                    before_timestamp=before_timestamp,
+                )
+            )
+        finally:
+            src_queue.close()
+
+        if not moved_items:
             return 2, "", ""
 
-        lines: list[str] = [
-            f"Moved {moved} messages from {source_queue} to {destination_queue}"
-        ]
+        move_summary = (
+            f"Moved {len(moved_items)} messages from "
+            f"{source_queue} to {destination_queue}"
+        )
+        lines: list[str] = [move_summary]
 
         if json_output or with_timestamps:
-            dest_queue = ctx.queue(destination_queue, persistent=True)
-            try:
-                iterator = dest_queue.peek_generator(with_timestamps=True)
-                payload_lines: list[str] = []
-                count = 0
-                for item in iterator:
-                    body, timestamp = cast(tuple[Any, Any], item)
-                    if json_output:
-                        payload_lines.append(
-                            json.dumps(
-                                {"message": body, "timestamp": timestamp},
-                                ensure_ascii=False,
-                            )
+            payload_lines: list[str] = []
+            for item in moved_items:
+                body, timestamp = cast(tuple[Any, Any], item)
+                if json_output:
+                    payload_lines.append(
+                        json.dumps(
+                            {"message": body, "timestamp": timestamp},
+                            ensure_ascii=False,
                         )
-                    elif with_timestamps:
-                        payload_lines.append(f"{timestamp}\t{body}")
-                    count += 1
-                    if count >= moved:
-                        break
-            finally:
-                dest_queue.close()
+                    )
+                elif with_timestamps:
+                    payload_lines.append(f"{timestamp}\t{body}")
             lines.append("\n".join(payload_lines))
 
         return 0, "\n".join(filter(None, lines)), ""
@@ -876,7 +968,8 @@ def move_command(
         json_output=json_output,
         show_timestamps=with_timestamps,
         message_id_str=message_id,
-        after_str=since,
+        after_str=after,
+        before_str=before,
     )
 
 
@@ -886,13 +979,18 @@ def list_command(
     stats: bool = False,
     endpoints: bool = False,
     pattern: str | None = None,
+    prefix: str | None = None,
     spec_context: str | None = None,
 ) -> tuple[int, str, str]:
     ctx = _context(spec_context)
+    if pattern is not None and prefix is not None:
+        return 1, "", "--pattern and --prefix cannot be used together"
 
     if endpoints:
         if stats:
             return 1, "", "--stats is not supported with --endpoints"
+        if prefix:
+            return 1, "", "--prefix is not supported with --endpoints"
         records = list_resolved_endpoints(ctx, pattern=pattern)
         if json_output:
             return (
@@ -905,19 +1003,43 @@ def list_command(
             )
         return 0, _format_endpoint_list(records), ""
 
-    if json_output:
-        queues = list_queues(ctx, include_stats=stats, pattern=pattern)
-        payload = json.dumps(
-            [info.to_payload(include_stats=stats) for info in queues],
-            ensure_ascii=False,
-        )
-        return 0, payload, ""
-
     return _run_simplebroker_command(
         sb_commands.cmd_list,
         ctx.broker_target,
         show_stats=stats,
         pattern=pattern,
+        prefix=prefix,
+        json_output=json_output,
+    )
+
+
+def exists_command(
+    queue_name: str,
+    *,
+    json_output: bool = False,
+    spec_context: str | None = None,
+) -> tuple[int, str, str]:
+    ctx = _context(spec_context)
+    return _run_simplebroker_command(
+        sb_commands.cmd_exists,
+        ctx.broker_target,
+        queue_name,
+        json_output=json_output,
+    )
+
+
+def stats_command(
+    queue_name: str,
+    *,
+    json_output: bool = False,
+    spec_context: str | None = None,
+) -> tuple[int, str, str]:
+    ctx = _context(spec_context)
+    return _run_simplebroker_command(
+        sb_commands.cmd_stats,
+        ctx.broker_target,
+        queue_name,
+        json_output=json_output,
     )
 
 
@@ -929,6 +1051,9 @@ def delete_command(
     spec_context: str | None = None,
 ) -> tuple[int, str, str]:
     ctx = _context(spec_context)
+    if message_id is not None:
+        if sb_commands.parse_exact_message_id(message_id) is None:
+            return 1, "", _invalid_message_id_error()
     target_queue = None if delete_all else queue_name
     return _run_simplebroker_command(
         sb_commands.cmd_delete,
@@ -962,12 +1087,19 @@ def watch_command(
     with_timestamps: bool,
     json_output: bool,
     peek: bool,
-    since: str | None,
-    quiet: bool,
-    move_to: str | None,
+    after: str | None = None,
+    quiet: bool = False,
+    move_to: str | None = None,
     spec_context: str | None = None,
 ) -> tuple[int, str, str]:
     ctx = _context(spec_context)
+    if move_to and after:
+        return (
+            1,
+            "",
+            "--move drains ALL messages from source queue, "
+            "incompatible with --after filtering",
+        )
 
     if limit is None:
         exit_code = sb_commands.cmd_watch(
@@ -976,17 +1108,17 @@ def watch_command(
             peek=peek,
             json_output=json_output,
             show_timestamps=with_timestamps,
-            after_str=since,
+            after_str=after,
             quiet=quiet,
             move_to=move_to,
         )
         return exit_code, "", ""
 
     try:
-        since_timestamp = (
-            TimestampGenerator.validate(since) if since is not None else None
+        after_timestamp = (
+            TimestampGenerator.validate(after) if after is not None else None
         )
-    except ValueError as exc:
+    except (TimestampError, ValueError) as exc:
         return 1, "", str(exc)
 
     if not quiet:
@@ -1007,7 +1139,7 @@ def watch_command(
         with_timestamps=with_timestamps,
         json_output=json_output,
         peek=peek,
-        since=since_timestamp,
+        after=after_timestamp,
         move_to=move_to,
     ):
         if json_output:
@@ -1096,6 +1228,8 @@ __all__ = [
     "move_command",
     "list_command",
     "resolve_command",
+    "exists_command",
+    "stats_command",
     "delete_command",
     "broadcast_command",
     "watch_command",

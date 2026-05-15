@@ -1321,8 +1321,36 @@ def _best_service_evidence(
 ) -> _ServiceEvidence | None:
     if not candidates:
         return None
+    terminal_tids = {
+        candidate.tid
+        for candidate in candidates
+        if candidate.status == "terminal" and candidate.tid is not None
+    }
+    eligible = [
+        candidate
+        for candidate in candidates
+        if not (
+            candidate.tid in terminal_tids
+            and candidate.status != "terminal"
+            and candidate.tid is not None
+        )
+    ]
+    live_candidates = [
+        candidate
+        for candidate in eligible
+        if candidate.status in {"running", "launched"}
+    ]
+    if live_candidates:
+        return max(
+            live_candidates,
+            key=lambda candidate: (
+                candidate.rank,
+                candidate.updated_at or 0,
+                candidate.tid or "",
+            ),
+        )
     return max(
-        candidates,
+        eligible,
         key=lambda candidate: (
             candidate.rank,
             candidate.updated_at or 0,

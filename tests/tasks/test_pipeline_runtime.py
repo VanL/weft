@@ -40,6 +40,25 @@ def _drain_json(queue) -> list[dict[str, Any]]:
     return [json.loads(item) for item in _drain(queue)]
 
 
+def _drive_consumer_once_until_idle(
+    consumer: Consumer,
+    *,
+    timeout: float = 5.0,
+) -> None:
+    deadline = time.monotonic() + timeout
+    consumer.process_once()
+    while time.monotonic() < deadline:
+        if (
+            not consumer._active_work_in_flight
+            and not consumer._has_pending_worker_results()
+            and not consumer._has_active_worker_threads()
+        ):
+            return
+        consumer.wait_for_activity(timeout=0.05)
+        consumer.process_once()
+    raise AssertionError("consumer worker did not finish")
+
+
 def _task_payload(
     *,
     function_target: str = "tests.tasks.sample_targets:echo_payload",
@@ -175,7 +194,7 @@ def test_pipeline_owned_stage_emits_success_owner_event_after_outbox_write(
     inbox = make_queue(f"T{tid}.inbox")
     inbox.write(json.dumps({"args": ["hello"], "kwargs": {"suffix": "!"}}))
 
-    task.process_once()
+    _drive_consumer_once_until_idle(task)
 
     assert make_queue(f"T{tid}.outbox").read_one() == "hello!"
     events = _drain_json(make_queue("P1775000000000000000.events"))
@@ -200,7 +219,7 @@ def test_pipeline_owned_stage_emits_failure_owner_event(broker_env) -> None:
 
     make_queue(f"T{tid}.inbox").write(json.dumps({"args": ["hello"]}))
 
-    task.process_once()
+    _drive_consumer_once_until_idle(task)
 
     events = _drain_json(make_queue("P1775000000000000000.events"))
     assert any(
@@ -232,7 +251,7 @@ def test_non_pipeline_task_emits_no_owner_event(broker_env) -> None:
     consumer = Consumer(db_path, task)
     make_queue(f"T{tid}.inbox").write(json.dumps({"args": ["hello"]}))
 
-    consumer.process_once()
+    _drive_consumer_once_until_idle(consumer)
 
     assert make_queue("P1775000000000000000.events").read_one() is None
 

@@ -212,6 +212,27 @@ CONTROL_CONVERGENCE_ACTION_VALUES: Final[frozenset[str]] = frozenset(
 TASK_PROCESS_POLL_INTERVAL: Final[float] = 0.05
 """Polling interval for spawned task-process main loops between `process_once` calls."""
 
+TASK_REACTOR_WAKEUP_MAX_SECONDS: Final[float] = 0.05
+"""Maximum wait chunk while task worker lanes may produce local reactor results."""
+
+TASK_WORKER_RESULT_QUEUE_MAXSIZE: Final[int] = 256
+"""Maximum queued worker-result envelopes before worker lanes apply backpressure."""
+
+TASK_WORKER_RESULT_DRAIN_MAX_PER_TURN: Final[int] = 64
+"""Maximum worker-result envelopes applied in one reactor turn."""
+
+CONSUMER_ACTIVE_WORKER_LANE: Final[str] = "consumer.active_work"
+"""Worker lane name for broker-free Consumer target execution."""
+
+CONSUMER_WORKER_EVENT_LANE: Final[str] = "consumer.worker_event"
+"""Worker lane name for Consumer progress events returned to the reactor."""
+
+MANAGER_CHILD_LAUNCH_WORKER_LANE: Final[str] = "manager.child_launch"
+"""Worker lane name for broker-free Manager child process launch."""
+
+TASK_MONITOR_PROCESSOR_WORKER_LANE: Final[str] = "task_monitor.processor"
+"""Worker lane name for broker-free TaskMonitor custom processors."""
+
 MANAGER_POLL_INTERVAL: Final[float] = TASK_PROCESS_POLL_INTERVAL
 """Polling interval for foreground manager-service loops."""
 
@@ -273,7 +294,7 @@ MANAGER_PID_LIVENESS_RECHECK_INTERVAL: Final[float] = 0.5
 """Throttle for repeated PID-liveness probes during stop-if-absent manager waits."""
 
 MANAGER_CHILD_EXIT_POLL_INTERVAL: Final[float] = 0.05
-"""Polling interval while the Manager waits for tracked child processes to exit."""
+"""Timer cadence for Manager parent-side user child process reaping."""
 
 MANAGER_CONTROL_DRAIN_MAX_MESSAGES: Final[int] = 32
 """Maximum manager control messages handled before yielding a manager turn."""
@@ -321,6 +342,9 @@ MANAGER_LEADERSHIP_PING_TIMEOUT_SECONDS: Final[float] = 0.05
 
 MANAGER_LEADERSHIP_PING_CACHE_TTL_SECONDS: Final[float] = 1.0
 """How long manager-owned leadership checks reuse a candidate PING outcome."""
+
+MANAGER_LEADERSHIP_CHECK_INTERVAL_SECONDS: Final[float] = 1.0
+"""Timer cadence for ordinary manager leadership convergence checks."""
 
 MANAGER_LEADERSHIP_DRAIN_REVALIDATE_SECONDS: Final[float] = 1.0
 """Interval for revalidating leader proof during voluntary leadership drain."""
@@ -881,6 +905,9 @@ HEARTBEAT_MIN_INTERVAL_SECONDS: Final[int] = 60
 
 HEARTBEAT_IDLE_TIMEOUT_SECONDS: Final[float] = 60.0
 """Idle timeout after the last registration before the heartbeat service exits."""
+
+HEARTBEAT_ACTIVITY_WAIT_CAP_SECONDS: Final[float] = 1.0
+"""Maximum HeartbeatTask wait chunk between supersession and idle checks."""
 
 HEARTBEAT_ENDPOINT_PROBE_TIMEOUT: Final[float] = 0.25
 """Bounded PING/PONG probe timeout used when validating a heartbeat endpoint."""

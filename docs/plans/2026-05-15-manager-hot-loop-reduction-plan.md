@@ -2,7 +2,7 @@
 
 Status: draft
 Source specs: docs/specifications/01-Core_Components.md [CC-2.1], [CC-2.2]; docs/specifications/03-Manager_Architecture.md [MA-1.1], [MA-1.4], [MA-1.6a], [MA-1.7]; docs/specifications/05-Message_Flow_and_State.md [MF-3], [MF-6], [MF-7]; docs/specifications/07-System_Invariants.md [MANAGER.3], [MANAGER.8], [MANAGER.12], [MANAGER.15], [MANAGER.16], [OBS.13]
-Superseded by: none
+Superseded by: [`2026-05-15-task-reactor-and-evidence-worker-plan.md`](./2026-05-15-task-reactor-and-evidence-worker-plan.md)
 
 ## 1. Goal
 
@@ -903,8 +903,9 @@ read-only plan mode and reported no remaining plan-level blockers. Gemini noted
 four non-blocking implementation risks: leadership memoization must be
 invalidated after accepted work, timer aggregation must handle seconds and
 nanoseconds carefully, any remaining child-exit poll at
-`MANAGER_CHILD_EXIT_POLL_INTERVAL` still wakes the manager while children are
-present, and the duplicate pending-message precheck must really be removed.
+`MANAGER_CHILD_EXIT_POLL_INTERVAL` still wakes the manager while user-work
+children are present, and the duplicate pending-message precheck must really be
+removed.
 Those risks are covered in Tasks 3, 5, and 9 and should be rechecked during
 implementation review.
 

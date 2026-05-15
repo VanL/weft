@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from importlib import import_module
 from typing import Any
 
-from simplebroker import BrokerTarget, Queue
+from simplebroker import BrokerTarget
 
 logger = logging.getLogger(__name__)
 
@@ -88,24 +88,15 @@ class BaseResourceMonitor(ABC):
         self._pid: int | None = None
         self.limits = limits
         self.polling_interval = polling_interval
-        queue_kwargs: dict[str, Any] = {}
-        if db_path is not None:
-            queue_kwargs["db_path"] = db_path
-        if config is not None:
-            queue_kwargs["config"] = config
-        self.metrics_queue = Queue("weft.metrics", **queue_kwargs)
-        self._metrics_queue_closed = False
+        del db_path, config
+        self._closed = False
 
     def close(self) -> None:
-        """Release queue resources owned by the monitor."""
+        """Release resources owned by the monitor."""
 
-        if self._metrics_queue_closed:
+        if self._closed:
             return
-        self._metrics_queue_closed = True
-        try:
-            self.metrics_queue.close()
-        except Exception:  # pragma: no cover - defensive cleanup
-            pass
+        self._closed = True
 
     def start_monitoring(self, pid: int) -> None:
         """Begin monitoring the given process id (Spec: [RM-5.1])."""
@@ -143,7 +134,7 @@ class BaseResourceMonitor(ABC):
         """Return the most recent metric snapshot, if available (Spec: [RM-5.1])."""
 
     def start(self, pid: int) -> None:
-        """Backward-compatible alias for start_monitoring."""
+        """Short-name runner API for starting monitoring."""
         if type(self).start_monitoring is BaseResourceMonitor.start_monitoring:
             raise NotImplementedError(
                 "Resource monitor must implement start() or start_monitoring()."
@@ -151,7 +142,7 @@ class BaseResourceMonitor(ABC):
         self.start_monitoring(pid)
 
     def stop(self) -> None:
-        """Backward-compatible alias for stop_monitoring."""
+        """Short-name runner API for stopping monitoring."""
         if type(self).stop_monitoring is BaseResourceMonitor.stop_monitoring:
             raise NotImplementedError(
                 "Resource monitor must implement stop() or stop_monitoring()."
@@ -159,7 +150,7 @@ class BaseResourceMonitor(ABC):
         self.stop_monitoring()
 
     def snapshot(self) -> ResourceMetrics:
-        """Backward-compatible alias for get_current_metrics."""
+        """Short-name runner API for reading current metrics."""
         if type(self).get_current_metrics is BaseResourceMonitor.get_current_metrics:
             raise NotImplementedError(
                 "Resource monitor must implement snapshot() or get_current_metrics()."
@@ -323,13 +314,8 @@ class PsutilResourceMonitor(BaseResourceMonitor):
         self._last_cpu_sample_at = now
         self._last_cpu_times = current_cpu_times
 
-        try:
-            timestamp = self.metrics_queue.generate_timestamp()
-        except Exception:  # pragma: no cover - fallback when queue unavailable
-            timestamp = time.time_ns()
-
         metrics = ResourceMetrics(
-            timestamp=timestamp,
+            timestamp=time.time_ns(),
             memory_mb=memory_mb,
             cpu_percent=cpu_percent,
             open_files=open_files,

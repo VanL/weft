@@ -47,6 +47,16 @@ def _drain(queue) -> list[str]:
     return items
 
 
+def _drive_task_until_complete(task: Consumer, *, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        task.process_once()
+        if task.taskspec.state.status == "completed":
+            return
+        task.wait_for_activity(timeout=0.02)
+    raise AssertionError("Task did not complete before timeout")
+
+
 def test_work_spawning_logged(broker_env, unique_tid: str) -> None:
     db_path, make_queue = broker_env
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
@@ -57,7 +67,7 @@ def test_work_spawning_logged(broker_env, unique_tid: str) -> None:
     inbox = make_queue(spec.io.inputs["inbox"])
     inbox.write(json.dumps({"args": ["payload"]}))
 
-    task._drain_queue()
+    _drive_task_until_complete(task)
 
     task.stop(join=False)
     task.cleanup()

@@ -248,6 +248,7 @@ class MultiQueueWatcher(BaseWatcher):
         self._queue_generation = 0
         self._multi_activity_waiter: Any | None = None
         self._multi_activity_waiter_generation: int | None = None
+        self._multi_activity_waiter_signature: tuple[str, ...] | None = None
         self._pending_messages_precheck_confirmed = False
 
         logger.debug(
@@ -343,15 +344,32 @@ class MultiQueueWatcher(BaseWatcher):
     # ------------------------------------------------------------------ #
     # Internal helpers                                                   #
     # ------------------------------------------------------------------ #
+    def _queue_counts_as_wait_activity(self, config: QueueRuntimeConfig) -> bool:
+        """Return whether *config* should wake ``wait_for_activity``."""
+
+        del config
+        return True
+
+    def _activity_wait_configs(self) -> list[QueueRuntimeConfig]:
+        """Return queue configs that should wake ``wait_for_activity``."""
+
+        return [
+            config
+            for config in self._queues.values()
+            if self._queue_counts_as_wait_activity(config)
+        ]
+
     def _activity_wait_queues(self) -> list[Queue]:
         """Return queues watched by the multi-queue activity waiter."""
-        return [config.queue for config in self._queues.values()]
+
+        return [config.queue for config in self._activity_wait_configs()]
 
     def _reset_multi_activity_waiter(self) -> None:
         """Close the caller-owned multi-queue waiter if one is active."""
         waiter = self._multi_activity_waiter
         self._multi_activity_waiter = None
         self._multi_activity_waiter_generation = None
+        self._multi_activity_waiter_signature = None
         if waiter is None:
             return
 
@@ -370,13 +388,23 @@ class MultiQueueWatcher(BaseWatcher):
 
     def _ensure_multi_activity_waiter(self) -> Any | None:
         """Create or return the SimpleBroker multi-queue activity waiter."""
-        if self._multi_activity_waiter_generation == self._queue_generation:
+        wait_configs = self._activity_wait_configs()
+        signature = tuple(config.name for config in wait_configs)
+        if (
+            self._multi_activity_waiter_generation == self._queue_generation
+            and self._multi_activity_waiter_signature == signature
+        ):
             return self._multi_activity_waiter
 
         self._reset_multi_activity_waiter()
+        self._multi_activity_waiter_generation = self._queue_generation
+        self._multi_activity_waiter_signature = signature
+        if not wait_configs:
+            return None
+
         try:
             self._multi_activity_waiter = create_activity_waiter_for_queues(
-                self._activity_wait_queues(),
+                [config.queue for config in wait_configs],
                 stop_event=self._stop_event,
             )
         except (BrokerError, OSError, RuntimeError, TypeError, ValueError):
@@ -385,7 +413,6 @@ class MultiQueueWatcher(BaseWatcher):
                 exc_info=True,
             )
             self._multi_activity_waiter = None
-        self._multi_activity_waiter_generation = self._queue_generation
         return self._multi_activity_waiter
 
     def _start_strategy_for_configured_queues(self) -> None:
@@ -424,10 +451,11 @@ class MultiQueueWatcher(BaseWatcher):
             return
 
         waiter = self._ensure_multi_activity_waiter()
+        if self._has_pending_messages():
+            self._mark_pending_messages_prechecked()
+            return
+
         if waiter is not None:
-            if self._has_pending_messages():
-                self._mark_pending_messages_prechecked()
-                return
             try:
                 waiter.wait(timeout)
                 return
@@ -482,7 +510,9 @@ class MultiQueueWatcher(BaseWatcher):
         Spec: [CC-2.1]
         """
         return any(
-            self._queue_has_pending(config.queue) for config in self._queues.values()
+            self._queue_counts_as_wait_activity(config)
+            and self._queue_has_pending(config.queue)
+            for config in self._queues.values()
         )
 
     def _queue_has_pending(self, queue: Queue) -> bool:

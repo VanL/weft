@@ -9,7 +9,10 @@ from pathlib import Path
 
 import pytest
 
+import weft.core.tasks.heartbeat as heartbeat_module
 from weft._constants import (
+    CONTROL_PING,
+    HEARTBEAT_ACTIVITY_WAIT_CAP_SECONDS,
     HEARTBEAT_MIN_INTERVAL_SECONDS,
     INTERNAL_HEARTBEAT_ENDPOINT_NAME,
     INTERNAL_RUNTIME_ENDPOINT_NAME_KEY,
@@ -228,7 +231,82 @@ def test_duplicate_heartbeat_services_converge_by_loser_exit(workdir: Path) -> N
         high_task.cleanup()
 
 
-def test_heartbeat_wait_uses_bounded_activity_seam(
+def test_heartbeat_owner_resolution_is_endpoint_registry_version_gated(
+    workdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = build_context(spec_context=workdir)
+    low_tid = str(time.time_ns())
+    high_tid = str(int(low_tid) + 1)
+    low_task = HeartbeatTask(
+        context.broker_target,
+        make_heartbeat_taskspec(low_tid, workdir),
+    )
+    high_task: HeartbeatTask | None = None
+    resolve_calls: list[str] = []
+    real_resolve_endpoint = heartbeat_module.resolve_endpoint
+
+    def counted_resolve_endpoint(
+        ctx: object,
+        name: str,
+    ) -> object:
+        resolve_calls.append(name)
+        return real_resolve_endpoint(ctx, name)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        heartbeat_module,
+        "resolve_endpoint",
+        counted_resolve_endpoint,
+    )
+
+    try:
+        low_task.process_once()
+        assert resolve_calls == [INTERNAL_HEARTBEAT_ENDPOINT_NAME]
+
+        low_task.process_once()
+        assert resolve_calls == [INTERNAL_HEARTBEAT_ENDPOINT_NAME]
+
+        high_task = HeartbeatTask(
+            context.broker_target,
+            make_heartbeat_taskspec(high_tid, workdir),
+        )
+        low_task.process_once()
+
+        assert resolve_calls == [
+            INTERNAL_HEARTBEAT_ENDPOINT_NAME,
+            INTERNAL_HEARTBEAT_ENDPOINT_NAME,
+        ]
+    finally:
+        low_task.stop(join=False)
+        low_task.cleanup()
+        if high_task is not None:
+            high_task.stop(join=False)
+            high_task.cleanup()
+
+
+def test_heartbeat_process_once_returns_without_waiting_when_no_work_is_due(
+    workdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = build_context(spec_context=workdir)
+    tid = str(time.time_ns())
+    task = HeartbeatTask(context.broker_target, make_heartbeat_taskspec(tid, workdir))
+
+    def fail_wait_for_activity(timeout: float | None) -> None:
+        del timeout
+        raise AssertionError("process_once must not wait internally")
+
+    monkeypatch.setattr(task, "wait_for_activity", fail_wait_for_activity)
+
+    try:
+        task.process_once()
+        assert task.should_stop is False
+    finally:
+        task.stop(join=False)
+        task.cleanup()
+
+
+def test_heartbeat_run_until_stopped_uses_next_wait_timeout(
     workdir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -242,34 +320,101 @@ def test_heartbeat_wait_uses_bounded_activity_seam(
         task.should_stop = True
 
     monkeypatch.setattr(task, "wait_for_activity", fake_wait_for_activity)
-    monkeypatch.setattr(task, "_has_pending_runtime_input", lambda: False)
 
     try:
-        task._wait_for_activity(timeout=0.25)
-        assert wait_calls
-        assert wait_calls[0] == pytest.approx(0.25, rel=0.01)
+        task.run_until_stopped(poll_interval=9.0)
+
+        assert wait_calls == [pytest.approx(HEARTBEAT_ACTIVITY_WAIT_CAP_SECONDS)]
     finally:
         task.stop(join=False)
         task.cleanup()
 
 
-def test_heartbeat_pending_input_returns_before_activity_wait(
+def test_heartbeat_pending_input_wakes_through_reactor_wait(
     workdir: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     context = build_context(spec_context=workdir)
     tid = str(time.time_ns())
     task = HeartbeatTask(context.broker_target, make_heartbeat_taskspec(tid, workdir))
-    wait_calls: list[float | None] = []
-
-    monkeypatch.setattr(
-        task, "wait_for_activity", lambda timeout: wait_calls.append(timeout)
-    )
-    monkeypatch.setattr(task, "_has_pending_runtime_input", lambda: True)
+    inbox = context.queue(f"T{tid}.inbox", persistent=False)
 
     try:
-        task._wait_for_activity(timeout=0.25)
-        assert wait_calls == []
+        assert task.next_wait_timeout() == pytest.approx(
+            HEARTBEAT_ACTIVITY_WAIT_CAP_SECONDS
+        )
+
+        inbox.write(json.dumps({"action": "cancel", "heartbeat_id": "build"}))
+
+        assert task.next_wait_timeout() == pytest.approx(
+            HEARTBEAT_ACTIVITY_WAIT_CAP_SECONDS
+        )
+        started_at = time.monotonic()
+        task.wait_for_activity(timeout=task.next_wait_timeout())
+        assert time.monotonic() - started_at < 0.5
     finally:
         task.stop(join=False)
         task.cleanup()
+        inbox.close()
+
+
+def test_heartbeat_next_wait_timeout_returns_zero_for_due_registration(
+    workdir: Path,
+) -> None:
+    context = build_context(spec_context=workdir)
+    tid = str(time.time_ns())
+    task = HeartbeatTask(context.broker_target, make_heartbeat_taskspec(tid, workdir))
+    inbox = context.queue(f"T{tid}.inbox", persistent=False)
+
+    try:
+        inbox.write(
+            json.dumps(
+                {
+                    "action": "upsert",
+                    "heartbeat_id": "build",
+                    "interval_seconds": HEARTBEAT_MIN_INTERVAL_SECONDS,
+                    "destination_queue": "build.queue",
+                    "message": "go",
+                }
+            )
+        )
+        task.process_once()
+        registration = task._registrations["build"]
+        registration.next_due_at = time.monotonic() - 1
+        task._due_heap.clear()
+        heapq.heappush(task._due_heap, (registration.next_due_at, "build"))
+
+        assert task.next_wait_timeout() == 0.0
+    finally:
+        task.stop(join=False)
+        task.cleanup()
+        inbox.close()
+
+
+def test_heartbeat_ping_while_waiting_is_handled_promptly(workdir: Path) -> None:
+    context = build_context(spec_context=workdir)
+    tid = str(time.time_ns())
+    task = HeartbeatTask(context.broker_target, make_heartbeat_taskspec(tid, workdir))
+    ctrl_in = context.queue(f"T{tid}.ctrl_in", persistent=False)
+    ctrl_out = context.queue(f"T{tid}.ctrl_out", persistent=False)
+
+    try:
+        ctrl_in.write(json.dumps({"command": CONTROL_PING, "request_id": "ping"}))
+
+        assert task.next_wait_timeout() == pytest.approx(
+            HEARTBEAT_ACTIVITY_WAIT_CAP_SECONDS
+        )
+        started_at = time.monotonic()
+        task.wait_for_activity(timeout=task.next_wait_timeout())
+        assert time.monotonic() - started_at < 0.5
+        task.process_once()
+
+        responses = [json.loads(item) for item in ctrl_out.peek_generator()]
+        pong = next(response for response in responses if response["command"] == "PING")
+        assert pong["status"] == "ok"
+        assert pong["message"] == "PONG"
+        assert pong["request_id"] == "ping"
+    finally:
+        task.stop(join=False)
+        task.cleanup()
+        ctrl_in.close()
+        ctrl_out.close()

@@ -353,6 +353,21 @@ def _drain(queue: Queue) -> list[str]:
     return items
 
 
+def _drive_consumer_until(
+    task: Consumer,
+    predicate,
+    *,
+    timeout: float = 10.0,
+) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        task.process_once()
+        if predicate():
+            return
+        task.wait_for_activity(timeout=0.02)
+    raise AssertionError("Consumer did not reach expected state before timeout")
+
+
 def _build_consumer_spec(
     tid: str,
     *,
@@ -790,7 +805,10 @@ def test_consumer_command_runners_share_basic_lifecycle(
             )
         )
 
-        task.process_once()
+        _drive_consumer_until(
+            task,
+            lambda: task.taskspec.state.status == "completed",
+        )
 
         assert task.taskspec.state.status == "completed"
 

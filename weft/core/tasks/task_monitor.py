@@ -18,7 +18,7 @@ import os
 import threading
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +35,7 @@ from weft._constants import (
     TASK_MONITOR_ACTIVITY_WAIT_CAP_SECONDS,
     TASK_MONITOR_HEARTBEAT_STARTUP_TIMEOUT_SECONDS,
     TASK_MONITOR_PONG_DETAIL_LIMIT,
+    TASK_MONITOR_PROCESSOR_WORKER_LANE,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS,
     WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS_DEFAULT,
@@ -58,7 +59,7 @@ from weft.core.task_monitoring import (
     resolve_task_monitor_processor,
     task_monitor_candidate_class_counts,
 )
-from weft.core.tasks.base import ControlRequest
+from weft.core.tasks.base import ControlRequest, TaskWorkerResult
 from weft.core.tasks.task_monitor_cleanup import (
     TaskMonitorCleanupConfig,
     run_task_monitor_cleanup,
@@ -70,6 +71,16 @@ from .base import BaseTask
 from .multiqueue_watcher import QueueMessageContext
 
 TaskMonitorCallback = Callable[[str, str, int], None]
+
+
+@dataclass(frozen=True, slots=True)
+class _TaskMonitorProcessorWork:
+    """Custom processor work scanned by the reactor and run broker-free."""
+
+    candidates: tuple[TaskMonitorCandidate, ...]
+    last_timestamp: int | None
+    events_scanned: int
+    request: TaskMonitorProcessorRequest
 
 
 def make_task_monitor_taskspec(tid: str | None = None) -> TaskSpec:
@@ -142,6 +153,7 @@ class TaskMonitorTask(BaseTask):
         self._last_prune_records_scanned = 0
         self._last_cleanup_queue_stats: tuple[dict[str, Any], ...] = ()
         self._last_cleanup_policy_stats: tuple[dict[str, Any], ...] = ()
+        self._processor_work_in_flight: _TaskMonitorProcessorWork | None = None
         self._heartbeat_registered = False
         self._heartbeat_error: str | None = None
         self._heartbeat_id = f"task-monitor:{taskspec.tid}"
@@ -280,28 +292,21 @@ class TaskMonitorTask(BaseTask):
             ),
         }
 
-    def _has_pending_runtime_input(self) -> bool:
-        for queue_name in (self._queue_names["ctrl_in"], self._queue_names["inbox"]):
-            try:
-                if self._queue(queue_name).has_pending():
-                    return True
-            except (BrokerError, OSError, RuntimeError):
-                continue
-        return False
-
     def next_wait_timeout(self) -> float:
         """Return the launcher wait timeout for the next monitor turn.
 
         The monitor is reactive to task-local wakeups and its heartbeat-driven
-        schedule. It must not rely on the launcher's 50 ms default polling loop
-        while it is simply waiting for the next scheduled cycle.
+        schedule. Queue readiness is owned by the shared MultiQueueWatcher
+        wait path; this method only exposes timer and local worker deadlines.
         """
 
-        if self._first_cycle_pending or self._wake_requested:
-            return 0.0
-        if self._has_pending_runtime_input():
+        if self._has_pending_worker_results():
             return 0.0
         if not self._monitor_config.enabled:
+            return TASK_MONITOR_ACTIVITY_WAIT_CAP_SECONDS
+        if self._first_cycle_pending or self._wake_requested:
+            return 0.0
+        if self._processor_work_in_flight is not None:
             return TASK_MONITOR_ACTIVITY_WAIT_CAP_SECONDS
         remaining = self._next_cycle_due_monotonic - time.monotonic()
         if remaining <= 0:
@@ -345,19 +350,27 @@ class TaskMonitorTask(BaseTask):
         Spec: [CC-2.3], [MF-5]
         """
 
+        self._drain_worker_results()
         if self.should_stop:
             return
         self._emit_task_monitor_config_once()
-        if not self._monitor_config.enabled:
-            self._set_activity("disabled", waiting_on=None)
-            self._maybe_emit_poll_report()
-            return
-
         self._drain_queue()
         if self.should_stop:
             self._maybe_emit_poll_report()
             return
+        if not self._monitor_config.enabled:
+            self._first_cycle_pending = False
+            self._wake_requested = False
+            self._set_activity("disabled", waiting_on=None)
+            self._maybe_emit_poll_report()
+            return
+
         self._ensure_heartbeat_registered()
+        if self._processor_work_in_flight is not None:
+            self._set_activity("processing", waiting_on=None)
+            self._drain_worker_results()
+            self._maybe_emit_poll_report()
+            return
 
         now_monotonic = time.monotonic()
         should_run = (
@@ -371,6 +384,7 @@ class TaskMonitorTask(BaseTask):
             self._run_monitor_cycle()
         else:
             self._set_activity("waiting", waiting_on=self._queue_names["inbox"])
+        self._drain_worker_results()
         self._maybe_emit_poll_report()
 
     def _handle_work_message(
@@ -419,6 +433,7 @@ class TaskMonitorTask(BaseTask):
                 "last_prune_records_scanned": self._last_prune_records_scanned,
                 "last_cleanup_queue_stats": list(self._last_cleanup_queue_stats),
                 "last_cleanup_policy_stats": list(self._last_cleanup_policy_stats),
+                "processor_in_flight": self._processor_work_in_flight is not None,
             }
         )
         return payload
@@ -466,6 +481,9 @@ class TaskMonitorTask(BaseTask):
                 "last_cycle": {
                     "success": self._last_processor_success,
                     "error": self._last_error,
+                    "processor_in_flight": (
+                        self._processor_work_in_flight is not None
+                    ),
                     "candidates_seen": self._last_candidates_seen,
                     "candidate_class_counts": dict(self._last_candidate_class_counts),
                     "safe_to_delete_candidates": (self._last_safe_to_delete_candidates),
@@ -589,7 +607,31 @@ class TaskMonitorTask(BaseTask):
             self._last_cleanup_queue_stats = ()
             self._last_cleanup_policy_stats = ()
 
-        result = self._process_monitor_candidates(candidates, now_ns=now_ns)
+        result = self._process_monitor_candidates(
+            candidates,
+            last_timestamp=last_timestamp,
+            events_scanned=events_scanned,
+            now_ns=now_ns,
+        )
+        if result is None:
+            return
+
+        self._finish_monitor_cycle(
+            candidates=candidates,
+            last_timestamp=last_timestamp,
+            events_scanned=events_scanned,
+            result=result,
+        )
+
+    def _finish_monitor_cycle(
+        self,
+        *,
+        candidates: tuple[TaskMonitorCandidate, ...],
+        last_timestamp: int | None,
+        events_scanned: int,
+        result: TaskMonitorProcessorResult,
+    ) -> None:
+        """Commit one processor result on the TaskMonitor reactor thread."""
 
         self._last_processor_success = result.success
         self._last_processed = result.processed
@@ -654,8 +696,10 @@ class TaskMonitorTask(BaseTask):
         self,
         candidates: tuple[TaskMonitorCandidate, ...],
         *,
+        last_timestamp: int | None,
+        events_scanned: int,
         now_ns: int,
-    ) -> TaskMonitorProcessorResult:
+    ) -> TaskMonitorProcessorResult | None:
         if self._monitor_config.processor in {"delete", "report_only"}:
             return self._run_task_monitor_cleanup_cycle(
                 apply=self._monitor_config.processor == "delete"
@@ -677,18 +721,63 @@ class TaskMonitorTask(BaseTask):
             candidates=candidates,
             now_ns=now_ns,
         )
+        work = _TaskMonitorProcessorWork(
+            candidates=candidates,
+            last_timestamp=last_timestamp,
+            events_scanned=events_scanned,
+            request=request,
+        )
+        self._processor_work_in_flight = work
+        self._set_activity("processing", waiting_on=None)
+        try:
+            self._submit_worker_call(
+                TASK_MONITOR_PROCESSOR_WORKER_LANE,
+                lambda: self._run_custom_monitor_processor(work.request),
+            )
+        except RuntimeError as exc:
+            self._processor_work_in_flight = None
+            return TaskMonitorProcessorResult(success=False, errors=(str(exc),))
+        return None
+
+    def _run_custom_monitor_processor(
+        self,
+        request: TaskMonitorProcessorRequest,
+    ) -> TaskMonitorProcessorResult:
+        """Run a custom broker-free processor callable on a worker lane."""
+
         try:
             processor = resolve_task_monitor_processor(self._monitor_config.processor)
             return processor(request)
         except Exception as exc:  # pragma: no cover - custom processor boundary
-            self._emit_task_monitor_log(
-                "task_monitor_processor_error",
-                required_level="info",
-                severity="error",
-                processor=self._monitor_config.processor,
-                errors=(str(exc),),
-            )
             return TaskMonitorProcessorResult(success=False, errors=(str(exc),))
+
+    def _handle_worker_result(self, result: TaskWorkerResult) -> None:
+        if result.lane != TASK_MONITOR_PROCESSOR_WORKER_LANE:
+            super()._handle_worker_result(result)
+            return
+
+        work = self._processor_work_in_flight
+        self._processor_work_in_flight = None
+        if work is None:
+            return
+        if result.error is not None:
+            processor_result = TaskMonitorProcessorResult(
+                success=False,
+                errors=(str(result.error),),
+            )
+        else:
+            processor_result = result.value
+            if not isinstance(processor_result, TaskMonitorProcessorResult):
+                processor_result = TaskMonitorProcessorResult(
+                    success=False,
+                    errors=("task-monitor processor returned an invalid result",),
+                )
+        self._finish_monitor_cycle(
+            candidates=work.candidates,
+            last_timestamp=work.last_timestamp,
+            events_scanned=work.events_scanned,
+            result=processor_result,
+        )
 
     def _run_task_monitor_cleanup_cycle(
         self,

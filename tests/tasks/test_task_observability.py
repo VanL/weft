@@ -77,6 +77,16 @@ def drain_queue(queue) -> list[str]:
     return messages
 
 
+def drive_task_until(task, predicate, *, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        task.process_once()
+        if predicate():
+            return
+        task.wait_for_activity(timeout=0.02)
+    raise AssertionError("Task did not reach expected state before timeout")
+
+
 def test_tid_mapping_written(broker_env, task_factory, unique_tid) -> None:
     db_path, make_queue = broker_env
     mapping_queue = make_queue(WEFT_TID_MAPPINGS_QUEUE)
@@ -133,7 +143,10 @@ def test_tid_mapping_records_worker_pid(broker_env, task_factory, unique_tid) ->
     inbox = make_queue(spec.io.inputs["inbox"])
     inbox.write(json.dumps({"args": ["payload"]}))
 
-    task._drain_queue()
+    drive_task_until(
+        task,
+        lambda: task.taskspec.state.status == "completed",
+    )
 
     records = [json.loads(msg) for msg in drain_queue(mapping_queue)]
     assert records, "expected at least one mapping record"
@@ -270,7 +283,10 @@ def test_state_logging_records_events(broker_env, task_factory, unique_tid) -> N
     inbox = make_queue(spec.io.inputs["inbox"])
     inbox.write(json.dumps({"args": ["payload"]}))
 
-    task._drain_queue()
+    drive_task_until(
+        task,
+        lambda: task.taskspec.state.status == "completed",
+    )
 
     records = [json.loads(msg) for msg in drain_queue(log_queue)]
     events = [record["event"] for record in records]
@@ -307,7 +323,10 @@ def test_success_terminal_ctrl_out_published_when_completed_log_is_missing(
     inbox = make_queue(spec.io.inputs["inbox"])
     inbox.write(json.dumps({"args": ["payload"]}))
 
-    task._drain_queue()
+    drive_task_until(
+        task,
+        lambda: task.taskspec.state.status == "completed",
+    )
 
     outbox = make_queue(spec.io.outputs["outbox"])
     assert outbox.read_one() == "payload"
@@ -332,7 +351,10 @@ def test_state_logging_records_failure(broker_env, task_factory, unique_tid) -> 
     inbox = make_queue(spec.io.inputs["inbox"])
     inbox.write(json.dumps({"args": ["payload"]}))
 
-    task._drain_queue()
+    drive_task_until(
+        task,
+        lambda: task.taskspec.state.status == "failed",
+    )
 
     records = [json.loads(msg) for msg in drain_queue(log_queue)]
     events = [record["event"] for record in records]
@@ -379,7 +401,7 @@ def test_control_stop_logged_and_cancelled(
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
     ctrl_in.write(CONTROL_STOP)
 
-    task._drain_queue()
+    task.process_once()
 
     records = [json.loads(msg) for msg in drain_queue(log_queue)]
     events = [record["event"] for record in records]
@@ -489,7 +511,10 @@ def test_state_logging_respects_redaction(
     inbox = make_queue(spec.io.inputs["inbox"])
     inbox.write(json.dumps({"args": ["payload"]}))
 
-    task._drain_queue()
+    drive_task_until(
+        task,
+        lambda: task.taskspec.state.status == "completed",
+    )
 
     records = [json.loads(msg) for msg in drain_queue(log_queue)]
     assert records, "expected state change records"
@@ -517,7 +542,10 @@ def test_state_logging_respects_redaction(
     inbox = make_queue(spec.io.inputs["inbox"])
     inbox.write(json.dumps({"args": ["payload"]}))
 
-    task._drain_queue()
+    drive_task_until(
+        task,
+        lambda: task.taskspec.state.status == "completed",
+    )
 
     records = [json.loads(msg) for msg in drain_queue(log_queue)]
     assert records, "expected state change records"

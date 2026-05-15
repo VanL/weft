@@ -28,9 +28,11 @@ from pydantic import (
 
 from simplebroker.ext import BrokerError
 from weft._constants import (
+    HEARTBEAT_ACTIVITY_WAIT_CAP_SECONDS,
     HEARTBEAT_IDLE_TIMEOUT_SECONDS,
     HEARTBEAT_MIN_INTERVAL_SECONDS,
     INTERNAL_HEARTBEAT_ENDPOINT_NAME,
+    WEFT_ENDPOINTS_REGISTRY_QUEUE,
 )
 from weft.context import WeftContext, build_context
 from weft.core.endpoints import resolve_endpoint
@@ -106,6 +108,11 @@ class HeartbeatTask(BaseTask):
             spec_context=taskspec.spec.weft_context,
             config=self._config,
         )
+        self._ownership_check_required = True
+        self._last_endpoint_registry_version: int | None = None
+        self._cached_service_ownership: tuple[
+            Literal["self", "other", "unknown"], str | None
+        ] = ("unknown", None)
         self._registrations: dict[str, HeartbeatRegistration] = {}
         self._due_heap: list[tuple[float, str]] = []
         self._idle_timeout_seconds = float(
@@ -145,18 +152,27 @@ class HeartbeatTask(BaseTask):
         if self.should_stop:
             return
 
-        while not self.should_stop:
-            if self._drain_one_control_message():
-                return
-            if self._drain_one_registration_message():
-                return
-            if self._exit_if_superseded():
-                return
-            if not self._paused and self._emit_due_registrations():
-                return
-            if self._maybe_idle_shutdown():
-                return
-            self._wait_for_activity(timeout=self._next_wait_timeout())
+        self._drain_worker_results()
+        if self._drain_one_control_message():
+            self._maybe_emit_poll_report()
+            return
+        if self.should_stop:
+            self._maybe_emit_poll_report()
+            return
+        if self._drain_one_registration_message():
+            self._maybe_emit_poll_report()
+            return
+        if self.should_stop:
+            self._maybe_emit_poll_report()
+            return
+        if self._exit_if_superseded():
+            self._maybe_emit_poll_report()
+            return
+        if not self._paused and self._emit_due_registrations():
+            self._maybe_emit_poll_report()
+            return
+        self._maybe_idle_shutdown()
+        self._maybe_emit_poll_report()
 
     def _drain_one_control_message(self) -> bool:
         ctrl_queue = self._queue(self._queue_names["ctrl_in"])
@@ -361,13 +377,50 @@ class HeartbeatTask(BaseTask):
     def _service_ownership(
         self,
     ) -> tuple[Literal["self", "other", "unknown"], str | None]:
+        if not self._ownership_check_required:
+            current_version = self._endpoint_registry_version()
+            if (
+                current_version is not None
+                and current_version == self._last_endpoint_registry_version
+            ):
+                return self._cached_service_ownership
+
+        version_before = self._endpoint_registry_version()
         resolved = resolve_endpoint(self._context, INTERNAL_HEARTBEAT_ENDPOINT_NAME)
+        version_after = self._endpoint_registry_version()
         if resolved is None:
-            return "unknown", None
-        owner_tid = resolved.record.tid
-        if owner_tid == self.tid:
-            return "self", owner_tid
-        return "other", owner_tid
+            ownership: tuple[Literal["self", "other", "unknown"], str | None] = (
+                "unknown",
+                None,
+            )
+        else:
+            owner_tid = resolved.record.tid
+            ownership = (
+                ("self", owner_tid) if owner_tid == self.tid else ("other", owner_tid)
+            )
+
+        self._cached_service_ownership = ownership
+        self._last_endpoint_registry_version = version_after
+        self._ownership_check_required = (
+            version_before is None
+            or version_after is None
+            or version_before != version_after
+        )
+        return ownership
+
+    def _endpoint_registry_version(self) -> int | None:
+        queue = self._queue(WEFT_ENDPOINTS_REGISTRY_QUEUE)
+        try:
+            version: int | None = None
+            for item in queue.peek_generator(with_timestamps=True):
+                if not isinstance(item, tuple) or len(item) != 2:
+                    continue
+                _body, timestamp = item
+                if isinstance(timestamp, int):
+                    version = timestamp if version is None else max(version, timestamp)
+        except (BrokerError, OSError, RuntimeError):
+            return None
+        return version
 
     def _exit_if_superseded(self) -> bool:
         ownership_state, owner_tid = self._service_ownership()
@@ -404,13 +457,23 @@ class HeartbeatTask(BaseTask):
         self.should_stop = True
         return True
 
-    def _next_wait_timeout(self) -> float | None:
+    def next_wait_timeout(self) -> float:
+        """Return the outer-loop wait timeout for the next heartbeat turn."""
+
+        if self._has_pending_worker_results():
+            return 0.0
         now = time.monotonic()
-        next_due = self._next_due_timeout(now=now)
+        next_due = None if self._paused else self._next_due_timeout(now=now)
         idle_timeout = self._next_idle_timeout(now=now)
-        timeouts = [value for value in (next_due, idle_timeout) if value is not None]
-        if not timeouts:
-            return 1.0
+        timeouts = [
+            value
+            for value in (
+                next_due,
+                idle_timeout,
+                HEARTBEAT_ACTIVITY_WAIT_CAP_SECONDS,
+            )
+            if value is not None
+        ]
         return max(0.0, min(timeouts))
 
     def _next_due_timeout(self, *, now: float) -> float | None:
@@ -429,36 +492,5 @@ class HeartbeatTask(BaseTask):
         if self._empty_since_monotonic is None:
             return self._idle_timeout_seconds
         return (self._empty_since_monotonic + self._idle_timeout_seconds) - now
-
-    def _has_pending_runtime_input(self) -> bool:
-        for queue_name in (self._queue_names["ctrl_in"], self._queue_names["inbox"]):
-            try:
-                if self._queue(queue_name).has_pending():
-                    return True
-            except (BrokerError, OSError, RuntimeError):
-                logger.debug(
-                    "Failed to inspect heartbeat queue %s for pending work",
-                    queue_name,
-                    exc_info=True,
-                )
-        return False
-
-    def _wait_for_activity(self, *, timeout: float | None) -> None:
-        wait_timeout = 1.0 if timeout is None else max(0.0, timeout)
-        if wait_timeout <= 0:
-            return
-
-        deadline = time.monotonic() + wait_timeout
-        while not self.should_stop:
-            if self._stop_event is not None and self._stop_event.is_set():
-                return
-            if self._has_pending_runtime_input():
-                return
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return
-            chunk = min(remaining, 1.0)
-            self.wait_for_activity(timeout=chunk)
-
 
 __all__ = ["HeartbeatTask"]
