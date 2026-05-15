@@ -114,19 +114,24 @@ def main(root_arg: str) -> int:
     root = prepare_project_root(Path(root_arg))
     context = build_context(spec_context=root)
     inboxes: list[object] = []
+    bootstrap_queue = context.queue("weft.test.bootstrap", persistent=False)
+    try:
+        bootstrap_queue.generate_timestamp()
+    finally:
+        bootstrap_queue.close()
     try:
         for index in range(5):
             tid = str(time.time_ns())
             spec = build_spec(tid, root)
+            inbox = context.queue(spec.io.inputs["inbox"], persistent=True)
+            inboxes.append(inbox)
+            inbox.write(json.dumps({}))
             process = launch_task_process(
                 Consumer,
                 context.broker_target,
                 spec,
                 config=context.config,
             )
-            inbox = context.queue(spec.io.inputs["inbox"], persistent=True)
-            inboxes.append(inbox)
-            inbox.write(json.dumps({}))
             wait_for_status(root, tid, "running")
             stopped = task_cmd.stop_tasks([tid], context_path=root)
             if stopped != 1:

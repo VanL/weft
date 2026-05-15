@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from simplebroker import BrokerTarget, Queue
 from simplebroker.ext import BrokerError
@@ -81,6 +81,32 @@ def generate_spawn_request_timestamp(
         return int(queue.generate_timestamp())
     finally:
         queue.close()
+
+
+def _write_spawn_request_with_timestamp(
+    db: object,
+    *,
+    queue_name: str,
+    message: str,
+    timestamp: int,
+) -> None:
+    """Write a spawn request at its preallocated TID timestamp.
+
+    SimpleBroker's public ``Queue.write()`` API always generates a new
+    timestamp. Weft's spawn submission contract needs the spawn-request message
+    timestamp to match the externally returned TID, so this narrow adapter owns
+    the private SimpleBroker exact-timestamp call until SimpleBroker exposes a
+    public equivalent.
+    """
+
+    db_core = cast(Any, db)
+    db_core._run_with_retry(
+        lambda: db_core._do_write_transaction(
+            queue_name,
+            message,
+            timestamp,
+        )
+    )
 
 
 def _prepare_spawn_metadata(
@@ -195,12 +221,11 @@ def submit_spawn_request(
     )
     try:
         with queue.get_connection() as db:
-            db._run_with_retry(
-                lambda: db._do_write_transaction(
-                    spawn_queue_name,
-                    message_json,
-                    message_timestamp,
-                )
+            _write_spawn_request_with_timestamp(
+                db,
+                queue_name=spawn_queue_name,
+                message=message_json,
+                timestamp=message_timestamp,
             )
     finally:
         queue.close()

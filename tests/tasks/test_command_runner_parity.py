@@ -518,9 +518,9 @@ def _launch_running_task(
         sandbox_profile=sandbox_profile,
         working_dir=root,
     )
-    process = launch_task_process(Consumer, ctx.broker_target, spec, config=ctx.config)
     inbox = ctx.queue(spec.io.inputs["inbox"], persistent=True)
     inbox.write(json.dumps({}))
+    process = launch_task_process(Consumer, ctx.broker_target, spec, config=ctx.config)
     _wait_for_running_snapshot(root, tid)
     return root, process, tid
 

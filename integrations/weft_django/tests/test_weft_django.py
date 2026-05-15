@@ -55,6 +55,7 @@ import weft_django
 import weft_django.client as weft_django_client
 from weft.client import SpecNotFound
 from weft.commands.types import TaskTerminalSnapshot
+from weft.context import build_context
 from weft.core.taskspec import TaskSpec
 from weft_django import (
     WeftSubmission,
@@ -75,6 +76,13 @@ from weft_django.conf import (
 from weft_django.registry import TaskRegistry, is_registered
 
 pytestmark = [pytest.mark.shared]
+
+_bootstrap_context = build_context(spec_context=TEST_ROOT)
+_bootstrap_queue = _bootstrap_context.queue("weft.test.bootstrap", persistent=False)
+try:
+    _bootstrap_queue.generate_timestamp()
+finally:
+    _bootstrap_queue.close()
 
 call_command("migrate", run_syncdb=True, verbosity=0)
 
