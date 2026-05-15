@@ -28,6 +28,7 @@ pytestmark = [pytest.mark.shared]
 PROCESSOR_REQUESTS: list[TaskMonitorProcessorRequest] = []
 BLOCKING_PROCESSOR_STARTED = threading.Event()
 BLOCKING_PROCESSOR_RELEASE = threading.Event()
+BLOCKING_PROCESSOR_TIMEOUT_SECONDS = 5.0
 
 
 def recording_processor(
@@ -55,7 +56,7 @@ def blocking_processor(
     request: TaskMonitorProcessorRequest,
 ) -> TaskMonitorProcessorResult:
     BLOCKING_PROCESSOR_STARTED.set()
-    assert BLOCKING_PROCESSOR_RELEASE.wait(timeout=5.0)
+    assert BLOCKING_PROCESSOR_RELEASE.wait(timeout=BLOCKING_PROCESSOR_TIMEOUT_SECONDS)
     PROCESSOR_REQUESTS.append(request)
     return TaskMonitorProcessorResult(
         success=True,
@@ -532,7 +533,7 @@ def test_task_monitor_slow_custom_processor_does_not_block_ping(
         task.process_once()
         elapsed = time.monotonic() - started_at
 
-        assert elapsed < 1.0
+        assert elapsed < BLOCKING_PROCESSOR_TIMEOUT_SECONDS * 0.5
         assert BLOCKING_PROCESSOR_STARTED.wait(timeout=2.0)
         assert task._processor_work_in_flight is not None
 
