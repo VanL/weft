@@ -560,7 +560,9 @@ def test_task_monitor_slow_custom_processor_does_not_block_ping(
 
         BLOCKING_PROCESSOR_RELEASE.set()
         deadline = time.monotonic() + 5.0
-        while task._processor_work_in_flight is not None and time.monotonic() < deadline:
+        while (
+            task._processor_work_in_flight is not None and time.monotonic() < deadline
+        ):
             task.process_once()
             task.wait_for_activity(timeout=0.05)
 

@@ -489,7 +489,9 @@ class BaseTask(MultiQueueWatcher, ABC):
 
     def _has_pending_worker_results(self) -> bool:
         """Return whether a worker lane has queued results for the reactor."""
-        return self._worker_result_event.is_set() or not self._worker_result_queue.empty()
+        return (
+            self._worker_result_event.is_set() or not self._worker_result_queue.empty()
+        )
 
     def _has_worker_activity(self) -> bool:
         """Return whether worker lanes still need a reactor turn."""
@@ -646,9 +648,9 @@ class BaseTask(MultiQueueWatcher, ABC):
         """
 
         iterations = 0
-        while (
-            not self.should_stop or self._has_worker_activity()
-        ) and not (self._stop_event and self._stop_event.is_set()):
+        while (not self.should_stop or self._has_worker_activity()) and not (
+            self._stop_event and self._stop_event.is_set()
+        ):
             self.process_once()
             iterations += 1
             if max_iterations is not None and iterations >= max_iterations:

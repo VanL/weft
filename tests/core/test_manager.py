@@ -2379,11 +2379,11 @@ def test_managed_service_pong_probe_is_nonblocking(
         tid=old_tid,
     )
 
-    candidates = manager._observed_service_candidates_by_key({service_key})[
-        service_key
-    ]
+    candidates = manager._observed_service_candidates_by_key({service_key})[service_key]
 
-    pending_candidate = next(candidate for candidate in candidates if candidate.tid == old_tid)
+    pending_candidate = next(
+        candidate for candidate in candidates if candidate.tid == old_tid
+    )
     assert pending_candidate.state == "uncertain"
     assert pending_candidate.source == "service-registry-pong"
     assert pending_candidate.reason == "ping_pending"
@@ -2393,16 +2393,14 @@ def test_managed_service_pong_probe_is_nonblocking(
         source="service-registry-pong",
     )
     ping_messages = [json.loads(item) for item in drain(make_queue(probe.ctrl_in_name))]
-    assert ping_messages == [
-        {"command": CONTROL_PING, "request_id": probe.request_id}
-    ]
+    assert ping_messages == [{"command": CONTROL_PING, "request_id": probe.request_id}]
 
     _write_service_pong(make_queue, probe)
-    candidates = manager._observed_service_candidates_by_key({service_key})[
-        service_key
-    ]
+    candidates = manager._observed_service_candidates_by_key({service_key})[service_key]
 
-    live_candidate = next(candidate for candidate in candidates if candidate.tid == old_tid)
+    live_candidate = next(
+        candidate for candidate in candidates if candidate.tid == old_tid
+    )
     assert live_candidate.state == "live"
     assert live_candidate.source == "service-registry-pong"
 
@@ -3373,8 +3371,7 @@ def test_manager_supersedes_fresh_higher_tid_active_refresh(
         == "higher_tid_active_refresh_seen"
     )
     assert (
-        superseded["metadata"]["supersession_observed_timestamp"]
-        == observed_timestamp
+        superseded["metadata"]["supersession_observed_timestamp"] == observed_timestamp
     )
 
 
@@ -4682,7 +4679,9 @@ def test_manager_leadership_waits_while_child_launch_is_in_flight(
     def fail_read_active_records() -> dict[str, dict[str, Any]]:
         raise AssertionError("active child launch should block leadership yield check")
 
-    monkeypatch.setattr(manager, "_read_active_manager_records", fail_read_active_records)
+    monkeypatch.setattr(
+        manager, "_read_active_manager_records", fail_read_active_records
+    )
 
     yielded = manager._maybe_yield_leadership(force=True)
 

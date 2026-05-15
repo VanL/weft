@@ -481,7 +481,9 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         except Exception as exc:
             if self._direct_work_waiting:
                 self._direct_work_exception = exc
-            elif self.taskspec.state.status in TERMINAL_TASK_STATUSES or self.should_stop:
+            elif (
+                self.taskspec.state.status in TERMINAL_TASK_STATUSES or self.should_stop
+            ):
                 logger.debug(
                     "Consumer worker result finalized terminal state",
                     exc_info=True,

@@ -5750,7 +5750,9 @@ class Manager(BaseTask):
                 self._drain_worker_results()
                 return
         internal_drained = (
-            0 if self._has_active_child_launches() else self._drain_internal_spawn_requests()
+            0
+            if self._has_active_child_launches()
+            else self._drain_internal_spawn_requests()
         )
         if internal_drained:
             self._last_activity_ns = time.time_ns()
@@ -5761,8 +5763,7 @@ class Manager(BaseTask):
             self._maybe_emit_poll_report()
         public_drained = (
             0
-            if self._has_active_child_launches()
-            or self._child_launch_started_this_turn
+            if self._has_active_child_launches() or self._child_launch_started_this_turn
             else self._drain_public_spawn_requests()
         )
         if public_drained:
@@ -5915,7 +5916,10 @@ class Manager(BaseTask):
         total_processed = 0
         attempted = False
         for _ in range(max_messages):
-            if self._has_active_child_launches() or self._child_launch_started_this_turn:
+            if (
+                self._has_active_child_launches()
+                or self._child_launch_started_this_turn
+            ):
                 break
             attempted = True
             processed = int(
@@ -5924,7 +5928,10 @@ class Manager(BaseTask):
             total_processed += processed
             if processed == 0:
                 break
-            if self._has_active_child_launches() or self._child_launch_started_this_turn:
+            if (
+                self._has_active_child_launches()
+                or self._child_launch_started_this_turn
+            ):
                 break
             if self.should_stop or self._draining:
                 break

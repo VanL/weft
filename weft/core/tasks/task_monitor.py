@@ -481,9 +481,7 @@ class TaskMonitorTask(BaseTask):
                 "last_cycle": {
                     "success": self._last_processor_success,
                     "error": self._last_error,
-                    "processor_in_flight": (
-                        self._processor_work_in_flight is not None
-                    ),
+                    "processor_in_flight": (self._processor_work_in_flight is not None),
                     "candidates_seen": self._last_candidates_seen,
                     "candidate_class_counts": dict(self._last_candidate_class_counts),
                     "safe_to_delete_candidates": (self._last_safe_to_delete_candidates),

@@ -493,4 +493,5 @@ class HeartbeatTask(BaseTask):
             return self._idle_timeout_seconds
         return (self._empty_since_monotonic + self._idle_timeout_seconds) - now
 
+
 __all__ = ["HeartbeatTask"]
