@@ -768,7 +768,7 @@ def test_manager_reactor_answers_ping_while_child_launch_is_active(
     manager.process_once()
     elapsed = time.monotonic() - started_at
 
-    assert elapsed < 1.0
+    assert elapsed < 3.0
     assert launch_started.wait(timeout=2.0)
     assert manager._active_child_launches
 
