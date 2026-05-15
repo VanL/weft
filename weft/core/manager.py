@@ -4984,7 +4984,14 @@ class Manager(BaseTask):
                 task_loader=_load_pipeline_stage,
                 source_ref=str(resolved.path),
             )
-        except (FileNotFoundError, ValueError, ValidationError):
+        except (
+            BrokerError,
+            FileNotFoundError,
+            OSError,
+            RuntimeError,
+            ValueError,
+            ValidationError,
+        ):
             logger.warning("Failed to compile stored pipeline %s", name, exc_info=True)
             return None
         return compiled.pipeline_taskspec.model_dump(mode="json"), (

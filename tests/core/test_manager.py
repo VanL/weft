@@ -597,7 +597,7 @@ class FakeLaunchProcess:
 
     def kill(self) -> None:
         self._alive = False
-        self.exitcode = -signal.SIGKILL
+        self.exitcode = -getattr(signal, "SIGKILL", signal.SIGTERM)
 
 
 def _process_running(pid: int) -> bool:
@@ -6175,6 +6175,40 @@ def test_manager_autostart_pipeline_target_launches_pipeline_run(
             == INTERNAL_RUNTIME_TASK_CLASS_PIPELINE
         )
         assert result_payload == "autostart-pipeline"
+    finally:
+        manager.cleanup()
+
+
+def test_manager_autostart_pipeline_compile_broker_error_is_retryable(
+    tmp_path: Path,
+    broker_env,
+    unique_tid,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, _make_queue = broker_env
+    autostart_dir, _manifest_path = write_autostart_pipeline_fixture(
+        tmp_path,
+        task_name="pipeline-broker-error-task",
+        pipeline_name="pipeline-broker-error",
+        manifest_name="pipeline-broker-error",
+        mode="ensure",
+        max_restarts=1,
+    )
+
+    config = load_config()
+    config["WEFT_AUTOSTART_TASKS"] = True
+    config["WEFT_AUTOSTART_DIR"] = str(autostart_dir)
+
+    def fail_compile(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise BrokerError("disk I/O error")
+
+    spec = make_manager_spec(unique_tid, idle_timeout=1.5)
+    manager = Manager(db_path, spec, config=config)
+    try:
+        monkeypatch.setattr(manager_mod, "compile_linear_pipeline", fail_compile)
+
+        assert manager._load_autostart_pipeline("pipeline-broker-error") is None
     finally:
         manager.cleanup()
 
