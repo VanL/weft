@@ -4446,7 +4446,11 @@ class Manager(BaseTask):
 
         if not desired_keys:
             return set()
-        pending: set[str] = set()
+        pending: set[str] = {
+            request.service_key
+            for request in self._active_child_launches.values()
+            if request.service_key in desired_keys
+        }
         for queue_name in self._spawn_inbox_queue_names():
             queue = self._queue(queue_name)
             for payload, _timestamp in iter_queue_json_entries(queue):

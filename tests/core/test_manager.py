@@ -6322,6 +6322,64 @@ def test_manager_autostart_pending_spawn_blocks_duplicate_restart(
         manager.cleanup()
 
 
+def test_manager_autostart_active_launch_blocks_duplicate_restart(
+    tmp_path: Path,
+    broker_env,
+    unique_tid,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, _make_queue = broker_env
+    autostart_dir, manifest_path = write_autostart_fixture(
+        tmp_path,
+        task_name="active-launch-restart",
+        manifest_name="active-launch-restart",
+        mode="ensure",
+        max_restarts=1,
+        backoff_seconds=0,
+        duration=0.0,
+    )
+
+    config = load_config()
+    config["WEFT_AUTOSTART_TASKS"] = False
+    config["WEFT_AUTOSTART_DIR"] = str(autostart_dir)
+
+    spec = make_manager_spec(unique_tid, idle_timeout=1.5)
+    manager = Manager(db_path, spec, config=config)
+    source = str(manifest_path.resolve())
+    enqueued: list[Any] = []
+    try:
+        manager._autostart_enabled = True
+        manager._autostart_state[source] = {
+            "restarts": 0,
+            "next_allowed_ns": 0,
+            "launched_once": True,
+        }
+        manager._service_state(source).launched_once = True
+        manager._active_child_launches["active-launch-child"] = (
+            manager_mod._ManagerChildLaunchRequest(
+                child_spec=manager.taskspec,
+                task_cls=Consumer,
+                internal_role=None,
+                service_key=source,
+                autostart_source=source,
+                detach_stdio=True,
+            )
+        )
+        monkeypatch.setattr(
+            manager,
+            "_enqueue_managed_service_request",
+            lambda service: enqueued.append(service) or True,
+        )
+
+        manager._tick_autostart(force=True)
+
+        assert enqueued == []
+        assert manager._service_state(source).spawn_pending is True
+        assert manager._autostart_state[source]["restarts"] == 0
+    finally:
+        manager.cleanup()
+
+
 def test_manager_autostart_spoofed_public_metadata_does_not_claim_manifest(
     tmp_path: Path,
     broker_env,
