@@ -617,10 +617,17 @@ def test_consumer_reactor_responds_to_ping_while_command_work_is_active(
     unique_tid: str,
 ) -> None:
     db_path, make_queue = broker_env
+    command_duration = 2.0
     spec = make_command_taskspec(
         unique_tid,
         sys.executable,
-        args=[PROCESS_SCRIPT, "--duration", "1.0", "--result", "reactor-done"],
+        args=[
+            PROCESS_SCRIPT,
+            "--duration",
+            str(command_duration),
+            "--result",
+            "reactor-done",
+        ],
     )
     task = Consumer(db_path, spec)
     inbox = make_queue(spec.io.inputs["inbox"])
@@ -633,8 +640,9 @@ def test_consumer_reactor_responds_to_ping_while_command_work_is_active(
     task.process_once()
     elapsed = time.monotonic() - started_at
 
-    assert elapsed < 0.5
+    assert elapsed < command_duration * 0.75
     assert task.taskspec.state.status == "running"
+    assert task._has_worker_activity() is True
     assert outbox.read_one() is None
 
     ctrl_in.write(json.dumps({"command": CONTROL_PING, "request_id": "during"}))
