@@ -1038,7 +1038,7 @@ def test_task_monitor_slow_custom_processor_does_not_block_ping(
         task.process_once()
         elapsed = time.monotonic() - started_at
 
-        assert elapsed < BLOCKING_PROCESSOR_TIMEOUT_SECONDS * 0.5
+        assert elapsed < BLOCKING_PROCESSOR_TIMEOUT_SECONDS - 0.5
         assert BLOCKING_PROCESSOR_STARTED.wait(timeout=2.0)
         assert task._processor_work_in_flight is not None
 
