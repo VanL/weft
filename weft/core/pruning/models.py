@@ -65,11 +65,12 @@ class CleanupQueueStats:
     stop_reason: str | None = None
     reason_counts: Mapping[str, int] = field(default_factory=dict)
     collated_tasks: tuple[SummaryLike, ...] = ()
+    metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def to_summary(self) -> dict[str, Any]:
         """Return a JSON-safe operational summary."""
 
-        return {
+        summary: dict[str, Any] = {
             "queue": self.queue,
             "scanned": self.scanned,
             "selected": self.selected,
@@ -80,6 +81,9 @@ class CleanupQueueStats:
             "collated_task_count": len(self.collated_tasks),
             "collated_tasks": [task.to_summary() for task in self.collated_tasks],
         }
+        if self.metadata:
+            summary["metadata"] = dict(self.metadata)
+        return summary
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,6 +154,7 @@ def cleanup_queue_stats(
     candidates: Sequence[CleanupCandidate],
     stop_reason: str | None,
     collated_tasks: tuple[SummaryLike, ...] = (),
+    metadata: Mapping[str, Any] | None = None,
 ) -> CleanupQueueStats:
     """Build cleanup stats from selected candidates."""
 
@@ -161,6 +166,7 @@ def cleanup_queue_stats(
         stop_reason=stop_reason,
         reason_counts=dict(reason_counts),
         collated_tasks=collated_tasks,
+        metadata=dict(metadata or {}),
     )
 
 

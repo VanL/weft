@@ -107,6 +107,34 @@ multi-process workloads. If an external pooler is used, it must preserve the
 backend notification semantics required by `LISTEN`/`NOTIFY`; pooling modes
 that discard listener state are outside Weft's broker contract.
 
+### Weft-Owned Operational Tables [SB-0.4a]
+
+Most Weft runtime state is queue-shaped, but Weft may keep narrow
+non-queue operational tables beside SimpleBroker tables when the state is a
+derived read model rather than queue data. The current example is the
+TaskMonitor durable collation store:
+
+- `weft_monitor_meta`
+- `weft_monitor_task_collations`
+- `weft_monitor_task_messages`
+
+These tables are Monitor-owned and versioned. They are derived from
+`weft.log.tasks`; they are not exposed through queue commands and do not
+replace SimpleBroker queue semantics. The Monitor may create, verify, and
+additively migrate only these Monitor tables inside an already initialized
+Weft broker database. It must use the resolved `WeftContext` and broker target;
+it must not parse DSNs, rediscover a different database target, provision
+Postgres, or create the broker database itself.
+
+_Implementation mapping_: `weft/core/monitor/store.py` uses the resolved
+`WeftContext` and owns table access; `weft/core/monitor/sql.py` owns SQL
+templates/builders and validates code-owned identifiers; `weft/core/tasks/base.py`
+builds task contexts with `create_database=False`; `weft/core/monitor/task_monitor.py`
+treats store unavailability as operational degradation instead of changing task
+execution. Optional external task-log JSONL emission is file output owned by
+`weft/core/monitor/external_log.py`; it is not queue data and does not change
+SimpleBroker's queue semantics.
+
 ### Runtime Endpoint Registry State [SB-0.5]
 
 Named endpoint discovery is stored as Weft-owned runtime state on ordinary
@@ -323,12 +351,15 @@ connection-pooling designs are tracked in the companion doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md`](../plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md)
+- [`docs/plans/2026-05-16-monitor-store-hardening-and-layering-plan.md`](../plans/2026-05-16-monitor-store-hardening-and-layering-plan.md)
 - [`docs/plans/2026-04-16-autostart-hardening-and-contract-alignment-plan.md`](../plans/2026-04-16-autostart-hardening-and-contract-alignment-plan.md)
 - [`docs/plans/2026-04-14-config-precedence-and-parsing-alignment-plan.md`](../plans/2026-04-14-config-precedence-and-parsing-alignment-plan.md)
 - [`docs/plans/2026-04-14-provider-cli-validation-boundary-and-agent-settings-alignment-plan.md`](../plans/2026-04-14-provider-cli-validation-boundary-and-agent-settings-alignment-plan.md)
 - [`docs/plans/2026-04-14-builtin-taskspecs-and-spec-resolution-plan.md`](../plans/2026-04-14-builtin-taskspecs-and-spec-resolution-plan.md)
 - [`docs/plans/2026-05-05-simplebroker-multiqueue-waiter-integration-plan.md`](../plans/2026-05-05-simplebroker-multiqueue-waiter-integration-plan.md)
 - [`docs/plans/2026-05-13-early-env-file-bootstrap-plan.md`](../plans/2026-05-13-early-env-file-bootstrap-plan.md)
+- [`docs/plans/2026-05-16-monitor-durable-collation-store-plan.md`](../plans/2026-05-16-monitor-durable-collation-store-plan.md)
 
 ## Related Documents
 

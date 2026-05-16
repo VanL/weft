@@ -31,7 +31,7 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, ClassVar, cast
 
@@ -72,6 +72,7 @@ from weft._constants import (
     load_config,
 )
 from weft._runner_plugins import require_runner_plugin
+from weft.context import WeftContext, build_context
 from weft.core.endpoints import (
     build_endpoint_record_payload,
     find_endpoint_registry_message,
@@ -245,6 +246,7 @@ class BaseTask(MultiQueueWatcher, ABC):
         )
         self._queue_cache: dict[str, Queue] = {}
         self._owned_queue_names: set[str] = set()
+        self._task_context_cache: WeftContext | None = None
         self._task_pid = os.getpid()
         self._task_pid_create_time = process_create_time(self._task_pid)
         self._caller_pid = os.getppid()
@@ -376,6 +378,47 @@ class BaseTask(MultiQueueWatcher, ABC):
             except StopIteration as exc:  # pragma: no cover - construction bug guard
                 raise RuntimeError("Task is missing configured queues") from exc
         return self._queue(queue_name)
+
+    def _build_task_context(self) -> WeftContext:
+        """Build process-stable context metadata for a task runtime.
+
+        Persistent tasks call this through ``_task_context()`` so ordinary
+        reactor turns do not repeatedly rebuild backend context. This caches
+        only immutable context metadata; queue handles and broker sessions stay
+        under the existing SimpleBroker queue lifecycle.
+
+        Spec: [CC-2.2], [MA-1.4]
+        """
+
+        spec_context = getattr(self.taskspec.spec, "weft_context", None)
+        config = getattr(self, "_config", {})
+        ctx = build_context(
+            spec_context=spec_context,
+            config=config,
+            create_database=False,
+        )
+        broker_target = getattr(self, "_db_path", None)
+        if isinstance(broker_target, BrokerTarget):
+            return replace(
+                ctx,
+                broker_target=broker_target,
+                database_path=broker_target.target_path,
+                broker_config={
+                    key: value
+                    for key, value in config.items()
+                    if key.startswith("BROKER_")
+                },
+            )
+        return ctx
+
+    def _task_context(self) -> WeftContext:
+        """Return cached context metadata for this task process."""
+
+        cached = getattr(self, "_task_context_cache", None)
+        if cached is None:
+            cached = self._build_task_context()
+            self._task_context_cache = cached
+        return cached
 
     def _outputs_base_dir(self) -> Path:
         spec_context = getattr(self.taskspec.spec, "weft_context", None)

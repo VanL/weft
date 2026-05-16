@@ -150,7 +150,7 @@ def _task_monitor_taskspec_payload(
         "name": "task-monitor",
         "spec": {
             "type": "function",
-            "function_target": "weft.core.tasks.task_monitor:runtime",
+            "function_target": "weft.core.monitor.task_monitor:runtime",
             "persistent": True,
             "runner": {"name": "host", "options": {}},
         },

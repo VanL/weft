@@ -27,12 +27,17 @@ from simplebroker.ext import BrokerError
 from weft._constants import (
     HEARTBEAT_MIN_INTERVAL_SECONDS,
     STATUS_RUNTIMELESS_STALE_AFTER_SECONDS,
-    TASK_MONITOR_TASK_LOG_CLEANUP_MIN_AGE_SECONDS,
     TASK_MONITOR_WEFT_ANOMALY_CLASSIFICATIONS,
     TERMINAL_TASK_EVENTS,
     TERMINAL_TASK_STATUSES,
     WEFT_GLOBAL_LOG_QUEUE,
+    WEFT_LOG_TASKS_EXTERNAL_ENABLED_DEFAULT,
+    WEFT_LOG_TASKS_EXTERNAL_MODE_DEFAULT,
+    WEFT_LOG_TASKS_EXTERNAL_MODES,
+    WEFT_LOG_TASKS_EXTERNAL_PATH_DEFAULT,
+    WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS_DEFAULT,
     WEFT_TASK_MONITOR_BATCH_SIZE_DEFAULT,
+    WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED_DEFAULT,
     WEFT_TASK_MONITOR_ENABLED_DEFAULT,
     WEFT_TASK_MONITOR_INTERVAL_SECONDS_DEFAULT,
     WEFT_TASK_MONITOR_LOG_SINK_DEFAULT,
@@ -40,6 +45,9 @@ from weft._constants import (
     WEFT_TASK_MONITOR_PROCESSOR_BUILTINS,
     WEFT_TASK_MONITOR_PROCESSOR_DEFAULT,
     WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS_DEFAULT,
+    WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE_DEFAULT,
+    WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED_DEFAULT,
+    WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT_DEFAULT,
 )
 from weft.context import WeftContext
 from weft.core import task_evidence
@@ -58,10 +66,19 @@ class TaskMonitorRuntimeConfig:
     enabled: bool = WEFT_TASK_MONITOR_ENABLED_DEFAULT
     interval_seconds: int = WEFT_TASK_MONITOR_INTERVAL_SECONDS_DEFAULT
     batch_size: int = WEFT_TASK_MONITOR_BATCH_SIZE_DEFAULT
-    task_log_cutoff_seconds: float = TASK_MONITOR_TASK_LOG_CLEANUP_MIN_AGE_SECONDS
+    task_log_scan_limit: int = WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT_DEFAULT
+    store_write_batch_size: int = WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE_DEFAULT
+    task_log_retention_period_seconds: float = (
+        WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS_DEFAULT
+    )
+    task_log_external_path: str = WEFT_LOG_TASKS_EXTERNAL_PATH_DEFAULT
+    task_log_external_enabled: bool = WEFT_LOG_TASKS_EXTERNAL_ENABLED_DEFAULT
+    task_log_external_mode: str = WEFT_LOG_TASKS_EXTERNAL_MODE_DEFAULT
     processor: str = WEFT_TASK_MONITOR_PROCESSOR_DEFAULT
     log_sink: str = WEFT_TASK_MONITOR_LOG_SINK_DEFAULT
     restart_backoff_seconds: float = WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS_DEFAULT
+    collation_store_enabled: bool = WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED_DEFAULT
+    table_delete_enabled: bool = WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED_DEFAULT
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any]) -> TaskMonitorRuntimeConfig:
@@ -91,15 +108,62 @@ class TaskMonitorRuntimeConfig:
         if batch_size <= 0:
             raise ValueError("WEFT_TASK_MONITOR_BATCH_SIZE must be positive")
 
-        task_log_cutoff_seconds = float(
+        task_log_scan_limit = int(
             config.get(
-                "WEFT_TASK_MONITOR_TASK_LOG_CUTOFF_SECONDS",
-                TASK_MONITOR_TASK_LOG_CLEANUP_MIN_AGE_SECONDS,
+                "WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT",
+                WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT_DEFAULT,
             )
         )
-        if task_log_cutoff_seconds <= 0:
+        if task_log_scan_limit <= 0:
             raise ValueError(
-                "WEFT_TASK_MONITOR_TASK_LOG_CUTOFF_SECONDS must be positive"
+                "WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT must be positive"
+            )
+
+        store_write_batch_size = int(
+            config.get(
+                "WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE",
+                WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE_DEFAULT,
+            )
+        )
+        if store_write_batch_size <= 0:
+            raise ValueError("WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE must be positive")
+
+        task_log_retention_period_seconds = float(
+            config.get(
+                "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS",
+                WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS_DEFAULT,
+            )
+        )
+        if task_log_retention_period_seconds <= 0:
+            raise ValueError(
+                "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS must be positive"
+            )
+
+        task_log_external_path = str(
+            config.get(
+                "WEFT_LOG_TASKS_EXTERNAL_PATH",
+                WEFT_LOG_TASKS_EXTERNAL_PATH_DEFAULT,
+            )
+        ).strip()
+        task_log_external_enabled = bool(
+            config.get(
+                "WEFT_LOG_TASKS_EXTERNAL_ENABLED",
+                bool(task_log_external_path),
+            )
+        )
+        task_log_external_mode = str(
+            config.get(
+                "WEFT_LOG_TASKS_EXTERNAL_MODE",
+                WEFT_LOG_TASKS_EXTERNAL_MODE_DEFAULT,
+            )
+        ).strip().lower()
+        if task_log_external_mode not in WEFT_LOG_TASKS_EXTERNAL_MODES:
+            allowed = ", ".join(sorted(WEFT_LOG_TASKS_EXTERNAL_MODES))
+            raise ValueError(f"WEFT_LOG_TASKS_EXTERNAL_MODE must be one of: {allowed}")
+        if task_log_external_enabled and not task_log_external_path:
+            raise ValueError(
+                "WEFT_LOG_TASKS_EXTERNAL_PATH must be set when "
+                "WEFT_LOG_TASKS_EXTERNAL_ENABLED is true"
             )
 
         processor = str(
@@ -137,14 +201,34 @@ class TaskMonitorRuntimeConfig:
                 "WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS must be positive"
             )
 
+        collation_store_enabled = bool(
+            config.get(
+                "WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED",
+                WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED_DEFAULT,
+            )
+        )
+        table_delete_enabled = bool(
+            config.get(
+                "WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED",
+                WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED_DEFAULT,
+            )
+        )
+
         return cls(
             enabled=enabled,
             interval_seconds=interval_seconds,
             batch_size=batch_size,
-            task_log_cutoff_seconds=task_log_cutoff_seconds,
+            task_log_scan_limit=task_log_scan_limit,
+            store_write_batch_size=store_write_batch_size,
+            task_log_retention_period_seconds=task_log_retention_period_seconds,
+            task_log_external_path=task_log_external_path,
+            task_log_external_enabled=task_log_external_enabled,
+            task_log_external_mode=task_log_external_mode,
             processor=processor,
             log_sink=log_sink,
             restart_backoff_seconds=restart_backoff_seconds,
+            collation_store_enabled=collation_store_enabled,
+            table_delete_enabled=table_delete_enabled,
         )
 
 

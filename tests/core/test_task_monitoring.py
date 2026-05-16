@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -14,11 +15,7 @@ from weft._constants import (
     WEFT_GLOBAL_LOG_QUEUE,
     load_config,
 )
-from weft.core.pruning.retention import (
-    RetentionPruneConfig,
-    run_retention_prune_for_context,
-)
-from weft.core.task_monitoring import (
+from weft.core.monitor.runtime import (
     TaskMonitorProcessorRequest,
     TaskMonitorProcessorResult,
     TaskMonitorRuntimeConfig,
@@ -26,10 +23,19 @@ from weft.core.task_monitoring import (
     resolve_task_monitor_processor,
     task_log_seen_candidate,
 )
-from weft.core.tasks.task_monitor import TaskMonitorTask, make_task_monitor_taskspec
+from weft.core.monitor.task_monitor import (
+    TaskMonitorTask,
+    make_task_monitor_taskspec,
+)
+from weft.core.pruning.retention import (
+    RetentionPruneConfig,
+    run_retention_prune_for_context,
+)
 from weft.helpers import iter_queue_entries
 
 pytestmark = [pytest.mark.shared]
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def custom_processor(
@@ -44,6 +50,21 @@ def custom_processor(
 
 def noop(_request: TaskMonitorProcessorRequest) -> TaskMonitorProcessorResult:
     return TaskMonitorProcessorResult(success=True)
+
+
+def test_task_monitor_old_tasks_module_path_is_removed() -> None:
+    old_module = REPO_ROOT / "weft" / "core" / "tasks" / "task_monitor.py"
+    old_import = "weft.core.tasks." + "task_monitor"
+    old_reexport = "from weft.core.tasks import " + "TaskMonitorTask"
+    offenders: list[str] = []
+    for root_name in ("weft", "tests"):
+        for path in (REPO_ROOT / root_name).rglob("*.py"):
+            text = path.read_text(encoding="utf-8")
+            if old_import in text or old_reexport in text:
+                offenders.append(path.relative_to(REPO_ROOT).as_posix())
+
+    assert not old_module.exists()
+    assert offenders == []
 
 
 def serve_log_events(capsys: pytest.CaptureFixture[str]) -> list[dict[str, object]]:
@@ -121,7 +142,10 @@ def test_runtime_config_reads_loaded_weft_config() -> None:
             "WEFT_TASK_MONITOR_ENABLED": "0",
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": str(HEARTBEAT_MIN_INTERVAL_SECONDS),
             "WEFT_TASK_MONITOR_BATCH_SIZE": 12,
-            "WEFT_TASK_MONITOR_TASK_LOG_CUTOFF_SECONDS": 172800.0,
+            "WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT": 120,
+            "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": 172800.0,
+            "WEFT_LOG_TASKS_EXTERNAL_PATH": "task-log.jsonl",
+            "WEFT_LOG_TASKS_EXTERNAL_MODE": "raw",
             "WEFT_TASK_MONITOR_PROCESSOR": "report_only",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
             "WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS": 3.5,
@@ -133,7 +157,11 @@ def test_runtime_config_reads_loaded_weft_config() -> None:
     assert runtime_config.enabled is False
     assert runtime_config.interval_seconds == HEARTBEAT_MIN_INTERVAL_SECONDS
     assert runtime_config.batch_size == 12
-    assert runtime_config.task_log_cutoff_seconds == 172800.0
+    assert runtime_config.task_log_scan_limit == 120
+    assert runtime_config.task_log_retention_period_seconds == 172800.0
+    assert runtime_config.task_log_external_path == "task-log.jsonl"
+    assert runtime_config.task_log_external_enabled is True
+    assert runtime_config.task_log_external_mode == "raw"
     assert runtime_config.processor == "report_only"
     assert runtime_config.log_sink == "none"
     assert runtime_config.restart_backoff_seconds == 3.5

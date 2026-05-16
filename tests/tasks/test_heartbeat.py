@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+import weft.core.tasks.base as base_task_mod
 import weft.core.tasks.heartbeat as heartbeat_module
 from weft._constants import (
     CONTROL_PING,
@@ -47,6 +48,31 @@ def make_heartbeat_taskspec(tid: str, root: Path) -> TaskSpec:
             INTERNAL_RUNTIME_ENDPOINT_NAME_KEY: INTERNAL_HEARTBEAT_ENDPOINT_NAME,
         },
     )
+
+
+def test_heartbeat_uses_cached_base_task_context(
+    workdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = build_context(spec_context=workdir)
+    calls: list[bool | None] = []
+    real_build_context = base_task_mod.build_context
+
+    def counted_build_context(*args: object, **kwargs: object) -> object:
+        value = kwargs.get("create_database")
+        calls.append(value if isinstance(value, bool) else None)
+        return real_build_context(*args, **kwargs)
+
+    monkeypatch.setattr(base_task_mod, "build_context", counted_build_context)
+    task = HeartbeatTask(
+        context.broker_target,
+        make_heartbeat_taskspec("1778089999999999901", workdir),
+    )
+    try:
+        assert task._context is task._task_context()
+        assert calls == [False]
+    finally:
+        task.cleanup()
 
 
 def test_heartbeat_service_accepts_upsert_and_cancel(workdir: Path) -> None:

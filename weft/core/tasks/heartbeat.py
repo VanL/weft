@@ -34,7 +34,7 @@ from weft._constants import (
     INTERNAL_HEARTBEAT_ENDPOINT_NAME,
     WEFT_ENDPOINTS_REGISTRY_QUEUE,
 )
-from weft.context import WeftContext, build_context
+from weft.context import WeftContext
 from weft.core.endpoints import resolve_endpoint
 from weft.core.taskspec import ReservedPolicy, TaskSpec
 
@@ -104,10 +104,7 @@ class HeartbeatTask(BaseTask):
         config: Mapping[str, Any] | None = None,
     ) -> None:
         super().__init__(db, taskspec, stop_event=stop_event, config=config)
-        self._context: WeftContext = build_context(
-            spec_context=taskspec.spec.weft_context,
-            config=self._config,
-        )
+        self._context: WeftContext = self._task_context()
         self._ownership_check_required = True
         self._last_endpoint_registry_version: int | None = None
         self._cached_service_ownership: tuple[

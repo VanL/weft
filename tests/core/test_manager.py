@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 
 import weft.core.manager as manager_mod
+import weft.core.tasks.base as base_task_mod
 from simplebroker.ext import BrokerError
 from tests.helpers.test_backend import active_test_backend
 from weft._constants import (
@@ -60,6 +61,7 @@ from weft._constants import (
     load_config,
 )
 from weft.core.manager import DispatchOwnership, ManagedChild, Manager
+from weft.core.monitor.task_monitor import TaskMonitorTask
 from weft.core.service_convergence import (
     build_manager_service_payload,
     build_service_owner_payload,
@@ -69,7 +71,6 @@ from weft.core.tasks import (
     HeartbeatTask,
     PipelineEdgeTask,
     PipelineTask,
-    TaskMonitorTask,
 )
 from weft.core.tasks.multiqueue_watcher import QueueMessageContext, QueueMode
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
@@ -354,6 +355,39 @@ def test_manager_autostart_root_dir_uses_configured_weft_directory_name(
     manager = Manager(db_path, spec, config=load_config())
     try:
         assert manager._autostart_root_dir() == (tmp_path / "project" / ".engram")
+    finally:
+        manager.stop(join=False)
+        manager.cleanup()
+
+
+def test_manager_context_is_cached_by_base_task(
+    tmp_path: Path,
+    broker_env,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, _make_queue = broker_env
+    calls: list[bool | None] = []
+    real_build_context = base_task_mod.build_context
+
+    def counted_build_context(*args: object, **kwargs: object) -> Any:
+        value = kwargs.get("create_database")
+        calls.append(value if isinstance(value, bool) else None)
+        return real_build_context(*args, **kwargs)
+
+    monkeypatch.setattr(base_task_mod, "build_context", counted_build_context)
+    spec = make_manager_spec(
+        unique_tid,
+        weft_context=str(tmp_path / "project"),
+        idle_timeout=0.0,
+    )
+    manager = Manager(db_path, spec, config=load_config())
+    try:
+        context = manager._manager_context()
+        assert manager._manager_context() is context
+        manager._register_manager()
+        assert manager._manager_context() is context
+        assert calls == [False]
     finally:
         manager.stop(join=False)
         manager.cleanup()
@@ -1715,7 +1749,7 @@ def test_throttled_managed_service_convergence_skips_broker_work(
     monkeypatch.setattr(
         manager,
         "_pending_service_keys",
-        lambda _keys: calls.append("pending_keys") or set(),
+        lambda _keys, **_kwargs: calls.append("pending_keys") or set(),
     )
     monkeypatch.setattr(
         manager,
@@ -1726,6 +1760,42 @@ def test_throttled_managed_service_convergence_skips_broker_work(
     manager._run_managed_service_convergence(include_autostart=False)
 
     assert calls == []
+
+
+def test_managed_service_convergence_reuses_internal_pending_probe_per_pass(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _make_queue = manager_setup
+    cleanup_calls = 0
+    pending_calls = 0
+
+    def child_exited() -> bool:
+        nonlocal cleanup_calls
+        cleanup_calls += 1
+        return cleanup_calls < 3
+
+    def internal_pending() -> bool:
+        nonlocal pending_calls
+        pending_calls += 1
+        return False
+
+    monkeypatch.setattr(manager, "_cleanup_children", child_exited)
+    monkeypatch.setattr(manager, "_internal_spawn_pending", internal_pending)
+    monkeypatch.setattr(manager, "_reconcile_managed_services", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        manager,
+        "_drain_internal_spawn_requests",
+        lambda: pytest.fail("empty internal inbox should not be drained"),
+    )
+
+    manager._run_managed_service_convergence(
+        include_autostart=False,
+        max_passes=3,
+        force=True,
+    )
+
+    assert pending_calls == 1
 
 
 def test_manager_leadership_yield_rate_gate_precedes_actionable_work(
@@ -1944,20 +2014,14 @@ def test_manager_wait_for_activity_fallback_honors_timeout(
     assert wait_timeouts == [0.2]
 
 
-def test_manager_leadership_yield_memoizes_per_turn_until_invalidated(
+def test_manager_leadership_self_owner_skips_actionable_scan_per_turn(
     manager_setup,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, _make_queue = manager_setup
     now_ns = 2_000_000_000_000
     current_ns = {"value": now_ns}
-    actionable_calls = 0
     registry_calls = 0
-
-    def count_actionable_work() -> bool:
-        nonlocal actionable_calls
-        actionable_calls += 1
-        return False
 
     def count_registry_reads() -> dict[str, dict[str, object]]:
         nonlocal registry_calls
@@ -1966,7 +2030,9 @@ def test_manager_leadership_yield_memoizes_per_turn_until_invalidated(
 
     monkeypatch.setattr(manager_mod.time, "time_ns", lambda: current_ns["value"])
     monkeypatch.setattr(
-        manager, "_has_actionable_leadership_work", count_actionable_work
+        manager,
+        "_has_actionable_leadership_work",
+        lambda: pytest.fail("self-owned leadership should not scan work queues"),
     )
     monkeypatch.setattr(manager, "_read_active_manager_records", count_registry_reads)
     manager._loop_iteration = 42
@@ -1974,20 +2040,53 @@ def test_manager_leadership_yield_memoizes_per_turn_until_invalidated(
         MANAGER_LEADERSHIP_CHECK_INTERVAL_SECONDS * 1_000_000_000
     )
     manager._last_leader_check_ns = now_ns - manager._leader_check_interval_ns - 1
+    manager._leader_check_turn = None
 
     assert manager._maybe_yield_leadership() is False
     current_ns["value"] += manager._leader_check_interval_ns + 1
     assert manager._maybe_yield_leadership() is False
 
-    assert actionable_calls == 1
     assert registry_calls == 1
 
     manager._invalidate_leadership_work_cache()
     current_ns["value"] += manager._leader_check_interval_ns + 1
 
     assert manager._maybe_yield_leadership() is False
-    assert actionable_calls == 2
     assert registry_calls == 2
+
+
+def test_manager_leadership_lower_owner_checks_actionable_work_before_yield(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _make_queue = manager_setup
+    now_ns = 2_000_000_000_000
+    actionable_calls = 0
+    lower_tid = str(int(manager.tid) - 1)
+
+    def count_actionable_work() -> bool:
+        nonlocal actionable_calls
+        actionable_calls += 1
+        return True
+
+    monkeypatch.setattr(manager_mod.time, "time_ns", lambda: now_ns)
+    monkeypatch.setattr(
+        manager, "_has_actionable_leadership_work", count_actionable_work
+    )
+    monkeypatch.setattr(
+        manager,
+        "_read_active_manager_records",
+        lambda: {lower_tid: {"tid": lower_tid}, manager.tid: {"tid": manager.tid}},
+    )
+    manager._leader_check_interval_ns = int(
+        MANAGER_LEADERSHIP_CHECK_INTERVAL_SECONDS * 1_000_000_000
+    )
+    manager._last_leader_check_ns = now_ns - manager._leader_check_interval_ns - 1
+    manager._leader_check_turn = None
+
+    assert manager._maybe_yield_leadership() is False
+    assert actionable_calls == 1
+    assert manager.should_stop is False
 
 
 def test_tracked_service_candidate_uses_live_child_without_terminal_scan(
@@ -2044,7 +2143,7 @@ def test_reconcile_reuses_tracked_service_candidates(
             source="manager-child",
         )
 
-    monkeypatch.setattr(manager, "_pending_service_keys", lambda _keys: set())
+    monkeypatch.setattr(manager, "_pending_service_keys", lambda _keys, **_kwargs: set())
     monkeypatch.setattr(manager, "_tracked_service_candidate", tracked)
     monkeypatch.setattr(
         manager,
@@ -2667,14 +2766,16 @@ def test_task_monitor_duplicate_runtime_handle_force_kills_scoped_host_pid(
     assert killed == [(duplicate_pid, 0.2)]
 
 
-def test_task_monitor_pending_spawn_request_blocks_duplicate_restart(
+def test_task_monitor_internal_pending_spawn_request_blocks_duplicate_restart(
     manager_setup,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, make_queue = manager_setup
     manager._task_monitor_enabled = True
     manager._queue_names["inbox"] = WEFT_SPAWN_REQUESTS_QUEUE
-    make_queue(WEFT_SPAWN_REQUESTS_QUEUE).write(
+    manager._queue_names["internal_inbox"] = WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE
+    manager._queue_names["internal_reserved"] = f"T{manager.tid}.internal_reserved"
+    make_queue(WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE).write(
         json.dumps(manager._build_task_monitor_spawn_payload())
     )
     monkeypatch.setattr(
@@ -2692,6 +2793,39 @@ def test_task_monitor_pending_spawn_request_blocks_duplicate_restart(
     manager._tick_task_monitor(force=True)
 
     assert enqueued == [INTERNAL_SERVICE_KEY_HEARTBEAT]
+    assert manager._task_monitor_spawn_pending is True
+
+
+def test_task_monitor_public_pending_spawn_request_does_not_block_internal_restart(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, make_queue = manager_setup
+    manager._task_monitor_enabled = True
+    manager._queue_names["inbox"] = WEFT_SPAWN_REQUESTS_QUEUE
+    manager._queue_names["internal_inbox"] = WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE
+    manager._queue_names["internal_reserved"] = f"T{manager.tid}.internal_reserved"
+    make_queue(WEFT_SPAWN_REQUESTS_QUEUE).write(
+        json.dumps(manager._build_task_monitor_spawn_payload())
+    )
+    monkeypatch.setattr(
+        manager,
+        "_evaluate_dispatch_ownership",
+        lambda: DispatchOwnership(state="self", leader_tid=manager.tid),
+    )
+    enqueued: list[str] = []
+    monkeypatch.setattr(
+        manager,
+        "_enqueue_managed_service_request",
+        lambda service: enqueued.append(service.key) or True,
+    )
+
+    manager._tick_task_monitor(force=True)
+
+    assert enqueued == [
+        INTERNAL_SERVICE_KEY_HEARTBEAT,
+        INTERNAL_SERVICE_KEY_TASK_MONITOR,
+    ]
     assert manager._task_monitor_spawn_pending is True
 
 
@@ -3076,6 +3210,43 @@ def test_internal_task_monitor_child_does_not_block_idle_shutdown(
         assert manager.taskspec.state.status == "completed"
     finally:
         manager._child_processes.clear()
+        manager.cleanup()
+
+
+def test_manager_process_once_skips_idle_broker_probe_when_idle_disabled(
+    broker_env,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, _make_queue = broker_env
+    spec = make_manager_spec(
+        unique_tid,
+        f"manager.{unique_tid}.inbox",
+        f"manager.{unique_tid}.ctrl_in",
+        f"manager.{unique_tid}.ctrl_out",
+        idle_timeout=0.0,
+    )
+    manager = Manager(
+        db_path,
+        spec,
+        config=load_config({"WEFT_TASK_MONITOR_ENABLED": False}),
+    )
+    try:
+        now_ns = time.time_ns()
+        manager._autostart_enabled = False
+        manager._last_managed_service_convergence_ns = now_ns
+        manager._last_leader_check_ns = now_ns
+        manager._last_registry_heartbeat_ns = now_ns
+        monkeypatch.setattr(
+            manager,
+            "_update_idle_activity_from_broker",
+            lambda *, force=False: pytest.fail(
+                "disabled idle timeout should not probe broker activity"
+            ),
+        )
+
+        manager.process_once()
+    finally:
         manager.cleanup()
 
 
@@ -5229,6 +5400,39 @@ def test_manager_superseded_self_record_stops_without_republishing_active(
     own_rows = [row for row in rows if row.get("tid") == manager.tid]
     assert own_rows
     assert own_rows[-1]["status"] == SERVICE_STATUS_SUPERSEDED
+
+
+def test_manager_leadership_observes_superseded_services_row_without_spawn_probe(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, make_queue = manager_setup
+    make_queue(WEFT_SERVICES_REGISTRY_QUEUE).write(
+        json.dumps(
+            _manager_service_payload(
+                manager,
+                tid=manager.tid,
+                status=SERVICE_STATUS_SUPERSEDED,
+                runtime_handle=_host_runtime_handle(os.getpid()),
+            )
+        )
+    )
+    monkeypatch.setattr(
+        manager,
+        "_has_actionable_leadership_work",
+        lambda: pytest.fail("superseded registry proof must not inspect spawn work"),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_internal_spawn_pending",
+        lambda: pytest.fail("superseded registry proof must not inspect spawn queues"),
+    )
+
+    yielded = manager._maybe_yield_leadership(force=True)
+
+    assert yielded is True
+    assert manager.should_stop is True
+    assert manager.taskspec.state.status == "cancelled"
 
 
 def test_manager_active_heartbeat_race_preserves_superseded_record(

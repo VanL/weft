@@ -88,6 +88,8 @@ from weft._constants import (
     WEFT_TASK_MONITOR_LOG_SINK_DEFAULT,
     WEFT_TASK_MONITOR_PROCESSOR_DEFAULT,
     WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS_DEFAULT,
+    WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE_DEFAULT,
+    WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT_DEFAULT,
     __version__,
     compile_config,
     load_config,
@@ -384,6 +386,14 @@ class TestLoadConfig:
                 == WEFT_TASK_MONITOR_BATCH_SIZE_DEFAULT
             )
             assert (
+                config["WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT"]
+                == WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT_DEFAULT
+            )
+            assert (
+                config["WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE"]
+                == WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE_DEFAULT
+            )
+            assert (
                 config["WEFT_TASK_MONITOR_PROCESSOR"]
                 == WEFT_TASK_MONITOR_PROCESSOR_DEFAULT
             )
@@ -418,7 +428,11 @@ class TestLoadConfig:
                     HEARTBEAT_MIN_INTERVAL_SECONDS
                 ),
                 "WEFT_TASK_MONITOR_BATCH_SIZE": "42",
-                "WEFT_TASK_MONITOR_TASK_LOG_CUTOFF_SECONDS": "172800",
+                "WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT": "420",
+                "WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE": "7",
+                "WEFT_LOG_TASKS_EXTERNAL_PATH": "task-log.jsonl",
+                "WEFT_LOG_TASKS_EXTERNAL_MODE": "raw",
+                "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "172800",
                 "WEFT_TASK_MONITOR_PROCESSOR": "tests.core.test_task_monitoring:noop",
                 "WEFT_TASK_MONITOR_LOG_SINK": "disk",
                 "WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS": "2.5",
@@ -432,7 +446,12 @@ class TestLoadConfig:
             HEARTBEAT_MIN_INTERVAL_SECONDS
         )
         assert config["WEFT_TASK_MONITOR_BATCH_SIZE"] == 42
-        assert config["WEFT_TASK_MONITOR_TASK_LOG_CUTOFF_SECONDS"] == 172800.0
+        assert config["WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT"] == 420
+        assert config["WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE"] == 7
+        assert config["WEFT_LOG_TASKS_EXTERNAL_PATH"] == "task-log.jsonl"
+        assert config["WEFT_LOG_TASKS_EXTERNAL_ENABLED"] is True
+        assert config["WEFT_LOG_TASKS_EXTERNAL_MODE"] == "raw"
+        assert config["WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS"] == 172800.0
         assert (
             config["WEFT_TASK_MONITOR_PROCESSOR"]
             == "tests.core.test_task_monitoring:noop"
@@ -462,10 +481,43 @@ class TestLoadConfig:
             with pytest.raises(ValueError, match="WEFT_TASK_MONITOR_BATCH_SIZE"):
                 load_config()
 
-    def test_task_monitor_task_log_cutoff_rejects_zero(self) -> None:
+    def test_task_monitor_task_log_scan_limit_rejects_zero(self) -> None:
         with patch.dict(
             os.environ,
-            {"WEFT_TASK_MONITOR_TASK_LOG_CUTOFF_SECONDS": "0"},
+            {"WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT": "0"},
+            clear=True,
+        ):
+            with pytest.raises(
+                ValueError, match="WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT"
+            ):
+                load_config()
+
+    def test_task_monitor_store_write_batch_size_rejects_zero(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE": "0"},
+            clear=True,
+        ):
+            with pytest.raises(
+                ValueError, match="WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE"
+            ):
+                load_config()
+
+    def test_log_tasks_retention_period_rejects_zero(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0"},
+            clear=True,
+        ):
+            with pytest.raises(
+                ValueError, match="WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS"
+            ):
+                load_config()
+
+    def test_removed_task_monitor_task_log_cutoff_rejects(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"WEFT_TASK_MONITOR_TASK_LOG_CUTOFF_SECONDS": "172800"},
             clear=True,
         ):
             with pytest.raises(

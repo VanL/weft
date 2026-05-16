@@ -99,6 +99,10 @@ Coverage policy:
 - Deferred test surfaces stay in the companion planned doc instead of being
   mixed into this canonical file.
 
+## Related Plans
+
+- [`docs/plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md`](../plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md)
+
 ## Related Documents
 
 - [08A-Testing_Strategy_Planned.md](08A-Testing_Strategy_Planned.md)

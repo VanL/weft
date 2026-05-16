@@ -34,7 +34,7 @@ from weft._constants import (
 )
 from weft.context import WeftContext, build_context
 from weft.core import task_evidence
-from weft.core.tasks.task_monitor import (
+from weft.core.monitor.task_monitor import (
     TaskMonitorTask,
     make_task_monitor_taskspec,
 )

@@ -16,7 +16,6 @@ from .monitor import Monitor
 from .multiqueue_watcher import MultiQueueWatcher
 from .observer import Observer, SamplingObserver
 from .pipeline import PipelineEdgeTask, PipelineTask
-from .task_monitor import TaskMonitorTask
 
 __all__ = [
     "BaseTask",
@@ -28,7 +27,6 @@ __all__ = [
     "Monitor",
     "Debugger",
     "HeartbeatTask",
-    "TaskMonitorTask",
     "MultiQueueWatcher",
     "PipelineTask",
     "PipelineEdgeTask",

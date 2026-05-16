@@ -18,7 +18,7 @@ import threading
 import time
 import uuid
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from multiprocessing.process import BaseProcess
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -101,7 +101,7 @@ from weft._constants import (
     WRAPPER_LOST_ERROR,
     get_weft_directory_name,
 )
-from weft.context import WeftContext, build_context
+from weft.context import WeftContext
 from weft.ext import RunnerHandle
 from weft.helpers import (
     canonical_owner_tid,
@@ -371,6 +371,7 @@ class Manager(BaseTask):
         self._last_broker_probe_ns = 0
         self._last_registry_heartbeat_ns = 0
         self._last_broker_timestamp = self._read_broker_timestamp(force=True)
+        self._manager_service_key = manager_service_key(self._manager_context())
         self._register_manager()
         if self._maybe_yield_leadership(force=True):
             return
@@ -1217,7 +1218,7 @@ class Manager(BaseTask):
 
             return HeartbeatTask
         if runtime_class == INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR:
-            from .tasks.task_monitor import TaskMonitorTask
+            from .monitor.task_monitor import TaskMonitorTask
 
             return TaskMonitorTask
         raise ValueError(f"unknown internal runtime task class '{runtime_class}'")
@@ -1358,7 +1359,7 @@ class Manager(BaseTask):
             projected = project_manager_service_record(
                 payload,
                 timestamp=self._registry_message_id or time.time_ns(),
-                service_key=manager_service_key(self._manager_context()),
+                service_key=self._manager_service_key,
             )
             if projected is not None:
                 projected["_timestamp"] = self._registry_message_id or time.time_ns()
@@ -1392,7 +1393,7 @@ class Manager(BaseTask):
         """Delete canonical manager service-owner rows outside the runtime window."""
 
         observed_now_ns = time.time_ns() if now_ns is None else now_ns
-        service_key = manager_service_key(self._manager_context())
+        service_key = self._manager_service_key
         expired_timestamps: list[int] = []
         try:
             entries = queue.peek_generator(with_timestamps=True)
@@ -1469,7 +1470,7 @@ class Manager(BaseTask):
 
         latest_timestamp = -1
         latest_status: str | None = None
-        service_key = manager_service_key(self._manager_context())
+        service_key = self._manager_service_key
         try:
             entries = queue.peek_generator(with_timestamps=True)
         except (AttributeError, BrokerError, OSError, RuntimeError):
@@ -1515,7 +1516,7 @@ class Manager(BaseTask):
         """Return latest self-owned row timestamp for a status, if readable."""
 
         latest_timestamp: int | None = None
-        service_key = manager_service_key(self._manager_context())
+        service_key = self._manager_service_key
         try:
             entries = queue.peek_generator(with_timestamps=True)
         except (AttributeError, BrokerError, OSError, RuntimeError):
@@ -1582,8 +1583,7 @@ class Manager(BaseTask):
                     record is None
                     or record.owner_tid != self.tid
                     or record.service_type != SERVICE_TYPE_MANAGER
-                    or record.service_key
-                    != manager_service_key(self._manager_context())
+                    or record.service_key != self._manager_service_key
                 ):
                     continue
                 self_timestamps.append(timestamp)
@@ -1695,7 +1695,7 @@ class Manager(BaseTask):
             projected = project_manager_service_record(
                 latest_payload,
                 timestamp=latest_ts,
-                service_key=manager_service_key(self._manager_context()),
+                service_key=self._manager_service_key,
             )
             if projected is not None:
                 projected["_timestamp"] = latest_ts
@@ -1776,7 +1776,7 @@ class Manager(BaseTask):
             projected = project_manager_service_record(
                 payload,
                 timestamp=timestamp,
-                service_key=manager_service_key(self._manager_context()),
+                service_key=self._manager_service_key,
             )
             if projected is not None and projected.get("tid") == tid:
                 latest = (payload, timestamp)
@@ -2117,7 +2117,7 @@ class Manager(BaseTask):
         """Refresh this manager's scoped registry view without broad status reads."""
 
         queue = self._queue(WEFT_SERVICES_REGISTRY_QUEUE)
-        service_key = manager_service_key(self._manager_context())
+        service_key = self._manager_service_key
         previous_last_seen_ts = self._manager_registry_last_seen_ts
         since_timestamp = (
             None
@@ -2284,7 +2284,7 @@ class Manager(BaseTask):
         projected = project_manager_service_record(
             payload,
             timestamp=projected_timestamp,
-            service_key=manager_service_key(self._manager_context()),
+            service_key=self._manager_service_key,
         )
         if projected is not None:
             projected["_timestamp"] = projected_timestamp
@@ -2300,10 +2300,27 @@ class Manager(BaseTask):
             superseded_message_id=message_id,
         )
 
+    def _self_superseded_manager_record_visible(self, *, now_ns: int) -> bool:
+        """Return whether the services registry has superseded this manager."""
+
+        record = self._manager_registry_snapshot.get(self.tid)
+        if record is None or record.get("status") != SERVICE_STATUS_SUPERSEDED:
+            return False
+        timestamp = record.get("_timestamp")
+        if isinstance(timestamp, int) and self._registry_entry_is_expired(
+            timestamp,
+            now_ns=now_ns,
+        ):
+            return False
+        return True
+
     def _active_dispatch_manager_records(self) -> dict[str, dict[str, Any]] | None:
         now_ns = time.time_ns()
         if not self._update_manager_registry_snapshot():
             return None
+        if self._self_superseded_manager_record_visible(now_ns=now_ns):
+            self._begin_superseded_shutdown()
+            return {}
 
         active: dict[str, dict[str, Any]] = {}
         stale_timestamps: list[int] = []
@@ -2541,12 +2558,7 @@ class Manager(BaseTask):
         self._last_leader_check_ns = now_ns
         self._leader_check_turn = self._loop_iteration
 
-        actionable_work = (
-            self._has_actionable_leadership_work()
-            if force
-            else self._has_actionable_leadership_work_for_turn()
-        )
-        if actionable_work:
+        if self._has_active_child_launches():
             return False
 
         active = self._read_active_manager_records()
@@ -2556,6 +2568,8 @@ class Manager(BaseTask):
                 reason="leadership_yield_check",
             )
             return False
+        if self._draining or self.should_stop:
+            return True
         leader_tid = canonical_owner_tid(active)
         ownership_state: DispatchOwnershipState
         if leader_tid is None:
@@ -2569,6 +2583,14 @@ class Manager(BaseTask):
             reason="leadership_yield_check",
         )
         if leader_tid is None or leader_tid == self.tid:
+            return False
+
+        actionable_work = (
+            self._has_actionable_leadership_work()
+            if force
+            else self._has_actionable_leadership_work_for_turn()
+        )
+        if actionable_work:
             return False
 
         if self._user_work_children():
@@ -4441,7 +4463,12 @@ class Manager(BaseTask):
             else None,
         )
 
-    def _pending_service_keys(self, desired_keys: set[str]) -> set[str]:
+    def _pending_service_keys(
+        self,
+        desired_keys: set[str],
+        *,
+        queue_names: Sequence[str] | None = None,
+    ) -> set[str]:
         """Return desired service keys that already have unconsumed spawn work."""
 
         if not desired_keys:
@@ -4451,7 +4478,12 @@ class Manager(BaseTask):
             for request in self._active_child_launches.values()
             if request.service_key in desired_keys
         }
-        for queue_name in self._spawn_inbox_queue_names():
+        scan_queue_names = (
+            self._spawn_inbox_queue_names()
+            if queue_names is None
+            else tuple(dict.fromkeys(queue_names))
+        )
+        for queue_name in scan_queue_names:
             queue = self._queue(queue_name)
             for payload, _timestamp in iter_queue_json_entries(queue):
                 key = self._spawn_request_service_key(
@@ -4548,22 +4580,7 @@ class Manager(BaseTask):
         return candidate_metadata
 
     def _manager_context(self) -> WeftContext:
-        spec_context = getattr(self.taskspec.spec, "weft_context", None)
-        config = getattr(self, "_config", {})
-        ctx = build_context(spec_context=spec_context, config=config)
-        broker_target = getattr(self, "_db_path", None)
-        if isinstance(broker_target, BrokerTarget):
-            return replace(
-                ctx,
-                broker_target=broker_target,
-                database_path=broker_target.target_path,
-                broker_config={
-                    key: value
-                    for key, value in config.items()
-                    if key.startswith("BROKER_")
-                },
-            )
-        return ctx
+        return self._task_context()
 
     def _observed_service_candidates_by_key(
         self,
@@ -4779,6 +4796,8 @@ class Manager(BaseTask):
             return
 
         services: list[ManagedServiceSpec] = []
+        internal_services: list[ManagedServiceSpec] = []
+        autostart_services: list[ManagedServiceSpec] = []
         if (
             include_internal
             and self._task_monitor_enabled
@@ -4787,15 +4806,31 @@ class Manager(BaseTask):
             # The heartbeat is a dependency of internal periodic services. Do not
             # run it as standalone background work when there is no dependent
             # service enabled.
-            services.append(self._heartbeat_service_spec())
-            services.append(self._task_monitor_service_spec())
+            internal_services.append(self._heartbeat_service_spec())
+            internal_services.append(self._task_monitor_service_spec())
         if include_autostart:
-            services.extend(self._desired_autostart_services(force=force))
+            autostart_services.extend(self._desired_autostart_services(force=force))
+        services.extend(internal_services)
+        services.extend(autostart_services)
         if not services:
             return
 
         desired_keys = {service.key for service in services}
-        pending_keys = self._pending_service_keys(desired_keys)
+        pending_keys: set[str] = set()
+        internal_keys = {service.key for service in internal_services}
+        if internal_keys:
+            if self._internal_spawn_queue_attached():
+                pending_keys.update(
+                    self._pending_service_keys(
+                        internal_keys,
+                        queue_names=(self._queue_names["internal_inbox"],),
+                    )
+                )
+            else:
+                pending_keys.update(self._pending_service_keys(internal_keys))
+        autostart_keys = {service.key for service in autostart_services}
+        if autostart_keys:
+            pending_keys.update(self._pending_service_keys(autostart_keys))
         tracked_by_key = {
             service.key: self._tracked_service_candidate(
                 service.key,
@@ -5532,6 +5567,7 @@ class Manager(BaseTask):
             return
         self._last_managed_service_convergence_ns = now_ns
         internal_spawn_pending = self._internal_spawn_pending()
+        internal_spawn_pending_for_pass = internal_spawn_pending
         active_reasons = self._managed_service_convergence_active_reasons(
             include_autostart=include_autostart,
             internal_spawn_pending=internal_spawn_pending,
@@ -5557,11 +5593,17 @@ class Manager(BaseTask):
                 self._managed_internal_spawn_enqueued and not enqueued_before
             )
             should_drain_internal = (
-                self._managed_internal_spawn_enqueued or self._internal_spawn_pending()
+                self._managed_internal_spawn_enqueued
+                or internal_spawn_pending_for_pass
             )
             self._managed_internal_spawn_enqueued = False
             drained = (
                 self._drain_internal_spawn_requests() if should_drain_internal else 0
+            )
+            internal_spawn_pending_for_pass = (
+                self._internal_spawn_pending()
+                if drained >= MANAGER_INTERNAL_SPAWN_DRAIN_MAX_MESSAGES
+                else False
             )
             state_after = self._managed_service_state_snapshot()
             progress_reasons = self._managed_service_progress_reasons(
@@ -5795,15 +5837,15 @@ class Manager(BaseTask):
             self._drain_worker_results()
             return
         self._drain_worker_results()
-        self._update_idle_activity_from_broker()
-        now_ns = time.time_ns()
-        idle_timeout_ns = int(float(self._idle_timeout) * 1_000_000_000)
         if self._user_work_children():
             # Idle timeout applies only when the manager is actually idle. Active
             # child tasks are in-flight work, not inactivity.
             return
         if self._idle_timeout <= 0:
             return
+        self._update_idle_activity_from_broker()
+        now_ns = time.time_ns()
+        idle_timeout_ns = int(float(self._idle_timeout) * 1_000_000_000)
         if self._manager_owned_work_pending():
             # Pending reserved spawn work is already claimed by this manager.
             # Keep the manager alive even when the row's timestamp is old; a

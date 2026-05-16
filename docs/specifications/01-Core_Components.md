@@ -14,6 +14,7 @@ See also:
 
 ## Related Plans
 
+- [`docs/plans/2026-05-16-monitor-store-hardening-and-layering-plan.md`](../plans/2026-05-16-monitor-store-hardening-and-layering-plan.md)
 - [`docs/plans/2026-05-08-agent-session-and-task-startup-observability-plan.md`](../plans/2026-05-08-agent-session-and-task-startup-observability-plan.md)
 - [`docs/plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md`](../plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md)
 - [`docs/plans/2026-04-06-runner-extension-point-plan.md`](../plans/2026-04-06-runner-extension-point-plan.md)
@@ -32,6 +33,8 @@ See also:
 - [`docs/plans/2026-05-09-prune-path-unification-plan.md`](../plans/2026-05-09-prune-path-unification-plan.md)
 - [`docs/plans/2026-05-13-internal-state-machine-helper-plan.md`](../plans/2026-05-13-internal-state-machine-helper-plan.md)
 - [`docs/plans/2026-05-15-manager-hot-loop-reduction-plan.md`](../plans/2026-05-15-manager-hot-loop-reduction-plan.md)
+- [`docs/plans/2026-05-15-manager-reactor-hot-loop-follow-up-plan.md`](../plans/2026-05-15-manager-reactor-hot-loop-follow-up-plan.md)
+- [`docs/plans/2026-05-16-monitor-durable-collation-store-plan.md`](../plans/2026-05-16-monitor-durable-collation-store-plan.md)
 
 ## 1. TaskSpec (`weft/core/taskspec/model.py`) [CC-1]
 
@@ -166,10 +169,11 @@ Concrete task classes express different queue behaviors on top of `BaseTask`.
 
 _Implementation mapping_: `weft/core/tasks/consumer.py`,
 `weft/core/tasks/observer.py`, `weft/core/tasks/monitor.py`,
-`weft/core/tasks/task_monitor.py`, `weft/core/tasks/pipeline.py`,
+`weft/core/monitor/task_monitor.py`, `weft/core/tasks/pipeline.py`,
 `weft/core/tasks/debugger.py`, `weft/core/tasks/heartbeat.py`,
 `weft/core/tasks/interactive.py`, `weft/core/tasks/sessions.py`;
-re-exported from `weft/core/tasks/__init__.py`.
+task primitives are re-exported from `weft/core/tasks/__init__.py`, while the
+TaskMonitor runtime is owned by `weft/core/monitor/`.
 
 Current task families:
 
@@ -184,10 +188,21 @@ Current task families:
   `weft system task-monitor` command and by the manager-supervised internal
   monitor service. Its foreground `scan_once()` path scans `weft.log.tasks`
   with generator-based peek semantics. Its persistent path wakes from its own
-  `T{tid}.inbox`, scans task-log history by high-water cursor, and calls the
-  configured task-monitor processor. Custom processors run in the shared
+  `T{tid}.inbox`, scans task-log history by high-water cursor, and can build a
+  Monitor-owned durable collation store from retained task-log rows. The store
+  is a derived operational read model: it starts from the logged `TaskSpec`
+  summary when present, records exact raw task-log message IDs, emits compact
+  terminal task summaries through the configured monitor sink, and may support
+  table-backed exact raw deletion after any required external task-log JSONL
+  emit succeeds. External lifecycle retention output is owned by
+  `weft/core/monitor/external_log.py`; `WEFT_TASK_MONITOR_LOG_SINK` remains
+  monitor operational output, not the external lifecycle-retention contract.
+  The store is not lifecycle truth, result authority, queue truth, or a public
+  status dependency. The persistent monitor also calls the configured
+  task-monitor processor. Custom processors run in the shared
   broker-free worker lane from a candidate snapshot; the TaskMonitor reactor
-  owns checkpoint advancement, cached diagnostics, and all broker effects.
+  owns checkpoint advancement, Monitor-store writes, cached diagnostics, and
+  all broker effects.
   The launcher asks the persistent monitor for its next wait timeout so the
   monitor sleeps until heartbeat/local due time or task-local input instead of
   polling at the default task-process interval. The supervised monitor builds
@@ -199,8 +214,12 @@ Current task families:
   reserve, move, unclaim, or delete active, ambiguous, claimed, malformed,
   unknown, or non-exact lifecycle messages. `report_only` remains available as
   a non-destructive override. Built-in cleanup processors run on the reactor so
-  exact deletes stay in the canonical prune path. `jsonl_then_delete` remains
-  fail-closed until the operational logging callback lands.
+  exact deletes stay in the canonical prune path. Successful completed
+  lifecycle proof does not require a reserved-queue probe; reserved probing is
+  for failure-like or suspected-loss cases. `jsonl_then_delete` remains
+  fail-closed until the operational logging callback lands. Raw external
+  task-log mode is a separate deletion owner: it emits retained raw rows before
+  exact deletion and does not write the Monitor collation tables in that cycle.
 - `PipelineTask`: internal orchestrator for first-class linear pipelines
 - `PipelineEdgeTask`: generated one-shot edge task for pipeline handoff
 - `HeartbeatTask`: manager-supervised internal interval emitter for
@@ -438,7 +457,13 @@ That means:
 _Implementation mapping_: `weft/core/resource_monitor.py`,
 `weft/core/runner_diagnostics.py`, `weft/core/runners/host.py`,
 `weft/core/runners/subprocess_runner.py`, `weft/core/tasks/sessions.py`,
-`weft/core/tasks/consumer.py`.
+`weft/core/tasks/consumer.py`. Monitor-owned durable collation is implemented
+by `weft/core/monitor/store.py`, `weft/core/monitor/sql.py`,
+`weft/core/monitor/collation.py`, and `weft/core/monitor/task_monitor.py`.
+
+## Related Plans
+
+- [`docs/plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md`](../plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md)
 
 ## Related Documents
 

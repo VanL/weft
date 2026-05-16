@@ -248,8 +248,9 @@ def test_interactive_client_waits_for_matching_request_id(broker_env) -> None:
         ctrl_out=spec.io.control["ctrl_out"],
     )
 
-    client.start()
     try:
+        # Seed before start so this test verifies ctrl_out replay and matching,
+        # not watcher startup timing under backend load.
         ctrl_out.write(
             json.dumps(
                 {
@@ -274,6 +275,7 @@ def test_interactive_client_waits_for_matching_request_id(broker_env) -> None:
                 }
             )
         )
+        client.start()
         response = client.wait_for_control_response(
             "PING",
             status="ok",

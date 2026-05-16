@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+import weft.core.monitor.cleanup as cleanup_mod
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import (
     QUEUE_RESERVED_SUFFIX,
@@ -22,13 +23,13 @@ from weft._constants import (
     WEFT_TID_MAPPINGS_QUEUE,
 )
 from weft.context import WeftContext, build_context
-from weft.core.pruning.policies import malformed_row_candidates, older_than_candidates
-from weft.core.queue_window import DecodedQueueWindowRow, QueueWindowRow
-from weft.core.task_log_collation import collate_next_task_log_group
-from weft.core.tasks.task_monitor_cleanup import (
+from weft.core.monitor.cleanup import (
     TaskMonitorCleanupConfig,
     run_task_monitor_cleanup,
 )
+from weft.core.monitor.task_log_collation import collate_next_task_log_group
+from weft.core.pruning.policies import malformed_row_candidates, older_than_candidates
+from weft.core.queue_window import DecodedQueueWindowRow, QueueWindowRow
 from weft.helpers import iter_queue_entries
 
 pytestmark = [pytest.mark.shared]
@@ -370,6 +371,68 @@ def test_task_monitor_cleanup_collates_terminal_task_log_for_anchor_tid(
     assert remaining == [{"event": "work_started", "tid": "1778000000000000002"}]
 
 
+def test_task_monitor_cleanup_collates_complete_family_behind_open_prefix(
+    tmp_path: Path,
+) -> None:
+    ctx = _context(tmp_path)
+    open_tid = "1778000000000000001"
+    complete_tid = "1778000000000000002"
+    _write_json(
+        ctx,
+        WEFT_GLOBAL_LOG_QUEUE,
+        {"event": "work_started", "tid": open_tid},
+    )
+    _write_json(
+        ctx,
+        WEFT_GLOBAL_LOG_QUEUE,
+        {"event": "task_activity", "tid": open_tid, "activity": "waiting"},
+    )
+    complete_start_id = _write_json(
+        ctx,
+        WEFT_GLOBAL_LOG_QUEUE,
+        {"event": "work_started", "tid": complete_tid},
+    )
+    complete_terminal_id = _write_json(
+        ctx,
+        WEFT_GLOBAL_LOG_QUEUE,
+        {"event": "work_completed", "status": "completed", "tid": complete_tid},
+    )
+
+    result = run_task_monitor_cleanup(
+        ctx,
+        TaskMonitorCleanupConfig(
+            batch_size=2,
+            task_log_scan_limit=10,
+            task_log_min_age_seconds=1.0,
+        ),
+        apply=True,
+        now_ns=_now_after(complete_terminal_id, 2.0),
+    )
+
+    assert result.success
+    assert result.deleted == 2
+    assert {candidate.message_id for candidate in result.candidates} == {
+        complete_start_id,
+        complete_terminal_id,
+    }
+    stats = _policy_summary_by_policy(result)
+    assert (
+        stats[TASK_MONITOR_POLICY_TASK_LOG_COLLATE_COMPLETE_LIFECYCLE]["selected"] == 2
+    )
+    queue_summary = next(
+        stat.to_summary()
+        for stat in result.queue_stats
+        if stat.queue == WEFT_GLOBAL_LOG_QUEUE
+    )
+    assert queue_summary["metadata"]["family_selection"][
+        "skipped_open_family_count"
+    ] == 1
+    remaining = [
+        json.loads(body) for body, _message_id in _read_rows(ctx, WEFT_GLOBAL_LOG_QUEUE)
+    ]
+    assert [row["tid"] for row in remaining] == [open_tid, open_tid]
+
+
 def test_task_monitor_cleanup_deletes_reserved_work_with_terminal_log_proof(
     tmp_path: Path,
 ) -> None:
@@ -417,6 +480,52 @@ def test_task_monitor_cleanup_deletes_reserved_work_with_terminal_log_proof(
     assert reserved_stats.selected == 1
     assert reserved_stats.deleted == 1
     assert _read_rows(ctx, reserved_queue) == []
+
+
+def test_task_monitor_cleanup_does_not_probe_reserved_for_successful_completion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = _context(tmp_path)
+    tid = "1778000000000000001"
+    _write_json(
+        ctx,
+        WEFT_GLOBAL_LOG_QUEUE,
+        {"event": "work_started", "tid": tid},
+    )
+    terminal_id = _write_json(
+        ctx,
+        WEFT_GLOBAL_LOG_QUEUE,
+        {"event": "work_completed", "tid": tid, "status": "completed"},
+    )
+    real_scan = cleanup_mod.scan_queue_window
+
+    def fail_reserved_scan(*args: object, **kwargs: object) -> object:
+        queue_name = args[1]
+        if isinstance(queue_name, str) and queue_name.endswith(
+            f".{QUEUE_RESERVED_SUFFIX}"
+        ):
+            raise AssertionError("successful completions must not probe reserved")
+        return real_scan(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "weft.core.monitor.cleanup.scan_queue_window",
+        fail_reserved_scan,
+    )
+
+    result = run_task_monitor_cleanup(
+        ctx,
+        TaskMonitorCleanupConfig(batch_size=10, task_log_min_age_seconds=1.0),
+        apply=True,
+        now_ns=_now_after(terminal_id, 2.0),
+    )
+
+    assert result.success
+    assert result.deleted == 2
+    assert all(
+        stat.policy != TASK_MONITOR_POLICY_RESERVED_DELETE_TERMINAL_PROVEN
+        for stat in result.policy_stats
+    )
 
 
 def test_task_monitor_cleanup_preserves_reserved_work_without_terminal_log_proof(
@@ -756,7 +865,7 @@ def test_task_monitor_cleanup_scan_budget_and_followup_delete_do_not_skip(
     for index in range(5):
         _write_raw(ctx, WEFT_GLOBAL_LOG_QUEUE, f"bad-{index}")
 
-    config = TaskMonitorCleanupConfig(batch_size=2)
+    config = TaskMonitorCleanupConfig(batch_size=2, task_log_scan_limit=2)
     first = run_task_monitor_cleanup(ctx, config, apply=True)
     second = run_task_monitor_cleanup(ctx, config, apply=True)
 
