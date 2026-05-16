@@ -540,8 +540,7 @@ def test_task_monitor_ping_includes_cached_collation_store_status(
     pong = next(
         response
         for response in responses
-        if response["command"] == CONTROL_PING
-        and response.get("request_id") == "store"
+        if response["command"] == CONTROL_PING and response.get("request_id") == "store"
     )
     store = pong[PONG_EXTENSION_KEY]["task_monitor"]["collation_store"]
     assert store["enabled"] is True
@@ -948,7 +947,8 @@ def test_task_monitor_raw_external_logs_and_deletes_without_store(
         if message.startswith("{")
     )
     records = [
-        json.loads(line) for line in external_path.read_text(encoding="utf-8").splitlines()
+        json.loads(line)
+        for line in external_path.read_text(encoding="utf-8").splitlines()
     ]
     assert [record["record_type"] for record in records] == [
         "task_log_raw",

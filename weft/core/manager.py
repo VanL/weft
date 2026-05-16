@@ -5593,8 +5593,7 @@ class Manager(BaseTask):
                 self._managed_internal_spawn_enqueued and not enqueued_before
             )
             should_drain_internal = (
-                self._managed_internal_spawn_enqueued
-                or internal_spawn_pending_for_pass
+                self._managed_internal_spawn_enqueued or internal_spawn_pending_for_pass
             )
             self._managed_internal_spawn_enqueued = False
             drained = (

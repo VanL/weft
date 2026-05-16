@@ -226,7 +226,9 @@ def select_deletable_task_log_messages(
 ) -> str:
     """Build a query for exact task-log messages proven deletable."""
 
-    summary_condition = "AND c.summary_emitted_at_ns IS NOT NULL" if require_summary else ""
+    summary_condition = (
+        "AND c.summary_emitted_at_ns IS NOT NULL" if require_summary else ""
+    )
     state_condition = (
         "AND (c.terminal_seen = 1 OR c.suspect_reason IS NOT NULL)"
         if require_summary

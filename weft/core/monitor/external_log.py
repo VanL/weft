@@ -196,7 +196,9 @@ class ExternalTaskLogSink:
         if self._handler is not None:
             return self._handler
         if self._path.exists() and self._path.is_dir():
-            raise ExternalTaskLogError(f"external task-log path is a directory: {self._path}")
+            raise ExternalTaskLogError(
+                f"external task-log path is a directory: {self._path}"
+            )
         self._path.parent.mkdir(parents=True, exist_ok=True)
         handler = _RaisingFileHandler(self._path, encoding="utf-8")
         handler.setLevel(logging.DEBUG)
@@ -227,7 +229,9 @@ class ExternalTaskLogSink:
         self._total_emitted += 1
 
 
-def disabled_external_task_log_status(*, mode: str, path: str | None) -> ExternalTaskLogStatus:
+def disabled_external_task_log_status(
+    *, mode: str, path: str | None
+) -> ExternalTaskLogStatus:
     """Return a cached status for disabled external logging."""
 
     return ExternalTaskLogStatus(

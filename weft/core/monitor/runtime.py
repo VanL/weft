@@ -115,9 +115,7 @@ class TaskMonitorRuntimeConfig:
             )
         )
         if task_log_scan_limit <= 0:
-            raise ValueError(
-                "WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT must be positive"
-            )
+            raise ValueError("WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT must be positive")
 
         store_write_batch_size = int(
             config.get(
@@ -126,7 +124,9 @@ class TaskMonitorRuntimeConfig:
             )
         )
         if store_write_batch_size <= 0:
-            raise ValueError("WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE must be positive")
+            raise ValueError(
+                "WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE must be positive"
+            )
 
         task_log_retention_period_seconds = float(
             config.get(
@@ -135,9 +135,7 @@ class TaskMonitorRuntimeConfig:
             )
         )
         if task_log_retention_period_seconds <= 0:
-            raise ValueError(
-                "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS must be positive"
-            )
+            raise ValueError("WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS must be positive")
 
         task_log_external_path = str(
             config.get(
@@ -151,12 +149,16 @@ class TaskMonitorRuntimeConfig:
                 bool(task_log_external_path),
             )
         )
-        task_log_external_mode = str(
-            config.get(
-                "WEFT_LOG_TASKS_EXTERNAL_MODE",
-                WEFT_LOG_TASKS_EXTERNAL_MODE_DEFAULT,
+        task_log_external_mode = (
+            str(
+                config.get(
+                    "WEFT_LOG_TASKS_EXTERNAL_MODE",
+                    WEFT_LOG_TASKS_EXTERNAL_MODE_DEFAULT,
+                )
             )
-        ).strip().lower()
+            .strip()
+            .lower()
+        )
         if task_log_external_mode not in WEFT_LOG_TASKS_EXTERNAL_MODES:
             allowed = ", ".join(sorted(WEFT_LOG_TASKS_EXTERNAL_MODES))
             raise ValueError(f"WEFT_LOG_TASKS_EXTERNAL_MODE must be one of: {allowed}")

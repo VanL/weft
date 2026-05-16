@@ -400,9 +400,7 @@ def _task_log_candidates(
         selection_limit=remaining,
     )
     complete_lifecycle_summaries = family_selection.complete_lifecycle_groups
-    terminal_without_start_summaries = (
-        family_selection.terminal_without_start_groups
-    )
+    terminal_without_start_summaries = family_selection.terminal_without_start_groups
     complete_lifecycle_candidates = [
         candidate
         for group in complete_lifecycle_summaries
@@ -436,9 +434,7 @@ def _task_log_candidates(
         old_stop_reason = TASK_MONITOR_TASK_LOG_SELECTION_LIMIT_REACHED
     candidates.extend(old_task_log_candidates)
     stop_reason = (
-        family_selection.stop_reason
-        or old_stop_reason
-        or scan_window.stop_reason
+        family_selection.stop_reason or old_stop_reason or scan_window.stop_reason
     )
     collated_summaries = (
         *complete_lifecycle_summaries,

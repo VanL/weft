@@ -2143,7 +2143,9 @@ def test_reconcile_reuses_tracked_service_candidates(
             source="manager-child",
         )
 
-    monkeypatch.setattr(manager, "_pending_service_keys", lambda _keys, **_kwargs: set())
+    monkeypatch.setattr(
+        manager, "_pending_service_keys", lambda _keys, **_kwargs: set()
+    )
     monkeypatch.setattr(manager, "_tracked_service_candidate", tracked)
     monkeypatch.setattr(
         manager,

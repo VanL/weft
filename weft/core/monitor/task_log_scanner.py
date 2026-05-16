@@ -427,7 +427,9 @@ def _summarize_open_families(
     summaries: list[TaskLogSkippedFamilySummary] = []
     for tid, family_rows in by_tid.items():
         start_rows = sum(1 for row in family_rows if _row_has_task_log_start(row))
-        terminal_rows = sum(1 for row in family_rows if is_terminal_task_log(row.payload))
+        terminal_rows = sum(
+            1 for row in family_rows if is_terminal_task_log(row.payload)
+        )
         if start_rows == 0 or terminal_rows > 0:
             continue
         summaries.append(

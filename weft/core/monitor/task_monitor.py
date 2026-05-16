@@ -348,9 +348,7 @@ class TaskMonitorTask(BaseTask):
             task_log_external=self._external_task_log_status.to_summary(),
             processor=self._monitor_config.processor,
             log_sink=self._monitor_config.log_sink,
-            collation_store_enabled=(
-                self._monitor_config.collation_store_enabled
-            ),
+            collation_store_enabled=(self._monitor_config.collation_store_enabled),
             table_delete_enabled=self._monitor_config.table_delete_enabled,
         )
 
@@ -505,9 +503,7 @@ class TaskMonitorTask(BaseTask):
                 "interval_seconds": self._monitor_config.interval_seconds,
                 "batch_size": self._monitor_config.batch_size,
                 "task_log_scan_limit": self._monitor_config.task_log_scan_limit,
-                "store_write_batch_size": (
-                    self._monitor_config.store_write_batch_size
-                ),
+                "store_write_batch_size": (self._monitor_config.store_write_batch_size),
                 "task_log_retention_period_seconds": (
                     self._monitor_config.task_log_retention_period_seconds
                 ),
@@ -533,17 +529,11 @@ class TaskMonitorTask(BaseTask):
                 "last_cleanup_queue_stats": list(self._last_cleanup_queue_stats),
                 "last_cleanup_policy_stats": list(self._last_cleanup_policy_stats),
                 "collation_store_available": self._monitor_store_status.available,
-                "collation_schema_version": (
-                    self._monitor_store_status.schema_version
-                ),
+                "collation_schema_version": (self._monitor_store_status.schema_version),
                 "collation_checkpoint": self._monitor_store_status.checkpoint,
-                "last_collation_rows_processed": (
-                    self._last_collation_rows_processed
-                ),
+                "last_collation_rows_processed": (self._last_collation_rows_processed),
                 "last_collation_tasks_updated": self._last_collation_tasks_updated,
-                "last_collation_terminal_tasks": (
-                    self._last_collation_terminal_tasks
-                ),
+                "last_collation_terminal_tasks": (self._last_collation_terminal_tasks),
                 "last_collation_summaries_emitted": (
                     self._last_collation_summaries_emitted
                 ),
@@ -580,9 +570,7 @@ class TaskMonitorTask(BaseTask):
                 "interval_seconds": self._monitor_config.interval_seconds,
                 "batch_size": self._monitor_config.batch_size,
                 "task_log_scan_limit": self._monitor_config.task_log_scan_limit,
-                "store_write_batch_size": (
-                    self._monitor_config.store_write_batch_size
-                ),
+                "store_write_batch_size": (self._monitor_config.store_write_batch_size),
                 "task_log_retention_period_seconds": (
                     self._monitor_config.task_log_retention_period_seconds
                 ),
@@ -620,13 +608,9 @@ class TaskMonitorTask(BaseTask):
                     "cleanup_policy_stats": list(self._last_cleanup_policy_stats)[
                         :TASK_MONITOR_PONG_DETAIL_LIMIT
                     ],
-                    "collation_rows_processed": (
-                        self._last_collation_rows_processed
-                    ),
+                    "collation_rows_processed": (self._last_collation_rows_processed),
                     "collation_tasks_updated": self._last_collation_tasks_updated,
-                    "collation_terminal_tasks": (
-                        self._last_collation_terminal_tasks
-                    ),
+                    "collation_terminal_tasks": (self._last_collation_terminal_tasks),
                     "collation_summaries_emitted": (
                         self._last_collation_summaries_emitted
                     ),
@@ -765,8 +749,8 @@ class TaskMonitorTask(BaseTask):
             self._last_collation_rows_processed = window.scanned
             self._last_collation_tasks_updated = ingest.tasks_updated
             self._last_collation_terminal_tasks = ingest.terminal_tasks
-            self._last_collation_summaries_emitted = (
-                self._emit_monitor_store_summaries(store, now_ns=now_ns)
+            self._last_collation_summaries_emitted = self._emit_monitor_store_summaries(
+                store, now_ns=now_ns
             )
             if (
                 self._monitor_config.processor == "delete"
@@ -1065,9 +1049,7 @@ class TaskMonitorTask(BaseTask):
             "collation_rows_processed": self._last_collation_rows_processed,
             "collation_tasks_updated": self._last_collation_tasks_updated,
             "collation_terminal_tasks": self._last_collation_terminal_tasks,
-            "collation_summaries_emitted": (
-                self._last_collation_summaries_emitted
-            ),
+            "collation_summaries_emitted": (self._last_collation_summaries_emitted),
             "collation_messages_marked_deleted": (
                 self._last_collation_messages_marked_deleted
             ),
@@ -1345,9 +1327,7 @@ class TaskMonitorTask(BaseTask):
             reported=reported,
             stop_reason=stop_reason,
             reason_counts=(
-                {"older_than_task_log_retention_period": selected}
-                if selected
-                else {}
+                {"older_than_task_log_retention_period": selected} if selected else {}
             ),
         )
         policy_stat = CleanupPolicyStats(
@@ -1359,9 +1339,7 @@ class TaskMonitorTask(BaseTask):
             reported=reported,
             stop_reason=stop_reason,
             reason_counts=(
-                {"older_than_task_log_retention_period": selected}
-                if selected
-                else {}
+                {"older_than_task_log_retention_period": selected} if selected else {}
             ),
         )
         self._last_prune_records_scanned += scanned

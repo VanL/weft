@@ -540,9 +540,7 @@ WEFT_LOG_TASKS_EXTERNAL_ENABLED_DEFAULT: Final[bool] = False
 WEFT_LOG_TASKS_EXTERNAL_MODE_DEFAULT: Final[str] = "collated"
 """Default external task-log logging mode when a path is configured."""
 
-WEFT_LOG_TASKS_EXTERNAL_MODES: Final[frozenset[str]] = frozenset(
-    {"collated", "raw"}
-)
+WEFT_LOG_TASKS_EXTERNAL_MODES: Final[frozenset[str]] = frozenset({"collated", "raw"})
 """Supported external task-log logging modes."""
 
 WEFT_LOG_TASKS_EXTERNAL_SCHEMA_VERSION: Final[int] = 1

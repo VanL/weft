@@ -424,9 +424,9 @@ def test_task_monitor_cleanup_collates_complete_family_behind_open_prefix(
         for stat in result.queue_stats
         if stat.queue == WEFT_GLOBAL_LOG_QUEUE
     )
-    assert queue_summary["metadata"]["family_selection"][
-        "skipped_open_family_count"
-    ] == 1
+    assert (
+        queue_summary["metadata"]["family_selection"]["skipped_open_family_count"] == 1
+    )
     remaining = [
         json.loads(body) for body, _message_id in _read_rows(ctx, WEFT_GLOBAL_LOG_QUEUE)
     ]

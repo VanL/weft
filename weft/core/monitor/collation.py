@@ -146,9 +146,7 @@ def update_from_task_log_payload(
             "last_event": event,
             "last_message_id": message_id,
         },
-        reserved_probe_needed=(
-            terminal_seen and terminal_status != STATUS_COMPLETED
-        ),
+        reserved_probe_needed=(terminal_seen and terminal_status != STATUS_COMPLETED),
     )
 
 
@@ -166,7 +164,16 @@ def _taskspec_summary(taskspec: Mapping[str, Any] | None) -> dict[str, Any]:
     if taskspec is None:
         return {}
     summary: dict[str, Any] = {}
-    for key in ("tid", "version", "name", "description", "spec", "io", "state", "metadata"):
+    for key in (
+        "tid",
+        "version",
+        "name",
+        "description",
+        "spec",
+        "io",
+        "state",
+        "metadata",
+    ):
         value = taskspec.get(key)
         if value is not None:
             summary[key] = value

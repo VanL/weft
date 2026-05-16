@@ -274,7 +274,12 @@ _monitor_index_specs: tuple[_MonitorIndexSpec, ...] = (
     _MonitorIndexSpec(
         name="idx_weft_monitor_collations_terminal",
         table=_monitor_tables.task_collations,
-        columns=("context_key", "terminal_seen", "raw_deleted_at_ns", "completed_at_ns"),
+        columns=(
+            "context_key",
+            "terminal_seen",
+            "raw_deleted_at_ns",
+            "completed_at_ns",
+        ),
     ),
     _MonitorIndexSpec(
         name="idx_weft_monitor_collations_last_seen",
@@ -627,7 +632,10 @@ class MonitorStore:
         Spec: [SB-0.4a], [MF-5]
         """
 
-        if self._context.database_path is not None and not self._context.database_path.exists():
+        if (
+            self._context.database_path is not None
+            and not self._context.database_path.exists()
+        ):
             raise MonitorStoreUnavailable("broker database does not exist")
 
         with self._context.broker() as broker:
@@ -770,7 +778,9 @@ class MonitorStore:
         if limit <= 0:
             return ()
         with self._context.broker() as broker:
-            return self._access(_runner_from_broker(broker)).list_unemitted_terminal_tasks(
+            return self._access(
+                _runner_from_broker(broker)
+            ).list_unemitted_terminal_tasks(
                 limit=limit,
             )
 
@@ -884,6 +894,7 @@ class MonitorStore:
         version = value.get("version")
         return version if isinstance(version, int) else None
 
+
 def _record_from_row(row: tuple[Any, ...]) -> MonitorTaskCollationRecord:
     values = dict(zip(_task_columns, row, strict=True))
     return MonitorTaskCollationRecord(
@@ -937,9 +948,7 @@ def _merge_record(
             terminal_seen=update.terminal_seen,
             terminal_event=update.terminal_event,
             terminal_status=update.terminal_status,
-            terminal_message_id=(
-                update.message_id if update.terminal_seen else None
-            ),
+            terminal_message_id=(update.message_id if update.terminal_seen else None),
             return_code=update.return_code,
             first_message_id=update.message_id,
             last_message_id=update.message_id,
@@ -980,17 +989,23 @@ def _merge_record(
         tid=existing.tid,
         name=_prefer_latest(existing.name, update.name, latest_update),
         runner=_prefer_latest(existing.runner, update.runner, latest_update),
-        parent_tid=_prefer_latest(existing.parent_tid, update.parent_tid, latest_update),
+        parent_tid=_prefer_latest(
+            existing.parent_tid, update.parent_tid, latest_update
+        ),
         role=_prefer_latest(existing.role, update.role, latest_update),
         status=status,
         terminal_seen=terminal_seen,
         terminal_event=terminal_event,
         terminal_status=terminal_status,
         terminal_message_id=terminal_message_id,
-        return_code=_prefer_latest(existing.return_code, update.return_code, latest_update),
+        return_code=_prefer_latest(
+            existing.return_code, update.return_code, latest_update
+        ),
         first_message_id=min(existing.first_message_id, update.message_id),
         last_message_id=max(existing.last_message_id, update.message_id),
-        first_seen_at_ns=_min_optional(existing.first_seen_at_ns, update.first_seen_at_ns),
+        first_seen_at_ns=_min_optional(
+            existing.first_seen_at_ns, update.first_seen_at_ns
+        ),
         last_seen_at_ns=_max_optional(existing.last_seen_at_ns, update.last_seen_at_ns),
         started_at_ns=_min_optional(existing.started_at_ns, update.started_at_ns),
         completed_at_ns=_prefer_latest(

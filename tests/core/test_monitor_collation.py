@@ -25,7 +25,9 @@ def _row(message_id: int, payload: dict[str, Any]) -> DecodedQueueWindowRow:
     )
 
 
-def test_monitor_collation_captures_successful_task_summary_without_reserved_probe() -> None:
+def test_monitor_collation_captures_successful_task_summary_without_reserved_probe() -> (
+    None
+):
     payload = {
         "event": "work_completed",
         "status": "completed",
