@@ -322,7 +322,7 @@ def test_task_monitor_cleanup_collates_terminal_task_log_for_anchor_tid(
     tmp_path: Path,
 ) -> None:
     ctx = _context(tmp_path)
-    start_id = _write_json(
+    _write_json(
         ctx,
         WEFT_GLOBAL_LOG_QUEUE,
         {"event": "work_started", "tid": "1778000000000000001"},
@@ -332,7 +332,7 @@ def test_task_monitor_cleanup_collates_terminal_task_log_for_anchor_tid(
         WEFT_GLOBAL_LOG_QUEUE,
         {"event": "work_started", "tid": "1778000000000000002"},
     )
-    _write_json(
+    terminal_id = _write_json(
         ctx,
         WEFT_GLOBAL_LOG_QUEUE,
         {"event": "work_completed", "tid": "1778000000000000001"},
@@ -342,7 +342,7 @@ def test_task_monitor_cleanup_collates_terminal_task_log_for_anchor_tid(
         ctx,
         TaskMonitorCleanupConfig(batch_size=10, task_log_min_age_seconds=1.0),
         apply=True,
-        now_ns=_now_after(start_id, 2.0),
+        now_ns=_now_after(terminal_id, 2.0),
     )
 
     assert result.success
