@@ -1955,6 +1955,44 @@ def test_manager_next_wait_timeout_returns_zero_for_immediate_work(
     assert manager.next_wait_timeout() == 0.0
 
 
+def test_manager_autostart_due_bypasses_convergence_throttle(
+    tmp_path: Path,
+    broker_env,
+    unique_tid: str,
+) -> None:
+    db_path, _make_queue = broker_env
+    autostart_dir = tmp_path / "autostart"
+    autostart_dir.mkdir()
+    config = load_config({"WEFT_TASK_MONITOR_ENABLED": "0"})
+    config["WEFT_AUTOSTART_TASKS"] = True
+    config["WEFT_AUTOSTART_DIR"] = str(autostart_dir)
+    manager = Manager(
+        db_path,
+        make_manager_spec(unique_tid, idle_timeout=0.0),
+        config=config,
+    )
+    now_ns = time.time_ns()
+    stale_scan_ns = now_ns - manager._autostart_scan_interval_ns - 1
+    manager._autostart_last_scan_ns = stale_scan_ns
+    manager._last_managed_service_convergence_ns = now_ns
+
+    try:
+        assert manager.next_wait_timeout() == 0.0
+
+        manager.process_once()
+
+        assert manager._autostart_last_scan_ns > stale_scan_ns
+        assert "autostart_scan_due" not in (
+            manager._managed_service_convergence_active_reasons(
+                include_autostart=True,
+                include_broker=False,
+            )
+        )
+    finally:
+        manager.stop(join=False)
+        manager.cleanup()
+
+
 def test_manager_clears_dispatch_stall_timer_when_backlog_drains(
     manager_setup,
     monkeypatch: pytest.MonkeyPatch,
@@ -4943,7 +4981,7 @@ def test_manager_services_successfully_reserved_public_work(
     assert reserved_queue.peek_one(exact_timestamp=message_id) is None
 
 
-def test_manager_pending_precheck_forces_inactive_public_queue_probe(
+def test_manager_does_not_probe_inactive_public_spawn_queue(
     broker_env,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -4973,8 +5011,56 @@ def test_manager_pending_precheck_forces_inactive_public_queue_probe(
 
     manager._active_queues = []
     manager._queue_iterator = itertools.cycle([])
+    manager._check_interval = 10
     manager._check_counter = 1
     manager._pending_messages_precheck_confirmed = False
+    monkeypatch.setattr(manager, "_leader_tid", lambda: manager.tid)
+    monkeypatch.setattr(manager, "_launch_child_task", _record_launch)
+
+    try:
+        manager.process_once()
+    finally:
+        manager.stop(join=False)
+        manager.cleanup()
+
+    assert launched == []
+    assert spawn_queue.peek_one(exact_timestamp=message_id) is not None
+    assert reserved_queue.peek_one(exact_timestamp=message_id) is None
+
+
+def test_manager_pending_precheck_activates_public_spawn_queue(
+    broker_env,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    config = load_config({"WEFT_TASK_MONITOR_ENABLED": "0"})
+    manager = Manager(db_path, make_manager_spec(unique_tid), config=config)
+    spawn_queue = make_queue(WEFT_SPAWN_REQUESTS_QUEUE)
+    reserved_queue = make_queue(manager._queue_names["reserved"])
+    drain(spawn_queue)
+
+    payload = {
+        "name": "inactive-public-queue",
+        "spec": {
+            "type": "function",
+            "function_target": "tests.tasks.sample_targets:echo_payload",
+        },
+    }
+    spawn_queue.write(json.dumps(payload))
+    message_id = pending_timestamps(spawn_queue)[0]
+    launched: list[str] = []
+
+    def _record_launch(child_spec: TaskSpec, *_args: object, **_kwargs: object) -> bool:
+        assert child_spec.tid is not None
+        launched.append(child_spec.tid)
+        return True
+
+    manager._active_queues = []
+    manager._queue_iterator = itertools.cycle([])
+    manager._check_interval = 10
+    manager._check_counter = 1
+    manager._pending_messages_precheck_confirmed = True
     monkeypatch.setattr(manager, "_leader_tid", lambda: manager.tid)
     monkeypatch.setattr(manager, "_launch_child_task", _record_launch)
 
@@ -4989,7 +5075,7 @@ def test_manager_pending_precheck_forces_inactive_public_queue_probe(
     assert reserved_queue.peek_one(exact_timestamp=message_id) is None
 
 
-def test_manager_spawn_drains_do_not_depend_on_pending_hint(
+def test_manager_spawn_drains_require_pending_evidence(
     broker_env,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -5046,10 +5132,10 @@ def test_manager_spawn_drains_do_not_depend_on_pending_hint(
         manager.stop(join=False)
         manager.cleanup()
 
-    assert launched == ["internal-first"] + [f"public-{index}" for index in range(5)]
-    assert internal_queue.peek_one() is None
+    assert launched == []
+    assert internal_queue.peek_one() is not None
     assert internal_reserved.peek_one() is None
-    assert spawn_queue.peek_one() is None
+    assert spawn_queue.peek_one() is not None
     assert reserved_queue.peek_one() is None
 
 

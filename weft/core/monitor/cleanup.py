@@ -144,6 +144,17 @@ class TaskMonitorCleanupResult:
         return tuple(stat.to_summary() for stat in self.policy_stats)
 
 
+@dataclass(frozen=True, slots=True)
+class _CleanupPolicyRun:
+    """Internal result for one ordered cleanup-policy run."""
+
+    candidates: tuple[CleanupCandidate, ...] = ()
+    applied_candidates: tuple[AppliedCleanupCandidate, ...] = ()
+    queue_stats: tuple[CleanupQueueStats, ...] = ()
+    policy_stats: tuple[CleanupPolicyStats, ...] = ()
+    errors: tuple[str, ...] = ()
+
+
 def run_task_monitor_cleanup(
     ctx: WeftContext,
     config: TaskMonitorCleanupConfig,
@@ -171,6 +182,7 @@ def run_task_monitor_cleanup(
     current_ns = time.time_ns() if now_ns is None else now_ns
     excluded = {tid for tid in exclude_tids if tid}
     candidates: list[CleanupCandidate] = []
+    applied: list[AppliedCleanupCandidate] = []
     queue_stats: list[CleanupQueueStats] = []
     policy_stats: list[CleanupPolicyStats] = []
     errors: list[str] = []
@@ -194,15 +206,19 @@ def run_task_monitor_cleanup(
                     queue_name,
                     scan_limit=config.task_log_scan_limit,
                 )
-                selected, queue_stat_records, policy_stat_records = (
-                    _task_log_candidates(
-                        ctx,
-                        task_log_window,
-                        config=config,
-                        now_ns=current_ns,
-                        exclude_tids=excluded,
-                    )
+                policy_run = _task_log_candidates(
+                    ctx,
+                    task_log_window,
+                    config=config,
+                    now_ns=current_ns,
+                    exclude_tids=excluded,
+                    apply=apply,
                 )
+                selected = list(policy_run.candidates)
+                applied.extend(policy_run.applied_candidates)
+                queue_stat_records = policy_run.queue_stats
+                policy_stat_records = policy_run.policy_stats
+                errors.extend(policy_run.errors)
             else:
                 rows = scan_queue_window(ctx, queue_name, limit=config.batch_size)
                 selected, queue_stat_records, policy_stat_records = (
@@ -214,6 +230,7 @@ def run_task_monitor_cleanup(
                         exclude_tids=excluded,
                     )
                 )
+                applied.extend(_apply_policy_candidates(ctx, selected, apply=apply))
         except (BrokerError, OSError, RuntimeError, ValueError) as exc:
             errors.append(f"failed to scan {queue_name}: {exc}")
             continue
@@ -221,29 +238,20 @@ def run_task_monitor_cleanup(
         queue_stats.extend(queue_stat_records)
         policy_stats.extend(policy_stat_records)
 
-    applied: tuple[AppliedCleanupCandidate, ...] = ()
-    if apply and candidates:
-        applied = tuple(
-            apply_exact_prune_candidates(
-                ctx,
-                candidates,
-                apply_result=applied_cleanup_candidate,
-            )
-        )
-
+    applied_tuple = tuple(applied)
     final_queue_stats = tuple(
-        _with_apply_counts(queue_stats, applied, report_only=not apply)
+        _with_apply_counts(queue_stats, applied_tuple, report_only=not apply)
     )
     final_policy_stats = tuple(
-        _with_policy_apply_counts(policy_stats, applied, report_only=not apply)
+        _with_policy_apply_counts(policy_stats, applied_tuple, report_only=not apply)
     )
     apply_errors = tuple(
-        candidate.error for candidate in applied if candidate.error is not None
+        candidate.error for candidate in applied_tuple if candidate.error is not None
     )
     return TaskMonitorCleanupResult(
         success=not errors and not apply_errors,
         candidates=tuple(candidates),
-        applied_candidates=applied,
+        applied_candidates=applied_tuple,
         queue_stats=final_queue_stats,
         policy_stats=final_policy_stats,
         errors=(*errors, *apply_errors),
@@ -282,6 +290,25 @@ def _select_queue_candidates(
             ),
         ),
         (),
+    )
+
+
+def _apply_policy_candidates(
+    ctx: WeftContext,
+    candidates: Sequence[CleanupCandidate],
+    *,
+    apply: bool,
+) -> tuple[AppliedCleanupCandidate, ...]:
+    """Apply one ordered policy's exact-delete candidates."""
+
+    if not apply or not candidates:
+        return ()
+    return tuple(
+        apply_exact_prune_candidates(
+            ctx,
+            candidates,
+            apply_result=applied_cleanup_candidate,
+        )
     )
 
 
@@ -377,20 +404,29 @@ def _task_log_candidates(
     config: TaskMonitorCleanupConfig,
     now_ns: int,
     exclude_tids: set[str],
-) -> tuple[
-    list[CleanupCandidate],
-    tuple[CleanupQueueStats, ...],
-    tuple[CleanupPolicyStats, ...],
-]:
+    apply: bool,
+) -> _CleanupPolicyRun:
     rows = scan_window.rows
+    applied: list[AppliedCleanupCandidate] = []
+    policy_stats: list[CleanupPolicyStats] = []
     remaining = config.batch_size
     malformed_candidates = _select_malformed_task_log_candidates(
         rows,
         limit=remaining,
     )
     candidates = list(malformed_candidates)
+    applied.extend(_apply_policy_candidates(ctx, malformed_candidates, apply=apply))
     claimed = {candidate.message_id for candidate in candidates}
     remaining = max(0, config.batch_size - len(candidates))
+    policy_stats.append(
+        cleanup_policy_stats(
+            WEFT_GLOBAL_LOG_QUEUE,
+            policy=TASK_MONITOR_POLICY_TASK_LOG_DELETE_MALFORMED,
+            scanned=scan_window.scanned,
+            candidates=malformed_candidates,
+            stop_reason=None,
+        )
+    )
     claimed_total = (
         _queue_claimed_count(ctx, WEFT_GLOBAL_LOG_QUEUE) if remaining > 0 else 0
     )
@@ -404,12 +440,24 @@ def _task_log_candidates(
         limit=remaining,
     )
     candidates.extend(claimed_task_log_candidates)
+    applied.extend(
+        _apply_policy_candidates(ctx, claimed_task_log_candidates, apply=apply)
+    )
     claimed.update(candidate.message_id for candidate in claimed_task_log_candidates)
     remaining = max(0, config.batch_size - len(candidates))
     claimed_stop_reason = (
         TASK_MONITOR_TASK_LOG_SELECTION_LIMIT_REACHED
         if claimed_total > len(claimed_task_log_candidates)
         else None
+    )
+    policy_stats.append(
+        cleanup_policy_stats(
+            WEFT_GLOBAL_LOG_QUEUE,
+            policy=TASK_MONITOR_POLICY_TASK_LOG_DELETE_CLAIMED,
+            scanned=len(claimed_rows),
+            candidates=claimed_task_log_candidates,
+            stop_reason=claimed_stop_reason,
+        )
     )
 
     family_selection = select_task_log_family_groups(
@@ -428,8 +476,20 @@ def _task_log_candidates(
         for candidate in _task_log_candidates_from_collated_group(group)
     ]
     candidates.extend(complete_lifecycle_candidates)
+    applied.extend(
+        _apply_policy_candidates(ctx, complete_lifecycle_candidates, apply=apply)
+    )
     claimed.update(candidate.message_id for candidate in complete_lifecycle_candidates)
     remaining = max(0, config.batch_size - len(candidates))
+    policy_stats.append(
+        cleanup_policy_stats(
+            WEFT_GLOBAL_LOG_QUEUE,
+            policy=TASK_MONITOR_POLICY_TASK_LOG_COLLATE_COMPLETE_LIFECYCLE,
+            scanned=scan_window.scanned,
+            candidates=complete_lifecycle_candidates,
+            stop_reason=family_selection.stop_reason,
+        )
+    )
 
     terminal_without_start_candidates = [
         candidate
@@ -437,10 +497,22 @@ def _task_log_candidates(
         for candidate in _task_log_candidates_from_collated_group(group)
     ]
     candidates.extend(terminal_without_start_candidates)
+    applied.extend(
+        _apply_policy_candidates(ctx, terminal_without_start_candidates, apply=apply)
+    )
     claimed.update(
         candidate.message_id for candidate in terminal_without_start_candidates
     )
     remaining = max(0, config.batch_size - len(candidates))
+    policy_stats.append(
+        cleanup_policy_stats(
+            WEFT_GLOBAL_LOG_QUEUE,
+            policy=TASK_MONITOR_POLICY_TASK_LOG_COLLATE_TERMINAL_WITHOUT_START,
+            scanned=scan_window.scanned,
+            candidates=terminal_without_start_candidates,
+            stop_reason=None,
+        )
+    )
 
     old_rows = _select_old_unstarted_task_log_candidates(
         rows,
@@ -454,6 +526,16 @@ def _task_log_candidates(
     if len(old_rows.candidates) > len(old_task_log_candidates):
         old_stop_reason = TASK_MONITOR_TASK_LOG_SELECTION_LIMIT_REACHED
     candidates.extend(old_task_log_candidates)
+    applied.extend(_apply_policy_candidates(ctx, old_task_log_candidates, apply=apply))
+    policy_stats.append(
+        cleanup_policy_stats(
+            WEFT_GLOBAL_LOG_QUEUE,
+            policy=TASK_MONITOR_POLICY_TASK_LOG_DELETE_OLD_WITHOUT_START,
+            scanned=scan_window.scanned,
+            candidates=old_task_log_candidates,
+            stop_reason=old_stop_reason,
+        )
+    )
     stop_reason = (
         claimed_stop_reason
         or family_selection.stop_reason
@@ -464,15 +546,23 @@ def _task_log_candidates(
         *complete_lifecycle_summaries,
         *terminal_without_start_summaries,
     )
-    reserved_candidates, reserved_stats, reserved_policy_stats = (
-        _terminal_reserved_candidates(
-            ctx,
-            collated_summaries,
-            config=config,
-            now_ns=now_ns,
+    reserved_errors: tuple[str, ...] = ()
+    try:
+        reserved_candidates, reserved_stats, reserved_policy_stats = (
+            _terminal_reserved_candidates(
+                ctx,
+                collated_summaries,
+                config=config,
+                now_ns=now_ns,
+            )
         )
-    )
+    except (BrokerError, OSError, RuntimeError, ValueError) as exc:
+        reserved_candidates = []
+        reserved_stats = ()
+        reserved_policy_stats = ()
+        reserved_errors = (f"failed to scan terminal reserved queues: {exc}",)
     candidates.extend(reserved_candidates)
+    applied.extend(_apply_policy_candidates(ctx, reserved_candidates, apply=apply))
     task_log_candidates = [
         candidate
         for candidate in candidates
@@ -486,47 +576,12 @@ def _task_log_candidates(
         collated_tasks=tuple(collated_summaries),
         metadata=_task_log_scan_metadata(scan_window, family_selection),
     )
-    task_log_policy_stats = (
-        cleanup_policy_stats(
-            WEFT_GLOBAL_LOG_QUEUE,
-            policy=TASK_MONITOR_POLICY_TASK_LOG_DELETE_MALFORMED,
-            scanned=scan_window.scanned,
-            candidates=malformed_candidates,
-            stop_reason=None,
-        ),
-        cleanup_policy_stats(
-            WEFT_GLOBAL_LOG_QUEUE,
-            policy=TASK_MONITOR_POLICY_TASK_LOG_DELETE_CLAIMED,
-            scanned=len(claimed_rows),
-            candidates=claimed_task_log_candidates,
-            stop_reason=claimed_stop_reason,
-        ),
-        cleanup_policy_stats(
-            WEFT_GLOBAL_LOG_QUEUE,
-            policy=TASK_MONITOR_POLICY_TASK_LOG_COLLATE_COMPLETE_LIFECYCLE,
-            scanned=scan_window.scanned,
-            candidates=complete_lifecycle_candidates,
-            stop_reason=family_selection.stop_reason,
-        ),
-        cleanup_policy_stats(
-            WEFT_GLOBAL_LOG_QUEUE,
-            policy=TASK_MONITOR_POLICY_TASK_LOG_COLLATE_TERMINAL_WITHOUT_START,
-            scanned=scan_window.scanned,
-            candidates=terminal_without_start_candidates,
-            stop_reason=None,
-        ),
-        cleanup_policy_stats(
-            WEFT_GLOBAL_LOG_QUEUE,
-            policy=TASK_MONITOR_POLICY_TASK_LOG_DELETE_OLD_WITHOUT_START,
-            scanned=scan_window.scanned,
-            candidates=old_task_log_candidates,
-            stop_reason=old_stop_reason,
-        ),
-    )
-    return (
-        candidates,
-        (task_log_stats, *reserved_stats),
-        (*task_log_policy_stats, *reserved_policy_stats),
+    return _CleanupPolicyRun(
+        candidates=tuple(candidates),
+        applied_candidates=tuple(applied),
+        queue_stats=(task_log_stats, *reserved_stats),
+        policy_stats=(*policy_stats, *reserved_policy_stats),
+        errors=reserved_errors,
     )
 
 

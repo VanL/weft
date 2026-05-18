@@ -5542,9 +5542,11 @@ class Manager(BaseTask):
             else MANAGED_SERVICE_STABLE_AUDIT_INTERVAL_SECONDS
         )
         interval_ns = int(interval_seconds * 1_000_000_000)
+        autostart_scan_due = "autostart_scan_due" in local_active_reasons
         if (
             not force
             and not self._managed_internal_spawn_enqueued
+            and not autostart_scan_due
             and self._last_managed_service_convergence_ns
             and now_ns - self._last_managed_service_convergence_ns < interval_ns
         ):
@@ -5567,6 +5569,8 @@ class Manager(BaseTask):
             return
         self._last_managed_service_convergence_ns = now_ns
         internal_spawn_pending = self._internal_spawn_pending()
+        if internal_spawn_pending:
+            self._mark_pending_messages_prechecked()
         internal_spawn_pending_for_pass = internal_spawn_pending
         active_reasons = self._managed_service_convergence_active_reasons(
             include_autostart=include_autostart,
@@ -5801,23 +5805,20 @@ class Manager(BaseTask):
                 self._continue_shutdown_drain()
                 self._drain_worker_results()
                 return
-        internal_drained = (
-            0
-            if self._has_active_child_launches()
-            else self._drain_internal_spawn_requests()
-        )
-        if internal_drained:
-            self._last_activity_ns = time.time_ns()
         if not self._has_active_child_launches():
             super().process_once()
         else:
             self._drain_worker_results()
             self._maybe_emit_poll_report()
-        public_drained = (
-            0
-            if self._has_active_child_launches() or self._child_launch_started_this_turn
-            else self._drain_public_spawn_requests()
-        )
+        public_inbox = self._queue_names.get("inbox")
+        public_drained = 0
+        if (
+            not self._has_active_child_launches()
+            and not self._child_launch_started_this_turn
+            and public_inbox == WEFT_SPAWN_REQUESTS_QUEUE
+            and public_inbox in self._active_queues
+        ):
+            public_drained = self._drain_public_spawn_requests()
         if public_drained:
             self._last_activity_ns = time.time_ns()
         if self._draining:
@@ -5958,12 +5959,11 @@ class Manager(BaseTask):
         event: str,
         component: str,
     ) -> int:
-        """Drain one spawn queue without relying on pending-message hints.
+        """Drain one watcher-active spawn queue.
 
-        Queue pending checks and activity waiters are useful scheduling hints,
-        but the atomic reservation attempt is the progress authority. A missed
-        hint should at worst cost one extra empty reservation attempt, not leave
-        accepted spawn work stranded.
+        Queue pending checks and activity waiters identify work for the shared
+        task loop. Once a queue is active, atomic reservation remains the
+        ownership authority for the specific spawn message.
         """
 
         total_processed = 0
@@ -5974,10 +5974,11 @@ class Manager(BaseTask):
                 or self._child_launch_started_this_turn
             ):
                 break
+            self._update_active_queues()
+            if queue_name not in self._active_queues:
+                break
             attempted = True
-            processed = int(
-                self._process_queue_message(queue_name, inactive_candidates=set())
-            )
+            processed = self._drain_round_robin_pass(queue_names=(queue_name,))
             total_processed += processed
             if processed == 0:
                 break

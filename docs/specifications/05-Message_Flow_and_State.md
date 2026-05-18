@@ -350,10 +350,12 @@ Current rules:
   lane; the TaskMonitor reactor commits the processor result, checkpoint, and
   cached diagnostics after the worker returns. For the built-in `delete` and
   `report_only` processors, cleanup uses a separate
-  bounded FIFO policy pass over supported cleanup queues, collects exact message
-  IDs, and applies deletes only after the scan window is complete. Built-in
-  cleanup runs on the TaskMonitor reactor, not in a worker. The manager owns
-  only child supervision; it does not scan lifecycle queues.
+  bounded FIFO policy pass over supported cleanup queues. Task-log cleanup
+  applies exact deletes after each ordered policy phase before the next policy
+  phase begins; this keeps malformed, claimed, and collated task-log deletion
+  ahead of any terminal-proven reserved-queue follow-up. Built-in cleanup runs
+  on the TaskMonitor reactor, not in a worker. The manager owns only child
+  supervision; it does not scan lifecycle queues.
 - when table collation is enabled, each monitor cycle scans bounded
   `weft.log.tasks` rows after the durable Monitor checkpoint, reduces valid
   task-log rows through `weft/core/monitor/collation.py`, upserts one summary
@@ -850,9 +852,11 @@ Current rules:
   defaulting to 172800 seconds. `WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT` remains
   the per-cycle task-log scan depth and defaults to 50000 rows. When no
   external task-log log is configured, the cleanup runner's task-log policy
-  order is malformed first, completed lifecycle collation second, truncated
-  terminal collation third, terminal-proven reserved cleanup fourth, and broad
-  older-than deletion last with open-start TIDs protected. Reserved cleanup is scoped to `T{tid}.reserved`
+  order is malformed first, previously claimed task-log rows second, completed
+  lifecycle collation third, truncated terminal collation fourth, broad
+  older-than task-log deletion fifth with open-start TIDs protected, and
+  terminal-proven reserved cleanup last.
+  Reserved cleanup is scoped to `T{tid}.reserved`
   queues for TIDs collated in the same pass and requires old-enough exact rows
   plus terminal task-log proof for that TID. Successful completed task-log
   proof skips reserved-queue probing; reserved probes are for failure-like or

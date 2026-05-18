@@ -401,10 +401,12 @@ There is now a manager-supervised `TaskMonitorTask` in addition to the
 foreground `weft system task-monitor` command. In the current contract it is
 operational only. The default processor is `delete`, which may delete exact
 rows selected by bounded cleanup policies. Task-log cleanup must delete
-malformed rows, collate completed lifecycle groups, classify terminal rows
-with no visible start as truncated groups, delete old reserved rows for TIDs
-that were terminal-collated in the same pass, and only then apply broad
-older-than deletion while preserving open-start TIDs in the bounded window.
+malformed rows, delete previously claimed task-log rows, collate completed
+lifecycle groups, classify terminal rows with no visible start as truncated
+groups, apply broad older-than deletion while preserving open-start TIDs in
+the bounded window, and only then consider old reserved rows for TIDs that
+were terminal-collated in the same pass. Each ordered task-log policy phase
+applies its exact deletions before the next phase begins.
 Task-log cleanup must use a scan-depth limit separate from the selected
 candidate batch size, so an old open-start family cannot prevent deletion of
 old completed families later in the scan.

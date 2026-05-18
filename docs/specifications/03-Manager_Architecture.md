@@ -95,20 +95,22 @@ Key responsibilities implemented in `weft/core/manager.py`:
    advisory registry leadership. Pending messages still sitting in
    `weft.spawn.requests` are unowned backlog and must not by themselves block a
    superseded manager from yielding to the lower-TID live canonical manager.
-   A live public manager advances public backlog with a bounded per-turn direct
-   reservation drain after normal watcher scheduling. The drain treats
-   `has_pending()` and backend activity waiters as hints only; an atomic
-   reservation attempt is the progress authority, so missed or stale pending
-   hints cannot strand accepted public spawn work under load.
+   A live public manager advances public backlog only after the shared
+   `BaseTask`/`MultiQueueWatcher` path has identified the public spawn queue as
+   active. The optional bounded per-turn drain may continue draining an already
+   active spawn queue, but it must not probe `weft.spawn.requests` with an empty
+   reservation attempt merely to discover whether work exists. Once a queue is
+   active, atomic reservation remains the dispatch authority for the specific
+   public spawn message.
    Pipeline-owned runtime child bootstrap is also eligible for the internal
    spawn lane once the top-level pipeline task has already been accepted from
    public dispatch; those child requests are implementation work for that
    accepted task, not new public backlog.
    Pending internal spawn work is manager-owned convergence work: it forces the
-   next scheduling drain to probe inactive queues so convergence does not
+   next shared scheduling drain to probe inactive queues so convergence does not
    depend on the periodic broad-probe interval. Internal spawn requests are
-   advanced with a bounded per-turn drain without consuming ordinary public
-   spawn work. Successful child launch emits
+   advanced only after the watcher has identified the internal queue as active,
+   without consuming ordinary public spawn work. Successful child launch emits
    durable `task_spawned` evidence with the child TID, child TaskSpec, and
    child PID so manager-owned singleton convergence can observe a live
    replacement before the child has completed its own initialization log writes.
@@ -229,7 +231,10 @@ Key responsibilities implemented in `weft/core/manager.py`:
    turn advances service convergence with bounded passes over child reap,
    service reconciliation, and manager-owned internal spawn drain; pending
    internal spawn work bypasses the stable-service throttle because it is
-   accepted-task work, not background audit work. Manager due timers are exposed
+   accepted-task work, not background audit work. An autostart scan that is due
+   also bypasses the convergence throttle once so the due bit is either cleared
+   by an empty scan or converted into concrete service work, instead of keeping
+   the task loop on a zero timeout. Manager due timers are exposed
    through `Manager.next_wait_timeout()` and then bounded by the shared
    `BaseTask`/`MultiQueueWatcher` activity wait path. Backend activity waiters
    are hints, not the clock that drives service supervision. Parent-side

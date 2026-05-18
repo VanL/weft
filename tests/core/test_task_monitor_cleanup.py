@@ -582,6 +582,56 @@ def test_task_monitor_cleanup_deletes_reserved_work_with_terminal_log_proof(
     assert _read_rows(ctx, reserved_queue) == []
 
 
+def test_task_monitor_cleanup_applies_task_log_deletes_before_reserved_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = _context(tmp_path)
+    tid = "1778000000000000001"
+    reserved_queue = f"T{tid}.{QUEUE_RESERVED_SUFFIX}"
+    _write_json(ctx, reserved_queue, {"payload": "retained failed work"})
+    _write_json(
+        ctx,
+        WEFT_GLOBAL_LOG_QUEUE,
+        {"event": "work_started", "tid": tid},
+    )
+    terminal_id = _write_json(
+        ctx,
+        WEFT_GLOBAL_LOG_QUEUE,
+        {"event": "work_failed", "tid": tid, "status": "failed"},
+    )
+    observed_task_log_rows_at_reserved_probe: list[list[dict[str, Any]]] = []
+    real_scan = cleanup_mod.scan_queue_window
+
+    def scan_with_reserved_observation(*args: object, **kwargs: object) -> object:
+        queue_name = args[1]
+        if queue_name == reserved_queue:
+            observed_task_log_rows_at_reserved_probe.append(
+                [
+                    json.loads(body)
+                    for body, _message_id in _read_rows(ctx, WEFT_GLOBAL_LOG_QUEUE)
+                ]
+            )
+        return real_scan(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "weft.core.monitor.cleanup.scan_queue_window",
+        scan_with_reserved_observation,
+    )
+
+    result = run_task_monitor_cleanup(
+        ctx,
+        TaskMonitorCleanupConfig(batch_size=10, task_log_min_age_seconds=1.0),
+        apply=True,
+        now_ns=_now_after(terminal_id, 2.0),
+    )
+
+    assert result.success
+    assert result.deleted == 3
+    assert observed_task_log_rows_at_reserved_probe == [[]]
+    assert _read_rows(ctx, WEFT_GLOBAL_LOG_QUEUE) == []
+
+
 def test_task_monitor_cleanup_does_not_probe_reserved_for_successful_completion(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
