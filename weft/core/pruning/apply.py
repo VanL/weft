@@ -101,9 +101,7 @@ def apply_exact_prune_candidates[
                             "per-row status unavailable"
                         )
                         for index, candidate in deletable:
-                            queue_results[index] = apply_result(
-                                candidate, False, error
-                            )
+                            queue_results[index] = apply_result(candidate, False, error)
 
             for result in queue_results:
                 if result is not None:
