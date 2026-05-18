@@ -5927,6 +5927,7 @@ class Manager(BaseTask):
         except (BrokerError, OSError, RuntimeError):
             backlog_pending = False
         if not backlog_pending:
+            self._last_public_dispatch_stall_log_ns = 0
             return
         now_ns = time.time_ns()
         interval_ns = int(MANAGER_DISPATCH_STALL_LOG_INTERVAL_SECONDS * 1_000_000_000)

@@ -66,6 +66,15 @@ def _read_rows(ctx: WeftContext, queue_name: str) -> list[tuple[str, int]]:
         queue.close()
 
 
+def _queue_stats(ctx: WeftContext, queue_name: str) -> tuple[int, int, int]:
+    queue = ctx.queue(queue_name, persistent=False)
+    try:
+        stats = queue.stats()
+        return stats.pending, stats.claimed, stats.total
+    finally:
+        queue.close()
+
+
 def _now_after(message_id: int, seconds: float) -> int:
     return message_id + int(seconds * 1_000_000_000) + 1
 
@@ -210,6 +219,31 @@ def test_task_monitor_cleanup_deletes_malformed_task_log(tmp_path: Path) -> None
     assert [body for body, _message_id in _read_rows(ctx, WEFT_GLOBAL_LOG_QUEUE)] == [
         json.dumps({"event": "work_started", "tid": "1778000000000000001"})
     ]
+
+
+def test_task_monitor_cleanup_physically_deletes_task_log_rows(
+    tmp_path: Path,
+) -> None:
+    ctx = _context(tmp_path)
+    first_bad_id = _write_raw(ctx, WEFT_GLOBAL_LOG_QUEUE, "{bad-json")
+    second_bad_id = _write_raw(ctx, WEFT_GLOBAL_LOG_QUEUE, "[1, 2, 3]")
+
+    assert _queue_stats(ctx, WEFT_GLOBAL_LOG_QUEUE) == (2, 0, 2)
+
+    result = run_task_monitor_cleanup(
+        ctx,
+        TaskMonitorCleanupConfig(batch_size=10, task_log_min_age_seconds=60.0),
+        apply=True,
+        now_ns=second_bad_id,
+    )
+
+    assert result.success
+    assert result.deleted == 2
+    assert {candidate.message_id for candidate in result.candidates} == {
+        first_bad_id,
+        second_bad_id,
+    }
+    assert _queue_stats(ctx, WEFT_GLOBAL_LOG_QUEUE) == (0, 0, 0)
 
 
 def test_task_monitor_cleanup_deletes_malformed_tid_mapping(tmp_path: Path) -> None:

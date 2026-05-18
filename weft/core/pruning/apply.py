@@ -69,16 +69,45 @@ def apply_exact_prune_candidates[
     for queue_name, queue_candidates in by_queue.items():
         queue = ctx.queue(queue_name, persistent=_queue_is_persistent(queue_name))
         try:
-            for candidate in queue_candidates:
+            queue_results: list[AppliedCandidate | None] = [None] * len(
+                queue_candidates
+            )
+            deletable: list[tuple[int, Candidate]] = []
+            for index, candidate in enumerate(queue_candidates):
                 if candidate.report_only and not force:
-                    applied.append(apply_result(candidate, False, None))
+                    queue_results[index] = apply_result(candidate, False, None)
                     continue
+                deletable.append((index, candidate))
+
+            if deletable:
                 try:
-                    deleted = bool(queue.delete(message_id=candidate.message_id))
+                    deleted_count = queue.delete_many(
+                        [candidate.message_id for _index, candidate in deletable]
+                    )
                 except (BrokerError, OSError, RuntimeError, ValueError) as exc:
-                    applied.append(apply_result(candidate, False, str(exc)))
-                    continue
-                applied.append(apply_result(candidate, deleted, None))
+                    for index, candidate in deletable:
+                        queue_results[index] = apply_result(candidate, False, str(exc))
+                else:
+                    if deleted_count == len(deletable):
+                        for index, candidate in deletable:
+                            queue_results[index] = apply_result(candidate, True, None)
+                    elif deleted_count == 0:
+                        for index, candidate in deletable:
+                            queue_results[index] = apply_result(candidate, False, None)
+                    else:
+                        error = (
+                            "batch delete removed "
+                            f"{deleted_count} of {len(deletable)} exact rows; "
+                            "per-row status unavailable"
+                        )
+                        for index, candidate in deletable:
+                            queue_results[index] = apply_result(
+                                candidate, False, error
+                            )
+
+            for result in queue_results:
+                if result is not None:
+                    applied.append(result)
         finally:
             queue.close()
     return applied

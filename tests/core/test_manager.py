@@ -40,6 +40,7 @@ from weft._constants import (
     MANAGED_SERVICE_CONVERGENCE_INTERVAL_SECONDS,
     MANAGED_SERVICE_STABLE_AUDIT_INTERVAL_SECONDS,
     MANAGER_CHILD_EXIT_POLL_INTERVAL,
+    MANAGER_DISPATCH_STALL_LOG_INTERVAL_SECONDS,
     MANAGER_LEADERSHIP_CHECK_INTERVAL_SECONDS,
     MANAGER_REGISTRY_HEARTBEAT_INTERVAL_SECONDS,
     MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY,
@@ -54,6 +55,7 @@ from weft._constants import (
     WEFT_MANAGER_CTRL_IN_QUEUE,
     WEFT_MANAGER_CTRL_OUT_QUEUE,
     WEFT_MANAGER_OUTBOX_QUEUE,
+    WEFT_MANAGER_SERVE_LOG_LEVEL,
     WEFT_SERVICES_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
@@ -1951,6 +1953,28 @@ def test_manager_next_wait_timeout_returns_zero_for_immediate_work(
     setattr(manager, attribute, value)
 
     assert manager.next_wait_timeout() == 0.0
+
+
+def test_manager_clears_dispatch_stall_timer_when_backlog_drains(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _make_queue = manager_setup
+    now_ns = 2_000_000_000_000
+    monkeypatch.setattr(manager_mod.time, "time_ns", lambda: now_ns)
+    _prime_manager_next_wait_baseline(manager, now_ns)
+    manager._config[MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY] = True
+    manager._config[WEFT_MANAGER_SERVE_LOG_LEVEL] = "info"
+    manager._last_public_dispatch_stall_log_ns = now_ns - int(
+        (MANAGER_DISPATCH_STALL_LOG_INTERVAL_SECONDS + 1.0) * 1_000_000_000
+    )
+
+    assert manager.next_wait_timeout() == 0.0
+
+    manager._maybe_log_public_dispatch_stall(manager._queue_names["inbox"])
+
+    assert manager._last_public_dispatch_stall_log_ns == 0
+    assert manager.next_wait_timeout() > 0.0
 
 
 def test_manager_wait_for_activity_passes_timeout_to_shared_waiter(
