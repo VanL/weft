@@ -480,6 +480,9 @@ TASK_MONITOR_POLICY_TID_MAPPING_DELETE_OLDER_THAN: Final[str] = (
 TASK_MONITOR_POLICY_TASK_LOG_DELETE_MALFORMED: Final[str] = "task_log.delete_malformed"
 """TaskMonitor cleanup policy for malformed task-log runtime rows."""
 
+TASK_MONITOR_POLICY_TASK_LOG_DELETE_CLAIMED: Final[str] = "task_log.delete_claimed"
+"""TaskMonitor cleanup policy for already claimed task-log runtime rows."""
+
 TASK_MONITOR_POLICY_TASK_LOG_COLLATE_COMPLETE_LIFECYCLE: Final[str] = (
     "task_log.collate_complete_lifecycle"
 )

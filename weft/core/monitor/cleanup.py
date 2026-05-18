@@ -26,6 +26,7 @@ from weft._constants import (
     TASK_MONITOR_POLICY_RESERVED_DELETE_TERMINAL_PROVEN,
     TASK_MONITOR_POLICY_TASK_LOG_COLLATE_COMPLETE_LIFECYCLE,
     TASK_MONITOR_POLICY_TASK_LOG_COLLATE_TERMINAL_WITHOUT_START,
+    TASK_MONITOR_POLICY_TASK_LOG_DELETE_CLAIMED,
     TASK_MONITOR_POLICY_TASK_LOG_DELETE_MALFORMED,
     TASK_MONITOR_POLICY_TASK_LOG_DELETE_OLD_WITHOUT_START,
     TASK_MONITOR_POLICY_TID_MAPPING_DELETE_MALFORMED,
@@ -390,6 +391,26 @@ def _task_log_candidates(
     candidates = list(malformed_candidates)
     claimed = {candidate.message_id for candidate in candidates}
     remaining = max(0, config.batch_size - len(candidates))
+    claimed_total = (
+        _queue_claimed_count(ctx, WEFT_GLOBAL_LOG_QUEUE) if remaining > 0 else 0
+    )
+    claimed_rows = _scan_claimed_task_log_rows(
+        ctx,
+        WEFT_GLOBAL_LOG_QUEUE,
+        limit=remaining,
+    )
+    claimed_task_log_candidates = _select_claimed_task_log_candidates(
+        claimed_rows,
+        limit=remaining,
+    )
+    candidates.extend(claimed_task_log_candidates)
+    claimed.update(candidate.message_id for candidate in claimed_task_log_candidates)
+    remaining = max(0, config.batch_size - len(candidates))
+    claimed_stop_reason = (
+        TASK_MONITOR_TASK_LOG_SELECTION_LIMIT_REACHED
+        if claimed_total > len(claimed_task_log_candidates)
+        else None
+    )
 
     family_selection = select_task_log_family_groups(
         rows,
@@ -434,7 +455,10 @@ def _task_log_candidates(
         old_stop_reason = TASK_MONITOR_TASK_LOG_SELECTION_LIMIT_REACHED
     candidates.extend(old_task_log_candidates)
     stop_reason = (
-        family_selection.stop_reason or old_stop_reason or scan_window.stop_reason
+        claimed_stop_reason
+        or family_selection.stop_reason
+        or old_stop_reason
+        or scan_window.stop_reason
     )
     collated_summaries = (
         *complete_lifecycle_summaries,
@@ -456,7 +480,7 @@ def _task_log_candidates(
     ]
     task_log_stats = cleanup_queue_stats(
         WEFT_GLOBAL_LOG_QUEUE,
-        scanned=scan_window.scanned,
+        scanned=scan_window.scanned + len(claimed_rows),
         candidates=task_log_candidates,
         stop_reason=stop_reason,
         collated_tasks=tuple(collated_summaries),
@@ -469,6 +493,13 @@ def _task_log_candidates(
             scanned=scan_window.scanned,
             candidates=malformed_candidates,
             stop_reason=None,
+        ),
+        cleanup_policy_stats(
+            WEFT_GLOBAL_LOG_QUEUE,
+            policy=TASK_MONITOR_POLICY_TASK_LOG_DELETE_CLAIMED,
+            scanned=len(claimed_rows),
+            candidates=claimed_task_log_candidates,
+            stop_reason=claimed_stop_reason,
         ),
         cleanup_policy_stats(
             WEFT_GLOBAL_LOG_QUEUE,
@@ -509,6 +540,90 @@ def _select_malformed_task_log_candidates(
         policy=TASK_MONITOR_POLICY_TASK_LOG_DELETE_MALFORMED,
         candidate_class="malformed_task_log",
     )[:limit]
+
+
+def _queue_claimed_count(ctx: WeftContext, queue_name: str) -> int:
+    queue = ctx.queue(queue_name, persistent=False)
+    try:
+        return int(queue.stats().claimed)
+    finally:
+        queue.close()
+
+
+def _scan_claimed_task_log_rows(
+    ctx: WeftContext,
+    queue_name: str,
+    *,
+    limit: int,
+) -> tuple[QueueWindowRow, ...]:
+    if limit <= 0:
+        return ()
+    with ctx.broker() as broker:
+        all_rows = _peek_rows_including_claimed(
+            broker,
+            queue_name,
+            limit=limit + _queue_pending_count(ctx, queue_name),
+        )
+    pending_ids = {
+        row.message_id
+        for row in scan_queue_window(ctx, queue_name, limit=max(1, len(all_rows)))
+    }
+    claimed_rows = [row for row in all_rows if row.message_id not in pending_ids]
+    return tuple(claimed_rows[:limit])
+
+
+def _queue_pending_count(ctx: WeftContext, queue_name: str) -> int:
+    queue = ctx.queue(queue_name, persistent=False)
+    try:
+        return int(queue.stats().pending)
+    finally:
+        queue.close()
+
+
+def _peek_rows_including_claimed(
+    broker: Any,
+    queue_name: str,
+    *,
+    limit: int,
+) -> tuple[QueueWindowRow, ...]:
+    retrieve = getattr(broker, "_retrieve", None)
+    if not callable(retrieve):
+        raise RuntimeError("broker client cannot retrieve claimed rows")
+    raw_rows = retrieve(
+        queue_name,
+        operation="peek",
+        limit=max(1, limit),
+        require_unclaimed=False,
+    )
+    return tuple(
+        QueueWindowRow(
+            queue=queue_name,
+            body=body if isinstance(body, str) else str(body),
+            message_id=int(message_id),
+        )
+        for body, message_id in raw_rows
+    )
+
+
+def _select_claimed_task_log_candidates(
+    rows: Sequence[QueueWindowRow],
+    *,
+    limit: int,
+) -> list[CleanupCandidate]:
+    candidates: list[CleanupCandidate] = []
+    for row in rows[:limit]:
+        decoded = _decode_row(row, queue_name=WEFT_GLOBAL_LOG_QUEUE)
+        candidates.append(
+            cleanup_candidate_from_row(
+                row,
+                policy=TASK_MONITOR_POLICY_TASK_LOG_DELETE_CLAIMED,
+                candidate_class="claimed_task_log",
+                reason="claimed_task_log_row",
+                tid=decoded.tid,
+                payload=decoded.payload,
+            )
+        )
+    return candidates
 
 
 def _task_log_candidates_from_collated_group(

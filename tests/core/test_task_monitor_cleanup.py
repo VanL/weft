@@ -15,6 +15,7 @@ from weft._constants import (
     TASK_MONITOR_POLICY_RESERVED_DELETE_TERMINAL_PROVEN,
     TASK_MONITOR_POLICY_TASK_LOG_COLLATE_COMPLETE_LIFECYCLE,
     TASK_MONITOR_POLICY_TASK_LOG_COLLATE_TERMINAL_WITHOUT_START,
+    TASK_MONITOR_POLICY_TASK_LOG_DELETE_CLAIMED,
     TASK_MONITOR_POLICY_TASK_LOG_DELETE_MALFORMED,
     TASK_MONITOR_POLICY_TASK_LOG_DELETE_OLD_WITHOUT_START,
     TASK_MONITOR_POLICY_TID_MAPPING_DELETE_MALFORMED,
@@ -71,6 +72,19 @@ def _queue_stats(ctx: WeftContext, queue_name: str) -> tuple[int, int, int]:
     try:
         stats = queue.stats()
         return stats.pending, stats.claimed, stats.total
+    finally:
+        queue.close()
+
+
+def _claim_one(ctx: WeftContext, queue_name: str) -> tuple[str, int]:
+    queue = ctx.queue(queue_name, persistent=False)
+    try:
+        claimed = queue.read_one(with_timestamps=True)
+        assert isinstance(claimed, tuple)
+        body, message_id = claimed
+        assert isinstance(body, str)
+        assert isinstance(message_id, int)
+        return body, message_id
     finally:
         queue.close()
 
@@ -243,6 +257,58 @@ def test_task_monitor_cleanup_physically_deletes_task_log_rows(
         first_bad_id,
         second_bad_id,
     }
+    assert _queue_stats(ctx, WEFT_GLOBAL_LOG_QUEUE) == (0, 0, 0)
+
+
+def test_task_monitor_cleanup_deletes_claimed_task_log_before_collation(
+    tmp_path: Path,
+) -> None:
+    ctx = _context(tmp_path)
+    claimed_id = _write_json(
+        ctx,
+        WEFT_GLOBAL_LOG_QUEUE,
+        {"event": "work_completed", "tid": "1778000000000000001"},
+    )
+    claimed_body, claimed_message_id = _claim_one(ctx, WEFT_GLOBAL_LOG_QUEUE)
+    assert claimed_message_id == claimed_id
+    assert json.loads(claimed_body)["tid"] == "1778000000000000001"
+    _write_json(
+        ctx,
+        WEFT_GLOBAL_LOG_QUEUE,
+        {"event": "work_started", "tid": "1778000000000000002"},
+    )
+    terminal_id = _write_json(
+        ctx,
+        WEFT_GLOBAL_LOG_QUEUE,
+        {"event": "work_completed", "tid": "1778000000000000002"},
+    )
+    assert _queue_stats(ctx, WEFT_GLOBAL_LOG_QUEUE) == (2, 1, 3)
+
+    result = run_task_monitor_cleanup(
+        ctx,
+        TaskMonitorCleanupConfig(batch_size=10, task_log_min_age_seconds=1.0),
+        apply=True,
+        now_ns=_now_after(terminal_id, 2.0),
+    )
+
+    assert result.success
+    assert result.deleted == 3
+    assert [candidate.policy for candidate in result.candidates] == [
+        TASK_MONITOR_POLICY_TASK_LOG_DELETE_CLAIMED,
+        TASK_MONITOR_POLICY_TASK_LOG_COLLATE_COMPLETE_LIFECYCLE,
+        TASK_MONITOR_POLICY_TASK_LOG_COLLATE_COMPLETE_LIFECYCLE,
+    ]
+    assert [candidate.candidate_class for candidate in result.candidates] == [
+        "claimed_task_log",
+        "collated_terminal_task_log",
+        "collated_terminal_task_log",
+    ]
+    stats = _policy_summary_by_policy(result)
+    assert stats[TASK_MONITOR_POLICY_TASK_LOG_DELETE_CLAIMED]["selected"] == 1
+    assert stats[TASK_MONITOR_POLICY_TASK_LOG_DELETE_CLAIMED]["deleted"] == 1
+    assert (
+        stats[TASK_MONITOR_POLICY_TASK_LOG_COLLATE_COMPLETE_LIFECYCLE]["selected"] == 2
+    )
     assert _queue_stats(ctx, WEFT_GLOBAL_LOG_QUEUE) == (0, 0, 0)
 
 
