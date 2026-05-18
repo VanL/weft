@@ -93,6 +93,22 @@ def test_monitor_collation_marks_failure_like_terminal_for_reserved_probe() -> N
     assert update.reserved_probe_needed is True
 
 
+def test_monitor_collation_does_not_treat_activity_status_as_terminal() -> None:
+    payload = {
+        "event": "task_activity",
+        "status": "failed",
+        "tid": "1779000000000000003",
+        "activity": "working",
+    }
+
+    update = update_from_task_log_row(_row(1779000000000004500, payload))
+
+    assert update is not None
+    assert update.terminal_seen is False
+    assert update.terminal_status is None
+    assert update.reserved_probe_needed is False
+
+
 def test_monitor_collation_ignores_malformed_rows() -> None:
     row = DecodedQueueWindowRow(
         raw=QueueWindowRow(

@@ -286,7 +286,11 @@ def test_task_monitor_cleanup_deletes_claimed_task_log_before_collation(
 
     result = run_task_monitor_cleanup(
         ctx,
-        TaskMonitorCleanupConfig(batch_size=10, task_log_min_age_seconds=1.0),
+        TaskMonitorCleanupConfig(
+            batch_size=10,
+            task_log_min_age_seconds=1.0,
+            reserved_cleanup_enabled=True,
+        ),
         apply=True,
         now_ns=_now_after(terminal_id, 2.0),
     )
@@ -310,6 +314,40 @@ def test_task_monitor_cleanup_deletes_claimed_task_log_before_collation(
         stats[TASK_MONITOR_POLICY_TASK_LOG_COLLATE_COMPLETE_LIFECYCLE]["selected"] == 2
     )
     assert _queue_stats(ctx, WEFT_GLOBAL_LOG_QUEUE) == (0, 0, 0)
+
+
+def test_task_monitor_cleanup_skips_claimed_scan_when_queue_has_no_claimed_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = _context(tmp_path)
+    started_id = _write_json(
+        ctx,
+        WEFT_GLOBAL_LOG_QUEUE,
+        {"event": "work_started", "tid": "1778000000000000001"},
+    )
+
+    def fail_claimed_retrieve(*args: object, **kwargs: object) -> object:
+        raise AssertionError(
+            "claimed scan should be skipped when claimed count is zero"
+        )
+
+    monkeypatch.setattr(
+        "weft.core.monitor.cleanup._peek_rows_including_claimed",
+        fail_claimed_retrieve,
+    )
+
+    result = run_task_monitor_cleanup(
+        ctx,
+        TaskMonitorCleanupConfig(batch_size=10, task_log_min_age_seconds=60.0),
+        apply=True,
+        now_ns=started_id,
+    )
+
+    assert result.success
+    assert result.deleted == 0
+    stats = _policy_summary_by_policy(result)
+    assert stats[TASK_MONITOR_POLICY_TASK_LOG_DELETE_CLAIMED]["selected"] == 0
 
 
 def test_task_monitor_cleanup_deletes_malformed_tid_mapping(tmp_path: Path) -> None:
@@ -440,7 +478,11 @@ def test_task_monitor_cleanup_collates_terminal_task_log_for_anchor_tid(
 
     result = run_task_monitor_cleanup(
         ctx,
-        TaskMonitorCleanupConfig(batch_size=10, task_log_min_age_seconds=1.0),
+        TaskMonitorCleanupConfig(
+            batch_size=10,
+            task_log_min_age_seconds=1.0,
+            reserved_cleanup_enabled=True,
+        ),
         apply=True,
         now_ns=_now_after(terminal_id, 2.0),
     )
@@ -553,7 +595,11 @@ def test_task_monitor_cleanup_deletes_reserved_work_with_terminal_log_proof(
 
     result = run_task_monitor_cleanup(
         ctx,
-        TaskMonitorCleanupConfig(batch_size=10, task_log_min_age_seconds=1.0),
+        TaskMonitorCleanupConfig(
+            batch_size=10,
+            task_log_min_age_seconds=1.0,
+            reserved_cleanup_enabled=True,
+        ),
         apply=True,
         now_ns=_now_after(terminal_id, 2.0),
     )
@@ -621,7 +667,11 @@ def test_task_monitor_cleanup_applies_task_log_deletes_before_reserved_probe(
 
     result = run_task_monitor_cleanup(
         ctx,
-        TaskMonitorCleanupConfig(batch_size=10, task_log_min_age_seconds=1.0),
+        TaskMonitorCleanupConfig(
+            batch_size=10,
+            task_log_min_age_seconds=1.0,
+            reserved_cleanup_enabled=True,
+        ),
         apply=True,
         now_ns=_now_after(terminal_id, 2.0),
     )
@@ -630,6 +680,54 @@ def test_task_monitor_cleanup_applies_task_log_deletes_before_reserved_probe(
     assert result.deleted == 3
     assert observed_task_log_rows_at_reserved_probe == [[]]
     assert _read_rows(ctx, WEFT_GLOBAL_LOG_QUEUE) == []
+
+
+def test_task_monitor_cleanup_skips_reserved_probe_when_budget_exhausted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = _context(tmp_path)
+    tid = "1778000000000000001"
+    reserved_queue = f"T{tid}.{QUEUE_RESERVED_SUFFIX}"
+    _write_json(ctx, reserved_queue, {"payload": "retained failed work"})
+    _write_json(
+        ctx,
+        WEFT_GLOBAL_LOG_QUEUE,
+        {"event": "work_started", "tid": tid},
+    )
+    terminal_id = _write_json(
+        ctx,
+        WEFT_GLOBAL_LOG_QUEUE,
+        {"event": "work_failed", "tid": tid, "status": "failed"},
+    )
+    real_scan = cleanup_mod.scan_queue_window
+
+    def fail_reserved_scan(*args: object, **kwargs: object) -> object:
+        queue_name = args[1]
+        if queue_name == reserved_queue:
+            raise AssertionError("reserved probe should wait for cleanup budget")
+        return real_scan(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "weft.core.monitor.cleanup.scan_queue_window",
+        fail_reserved_scan,
+    )
+
+    result = run_task_monitor_cleanup(
+        ctx,
+        TaskMonitorCleanupConfig(
+            batch_size=2,
+            task_log_scan_limit=10,
+            task_log_min_age_seconds=1.0,
+            reserved_cleanup_enabled=True,
+        ),
+        apply=True,
+        now_ns=_now_after(terminal_id, 2.0),
+    )
+
+    assert result.success
+    assert result.deleted == 2
+    assert _read_rows(ctx, reserved_queue) != []
 
 
 def test_task_monitor_cleanup_does_not_probe_reserved_for_successful_completion(
@@ -672,6 +770,55 @@ def test_task_monitor_cleanup_does_not_probe_reserved_for_successful_completion(
 
     assert result.success
     assert result.deleted == 2
+    assert all(
+        stat.policy != TASK_MONITOR_POLICY_RESERVED_DELETE_TERMINAL_PROVEN
+        for stat in result.policy_stats
+    )
+
+
+def test_task_monitor_cleanup_default_does_not_probe_reserved_for_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = _context(tmp_path)
+    tid = "1778000000000000001"
+    reserved_queue = f"T{tid}.{QUEUE_RESERVED_SUFFIX}"
+    _write_json(ctx, reserved_queue, {"payload": "retained failed work"})
+    _write_json(
+        ctx,
+        WEFT_GLOBAL_LOG_QUEUE,
+        {"event": "work_started", "tid": tid},
+    )
+    terminal_id = _write_json(
+        ctx,
+        WEFT_GLOBAL_LOG_QUEUE,
+        {"event": "work_failed", "tid": tid, "status": "failed"},
+    )
+    real_scan = cleanup_mod.scan_queue_window
+
+    def fail_reserved_scan(*args: object, **kwargs: object) -> object:
+        queue_name = args[1]
+        if isinstance(queue_name, str) and queue_name.endswith(
+            f".{QUEUE_RESERVED_SUFFIX}"
+        ):
+            raise AssertionError("default cleanup must not probe reserved queues")
+        return real_scan(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "weft.core.monitor.cleanup.scan_queue_window",
+        fail_reserved_scan,
+    )
+
+    result = run_task_monitor_cleanup(
+        ctx,
+        TaskMonitorCleanupConfig(batch_size=10, task_log_min_age_seconds=1.0),
+        apply=True,
+        now_ns=_now_after(terminal_id, 2.0),
+    )
+
+    assert result.success
+    assert result.deleted == 2
+    assert _read_rows(ctx, reserved_queue) != []
     assert all(
         stat.policy != TASK_MONITOR_POLICY_RESERVED_DELETE_TERMINAL_PROVEN
         for stat in result.policy_stats

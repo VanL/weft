@@ -144,6 +144,6 @@ def is_terminal_task_log(payload: Mapping[str, Any] | None) -> bool:
         return False
     event = payload.get("event")
     status = payload.get("status")
-    if isinstance(event, str) and event in TERMINAL_TASK_EVENTS:
-        return True
+    if isinstance(event, str):
+        return event in TERMINAL_TASK_EVENTS
     return isinstance(status, str) and status in TERMINAL_TASK_STATUSES

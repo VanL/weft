@@ -219,6 +219,13 @@ runbook needs to become stricter.
 
 ## 2026-05-09 Prune Path Ownership
 
+- Background cleanup must not turn retained lifecycle evidence into broad
+  task-local queue probes. If cleanup needs task-local recovery-sensitive
+  queues such as `T{tid}.reserved`, make that path explicit and bounded rather
+  than coupling it to ordinary `weft.log.tasks` retention. Terminal-looking
+  status fields on diagnostic events such as `task_activity` are not enough to
+  close a lifecycle family; prefer explicit terminal events.
+
 - Destructive cleanup must have one canonical candidate-selection and exact
   delete path. Foreground CLI wrappers and background monitor services may pass
   different policy arguments, but they must not reimplement pruning semantics.

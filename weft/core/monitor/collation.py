@@ -152,9 +152,7 @@ def update_from_task_log_payload(
 
 def _terminal_status(*, event: str | None, status: str | None) -> str | None:
     if event is not None:
-        terminal = TERMINAL_TASK_EVENTS.get(event)
-        if terminal is not None:
-            return terminal
+        return TERMINAL_TASK_EVENTS.get(event)
     if status in TERMINAL_TASK_STATUSES:
         return status
     return None

@@ -353,9 +353,9 @@ Current rules:
   bounded FIFO policy pass over supported cleanup queues. Task-log cleanup
   applies exact deletes after each ordered policy phase before the next policy
   phase begins; this keeps malformed, claimed, and collated task-log deletion
-  ahead of any terminal-proven reserved-queue follow-up. Built-in cleanup runs
-  on the TaskMonitor reactor, not in a worker. The manager owns only child
-  supervision; it does not scan lifecycle queues.
+  bounded without making ordinary retention scan task-local reserved queues.
+  Built-in cleanup runs on the TaskMonitor reactor, not in a worker. The
+  manager owns only child supervision; it does not scan lifecycle queues.
 - when table collation is enabled, each monitor cycle scans bounded
   `weft.log.tasks` rows after the durable Monitor checkpoint, reduces valid
   task-log rows through `weft/core/monitor/collation.py`, upserts one summary
@@ -768,22 +768,23 @@ system pruning:
   `WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT`, then first deletes malformed rows,
   then selects completed lifecycle groups by TID family even when older open
   families precede them, then classifies terminal rows with no visible start
-  event as truncated terminal groups, deletes old `T{tid}.reserved` rows for
-  collated terminal TIDs when the same pass has terminal task-log proof for
-  that TID, then applies broad older-than cleanup to remaining rows while
-  preserving TIDs that have visible start evidence but no terminal evidence in
-  the current scan. `WEFT_TASK_MONITOR_BATCH_SIZE` caps selected cleanup
-  candidates per cycle; it is not the task-log scan depth. Reserved rows
-  without retained terminal log proof remain protected
-  recovery-sensitive evidence. Per-cycle collation summaries are operational
-  TaskMonitor evidence only, not durable archive records. Each cleanup cycle
-  also records cached policy stats for the policies that ran, including
+  event as truncated terminal groups, then applies broad older-than cleanup to
+  remaining rows while preserving TIDs that have visible start evidence but no
+  terminal evidence in the current scan. Rows with non-terminal events such as
+  `task_activity` do not close lifecycle groups solely because they carry a
+  terminal-looking status. Ordinary supervised cleanup does not probe
+  task-local `T{tid}.reserved` queues. Terminal-proven reserved cleanup is an
+  explicit internal policy path, not part of the default retention pass.
+  `WEFT_TASK_MONITOR_BATCH_SIZE` caps selected cleanup candidates per cycle;
+  it is not the task-log scan depth. Reserved rows remain protected
+  recovery-sensitive evidence by default. Per-cycle collation summaries are
+  operational TaskMonitor evidence only, not durable archive records. Each
+  cleanup cycle also records cached policy stats for the policies that ran, including
   zero-selected policy records so PONG can distinguish "ran and selected
   nothing" from "did not run". The monitor must not delete active work,
-  ambiguous task-local evidence, claimed outbox residue, user payload rows
-  outside terminal-proven reserved cleanup, spawn requests, manager control
-  rows, or candidates without exact message IDs. `report_only` remains
-  available as a non-destructive override.
+  ambiguous task-local evidence, claimed outbox residue, user payload rows,
+  spawn requests, manager control rows, or candidates without exact message
+  IDs. `report_only` remains available as a non-destructive override.
 - `weft system prune --family task-log|task-local|retention` is an explicit
   operator action, not a background sweeper. Ordinary apply mode requires an
   archive artifact before deletion. Force apply mode is a human override for
@@ -853,14 +854,11 @@ Current rules:
   the per-cycle task-log scan depth and defaults to 50000 rows. When no
   external task-log log is configured, the cleanup runner's task-log policy
   order is malformed first, previously claimed task-log rows second, completed
-  lifecycle collation third, truncated terminal collation fourth, broad
-  older-than task-log deletion fifth with open-start TIDs protected, and
-  terminal-proven reserved cleanup last.
-  Reserved cleanup is scoped to `T{tid}.reserved`
-  queues for TIDs collated in the same pass and requires old-enough exact rows
-  plus terminal task-log proof for that TID. Successful completed task-log
-  proof skips reserved-queue probing; reserved probes are for failure-like or
-  suspected-loss cases.
+  lifecycle collation third, truncated terminal collation fourth, and broad
+  older-than task-log deletion fifth with open-start TIDs protected. The
+  default cleanup runner does not probe `T{tid}.reserved` queues. The internal
+  terminal-proven reserved cleanup helper remains bounded and opt-in for an
+  explicit policy path; it is not part of ordinary supervised retention.
   Cleanup candidates carry a policy name so queue summaries and policy
   summaries are derived from the same selected exact rows. Collate may emit
   operational per-cycle summaries before exact deletion so

@@ -403,15 +403,17 @@ operational only. The default processor is `delete`, which may delete exact
 rows selected by bounded cleanup policies. Task-log cleanup must delete
 malformed rows, delete previously claimed task-log rows, collate completed
 lifecycle groups, classify terminal rows with no visible start as truncated
-groups, apply broad older-than deletion while preserving open-start TIDs in
-the bounded window, and only then consider old reserved rows for TIDs that
-were terminal-collated in the same pass. Each ordered task-log policy phase
-applies its exact deletions before the next phase begins.
+groups, and apply broad older-than deletion while preserving open-start TIDs
+in the bounded window. Each ordered task-log policy phase applies its exact
+deletions before the next phase begins.
 Task-log cleanup must use a scan-depth limit separate from the selected
 candidate batch size, so an old open-start family cannot prevent deletion of
 old completed families later in the scan.
-Reserved rows without retained terminal log proof stay protected by default;
-successful completed terminal proof does not require a reserved-queue probe.
+Task-log cleanup must not treat diagnostic rows such as `task_activity` as
+terminal lifecycle proof solely because their status field is terminal-looking.
+Ordinary supervised cleanup must not probe task-local `T{tid}.reserved` queues.
+Reserved rows stay protected by default; successful completed terminal proof
+does not require a reserved-queue probe.
 Collation summaries, cleanup policy stats, and Monitor-owned collation tables
 remain operational TaskMonitor output only. Those deletes, summaries, and
 tables do not make task-monitor output lifecycle truth or result authority.

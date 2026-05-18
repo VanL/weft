@@ -114,3 +114,40 @@ def test_task_log_scanner_selects_terminal_without_visible_start(
     assert [group.tid for group in selection.terminal_without_start_groups] == [
         terminal_tid
     ]
+
+
+def test_task_log_scanner_waits_for_terminal_event_after_activity_status(
+    tmp_path: Path,
+) -> None:
+    ctx = _context(tmp_path)
+    tid = "1778000000000000004"
+    _write_json(
+        ctx,
+        WEFT_GLOBAL_LOG_QUEUE,
+        {"event": "work_started", "status": "running", "tid": tid},
+    )
+    _write_json(
+        ctx,
+        WEFT_GLOBAL_LOG_QUEUE,
+        {"event": "task_activity", "status": "failed", "tid": tid},
+    )
+    terminal_id = _write_json(
+        ctx,
+        WEFT_GLOBAL_LOG_QUEUE,
+        {"event": "work_failed", "status": "failed", "tid": tid},
+    )
+
+    scanner = GeneratorTaskLogScanner()
+    window = scanner.scan_window(ctx, WEFT_GLOBAL_LOG_QUEUE, scan_limit=10)
+    selection = select_task_log_family_groups(
+        window.rows,
+        now_ns=_now_after(terminal_id, 2.0),
+        min_age_seconds=1.0,
+        exclude_tids=set(),
+        selection_limit=10,
+    )
+
+    assert [group.message_ids for group in selection.complete_lifecycle_groups] == [
+        tuple(row.raw.message_id for row in window.rows)
+    ]
+    assert selection.terminal_without_start_groups == ()

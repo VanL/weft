@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 105 plan files in this directory.
+There are currently 106 plan files in this directory.
 
 ## Curation Policy
 
@@ -22,6 +22,7 @@ There are currently 105 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-05-18-monitor-cleanup-reserved-hot-path-plan.md`](./2026-05-18-monitor-cleanup-reserved-hot-path-plan.md) | Monitor Cleanup Reserved Hot Path Plan | `completed` | none |
 | [`2026-05-16-task-log-external-logging-and-retention-policy-plan.md`](./2026-05-16-task-log-external-logging-and-retention-policy-plan.md) | Task Log External Logging And Retention Policy Plan | `completed` | none |
 | [`2026-05-16-monitor-store-hardening-and-layering-plan.md`](./2026-05-16-monitor-store-hardening-and-layering-plan.md) | Monitor Store Hardening And Layering Plan | `completed` | none |
 | [`2026-05-16-monitor-durable-collation-store-plan.md`](./2026-05-16-monitor-durable-collation-store-plan.md) | Monitor Durable Collation Store Plan | `completed` | none |

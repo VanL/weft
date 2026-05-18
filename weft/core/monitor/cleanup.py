@@ -89,6 +89,7 @@ class TaskMonitorCleanupConfig:
     )
     task_log_min_age_seconds: float = WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS_DEFAULT
     task_log_cleanup_enabled: bool = True
+    reserved_cleanup_enabled: bool = False
     queues: tuple[str, ...] = (WEFT_TID_MAPPINGS_QUEUE, WEFT_GLOBAL_LOG_QUEUE)
     task_log_scan_backend: TaskLogScanBackend | None = None
 
@@ -430,15 +431,19 @@ def _task_log_candidates(
     claimed_total = (
         _queue_claimed_count(ctx, WEFT_GLOBAL_LOG_QUEUE) if remaining > 0 else 0
     )
-    claimed_rows = _scan_claimed_task_log_rows(
-        ctx,
-        WEFT_GLOBAL_LOG_QUEUE,
-        limit=remaining,
-    )
-    claimed_task_log_candidates = _select_claimed_task_log_candidates(
-        claimed_rows,
-        limit=remaining,
-    )
+    if claimed_total > 0:
+        claimed_rows = _scan_claimed_task_log_rows(
+            ctx,
+            WEFT_GLOBAL_LOG_QUEUE,
+            limit=remaining,
+        )
+        claimed_task_log_candidates = _select_claimed_task_log_candidates(
+            claimed_rows,
+            limit=remaining,
+        )
+    else:
+        claimed_rows = ()
+        claimed_task_log_candidates = []
     candidates.extend(claimed_task_log_candidates)
     applied.extend(
         _apply_policy_candidates(ctx, claimed_task_log_candidates, apply=apply)
@@ -527,6 +532,7 @@ def _task_log_candidates(
         old_stop_reason = TASK_MONITOR_TASK_LOG_SELECTION_LIMIT_REACHED
     candidates.extend(old_task_log_candidates)
     applied.extend(_apply_policy_candidates(ctx, old_task_log_candidates, apply=apply))
+    remaining = max(0, config.batch_size - len(candidates))
     policy_stats.append(
         cleanup_policy_stats(
             WEFT_GLOBAL_LOG_QUEUE,
@@ -547,20 +553,26 @@ def _task_log_candidates(
         *terminal_without_start_summaries,
     )
     reserved_errors: tuple[str, ...] = ()
-    try:
-        reserved_candidates, reserved_stats, reserved_policy_stats = (
-            _terminal_reserved_candidates(
-                ctx,
-                collated_summaries,
-                config=config,
-                now_ns=now_ns,
+    if config.reserved_cleanup_enabled and remaining > 0:
+        try:
+            reserved_candidates, reserved_stats, reserved_policy_stats = (
+                _terminal_reserved_candidates(
+                    ctx,
+                    collated_summaries,
+                    config=config,
+                    now_ns=now_ns,
+                    selection_limit=remaining,
+                )
             )
-        )
-    except (BrokerError, OSError, RuntimeError, ValueError) as exc:
+        except (BrokerError, OSError, RuntimeError, ValueError) as exc:
+            reserved_candidates = []
+            reserved_stats = ()
+            reserved_policy_stats = ()
+            reserved_errors = (f"failed to scan terminal reserved queues: {exc}",)
+    else:
         reserved_candidates = []
         reserved_stats = ()
         reserved_policy_stats = ()
-        reserved_errors = (f"failed to scan terminal reserved queues: {exc}",)
     candidates.extend(reserved_candidates)
     applied.extend(_apply_policy_candidates(ctx, reserved_candidates, apply=apply))
     task_log_candidates = [
@@ -743,19 +755,28 @@ def _terminal_reserved_candidates(
     *,
     config: TaskMonitorCleanupConfig,
     now_ns: int,
+    selection_limit: int,
 ) -> tuple[
     list[CleanupCandidate],
     tuple[CleanupQueueStats, ...],
     tuple[CleanupPolicyStats, ...],
 ]:
+    if selection_limit <= 0:
+        return [], (), ()
+
     candidates: list[CleanupCandidate] = []
     stats: list[CleanupQueueStats] = []
     policy_stats: list[CleanupPolicyStats] = []
+    probes_remaining = selection_limit
     for group in groups:
+        if len(candidates) >= selection_limit or probes_remaining <= 0:
+            break
         if _collated_group_is_successful_completion(group):
             continue
+        probes_remaining -= 1
         queue_name = f"T{group.tid}.{QUEUE_RESERVED_SUFFIX}"
-        rows = scan_queue_window(ctx, queue_name, limit=config.batch_size)
+        remaining_candidates = max(0, selection_limit - len(candidates))
+        rows = scan_queue_window(ctx, queue_name, limit=remaining_candidates)
         if not rows:
             continue
         decoded = tuple(_decode_reserved_row(row) for row in rows)
@@ -777,12 +798,13 @@ def _terminal_reserved_candidates(
             stop_reason="first_reserved_row_too_young",
             tid_from_row=reserved_tid,
         )
-        candidates.extend(selected.candidates)
+        selected_candidates = selected.candidates[:remaining_candidates]
+        candidates.extend(selected_candidates)
         stats.append(
             cleanup_queue_stats(
                 queue_name,
                 scanned=len(rows),
-                candidates=selected.candidates,
+                candidates=selected_candidates,
                 stop_reason=selected.stop_reason,
             )
         )
@@ -791,7 +813,7 @@ def _terminal_reserved_candidates(
                 queue_name,
                 policy=TASK_MONITOR_POLICY_RESERVED_DELETE_TERMINAL_PROVEN,
                 scanned=len(rows),
-                candidates=selected.candidates,
+                candidates=selected_candidates,
                 stop_reason=selected.stop_reason,
             )
         )
