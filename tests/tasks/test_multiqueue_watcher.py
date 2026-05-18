@@ -5,6 +5,8 @@ from __future__ import annotations
 import threading
 import time
 
+import pytest
+
 from weft._constants import QUEUE_PRIORITY_INTERNAL, QUEUE_PRIORITY_NORMAL
 from weft.core.tasks.multiqueue_watcher import (
     MultiQueueWatcher,
@@ -19,18 +21,19 @@ def run_single_drain(watcher: MultiQueueWatcher) -> None:
 
 
 class FakeWaiter:
-    def __init__(self, *, raises: bool = False) -> None:
+    def __init__(self, *, raises: bool = False, result: bool = False) -> None:
         self.wait_calls: list[float | None] = []
         self.wait_entered = threading.Event()
         self.close_calls = 0
         self.raises = raises
+        self.result = result
 
     def wait(self, timeout: float | None) -> bool:
         self.wait_calls.append(timeout)
         self.wait_entered.set()
         if self.raises:
             raise RuntimeError("waiter failed")
-        return False
+        return self.result
 
     def close(self) -> None:
         self.close_calls += 1
@@ -110,7 +113,7 @@ def test_wait_for_activity_uses_simplebroker_multi_queue_waiter(
     assert fake_waiter.wait_calls == [0.25]
 
 
-def test_wait_for_activity_skips_waiter_when_work_is_pending(
+def test_wait_for_activity_positive_timeout_uses_waiter_without_precheck(
     broker_env,
     monkeypatch,
 ) -> None:
@@ -148,13 +151,128 @@ def test_wait_for_activity_skips_waiter_when_work_is_pending(
         watcher.stop(join=False)
 
     assert create_calls == 1
-    assert fake_waiter.wait_calls == []
+    assert fake_waiter.wait_calls == [0.25]
     assert queue.peek_one() == "ready"
 
 
-def test_wake_precheck_forces_inactive_queue_probe(broker_env) -> None:
+def test_wait_for_activity_zero_timeout_does_not_probe_queues(
+    broker_env,
+    monkeypatch,
+) -> None:
+    db_path, _make_queue = broker_env
+
+    def handler(
+        _message: str,
+        _timestamp: int,
+        _context: QueueMessageContext,
+    ) -> None:
+        pass
+
+    watcher = MultiQueueWatcher(
+        queue_configs={"zero-timeout.one": {"handler": handler}},
+        db=db_path,
+    )
+    monkeypatch.setattr(
+        watcher,
+        "_has_pending_messages",
+        lambda: pytest.fail("zero-timeout waits must not poll watched queues"),
+    )
+
+    try:
+        watcher.wait_for_activity(timeout=0)
+    finally:
+        watcher.stop(join=False)
+
+
+def test_native_waiter_activity_forces_inactive_queue_probe(
+    broker_env,
+    monkeypatch,
+) -> None:
     db_path, make_queue = broker_env
-    queue = make_queue("precheck.two")
+    queue = make_queue("native-precheck.two")
+    queue.write("ready")
+    seen: list[str] = []
+    fake_waiter = FakeWaiter(result=True)
+
+    def handler(
+        message: str,
+        _timestamp: int,
+        _context: QueueMessageContext,
+    ) -> None:
+        seen.append(message)
+
+    monkeypatch.setattr(
+        "weft.core.tasks.multiqueue_watcher.create_activity_waiter_for_queues",
+        lambda queues, *, stop_event: fake_waiter,
+    )
+    watcher = MultiQueueWatcher(
+        queue_configs={
+            "native-precheck.one": {"handler": handler},
+            "native-precheck.two": {"handler": handler},
+        },
+        db=db_path,
+        check_interval=10,
+    )
+
+    try:
+        watcher._next_inactive_probe_at = time.monotonic() + 60
+        watcher._check_counter = 1
+        watcher.wait_for_activity(timeout=0.25)
+        watcher._drain_queue()
+    finally:
+        watcher.stop(join=False)
+
+    assert seen == ["ready"]
+    assert fake_waiter.wait_calls == [0.25]
+
+
+def test_native_waiter_timeout_does_not_probe_inactive_queues_before_deadline(
+    broker_env,
+    monkeypatch,
+) -> None:
+    db_path, _make_queue = broker_env
+    fake_waiter = FakeWaiter(result=False)
+
+    def handler(
+        _message: str,
+        _timestamp: int,
+        _context: QueueMessageContext,
+    ) -> None:
+        pass
+
+    monkeypatch.setattr(
+        "weft.core.tasks.multiqueue_watcher.create_activity_waiter_for_queues",
+        lambda queues, *, stop_event: fake_waiter,
+    )
+    watcher = MultiQueueWatcher(
+        queue_configs={"native-timeout.one": {"handler": handler}},
+        db=db_path,
+        check_interval=10,
+    )
+    monkeypatch.setattr(
+        watcher,
+        "_queue_has_pending",
+        lambda _queue: pytest.fail(
+            "native waiter timeout must not become an inactive queue probe"
+        ),
+    )
+
+    try:
+        watcher._next_inactive_probe_at = time.monotonic() + 60
+        watcher._check_counter = 1
+        watcher.wait_for_activity(timeout=0.01)
+        watcher._drain_queue()
+    finally:
+        watcher.stop(join=False)
+
+    assert fake_waiter.wait_calls == [0.01]
+
+
+def test_inactive_queue_discovery_is_time_bounded(
+    broker_env,
+) -> None:
+    db_path, make_queue = broker_env
+    queue = make_queue("periodic-discovery.two")
     queue.write("ready")
     seen: list[str] = []
 
@@ -167,8 +285,8 @@ def test_wake_precheck_forces_inactive_queue_probe(broker_env) -> None:
 
     watcher = MultiQueueWatcher(
         queue_configs={
-            "precheck.one": {"handler": handler},
-            "precheck.two": {"handler": handler},
+            "periodic-discovery.one": {"handler": handler},
+            "periodic-discovery.two": {"handler": handler},
         },
         db=db_path,
         check_interval=10,
@@ -176,7 +294,11 @@ def test_wake_precheck_forces_inactive_queue_probe(broker_env) -> None:
 
     try:
         watcher._check_counter = 1
-        watcher.wait_for_activity(timeout=0)
+        watcher._next_inactive_probe_at = time.monotonic() + 60
+        watcher._drain_queue()
+        assert seen == []
+
+        watcher._next_inactive_probe_at = time.monotonic() - 1
         watcher._drain_queue()
     finally:
         watcher.stop(join=False)

@@ -497,6 +497,7 @@ def test_pipeline_task_updates_child_status_from_started_owner_events(
         )
     )
 
+    task.wait_for_activity(timeout=0.05)
     task.process_once()
     task.process_once()
 
@@ -542,6 +543,7 @@ def test_pipeline_task_sets_current_edge_after_successful_stage_terminal(
         )
     )
 
+    task.wait_for_activity(timeout=0.05)
     task.process_once()
 
     snapshots = _drain_json(ctx.queue(compiled.runtime.queues.status, persistent=True))
@@ -581,6 +583,7 @@ def test_pipeline_task_marks_completed_when_exit_edge_checks_in(tmp_path: Path) 
         )
     )
 
+    task.wait_for_activity(timeout=0.05)
     task.process_once()
 
     assert task.taskspec.state.status == "completed"
@@ -620,6 +623,7 @@ def test_pipeline_task_fails_fast_when_child_stage_fails(tmp_path: Path) -> None
         )
     )
 
+    task.wait_for_activity(timeout=0.05)
     task.process_once()
 
     assert task.taskspec.state.status == "failed"
@@ -649,6 +653,7 @@ def test_pipeline_task_stop_propagates_to_waiting_children(tmp_path: Path) -> No
     task.process_once()
 
     ctx.queue(compiled.runtime.queues.ctrl_in, persistent=True).write(CONTROL_STOP)
+    task.wait_for_activity(timeout=0.05)
     task.process_once()
 
     assert task.taskspec.state.status == "cancelled"
@@ -675,6 +680,7 @@ def test_pipeline_task_kill_propagates_to_waiting_children(tmp_path: Path) -> No
     task.process_once()
 
     ctx.queue(compiled.runtime.queues.ctrl_in, persistent=True).write(CONTROL_KILL)
+    task.wait_for_activity(timeout=0.05)
     task.process_once()
 
     assert task.taskspec.state.status == "killed"

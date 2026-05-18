@@ -209,6 +209,48 @@ def test_monitor_store_summary_ready_respects_terminal_retention(tmp_path) -> No
     ]
 
 
+def test_monitor_store_summary_ready_uses_family_high_water(tmp_path) -> None:
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    tid = "1779000000000000094"
+    terminal = _update(
+        tid,
+        1779000000000009000,
+        event="work_completed",
+        status="completed",
+        terminal=True,
+    )
+    later_activity = _update(
+        tid,
+        1779000005000009000,
+        event="task_activity",
+        status="completed",
+    )
+    store.record_task_log_updates(
+        WEFT_GLOBAL_LOG_QUEUE,
+        (terminal, later_activity),
+        checkpoint_message_id=None,
+    )
+
+    ready_before_later_row_ages = store.list_summary_ready_tasks(
+        limit=10,
+        now_ns=later_activity.message_id + 1_000_000_000,
+        retention_seconds=2.0,
+    )
+    ready_after_family_high_water_ages = store.list_summary_ready_tasks(
+        limit=10,
+        now_ns=later_activity.message_id + 3_000_000_000,
+        retention_seconds=2.0,
+    )
+
+    assert ready_before_later_row_ages == ()
+    assert [
+        (item.record.tid, item.close_reason)
+        for item in ready_after_family_high_water_ages
+    ] == [(tid, "terminal")]
+
+
 def test_monitor_store_summary_ready_suspects_only_known_interval(tmp_path) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
@@ -235,6 +277,113 @@ def test_monitor_store_summary_ready_suspects_only_known_interval(tmp_path) -> N
 
     assert [(item.record.tid, item.close_reason) for item in ready] == [
         (known_tid, "suspected_inactive")
+    ]
+
+
+def test_monitor_store_summary_ready_classifies_stale_open_without_interval(
+    tmp_path,
+) -> None:
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    tid = "1779000000000000095"
+    update = _update(tid, 1779000000000012000)
+    store.record_task_log_updates(
+        WEFT_GLOBAL_LOG_QUEUE,
+        (update,),
+        checkpoint_message_id=None,
+    )
+
+    too_soon = store.list_summary_ready_tasks(
+        limit=10,
+        now_ns=update.message_id + 3_000_000_000,
+        retention_seconds=1.0,
+        stale_open_family_seconds=5.0,
+    )
+    stale = store.list_summary_ready_tasks(
+        limit=10,
+        now_ns=update.message_id + 6_000_000_000,
+        retention_seconds=1.0,
+        stale_open_family_seconds=5.0,
+    )
+
+    assert too_soon == ()
+    assert [(item.record.tid, item.close_reason) for item in stale] == [
+        (tid, "stale_open")
+    ]
+
+
+def test_monitor_store_disposition_tombstone_removes_family_from_ready_list(
+    tmp_path,
+) -> None:
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    tid = "1779000000000000096"
+    terminal = _update(
+        tid,
+        1779000000000013000,
+        event="work_completed",
+        status="completed",
+        terminal=True,
+    )
+    store.record_task_log_updates(
+        WEFT_GLOBAL_LOG_QUEUE,
+        (terminal,),
+        checkpoint_message_id=None,
+    )
+    store.mark_summary_emitted(tid, terminal.message_id + 3)
+    store.mark_task_control_deleted(tid, terminal.message_id + 4)
+    store.mark_family_disposed(
+        tid,
+        terminal.message_id + 5,
+        disposition_reason="terminal",
+    )
+
+    record = store.get_task(tid)
+    ready = store.list_summary_ready_tasks(
+        limit=10,
+        now_ns=terminal.message_id + 3_000_000_000,
+        retention_seconds=1.0,
+    )
+
+    assert record is not None
+    assert record.summary_emitted_at_ns == terminal.message_id + 3
+    assert record.task_control_deleted_at_ns == terminal.message_id + 4
+    assert record.disposition_reason == "terminal"
+    assert record.disposition_at_ns == terminal.message_id + 5
+    assert ready == ()
+
+
+def test_monitor_store_summary_ready_keeps_summary_emitted_undisposed_family(
+    tmp_path,
+) -> None:
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    tid = "1779000000000000097"
+    terminal = _update(
+        tid,
+        1779000000000014000,
+        event="work_completed",
+        status="completed",
+        terminal=True,
+    )
+    store.record_task_log_updates(
+        WEFT_GLOBAL_LOG_QUEUE,
+        (terminal,),
+        checkpoint_message_id=None,
+    )
+    store.mark_summary_emitted(tid, terminal.message_id + 1)
+
+    ready = store.list_summary_ready_tasks(
+        limit=10,
+        now_ns=terminal.message_id + 3_000_000_000,
+        retention_seconds=1.0,
+    )
+
+    assert [(item.record.tid, item.close_reason) for item in ready] == [
+        (tid, "terminal")
     ]
 
 

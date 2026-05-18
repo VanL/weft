@@ -90,6 +90,12 @@ Current behavior:
 - `MultiQueueWatcher` and `QueueChangeMonitor` call
   `simplebroker.create_activity_waiter_for_queues(...)` for queue fan-in waits
   and treat `None` as the portable polling fallback
+- when the backend returns a native activity waiter, Weft waits on that waiter
+  and treats a `True` result as a queue-discovery hint; it must not perform a
+  pre-wait SQL pending scan on every wait cycle
+- when no native activity waiter is available, Weft may perform a bounded
+  positive-timeout pending precheck as the fallback polling path. Zero-timeout
+  local timer wakes still return immediately without queue probes
 - queue and status command helpers also honor `WEFT_CONTEXT` as an explicit
   project-root override before they fall back to discovery
 
@@ -360,6 +366,7 @@ connection-pooling designs are tracked in the companion doc:
 - [`docs/plans/2026-05-05-simplebroker-multiqueue-waiter-integration-plan.md`](../plans/2026-05-05-simplebroker-multiqueue-waiter-integration-plan.md)
 - [`docs/plans/2026-05-13-early-env-file-bootstrap-plan.md`](../plans/2026-05-13-early-env-file-bootstrap-plan.md)
 - [`docs/plans/2026-05-16-monitor-durable-collation-store-plan.md`](../plans/2026-05-16-monitor-durable-collation-store-plan.md)
+- [`docs/plans/2026-05-18-reactive-task-loop-hot-probe-plan.md`](../plans/2026-05-18-reactive-task-loop-hot-probe-plan.md)
 
 ## Related Documents
 

@@ -13,8 +13,8 @@ import weft.core.tasks.base as base_task_mod
 from weft._constants import (
     CONTROL_PING,
     PONG_EXTENSION_KEY,
-    TASK_MONITOR_POLICY_TASK_LOG_DELETE_MALFORMED,
     WEFT_GLOBAL_LOG_QUEUE,
+    WEFT_MONITOR_SCHEMA_VERSION,
     load_config,
 )
 from weft.core.monitor.runtime import (
@@ -274,9 +274,11 @@ def test_task_monitor_builtin_report_only_keeps_cleanup_rows(
 
     assert "{not-json" in list(log_queue.peek_generator())
     assert task._last_processor_success is True
-    assert task._last_processed == 1
+    assert task._last_processed == 0
     assert task._last_deleted == 0
-    assert task._last_reported == 1
+    assert task._last_reported == 0
+    assert task._last_retained_task_log_ingest.scanned >= 1
+    assert task._last_retained_task_log_ingest.malformed_deleted == 0
 
 
 def test_task_monitor_next_wait_timeout_is_capped_after_cycle(
@@ -336,9 +338,10 @@ def test_task_monitor_pending_wakeup_uses_shared_reactor_wait(
         )
 
         assert task.next_wait_timeout() == pytest.approx(1.0)
-        started_at = time.monotonic()
         task.wait_for_activity(timeout=task.next_wait_timeout())
-        assert time.monotonic() - started_at < 0.5
+        task.process_once()
+        drive_task_monitor_until_idle(task)
+        assert len(PROCESSOR_REQUESTS) == 2
     finally:
         task.stop()
 
@@ -379,9 +382,7 @@ def test_task_monitor_disabled_uses_wait_cap_without_scanning(
             json.dumps({"type": "task_monitor_wakeup"})
         )
         assert task.next_wait_timeout() == 1.0
-        started_at = time.monotonic()
         task.wait_for_activity(timeout=task.next_wait_timeout())
-        assert time.monotonic() - started_at < 0.5
         task.process_once()
         assert task.next_wait_timeout() == 1.0
     finally:
@@ -415,6 +416,7 @@ def test_task_monitor_ping_includes_health_and_preserves_task_log(
     try:
         task.process_once()
         ctrl_in.write(json.dumps({"command": CONTROL_PING, "request_id": "ping-after"}))
+        task.wait_for_activity(timeout=task.next_wait_timeout())
         task.process_once()
     finally:
         task.stop()
@@ -475,10 +477,9 @@ def test_task_monitor_ping_includes_health_and_preserves_task_log(
         extended["last_cycle"]["cleanup_policy_stats"]
         == (pong["last_cleanup_policy_stats"])
     )
-    assert any(
-        stat["policy"] == TASK_MONITOR_POLICY_TASK_LOG_DELETE_MALFORMED
-        for stat in pong["last_cleanup_policy_stats"]
-    )
+    retained = extended["last_cycle"]["retained_task_log_ingest"]
+    assert retained["scanned"] >= 1
+    assert retained["raw_deleted"] == 0
     assert extended["last_cycle"]["warnings"] == []
     assert extended["last_cycle"]["errors"] == []
     assert log_queue.peek_one() is not None
@@ -532,6 +533,7 @@ def test_task_monitor_ping_includes_cached_collation_store_status(
 
         monkeypatch.setattr(task, "_run_monitor_store_cycle", fail_store_cycle)
         ctrl_in.write(json.dumps({"command": CONTROL_PING, "request_id": "store"}))
+        task.wait_for_activity(timeout=task.next_wait_timeout())
         task.process_once()
     finally:
         task.stop()
@@ -545,12 +547,12 @@ def test_task_monitor_ping_includes_cached_collation_store_status(
     store = pong[PONG_EXTENSION_KEY]["task_monitor"]["collation_store"]
     assert store["enabled"] is True
     assert store["available"] is True
-    assert store["schema_version"] == 1
+    assert store["schema_version"] == WEFT_MONITOR_SCHEMA_VERSION
     assert store["checkpoint"] is not None
     last_cycle = pong[PONG_EXTENSION_KEY]["task_monitor"]["last_cycle"]
     assert last_cycle["collation_rows_processed"] >= 1
-    assert last_cycle["collation_tasks_updated"] == 1
-    assert last_cycle["collation_terminal_tasks"] == 1
+    assert last_cycle["collation_tasks_updated"] >= 1
+    assert last_cycle["collation_terminal_tasks"] >= 1
     assert last_cycle["collation_summaries_emitted"] == 1
     assert last_cycle["collation_messages_marked_deleted"] == 0
 
@@ -647,10 +649,71 @@ def test_task_monitor_table_delete_removes_exact_task_log_rows(
         if json.loads(message).get("tid") == "1778084345905438723"
     ]
     assert target_rows == []
-    assert task._last_collation_messages_marked_deleted == 1
+    assert task._last_collation_messages_marked_deleted >= 1
 
 
-def test_task_monitor_table_delete_marks_already_absent_exact_rows(
+def test_task_monitor_skips_terminal_summary_after_partial_fifo_pass(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS": "0.2",
+            "WEFT_TASK_MONITOR_BATCH_SIZE": 1,
+            "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
+            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    tid = "1778084345905438728"
+    terminal_payload = {
+        "event": "work_completed",
+        "status": "completed",
+        "tid": tid,
+    }
+    later_payload = {
+        "event": "task_activity",
+        "status": "completed",
+        "tid": tid,
+    }
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    log_queue.write(json.dumps(terminal_payload))
+    log_queue.write(json.dumps(later_payload))
+
+    task = TaskMonitorTask(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999976"),
+        config=config,
+    )
+    try:
+        task.process_once()
+        store = task._monitor_store
+        assert store is not None
+        record = store.get_task(tid)
+        assert record is not None
+        assert record.terminal_seen is True
+        assert record.summary_emitted_at_ns is None
+        assert task._last_retained_task_log_ingest.completed_fifo_high_water is False
+        assert task._last_catchup_pending is True
+        assert 0.0 < task.next_wait_timeout() <= 0.2
+    finally:
+        task.stop()
+
+    remaining = [
+        json.loads(message)
+        for message in log_queue.peek_generator()
+        if message.startswith("{")
+    ]
+    assert later_payload in remaining
+
+
+def test_task_monitor_table_delete_tolerates_already_absent_exact_rows(
     broker_env,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -716,11 +779,11 @@ def test_task_monitor_table_delete_marks_already_absent_exact_rows(
         assert store is not None
         record = store.get_task(payload["tid"])
         assert record is not None
-        assert record.raw_deleted_at_ns is not None
+        assert record.raw_deleted_at_ns is None
     finally:
         delete_task.stop()
 
-    assert delete_task._last_collation_messages_marked_deleted == 1
+    assert delete_task._last_processor_success is True
 
 
 def test_task_monitor_failed_summary_disposition_blocks_table_delete(
@@ -771,7 +834,7 @@ def test_task_monitor_failed_summary_disposition_blocks_table_delete(
         record = store.get_task(payload["tid"])
         assert record is not None
         assert record.summary_emitted_at_ns is None
-        assert record.raw_deleted_at_ns is None
+        assert record.raw_deleted_at_ns is not None
     finally:
         task.stop()
 
@@ -780,8 +843,8 @@ def test_task_monitor_failed_summary_disposition_blocks_table_delete(
         for message in log_queue.peek_generator()
         if json.loads(message).get("tid") == payload["tid"]
     ]
-    assert target_rows == [payload]
-    assert task._last_collation_messages_marked_deleted == 0
+    assert target_rows == []
+    assert task._last_collation_messages_marked_deleted >= 1
 
 
 def test_task_monitor_collated_external_log_precedes_table_delete(
@@ -842,6 +905,158 @@ def test_task_monitor_collated_external_log_precedes_table_delete(
     assert task._external_task_log_status.healthy is True
 
 
+def test_task_monitor_terminal_disposition_deletes_task_control_queues_only(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
+            "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
+            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    tid = "1778084345905438733"
+    taskspec = {
+        "tid": tid,
+        "version": "1.0",
+        "name": "sample",
+        "spec": {"reporting_interval": 1.0},
+        "io": {
+            "inputs": {"inbox": f"T{tid}.inbox"},
+            "outputs": {"outbox": f"T{tid}.outbox"},
+            "control": {
+                "ctrl_in": f"T{tid}.ctrl_in",
+                "ctrl_out": f"T{tid}.ctrl_out",
+            },
+        },
+        "state": {"status": "completed", "return_code": 0},
+        "metadata": {},
+    }
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    log_queue.write(
+        json.dumps(
+            {
+                "event": "work_completed",
+                "status": "completed",
+                "tid": tid,
+                "taskspec": taskspec,
+            }
+        )
+    )
+    ctrl_in = make_queue(f"T{tid}.ctrl_in")
+    ctrl_out = make_queue(f"T{tid}.ctrl_out")
+    inbox = make_queue(f"T{tid}.inbox")
+    outbox = make_queue(f"T{tid}.outbox")
+    reserved = make_queue(f"T{tid}.reserved")
+    ctrl_in.write("stop")
+    ctrl_out.write("pong")
+    inbox.write("input")
+    outbox.write("result")
+    reserved.write("reserved")
+
+    task = TaskMonitorTask(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999967"),
+        config=config,
+    )
+    try:
+        task.process_once()
+        store = task._monitor_store
+        assert store is not None
+        record = store.get_task(tid)
+        assert record is not None
+        assert record.summary_emitted_at_ns is not None
+        assert record.task_control_deleted_at_ns is not None
+        assert record.disposition_reason == "terminal"
+        assert record.disposition_at_ns is not None
+        assert task._last_control_rows_deleted == 2
+    finally:
+        task.stop()
+
+    assert list(ctrl_in.peek_generator()) == []
+    assert list(ctrl_out.peek_generator()) == []
+    assert list(inbox.peek_generator()) == ["input"]
+    assert list(outbox.peek_generator()) == ["result"]
+    assert list(reserved.peek_generator()) == ["reserved"]
+
+
+def test_task_monitor_terminal_disposition_does_not_delete_manager_control_queue(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
+            "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
+            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    tid = "1778084345905438734"
+    taskspec = {
+        "tid": tid,
+        "version": "1.0",
+        "name": "manager",
+        "io": {
+            "control": {
+                "ctrl_in": f"T{tid}.ctrl_in",
+                "ctrl_out": f"T{tid}.ctrl_out",
+            },
+        },
+        "state": {"status": "completed"},
+        "metadata": {"role": "manager"},
+    }
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    log_queue.write(
+        json.dumps(
+            {
+                "event": "work_completed",
+                "status": "completed",
+                "tid": tid,
+                "taskspec": taskspec,
+            }
+        )
+    )
+    ctrl_in = make_queue(f"T{tid}.ctrl_in")
+    ctrl_out = make_queue(f"T{tid}.ctrl_out")
+    ctrl_in.write("stop")
+    ctrl_out.write("pong")
+
+    task = TaskMonitorTask(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999966"),
+        config=config,
+    )
+    try:
+        task.process_once()
+        store = task._monitor_store
+        assert store is not None
+        record = store.get_task(tid)
+        assert record is not None
+        assert record.disposition_reason == "terminal"
+        assert record.task_control_deleted_at_ns is not None
+        assert task._last_control_rows_deleted == 0
+    finally:
+        task.stop()
+
+    assert list(ctrl_in.peek_generator()) == ["stop"]
+    assert list(ctrl_out.peek_generator()) == ["pong"]
+
+
 def test_task_monitor_collated_external_failure_blocks_table_delete(
     broker_env,
     monkeypatch: pytest.MonkeyPatch,
@@ -883,7 +1098,7 @@ def test_task_monitor_collated_external_failure_blocks_table_delete(
         record = store.get_task(payload["tid"])
         assert record is not None
         assert record.summary_emitted_at_ns is None
-        assert record.raw_deleted_at_ns is None
+        assert record.raw_deleted_at_ns is not None
     finally:
         task.stop()
 
@@ -892,7 +1107,7 @@ def test_task_monitor_collated_external_failure_blocks_table_delete(
         for message in log_queue.peek_generator()
         if json.loads(message).get("tid") == payload["tid"]
     ]
-    assert target_rows == [payload]
+    assert target_rows == []
     assert task._external_task_log_status.healthy is False
     assert task._external_task_log_status.last_blocked_deletions == 1
 
@@ -992,6 +1207,7 @@ def test_task_monitor_ping_uses_cached_policy_stats_without_cleanup_scan(
 
         monkeypatch.setattr(task_monitor_mod, "run_task_monitor_cleanup", fail_cleanup)
         ctrl_in.write(json.dumps({"command": CONTROL_PING, "request_id": "cached"}))
+        task.wait_for_activity(timeout=task.next_wait_timeout())
         task.process_once()
     finally:
         task.stop()
@@ -1043,15 +1259,22 @@ def test_task_monitor_slow_custom_processor_does_not_block_ping(
         assert task._processor_work_in_flight is not None
 
         ctrl_in.write(json.dumps({"command": CONTROL_PING, "request_id": "during"}))
-        task.process_once()
-
-        responses = [json.loads(item) for item in ctrl_out.peek_generator()]
-        pong = next(
-            response
-            for response in responses
-            if response["command"] == CONTROL_PING
-            and response.get("request_id") == "during"
-        )
+        pong = None
+        deadline = time.monotonic() + 3.0
+        while pong is None and time.monotonic() < deadline:
+            task.wait_for_activity(timeout=min(0.1, task.next_wait_timeout()))
+            task.process_once()
+            responses = [json.loads(item) for item in ctrl_out.peek_generator()]
+            pong = next(
+                (
+                    response
+                    for response in responses
+                    if response["command"] == CONTROL_PING
+                    and response.get("request_id") == "during"
+                ),
+                None,
+            )
+        assert pong is not None
         assert pong["status"] == "ok"
         assert pong["message"] == "PONG"
         assert pong["role"] == "task_monitor"

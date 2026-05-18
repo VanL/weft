@@ -31,7 +31,11 @@ from simplebroker.watcher import (
     _StopLoop,
     default_error_handler,
 )
-from weft._constants import QUEUE_PRIORITY_NORMAL, load_config
+from weft._constants import (
+    QUEUE_PRIORITY_NORMAL,
+    TASK_INACTIVE_QUEUE_DISCOVERY_INTERVAL_SECONDS,
+    load_config,
+)
 from weft.context import resolve_context_broker_target
 
 logger = logging.getLogger(__name__)
@@ -100,6 +104,7 @@ class MultiQueueWatcher(BaseWatcher):
         polling_strategy: PollingStrategy | None = None,
         yield_strategy: str = "round_robin",
         check_interval: int = 10,
+        inactive_probe_interval: float = TASK_INACTIVE_QUEUE_DISCOVERY_INTERVAL_SECONDS,
         default_error_handler_fn: Callable[
             [Exception, str, int], bool | None
         ] = default_error_handler,
@@ -117,7 +122,10 @@ class MultiQueueWatcher(BaseWatcher):
             persistent: Whether queues should be persistent
             polling_strategy: Optional SimpleBroker polling strategy override
             yield_strategy: Queue iteration strategy (currently round_robin)
-            check_interval: How often inactive queues are probed for new work
+            check_interval: Legacy turn-count discovery setting retained for
+                existing callers; inactive discovery is now time-bounded.
+            inactive_probe_interval: Minimum seconds between broad inactive
+                queue discovery probes when no native activity hint is pending.
             default_error_handler_fn: Fallback error handler when queue config
                 does not supply one (defaults to SimpleBroker's default)
             config: Optional SimpleBroker configuration dictionary. If omitted,
@@ -136,6 +144,7 @@ class MultiQueueWatcher(BaseWatcher):
         self._persistent = persistent
         self._yield_strategy = yield_strategy
         self._check_interval = check_interval
+        self._inactive_probe_interval = max(0.0, float(inactive_probe_interval))
         self._default_error_handler = default_error_handler_fn
         self._handler: Callable[[str, int], None] | None = None
         self._error_handler: Callable[[Exception, str, int], bool | None] | None = None
@@ -250,11 +259,13 @@ class MultiQueueWatcher(BaseWatcher):
         self._multi_activity_waiter_generation: int | None = None
         self._multi_activity_waiter_signature: tuple[str, ...] | None = None
         self._pending_messages_precheck_confirmed = False
+        self._next_inactive_probe_at = time.monotonic()
 
         logger.debug(
             "MultiQueueWatcher initialized with queues: %s",
             list(self._queues.keys()),
         )
+        self._ensure_multi_activity_waiter()
 
     # ------------------------------------------------------------------ #
     # Public API                                                         #
@@ -382,9 +393,19 @@ class MultiQueueWatcher(BaseWatcher):
             logger.debug("Failed to close multi-queue activity waiter", exc_info=True)
 
     def _mark_pending_messages_prechecked(self) -> None:
-        """Force the next drain to probe every configured queue."""
+        """Force the next drain to run broad inactive-queue discovery."""
 
         self._pending_messages_precheck_confirmed = True
+
+    def _mark_queue_active(self, queue_name: str) -> None:
+        """Mark one configured queue as active based on explicit caller evidence."""
+
+        if queue_name not in self._queues:
+            raise ValueError(f"Queue '{queue_name}' is not configured")
+        if queue_name in self._active_queues:
+            return
+        self._active_queues.append(queue_name)
+        self._queue_iterator = itertools.cycle(self._active_queues)
 
     def _ensure_multi_activity_waiter(self) -> Any | None:
         """Create or return the SimpleBroker multi-queue activity waiter."""
@@ -445,19 +466,14 @@ class MultiQueueWatcher(BaseWatcher):
         Spec: [CC-2.1], [SB-0.4]
         """
         if timeout is None or timeout <= 0:
-            if self._has_pending_messages():
-                self._mark_pending_messages_prechecked()
-                return
             return
 
         waiter = self._ensure_multi_activity_waiter()
-        if self._has_pending_messages():
-            self._mark_pending_messages_prechecked()
-            return
 
         if waiter is not None:
             try:
-                waiter.wait(timeout)
+                if waiter.wait(timeout):
+                    self._mark_pending_messages_prechecked()
                 return
             except (BrokerError, OSError, RuntimeError, TypeError, ValueError):
                 logger.debug(
@@ -465,6 +481,10 @@ class MultiQueueWatcher(BaseWatcher):
                     exc_info=True,
                 )
                 self._reset_multi_activity_waiter()
+
+        if self._has_pending_messages():
+            self._mark_pending_messages_prechecked()
+            return
 
         self._stop_event.wait(timeout)
 
@@ -542,15 +562,20 @@ class MultiQueueWatcher(BaseWatcher):
             if self._queue_has_pending(self._queues[name].queue)
         ]
 
+        now = time.monotonic()
         precheck_confirmed = self._pending_messages_precheck_confirmed
-        should_probe_all = precheck_confirmed or (
-            self._check_counter % self._check_interval == 0
-        )
+        discovery_due = now >= self._next_inactive_probe_at
+        should_probe_all = precheck_confirmed or discovery_due
         if should_probe_all:
             for name, config in self._queues.items():
-                if name not in still_active and self._queue_has_pending(config.queue):
+                if (
+                    name not in still_active
+                    and self._queue_counts_as_wait_activity(config)
+                    and self._queue_has_pending(config.queue)
+                ):
                     still_active.append(name)
             self._pending_messages_precheck_confirmed = False
+            self._next_inactive_probe_at = now + self._inactive_probe_interval
 
         if set(still_active) != set(self._active_queues):
             self._active_queues = still_active

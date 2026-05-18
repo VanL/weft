@@ -35,6 +35,7 @@ See also:
 - [`docs/plans/2026-05-15-manager-hot-loop-reduction-plan.md`](../plans/2026-05-15-manager-hot-loop-reduction-plan.md)
 - [`docs/plans/2026-05-15-manager-reactor-hot-loop-follow-up-plan.md`](../plans/2026-05-15-manager-reactor-hot-loop-follow-up-plan.md)
 - [`docs/plans/2026-05-16-monitor-durable-collation-store-plan.md`](../plans/2026-05-16-monitor-durable-collation-store-plan.md)
+- [`docs/plans/2026-05-18-reactive-task-loop-hot-probe-plan.md`](../plans/2026-05-18-reactive-task-loop-hot-probe-plan.md)
 
 ## 1. TaskSpec (`weft/core/taskspec/model.py`) [CC-1]
 
@@ -121,9 +122,12 @@ Current role:
 - support `READ`, `PEEK`, and reserve-oriented processing semantics
 - own a backend-neutral wait seam that uses SimpleBroker's multi-queue
   activity waiter when available and falls back to polling otherwise
-- treat pending work observed by the wait seam as a hard scheduling signal:
-  the next drain must probe all configured queues, including inactive queues,
-  rather than waiting for the periodic broad-probe interval
+- treat native waiter activity as a hard scheduling hint: the next drain may
+  run broad inactive-queue discovery for queues that count as ordinary wait
+  activity, rather than waiting for the periodic discovery interval
+- treat zero-timeout waits as local due-timer boundaries only. They must not
+  scan queues. Backends without a native waiter may still perform a bounded
+  positive-timeout pending precheck as the portable polling fallback
 - expose a small scheduling primitive that higher-level tasks reuse
 
 Why this exists:
@@ -464,6 +468,7 @@ by `weft/core/monitor/store.py`, `weft/core/monitor/sql.py`,
 ## Related Plans
 
 - [`docs/plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md`](../plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md)
+- [`docs/plans/2026-05-18-reactive-task-loop-hot-probe-plan.md`](../plans/2026-05-18-reactive-task-loop-hot-probe-plan.md)
 
 ## Related Documents
 

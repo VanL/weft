@@ -215,6 +215,9 @@ TASK_PROCESS_POLL_INTERVAL: Final[float] = 0.05
 TASK_REACTOR_WAKEUP_MAX_SECONDS: Final[float] = 0.05
 """Maximum wait chunk while task worker lanes may produce local reactor results."""
 
+TASK_INACTIVE_QUEUE_DISCOVERY_INTERVAL_SECONDS: Final[float] = 1.0
+"""Minimum interval between broad inactive-queue discovery probes."""
+
 TASK_WORKER_RESULT_QUEUE_MAXSIZE: Final[int] = 256
 """Maximum queued worker-result envelopes before worker lanes apply backpressure."""
 
@@ -440,7 +443,7 @@ WEFT_GLOBAL_LOG_QUEUE: Final[str] = "weft.log.tasks"
 TASK_MONITOR_SCHEMA_VERSION: Final[int] = 1
 """JSONL schema version for task monitor operational records."""
 
-WEFT_MONITOR_SCHEMA_VERSION: Final[int] = 1
+WEFT_MONITOR_SCHEMA_VERSION: Final[int] = 2
 """Schema version for Monitor-owned durable collation tables."""
 
 WEFT_MONITOR_META_TABLE: Final[str] = "weft_monitor_meta"
@@ -522,6 +525,9 @@ WEFT_TASK_MONITOR_ENABLED_DEFAULT: Final[bool] = True
 WEFT_TASK_MONITOR_INTERVAL_SECONDS_DEFAULT: Final[int] = 300
 """Default heartbeat wake interval for the supervised task monitor."""
 
+WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS_DEFAULT: Final[float] = 2.0
+"""Default short wake interval while retained task-log backlog remains."""
+
 WEFT_TASK_MONITOR_BATCH_SIZE_DEFAULT: Final[int] = 5000
 """Default maximum cleanup candidates selected by one supervised monitor cycle."""
 
@@ -530,6 +536,12 @@ WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT_DEFAULT: Final[int] = 50000
 
 WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE_DEFAULT: Final[int] = 100
 """Default Monitor-store rows written per transaction by one supervised cycle."""
+
+WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS_DEFAULT: Final[float] = 604800.0
+"""Default hard age before open Monitor families without intervals are suspected."""
+
+WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT_DEFAULT: Final[int] = 1000
+"""Default per-cycle exact-delete cap for terminal task control queues."""
 
 WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS_DEFAULT: Final[float] = 172800.0
 """Default minimum age before TaskMonitor logs/deletes task-log rows."""
@@ -1595,6 +1607,15 @@ def _parse_task_monitor_interval_seconds(value: str) -> int:
     return parsed
 
 
+def _parse_task_monitor_catchup_interval_seconds(value: str) -> float:
+    """Parse the task-monitor backlog catch-up interval."""
+
+    return _parse_positive_float(
+        value,
+        name="WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS",
+    )
+
+
 def _parse_task_monitor_batch_size(value: str) -> int:
     """Parse the task-monitor batch size environment variable."""
 
@@ -1616,6 +1637,24 @@ def _parse_task_monitor_store_write_batch_size(value: str) -> int:
     return _parse_positive_int(
         value,
         name="WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE",
+    )
+
+
+def _parse_task_monitor_stale_open_family_seconds(value: str) -> float:
+    """Parse the task-monitor stale-open family hard-age threshold."""
+
+    return _parse_positive_float(
+        value,
+        name="WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS",
+    )
+
+
+def _parse_task_monitor_control_queue_delete_limit(value: str) -> int:
+    """Parse the task-monitor per-cycle control queue delete limit."""
+
+    return _parse_positive_int(
+        value,
+        name="WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT",
     )
 
 
@@ -1895,6 +1934,11 @@ def _load_weft_env_vars() -> dict[str, Any]:
             default=WEFT_TASK_MONITOR_INTERVAL_SECONDS_DEFAULT,
             parser=_parse_task_monitor_interval_seconds,
         ),
+        "WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS": _load_weft_env_value(
+            "WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS",
+            default=WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS_DEFAULT,
+            parser=_parse_task_monitor_catchup_interval_seconds,
+        ),
         "WEFT_TASK_MONITOR_BATCH_SIZE": _load_weft_env_value(
             "WEFT_TASK_MONITOR_BATCH_SIZE",
             default=WEFT_TASK_MONITOR_BATCH_SIZE_DEFAULT,
@@ -1909,6 +1953,16 @@ def _load_weft_env_vars() -> dict[str, Any]:
             "WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE",
             default=WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE_DEFAULT,
             parser=_parse_task_monitor_store_write_batch_size,
+        ),
+        "WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS": _load_weft_env_value(
+            "WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS",
+            default=WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS_DEFAULT,
+            parser=_parse_task_monitor_stale_open_family_seconds,
+        ),
+        "WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT": _load_weft_env_value(
+            "WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT",
+            default=WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT_DEFAULT,
+            parser=_parse_task_monitor_control_queue_delete_limit,
         ),
         "WEFT_TASK_MONITOR_PROCESSOR": _load_weft_env_value(
             "WEFT_TASK_MONITOR_PROCESSOR",
@@ -2044,6 +2098,15 @@ def _normalize_weft_override_value(name: str, value: Any) -> Any:
         raise TypeError(
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS override must be int or str"
         )
+    if name == "WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS":
+        if isinstance(value, str):
+            return _parse_task_monitor_catchup_interval_seconds(value)
+        if isinstance(value, int | float):
+            return _parse_task_monitor_catchup_interval_seconds(str(float(value)))
+        raise TypeError(
+            "WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS override must be int, "
+            "float, or str"
+        )
     if name == "WEFT_TASK_MONITOR_BATCH_SIZE":
         if isinstance(value, str):
             return _parse_task_monitor_batch_size(value)
@@ -2065,6 +2128,23 @@ def _normalize_weft_override_value(name: str, value: Any) -> Any:
             return _parse_task_monitor_store_write_batch_size(str(value))
         raise TypeError(
             "WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE override must be int or str"
+        )
+    if name == "WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS":
+        if isinstance(value, str):
+            return _parse_task_monitor_stale_open_family_seconds(value)
+        if isinstance(value, int | float):
+            return _parse_task_monitor_stale_open_family_seconds(str(float(value)))
+        raise TypeError(
+            "WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS override must be int, "
+            "float, or str"
+        )
+    if name == "WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT":
+        if isinstance(value, str):
+            return _parse_task_monitor_control_queue_delete_limit(value)
+        if isinstance(value, int):
+            return _parse_task_monitor_control_queue_delete_limit(str(value))
+        raise TypeError(
+            "WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT override must be int or str"
         )
     if name == "WEFT_TASK_MONITOR_PROCESSOR":
         if isinstance(value, str):

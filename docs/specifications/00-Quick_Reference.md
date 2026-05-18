@@ -145,18 +145,21 @@ Format rules and sanitization live in `01-Core_Components.md`.
 | `WEFT_AUTOSTART_TASKS` | Whether manager boot should consider autostart manifests under the active Weft metadata directory. |
 | `WEFT_TASK_MONITOR_ENABLED` | Whether the canonical manager supervises the internal `TaskMonitorTask`. Defaults to true. |
 | `WEFT_TASK_MONITOR_INTERVAL_SECONDS` | Heartbeat wake interval for the supervised task monitor. Must be at least the heartbeat minimum. |
-| `WEFT_TASK_MONITOR_BATCH_SIZE` | Maximum cleanup candidates selected by one supervised monitor cleanup cycle. Defaults to 5000. |
-| `WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT` | Maximum `weft.log.tasks` rows scanned by one supervised monitor cleanup cycle. Defaults to 50000. |
+| `WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS` | Short wake interval used while retained task-log backlog remains after a batch-limited cycle. Defaults to 2 seconds. |
+| `WEFT_TASK_MONITOR_BATCH_SIZE` | Maximum retained task-log rows or cleanup candidates processed by one supervised monitor cycle. Defaults to 5000. |
+| `WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT` | Maximum `weft.log.tasks` rows scanned by one supervised monitor cycle. Defaults to 50000. |
 | `WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE` | Maximum Monitor-store updates written in one transaction while collating task-log lifecycle evidence. Defaults to 100. |
+| `WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS` | Hard age before an open Monitor-table task family with no usable reporting interval is classified `stale_open`. Defaults to 604800 seconds. |
+| `WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT` | Per-cycle cap for exact deletion from terminal task-local `T{tid}.ctrl_in` and `T{tid}.ctrl_out` queues. Defaults to 1000. |
 | `WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS` | Minimum age before supervised TaskMonitor external logging/deletion may process eligible `weft.log.tasks` rows or families. Defaults to 172800 seconds. |
 | `WEFT_LOG_TASKS_EXTERNAL_PATH` | Optional JSONL file path for external task-log operational retention output. Empty disables external task-log logging. Relative paths resolve under `WEFT_LOGS_DIR`. |
 | `WEFT_LOG_TASKS_EXTERNAL_ENABLED` | Optional boolean override for external task-log logging. Defaults true when `WEFT_LOG_TASKS_EXTERNAL_PATH` is non-empty and false otherwise. |
 | `WEFT_LOG_TASKS_EXTERNAL_MODE` | External task-log logging mode: `collated` or `raw`. Defaults to `collated`. |
-| `WEFT_TASK_MONITOR_PROCESSOR` | Task-monitor processor name. Defaults to `delete`. Built-ins are `report_only`, `delete`, and `jsonl_then_delete`; `delete` removes exact rows selected by explicit TaskMonitor cleanup policies, with task-log collate running before broad older-than deletion and reporting cached queue and policy cleanup stats in TaskMonitor PONG, while `jsonl_then_delete` remains fail-closed until the logging callback lands. Custom values use `module:function`. |
+| `WEFT_TASK_MONITOR_PROCESSOR` | Task-monitor processor name. Defaults to `delete`. Built-ins are `report_only`, `delete`, and `jsonl_then_delete`; `delete` folds retained `weft.log.tasks` rows into Monitor-owned tables before exact deletion, keeps runtime-state cleanup policy-driven, and reports cached diagnostics in TaskMonitor PONG. `jsonl_then_delete` remains fail-closed until the logging callback lands. Custom values use `module:function`. |
 | `WEFT_TASK_MONITOR_LOG_SINK` | Operational output sink selector for monitor processors: `stdout`, `disk`, or `none`. |
 | `WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS` | Manager restart backoff after the supervised monitor exits. |
 | `WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED` | Whether the supervised monitor creates/verifies and uses its Monitor-owned durable collation tables. Defaults to true. |
-| `WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED` | Whether the supervised monitor may delete exact `weft.log.tasks` rows from durable Monitor table proof after summary emission. Defaults to false. |
+| `WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED` | Legacy guard for the older table-backed raw-delete path. The current supervised `delete` processor uses retained FIFO ingestion when `WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED` is true. |
 | `WEFT_DIRECTORY_NAME` | Name of the Weft metadata directory. Defaults to `.weft` and is used before project discovery. |
 | `WEFT_LOGS_DIR` | Optional log-root override. Relative values resolve against the project root; absolute values are used directly. Defaults to `.weft/logs`. |
 | `WEFT_DEFAULT_DB_LOCATION` | Broker default database location for SimpleBroker project resolution. |
@@ -181,3 +184,4 @@ _Implementation mapping_: `weft/core/taskspec/model.py` (process_target, peak_* 
 ## Related Plans
 
 - [`docs/plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md`](../plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md)
+- [`docs/plans/2026-05-18-monitor-table-driven-retained-log-cleanup-plan.md`](../plans/2026-05-18-monitor-table-driven-retained-log-cleanup-plan.md)

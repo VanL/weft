@@ -317,9 +317,16 @@ def test_interactive_control_commands_report_live_status(
 
         ctrl_in.write("STATUS")
         ctrl_in.write("PING")
-        _spin(task, iterations=6)
+        responses: list[dict[str, object]] = []
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            _spin(task, iterations=1)
+            responses = [json.loads(msg) for msg in ctrl_out.peek_generator()]
+            if any(r.get("command") == "STATUS" for r in responses) and any(
+                r.get("command") == "PING" for r in responses
+            ):
+                break
 
-        responses = [json.loads(msg) for msg in _drain(ctrl_out)]
         status_response = next(r for r in responses if r.get("command") == "STATUS")
         ping_response = next(r for r in responses if r.get("command") == "PING")
 

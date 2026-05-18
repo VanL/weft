@@ -48,7 +48,8 @@ def test_monitor_sql_summary_ready_queries_parameterize_cutoffs() -> None:
         ("context_key", "tid", "last_message_id"),
     )
 
-    assert "COALESCE(" in terminal
+    assert "last_message_id <= ?" in terminal
+    assert "COALESCE(" not in terminal
     assert "last_message_id <= ?" in open_query
     assert "LIMIT ?" in terminal
     assert "LIMIT ?" in open_query

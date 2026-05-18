@@ -28,6 +28,7 @@ from weft._constants import (
     WEFT_MONITOR_SCHEMA_VERSION_KEY,
     WEFT_MONITOR_TASK_COLLATIONS_TABLE,
     WEFT_MONITOR_TASK_MESSAGES_TABLE,
+    WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS_DEFAULT,
     WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE_DEFAULT,
 )
 from weft.context import WeftContext, service_context_key
@@ -160,6 +161,10 @@ class MonitorTaskCollationRecord:
     summary_emitted_at_ns: int | None = None
     raw_deleted_at_ns: int | None = None
     suspect_reason: str | None = None
+    suspect_at_ns: int | None = None
+    disposition_reason: str | None = None
+    disposition_at_ns: int | None = None
+    task_control_deleted_at_ns: int | None = None
     updated_at_ns: int = 0
 
     def to_summary(self) -> dict[str, Any]:
@@ -191,6 +196,10 @@ class MonitorTaskCollationRecord:
             "summary_emitted_at_ns": self.summary_emitted_at_ns,
             "raw_deleted_at_ns": self.raw_deleted_at_ns,
             "suspect_reason": self.suspect_reason,
+            "suspect_at_ns": self.suspect_at_ns,
+            "disposition_reason": self.disposition_reason,
+            "disposition_at_ns": self.disposition_at_ns,
+            "task_control_deleted_at_ns": self.task_control_deleted_at_ns,
         }
 
 
@@ -267,7 +276,18 @@ _task_columns: tuple[str, ...] = (
     "summary_emitted_at_ns",
     "raw_deleted_at_ns",
     "suspect_reason",
+    "suspect_at_ns",
+    "disposition_reason",
+    "disposition_at_ns",
+    "task_control_deleted_at_ns",
     "updated_at_ns",
+)
+
+_task_collation_additive_columns: tuple[tuple[str, str], ...] = (
+    ("suspect_at_ns", "BIGINT NULL"),
+    ("disposition_reason", "TEXT NULL"),
+    ("disposition_at_ns", "BIGINT NULL"),
+    ("task_control_deleted_at_ns", "BIGINT NULL"),
 )
 
 _monitor_index_specs: tuple[_MonitorIndexSpec, ...] = (
@@ -290,6 +310,21 @@ _monitor_index_specs: tuple[_MonitorIndexSpec, ...] = (
         name="idx_weft_monitor_collations_reserved_probe",
         table=_monitor_tables.task_collations,
         columns=("context_key", "reserved_probe_needed", "last_seen_at_ns"),
+    ),
+    _MonitorIndexSpec(
+        name="idx_weft_monitor_collations_disposition_terminal",
+        table=_monitor_tables.task_collations,
+        columns=(
+            "context_key",
+            "terminal_seen",
+            "disposition_at_ns",
+            "last_message_id",
+        ),
+    ),
+    _MonitorIndexSpec(
+        name="idx_weft_monitor_collations_disposition_open",
+        table=_monitor_tables.task_collations,
+        columns=("context_key", "disposition_at_ns", "last_message_id"),
     ),
     _MonitorIndexSpec(
         name="idx_weft_monitor_messages_tid",
@@ -330,10 +365,12 @@ class _MonitorTableAccess:
         runner: _SQLRunner,
         *,
         context_key: str,
+        backend_name: str,
         tables: _MonitorTableNames = _monitor_tables,
     ) -> None:
         self._runner = runner
         self._context_key = context_key
+        self._backend_name = backend_name
         self._tables = tables
 
     def ensure_schema(self) -> None:
@@ -346,10 +383,37 @@ class _MonitorTableAccess:
         self._runner.run(
             monitor_sql.create_task_messages_table(self._tables.task_messages)
         )
+        for column, definition in _task_collation_additive_columns:
+            if not self._column_exists(self._tables.task_collations, column):
+                self._runner.run(
+                    monitor_sql.add_column(
+                        self._tables.task_collations,
+                        column,
+                        definition,
+                    )
+                )
         for spec in _monitor_index_specs:
             self._runner.run(
                 monitor_sql.create_index(spec.name, spec.table, spec.columns)
             )
+
+    def _column_exists(self, table: str, column: str) -> bool:
+        if self._backend_name == "postgres":
+            rows = list(
+                self._runner.run(
+                    monitor_sql.postgres_column_exists(),
+                    (table, column),
+                    fetch=True,
+                )
+            )
+            return bool(rows)
+        rows = list(
+            self._runner.run(
+                monitor_sql.sqlite_table_info(table),
+                fetch=True,
+            )
+        )
+        return any(len(row) > 1 and str(row[1]) == column for row in rows)
 
     def read_meta(self, key: str) -> dict[str, Any] | None:
         """Read one Monitor metadata value."""
@@ -416,6 +480,9 @@ class _MonitorTableAccess:
         limit: int,
         now_ns: int,
         retention_seconds: float,
+        stale_open_family_seconds: float = (
+            WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS_DEFAULT
+        ),
         include_suspected: bool = True,
     ) -> tuple[MonitorSummaryReadyTask, ...]:
         """Return retained task families ready for summary disposition."""
@@ -457,6 +524,15 @@ class _MonitorTableAccess:
                             close_reason="suspected_inactive",
                         )
                     )
+                elif _stale_open(
+                    record, now_ns=now_ns, max_age_seconds=stale_open_family_seconds
+                ):
+                    ready.append(
+                        MonitorSummaryReadyTask(
+                            record=record,
+                            close_reason="stale_open",
+                        )
+                    )
         return tuple(ready)
 
     def mark_summary_emitted(
@@ -474,6 +550,43 @@ class _MonitorTableAccess:
                 int(emitted_at_ns),
                 suspect_reason,
                 int(emitted_at_ns),
+                self._context_key,
+                tid,
+            ),
+        )
+
+    def mark_task_control_deleted(self, tid: str, deleted_at_ns: int) -> None:
+        """Mark one task family's control queues cleanup complete."""
+
+        self._runner.run(
+            monitor_sql.mark_task_control_deleted(self._tables.task_collations),
+            (
+                int(deleted_at_ns),
+                int(deleted_at_ns),
+                self._context_key,
+                tid,
+            ),
+        )
+
+    def mark_family_disposed(
+        self,
+        tid: str,
+        disposed_at_ns: int,
+        *,
+        disposition_reason: str,
+        suspect_reason: str | None = None,
+        suspect_at_ns: int | None = None,
+    ) -> None:
+        """Mark one Monitor task family disposition complete."""
+
+        self._runner.run(
+            monitor_sql.mark_family_disposed(self._tables.task_collations),
+            (
+                disposition_reason,
+                int(disposed_at_ns),
+                suspect_reason,
+                suspect_at_ns,
+                int(disposed_at_ns),
                 self._context_key,
                 tid,
             ),
@@ -617,7 +730,11 @@ class MonitorStore:
         return self._config.schema_version
 
     def _access(self, runner: _SQLRunner) -> _MonitorTableAccess:
-        return _MonitorTableAccess(runner, context_key=self._context_key)
+        return _MonitorTableAccess(
+            runner,
+            context_key=self._context_key,
+            backend_name=self._context.backend_name,
+        )
 
     def close(self) -> None:
         """Close the store.
@@ -790,6 +907,9 @@ class MonitorStore:
         limit: int,
         now_ns: int,
         retention_seconds: float,
+        stale_open_family_seconds: float = (
+            WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS_DEFAULT
+        ),
         include_suspected: bool = True,
     ) -> tuple[MonitorSummaryReadyTask, ...]:
         """Return retained task families ready for summary disposition."""
@@ -801,6 +921,7 @@ class MonitorStore:
                 limit=limit,
                 now_ns=now_ns,
                 retention_seconds=retention_seconds,
+                stale_open_family_seconds=stale_open_family_seconds,
                 include_suspected=include_suspected,
             )
 
@@ -824,6 +945,48 @@ class MonitorStore:
                     tid,
                     emitted_at_ns,
                     suspect_reason=suspect_reason,
+                )
+
+    def mark_task_control_deleted(
+        self,
+        tid: str,
+        deleted_at_ns: int,
+    ) -> None:
+        """Mark terminal task-local control queue cleanup complete."""
+
+        with self._context.broker() as broker:
+            runner = _runner_from_broker(broker)
+            access = self._access(runner)
+            with _write_transaction(runner):
+                access.mark_task_control_deleted(tid, deleted_at_ns)
+
+    def mark_family_disposed(
+        self,
+        tid: str,
+        disposed_at_ns: int,
+        *,
+        disposition_reason: str,
+        suspect_reason: str | None = None,
+        suspect_at_ns: int | None = None,
+    ) -> None:
+        """Mark one Monitor task family as dispositioned.
+
+        This is a compact tombstone. It does not physically remove Monitor
+        rows.
+
+        Spec: [MF-5], [OBS.13]
+        """
+
+        with self._context.broker() as broker:
+            runner = _runner_from_broker(broker)
+            access = self._access(runner)
+            with _write_transaction(runner):
+                access.mark_family_disposed(
+                    tid,
+                    disposed_at_ns,
+                    disposition_reason=disposition_reason,
+                    suspect_reason=suspect_reason,
+                    suspect_at_ns=suspect_at_ns,
                 )
 
     def list_deletable_task_log_messages(
@@ -926,6 +1089,10 @@ def _record_from_row(row: tuple[Any, ...]) -> MonitorTaskCollationRecord:
         summary_emitted_at_ns=_int_or_none(values["summary_emitted_at_ns"]),
         raw_deleted_at_ns=_int_or_none(values["raw_deleted_at_ns"]),
         suspect_reason=_str_or_none(values["suspect_reason"]),
+        suspect_at_ns=_int_or_none(values["suspect_at_ns"]),
+        disposition_reason=_str_or_none(values["disposition_reason"]),
+        disposition_at_ns=_int_or_none(values["disposition_at_ns"]),
+        task_control_deleted_at_ns=_int_or_none(values["task_control_deleted_at_ns"]),
         updated_at_ns=int(values["updated_at_ns"]),
     )
 
@@ -1041,6 +1208,10 @@ def _merge_record(
         summary_emitted_at_ns=existing.summary_emitted_at_ns,
         raw_deleted_at_ns=existing.raw_deleted_at_ns,
         suspect_reason=existing.suspect_reason,
+        suspect_at_ns=existing.suspect_at_ns,
+        disposition_reason=existing.disposition_reason,
+        disposition_at_ns=existing.disposition_at_ns,
+        task_control_deleted_at_ns=existing.task_control_deleted_at_ns,
         updated_at_ns=now_ns,
     )
 
@@ -1075,6 +1246,10 @@ def _record_values(record: MonitorTaskCollationRecord) -> tuple[Any, ...]:
         record.summary_emitted_at_ns,
         record.raw_deleted_at_ns,
         record.suspect_reason,
+        record.suspect_at_ns,
+        record.disposition_reason,
+        record.disposition_at_ns,
+        record.task_control_deleted_at_ns,
         record.updated_at_ns,
     )
 
@@ -1093,6 +1268,18 @@ def _suspected_inactive(
         return False
     newest_age = max(0.0, (int(now_ns) - int(record.last_message_id)) / 1_000_000_000)
     return newest_age >= interval * 3
+
+
+def _stale_open(
+    record: MonitorTaskCollationRecord,
+    *,
+    now_ns: int,
+    max_age_seconds: float,
+) -> bool:
+    if _effective_reporting_interval_seconds(record) is not None:
+        return False
+    newest_age = max(0.0, (int(now_ns) - int(record.last_message_id)) / 1_000_000_000)
+    return newest_age >= max_age_seconds
 
 
 def _effective_reporting_interval_seconds(

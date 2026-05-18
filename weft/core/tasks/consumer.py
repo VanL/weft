@@ -142,7 +142,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
     def _queue_counts_as_wait_activity(self, config: QueueRuntimeConfig) -> bool:
         """Ignore already-reserved work as fresh wait activity while active."""
 
-        if self._active_work_in_flight:
+        if getattr(self, "_active_work_in_flight", False):
             return config.name == self._queue_names["ctrl_in"]
         return super()._queue_counts_as_wait_activity(config)
 

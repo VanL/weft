@@ -39,6 +39,7 @@ from weft._constants import (
     TASK_MONITOR_PONG_DETAIL_LIMIT,
     TASK_MONITOR_PROCESSOR_WORKER_LANE,
     TASK_MONITOR_SCHEMA_VERSION,
+    TASK_MONITOR_TASK_LOG_SCAN_LIMIT_REACHED,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS,
     WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS_DEFAULT,
@@ -70,12 +71,13 @@ from weft.core.monitor.store import (
     MonitorStore,
     MonitorStoreStatus,
     MonitorSummaryReadyTask,
+    MonitorTaskCollationRecord,
     open_monitor_store,
 )
 from weft.core.monitor.task_log_scanner import GeneratorTaskLogScanner
 from weft.core.pruning.apply import apply_exact_prune_candidates
 from weft.core.pruning.models import CleanupPolicyStats, CleanupQueueStats
-from weft.core.queue_window import is_old_enough
+from weft.core.queue_window import QueueWindowRow, is_old_enough
 from weft.core.serve_log import (
     build_serve_log_record,
     emit_serve_log_record,
@@ -119,6 +121,66 @@ class _RawExternalPruneRef:
     report_only: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class _RetainedTaskLogIngestResult:
+    """Cached result for one retained task-log FIFO ingestion pass."""
+
+    scanned: int = 0
+    malformed_deleted: int = 0
+    valid_ingested: int = 0
+    raw_deleted: int = 0
+    store_write_errors: tuple[str, ...] = ()
+    raw_delete_errors: tuple[str, ...] = ()
+    stop_reason: str | None = None
+    oldest_too_young_age_seconds: float | None = None
+    completed_fifo_high_water: bool = False
+
+    @property
+    def success(self) -> bool:
+        """Return whether the pass finished without write/delete errors."""
+
+        return not self.store_write_errors and not self.raw_delete_errors
+
+    def to_summary(self) -> dict[str, Any]:
+        """Return a JSON-safe cached PONG summary."""
+
+        return {
+            "scanned": self.scanned,
+            "malformed_deleted": self.malformed_deleted,
+            "valid_ingested": self.valid_ingested,
+            "raw_deleted": self.raw_deleted,
+            "store_write_errors": list(self.store_write_errors),
+            "raw_delete_errors": list(self.raw_delete_errors),
+            "stop_reason": self.stop_reason,
+            "oldest_too_young_age_seconds": self.oldest_too_young_age_seconds,
+            "completed_fifo_high_water": self.completed_fifo_high_water,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class _TaskControlCleanupResult:
+    """Cached result for terminal task-local control queue cleanup."""
+
+    deleted: int = 0
+    errors: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
+
+    @property
+    def success(self) -> bool:
+        """Return whether the cleanup finished without delete errors."""
+
+        return not self.errors
+
+    def to_summary(self) -> dict[str, Any]:
+        """Return a JSON-safe cached PONG summary."""
+
+        return {
+            "deleted": self.deleted,
+            "errors": list(self.errors),
+            "warnings": list(self.warnings),
+        }
+
+
 def _applied_monitor_raw_message(
     candidate: MonitorRawMessageRef,
     deleted: bool,
@@ -145,6 +207,29 @@ def _applied_raw_external_message(
         deleted=deleted,
         error=error,
     )
+
+
+def _standard_task_control_queue_names(
+    record: MonitorTaskCollationRecord,
+) -> tuple[str, str] | None:
+    """Return standard task-local control queues eligible for cleanup."""
+
+    if record.role == "manager" or not record.tid.isdigit():
+        return None
+    expected_ctrl_in = f"T{record.tid}.{QUEUE_CTRL_IN_SUFFIX}"
+    expected_ctrl_out = f"T{record.tid}.{QUEUE_CTRL_OUT_SUFFIX}"
+    io_summary = record.taskspec_summary.get("io")
+    if not isinstance(io_summary, Mapping):
+        return None
+    control = io_summary.get("control")
+    if not isinstance(control, Mapping):
+        return None
+    if (
+        control.get("ctrl_in") != expected_ctrl_in
+        or control.get("ctrl_out") != expected_ctrl_out
+    ):
+        return None
+    return expected_ctrl_in, expected_ctrl_out
 
 
 def make_task_monitor_taskspec(tid: str | None = None) -> TaskSpec:
@@ -217,6 +302,7 @@ class TaskMonitorTask(BaseTask):
         self._last_prune_records_scanned = 0
         self._last_cleanup_queue_stats: tuple[dict[str, Any], ...] = ()
         self._last_cleanup_policy_stats: tuple[dict[str, Any], ...] = ()
+        self._last_catchup_pending = False
         self._monitor_store: MonitorStore | None = None
         self._monitor_store_status = MonitorStoreStatus(
             enabled=False,
@@ -227,6 +313,12 @@ class TaskMonitorTask(BaseTask):
         self._last_collation_terminal_tasks = 0
         self._last_collation_summaries_emitted = 0
         self._last_collation_messages_marked_deleted = 0
+        self._last_terminal_families_disposed = 0
+        self._last_suspect_families_classified = 0
+        self._last_control_rows_deleted = 0
+        self._last_control_delete_errors: tuple[str, ...] = ()
+        self._last_control_delete_warnings: tuple[str, ...] = ()
+        self._last_retained_task_log_ingest = _RetainedTaskLogIngestResult()
         self._last_collation_store_error: str | None = None
         self._external_task_log_sink: ExternalTaskLogSink | None = None
         self._external_task_log_status = disabled_external_task_log_status(
@@ -340,6 +432,7 @@ class TaskMonitorTask(BaseTask):
             enabled=self._monitor_config.enabled,
             interval_seconds=self._monitor_config.interval_seconds,
             batch_size=self._monitor_config.batch_size,
+            catchup_interval_seconds=self._monitor_config.catchup_interval_seconds,
             task_log_scan_limit=self._monitor_config.task_log_scan_limit,
             store_write_batch_size=self._monitor_config.store_write_batch_size,
             task_log_retention_period_seconds=(
@@ -502,6 +595,9 @@ class TaskMonitorTask(BaseTask):
                 "mode": "persistent",
                 "interval_seconds": self._monitor_config.interval_seconds,
                 "batch_size": self._monitor_config.batch_size,
+                "catchup_interval_seconds": (
+                    self._monitor_config.catchup_interval_seconds
+                ),
                 "task_log_scan_limit": self._monitor_config.task_log_scan_limit,
                 "store_write_batch_size": (self._monitor_config.store_write_batch_size),
                 "task_log_retention_period_seconds": (
@@ -528,6 +624,7 @@ class TaskMonitorTask(BaseTask):
                 "last_prune_records_scanned": self._last_prune_records_scanned,
                 "last_cleanup_queue_stats": list(self._last_cleanup_queue_stats),
                 "last_cleanup_policy_stats": list(self._last_cleanup_policy_stats),
+                "last_catchup_pending": self._last_catchup_pending,
                 "collation_store_available": self._monitor_store_status.available,
                 "collation_schema_version": (self._monitor_store_status.schema_version),
                 "collation_checkpoint": self._monitor_store_status.checkpoint,
@@ -539,6 +636,20 @@ class TaskMonitorTask(BaseTask):
                 ),
                 "last_collation_messages_marked_deleted": (
                     self._last_collation_messages_marked_deleted
+                ),
+                "last_terminal_families_disposed": (
+                    self._last_terminal_families_disposed
+                ),
+                "last_suspect_families_classified": (
+                    self._last_suspect_families_classified
+                ),
+                "last_control_rows_deleted": self._last_control_rows_deleted,
+                "last_control_delete_errors": list(self._last_control_delete_errors),
+                "last_control_delete_warnings": (
+                    list(self._last_control_delete_warnings)
+                ),
+                "last_retained_task_log_ingest": (
+                    self._last_retained_task_log_ingest.to_summary()
                 ),
                 "last_collation_store_error": self._last_collation_store_error,
                 "processor_in_flight": self._processor_work_in_flight is not None,
@@ -569,6 +680,9 @@ class TaskMonitorTask(BaseTask):
                 "processor": self._monitor_config.processor,
                 "interval_seconds": self._monitor_config.interval_seconds,
                 "batch_size": self._monitor_config.batch_size,
+                "catchup_interval_seconds": (
+                    self._monitor_config.catchup_interval_seconds
+                ),
                 "task_log_scan_limit": self._monitor_config.task_log_scan_limit,
                 "store_write_batch_size": (self._monitor_config.store_write_batch_size),
                 "task_log_retention_period_seconds": (
@@ -590,6 +704,7 @@ class TaskMonitorTask(BaseTask):
                     "last_cycle_at": self._last_cycle_at,
                     "last_checkpoint": self._last_checkpoint,
                     "next_cycle_due_in_seconds": next_cycle_due,
+                    "catchup_pending": self._last_catchup_pending,
                 },
                 "last_cycle": {
                     "success": self._last_processor_success,
@@ -616,6 +731,22 @@ class TaskMonitorTask(BaseTask):
                     ),
                     "collation_messages_marked_deleted": (
                         self._last_collation_messages_marked_deleted
+                    ),
+                    "terminal_families_disposed": (
+                        self._last_terminal_families_disposed
+                    ),
+                    "suspect_families_classified": (
+                        self._last_suspect_families_classified
+                    ),
+                    "control_rows_deleted": self._last_control_rows_deleted,
+                    "control_delete_errors": list(self._last_control_delete_errors)[
+                        :TASK_MONITOR_PONG_DETAIL_LIMIT
+                    ],
+                    "control_delete_warnings": list(self._last_control_delete_warnings)[
+                        :TASK_MONITOR_PONG_DETAIL_LIMIT
+                    ],
+                    "retained_task_log_ingest": (
+                        self._last_retained_task_log_ingest.to_summary()
                     ),
                     "collation_store_error": self._last_collation_store_error,
                     "warnings": list(self._last_warnings)[
@@ -668,7 +799,7 @@ class TaskMonitorTask(BaseTask):
             if self._monitor_config.task_log_external_mode == "raw":
                 return "raw_external"
             return "collated_store"
-        if self._monitor_config.table_delete_enabled:
+        if self._monitor_config.collation_store_enabled:
             return "collated_store"
         if self._monitor_config.processor in {"delete", "report_only"}:
             return "cleanup_policy"
@@ -720,44 +851,37 @@ class TaskMonitorTask(BaseTask):
         self._last_collation_terminal_tasks = 0
         self._last_collation_summaries_emitted = 0
         self._last_collation_messages_marked_deleted = 0
+        self._last_terminal_families_disposed = 0
+        self._last_suspect_families_classified = 0
+        self._last_control_rows_deleted = 0
+        self._last_control_delete_errors = ()
+        self._last_control_delete_warnings = ()
+        self._last_retained_task_log_ingest = _RetainedTaskLogIngestResult()
         store = self._ensure_monitor_store()
         if store is None:
             return
 
         try:
-            checkpoint = store.get_checkpoint(WEFT_GLOBAL_LOG_QUEUE)
-            scanner = GeneratorTaskLogScanner()
-            window = scanner.scan_window(
-                self._monitor_context(),
-                WEFT_GLOBAL_LOG_QUEUE,
-                scan_limit=self._monitor_config.task_log_scan_limit,
-                since_timestamp=checkpoint,
+            retained_ingest = self._ingest_retained_task_log_rows(
+                store,
+                now_ns=now_ns,
+                apply=(
+                    self._monitor_config.processor == "delete"
+                    and task_log_owner == "collated_store"
+                ),
             )
-            last_message_id: int | None = None
-            updates = []
-            for row in window.rows:
-                last_message_id = max(last_message_id or 0, row.raw.message_id)
-                update = update_from_task_log_row(row)
-                if update is None or update.tid == self.tid:
-                    continue
-                updates.append(update)
-            ingest = store.record_task_log_updates(
-                WEFT_GLOBAL_LOG_QUEUE,
-                updates,
-                checkpoint_message_id=last_message_id,
-            )
-            self._last_collation_rows_processed = window.scanned
-            self._last_collation_tasks_updated = ingest.tasks_updated
-            self._last_collation_terminal_tasks = ingest.terminal_tasks
-            self._last_collation_summaries_emitted = self._emit_monitor_store_summaries(
-                store, now_ns=now_ns
-            )
-            if (
-                self._monitor_config.processor == "delete"
-                and task_log_owner == "collated_store"
-            ):
-                self._last_collation_messages_marked_deleted = (
-                    self._delete_monitor_store_task_log_rows(store)
+            self._last_retained_task_log_ingest = retained_ingest
+            self._last_collation_rows_processed = retained_ingest.scanned
+            if retained_ingest.completed_fifo_high_water:
+                self._last_collation_summaries_emitted = (
+                    self._emit_monitor_store_summaries(
+                        store,
+                        now_ns=now_ns,
+                        apply_disposition=(
+                            self._monitor_config.processor == "delete"
+                            and task_log_owner == "collated_store"
+                        ),
+                    )
                 )
             checkpoint = store.get_checkpoint(WEFT_GLOBAL_LOG_QUEUE)
             self._monitor_store_status = MonitorStoreStatus(
@@ -777,11 +901,150 @@ class TaskMonitorTask(BaseTask):
                 error=str(exc),
             )
 
+    def _ingest_retained_task_log_rows(
+        self,
+        store: MonitorStore,
+        *,
+        now_ns: int,
+        apply: bool,
+    ) -> _RetainedTaskLogIngestResult:
+        """Fold retained visible task-log rows into the Monitor table."""
+
+        scanner = GeneratorTaskLogScanner()
+        window = scanner.scan_window(
+            self._monitor_context(),
+            WEFT_GLOBAL_LOG_QUEUE,
+            scan_limit=self._monitor_config.task_log_scan_limit,
+        )
+        scanned = 0
+        malformed_deleted = 0
+        valid_ingested = 0
+        raw_deleted = 0
+        store_errors: list[str] = []
+        delete_errors: list[str] = []
+        stop_reason = window.stop_reason
+        oldest_too_young_age: float | None = None
+        last_processed_message_id: int | None = None
+        terminal_tasks: set[str] = set()
+        updated_tasks: set[str] = set()
+
+        for row in window.rows:
+            scanned += 1
+            if malformed_deleted + raw_deleted >= self._monitor_config.batch_size:
+                stop_reason = "batch_limit"
+                break
+            if row.malformed_reason is not None:
+                if apply:
+                    deleted, errors = self._delete_exact_task_log_rows((row.raw,))
+                    malformed_deleted += deleted
+                    delete_errors.extend(errors)
+                    if errors:
+                        stop_reason = "queue_delete_error"
+                        break
+                last_processed_message_id = row.raw.message_id
+                continue
+
+            if not is_old_enough(
+                row.raw.message_id,
+                now_ns,
+                self._monitor_config.task_log_retention_period_seconds,
+            ):
+                stop_reason = "first_task_log_too_young"
+                oldest_too_young_age = max(
+                    0.0,
+                    (now_ns - row.raw.message_id) / 1_000_000_000,
+                )
+                break
+
+            update = update_from_task_log_row(row)
+            if update is None:
+                if apply:
+                    deleted, errors = self._delete_exact_task_log_rows((row.raw,))
+                    malformed_deleted += deleted
+                    delete_errors.extend(errors)
+                    if errors:
+                        stop_reason = "queue_delete_error"
+                        break
+                last_processed_message_id = row.raw.message_id
+                continue
+
+            try:
+                ingest = store.record_task_log_updates(
+                    WEFT_GLOBAL_LOG_QUEUE,
+                    (update,),
+                    checkpoint_message_id=None,
+                )
+            except (OSError, RuntimeError, ValueError) as exc:
+                store_errors.append(str(exc))
+                stop_reason = "store_write_error"
+                break
+            valid_ingested += ingest.updates_written
+            last_processed_message_id = row.raw.message_id
+            updated_tasks.add(update.tid)
+            if update.terminal_seen:
+                terminal_tasks.add(update.tid)
+            if apply:
+                deleted, errors = self._delete_exact_task_log_rows((row.raw,))
+                raw_deleted += deleted
+                delete_errors.extend(errors)
+                if deleted:
+                    store.mark_messages_deleted(
+                        (row.raw.message_id,), deleted_at_ns=now_ns
+                    )
+                if errors:
+                    stop_reason = "queue_delete_error"
+                    break
+
+        if last_processed_message_id is not None and not store_errors:
+            store.set_checkpoint(WEFT_GLOBAL_LOG_QUEUE, last_processed_message_id)
+        if stop_reason is None and window.scan_limit_reached:
+            stop_reason = window.stop_reason
+        completed_high_water = stop_reason in {None, "first_task_log_too_young"}
+        self._last_collation_tasks_updated = len(updated_tasks)
+        self._last_collation_terminal_tasks = len(terminal_tasks)
+        self._last_collation_messages_marked_deleted = malformed_deleted + raw_deleted
+        return _RetainedTaskLogIngestResult(
+            scanned=scanned,
+            malformed_deleted=malformed_deleted,
+            valid_ingested=valid_ingested,
+            raw_deleted=raw_deleted,
+            store_write_errors=tuple(store_errors),
+            raw_delete_errors=tuple(delete_errors),
+            stop_reason=stop_reason,
+            oldest_too_young_age_seconds=oldest_too_young_age,
+            completed_fifo_high_water=completed_high_water,
+        )
+
+    def _delete_exact_task_log_rows(
+        self,
+        rows: tuple[QueueWindowRow, ...],
+    ) -> tuple[int, list[str]]:
+        """Delete exact task-log rows and return deleted count plus errors."""
+
+        refs = tuple(
+            _RawExternalPruneRef(
+                queue=row.queue,
+                message_id=int(row.message_id),
+            )
+            for row in rows
+        )
+        applied = tuple(
+            apply_exact_prune_candidates(
+                self._monitor_context(),
+                refs,
+                apply_result=_applied_raw_external_message,
+            )
+        )
+        errors = [result.error for result in applied if result.error is not None]
+        completed = sum(1 for result in applied if result.error is None)
+        return completed, errors
+
     def _emit_monitor_store_summaries(
         self,
         store: MonitorStore,
         *,
         now_ns: int,
+        apply_disposition: bool,
     ) -> int:
         """Emit terminal summary dispositions for Monitor collation rows.
 
@@ -793,29 +1056,65 @@ class TaskMonitorTask(BaseTask):
             limit=self._monitor_config.batch_size,
             now_ns=now_ns,
             retention_seconds=self._monitor_config.task_log_retention_period_seconds,
+            stale_open_family_seconds=(self._monitor_config.stale_open_family_seconds),
         ):
-            try:
-                self._emit_monitor_store_summary(
-                    ready,
-                    emitted_at_ns=now_ns,
+            if ready.record.summary_emitted_at_ns is None:
+                try:
+                    self._emit_monitor_store_summary(
+                        ready,
+                        emitted_at_ns=now_ns,
+                    )
+                except (ExternalTaskLogError, OSError) as exc:
+                    sink = self._external_task_log_sink
+                    if sink is not None:
+                        sink.record_blocked_deletions(1)
+                        self._refresh_external_task_log_status()
+                    self._last_collation_store_error = str(exc)
+                    continue
+                store.mark_summary_emitted(
+                    ready.record.tid,
+                    now_ns,
+                    suspect_reason=(
+                        ready.close_reason if ready.close_reason != "terminal" else None
+                    ),
                 )
-            except ExternalTaskLogError as exc:
-                sink = self._external_task_log_sink
-                if sink is not None:
-                    sink.record_blocked_deletions(1)
-                    self._refresh_external_task_log_status()
-                self._last_collation_store_error = str(exc)
+                emitted += 1
+            if not apply_disposition:
                 continue
-            store.mark_summary_emitted(
+
+            if (
+                ready.close_reason == "terminal"
+                and ready.record.task_control_deleted_at_ns is None
+            ):
+                control_result = self._delete_terminal_control_queues(ready.record)
+                self._last_control_rows_deleted += control_result.deleted
+                self._last_control_delete_errors = (
+                    *self._last_control_delete_errors,
+                    *control_result.errors,
+                )
+                self._last_control_delete_warnings = (
+                    *self._last_control_delete_warnings,
+                    *control_result.warnings,
+                )
+                if not control_result.success:
+                    self._last_collation_store_error = "; ".join(control_result.errors)
+                    continue
+                store.mark_task_control_deleted(ready.record.tid, now_ns)
+
+            suspect_reason = (
+                ready.close_reason if ready.close_reason != "terminal" else None
+            )
+            store.mark_family_disposed(
                 ready.record.tid,
                 now_ns,
-                suspect_reason=(
-                    ready.close_reason
-                    if ready.close_reason == "suspected_inactive"
-                    else None
-                ),
+                disposition_reason=ready.close_reason,
+                suspect_reason=suspect_reason,
+                suspect_at_ns=now_ns if suspect_reason is not None else None,
             )
-            emitted += 1
+            if ready.close_reason == "terminal":
+                self._last_terminal_families_disposed += 1
+            else:
+                self._last_suspect_families_classified += 1
         self._refresh_external_task_log_status()
         return emitted
 
@@ -857,6 +1156,56 @@ class TaskMonitorTask(BaseTask):
                 handle.write("\n")
             return
         print(json.dumps(payload, sort_keys=True, default=str), flush=True)
+
+    def _delete_terminal_control_queues(
+        self,
+        record: MonitorTaskCollationRecord,
+    ) -> _TaskControlCleanupResult:
+        """Delete visible standard task-local control queue rows for a task."""
+
+        if record.task_control_deleted_at_ns is not None:
+            return _TaskControlCleanupResult()
+        queue_names = _standard_task_control_queue_names(record)
+        if queue_names is None:
+            return _TaskControlCleanupResult()
+
+        deleted = 0
+        errors: list[str] = []
+        warnings: list[str] = []
+        remaining = self._monitor_config.control_queue_delete_limit
+        ctx = self._monitor_context()
+        for queue_name in queue_names:
+            if remaining <= 0:
+                break
+            queue = ctx.queue(queue_name, persistent=False)
+            try:
+                stats_before = queue.stats()
+                message_ids: list[int] = []
+                for _body, message_id in iter_queue_entries(queue):
+                    message_ids.append(message_id)
+                    if len(message_ids) >= remaining:
+                        break
+                if message_ids:
+                    removed = int(queue.delete_many(message_ids))
+                    deleted += removed
+                    remaining -= removed
+                stats_after = queue.stats()
+                if stats_before.claimed or stats_after.claimed:
+                    warnings.append(
+                        f"{queue_name} has {stats_after.claimed} claimed control "
+                        "rows; public SimpleBroker queue API cannot enumerate "
+                        "claimed rows for exact cleanup"
+                    )
+            except (BrokerError, OSError, RuntimeError, ValueError) as exc:
+                errors.append(f"{queue_name}: {exc}")
+            finally:
+                queue.close()
+
+        return _TaskControlCleanupResult(
+            deleted=deleted,
+            errors=tuple(errors),
+            warnings=tuple(warnings),
+        )
 
     def _delete_monitor_store_task_log_rows(self, store: MonitorStore) -> int:
         """Delete exact task-log rows proven by durable Monitor collation.
@@ -954,6 +1303,11 @@ class TaskMonitorTask(BaseTask):
             self._last_collation_terminal_tasks = 0
             self._last_collation_summaries_emitted = 0
             self._last_collation_messages_marked_deleted = 0
+            self._last_terminal_families_disposed = 0
+            self._last_suspect_families_classified = 0
+            self._last_control_rows_deleted = 0
+            self._last_control_delete_errors = ()
+            self._last_control_delete_warnings = ()
         else:
             self._run_monitor_store_cycle(now_ns=now_ns, task_log_owner=task_log_owner)
         if self._monitor_config.processor in WEFT_TASK_MONITOR_PROCESSOR_BUILTINS:
@@ -1021,9 +1375,17 @@ class TaskMonitorTask(BaseTask):
             self._last_error = self._heartbeat_error
         else:
             self._last_error = "; ".join(result.errors) if result.errors else "failed"
-        self._next_cycle_due_monotonic = (
-            time.monotonic() + self._monitor_config.interval_seconds
+        self._last_catchup_pending = (
+            result.success
+            and self._last_retained_task_log_ingest.stop_reason
+            in {"batch_limit", TASK_MONITOR_TASK_LOG_SCAN_LIMIT_REACHED}
         )
+        next_interval_seconds = (
+            self._monitor_config.catchup_interval_seconds
+            if self._last_catchup_pending
+            else self._monitor_config.interval_seconds
+        )
+        self._next_cycle_due_monotonic = time.monotonic() + next_interval_seconds
         self._set_activity(
             "waiting",
             waiting_on=self._queue_names["inbox"],
@@ -1035,6 +1397,7 @@ class TaskMonitorTask(BaseTask):
             "enabled": self._monitor_config.enabled,
             "interval_seconds": self._monitor_config.interval_seconds,
             "batch_size": self._monitor_config.batch_size,
+            "catchup_interval_seconds": self._monitor_config.catchup_interval_seconds,
             "events_scanned": events_scanned,
             "candidate_count": len(candidates),
             "safe_to_delete_count": self._last_safe_to_delete_candidates,
@@ -1053,6 +1416,11 @@ class TaskMonitorTask(BaseTask):
             "collation_messages_marked_deleted": (
                 self._last_collation_messages_marked_deleted
             ),
+            "terminal_families_disposed": self._last_terminal_families_disposed,
+            "suspect_families_classified": self._last_suspect_families_classified,
+            "control_rows_deleted": self._last_control_rows_deleted,
+            "control_delete_errors": self._last_control_delete_errors,
+            "control_delete_warnings": self._last_control_delete_warnings,
             "processed": result.processed,
             "deleted": result.deleted,
             "reported": result.reported,
@@ -1061,7 +1429,8 @@ class TaskMonitorTask(BaseTask):
             "last_checkpoint": self._last_checkpoint,
             "warnings": result.warnings,
             "errors": result.errors,
-            "next_interval_seconds": self._monitor_config.interval_seconds,
+            "catchup_pending": self._last_catchup_pending,
+            "next_interval_seconds": next_interval_seconds,
         }
         self._emit_task_monitor_log_rate_limited(
             "task_monitor_cycle",
@@ -1183,6 +1552,29 @@ class TaskMonitorTask(BaseTask):
             apply=apply,
             task_log_cleanup_enabled=task_log_owner == "cleanup_policy",
         )
+        if task_log_owner == "collated_store" and apply:
+            ingest = self._last_retained_task_log_ingest
+            errors = (
+                *cleanup.errors,
+                *ingest.store_write_errors,
+                *ingest.raw_delete_errors,
+                *self._last_control_delete_errors,
+            )
+            return TaskMonitorProcessorResult(
+                success=cleanup.success and ingest.success,
+                processed=cleanup.processed
+                + ingest.malformed_deleted
+                + ingest.valid_ingested,
+                deleted=(
+                    cleanup.deleted
+                    + ingest.malformed_deleted
+                    + ingest.raw_deleted
+                    + self._last_control_rows_deleted
+                ),
+                reported=cleanup.reported,
+                errors=errors,
+                warnings=(*cleanup.warnings, *self._last_control_delete_warnings),
+            )
         if task_log_owner != "raw_external" or not apply:
             return cleanup
         raw_result = self._run_raw_external_task_log_cycle(now_ns=now_ns)

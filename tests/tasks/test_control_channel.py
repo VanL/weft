@@ -91,6 +91,7 @@ def test_pause_resume_control_flow(broker_env, unique_tid):
     assert outbox.read_one() is None
 
     ctrl_in.write("RESUME")
+    task.wait_for_activity(timeout=0.02)
     task.process_once()
     responses = [json.loads(msg) for msg in _read_all(ctrl_out)]
     all_responses.extend(responses)

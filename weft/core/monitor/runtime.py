@@ -37,7 +37,9 @@ from weft._constants import (
     WEFT_LOG_TASKS_EXTERNAL_PATH_DEFAULT,
     WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS_DEFAULT,
     WEFT_TASK_MONITOR_BATCH_SIZE_DEFAULT,
+    WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS_DEFAULT,
     WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED_DEFAULT,
+    WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT_DEFAULT,
     WEFT_TASK_MONITOR_ENABLED_DEFAULT,
     WEFT_TASK_MONITOR_INTERVAL_SECONDS_DEFAULT,
     WEFT_TASK_MONITOR_LOG_SINK_DEFAULT,
@@ -45,6 +47,7 @@ from weft._constants import (
     WEFT_TASK_MONITOR_PROCESSOR_BUILTINS,
     WEFT_TASK_MONITOR_PROCESSOR_DEFAULT,
     WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS_DEFAULT,
+    WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS_DEFAULT,
     WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE_DEFAULT,
     WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED_DEFAULT,
     WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT_DEFAULT,
@@ -65,9 +68,16 @@ class TaskMonitorRuntimeConfig:
 
     enabled: bool = WEFT_TASK_MONITOR_ENABLED_DEFAULT
     interval_seconds: int = WEFT_TASK_MONITOR_INTERVAL_SECONDS_DEFAULT
+    catchup_interval_seconds: float = WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS_DEFAULT
     batch_size: int = WEFT_TASK_MONITOR_BATCH_SIZE_DEFAULT
     task_log_scan_limit: int = WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT_DEFAULT
     store_write_batch_size: int = WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE_DEFAULT
+    stale_open_family_seconds: float = (
+        WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS_DEFAULT
+    )
+    control_queue_delete_limit: int = (
+        WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT_DEFAULT
+    )
     task_log_retention_period_seconds: float = (
         WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS_DEFAULT
     )
@@ -99,6 +109,17 @@ class TaskMonitorRuntimeConfig:
                 f"{HEARTBEAT_MIN_INTERVAL_SECONDS}"
             )
 
+        catchup_interval_seconds = float(
+            config.get(
+                "WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS",
+                WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS_DEFAULT,
+            )
+        )
+        if catchup_interval_seconds <= 0:
+            raise ValueError(
+                "WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS must be positive"
+            )
+
         batch_size = int(
             config.get(
                 "WEFT_TASK_MONITOR_BATCH_SIZE",
@@ -126,6 +147,28 @@ class TaskMonitorRuntimeConfig:
         if store_write_batch_size <= 0:
             raise ValueError(
                 "WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE must be positive"
+            )
+
+        stale_open_family_seconds = float(
+            config.get(
+                "WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS",
+                WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS_DEFAULT,
+            )
+        )
+        if stale_open_family_seconds <= 0:
+            raise ValueError(
+                "WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS must be positive"
+            )
+
+        control_queue_delete_limit = int(
+            config.get(
+                "WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT",
+                WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT_DEFAULT,
+            )
+        )
+        if control_queue_delete_limit <= 0:
+            raise ValueError(
+                "WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT must be positive"
             )
 
         task_log_retention_period_seconds = float(
@@ -219,9 +262,12 @@ class TaskMonitorRuntimeConfig:
         return cls(
             enabled=enabled,
             interval_seconds=interval_seconds,
+            catchup_interval_seconds=catchup_interval_seconds,
             batch_size=batch_size,
             task_log_scan_limit=task_log_scan_limit,
             store_write_batch_size=store_write_batch_size,
+            stale_open_family_seconds=stale_open_family_seconds,
+            control_queue_delete_limit=control_queue_delete_limit,
             task_log_retention_period_seconds=task_log_retention_period_seconds,
             task_log_external_path=task_log_external_path,
             task_log_external_enabled=task_log_external_enabled,

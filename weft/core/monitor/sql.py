@@ -84,6 +84,10 @@ def create_task_collations_table(table: str) -> str:
           summary_emitted_at_ns BIGINT NULL,
           raw_deleted_at_ns BIGINT NULL,
           suspect_reason TEXT NULL,
+          suspect_at_ns BIGINT NULL,
+          disposition_reason TEXT NULL,
+          disposition_at_ns BIGINT NULL,
+          task_control_deleted_at_ns BIGINT NULL,
           updated_at_ns BIGINT NOT NULL,
           PRIMARY KEY (context_key, tid)
         )
@@ -119,6 +123,32 @@ def create_index(
     return f"""
         CREATE INDEX IF NOT EXISTS {identifier(index_name)}
         ON {identifier(table)} ({identifier_list(columns)})
+        """
+
+
+def add_column(table: str, column: str, definition: str) -> str:
+    """Build an additive column migration statement for trusted fragments."""
+
+    return (
+        f"ALTER TABLE {identifier(table)} ADD COLUMN {identifier(column)} {definition}"
+    )
+
+
+def sqlite_table_info(table: str) -> str:
+    """Build a SQLite table-info pragma for trusted table names."""
+
+    return f"PRAGMA table_info({identifier(table)})"
+
+
+def postgres_column_exists() -> str:
+    """Build a Postgres information-schema column lookup."""
+
+    return """
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_name = ?
+          AND column_name = ?
+        LIMIT 1
         """
 
 
@@ -179,10 +209,9 @@ def select_summary_ready_terminal_tasks(
         FROM {identifier(collations_table)}
         WHERE context_key = ?
           AND terminal_seen = 1
-          AND summary_emitted_at_ns IS NULL
-          AND raw_deleted_at_ns IS NULL
-          AND COALESCE(completed_at_ns, terminal_message_id, last_seen_at_ns, last_message_id) <= ?
-        ORDER BY terminal_message_id, tid
+          AND disposition_at_ns IS NULL
+          AND last_message_id <= ?
+        ORDER BY last_message_id, tid
         LIMIT ?
         """
 
@@ -198,8 +227,7 @@ def select_summary_ready_open_tasks(
         FROM {identifier(collations_table)}
         WHERE context_key = ?
           AND terminal_seen = 0
-          AND summary_emitted_at_ns IS NULL
-          AND raw_deleted_at_ns IS NULL
+          AND disposition_at_ns IS NULL
           AND last_message_id <= ?
         ORDER BY last_message_id, tid
         LIMIT ?
@@ -213,6 +241,31 @@ def mark_summary_emitted(collations_table: str) -> str:
         UPDATE {identifier(collations_table)}
         SET summary_emitted_at_ns = ?,
             suspect_reason = COALESCE(?, suspect_reason),
+            updated_at_ns = ?
+        WHERE context_key = ? AND tid = ?
+        """
+
+
+def mark_task_control_deleted(collations_table: str) -> str:
+    """Build a task-control cleanup marker update."""
+
+    return f"""
+        UPDATE {identifier(collations_table)}
+        SET task_control_deleted_at_ns = ?,
+            updated_at_ns = ?
+        WHERE context_key = ? AND tid = ?
+        """
+
+
+def mark_family_disposed(collations_table: str) -> str:
+    """Build a Monitor family disposition update."""
+
+    return f"""
+        UPDATE {identifier(collations_table)}
+        SET disposition_reason = ?,
+            disposition_at_ns = ?,
+            suspect_reason = COALESCE(?, suspect_reason),
+            suspect_at_ns = COALESCE(?, suspect_at_ns),
             updated_at_ns = ?
         WHERE context_key = ? AND tid = ?
         """

@@ -814,6 +814,11 @@ runbook needs to become stricter.
   and turns a correct worker lane into a CPU spin under parallel test or
   production load. Control queues still count as wait activity during active
   work.
+- A task's local due timer is not queue evidence. `next_wait_timeout() == 0`
+  should run due local work and then return to the shared wait path; it should
+  not trigger `Queue.has_pending()` or empty `move_one()` probes. Native
+  activity waiters should supply queue-discovery hints, and non-native fallback
+  polling must stay bounded by positive wait intervals.
 
 ## 2026-05-13 Manager Leadership Liveness
 

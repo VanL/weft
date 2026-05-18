@@ -165,20 +165,30 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
   create, verify, and additively migrate only those tables inside an already
   initialized Weft broker database; it must not create or initialize the broker
   database. If configured with the built-in `delete`
-  processor, it may delete exact cleanup candidate rows selected by explicit
-  bounded policies only. Malformed rows are deletable only from Weft-owned
-  schema queues whose policy says malformed rows are disposable, such as
+  processor, it may delete exact cleanup rows selected by explicit supported
+  paths only. For retained `weft.log.tasks`, the supported supervised path is:
+  delete malformed rows, fold valid retained rows into Monitor-owned tables,
+  then delete those exact raw rows. For runtime-state queues, cleanup remains
+  policy driven. Malformed rows are deletable only from Weft-owned schema
+  queues whose policy says malformed rows are disposable, such as
   `weft.log.tasks` and `weft.state.tid_mappings`. It must not delete active
   work, ambiguous task-local evidence, claimed outbox residue, user payload
   rows, unknown rows outside an explicit cleanup policy, inbox/reserved work
   without terminal task-log proof for the same TID in the cleanup pass, or
   non-exact lifecycle evidence. Task-log collation summaries emitted by the
   monitor are operational evidence about cleanup work performed; they are not
-  durable task lifecycle truth or archival records. If external task-log JSONL
-  logging is configured, the monitor must emit the required raw row or
-  collated summary before deleting the affected exact `weft.log.tasks` rows.
-  External sink validation or emit failure blocks deletion of affected rows
-  but must not prevent the TaskMonitor service from starting. TaskMonitor PONG cleanup
+  durable task lifecycle truth or archival records. In collated mode, durable
+  Monitor table ingestion happens before raw `weft.log.tasks` deletion, and
+  external summary failure blocks family disposition retry rather than
+  resurrecting already ingested raw rows. Family disposition is explicit table
+  state and is separate from summary emission. Terminal disposition may remove
+  exact visible rows from standard task-local `T{tid}.ctrl_in` and
+  `T{tid}.ctrl_out` queues only; manager/global/custom control queues and
+  task-local inbox/outbox/reserved queues are excluded from this default
+  monitor cleanup. In raw external mode, external emit still happens before
+  deletion of the affected raw row. External sink
+  validation or emit failure must not prevent the TaskMonitor service from
+  starting. TaskMonitor PONG cleanup
   diagnostics are cached from the last cleanup cycle. They may report both
   queue-level stats and policy-level stats, including zero-selected policy
   rows, plus cached Monitor-store availability, checkpoint, collation, summary,
@@ -351,6 +361,12 @@ _Implementation mapping_: `weft/core/manager.py`,
   backend activity-waiter wakeup before they can advance. The manager may use a
   small fixed pass limit to prevent busy-loop bugs, but each pass must move
   monotonically through reap, reduce, enqueue, and internal-drain side effects.
+- **MANAGER.17**: manager wait scheduling must distinguish local due timers
+  from queue evidence. `next_wait_timeout() == 0.0` authorizes due local work;
+  it does not authorize probing `weft.spawn.requests` or manager `.reserved`
+  queues. Public spawn work advances only after the shared watcher marks the
+  public spawn queue active through native activity, fallback polling evidence,
+  or bounded periodic discovery.
 
 ### Context Invariants
 
@@ -400,15 +416,20 @@ Current invariant visibility comes from:
 There is now a manager-supervised `TaskMonitorTask` in addition to the
 foreground `weft system task-monitor` command. In the current contract it is
 operational only. The default processor is `delete`, which may delete exact
-rows selected by bounded cleanup policies. Task-log cleanup must delete
-malformed rows, delete previously claimed task-log rows, collate completed
-lifecycle groups, classify terminal rows with no visible start as truncated
-groups, and apply broad older-than deletion while preserving open-start TIDs
-in the bounded window. Each ordered task-log policy phase applies its exact
-deletions before the next phase begins.
-Task-log cleanup must use a scan-depth limit separate from the selected
-candidate batch size, so an old open-start family cannot prevent deletion of
-old completed families later in the scan.
+rows selected by supported cleanup paths. Retained task-log cleanup is
+Monitor-table driven: malformed `weft.log.tasks` rows are exact-deleted; valid
+rows older than `WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS` are folded into
+Monitor-owned tables before exact deletion; and family summaries/disposition
+can run only after the FIFO pass reaches a completed high-water mark
+(`empty` or first too-young visible row). A batch-limited, scan-limited, or
+error-limited pass must not close a task family.
+Terminal family disposition records a compact table tombstone instead of
+physically purging the family row. Open families are classified operationally:
+`suspected_inactive` requires a usable reporting interval and a reporting gap;
+`stale_open` requires the explicit hard-age threshold for families without a
+usable interval. Neither classification is public lifecycle truth.
+Task-log cleanup must use a scan-depth limit separate from the processed batch
+size, so backlog catch-up can make progress without a hot private loop.
 Task-log cleanup must not treat diagnostic rows such as `task_activity` as
 terminal lifecycle proof solely because their status field is terminal-looking.
 Ordinary supervised cleanup must not probe task-local `T{tid}.reserved` queues.
@@ -423,10 +444,9 @@ non-destructive override. External task-log retention output is optional
 operational JSONL file output and is owned by
 `weft/core/monitor/external_log.py`. Cleanup
 orchestration lives in
-`weft/core/monitor/cleanup.py`; reusable row policies live under
-`weft/core/pruning/policies/`; task-log scan and family selection lives in
-`weft/core/monitor/task_log_scanner.py`; task-log group summaries live in
-`weft/core/monitor/task_log_collation.py`; durable Monitor collation lives in
+`weft/core/monitor/task_monitor.py`; reusable runtime-state row policies live
+under `weft/core/pruning/policies/`; legacy/foreground task-log scan helpers
+live in `weft/core/monitor/task_log_scanner.py`; durable Monitor collation lives in
 `weft/core/monitor/store.py`, `weft/core/monitor/sql.py`, and
 `weft/core/monitor/collation.py`; external task-log file emission lives in
 `weft/core/monitor/external_log.py`; exact deletion still goes through
@@ -443,6 +463,7 @@ doc:
 ## Related Plans
 
 - [`docs/plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md`](../plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md)
+- [`docs/plans/2026-05-18-monitor-table-driven-retained-log-cleanup-plan.md`](../plans/2026-05-18-monitor-table-driven-retained-log-cleanup-plan.md)
 - [`docs/plans/2026-05-16-monitor-store-hardening-and-layering-plan.md`](../plans/2026-05-16-monitor-store-hardening-and-layering-plan.md)
 - [`docs/plans/2026-05-08-agent-session-and-task-startup-observability-plan.md`](../plans/2026-05-08-agent-session-and-task-startup-observability-plan.md)
 - [`docs/plans/2026-05-06-lifecycle-reconciliation-architecture-plan.md`](../plans/2026-05-06-lifecycle-reconciliation-architecture-plan.md)
@@ -468,6 +489,7 @@ doc:
 - [`docs/plans/2026-05-15-manager-hot-loop-reduction-plan.md`](../plans/2026-05-15-manager-hot-loop-reduction-plan.md)
 - [`docs/plans/2026-05-15-manager-reactor-hot-loop-follow-up-plan.md`](../plans/2026-05-15-manager-reactor-hot-loop-follow-up-plan.md)
 - [`docs/plans/2026-05-16-monitor-durable-collation-store-plan.md`](../plans/2026-05-16-monitor-durable-collation-store-plan.md)
+- [`docs/plans/2026-05-18-reactive-task-loop-hot-probe-plan.md`](../plans/2026-05-18-reactive-task-loop-hot-probe-plan.md)
 
 ## Related Documents
 

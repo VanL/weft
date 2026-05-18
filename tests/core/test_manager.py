@@ -1908,6 +1908,51 @@ def test_manager_next_wait_timeout_returns_nearest_due_source(
         manager._child_processes.pop("1777000000000000051", None)
 
 
+def test_manager_next_wait_timeout_ignores_broker_probe_when_idle_disabled(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _make_queue = manager_setup
+    now_ns = 2_000_000_000_000
+    monkeypatch.setattr(manager_mod.time, "time_ns", lambda: now_ns)
+
+    _prime_manager_next_wait_baseline(manager, now_ns)
+    manager._idle_timeout = 0.0
+    manager._last_broker_probe_ns = now_ns - manager._broker_probe_interval_ns - 1
+
+    assert manager.next_wait_timeout() > 0.0
+
+
+def test_manager_init_skips_initial_broker_probe_when_idle_disabled(
+    broker_env,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, _make_queue = broker_env
+
+    def fail_read_broker_timestamp(
+        self: Manager,
+        *,
+        force: bool = False,
+    ) -> int:
+        del self, force
+        raise AssertionError("idle_timeout=0 managers must not probe broker activity")
+
+    monkeypatch.setattr(Manager, "_read_broker_timestamp", fail_read_broker_timestamp)
+    spec = make_manager_spec(unique_tid, idle_timeout=0.0)
+
+    manager = Manager(
+        db_path,
+        spec,
+        config=load_config({"WEFT_TASK_MONITOR_ENABLED": "0"}),
+    )
+    try:
+        assert manager._last_broker_timestamp == 0
+        assert manager._last_broker_probe_ns == 0
+    finally:
+        manager.cleanup()
+
+
 def test_manager_next_wait_timeout_does_not_child_poll_supervision_only_services(
     manager_setup,
     monkeypatch: pytest.MonkeyPatch,
@@ -5013,6 +5058,7 @@ def test_manager_does_not_probe_inactive_public_spawn_queue(
     manager._queue_iterator = itertools.cycle([])
     manager._check_interval = 10
     manager._check_counter = 1
+    manager._next_inactive_probe_at = time.monotonic() + 60
     manager._pending_messages_precheck_confirmed = False
     monkeypatch.setattr(manager, "_leader_tid", lambda: manager.tid)
     monkeypatch.setattr(manager, "_launch_child_task", _record_launch)
@@ -5060,6 +5106,7 @@ def test_manager_pending_precheck_activates_public_spawn_queue(
     manager._queue_iterator = itertools.cycle([])
     manager._check_interval = 10
     manager._check_counter = 1
+    manager._next_inactive_probe_at = time.monotonic() + 60
     manager._pending_messages_precheck_confirmed = True
     monkeypatch.setattr(manager, "_leader_tid", lambda: manager.tid)
     monkeypatch.setattr(manager, "_launch_child_task", _record_launch)
@@ -5073,6 +5120,38 @@ def test_manager_pending_precheck_activates_public_spawn_queue(
     assert launched == [str(message_id)]
     assert spawn_queue.peek_one(exact_timestamp=message_id) is None
     assert reserved_queue.peek_one(exact_timestamp=message_id) is None
+
+
+def test_manager_idle_discovery_skips_reserved_queues(
+    broker_env,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, _make_queue = broker_env
+    config = load_config({"WEFT_TASK_MONITOR_ENABLED": "0"})
+    manager = Manager(db_path, make_manager_spec(unique_tid), config=config)
+    reserved_names = {
+        reserved_queue
+        for reserved_queue, _source_queue in manager._spawn_reserved_queue_pairs()
+    }
+
+    def pending_probe(queue: object) -> bool:
+        queue_name = getattr(queue, "name", "")
+        if queue_name in reserved_names:
+            raise AssertionError("reserved queues are not ordinary idle discovery")
+        return False
+
+    monkeypatch.setattr(manager, "_queue_has_pending", pending_probe)
+    manager._active_queues = []
+    manager._queue_iterator = itertools.cycle([])
+    manager._pending_messages_precheck_confirmed = True
+    manager._next_inactive_probe_at = 0
+
+    try:
+        manager._drain_queue()
+    finally:
+        manager.stop(join=False)
+        manager.cleanup()
 
 
 def test_manager_spawn_drains_require_pending_evidence(

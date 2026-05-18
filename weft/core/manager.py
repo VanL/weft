@@ -164,7 +164,7 @@ from .tasks.base import (
     TaskControlPolicy,
     TaskWorkerResult,
 )
-from .tasks.multiqueue_watcher import QueueMode
+from .tasks.multiqueue_watcher import QueueMode, QueueRuntimeConfig
 from .taskspec import (
     ReservedPolicy,
     TaskSpec,
@@ -370,7 +370,11 @@ class Manager(BaseTask):
         self._broker_probe_interval_ns = 1_000_000_000  # probe at most once per second
         self._last_broker_probe_ns = 0
         self._last_registry_heartbeat_ns = 0
-        self._last_broker_timestamp = self._read_broker_timestamp(force=True)
+        if self._idle_timeout > 0:
+            self._last_broker_timestamp = self._read_broker_timestamp(force=True)
+        else:
+            self._last_broker_timestamp = 0
+            self._last_broker_probe_ns = 0
         self._manager_service_key = manager_service_key(self._manager_context())
         self._register_manager()
         if self._maybe_yield_leadership(force=True):
@@ -705,6 +709,17 @@ class Manager(BaseTask):
                 self._handle_reserved_message
             )
         return configs
+
+    def _queue_counts_as_wait_activity(self, config: QueueRuntimeConfig) -> bool:
+        """Exclude reserved queues from ordinary wait/discovery activity."""
+
+        reserved_names = {
+            reserved_queue
+            for reserved_queue, _source_queue in self._spawn_reserved_queue_pairs()
+        }
+        if config.name in reserved_names:
+            return False
+        return super()._queue_counts_as_wait_activity(config)
 
     def _build_tid_mapping_payload(self) -> dict[str, Any]:
         """Publish manager identity in tid mappings even without explicit metadata."""
@@ -2482,7 +2497,7 @@ class Manager(BaseTask):
             if name not in reserved_names:
                 continue
             if self._queue_has_pending(config.queue):
-                self._mark_pending_messages_prechecked()
+                self._mark_queue_active(name)
                 return True
         return self._manager_control_pending_is_actionable()
 
@@ -5718,7 +5733,7 @@ class Manager(BaseTask):
                 now_ns=now_ns,
             )
         )
-        if self._last_broker_probe_ns > 0:
+        if self._idle_timeout > 0 and self._last_broker_probe_ns > 0:
             timeouts.append(
                 self._timeout_until_ns(
                     self._last_broker_probe_ns + self._broker_probe_interval_ns,
@@ -5968,13 +5983,13 @@ class Manager(BaseTask):
 
         total_processed = 0
         attempted = False
+        self._update_active_queues()
         for _ in range(max_messages):
             if (
                 self._has_active_child_launches()
                 or self._child_launch_started_this_turn
             ):
                 break
-            self._update_active_queues()
             if queue_name not in self._active_queues:
                 break
             attempted = True

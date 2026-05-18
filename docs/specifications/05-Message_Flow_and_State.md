@@ -29,6 +29,8 @@ See also:
   [`docs/plans/2026-05-09-service-liveness-and-health-convergence-plan.md`](../plans/2026-05-09-service-liveness-and-health-convergence-plan.md)
 - active manager-service authority hardening plan:
   [`docs/plans/2026-05-10-manager-service-authority-boundary-hardening-plan.md`](../plans/2026-05-10-manager-service-authority-boundary-hardening-plan.md)
+- active reactive task-loop hot-probe plan:
+  [`docs/plans/2026-05-18-reactive-task-loop-hot-probe-plan.md`](../plans/2026-05-18-reactive-task-loop-hot-probe-plan.md)
 
 ## Message Flow Patterns [MF-0]
 
@@ -348,33 +350,47 @@ Current rules:
   generator/high-water cursor for observation and custom processors. Custom
   processors run from the resulting candidate snapshot in a broker-free worker
   lane; the TaskMonitor reactor commits the processor result, checkpoint, and
-  cached diagnostics after the worker returns. For the built-in `delete` and
-  `report_only` processors, cleanup uses a separate
-  bounded FIFO policy pass over supported cleanup queues. Task-log cleanup
-  applies exact deletes after each ordered policy phase before the next policy
-  phase begins; this keeps malformed, claimed, and collated task-log deletion
-  bounded without making ordinary retention scan task-local reserved queues.
-  Built-in cleanup runs on the TaskMonitor reactor, not in a worker. The
-  manager owns only child supervision; it does not scan lifecycle queues.
-- when table collation is enabled, each monitor cycle scans bounded
-  `weft.log.tasks` rows after the durable Monitor checkpoint, reduces valid
+  cached diagnostics after the worker returns. For the built-in `delete`
+  processor with Monitor collation enabled, retained `weft.log.tasks` rows are
+  processed in FIFO order: malformed rows are exact-deleted, valid rows older
+  than `WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS` are first folded into the
+  Monitor table and then exact-deleted, and the pass stops at the first
+  retained-too-young visible row or a configured bound. Built-in cleanup still
+  runs runtime-state policies such as `weft.state.tid_mappings`, but it no
+  longer uses bounded task-log family windows as the supervised task-log
+  deletion authority. The manager owns only child supervision; it does not scan
+  lifecycle queues.
+- when table collation is enabled, each retained FIFO pass reduces valid
   task-log rows through `weft/core/monitor/collation.py`, upserts one summary
   row per TID, and records each incorporated raw message ID in
-  `weft_monitor_task_messages`. Checkpoints advance only after durable store
-  writes succeed; replaying the same row is idempotent. PONG reports cached
-  store availability, checkpoint, rows processed, tasks updated, terminal
-  tasks observed, summaries emitted, and table-backed deletions from the last
-  cycle. PONG must not query the store or scan queues while answering `PING`.
+  `weft_monitor_task_messages` before deleting the raw broker row. Replaying
+  the same raw row after a delete failure is idempotent. A terminal family may
+  emit a compact operational summary only after the FIFO pass reaches a
+  completed high-water mark: queue empty or first too-young visible row. If the
+  pass stops on batch limit, scan limit, store write failure, or queue delete
+  failure, family summary/disposition is skipped for that cycle. Summary
+  readiness uses the family high-water (`last_message_id`/`last_seen_at_ns`),
+  not the first terminal event timestamp. Family disposition is an explicit
+  compact tombstone (`disposition_reason` plus `disposition_at_ns`), separate
+  from `summary_emitted_at_ns`, so summary emission can be retried separately
+  from task-local runtime cleanup. PONG reports cached store availability,
+  checkpoint, rows processed, tasks updated, terminal tasks observed, summaries
+  emitted, families disposed/classified, task-control rows deleted, and raw rows
+  deleted from the last cycle. PONG must not query the store or scan queues
+  while answering `PING`.
 - terminal Monitor collation rows may emit compact operational task summaries
-  through the configured task-monitor sink. A task is eligible for table-backed
-  raw task-log deletion only after terminal collation and summary emission have
-  been recorded. Table-backed deletion is disabled unless
-  `WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED=1` and still deletes only exact
-  message IDs through the canonical prune helper. The table-backed path marks
-  Monitor child message rows deleted only after broker deletion succeeds.
-  Successful completed lifecycles do not require reserved-queue probes;
-  failure-like terminal rows may keep `reserved_probe_needed` for a later
-  explicit policy.
+  through the configured task-monitor sink. In collated mode, durable Monitor
+  ingestion gates raw `weft.log.tasks` deletion; external summary emission
+  gates only family summary/disposition retry, not resurrection of already
+  ingested raw rows. Raw external mode remains emit-before-delete and does not
+  write Monitor collation rows. Successful completed lifecycles do not require
+  reserved-queue probes; failure-like terminal rows may keep
+  `reserved_probe_needed` for a later explicit policy. Terminal disposition may
+  exact-delete visible rows from standard task-local `T{tid}.ctrl_in` and
+  `T{tid}.ctrl_out` queues after any required summary is emitted. Manager,
+  global, and custom control queues are excluded. `T{tid}.inbox`,
+  `T{tid}.outbox`, and `T{tid}.reserved` remain outside the default supervised
+  monitor cleanup path.
 - `weft system prune` is a separate foreground maintenance command.
   `--family runtime-state` reports or deletes exact message IDs from supported
   `weft.state.*` queues after conservative live/recent checks.
@@ -760,28 +776,29 @@ system pruning:
 - task-owned cleanup may remove spilled output when `cleanup_on_exit` is enabled
 - there is no built-in age-based output sweeper in the current contract
 - the supervised task monitor exists in the current contract. Its default
-  `delete` processor may delete exact message IDs selected by bounded
-  queue-specific cleanup policies from supported Weft-owned cleanup queues.
-  First-slice policies cover malformed rows, age-based runtime evidence cleanup
-  for `weft.state.tid_mappings`, and age-gated task-log cleanup for
-  `weft.log.tasks`. Task-log cleanup scans `weft.log.tasks` up to
-  `WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT`, then first deletes malformed rows,
-  then selects completed lifecycle groups by TID family even when older open
-  families precede them, then classifies terminal rows with no visible start
-  event as truncated terminal groups, then applies broad older-than cleanup to
-  remaining rows while preserving TIDs that have visible start evidence but no
-  terminal evidence in the current scan. Rows with non-terminal events such as
+  `delete` processor may delete exact message IDs selected by supported
+  Weft-owned cleanup paths. Runtime-state queues such as
+  `weft.state.tid_mappings` remain policy driven. `weft.log.tasks` is now
+  table driven when Monitor collation is enabled: the monitor scans visible
+  rows in FIFO order up to `WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT`, deletes
+  malformed rows, folds valid retained rows into the Monitor table, and then
+  deletes those exact raw rows. The first retained-too-young visible row stops
+  the pass because SimpleBroker queue order is FIFO. Family summaries are
+  emitted only after a completed FIFO high-water pass, never after a partial
+  batch-limited or error-limited pass. Rows with non-terminal events such as
   `task_activity` do not close lifecycle groups solely because they carry a
   terminal-looking status. Ordinary supervised cleanup does not probe
-  task-local `T{tid}.reserved` queues. Terminal-proven reserved cleanup is an
-  explicit internal policy path, not part of the default retention pass.
-  `WEFT_TASK_MONITOR_BATCH_SIZE` caps selected cleanup candidates per cycle;
-  it is not the task-log scan depth. Reserved rows remain protected
-  recovery-sensitive evidence by default. Per-cycle collation summaries are
-  operational TaskMonitor evidence only, not durable archive records. Each
-  cleanup cycle also records cached policy stats for the policies that ran, including
-  zero-selected policy records so PONG can distinguish "ran and selected
-  nothing" from "did not run". The monitor must not delete active work,
+  task-local `T{tid}.reserved` queues. Terminal disposition may clear standard
+  task-local `ctrl_in` and `ctrl_out` runtime queues; it must not clear
+  task-local inbox, outbox, or reserved queues. Terminal-proven reserved cleanup
+  is an explicit internal policy path, not part of the default retention pass.
+  `WEFT_TASK_MONITOR_BATCH_SIZE` caps retained task-log rows or cleanup
+  candidates per cycle; it is not the task-log scan depth. Reserved rows remain
+  protected recovery-sensitive evidence by default. Per-cycle collation
+  summaries are operational TaskMonitor evidence only, not durable archive
+  records. Each cleanup cycle records cached policy/store stats so PONG can
+  distinguish "ran and selected zero" from "did not run". The monitor must not
+  delete active work,
   ambiguous task-local evidence, claimed outbox residue, user payload rows,
   spawn requests, manager control rows, or candidates without exact message
   IDs. `report_only` remains available as a non-destructive override.
@@ -836,50 +853,47 @@ Current rules:
   unless the class is safe for ordinary deletion. `--force --apply` is the
   explicit human override for those ordinary protections.
 - the manager-supervised `TaskMonitorTask` reports and deletes through the
-  TaskMonitor-owned cleanup runner in `weft/core/monitor/cleanup.py`.
-  The runner uses neutral queue-window rows from `weft/core/queue_window.py`,
-  swappable task-log scan and family-selection helpers from
-  `weft/core/monitor/task_log_scanner.py`, task-log group summaries from
-  `weft/core/monitor/task_log_collation.py`, reusable pruning policies under
-  `weft/core/pruning/policies/`, and the canonical exact-delete helper shared
-  with foreground `weft system prune`. It does not reuse the foreground global
-  candidate builders. If configured with
-  `WEFT_TASK_MONITOR_PROCESSOR=delete`, it may delete exact candidate message
-  IDs selected by its bounded policies only. It must not apply archive side
-  effects, force-only retention cleanup, task-local retention cleanup, or
-  archive side effects, force-only retention cleanup, or task-local retention
-  cleanup in this slice. Task-log cleanup and external retention output use
-  one public minimum-age clock: `WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS`,
-  defaulting to 172800 seconds. `WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT` remains
-  the per-cycle task-log scan depth and defaults to 50000 rows. When no
-  external task-log log is configured, the cleanup runner's task-log policy
-  order is malformed first, previously claimed task-log rows second, completed
-  lifecycle collation third, truncated terminal collation fourth, and broad
-  older-than task-log deletion fifth with open-start TIDs protected. The
-  default cleanup runner does not probe `T{tid}.reserved` queues. The internal
-  terminal-proven reserved cleanup helper remains bounded and opt-in for an
-  explicit policy path; it is not part of ordinary supervised retention.
-  Cleanup candidates carry a policy name so queue summaries and policy
-  summaries are derived from the same selected exact rows. Collate may emit
-  operational per-cycle summaries before exact deletion so
-  operators can observe steady-state lifecycle reduction.
-- the durable table-backed collation path is separate from the cleanup policy
-  runner. It uses `weft/core/monitor/store.py` for schema, checkpoints,
+  TaskMonitor-owned cleanup runner in `weft/core/monitor/cleanup.py` for
+  runtime-state queues and legacy/foreground policy surfaces. Retained
+  `weft.log.tasks` cleanup is orchestrated by
+  `weft/core/monitor/task_monitor.py` with durable collation in
+  `weft/core/monitor/store.py`, not by the old bounded family-window task-log
+  policy runner. All destructive paths still use the canonical exact-delete
+  helper shared with foreground `weft system prune`. The supervised monitor
+  must not apply archive side effects, force-only retention cleanup, or
+  task-local retention cleanup in this slice. Task-log cleanup and external
+  retention output use one public minimum-age clock:
+  `WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS`, defaulting to 172800 seconds.
+  `WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT` remains the per-cycle task-log scan
+  depth and defaults to 50000 rows. The default cleanup runner does not probe
+  `T{tid}.reserved` queues. The internal terminal-proven reserved cleanup
+  helper remains bounded and opt-in for an explicit policy path; it is not part
+  of ordinary supervised retention. When a cycle stops because the retained
+  FIFO pass hit its batch or scan limit while old rows remain, the monitor uses
+  `WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS` for the next wake instead of the
+  full heartbeat interval.
+- the durable table-backed collation path uses
+  `weft/core/monitor/store.py` for schema, checkpoints,
   task-summary rows, child raw-message rows, and the table access layer; it uses
   `weft/core/monitor/sql.py` for SQL construction and trusted identifier
   validation; it uses
   `weft/core/monitor/collation.py` for pure row reduction; it uses
   `weft/core/monitor/external_log.py` for optional external JSONL emission; it
-  uses the same canonical exact-delete helper only after any required external
-  emit succeeds.
+  uses the same canonical exact-delete helper after durable table ingestion for
+  collated mode, and after raw external emit for raw mode.
   Disabling `WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED` leaves the tables in
-  place and removes them from the monitor cycle; disabling
-  `WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED` prevents table-backed raw deletion
-  when no external collated log is configured while still allowing collation
-  and PONG diagnostics. If `WEFT_LOG_TASKS_EXTERNAL_PATH` is enabled in
-  `collated` mode, collated summaries are emitted before exact raw-row
-  deletion. If it is enabled in `raw` mode, raw retained rows are emitted and
-  deleted without writing Monitor collation tables. PONG exposes cached
+  place and removes them from the monitor cycle. `WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED`
+  is retained as a legacy guard for the older table-backed raw-delete path; the
+  current supervised `delete` path deletes retained collated raw rows when the
+  collation store is enabled and available. If the store is unavailable,
+  well-formed task-log rows remain visible rather than falling back to the old
+  family-window deleter. If `WEFT_LOG_TASKS_EXTERNAL_PATH` is enabled in
+  `raw` mode, raw retained rows are emitted and deleted without writing Monitor
+  collation tables. Open families with a usable reporting interval may be
+  classified `suspected_inactive` after the configured reporting gap; open
+  families without a usable interval may be classified `stale_open` only after
+  `WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS`. These classifications are
+  operational Monitor-table state, not public lifecycle truth. PONG exposes cached
   external-log status and retention settings only; it does not open files,
   scan queues, or query Monitor tables.
 - `weft system tidy` handles backend-native cleanup of empty queues and broker
@@ -905,6 +919,7 @@ management live in the companion doc:
 ## Related Plans
 
 - [`docs/plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md`](../plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md)
+- [`docs/plans/2026-05-18-monitor-table-driven-retained-log-cleanup-plan.md`](../plans/2026-05-18-monitor-table-driven-retained-log-cleanup-plan.md)
 - [`docs/plans/2026-05-16-monitor-store-hardening-and-layering-plan.md`](../plans/2026-05-16-monitor-store-hardening-and-layering-plan.md)
 - [`docs/plans/2026-05-08-agent-session-and-task-startup-observability-plan.md`](../plans/2026-05-08-agent-session-and-task-startup-observability-plan.md)
 - [`docs/plans/2026-05-06-lifecycle-reconciliation-architecture-plan.md`](../plans/2026-05-06-lifecycle-reconciliation-architecture-plan.md)
@@ -939,3 +954,4 @@ management live in the companion doc:
 - [`docs/plans/2026-05-15-manager-hot-loop-reduction-plan.md`](../plans/2026-05-15-manager-hot-loop-reduction-plan.md)
 - [`docs/plans/2026-05-15-manager-reactor-hot-loop-follow-up-plan.md`](../plans/2026-05-15-manager-reactor-hot-loop-follow-up-plan.md)
 - [`docs/plans/2026-05-16-monitor-durable-collation-store-plan.md`](../plans/2026-05-16-monitor-durable-collation-store-plan.md)
+- [`docs/plans/2026-05-18-reactive-task-loop-hot-probe-plan.md`](../plans/2026-05-18-reactive-task-loop-hot-probe-plan.md)
