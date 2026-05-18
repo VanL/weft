@@ -692,6 +692,7 @@ def test_task_monitor_skips_terminal_summary_after_partial_fifo_pass(
         config=config,
     )
     try:
+        cycle_started_at = time.monotonic()
         task.process_once()
         store = task._monitor_store
         assert store is not None
@@ -701,7 +702,8 @@ def test_task_monitor_skips_terminal_summary_after_partial_fifo_pass(
         assert record.summary_emitted_at_ns is None
         assert task._last_retained_task_log_ingest.completed_fifo_high_water is False
         assert task._last_catchup_pending is True
-        assert 0.0 < task.next_wait_timeout() <= 0.2
+        assert task._next_cycle_due_monotonic > cycle_started_at
+        assert 0.0 <= task.next_wait_timeout() <= 0.2
     finally:
         task.stop()
 

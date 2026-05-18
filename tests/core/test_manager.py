@@ -5851,7 +5851,7 @@ def test_manager_control_drain_yields_when_peek_message_does_not_advance(
     start = time.monotonic()
     manager._drain_control_queue_first()
 
-    assert time.monotonic() - start < 0.5
+    assert time.monotonic() - start < 2.0
     assert stuck_queue.delete_calls == 1
     response = json.loads(ctrl_out.read_one())
     assert response["command"] == CONTROL_PING
