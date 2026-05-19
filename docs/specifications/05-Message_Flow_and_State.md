@@ -377,12 +377,19 @@ Current rules:
   a separate bounded maintenance slice selected by Monitor-store readiness
   (`terminal_seen`, `summary_emitted_at_ns`, no prior
   `task_control_deleted_at_ns`, no disposition, and retained family
-  high-water). PONG reports cached store availability,
-  checkpoint, rows processed, tasks updated, terminal tasks observed, summaries
-  emitted, families disposed/classified, task-control families processed,
-  task-control queues deleted, estimated task-control rows deleted, and raw
-  rows deleted from the last cycle. PONG must not query the store or scan
-  queues while answering `PING`.
+  high-water). Terminal task-local control cleanup runs on a dedicated
+  TaskMonitor maintenance worker after the summary/disposition high-water is
+  reached; that worker owns only the queue-delete plus Monitor-store mark
+  transaction for standard terminal `T{tid}.ctrl_in` and `T{tid}.ctrl_out`
+  queues. The TaskMonitor reactor remains live for PING/STATUS/STOP/KILL,
+  heartbeat wakeups, scheduling, and cached diagnostics while the worker is in
+  flight. PONG reports cached store availability, checkpoint, rows processed,
+  tasks updated, terminal tasks observed, summaries emitted, families
+  disposed/classified, whether terminal control cleanup is in flight,
+  task-control families processed, task-control queues deleted, estimated
+  task-control rows deleted, and raw rows deleted from the last completed
+  cleanup result. PONG must not query the store or scan queues while answering
+  `PING`.
 - terminal Monitor collation rows may emit compact operational task summaries
   through the configured task-monitor sink. In collated mode, durable Monitor
   ingestion gates raw `weft.log.tasks` deletion; external summary emission
@@ -393,8 +400,9 @@ Current rules:
   `reserved_probe_needed` for a later explicit policy. After any required
   summary is emitted, terminal disposition may delete the whole standard
   task-local `T{tid}.ctrl_in` and `T{tid}.ctrl_out` runtime queues, including
-  visible and claimed rows, through public SimpleBroker queue APIs. Manager,
-  global, and custom control queues are excluded. `T{tid}.inbox`,
+  visible and claimed rows, through public SimpleBroker queue APIs from the
+  dedicated TaskMonitor terminal-control-cleanup worker. Manager, global, and
+  custom control queues are excluded. `T{tid}.inbox`,
   `T{tid}.outbox`, and `T{tid}.reserved` remain outside the default supervised
   monitor cleanup path.
 - `weft system prune` is a separate foreground maintenance command.

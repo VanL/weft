@@ -185,19 +185,23 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
   whole standard task-local `T{tid}.ctrl_in` and `T{tid}.ctrl_out` runtime
   queues, including visible and claimed rows, after required summary emission
   succeeds. The selection is bounded by Monitor-store readiness and the delete
-  uses public SimpleBroker queue APIs; it must not use private queue-table SQL.
-  Manager/global/custom control queues and task-local inbox/outbox/reserved
-  queues are excluded from this default monitor cleanup. In raw external mode,
+  uses public SimpleBroker queue APIs from a dedicated TaskMonitor
+  terminal-control-cleanup worker; it must not use private queue-table SQL.
+  That worker is the only TaskMonitor worker lane allowed to own broker/store
+  cleanup effects, and the reactor must continue servicing task-local control
+  while it is in flight. Manager/global/custom control queues and task-local
+  inbox/outbox/reserved queues are excluded from this default monitor cleanup.
+  In raw external mode,
   external emit still happens before deletion of the affected raw row. External sink
   validation or emit failure must not prevent the TaskMonitor service from
   starting. TaskMonitor PONG cleanup
   diagnostics are cached from the last cleanup cycle. They may report both
   queue-level stats and policy-level stats, including zero-selected policy
   rows, plus cached Monitor-store availability, checkpoint, collation, summary,
-  external-log health, and table-backed deletion counts. PONG must not perform
-  queue scans, open or validate external log files, query the Monitor store,
-  recompute cleanup candidates, or delete/report rows while answering a
-  liveness request.
+  external-log health, table-backed deletion counts, and whether terminal
+  control cleanup is currently in flight. PONG must not perform queue scans,
+  open or validate external log files, query the Monitor store, recompute
+  cleanup candidates, or delete/report rows while answering a liveness request.
 - **OBS.14**: claimed outbox residue is recovery evidence, not decoded result
   evidence. Status/result readers may surface
   `claimed_result_without_terminal`, but they must not delete, unclaim, or

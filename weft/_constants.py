@@ -236,6 +236,9 @@ MANAGER_CHILD_LAUNCH_WORKER_LANE: Final[str] = "manager.child_launch"
 TASK_MONITOR_PROCESSOR_WORKER_LANE: Final[str] = "task_monitor.processor"
 """Worker lane name for broker-free TaskMonitor custom processors."""
 
+TASK_MONITOR_CONTROL_CLEANUP_WORKER_LANE: Final[str] = "task_monitor.control_cleanup"
+"""Worker lane name for TaskMonitor terminal task-local control cleanup."""
+
 MANAGER_POLL_INTERVAL: Final[float] = TASK_PROCESS_POLL_INTERVAL
 """Polling interval for foreground manager-service loops."""
 

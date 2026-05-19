@@ -33,6 +33,7 @@ from weft._constants import (
     QUEUE_INBOX_SUFFIX,
     QUEUE_OUTBOX_SUFFIX,
     TASK_MONITOR_ACTIVITY_WAIT_CAP_SECONDS,
+    TASK_MONITOR_CONTROL_CLEANUP_WORKER_LANE,
     TASK_MONITOR_HEARTBEAT_STARTUP_TIMEOUT_SECONDS,
     TASK_MONITOR_LOG_SUBDIR,
     TASK_MONITOR_POLICY_TASK_LOG_EXTERNAL_RAW,
@@ -101,6 +102,23 @@ class _TaskMonitorProcessorWork:
     last_timestamp: int | None
     events_scanned: int
     request: TaskMonitorProcessorRequest
+
+
+@dataclass(frozen=True, slots=True)
+class _TaskControlCleanupWork:
+    """Terminal control cleanup work owned by the TaskMonitor maintenance lane."""
+
+    request_id: str
+    now_ns: int
+
+
+@dataclass(frozen=True, slots=True)
+class _TaskControlCleanupWorkerResult:
+    """Terminal control cleanup result returned to the TaskMonitor reactor."""
+
+    work: _TaskControlCleanupWork
+    cleanup: _TaskControlCleanupResult
+    monitor_status: MonitorStoreStatus | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -362,6 +380,7 @@ class TaskMonitorTask(BaseTask):
             path=None,
         )
         self._processor_work_in_flight: _TaskMonitorProcessorWork | None = None
+        self._control_cleanup_work_in_flight: _TaskControlCleanupWork | None = None
         self._heartbeat_registered = False
         self._heartbeat_error: str | None = None
         self._heartbeat_id = f"task-monitor:{taskspec.tid}"
@@ -523,7 +542,10 @@ class TaskMonitorTask(BaseTask):
             return TASK_MONITOR_ACTIVITY_WAIT_CAP_SECONDS
         if self._first_cycle_pending or self._wake_requested:
             return 0.0
-        if self._processor_work_in_flight is not None:
+        if (
+            self._processor_work_in_flight is not None
+            or self._control_cleanup_work_in_flight is not None
+        ):
             return TASK_MONITOR_ACTIVITY_WAIT_CAP_SECONDS
         remaining = self._next_cycle_due_monotonic - time.monotonic()
         if remaining <= 0:
@@ -585,6 +607,11 @@ class TaskMonitorTask(BaseTask):
         self._ensure_heartbeat_registered()
         if self._processor_work_in_flight is not None:
             self._set_activity("processing", waiting_on=None)
+            self._drain_worker_results()
+            self._maybe_emit_poll_report()
+            return
+        if self._control_cleanup_work_in_flight is not None:
+            self._set_activity("control_cleanup", waiting_on=None)
             self._drain_worker_results()
             self._maybe_emit_poll_report()
             return
@@ -703,6 +730,9 @@ class TaskMonitorTask(BaseTask):
                 ),
                 "last_collation_store_error": self._last_collation_store_error,
                 "processor_in_flight": self._processor_work_in_flight is not None,
+                "control_cleanup_in_flight": (
+                    self._control_cleanup_work_in_flight is not None
+                ),
             }
         )
         return payload
@@ -760,6 +790,9 @@ class TaskMonitorTask(BaseTask):
                     "success": self._last_processor_success,
                     "error": self._last_error,
                     "processor_in_flight": (self._processor_work_in_flight is not None),
+                    "control_cleanup_in_flight": (
+                        self._control_cleanup_work_in_flight is not None
+                    ),
                     "candidates_seen": self._last_candidates_seen,
                     "candidate_class_counts": dict(self._last_candidate_class_counts),
                     "safe_to_delete_candidates": (self._last_safe_to_delete_candidates),
@@ -955,32 +988,7 @@ class TaskMonitorTask(BaseTask):
                     self._monitor_config.processor == "delete"
                     and task_log_owner == "collated_store"
                 ):
-                    control_result = self._run_terminal_control_cleanup_slice(
-                        store,
-                        now_ns=now_ns,
-                    )
-                    self._last_control_families_processed = (
-                        control_result.families_processed
-                    )
-                    self._last_control_families_disposed = (
-                        control_result.families_disposed
-                    )
-                    self._last_control_queues_deleted = control_result.queues_deleted
-                    self._last_control_rows_estimated_deleted = (
-                        control_result.rows_estimated_deleted
-                    )
-                    self._last_control_rows_deleted = (
-                        control_result.rows_estimated_deleted
-                    )
-                    self._last_control_nonstandard_skipped = (
-                        control_result.skipped_nonstandard
-                    )
-                    self._last_control_cleanup_pending = control_result.pending
-                    self._last_control_delete_errors = control_result.errors
-                    self._last_control_delete_warnings = control_result.warnings
-                    self._last_terminal_families_disposed += (
-                        control_result.families_disposed
-                    )
+                    self._maybe_start_terminal_control_cleanup_worker(now_ns=now_ns)
             checkpoint = store.get_checkpoint(WEFT_GLOBAL_LOG_QUEUE)
             self._monitor_store_status = MonitorStoreStatus(
                 enabled=True,
@@ -1342,6 +1350,110 @@ class TaskMonitorTask(BaseTask):
             warnings=tuple(warnings),
         )
 
+    def _maybe_start_terminal_control_cleanup_worker(self, *, now_ns: int) -> None:
+        """Start the TaskMonitor-owned terminal control cleanup worker if idle."""
+
+        if self._control_cleanup_work_in_flight is not None:
+            self._last_control_cleanup_pending = True
+            return
+        work = _TaskControlCleanupWork(
+            request_id=f"{self.tid}:{now_ns}:control_cleanup",
+            now_ns=now_ns,
+        )
+        self._control_cleanup_work_in_flight = work
+        self._last_control_cleanup_pending = True
+        self._set_activity("control_cleanup", waiting_on=None)
+        try:
+            self._submit_terminal_control_cleanup_worker(work)
+        except RuntimeError as exc:
+            self._control_cleanup_work_in_flight = None
+            self._last_control_cleanup_pending = False
+            self._last_control_delete_errors = (str(exc),)
+            self._last_error = str(exc)
+            self._last_processor_success = False
+
+    def _submit_terminal_control_cleanup_worker(
+        self,
+        work: _TaskControlCleanupWork,
+    ) -> threading.Thread:
+        """Run terminal control cleanup on its dedicated durable-effects lane.
+
+        This lane is a narrow TaskMonitor exception to the generic broker-free
+        task-worker rule: it may open fresh broker/store handles, delete
+        standard terminal task-local control queues, and mark the corresponding
+        Monitor-store records. It must not mutate cached monitor fields
+        directly; those are applied from its result on the reactor thread.
+
+        Spec: [CC-2.3], [MF-5]
+        """
+
+        if self._worker_stopping.is_set():
+            raise RuntimeError("Task worker lanes are stopping")
+
+        def runner() -> None:
+            try:
+                try:
+                    value = self._run_terminal_control_cleanup_worker(work)
+                except BaseException as exc:
+                    self._publish_worker_result(
+                        TASK_MONITOR_CONTROL_CLEANUP_WORKER_LANE,
+                        error=exc,
+                    )
+                else:
+                    self._publish_worker_result(
+                        TASK_MONITOR_CONTROL_CLEANUP_WORKER_LANE,
+                        value=value,
+                    )
+            finally:
+                current = threading.current_thread()
+                with self._worker_lock:
+                    self._worker_threads.discard(current)
+
+        thread = threading.Thread(
+            target=runner,
+            name=f"weft-worker-{self.tid_short}-monitor-control-cleanup",
+            daemon=True,
+        )
+        with self._worker_lock:
+            self._worker_threads.add(thread)
+        thread.start()
+        return thread
+
+    def _run_terminal_control_cleanup_worker(
+        self,
+        work: _TaskControlCleanupWork,
+    ) -> _TaskControlCleanupWorkerResult:
+        """Run terminal control cleanup with fresh thread-local broker handles."""
+
+        try:
+            store = open_monitor_store(self._monitor_context(), config=self._config)
+            store.ensure_schema()
+            cleanup = self._run_terminal_control_cleanup_slice(
+                store,
+                now_ns=work.now_ns,
+            )
+            status = MonitorStoreStatus(
+                enabled=True,
+                available=True,
+                schema_version=store.schema_version,
+                checkpoint=store.get_checkpoint(WEFT_GLOBAL_LOG_QUEUE),
+            )
+        except (BrokerError, OSError, RuntimeError, ValueError) as exc:
+            cleanup = _TaskControlCleanupResult(
+                pending=True,
+                errors=(str(exc),),
+            )
+            status = MonitorStoreStatus(
+                enabled=True,
+                available=False,
+                error=str(exc),
+            )
+        return _TaskControlCleanupWorkerResult(
+            work=work,
+            cleanup=cleanup,
+            monitor_status=status,
+        )
+
     def _run_terminal_control_cleanup_slice(
         self,
         store: MonitorStore,
@@ -1385,13 +1497,20 @@ class TaskMonitorTask(BaseTask):
             family_disposition_marks.append((record.tid, "terminal", None, None))
 
         if control_delete_marks:
-            store.mark_task_controls_deleted(control_delete_marks, now_ns)
+            try:
+                store.mark_task_controls_deleted(control_delete_marks, now_ns)
+            except (OSError, RuntimeError, ValueError) as exc:
+                errors.append(f"mark_task_controls_deleted: {exc}")
+                family_disposition_marks = []
+                families_disposed = 0
         if family_disposition_marks:
-            store.mark_families_disposed(family_disposition_marks, now_ns)
-        if errors:
-            self._last_collation_store_error = "; ".join(errors)
+            try:
+                store.mark_families_disposed(family_disposition_marks, now_ns)
+            except (OSError, RuntimeError, ValueError) as exc:
+                errors.append(f"mark_families_disposed: {exc}")
+                families_disposed = 0
 
-        pending = len(ready_records) > control_limit
+        pending = len(ready_records) > control_limit or bool(errors)
         return _TaskControlCleanupResult(
             families_processed=families_processed,
             families_disposed=families_disposed,
@@ -1629,6 +1748,9 @@ class TaskMonitorTask(BaseTask):
             ),
             "control_nonstandard_skipped": self._last_control_nonstandard_skipped,
             "control_cleanup_pending": self._last_control_cleanup_pending,
+            "control_cleanup_in_flight": (
+                self._control_cleanup_work_in_flight is not None
+            ),
             "control_rows_deleted": self._last_control_rows_deleted,
             "control_delete_errors": self._last_control_delete_errors,
             "control_delete_warnings": self._last_control_delete_warnings,
@@ -1723,6 +1845,9 @@ class TaskMonitorTask(BaseTask):
             return TaskMonitorProcessorResult(success=False, errors=(str(exc),))
 
     def _handle_worker_result(self, result: TaskWorkerResult) -> None:
+        if result.lane == TASK_MONITOR_CONTROL_CLEANUP_WORKER_LANE:
+            self._handle_control_cleanup_worker_result(result)
+            return
         if result.lane != TASK_MONITOR_PROCESSOR_WORKER_LANE:
             super()._handle_worker_result(result)
             return
@@ -1748,6 +1873,77 @@ class TaskMonitorTask(BaseTask):
             last_timestamp=work.last_timestamp,
             events_scanned=work.events_scanned,
             result=processor_result,
+        )
+
+    def _handle_control_cleanup_worker_result(self, result: TaskWorkerResult) -> None:
+        """Apply terminal control cleanup worker results on the reactor thread."""
+
+        work = self._control_cleanup_work_in_flight
+        self._control_cleanup_work_in_flight = None
+        if work is None:
+            return
+        if result.error is not None:
+            cleanup = _TaskControlCleanupResult(
+                pending=True,
+                errors=(str(result.error),),
+            )
+            monitor_status = None
+        else:
+            worker_result = result.value
+            if (
+                not isinstance(worker_result, _TaskControlCleanupWorkerResult)
+                or worker_result.work.request_id != work.request_id
+            ):
+                cleanup = _TaskControlCleanupResult(
+                    pending=True,
+                    errors=("task-monitor control cleanup returned an invalid result",),
+                )
+                monitor_status = None
+            else:
+                cleanup = worker_result.cleanup
+                monitor_status = worker_result.monitor_status
+
+        self._last_control_families_processed = cleanup.families_processed
+        self._last_control_families_disposed = cleanup.families_disposed
+        self._last_control_queues_deleted = cleanup.queues_deleted
+        self._last_control_rows_estimated_deleted = cleanup.rows_estimated_deleted
+        self._last_control_rows_deleted = cleanup.rows_estimated_deleted
+        self._last_control_nonstandard_skipped = cleanup.skipped_nonstandard
+        self._last_control_cleanup_pending = cleanup.pending
+        self._last_control_delete_errors = cleanup.errors
+        self._last_control_delete_warnings = cleanup.warnings
+        self._last_terminal_families_disposed += cleanup.families_disposed
+        if monitor_status is not None:
+            self._monitor_store_status = monitor_status
+            self._last_collation_store_error = monitor_status.error
+
+        if cleanup.success:
+            self._last_error = self._heartbeat_error
+        else:
+            self._last_error = "; ".join(cleanup.errors) if cleanup.errors else "failed"
+            self._last_processor_success = False
+            if self._last_collation_store_error is None:
+                self._last_collation_store_error = self._last_error
+
+        self._last_catchup_pending = cleanup.pending or not cleanup.success
+        next_interval_seconds = (
+            self._monitor_config.catchup_interval_seconds
+            if self._last_catchup_pending
+            else self._monitor_config.interval_seconds
+        )
+        self._next_cycle_due_monotonic = time.monotonic() + next_interval_seconds
+        self._set_activity("waiting", waiting_on=self._queue_names["inbox"])
+        self._emit_task_monitor_log_rate_limited(
+            "task_monitor_control_cleanup",
+            required_level="info",
+            severity="info" if cleanup.success else "warning",
+            key="task_monitor_control_cleanup",
+            state=cleanup.to_summary(),
+            log_fields={
+                **cleanup.to_summary(),
+                "success": cleanup.success,
+                "next_interval_seconds": next_interval_seconds,
+            },
         )
 
     def _run_builtin_monitor_processor_cycle(

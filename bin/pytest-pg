@@ -255,6 +255,41 @@ def _build_pytest_command(
     ]
 
 
+def _initialize_broker_schema(*, env: dict[str, str]) -> None:
+    """Initialize the shared PG schema before pytest-xdist workers race on it."""
+
+    code = "\n".join(
+        (
+            "import os",
+            "from simplebroker import Queue",
+            "target = os.environ['BROKER_BACKEND_TARGET']",
+            "queue = Queue(",
+            "    'weft.pg.preflight',",
+            "    db_path=target,",
+            "    persistent=True,",
+            "    config=dict(os.environ),",
+            ")",
+            "queue.close()",
+        )
+    )
+    _run(
+        [
+            "uv",
+            "run",
+            "--extra",
+            "dev",
+            "--with-editable",
+            ".",
+            "--with",
+            "simplebroker-pg[dev]",
+            "python",
+            "-c",
+            code,
+        ],
+        env=env,
+    )
+
+
 def _launch_pytest_process(
     command: list[str],
     *,
@@ -457,9 +492,11 @@ def main() -> int:
     try:
         container_name, dsn = _start_postgres_container()
         print(f"Postgres test DSN: {dsn}", flush=True)
+        env = _build_test_env(dsn=dsn)
+        _initialize_broker_schema(env=env)
         return _run_pytest_command(
             _build_pytest_command(marker=marker, pytest_targets=args.pytest_targets),
-            env=_build_test_env(dsn=dsn),
+            env=env,
         )
     except subprocess.CalledProcessError as exc:
         return exc.returncode or 1

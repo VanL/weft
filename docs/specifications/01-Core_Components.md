@@ -211,8 +211,13 @@ Current task families:
   monitor also calls the configured
   task-monitor processor. Custom processors run in the shared
   broker-free worker lane from a candidate snapshot; the TaskMonitor reactor
-  owns checkpoint advancement, Monitor-store writes, cached diagnostics, and
-  all broker effects.
+  owns checkpoint advancement, ordinary Monitor-store writes, cached
+  diagnostics, and broker effects except for one declared maintenance lane:
+  the terminal-control-cleanup worker may open fresh broker/store handles,
+  delete standard terminal `T{tid}.ctrl_in` and `T{tid}.ctrl_out` queues, and
+  mark the matching Monitor-store family complete. That worker returns cached
+  result data to the reactor; it must not answer control messages or mutate
+  reactor-owned diagnostic fields directly.
   The launcher asks the persistent monitor for its next wait timeout so the
   monitor sleeps until heartbeat/local due time or task-local input instead of
   polling at the default task-process interval. The supervised monitor builds
