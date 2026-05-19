@@ -150,8 +150,8 @@ Format rules and sanitization live in `01-Core_Components.md`.
 | `WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT` | Maximum `weft.log.tasks` rows scanned by one supervised monitor cycle. Defaults to 50000. |
 | `WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE` | Maximum Monitor-store updates written in one transaction while collating task-log lifecycle evidence. Defaults to 100. |
 | `WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS` | Hard age before an open Monitor-table task family with no usable reporting interval is classified `stale_open`. Defaults to 604800 seconds. |
-| `WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT` | Per-cycle cap for exact deletion from terminal task-local `T{tid}.ctrl_in` and `T{tid}.ctrl_out` queues. Defaults to 1000. |
-| `WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS` | Minimum age before supervised TaskMonitor external logging/deletion may process eligible `weft.log.tasks` rows or families. Defaults to 172800 seconds. |
+| `WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT` | Per-cycle family cap for supervised runtime-queue cleanup from task-local `T{tid}.ctrl_in`, `T{tid}.ctrl_out`, and eligible stale `T{tid}.reserved` queues. Defaults to 1000. |
+| `WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS` | Minimum age before supervised TaskMonitor may classify open task-log families or raw external rows. Terminal families may be summarized and retired as soon as the monitor reaches a complete FIFO high-water pass. Defaults to 172800 seconds. |
 | `WEFT_LOG_TASKS_EXTERNAL_PATH` | Optional JSONL file path for external task-log operational retention output. Empty disables external task-log logging. Relative paths resolve under `WEFT_LOGS_DIR`. |
 | `WEFT_LOG_TASKS_EXTERNAL_ENABLED` | Optional boolean override for external task-log logging. Defaults true when `WEFT_LOG_TASKS_EXTERNAL_PATH` is non-empty and false otherwise. |
 | `WEFT_LOG_TASKS_EXTERNAL_MODE` | External task-log logging mode: `collated` or `raw`. Defaults to `collated`. |
@@ -183,5 +183,6 @@ _Implementation mapping_: `weft/core/taskspec/model.py` (process_target, peak_* 
 
 ## Related Plans
 
+- [`docs/plans/2026-05-19-monitor-terminal-retirement-and-runtime-queue-cleanup-plan.md`](../plans/2026-05-19-monitor-terminal-retirement-and-runtime-queue-cleanup-plan.md)
 - [`docs/plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md`](../plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md)
 - [`docs/plans/2026-05-18-monitor-table-driven-retained-log-cleanup-plan.md`](../plans/2026-05-18-monitor-table-driven-retained-log-cleanup-plan.md)

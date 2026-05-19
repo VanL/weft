@@ -492,6 +492,7 @@ class _MonitorTableAccess:
         limit: int,
         now_ns: int,
         retention_seconds: float,
+        terminal_retention_seconds: float | None = None,
         stale_open_family_seconds: float = (
             WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS_DEFAULT
         ),
@@ -501,13 +502,19 @@ class _MonitorTableAccess:
 
         if limit <= 0:
             return ()
-        cutoff_ns = _retention_cutoff_ns(now_ns, retention_seconds)
+        terminal_cutoff_ns = _retention_cutoff_ns(
+            now_ns,
+            retention_seconds
+            if terminal_retention_seconds is None
+            else terminal_retention_seconds,
+        )
+        open_cutoff_ns = _retention_cutoff_ns(now_ns, retention_seconds)
         terminal_rows = self._runner.run(
             monitor_sql.select_summary_ready_terminal_tasks(
                 self._tables.task_collations,
                 _task_columns,
             ),
-            (self._context_key, cutoff_ns, int(limit)),
+            (self._context_key, terminal_cutoff_ns, int(limit)),
             fetch=True,
         )
         ready: list[MonitorSummaryReadyTask] = [
@@ -524,7 +531,7 @@ class _MonitorTableAccess:
                     self._tables.task_collations,
                     _task_columns,
                 ),
-                (self._context_key, cutoff_ns, remaining),
+                (self._context_key, open_cutoff_ns, remaining),
                 fetch=True,
             )
             for row in open_rows:
@@ -992,6 +999,7 @@ class MonitorStore:
         limit: int,
         now_ns: int,
         retention_seconds: float,
+        terminal_retention_seconds: float | None = None,
         stale_open_family_seconds: float = (
             WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS_DEFAULT
         ),
@@ -1006,6 +1014,7 @@ class MonitorStore:
                 limit=limit,
                 now_ns=now_ns,
                 retention_seconds=retention_seconds,
+                terminal_retention_seconds=terminal_retention_seconds,
                 stale_open_family_seconds=stale_open_family_seconds,
                 include_suspected=include_suspected,
             )

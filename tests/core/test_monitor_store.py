@@ -444,7 +444,7 @@ def test_monitor_store_terminal_control_cleanup_ready_requires_summary_and_age(
         retention_seconds=2.0,
     )
 
-    assert [record.tid for record in ready] == [ready_tid]
+    assert [record.tid for record in ready] == [ready_tid, disposed_tid]
 
 
 def test_monitor_store_batch_ingest_updates_tasks_and_checkpoint(tmp_path) -> None:

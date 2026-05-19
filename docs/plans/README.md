@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 111 plan files in this directory.
+There are currently 112 plan files in this directory.
 
 ## Curation Policy
 
@@ -22,6 +22,7 @@ There are currently 111 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-05-19-monitor-terminal-retirement-and-runtime-queue-cleanup-plan.md`](./2026-05-19-monitor-terminal-retirement-and-runtime-queue-cleanup-plan.md) | Monitor Terminal Retirement And Runtime Queue Cleanup Plan | `completed` | none |
 | [`2026-05-19-task-monitor-control-cleanup-worker-plan.md`](./2026-05-19-task-monitor-control-cleanup-worker-plan.md) | Task Monitor Control Cleanup Worker Plan | `completed` | none |
 | [`2026-05-19-task-monitor-bounded-control-cleanup-plan.md`](./2026-05-19-task-monitor-bounded-control-cleanup-plan.md) | Task Monitor Bounded Control Cleanup Plan | `completed` | none |
 | [`2026-05-19-monitor-loop-batched-cleanup-plan.md`](./2026-05-19-monitor-loop-batched-cleanup-plan.md) | Monitor Loop Batched Cleanup Plan | `completed` | none |

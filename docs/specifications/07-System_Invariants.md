@@ -438,9 +438,13 @@ Task-log cleanup must use a scan-depth limit separate from the processed batch
 size, so backlog catch-up can make progress without a hot private loop.
 Task-log cleanup must not treat diagnostic rows such as `task_activity` as
 terminal lifecycle proof solely because their status field is terminal-looking.
-Ordinary supervised cleanup must not probe task-local `T{tid}.reserved` queues.
-Reserved rows stay protected by default; successful completed terminal proof
-does not require a reserved-queue probe.
+Ordinary supervised cleanup may delete standard task-local `T{tid}.reserved`
+queues only through the TaskMonitor-owned runtime cleanup pass when the Monitor
+table already proves the family terminal/disposed/raw-deleted, or when no
+Monitor row exists and the TID is older than the task-log retention period with
+no active runtime-owner evidence. Reserved deletion must use public
+SimpleBroker queue APIs and must remain bounded by the same runtime cleanup
+limit as task-local control queue cleanup.
 Collation summaries, cleanup policy stats, and Monitor-owned collation tables
 remain operational TaskMonitor output only. Those deletes, summaries, and
 tables do not make task-monitor output lifecycle truth or result authority.
@@ -454,9 +458,10 @@ orchestration lives in
 under `weft/core/pruning/policies/`; legacy/foreground task-log scan helpers
 live in `weft/core/monitor/task_log_scanner.py`; durable Monitor collation lives in
 `weft/core/monitor/store.py`, `weft/core/monitor/sql.py`, and
-`weft/core/monitor/collation.py`; terminal control-cleanup readiness lives in
-the Monitor store/SQL layer; terminal control queue deletion lives at the
-TaskMonitor runtime boundary; external task-log file emission lives in
+`weft/core/monitor/collation.py`; runtime queue cleanup readiness lives in
+the Monitor store/SQL layer and TaskMonitor boundary; terminal control and
+eligible reserved queue deletion live at the TaskMonitor runtime boundary;
+external task-log file emission lives in
 `weft/core/monitor/external_log.py`; exact raw-message deletion still goes
 through `weft/core/pruning/apply.py`.
 
@@ -470,6 +475,7 @@ doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-05-19-monitor-terminal-retirement-and-runtime-queue-cleanup-plan.md`](../plans/2026-05-19-monitor-terminal-retirement-and-runtime-queue-cleanup-plan.md)
 - [`docs/plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md`](../plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md)
 - [`docs/plans/2026-05-18-monitor-table-driven-retained-log-cleanup-plan.md`](../plans/2026-05-18-monitor-table-driven-retained-log-cleanup-plan.md)
 - [`docs/plans/2026-05-19-task-monitor-bounded-control-cleanup-plan.md`](../plans/2026-05-19-task-monitor-bounded-control-cleanup-plan.md)

@@ -14,6 +14,7 @@ See also:
 
 ## Related Plans
 
+- [`docs/plans/2026-05-19-monitor-terminal-retirement-and-runtime-queue-cleanup-plan.md`](../plans/2026-05-19-monitor-terminal-retirement-and-runtime-queue-cleanup-plan.md)
 - [`docs/plans/2026-05-16-monitor-store-hardening-and-layering-plan.md`](../plans/2026-05-16-monitor-store-hardening-and-layering-plan.md)
 - [`docs/plans/2026-05-08-agent-session-and-task-startup-observability-plan.md`](../plans/2026-05-08-agent-session-and-task-startup-observability-plan.md)
 - [`docs/plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md`](../plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md)
@@ -204,19 +205,22 @@ Current task families:
   The store is not lifecycle truth, result authority, queue truth, or a public
   status dependency. Terminal task summaries and terminal task-local control
   cleanup are separate maintenance slices: summary emission records
-  `summary_emitted_at_ns`; retained terminal cleanup later uses Monitor-store
-  readiness to delete only whole standard `T{tid}.ctrl_in` and
-  `T{tid}.ctrl_out` runtime queues, then records
-  `task_control_deleted_at_ns` and terminal disposition. The persistent
+  `summary_emitted_at_ns`; retained runtime cleanup later uses Monitor-store
+  readiness to delete whole standard `T{tid}.ctrl_in` and `T{tid}.ctrl_out`
+  runtime queues, and may delete eligible stale standard `T{tid}.reserved`
+  queues after monitor-table proof or stale no-monitor evidence. Control
+  cleanup records `task_control_deleted_at_ns` and terminal disposition when
+  needed. The persistent
   monitor also calls the configured
   task-monitor processor. Custom processors run in the shared
   broker-free worker lane from a candidate snapshot; the TaskMonitor reactor
   owns checkpoint advancement, ordinary Monitor-store writes, cached
   diagnostics, and broker effects except for one declared maintenance lane:
-  the terminal-control-cleanup worker may open fresh broker/store handles,
-  delete standard terminal `T{tid}.ctrl_in` and `T{tid}.ctrl_out` queues, and
-  mark the matching Monitor-store family complete. That worker returns cached
-  result data to the reactor; it must not answer control messages or mutate
+  the runtime-cleanup worker may open fresh broker/store handles, delete
+  standard terminal/disposed `T{tid}.ctrl_in` and `T{tid}.ctrl_out` queues,
+  delete eligible stale standard `T{tid}.reserved` queues, and mark the
+  matching Monitor-store family complete. That worker returns cached result
+  data to the reactor; it must not answer control messages or mutate
   reactor-owned diagnostic fields directly.
   The launcher asks the persistent monitor for its next wait timeout so the
   monitor sleeps until heartbeat/local due time or task-local input instead of
@@ -475,12 +479,13 @@ _Implementation mapping_: `weft/core/resource_monitor.py`,
 `weft/core/tasks/consumer.py`. Monitor-owned durable collation is implemented
 by `weft/core/monitor/store.py`, `weft/core/monitor/sql.py`,
 `weft/core/monitor/collation.py`, and `weft/core/monitor/task_monitor.py`.
-Terminal summary readiness and terminal control-cleanup readiness live in the
-Monitor store/SQL layer; physical task-local runtime queue cleanup remains at
-the TaskMonitor runtime boundary.
+Terminal summary readiness and control-cleanup readiness live in the Monitor
+store/SQL layer; physical task-local runtime queue cleanup remains at the
+TaskMonitor runtime boundary.
 
 ## Related Plans
 
+- [`docs/plans/2026-05-19-monitor-terminal-retirement-and-runtime-queue-cleanup-plan.md`](../plans/2026-05-19-monitor-terminal-retirement-and-runtime-queue-cleanup-plan.md)
 - [`docs/plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md`](../plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md)
 - [`docs/plans/2026-05-19-task-monitor-bounded-control-cleanup-plan.md`](../plans/2026-05-19-task-monitor-bounded-control-cleanup-plan.md)
 - [`docs/plans/2026-05-18-reactive-task-loop-hot-probe-plan.md`](../plans/2026-05-18-reactive-task-loop-hot-probe-plan.md)

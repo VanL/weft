@@ -77,10 +77,10 @@ def test_monitor_sql_terminal_control_cleanup_query_requires_summary() -> None:
         ("context_key", "tid", "last_message_id"),
     )
 
-    assert "terminal_seen = 1" in query
     assert "summary_emitted_at_ns IS NOT NULL" in query
     assert "task_control_deleted_at_ns IS NULL" in query
-    assert "disposition_at_ns IS NULL" in query
+    assert "terminal_seen = 1 AND last_message_id <= ?" in query
+    assert "OR disposition_at_ns IS NOT NULL" in query
     assert "last_message_id <= ?" in query
     assert "LIMIT ?" in query
     assert "%s" not in query
