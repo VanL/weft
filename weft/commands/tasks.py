@@ -36,6 +36,7 @@ from weft.commands.types import TaskSnapshot as PublicTaskSnapshot
 from weft.commands.types import TaskTerminalSnapshot
 from weft.context import WeftContext, build_context
 from weft.core.control_probe import send_keyed_ping_probe
+from weft.core.monitor.store import MonitorTaskCollationRecord, open_monitor_store
 from weft.core.queue_wait import QueueChangeMonitor
 from weft.helpers import (
     iter_queue_json_entries,
@@ -490,9 +491,73 @@ def task_status(
         pipeline_snapshot, base_snapshot
     ):
         return _pipeline_task_snapshot(ctx, full_tid, pipeline_snapshot, base_snapshot)
+    if base_snapshot is None and full_tid.isdigit() and len(full_tid) == 19:
+        base_snapshot = _monitor_store_task_snapshot(
+            ctx,
+            full_tid,
+            include_terminal=include_terminal,
+        )
     if pipeline_snapshot is not None and base_snapshot is not None:
         base_snapshot = replace(base_snapshot, pipeline_status=pipeline_snapshot)
     return base_snapshot
+
+
+def _task_snapshot_from_monitor_store_record(
+    record: MonitorTaskCollationRecord,
+) -> status_cmd.TaskSnapshot:
+    """Build a task snapshot from durable Monitor collation state."""
+
+    status = record.terminal_status or record.status or "unknown"
+    taskspec_summary = record.taskspec_summary
+    metadata = taskspec_summary.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    started_at = record.started_at_ns
+    completed_at = record.completed_at_ns
+    if isinstance(started_at, int) and isinstance(completed_at, int):
+        duration = max(0.0, (completed_at - started_at) / 1_000_000_000)
+    else:
+        duration = None
+    error = record.state.get("error")
+    return status_cmd.TaskSnapshot(
+        tid=record.tid,
+        tid_short=record.tid[-TASKSPEC_TID_SHORT_LENGTH:],
+        name=record.name or str(taskspec_summary.get("name") or record.tid),
+        status=status,
+        event=record.terminal_event or "monitor_store",
+        activity=None,
+        waiting_on=None,
+        started_at=started_at if isinstance(started_at, int) else None,
+        completed_at=completed_at if isinstance(completed_at, int) else None,
+        last_timestamp=record.last_message_id,
+        duration_seconds=duration,
+        runner=record.runner,
+        runtime_handle=None,
+        runtime=None,
+        metadata=dict(metadata),
+        return_code=record.return_code,
+        error=error if isinstance(error, str) else None,
+    )
+
+
+def _monitor_store_task_snapshot(
+    ctx: WeftContext,
+    tid: str,
+    *,
+    include_terminal: bool,
+) -> status_cmd.TaskSnapshot | None:
+    """Return a snapshot from Monitor state after raw task-log retirement."""
+
+    try:
+        store = open_monitor_store(ctx, config=ctx.config)
+        record = store.get_task(tid)
+    except Exception:  # pragma: no cover - monitor fallback must not break status
+        return None
+    if record is None:
+        return None
+    snapshot = _task_snapshot_from_monitor_store_record(record)
+    if not include_terminal and snapshot.status in status_cmd.TERMINAL_TASK_STATUSES:
+        return None
+    return snapshot
 
 
 def task_ping(

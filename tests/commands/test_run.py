@@ -60,6 +60,8 @@ from weft.commands.run import (
 from weft.context import build_context
 from weft.core import manager_runtime as core_manager_runtime
 from weft.core.control_probe import ControlProbeResult, MatchedPong
+from weft.core.monitor.collation import MonitorTaskEventUpdate
+from weft.core.monitor.store import open_monitor_store
 from weft.core.service_convergence import build_manager_service_payload
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 from weft.helpers import iter_queue_json_entries
@@ -285,6 +287,53 @@ def _wait_for_task_status(
         f"Timed out waiting for {expected_status} snapshot for {tid}: "
         f"{last_snapshot.to_dict() if last_snapshot is not None else None}"
     )
+
+
+def test_task_status_falls_back_to_monitor_store_after_raw_log_retirement(
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+    store = open_monitor_store(context)
+    store.ensure_schema()
+    tid = "1779226615233822720"
+    store.upsert_task_event(
+        MonitorTaskEventUpdate(
+            tid=tid,
+            queue_name=WEFT_GLOBAL_LOG_QUEUE,
+            message_id=1779226615233822999,
+            event="work_completed",
+            status="completed",
+            observed_at_ns=1779226615233822999,
+            name="retired-log-task",
+            runner="host",
+            terminal_seen=True,
+            terminal_event="work_completed",
+            terminal_status="completed",
+            first_seen_at_ns=1779226615233822000,
+            last_seen_at_ns=1779226615233822999,
+            completed_at_ns=1779226615233822999,
+            taskspec_summary={
+                "tid": tid,
+                "name": "retired-log-task",
+                "metadata": {"kind": "status-fallback"},
+            },
+            state={"status": "completed"},
+            lifecycle={"event": "work_completed", "status": "completed"},
+            resources={},
+            diagnostics={},
+            bookkeeping={},
+        )
+    )
+
+    snapshot = task_cmd.task_status(tid, context_path=root)
+
+    assert snapshot is not None
+    assert snapshot.tid == tid
+    assert snapshot.name == "retired-log-task"
+    assert snapshot.status == "completed"
+    assert snapshot.event == "work_completed"
+    assert snapshot.metadata == {"kind": "status-fallback"}
 
 
 def _stop_active_manager(context) -> None:
