@@ -202,7 +202,13 @@ Current task families:
   `weft/core/monitor/external_log.py`; `WEFT_TASK_MONITOR_LOG_SINK` remains
   monitor operational output, not the external lifecycle-retention contract.
   The store is not lifecycle truth, result authority, queue truth, or a public
-  status dependency. The persistent monitor also calls the configured
+  status dependency. Terminal task summaries and terminal task-local control
+  cleanup are separate maintenance slices: summary emission records
+  `summary_emitted_at_ns`; retained terminal cleanup later uses Monitor-store
+  readiness to delete only whole standard `T{tid}.ctrl_in` and
+  `T{tid}.ctrl_out` runtime queues, then records
+  `task_control_deleted_at_ns` and terminal disposition. The persistent
+  monitor also calls the configured
   task-monitor processor. Custom processors run in the shared
   broker-free worker lane from a candidate snapshot; the TaskMonitor reactor
   owns checkpoint advancement, Monitor-store writes, cached diagnostics, and
@@ -464,10 +470,14 @@ _Implementation mapping_: `weft/core/resource_monitor.py`,
 `weft/core/tasks/consumer.py`. Monitor-owned durable collation is implemented
 by `weft/core/monitor/store.py`, `weft/core/monitor/sql.py`,
 `weft/core/monitor/collation.py`, and `weft/core/monitor/task_monitor.py`.
+Terminal summary readiness and terminal control-cleanup readiness live in the
+Monitor store/SQL layer; physical task-local runtime queue cleanup remains at
+the TaskMonitor runtime boundary.
 
 ## Related Plans
 
 - [`docs/plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md`](../plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md)
+- [`docs/plans/2026-05-19-task-monitor-bounded-control-cleanup-plan.md`](../plans/2026-05-19-task-monitor-bounded-control-cleanup-plan.md)
 - [`docs/plans/2026-05-18-reactive-task-loop-hot-probe-plan.md`](../plans/2026-05-18-reactive-task-loop-hot-probe-plan.md)
 
 ## Related Documents

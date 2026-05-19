@@ -387,6 +387,66 @@ def test_monitor_store_summary_ready_keeps_summary_emitted_undisposed_family(
     ]
 
 
+def test_monitor_store_terminal_control_cleanup_ready_requires_summary_and_age(
+    tmp_path,
+) -> None:
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    ready_tid = "1779000000000000197"
+    no_summary_tid = "1779000000000000198"
+    disposed_tid = "1779000000000000199"
+    too_young_tid = "1779000000000000200"
+    ready_terminal = _update(
+        ready_tid,
+        1779000000000015000,
+        event="work_completed",
+        status="completed",
+        terminal=True,
+    )
+    no_summary_terminal = _update(
+        no_summary_tid,
+        1779000000000016000,
+        event="work_completed",
+        status="completed",
+        terminal=True,
+    )
+    disposed_terminal = _update(
+        disposed_tid,
+        1779000000000017000,
+        event="work_completed",
+        status="completed",
+        terminal=True,
+    )
+    too_young_terminal = _update(
+        too_young_tid,
+        1779000005000018000,
+        event="work_completed",
+        status="completed",
+        terminal=True,
+    )
+    store.record_task_log_updates(
+        WEFT_GLOBAL_LOG_QUEUE,
+        (ready_terminal, no_summary_terminal, disposed_terminal, too_young_terminal),
+        checkpoint_message_id=None,
+    )
+    store.mark_summary_emitted(ready_tid, ready_terminal.message_id + 1)
+    store.mark_summary_emitted(disposed_tid, disposed_terminal.message_id + 1)
+    store.mark_family_disposed(
+        disposed_tid,
+        disposed_terminal.message_id + 2,
+        disposition_reason="terminal",
+    )
+
+    ready = store.list_terminal_control_cleanup_ready_tasks(
+        limit=10,
+        now_ns=ready_terminal.message_id + 3_000_000_000,
+        retention_seconds=2.0,
+    )
+
+    assert [record.tid for record in ready] == [ready_tid]
+
+
 def test_monitor_store_batch_ingest_updates_tasks_and_checkpoint(tmp_path) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(

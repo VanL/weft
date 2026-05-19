@@ -541,7 +541,7 @@ WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS_DEFAULT: Final[float] = 604800.0
 """Default hard age before open Monitor families without intervals are suspected."""
 
 WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT_DEFAULT: Final[int] = 1000
-"""Default per-cycle exact-delete cap for terminal task control queues."""
+"""Default per-cycle family cap for terminal task control-queue cleanup."""
 
 WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS_DEFAULT: Final[float] = 172800.0
 """Default minimum age before TaskMonitor logs/deletes task-log rows."""
@@ -1650,7 +1650,7 @@ def _parse_task_monitor_stale_open_family_seconds(value: str) -> float:
 
 
 def _parse_task_monitor_control_queue_delete_limit(value: str) -> int:
-    """Parse the task-monitor per-cycle control queue delete limit."""
+    """Parse the task-monitor per-cycle control-cleanup family limit."""
 
     return _parse_positive_int(
         value,

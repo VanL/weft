@@ -216,6 +216,26 @@ def select_summary_ready_terminal_tasks(
         """
 
 
+def select_terminal_control_cleanup_ready_tasks(
+    collations_table: str,
+    columns: Sequence[str],
+) -> str:
+    """Build a query for retained terminal task-local control cleanup."""
+
+    return f"""
+        SELECT {identifier_list(columns)}
+        FROM {identifier(collations_table)}
+        WHERE context_key = ?
+          AND terminal_seen = 1
+          AND summary_emitted_at_ns IS NOT NULL
+          AND task_control_deleted_at_ns IS NULL
+          AND disposition_at_ns IS NULL
+          AND last_message_id <= ?
+        ORDER BY last_message_id, tid
+        LIMIT ?
+        """
+
+
 def select_summary_ready_open_tasks(
     collations_table: str,
     columns: Sequence[str],

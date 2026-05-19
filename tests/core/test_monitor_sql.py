@@ -69,3 +69,18 @@ def test_monitor_sql_summary_ready_queries_parameterize_cutoffs() -> None:
     assert "LIMIT ?" in open_query
     assert "%s" not in terminal
     assert "%s" not in open_query
+
+
+def test_monitor_sql_terminal_control_cleanup_query_requires_summary() -> None:
+    query = monitor_sql.select_terminal_control_cleanup_ready_tasks(
+        "weft_monitor_task_collations",
+        ("context_key", "tid", "last_message_id"),
+    )
+
+    assert "terminal_seen = 1" in query
+    assert "summary_emitted_at_ns IS NOT NULL" in query
+    assert "task_control_deleted_at_ns IS NULL" in query
+    assert "disposition_at_ns IS NULL" in query
+    assert "last_message_id <= ?" in query
+    assert "LIMIT ?" in query
+    assert "%s" not in query

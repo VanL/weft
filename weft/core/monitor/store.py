@@ -322,6 +322,18 @@ _monitor_index_specs: tuple[_MonitorIndexSpec, ...] = (
         ),
     ),
     _MonitorIndexSpec(
+        name="idx_weft_monitor_collations_control_cleanup",
+        table=_monitor_tables.task_collations,
+        columns=(
+            "context_key",
+            "terminal_seen",
+            "summary_emitted_at_ns",
+            "task_control_deleted_at_ns",
+            "disposition_at_ns",
+            "last_message_id",
+        ),
+    ),
+    _MonitorIndexSpec(
         name="idx_weft_monitor_collations_disposition_open",
         table=_monitor_tables.task_collations,
         columns=("context_key", "disposition_at_ns", "last_message_id"),
@@ -534,6 +546,28 @@ class _MonitorTableAccess:
                         )
                     )
         return tuple(ready)
+
+    def list_terminal_control_cleanup_ready_tasks(
+        self,
+        *,
+        limit: int,
+        now_ns: int,
+        retention_seconds: float,
+    ) -> tuple[MonitorTaskCollationRecord, ...]:
+        """Return retained terminal families ready for control cleanup."""
+
+        if limit <= 0:
+            return ()
+        cutoff_ns = _retention_cutoff_ns(now_ns, retention_seconds)
+        rows = self._runner.run(
+            monitor_sql.select_terminal_control_cleanup_ready_tasks(
+                self._tables.task_collations,
+                _task_columns,
+            ),
+            (self._context_key, cutoff_ns, int(limit)),
+            fetch=True,
+        )
+        return tuple(_record_from_row(row) for row in rows)
 
     def mark_summary_emitted(
         self,
@@ -974,6 +1008,26 @@ class MonitorStore:
                 retention_seconds=retention_seconds,
                 stale_open_family_seconds=stale_open_family_seconds,
                 include_suspected=include_suspected,
+            )
+
+    def list_terminal_control_cleanup_ready_tasks(
+        self,
+        *,
+        limit: int,
+        now_ns: int,
+        retention_seconds: float,
+    ) -> tuple[MonitorTaskCollationRecord, ...]:
+        """Return retained terminal families ready for control cleanup."""
+
+        if limit <= 0:
+            return ()
+        with self._context.broker() as broker:
+            return self._access(
+                _runner_from_broker(broker)
+            ).list_terminal_control_cleanup_ready_tasks(
+                limit=limit,
+                now_ns=now_ns,
+                retention_seconds=retention_seconds,
             )
 
     def mark_summary_emitted(

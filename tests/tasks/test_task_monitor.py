@@ -1044,7 +1044,11 @@ def test_task_monitor_terminal_disposition_deletes_task_control_queues_only(
     outbox = make_queue(f"T{tid}.outbox")
     reserved = make_queue(f"T{tid}.reserved")
     ctrl_in.write("stop")
+    ctrl_in.write("claimed-stop")
+    assert ctrl_in.read_one() == "stop"
     ctrl_out.write("pong")
+    ctrl_out.write("claimed-pong")
+    assert ctrl_out.read_one() == "pong"
     inbox.write("input")
     outbox.write("result")
     reserved.write("reserved")
@@ -1064,12 +1068,16 @@ def test_task_monitor_terminal_disposition_deletes_task_control_queues_only(
         assert record.task_control_deleted_at_ns is not None
         assert record.disposition_reason == "terminal"
         assert record.disposition_at_ns is not None
-        assert task._last_control_rows_deleted == 2
+        assert task._last_control_families_processed == 1
+        assert task._last_control_families_disposed == 1
+        assert task._last_control_queues_deleted == 2
+        assert task._last_control_rows_estimated_deleted == 4
+        assert task._last_control_rows_deleted == 4
     finally:
         task.stop()
 
-    assert list(ctrl_in.peek_generator()) == []
-    assert list(ctrl_out.peek_generator()) == []
+    assert ctrl_in.stats().total == 0
+    assert ctrl_out.stats().total == 0
     assert list(inbox.peek_generator()) == ["input"]
     assert list(outbox.peek_generator()) == ["result"]
     assert list(reserved.peek_generator()) == ["reserved"]
@@ -1136,12 +1144,99 @@ def test_task_monitor_terminal_disposition_does_not_delete_manager_control_queue
         assert record is not None
         assert record.disposition_reason == "terminal"
         assert record.task_control_deleted_at_ns is not None
+        assert task._last_control_nonstandard_skipped == 1
         assert task._last_control_rows_deleted == 0
     finally:
         task.stop()
 
     assert list(ctrl_in.peek_generator()) == ["stop"]
     assert list(ctrl_out.peek_generator()) == ["pong"]
+
+
+def test_task_monitor_terminal_control_cleanup_is_bounded_by_family(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS": "0.01",
+            "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
+            "WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT": 1,
+            "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
+            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    tids = ("1778084345905438741", "1778084345905438742")
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    for tid in tids:
+        taskspec = {
+            "tid": tid,
+            "version": "1.0",
+            "name": "sample",
+            "io": {
+                "control": {
+                    "ctrl_in": f"T{tid}.ctrl_in",
+                    "ctrl_out": f"T{tid}.ctrl_out",
+                },
+            },
+            "state": {"status": "completed"},
+            "metadata": {},
+        }
+        log_queue.write(
+            json.dumps(
+                {
+                    "event": "work_completed",
+                    "status": "completed",
+                    "tid": tid,
+                    "taskspec": taskspec,
+                }
+            )
+        )
+        make_queue(f"T{tid}.ctrl_in").write(f"stop-{tid}")
+        make_queue(f"T{tid}.ctrl_out").write(f"pong-{tid}")
+
+    task = TaskMonitorTask(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999965"),
+        config=config,
+    )
+    try:
+        task.process_once()
+        store = task._monitor_store
+        assert store is not None
+        first = store.get_task(tids[0])
+        second = store.get_task(tids[1])
+        assert first is not None
+        assert second is not None
+        assert first.disposition_reason == "terminal"
+        assert first.task_control_deleted_at_ns is not None
+        assert second.summary_emitted_at_ns is not None
+        assert second.disposition_at_ns is None
+        assert second.task_control_deleted_at_ns is None
+        assert task._last_control_families_processed == 1
+        assert task._last_control_cleanup_pending is True
+
+        task._next_cycle_due_monotonic = 0.0
+        task.process_once()
+
+        second = store.get_task(tids[1])
+        assert second is not None
+        assert second.disposition_reason == "terminal"
+        assert second.task_control_deleted_at_ns is not None
+        assert task._last_control_families_processed == 1
+    finally:
+        task.stop()
+
+    for tid in tids:
+        assert make_queue(f"T{tid}.ctrl_in").stats().total == 0
+        assert make_queue(f"T{tid}.ctrl_out").stats().total == 0
 
 
 def test_task_monitor_collated_external_failure_blocks_table_delete(

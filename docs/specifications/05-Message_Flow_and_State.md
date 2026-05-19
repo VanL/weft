@@ -373,11 +373,16 @@ Current rules:
   not the first terminal event timestamp. Family disposition is an explicit
   compact tombstone (`disposition_reason` plus `disposition_at_ns`), separate
   from `summary_emitted_at_ns`, so summary emission can be retried separately
-  from task-local runtime cleanup. PONG reports cached store availability,
+  from task-local runtime cleanup. Terminal task-local runtime cleanup runs as
+  a separate bounded maintenance slice selected by Monitor-store readiness
+  (`terminal_seen`, `summary_emitted_at_ns`, no prior
+  `task_control_deleted_at_ns`, no disposition, and retained family
+  high-water). PONG reports cached store availability,
   checkpoint, rows processed, tasks updated, terminal tasks observed, summaries
-  emitted, families disposed/classified, task-control rows deleted, and raw rows
-  deleted from the last cycle. PONG must not query the store or scan queues
-  while answering `PING`.
+  emitted, families disposed/classified, task-control families processed,
+  task-control queues deleted, estimated task-control rows deleted, and raw
+  rows deleted from the last cycle. PONG must not query the store or scan
+  queues while answering `PING`.
 - terminal Monitor collation rows may emit compact operational task summaries
   through the configured task-monitor sink. In collated mode, durable Monitor
   ingestion gates raw `weft.log.tasks` deletion; external summary emission
@@ -385,9 +390,10 @@ Current rules:
   ingested raw rows. Raw external mode remains emit-before-delete and does not
   write Monitor collation rows. Successful completed lifecycles do not require
   reserved-queue probes; failure-like terminal rows may keep
-  `reserved_probe_needed` for a later explicit policy. Terminal disposition may
-  exact-delete visible rows from standard task-local `T{tid}.ctrl_in` and
-  `T{tid}.ctrl_out` queues after any required summary is emitted. Manager,
+  `reserved_probe_needed` for a later explicit policy. After any required
+  summary is emitted, terminal disposition may delete the whole standard
+  task-local `T{tid}.ctrl_in` and `T{tid}.ctrl_out` runtime queues, including
+  visible and claimed rows, through public SimpleBroker queue APIs. Manager,
   global, and custom control queues are excluded. `T{tid}.inbox`,
   `T{tid}.outbox`, and `T{tid}.reserved` remain outside the default supervised
   monitor cleanup path.
@@ -954,4 +960,5 @@ management live in the companion doc:
 - [`docs/plans/2026-05-15-manager-hot-loop-reduction-plan.md`](../plans/2026-05-15-manager-hot-loop-reduction-plan.md)
 - [`docs/plans/2026-05-15-manager-reactor-hot-loop-follow-up-plan.md`](../plans/2026-05-15-manager-reactor-hot-loop-follow-up-plan.md)
 - [`docs/plans/2026-05-16-monitor-durable-collation-store-plan.md`](../plans/2026-05-16-monitor-durable-collation-store-plan.md)
+- [`docs/plans/2026-05-19-task-monitor-bounded-control-cleanup-plan.md`](../plans/2026-05-19-task-monitor-bounded-control-cleanup-plan.md)
 - [`docs/plans/2026-05-18-reactive-task-loop-hot-probe-plan.md`](../plans/2026-05-18-reactive-task-loop-hot-probe-plan.md)

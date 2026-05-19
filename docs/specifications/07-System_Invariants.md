@@ -182,11 +182,13 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
   external summary failure blocks family disposition retry rather than
   resurrecting already ingested raw rows. Family disposition is explicit table
   state and is separate from summary emission. Terminal disposition may remove
-  exact visible rows from standard task-local `T{tid}.ctrl_in` and
-  `T{tid}.ctrl_out` queues only; manager/global/custom control queues and
-  task-local inbox/outbox/reserved queues are excluded from this default
-  monitor cleanup. In raw external mode, external emit still happens before
-  deletion of the affected raw row. External sink
+  whole standard task-local `T{tid}.ctrl_in` and `T{tid}.ctrl_out` runtime
+  queues, including visible and claimed rows, after required summary emission
+  succeeds. The selection is bounded by Monitor-store readiness and the delete
+  uses public SimpleBroker queue APIs; it must not use private queue-table SQL.
+  Manager/global/custom control queues and task-local inbox/outbox/reserved
+  queues are excluded from this default monitor cleanup. In raw external mode,
+  external emit still happens before deletion of the affected raw row. External sink
   validation or emit failure must not prevent the TaskMonitor service from
   starting. TaskMonitor PONG cleanup
   diagnostics are cached from the last cleanup cycle. They may report both
@@ -448,9 +450,11 @@ orchestration lives in
 under `weft/core/pruning/policies/`; legacy/foreground task-log scan helpers
 live in `weft/core/monitor/task_log_scanner.py`; durable Monitor collation lives in
 `weft/core/monitor/store.py`, `weft/core/monitor/sql.py`, and
-`weft/core/monitor/collation.py`; external task-log file emission lives in
-`weft/core/monitor/external_log.py`; exact deletion still goes through
-`weft/core/pruning/apply.py`.
+`weft/core/monitor/collation.py`; terminal control-cleanup readiness lives in
+the Monitor store/SQL layer; terminal control queue deletion lives at the
+TaskMonitor runtime boundary; external task-log file emission lives in
+`weft/core/monitor/external_log.py`; exact raw-message deletion still goes
+through `weft/core/pruning/apply.py`.
 
 ## Scope Boundary
 
@@ -464,6 +468,7 @@ doc:
 
 - [`docs/plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md`](../plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md)
 - [`docs/plans/2026-05-18-monitor-table-driven-retained-log-cleanup-plan.md`](../plans/2026-05-18-monitor-table-driven-retained-log-cleanup-plan.md)
+- [`docs/plans/2026-05-19-task-monitor-bounded-control-cleanup-plan.md`](../plans/2026-05-19-task-monitor-bounded-control-cleanup-plan.md)
 - [`docs/plans/2026-05-16-monitor-store-hardening-and-layering-plan.md`](../plans/2026-05-16-monitor-store-hardening-and-layering-plan.md)
 - [`docs/plans/2026-05-08-agent-session-and-task-startup-observability-plan.md`](../plans/2026-05-08-agent-session-and-task-startup-observability-plan.md)
 - [`docs/plans/2026-05-06-lifecycle-reconciliation-architecture-plan.md`](../plans/2026-05-06-lifecycle-reconciliation-architecture-plan.md)

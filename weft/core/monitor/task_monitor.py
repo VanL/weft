@@ -173,7 +173,12 @@ class _RetainedTaskLogIngestResult:
 class _TaskControlCleanupResult:
     """Cached result for terminal task-local control queue cleanup."""
 
-    deleted: int = 0
+    families_processed: int = 0
+    families_disposed: int = 0
+    queues_deleted: int = 0
+    rows_estimated_deleted: int = 0
+    skipped_nonstandard: int = 0
+    pending: bool = False
     errors: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
 
@@ -187,7 +192,12 @@ class _TaskControlCleanupResult:
         """Return a JSON-safe cached PONG summary."""
 
         return {
-            "deleted": self.deleted,
+            "families_processed": self.families_processed,
+            "families_disposed": self.families_disposed,
+            "queues_deleted": self.queues_deleted,
+            "rows_estimated_deleted": self.rows_estimated_deleted,
+            "skipped_nonstandard": self.skipped_nonstandard,
+            "pending": self.pending,
             "errors": list(self.errors),
             "warnings": list(self.warnings),
         }
@@ -335,6 +345,12 @@ class TaskMonitorTask(BaseTask):
         self._last_collation_messages_marked_deleted = 0
         self._last_terminal_families_disposed = 0
         self._last_suspect_families_classified = 0
+        self._last_control_families_processed = 0
+        self._last_control_families_disposed = 0
+        self._last_control_queues_deleted = 0
+        self._last_control_rows_estimated_deleted = 0
+        self._last_control_nonstandard_skipped = 0
+        self._last_control_cleanup_pending = False
         self._last_control_rows_deleted = 0
         self._last_control_delete_errors: tuple[str, ...] = ()
         self._last_control_delete_warnings: tuple[str, ...] = ()
@@ -663,6 +679,20 @@ class TaskMonitorTask(BaseTask):
                 "last_suspect_families_classified": (
                     self._last_suspect_families_classified
                 ),
+                "last_control_families_processed": (
+                    self._last_control_families_processed
+                ),
+                "last_control_families_disposed": (
+                    self._last_control_families_disposed
+                ),
+                "last_control_queues_deleted": self._last_control_queues_deleted,
+                "last_control_rows_estimated_deleted": (
+                    self._last_control_rows_estimated_deleted
+                ),
+                "last_control_nonstandard_skipped": (
+                    self._last_control_nonstandard_skipped
+                ),
+                "last_control_cleanup_pending": self._last_control_cleanup_pending,
                 "last_control_rows_deleted": self._last_control_rows_deleted,
                 "last_control_delete_errors": list(self._last_control_delete_errors),
                 "last_control_delete_warnings": (
@@ -758,6 +788,18 @@ class TaskMonitorTask(BaseTask):
                     "suspect_families_classified": (
                         self._last_suspect_families_classified
                     ),
+                    "control_families_processed": (
+                        self._last_control_families_processed
+                    ),
+                    "control_families_disposed": (self._last_control_families_disposed),
+                    "control_queues_deleted": self._last_control_queues_deleted,
+                    "control_rows_estimated_deleted": (
+                        self._last_control_rows_estimated_deleted
+                    ),
+                    "control_nonstandard_skipped": (
+                        self._last_control_nonstandard_skipped
+                    ),
+                    "control_cleanup_pending": self._last_control_cleanup_pending,
                     "control_rows_deleted": self._last_control_rows_deleted,
                     "control_delete_errors": list(self._last_control_delete_errors)[
                         :TASK_MONITOR_PONG_DETAIL_LIMIT
@@ -873,6 +915,12 @@ class TaskMonitorTask(BaseTask):
         self._last_collation_messages_marked_deleted = 0
         self._last_terminal_families_disposed = 0
         self._last_suspect_families_classified = 0
+        self._last_control_families_processed = 0
+        self._last_control_families_disposed = 0
+        self._last_control_queues_deleted = 0
+        self._last_control_rows_estimated_deleted = 0
+        self._last_control_nonstandard_skipped = 0
+        self._last_control_cleanup_pending = False
         self._last_control_rows_deleted = 0
         self._last_control_delete_errors = ()
         self._last_control_delete_warnings = ()
@@ -903,6 +951,36 @@ class TaskMonitorTask(BaseTask):
                         ),
                     )
                 )
+                if (
+                    self._monitor_config.processor == "delete"
+                    and task_log_owner == "collated_store"
+                ):
+                    control_result = self._run_terminal_control_cleanup_slice(
+                        store,
+                        now_ns=now_ns,
+                    )
+                    self._last_control_families_processed = (
+                        control_result.families_processed
+                    )
+                    self._last_control_families_disposed = (
+                        control_result.families_disposed
+                    )
+                    self._last_control_queues_deleted = control_result.queues_deleted
+                    self._last_control_rows_estimated_deleted = (
+                        control_result.rows_estimated_deleted
+                    )
+                    self._last_control_rows_deleted = (
+                        control_result.rows_estimated_deleted
+                    )
+                    self._last_control_nonstandard_skipped = (
+                        control_result.skipped_nonstandard
+                    )
+                    self._last_control_cleanup_pending = control_result.pending
+                    self._last_control_delete_errors = control_result.errors
+                    self._last_control_delete_warnings = control_result.warnings
+                    self._last_terminal_families_disposed += (
+                        control_result.families_disposed
+                    )
             checkpoint = store.get_checkpoint(WEFT_GLOBAL_LOG_QUEUE)
             self._monitor_store_status = MonitorStoreStatus(
                 enabled=True,
@@ -1118,7 +1196,6 @@ class TaskMonitorTask(BaseTask):
         """
 
         summary_marks: list[tuple[str, str | None]] = []
-        control_delete_marks: list[str] = []
         family_disposition_marks: list[tuple[str, str, str | None, int | None]] = []
         for ready in store.list_summary_ready_tasks(
             limit=self._monitor_config.batch_size,
@@ -1152,24 +1229,8 @@ class TaskMonitorTask(BaseTask):
             if not apply_disposition:
                 continue
 
-            if (
-                ready.close_reason == "terminal"
-                and ready.record.task_control_deleted_at_ns is None
-            ):
-                control_result = self._delete_terminal_control_queues(ready.record)
-                self._last_control_rows_deleted += control_result.deleted
-                self._last_control_delete_errors = (
-                    *self._last_control_delete_errors,
-                    *control_result.errors,
-                )
-                self._last_control_delete_warnings = (
-                    *self._last_control_delete_warnings,
-                    *control_result.warnings,
-                )
-                if not control_result.success:
-                    self._last_collation_store_error = "; ".join(control_result.errors)
-                    continue
-                control_delete_marks.append(ready.record.tid)
+            if ready.close_reason == "terminal":
+                continue
 
             suspect_reason = (
                 ready.close_reason if ready.close_reason != "terminal" else None
@@ -1185,8 +1246,6 @@ class TaskMonitorTask(BaseTask):
 
         if summary_marks:
             store.mark_summaries_emitted(summary_marks, now_ns)
-        if control_delete_marks:
-            store.mark_task_controls_deleted(control_delete_marks, now_ns)
         if family_disposition_marks:
             store.mark_families_disposed(family_disposition_marks, now_ns)
             for (
@@ -1245,48 +1304,101 @@ class TaskMonitorTask(BaseTask):
         self,
         record: MonitorTaskCollationRecord,
     ) -> _TaskControlCleanupResult:
-        """Delete visible standard task-local control queue rows for a task."""
+        """Delete whole standard terminal task-local control queues for a task."""
 
         if record.task_control_deleted_at_ns is not None:
-            return _TaskControlCleanupResult()
+            return _TaskControlCleanupResult(families_processed=1)
         queue_names = _standard_task_control_queue_names(record)
         if queue_names is None:
-            return _TaskControlCleanupResult()
+            return _TaskControlCleanupResult(
+                families_processed=1,
+                families_disposed=1,
+                skipped_nonstandard=1,
+            )
 
-        deleted = 0
+        queues_deleted = 0
+        rows_estimated_deleted = 0
         errors: list[str] = []
         warnings: list[str] = []
-        remaining = self._monitor_config.control_queue_delete_limit
         ctx = self._monitor_context()
         for queue_name in queue_names:
-            if remaining <= 0:
-                break
             queue = ctx.queue(queue_name, persistent=False)
             try:
                 stats_before = queue.stats()
-                message_ids: list[int] = []
-                for _body, message_id in iter_queue_entries(queue):
-                    message_ids.append(message_id)
-                    if len(message_ids) >= remaining:
-                        break
-                if message_ids:
-                    removed = int(queue.delete_many(message_ids))
-                    deleted += removed
-                    remaining -= removed
-                stats_after = queue.stats()
-                if stats_before.claimed or stats_after.claimed:
-                    warnings.append(
-                        f"{queue_name} has {stats_after.claimed} claimed control "
-                        "rows; public SimpleBroker queue API cannot enumerate "
-                        "claimed rows for exact cleanup"
-                    )
+                rows_estimated_deleted += int(stats_before.total)
+                if queue.delete():
+                    queues_deleted += 1
             except (BrokerError, OSError, RuntimeError, ValueError) as exc:
                 errors.append(f"{queue_name}: {exc}")
             finally:
                 queue.close()
 
         return _TaskControlCleanupResult(
-            deleted=deleted,
+            families_processed=1,
+            families_disposed=0 if errors else 1,
+            queues_deleted=queues_deleted,
+            rows_estimated_deleted=0 if errors else rows_estimated_deleted,
+            errors=tuple(errors),
+            warnings=tuple(warnings),
+        )
+
+    def _run_terminal_control_cleanup_slice(
+        self,
+        store: MonitorStore,
+        *,
+        now_ns: int,
+    ) -> _TaskControlCleanupResult:
+        """Run one bounded terminal task-local control cleanup slice."""
+
+        control_limit = self._monitor_config.control_queue_delete_limit
+        ready_records = store.list_terminal_control_cleanup_ready_tasks(
+            limit=control_limit + 1,
+            now_ns=now_ns,
+            retention_seconds=self._monitor_config.task_log_retention_period_seconds,
+        )
+        records = ready_records[:control_limit]
+        if not records:
+            return _TaskControlCleanupResult()
+
+        families_processed = 0
+        families_disposed = 0
+        queues_deleted = 0
+        rows_estimated_deleted = 0
+        skipped_nonstandard = 0
+        errors: list[str] = []
+        warnings: list[str] = []
+        control_delete_marks: list[str] = []
+        family_disposition_marks: list[tuple[str, str, str | None, int | None]] = []
+
+        for record in records:
+            result = self._delete_terminal_control_queues(record)
+            families_processed += result.families_processed
+            families_disposed += result.families_disposed
+            queues_deleted += result.queues_deleted
+            rows_estimated_deleted += result.rows_estimated_deleted
+            skipped_nonstandard += result.skipped_nonstandard
+            errors.extend(result.errors)
+            warnings.extend(result.warnings)
+            if not result.success:
+                continue
+            control_delete_marks.append(record.tid)
+            family_disposition_marks.append((record.tid, "terminal", None, None))
+
+        if control_delete_marks:
+            store.mark_task_controls_deleted(control_delete_marks, now_ns)
+        if family_disposition_marks:
+            store.mark_families_disposed(family_disposition_marks, now_ns)
+        if errors:
+            self._last_collation_store_error = "; ".join(errors)
+
+        pending = len(ready_records) > control_limit
+        return _TaskControlCleanupResult(
+            families_processed=families_processed,
+            families_disposed=families_disposed,
+            queues_deleted=queues_deleted,
+            rows_estimated_deleted=rows_estimated_deleted,
+            skipped_nonstandard=skipped_nonstandard,
+            pending=pending,
             errors=tuple(errors),
             warnings=tuple(warnings),
         )
@@ -1390,6 +1502,12 @@ class TaskMonitorTask(BaseTask):
             self._last_collation_messages_marked_deleted = 0
             self._last_terminal_families_disposed = 0
             self._last_suspect_families_classified = 0
+            self._last_control_families_processed = 0
+            self._last_control_families_disposed = 0
+            self._last_control_queues_deleted = 0
+            self._last_control_rows_estimated_deleted = 0
+            self._last_control_nonstandard_skipped = 0
+            self._last_control_cleanup_pending = False
             self._last_control_rows_deleted = 0
             self._last_control_delete_errors = ()
             self._last_control_delete_warnings = ()
@@ -1460,10 +1578,10 @@ class TaskMonitorTask(BaseTask):
             self._last_error = self._heartbeat_error
         else:
             self._last_error = "; ".join(result.errors) if result.errors else "failed"
-        self._last_catchup_pending = (
-            result.success
-            and self._last_retained_task_log_ingest.stop_reason
+        self._last_catchup_pending = result.success and (
+            self._last_retained_task_log_ingest.stop_reason
             in {"batch_limit", TASK_MONITOR_TASK_LOG_SCAN_LIMIT_REACHED}
+            or self._last_control_cleanup_pending
         )
         next_interval_seconds = (
             self._monitor_config.catchup_interval_seconds
@@ -1503,6 +1621,14 @@ class TaskMonitorTask(BaseTask):
             ),
             "terminal_families_disposed": self._last_terminal_families_disposed,
             "suspect_families_classified": self._last_suspect_families_classified,
+            "control_families_processed": self._last_control_families_processed,
+            "control_families_disposed": self._last_control_families_disposed,
+            "control_queues_deleted": self._last_control_queues_deleted,
+            "control_rows_estimated_deleted": (
+                self._last_control_rows_estimated_deleted
+            ),
+            "control_nonstandard_skipped": self._last_control_nonstandard_skipped,
+            "control_cleanup_pending": self._last_control_cleanup_pending,
             "control_rows_deleted": self._last_control_rows_deleted,
             "control_delete_errors": self._last_control_delete_errors,
             "control_delete_warnings": self._last_control_delete_warnings,
@@ -1646,7 +1772,11 @@ class TaskMonitorTask(BaseTask):
                 *self._last_control_delete_errors,
             )
             return TaskMonitorProcessorResult(
-                success=cleanup.success and ingest.success,
+                success=(
+                    cleanup.success
+                    and ingest.success
+                    and not self._last_control_delete_errors
+                ),
                 processed=cleanup.processed
                 + ingest.malformed_deleted
                 + ingest.valid_ingested,
