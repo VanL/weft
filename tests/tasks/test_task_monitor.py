@@ -21,6 +21,7 @@ from weft.core.monitor.runtime import (
     TaskMonitorProcessorRequest,
     TaskMonitorProcessorResult,
 )
+from weft.core.monitor.store import MonitorStore, MonitorStoreIngestResult
 from weft.core.monitor.task_monitor import (
     TaskMonitorTask,
     make_task_monitor_taskspec,
@@ -650,6 +651,90 @@ def test_task_monitor_table_delete_removes_exact_task_log_rows(
     ]
     assert target_rows == []
     assert task._last_collation_messages_marked_deleted >= 1
+
+
+def test_task_monitor_retained_ingest_batches_store_and_delete_work(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    update_batch_sizes: list[int] = []
+    original_record_updates = MonitorStore.record_task_log_updates
+
+    def record_updates(
+        self: MonitorStore,
+        queue_name: str,
+        updates,
+        *,
+        checkpoint_message_id: int | None,
+    ) -> MonitorStoreIngestResult:
+        update_batch_sizes.append(len(tuple(updates)))
+        return original_record_updates(
+            self,
+            queue_name,
+            updates,
+            checkpoint_message_id=checkpoint_message_id,
+        )
+
+    monkeypatch.setattr(MonitorStore, "record_task_log_updates", record_updates)
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
+            "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
+            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+            "WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED": "1",
+        }
+    )
+    tid = "1778084345905438729"
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    for index in range(5):
+        log_queue.write(
+            json.dumps(
+                {
+                    "event": "task_activity",
+                    "status": "running",
+                    "tid": tid,
+                    "sequence": index,
+                }
+            )
+        )
+
+    task = TaskMonitorTask(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999977"),
+        config=config,
+    )
+    try:
+        task.process_once()
+        store = task._monitor_store
+        assert store is not None
+        record = store.get_task(tid)
+        assert record is not None
+    finally:
+        task.stop()
+
+    assert len(update_batch_sizes) == 1
+    assert update_batch_sizes[0] >= 5
+    target_rows = [
+        json.loads(message)
+        for message in log_queue.peek_generator()
+        if json.loads(message).get("tid") == tid
+    ]
+    assert target_rows == []
+    retained = task._last_retained_task_log_ingest
+    assert retained.selected >= 5
+    assert retained.valid_ingested >= 5
+    assert retained.raw_deleted >= 5
+    assert retained.store_update_chunks == 1
+    assert retained.exact_delete_chunks == 1
+    assert retained.deleted_mark_chunks == 1
+    assert retained.checkpoint_written is True
 
 
 def test_task_monitor_skips_terminal_summary_after_partial_fifo_pass(

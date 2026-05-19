@@ -51,7 +51,7 @@ from weft.core.monitor.cleanup import (
     TaskMonitorCleanupConfig,
     run_task_monitor_cleanup,
 )
-from weft.core.monitor.collation import update_from_task_log_row
+from weft.core.monitor.collation import MonitorTaskEventUpdate, update_from_task_log_row
 from weft.core.monitor.external_log import (
     ExternalTaskLogError,
     ExternalTaskLogSink,
@@ -126,9 +126,15 @@ class _RetainedTaskLogIngestResult:
     """Cached result for one retained task-log FIFO ingestion pass."""
 
     scanned: int = 0
+    selected: int = 0
     malformed_deleted: int = 0
     valid_ingested: int = 0
     raw_deleted: int = 0
+    store_update_chunks: int = 0
+    exact_delete_chunks: int = 0
+    deleted_mark_chunks: int = 0
+    checkpoint_message_id: int | None = None
+    checkpoint_written: bool = False
     store_write_errors: tuple[str, ...] = ()
     raw_delete_errors: tuple[str, ...] = ()
     stop_reason: str | None = None
@@ -146,9 +152,15 @@ class _RetainedTaskLogIngestResult:
 
         return {
             "scanned": self.scanned,
+            "selected": self.selected,
             "malformed_deleted": self.malformed_deleted,
             "valid_ingested": self.valid_ingested,
             "raw_deleted": self.raw_deleted,
+            "store_update_chunks": self.store_update_chunks,
+            "exact_delete_chunks": self.exact_delete_chunks,
+            "deleted_mark_chunks": self.deleted_mark_chunks,
+            "checkpoint_message_id": self.checkpoint_message_id,
+            "checkpoint_written": self.checkpoint_written,
             "store_write_errors": list(self.store_write_errors),
             "raw_delete_errors": list(self.raw_delete_errors),
             "stop_reason": self.stop_reason,
@@ -179,6 +191,14 @@ class _TaskControlCleanupResult:
             "errors": list(self.errors),
             "warnings": list(self.warnings),
         }
+
+
+@dataclass(frozen=True, slots=True)
+class _ExactTaskLogDeleteResult:
+    """Exact task-log delete result with IDs proven deleted by the broker."""
+
+    deleted_ids: tuple[int, ...] = ()
+    errors: tuple[str, ...] = ()
 
 
 def _applied_monitor_raw_message(
@@ -920,28 +940,30 @@ class TaskMonitorTask(BaseTask):
         malformed_deleted = 0
         valid_ingested = 0
         raw_deleted = 0
+        store_update_chunks = 0
+        exact_delete_chunks = 0
+        deleted_mark_chunks = 0
         store_errors: list[str] = []
         delete_errors: list[str] = []
         stop_reason = window.stop_reason
         oldest_too_young_age: float | None = None
-        last_processed_message_id: int | None = None
+        last_selected_message_id: int | None = None
         terminal_tasks: set[str] = set()
         updated_tasks: set[str] = set()
+        selected_rows: list[QueueWindowRow] = []
+        valid_updates: list[MonitorTaskEventUpdate] = []
+        valid_message_ids: set[int] = set()
+        malformed_message_ids: set[int] = set()
 
         for row in window.rows:
             scanned += 1
-            if malformed_deleted + raw_deleted >= self._monitor_config.batch_size:
+            if len(selected_rows) >= self._monitor_config.batch_size:
                 stop_reason = "batch_limit"
                 break
             if row.malformed_reason is not None:
-                if apply:
-                    deleted, errors = self._delete_exact_task_log_rows((row.raw,))
-                    malformed_deleted += deleted
-                    delete_errors.extend(errors)
-                    if errors:
-                        stop_reason = "queue_delete_error"
-                        break
-                last_processed_message_id = row.raw.message_id
+                selected_rows.append(row.raw)
+                malformed_message_ids.add(row.raw.message_id)
+                last_selected_message_id = row.raw.message_id
                 continue
 
             if not is_old_enough(
@@ -958,56 +980,86 @@ class TaskMonitorTask(BaseTask):
 
             update = update_from_task_log_row(row)
             if update is None:
-                if apply:
-                    deleted, errors = self._delete_exact_task_log_rows((row.raw,))
-                    malformed_deleted += deleted
-                    delete_errors.extend(errors)
-                    if errors:
-                        stop_reason = "queue_delete_error"
-                        break
-                last_processed_message_id = row.raw.message_id
+                selected_rows.append(row.raw)
+                malformed_message_ids.add(row.raw.message_id)
+                last_selected_message_id = row.raw.message_id
                 continue
 
+            selected_rows.append(row.raw)
+            valid_updates.append(update)
+            valid_message_ids.add(row.raw.message_id)
+            last_selected_message_id = row.raw.message_id
+            updated_tasks.add(update.tid)
+            if update.terminal_seen:
+                terminal_tasks.add(update.tid)
+
+        if valid_updates:
             try:
                 ingest = store.record_task_log_updates(
                     WEFT_GLOBAL_LOG_QUEUE,
-                    (update,),
+                    tuple(valid_updates),
                     checkpoint_message_id=None,
                 )
             except (OSError, RuntimeError, ValueError) as exc:
                 store_errors.append(str(exc))
                 stop_reason = "store_write_error"
-                break
-            valid_ingested += ingest.updates_written
-            last_processed_message_id = row.raw.message_id
-            updated_tasks.add(update.tid)
-            if update.terminal_seen:
-                terminal_tasks.add(update.tid)
-            if apply:
-                deleted, errors = self._delete_exact_task_log_rows((row.raw,))
-                raw_deleted += deleted
-                delete_errors.extend(errors)
-                if deleted:
-                    store.mark_messages_deleted(
-                        (row.raw.message_id,), deleted_at_ns=now_ns
-                    )
-                if errors:
-                    stop_reason = "queue_delete_error"
-                    break
+            else:
+                valid_ingested += ingest.updates_written
+                store_update_chunks += 1
 
-        if last_processed_message_id is not None and not store_errors:
-            store.set_checkpoint(WEFT_GLOBAL_LOG_QUEUE, last_processed_message_id)
+        if apply and selected_rows and not store_errors:
+            delete_result = self._delete_exact_task_log_rows(
+                tuple(selected_rows),
+                require_deleted=True,
+            )
+            exact_delete_chunks += 1
+            deleted_ids = set(delete_result.deleted_ids)
+            malformed_deleted += len(deleted_ids & malformed_message_ids)
+            raw_deleted += len(deleted_ids & valid_message_ids)
+            delete_errors.extend(delete_result.errors)
+            deleted_valid_ids = tuple(sorted(deleted_ids & valid_message_ids))
+            if deleted_valid_ids:
+                try:
+                    store.mark_messages_deleted(
+                        deleted_valid_ids,
+                        deleted_at_ns=now_ns,
+                    )
+                    deleted_mark_chunks += 1
+                except (OSError, RuntimeError, ValueError) as exc:
+                    store_errors.append(str(exc))
+                    stop_reason = "store_deleted_mark_error"
+            if delete_errors and stop_reason is None:
+                stop_reason = "queue_delete_error"
+
+        checkpoint_written = False
+        if (
+            last_selected_message_id is not None
+            and not store_errors
+            and not delete_errors
+        ):
+            store.set_checkpoint(WEFT_GLOBAL_LOG_QUEUE, last_selected_message_id)
+            checkpoint_written = True
         if stop_reason is None and window.scan_limit_reached:
             stop_reason = window.stop_reason
-        completed_high_water = stop_reason in {None, "first_task_log_too_young"}
+        completed_high_water = (
+            not store_errors
+            and not delete_errors
+            and stop_reason in {None, "first_task_log_too_young"}
+        )
         self._last_collation_tasks_updated = len(updated_tasks)
         self._last_collation_terminal_tasks = len(terminal_tasks)
         self._last_collation_messages_marked_deleted = malformed_deleted + raw_deleted
         return _RetainedTaskLogIngestResult(
             scanned=scanned,
+            selected=len(selected_rows),
             malformed_deleted=malformed_deleted,
             valid_ingested=valid_ingested,
             raw_deleted=raw_deleted,
+            store_update_chunks=store_update_chunks,
+            exact_delete_chunks=exact_delete_chunks,
+            deleted_mark_chunks=deleted_mark_chunks,
+            checkpoint_message_id=last_selected_message_id,
+            checkpoint_written=checkpoint_written,
             store_write_errors=tuple(store_errors),
             raw_delete_errors=tuple(delete_errors),
             stop_reason=stop_reason,
@@ -1018,8 +1070,10 @@ class TaskMonitorTask(BaseTask):
     def _delete_exact_task_log_rows(
         self,
         rows: tuple[QueueWindowRow, ...],
-    ) -> tuple[int, list[str]]:
-        """Delete exact task-log rows and return deleted count plus errors."""
+        *,
+        require_deleted: bool = False,
+    ) -> _ExactTaskLogDeleteResult:
+        """Delete exact task-log rows and return IDs proven deleted."""
 
         refs = tuple(
             _RawExternalPruneRef(
@@ -1036,8 +1090,20 @@ class TaskMonitorTask(BaseTask):
             )
         )
         errors = [result.error for result in applied if result.error is not None]
-        completed = sum(1 for result in applied if result.error is None)
-        return completed, errors
+        if require_deleted:
+            errors.extend(
+                f"{result.candidate.queue}:{result.candidate.message_id} "
+                "was not deleted by exact broker delete"
+                for result in applied
+                if not result.deleted and result.error is None
+            )
+        deleted_ids = tuple(
+            result.candidate.message_id for result in applied if result.deleted
+        )
+        return _ExactTaskLogDeleteResult(
+            deleted_ids=deleted_ids,
+            errors=tuple(errors),
+        )
 
     def _emit_monitor_store_summaries(
         self,
@@ -1051,7 +1117,9 @@ class TaskMonitorTask(BaseTask):
         Spec: [MF-5]
         """
 
-        emitted = 0
+        summary_marks: list[tuple[str, str | None]] = []
+        control_delete_marks: list[str] = []
+        family_disposition_marks: list[tuple[str, str, str | None, int | None]] = []
         for ready in store.list_summary_ready_tasks(
             limit=self._monitor_config.batch_size,
             now_ns=now_ns,
@@ -1071,14 +1139,16 @@ class TaskMonitorTask(BaseTask):
                         self._refresh_external_task_log_status()
                     self._last_collation_store_error = str(exc)
                     continue
-                store.mark_summary_emitted(
-                    ready.record.tid,
-                    now_ns,
-                    suspect_reason=(
-                        ready.close_reason if ready.close_reason != "terminal" else None
-                    ),
+                summary_marks.append(
+                    (
+                        ready.record.tid,
+                        (
+                            ready.close_reason
+                            if ready.close_reason != "terminal"
+                            else None
+                        ),
+                    )
                 )
-                emitted += 1
             if not apply_disposition:
                 continue
 
@@ -1099,24 +1169,38 @@ class TaskMonitorTask(BaseTask):
                 if not control_result.success:
                     self._last_collation_store_error = "; ".join(control_result.errors)
                     continue
-                store.mark_task_control_deleted(ready.record.tid, now_ns)
+                control_delete_marks.append(ready.record.tid)
 
             suspect_reason = (
                 ready.close_reason if ready.close_reason != "terminal" else None
             )
-            store.mark_family_disposed(
-                ready.record.tid,
-                now_ns,
-                disposition_reason=ready.close_reason,
-                suspect_reason=suspect_reason,
-                suspect_at_ns=now_ns if suspect_reason is not None else None,
+            family_disposition_marks.append(
+                (
+                    ready.record.tid,
+                    ready.close_reason,
+                    suspect_reason,
+                    now_ns if suspect_reason is not None else None,
+                )
             )
-            if ready.close_reason == "terminal":
-                self._last_terminal_families_disposed += 1
-            else:
-                self._last_suspect_families_classified += 1
+
+        if summary_marks:
+            store.mark_summaries_emitted(summary_marks, now_ns)
+        if control_delete_marks:
+            store.mark_task_controls_deleted(control_delete_marks, now_ns)
+        if family_disposition_marks:
+            store.mark_families_disposed(family_disposition_marks, now_ns)
+            for (
+                _tid,
+                disposition_reason,
+                _suspect_reason,
+                _suspect_at_ns,
+            ) in family_disposition_marks:
+                if disposition_reason == "terminal":
+                    self._last_terminal_families_disposed += 1
+                else:
+                    self._last_suspect_families_classified += 1
         self._refresh_external_task_log_status()
-        return emitted
+        return len(summary_marks)
 
     def _emit_monitor_store_summary(
         self,
@@ -1225,9 +1309,10 @@ class TaskMonitorTask(BaseTask):
             apply_result=_applied_monitor_raw_message,
         )
         deleted_ids = tuple(
-            result.candidate.message_id for result in applied if result.error is None
+            result.candidate.message_id for result in applied if result.deleted
         )
-        store.mark_messages_deleted(deleted_ids)
+        if deleted_ids:
+            store.mark_messages_deleted(deleted_ids)
         errors = tuple(result.error for result in applied if result.error is not None)
         if errors:
             self._last_collation_store_error = "; ".join(errors)

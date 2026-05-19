@@ -312,6 +312,17 @@ def mark_message_deleted(messages_table: str) -> str:
         """
 
 
+def mark_messages_deleted(messages_table: str, message_id_count: int) -> str:
+    """Build a batched exact message-deleted update."""
+
+    return f"""
+        UPDATE {identifier(messages_table)}
+        SET deleted_at_ns = ?
+        WHERE context_key = ?
+          AND message_id IN ({placeholders(message_id_count)})
+        """
+
+
 def select_distinct_tids_for_message_ids(
     messages_table: str,
     message_id_count: int,
@@ -364,6 +375,40 @@ def reconcile_raw_deleted_tasks(
         UPDATE {collations}
         SET raw_deleted_at_ns = ?, updated_at_ns = ?
         WHERE context_key = ?
+          AND raw_deleted_at_ns IS NULL
+          AND EXISTS (
+            SELECT 1
+            FROM {messages} AS m
+            WHERE m.context_key = {collations}.context_key
+              AND m.tid = {collations}.tid
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM {messages} AS m
+            WHERE m.context_key = {collations}.context_key
+              AND m.tid = {collations}.tid
+              AND m.deleted_at_ns IS NULL
+          )
+        """
+
+
+def reconcile_raw_deleted_tasks_for_tids(
+    collations_table: str,
+    messages_table: str,
+    tid_count: int,
+) -> str:
+    """Build affected-task parent raw-deleted reconciliation update.
+
+    Spec: [MF-5], [OBS.17]
+    """
+
+    collations = identifier(collations_table)
+    messages = identifier(messages_table)
+    return f"""
+        UPDATE {collations}
+        SET raw_deleted_at_ns = ?, updated_at_ns = ?
+        WHERE context_key = ?
+          AND tid IN ({placeholders(tid_count)})
           AND raw_deleted_at_ns IS NULL
           AND EXISTS (
             SELECT 1

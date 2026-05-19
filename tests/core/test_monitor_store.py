@@ -457,6 +457,48 @@ def test_monitor_store_mark_messages_deleted_reconciles_parent(tmp_path) -> None
     assert record.raw_deleted_at_ns == 2
 
 
+def test_monitor_store_mark_messages_deleted_reconciles_only_affected_tids(
+    tmp_path,
+) -> None:
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    first_tid = "1779000000000000021"
+    second_tid = "1779000000000000022"
+    first_start = _update(first_tid, 1779000000000006100)
+    first_terminal = _update(
+        first_tid,
+        1779000000000006200,
+        event="work_completed",
+        status="completed",
+        terminal=True,
+    )
+    second_terminal = _update(
+        second_tid,
+        1779000000000006300,
+        event="work_completed",
+        status="completed",
+        terminal=True,
+    )
+    store.record_task_log_updates(
+        WEFT_GLOBAL_LOG_QUEUE,
+        (first_start, first_terminal, second_terminal),
+        checkpoint_message_id=None,
+    )
+
+    store.mark_messages_deleted(
+        (first_start.message_id, first_terminal.message_id),
+        deleted_at_ns=5,
+    )
+
+    first_record = store.get_task(first_tid)
+    second_record = store.get_task(second_tid)
+    assert first_record is not None
+    assert second_record is not None
+    assert first_record.raw_deleted_at_ns == 5
+    assert second_record.raw_deleted_at_ns is None
+
+
 def test_monitor_store_reconciles_existing_child_deletions(tmp_path) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)

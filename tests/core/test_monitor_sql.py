@@ -38,6 +38,20 @@ def test_monitor_sql_builds_raw_deleted_reconciliation_query() -> None:
     assert "%s" not in query
 
 
+def test_monitor_sql_builds_affected_tid_reconciliation_query() -> None:
+    query = monitor_sql.reconcile_raw_deleted_tasks_for_tids(
+        "weft_monitor_task_collations",
+        "weft_monitor_task_messages",
+        2,
+    )
+
+    assert "UPDATE weft_monitor_task_collations" in query
+    assert "tid IN (?, ?)" in query
+    assert "raw_deleted_at_ns IS NULL" in query
+    assert "deleted_at_ns IS NULL" in query
+    assert "%s" not in query
+
+
 def test_monitor_sql_summary_ready_queries_parameterize_cutoffs() -> None:
     terminal = monitor_sql.select_summary_ready_terminal_tasks(
         "weft_monitor_task_collations",

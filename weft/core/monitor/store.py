@@ -626,6 +626,21 @@ class _MonitorTableAccess:
             (int(deleted_at_ns), self._context_key, int(message_id)),
         )
 
+    def mark_messages_deleted(
+        self,
+        message_ids: Sequence[int],
+        deleted_at_ns: int,
+    ) -> None:
+        """Mark a batch of exact raw messages deleted."""
+
+        ids = tuple(int(message_id) for message_id in message_ids)
+        if not ids:
+            return
+        self._runner.run(
+            monitor_sql.mark_messages_deleted(self._tables.task_messages, len(ids)),
+            (int(deleted_at_ns), self._context_key, *ids),
+        )
+
     def tids_for_message_ids(self, message_ids: Sequence[int]) -> set[str]:
         """Return TIDs attached to the given exact raw message IDs."""
 
@@ -673,6 +688,30 @@ class _MonitorTableAccess:
                 self._tables.task_messages,
             ),
             (int(deleted_at_ns), int(deleted_at_ns), self._context_key),
+        )
+
+    def reconcile_raw_deleted_for_tids(
+        self,
+        tids: Sequence[str],
+        deleted_at_ns: int,
+    ) -> None:
+        """Mark affected parent rows whose known child rows are all deleted."""
+
+        tid_items = tuple(str(tid) for tid in tids)
+        if not tid_items:
+            return
+        self._runner.run(
+            monitor_sql.reconcile_raw_deleted_tasks_for_tids(
+                self._tables.task_collations,
+                self._tables.task_messages,
+                len(tid_items),
+            ),
+            (
+                int(deleted_at_ns),
+                int(deleted_at_ns),
+                self._context_key,
+                *tid_items,
+            ),
         )
 
     def upsert_record(self, record: MonitorTaskCollationRecord) -> None:
@@ -845,14 +884,26 @@ class MonitorStore:
             access = self._access(runner)
             for chunk in _chunks(update_items, self._config.write_batch_size):
                 with _write_transaction(runner):
+                    updates_by_tid: dict[str, list[MonitorTaskEventUpdate]] = {}
                     for update in chunk:
-                        existing = access.fetch_task(update.tid)
-                        merged = _merge_record(self._context_key, existing, update)
-                        access.upsert_record(merged)
+                        updates_by_tid.setdefault(update.tid, []).append(update)
+
+                    for tid, tid_updates in updates_by_tid.items():
+                        merged = access.fetch_task(tid)
+                        for update in tid_updates:
+                            merged = _merge_record(
+                                self._context_key,
+                                merged,
+                                update,
+                            )
+                            tasks_updated.add(update.tid)
+                            if update.terminal_seen:
+                                terminal_tasks.add(update.tid)
+                        if merged is not None:
+                            access.upsert_record(merged)
+
+                    for update in chunk:
                         access.upsert_message(update)
-                        tasks_updated.add(update.tid)
-                        if update.terminal_seen:
-                            terminal_tasks.add(update.tid)
             if checkpoint_message_id is not None:
                 with _write_transaction(runner):
                     access.write_meta(
@@ -937,15 +988,35 @@ class MonitorStore:
         Spec: [MF-5]
         """
 
+        self.mark_summaries_emitted(
+            ((tid, suspect_reason),),
+            emitted_at_ns,
+        )
+
+    def mark_summaries_emitted(
+        self,
+        items: Sequence[tuple[str, str | None]],
+        emitted_at_ns: int,
+    ) -> None:
+        """Mark terminal summary emission complete for a batch of families.
+
+        Spec: [MF-5]
+        """
+
+        item_tuple = tuple(items)
+        if not item_tuple:
+            return
         with self._context.broker() as broker:
             runner = _runner_from_broker(broker)
             access = self._access(runner)
-            with _write_transaction(runner):
-                access.mark_summary_emitted(
-                    tid,
-                    emitted_at_ns,
-                    suspect_reason=suspect_reason,
-                )
+            for chunk in _chunks(item_tuple, self._config.write_batch_size):
+                with _write_transaction(runner):
+                    for tid, suspect_reason in chunk:
+                        access.mark_summary_emitted(
+                            tid,
+                            emitted_at_ns,
+                            suspect_reason=suspect_reason,
+                        )
 
     def mark_task_control_deleted(
         self,
@@ -954,11 +1025,25 @@ class MonitorStore:
     ) -> None:
         """Mark terminal task-local control queue cleanup complete."""
 
+        self.mark_task_controls_deleted((tid,), deleted_at_ns)
+
+    def mark_task_controls_deleted(
+        self,
+        tids: Sequence[str],
+        deleted_at_ns: int,
+    ) -> None:
+        """Mark task-local control queue cleanup complete for a batch."""
+
+        tid_tuple = tuple(str(tid) for tid in tids)
+        if not tid_tuple:
+            return
         with self._context.broker() as broker:
             runner = _runner_from_broker(broker)
             access = self._access(runner)
-            with _write_transaction(runner):
-                access.mark_task_control_deleted(tid, deleted_at_ns)
+            for chunk in _chunks(tid_tuple, self._config.write_batch_size):
+                with _write_transaction(runner):
+                    for tid in chunk:
+                        access.mark_task_control_deleted(tid, deleted_at_ns)
 
     def mark_family_disposed(
         self,
@@ -977,17 +1062,52 @@ class MonitorStore:
         Spec: [MF-5], [OBS.13]
         """
 
+        self.mark_families_disposed(
+            (
+                (
+                    tid,
+                    disposition_reason,
+                    suspect_reason,
+                    suspect_at_ns,
+                ),
+            ),
+            disposed_at_ns,
+        )
+
+    def mark_families_disposed(
+        self,
+        items: Sequence[tuple[str, str, str | None, int | None]],
+        disposed_at_ns: int,
+    ) -> None:
+        """Mark Monitor families disposed in batches.
+
+        This is a compact tombstone. It does not physically remove Monitor
+        rows.
+
+        Spec: [MF-5], [OBS.13]
+        """
+
+        item_tuple = tuple(items)
+        if not item_tuple:
+            return
         with self._context.broker() as broker:
             runner = _runner_from_broker(broker)
             access = self._access(runner)
-            with _write_transaction(runner):
-                access.mark_family_disposed(
-                    tid,
-                    disposed_at_ns,
-                    disposition_reason=disposition_reason,
-                    suspect_reason=suspect_reason,
-                    suspect_at_ns=suspect_at_ns,
-                )
+            for chunk in _chunks(item_tuple, self._config.write_batch_size):
+                with _write_transaction(runner):
+                    for (
+                        tid,
+                        disposition_reason,
+                        suspect_reason,
+                        suspect_at_ns,
+                    ) in chunk:
+                        access.mark_family_disposed(
+                            tid,
+                            disposed_at_ns,
+                            disposition_reason=disposition_reason,
+                            suspect_reason=suspect_reason,
+                            suspect_at_ns=suspect_at_ns,
+                        )
 
     def list_deletable_task_log_messages(
         self,
@@ -1025,10 +1145,14 @@ class MonitorStore:
         with self._context.broker() as broker:
             runner = _runner_from_broker(broker)
             access = self._access(runner)
-            with _write_transaction(runner):
-                for message_id in ids:
-                    access.mark_message_deleted(message_id, timestamp)
-                access.reconcile_raw_deleted(timestamp)
+            for chunk in _chunks(ids, self._config.write_batch_size):
+                with _write_transaction(runner):
+                    affected_tids = access.tids_for_message_ids(chunk)
+                    access.mark_messages_deleted(chunk, timestamp)
+                    access.reconcile_raw_deleted_for_tids(
+                        sorted(affected_tids),
+                        timestamp,
+                    )
 
     def status(self) -> MonitorStoreStatus:
         """Return a store status snapshot for cached PONG fields."""

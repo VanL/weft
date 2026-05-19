@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,7 @@ from weft.core.monitor.cleanup import (
     run_task_monitor_cleanup,
 )
 from weft.core.monitor.task_log_collation import collate_next_task_log_group
+from weft.core.pruning.apply import apply_exact_prune_candidates
 from weft.core.pruning.policies import malformed_row_candidates, older_than_candidates
 from weft.core.queue_window import DecodedQueueWindowRow, QueueWindowRow
 from weft.helpers import iter_queue_entries
@@ -91,6 +93,63 @@ def _claim_one(ctx: WeftContext, queue_name: str) -> tuple[str, int]:
 
 def _now_after(message_id: int, seconds: float) -> int:
     return message_id + int(seconds * 1_000_000_000) + 1
+
+
+@dataclass(frozen=True, slots=True)
+class _ExactDeleteCandidate:
+    queue: str
+    message_id: int
+    report_only: bool = False
+
+
+def test_apply_exact_prune_candidates_reports_missing_row_not_deleted(
+    tmp_path: Path,
+) -> None:
+    ctx = _context(tmp_path)
+    missing_id = 1779000000000020000
+
+    applied = apply_exact_prune_candidates(
+        ctx,
+        (
+            _ExactDeleteCandidate(
+                queue="test.exact-delete",
+                message_id=missing_id,
+            ),
+        ),
+        apply_result=lambda candidate, deleted, error: (
+            candidate.message_id,
+            deleted,
+            error,
+        ),
+    )
+
+    assert applied == [(missing_id, False, None)]
+
+
+def test_apply_exact_prune_candidates_reports_deleted_rows(
+    tmp_path: Path,
+) -> None:
+    ctx = _context(tmp_path)
+    queue_name = "test.exact-delete"
+    message_id = _write_raw(ctx, queue_name, "payload")
+
+    applied = apply_exact_prune_candidates(
+        ctx,
+        (
+            _ExactDeleteCandidate(
+                queue=queue_name,
+                message_id=message_id,
+            ),
+        ),
+        apply_result=lambda candidate, deleted, error: (
+            candidate.message_id,
+            deleted,
+            error,
+        ),
+    )
+
+    assert applied == [(message_id, True, None)]
+    assert _read_rows(ctx, queue_name) == []
 
 
 def _decoded_row(
