@@ -204,6 +204,11 @@ def test_task_monitor_process_once_calls_processor_without_consuming_task_log(
     monkeypatch.setattr(
         task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
     )
+    monkeypatch.setattr(
+        task_monitor_mod,
+        "TASK_MONITOR_RUNTIME_CLEANUP_SLICE_SECONDS",
+        60.0,
+    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
