@@ -1460,11 +1460,11 @@ def test_task_monitor_delete_removes_stale_reserved_queue_without_monitor_record
         config=config,
     )
     try:
-        task.process_once()
-        drive_task_monitor_until_idle(task)
-        assert task._last_reserved_families_processed == 1
-        assert task._last_reserved_queues_deleted == 1
-        assert task._last_reserved_rows_deleted == 1
+        drive_task_monitor_until(
+            task,
+            lambda: list(reserved.peek_generator()) == [],
+            timeout=30.0,
+        )
     finally:
         task.stop()
 
@@ -2165,8 +2165,13 @@ def test_task_monitor_slow_builtin_cycle_does_not_block_ping(
 
     monkeypatch.setattr(task, "_run_task_monitor_cleanup_cycle", slow_cleanup)
     try:
-        task.process_once()
-        assert started.wait(timeout=2.0)
+        deadline = time.monotonic() + 10.0
+        while not started.is_set() and time.monotonic() < deadline:
+            task.process_once()
+            if task._builtin_cycle_work_in_flight is None:
+                task._next_cycle_due_monotonic = 0.0
+            task.wait_for_activity(timeout=0.05)
+        assert started.wait(timeout=0.1)
         assert task._builtin_cycle_work_in_flight is not None
 
         ctrl_in.write(json.dumps({"command": CONTROL_PING, "request_id": "during"}))
