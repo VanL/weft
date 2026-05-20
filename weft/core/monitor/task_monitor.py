@@ -1101,6 +1101,10 @@ class TaskMonitorTask(BaseTask):
         Spec: [MF-5], [OBS.13]
         """
 
+        runtime_cleanup_requested = (
+            self._monitor_config.processor == "delete"
+            and task_log_owner == "collated_store"
+        )
         runtime_cleanup_ready = False
         self._last_collation_rows_processed = 0
         self._last_collation_tasks_updated = 0
@@ -1155,10 +1159,7 @@ class TaskMonitorTask(BaseTask):
                         ),
                     )
                 )
-                if (
-                    self._monitor_config.processor == "delete"
-                    and task_log_owner == "collated_store"
-                ):
+                if runtime_cleanup_requested:
                     self._apply_monitor_store_retirement_result(
                         self._delete_monitor_store_task_log_rows(store)
                     )
@@ -1174,9 +1175,10 @@ class TaskMonitorTask(BaseTask):
                             retired_at_ns=now_ns,
                         )
                     )
-                    runtime_cleanup_ready = True
-                    if start_control_cleanup:
-                        self._maybe_start_terminal_control_cleanup_worker(now_ns=now_ns)
+            if runtime_cleanup_requested:
+                runtime_cleanup_ready = True
+                if start_control_cleanup:
+                    self._maybe_start_terminal_control_cleanup_worker(now_ns=now_ns)
             checkpoint = store.get_checkpoint(WEFT_GLOBAL_LOG_QUEUE)
             self._monitor_store_status = MonitorStoreStatus(
                 enabled=True,
@@ -1943,7 +1945,7 @@ class TaskMonitorTask(BaseTask):
 
         if deadline_hit:
             reserved_cleanup = _TaskControlCleanupResult(pending=reserved_has_work)
-        else:
+        elif remaining_limit > 0:
             reserved_cleanup = self._delete_runtime_reserved_queues(
                 store,
                 now_ns=now_ns,
@@ -1955,6 +1957,8 @@ class TaskMonitorTask(BaseTask):
             family_budget_used += reserved_cleanup.reserved_families_processed
             if reserved_cleanup.deadline_hit:
                 deadline_hit = True
+        else:
+            reserved_cleanup = _TaskControlCleanupResult(pending=reserved_has_work)
 
         errors.extend(reserved_cleanup.errors)
         warnings.extend(reserved_cleanup.warnings)
@@ -2649,7 +2653,9 @@ class TaskMonitorTask(BaseTask):
             if self._last_collation_store_error is None:
                 self._last_collation_store_error = self._last_error
 
-        self._last_catchup_pending = cleanup.pending or not cleanup.success
+        self._last_catchup_pending = (
+            self._last_catchup_pending or cleanup.pending or not cleanup.success
+        )
         next_interval_seconds = (
             self._monitor_config.catchup_interval_seconds
             if self._last_catchup_pending

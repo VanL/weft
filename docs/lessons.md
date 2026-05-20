@@ -324,6 +324,10 @@ runbook needs to become stricter.
   absence of exceptions. For task-local control cleanup, `Queue.delete()`
   returning `False` can no longer be treated as success when rows remain; check
   post-delete queue stats before writing `task_control_deleted_at_ns`.
+- TaskMonitor catch-up state can have more than one owner in the same turn.
+  A runtime cleanup worker result must not clear task-log catch-up that was set
+  by the built-in cycle, and a control slice that spends the full family budget
+  must preserve reserved-cleanup pending state so the next catch-up turn runs.
 
 ## 2026-05-20 Host PID Namespace Visibility
 
