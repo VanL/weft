@@ -295,7 +295,7 @@ def _enrich_import_plan(plan: ImportPlan, context: WeftContext) -> None:
             existing_aliases = {}
 
         try:
-            existing_queues = {name for name, _count in broker.list_queues()}
+            existing_queues = set(broker.list_queues())
         except (
             BrokerError,
             OSError,

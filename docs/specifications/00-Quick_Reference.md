@@ -55,6 +55,9 @@ Notes:
   `weft_monitor_task_messages` are Monitor-owned operational tables, not
   queues. They are derived from `weft.log.tasks`, are not exposed through
   `weft queue *`, and are not task lifecycle or result authority.
+  `weft_monitor_task_messages` stores temporary pending raw-message references;
+  completed raw-message refs are physically removed from the Monitor table
+  rather than retained as queue-like tombstones.
 - `weft system prune` can explicitly dry-run or apply exact-message pruning.
   It defaults to runtime-only `weft.state.*` pruning. Retention families can
   also prune selected `weft.log.tasks` and task-local `T{tid}.*` rows with
@@ -183,6 +186,7 @@ _Implementation mapping_: `weft/core/taskspec/model.py` (process_target, peak_* 
 
 ## Related Plans
 
+- [`docs/plans/2026-05-20-monitor-collation-table-retirement-plan.md`](../plans/2026-05-20-monitor-collation-table-retirement-plan.md)
 - [`docs/plans/2026-05-20-monitor-fair-cleanup-scheduling-plan.md`](../plans/2026-05-20-monitor-fair-cleanup-scheduling-plan.md)
 - [`docs/plans/2026-05-19-monitor-terminal-retirement-and-runtime-queue-cleanup-plan.md`](../plans/2026-05-19-monitor-terminal-retirement-and-runtime-queue-cleanup-plan.md)
 - [`docs/plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md`](../plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md)

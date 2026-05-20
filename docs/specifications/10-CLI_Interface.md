@@ -339,6 +339,10 @@ Current behavior:
 - JSON task snapshots may include an additive `reconciliation` object when
   lifecycle evidence and runtime liveness disagree; the public `status` remains
   one of the normal lifecycle states
+- host-PID runtime descriptions must distinguish process absence from PID
+  namespace visibility. When `weft status` runs inside a container and cannot
+  observe a host-scoped PID, the runtime description reports unknown visibility
+  metadata rather than `state="missing"`.
 - JSON task snapshots may also include additive reconciliation classifications
   from shared task evidence, including `wrapper_lost`, `terminal_ctrl_out`,
   `result_without_terminal`, and `stale_liveness`; claimed result residue may surface as
@@ -588,10 +592,12 @@ Current queue subcommands:
 These commands intentionally stay close to SimpleBroker behavior. Weft adds
 project resolution, aliases, and task/runtime conventions on top.
 
-Current raw queue filters and metadata helpers mirror SimpleBroker 3.6.1:
+Current raw queue filters and metadata helpers mirror current SimpleBroker:
 
 - `read`, `peek`, and `move` accept `--after` and `--before`
-- `list` accepts `--pattern`, `--prefix`, `--stats`, and `--json`
+- `list` accepts `--pattern`, `--prefix`, `--stats`, and `--json`; by default
+  it lists queue names only, while `--stats` includes pending, claimed, and
+  total counts
 - `exists` checks whether a queue exists, including queues with claimed rows
 - `stats` reports pending, claimed, total, and existence counts for one queue
 - command-local JSON output follows SimpleBroker's newline-delimited JSON shape

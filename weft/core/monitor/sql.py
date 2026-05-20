@@ -323,22 +323,48 @@ def select_deletable_task_log_messages(
         """
 
 
-def mark_message_deleted(messages_table: str) -> str:
-    """Build an exact message-deleted update."""
+def select_task_message_refs_for_message_ids(
+    messages_table: str,
+    message_id_count: int,
+) -> str:
+    """Build a query for exact child message refs.
+
+    Spec: [MF-5], [OBS.13]
+    """
 
     return f"""
-        UPDATE {identifier(messages_table)}
-        SET deleted_at_ns = ?
-        WHERE context_key = ? AND message_id = ?
+        SELECT tid, message_id
+        FROM {identifier(messages_table)}
+        WHERE context_key = ?
+          AND message_id IN ({placeholders(message_id_count)})
+        ORDER BY message_id
         """
 
 
-def mark_messages_deleted(messages_table: str, message_id_count: int) -> str:
-    """Build a batched exact message-deleted update."""
+def select_deleted_task_message_refs(messages_table: str) -> str:
+    """Build a bounded query for legacy child message tombstones.
+
+    Spec: [MF-5], [OBS.13]
+    """
 
     return f"""
-        UPDATE {identifier(messages_table)}
-        SET deleted_at_ns = ?
+        SELECT tid, message_id
+        FROM {identifier(messages_table)}
+        WHERE context_key = ?
+          AND deleted_at_ns IS NOT NULL
+        ORDER BY message_id
+        LIMIT ?
+        """
+
+
+def delete_task_messages(messages_table: str, message_id_count: int) -> str:
+    """Build a batched exact child message delete.
+
+    Spec: [MF-5], [OBS.13]
+    """
+
+    return f"""
+        DELETE FROM {identifier(messages_table)}
         WHERE context_key = ?
           AND message_id IN ({placeholders(message_id_count)})
         """
@@ -358,15 +384,14 @@ def select_distinct_tids_for_message_ids(
         """
 
 
-def select_remaining_undeleted_message(messages_table: str) -> str:
-    """Build a query checking for any remaining undeleted task message."""
+def select_remaining_task_message(messages_table: str) -> str:
+    """Build a query checking for any remaining task message."""
 
     return f"""
         SELECT 1
         FROM {identifier(messages_table)}
         WHERE context_key = ?
           AND tid = ?
-          AND deleted_at_ns IS NULL
         LIMIT 1
         """
 
@@ -397,18 +422,11 @@ def reconcile_raw_deleted_tasks(
         SET raw_deleted_at_ns = ?, updated_at_ns = ?
         WHERE context_key = ?
           AND raw_deleted_at_ns IS NULL
-          AND EXISTS (
-            SELECT 1
-            FROM {messages} AS m
-            WHERE m.context_key = {collations}.context_key
-              AND m.tid = {collations}.tid
-          )
           AND NOT EXISTS (
             SELECT 1
             FROM {messages} AS m
             WHERE m.context_key = {collations}.context_key
               AND m.tid = {collations}.tid
-              AND m.deleted_at_ns IS NULL
           )
         """
 
@@ -431,19 +449,55 @@ def reconcile_raw_deleted_tasks_for_tids(
         WHERE context_key = ?
           AND tid IN ({placeholders(tid_count)})
           AND raw_deleted_at_ns IS NULL
-          AND EXISTS (
-            SELECT 1
-            FROM {messages} AS m
-            WHERE m.context_key = {collations}.context_key
-              AND m.tid = {collations}.tid
-          )
           AND NOT EXISTS (
             SELECT 1
             FROM {messages} AS m
             WHERE m.context_key = {collations}.context_key
               AND m.tid = {collations}.tid
-              AND m.deleted_at_ns IS NULL
           )
+        """
+
+
+def select_retirable_task_collations(
+    collations_table: str,
+    messages_table: str,
+) -> str:
+    """Build a query for completed Monitor collation families.
+
+    Spec: [MF-5], [OBS.13]
+    """
+
+    collations = identifier(collations_table)
+    messages = identifier(messages_table)
+    return f"""
+        SELECT tid
+        FROM {collations}
+        WHERE context_key = ?
+          AND raw_deleted_at_ns IS NOT NULL
+          AND summary_emitted_at_ns IS NOT NULL
+          AND disposition_at_ns IS NOT NULL
+          AND task_control_deleted_at_ns IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1
+            FROM {messages} AS m
+            WHERE m.context_key = {collations}.context_key
+              AND m.tid = {collations}.tid
+          )
+        ORDER BY last_message_id, tid
+        LIMIT ?
+        """
+
+
+def delete_task_collations(collations_table: str, tid_count: int) -> str:
+    """Build a batched completed Monitor collation-family delete.
+
+    Spec: [MF-5], [OBS.13]
+    """
+
+    return f"""
+        DELETE FROM {identifier(collations_table)}
+        WHERE context_key = ?
+          AND tid IN ({placeholders(tid_count)})
         """
 
 

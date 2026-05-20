@@ -318,6 +318,20 @@ runbook needs to become stricter.
   spawn requests into an inbox that no process will ever service. The fix
   belongs in the shared PID-liveness helper, not in one caller.
 
+## 2026-05-20 Cleanup Markers
+
+- Cleanup completion markers must be based on verified cleanup facts, not only
+  absence of exceptions. For task-local control cleanup, `Queue.delete()`
+  returning `False` can no longer be treated as success when rows remain; check
+  post-delete queue stats before writing `task_control_deleted_at_ns`.
+
+## 2026-05-20 Host PID Namespace Visibility
+
+- A host-scoped PID that is not visible from a container is ambiguous evidence,
+  not process-death proof. Status/runtime descriptions should report unknown
+  namespace visibility rather than `missing`; only same-namespace host liveness
+  checks can prove a host process is gone.
+
 ## 2026-04-09 Release Publication Guards
 
 - First-party package publish workflows must wait for a successful `Test`

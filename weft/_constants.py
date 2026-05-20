@@ -236,6 +236,9 @@ MANAGER_CHILD_LAUNCH_WORKER_LANE: Final[str] = "manager.child_launch"
 TASK_MONITOR_PROCESSOR_WORKER_LANE: Final[str] = "task_monitor.processor"
 """Worker lane name for broker-free TaskMonitor custom processors."""
 
+TASK_MONITOR_BUILTIN_CYCLE_WORKER_LANE: Final[str] = "task_monitor.builtin_cycle"
+"""Worker lane name for TaskMonitor built-in monitor cycle work."""
+
 TASK_MONITOR_CONTROL_CLEANUP_WORKER_LANE: Final[str] = "task_monitor.control_cleanup"
 """Worker lane name for TaskMonitor terminal task-local control cleanup."""
 

@@ -19,6 +19,7 @@ import time
 import traceback
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from functools import lru_cache
 from multiprocessing.process import BaseProcess
 from multiprocessing.queues import Queue as MPQueue
 from typing import Any, TextIO, cast
@@ -57,6 +58,8 @@ from weft.ext import (
     RunnerRuntimeDescription,
 )
 from weft.helpers import (
+    ContainerRuntimeDetection,
+    detect_container_runtime,
     kill_process_tree,
     pid_is_live,
     pid_matches_create_time,
@@ -109,6 +112,13 @@ def _host_pid_matches(pid: int, create_time: float | None) -> bool:
     if create_time is None:
         return pid_is_live(pid)
     return pid_matches_create_time(pid, create_time)
+
+
+@lru_cache(maxsize=1)
+def _current_container_runtime() -> ContainerRuntimeDetection | None:
+    """Return cached container evidence for host-PID visibility decisions."""
+
+    return detect_container_runtime()
 
 
 def _worker_entry(
@@ -948,16 +958,26 @@ class HostRunnerPlugin:
     def describe(self, handle: RunnerHandle) -> RunnerRuntimeDescription | None:
         host_processes = handle.scoped_host_processes()
         primary_pid = host_processes[0][0] if host_processes else None
+        metadata: dict[str, Any] = {
+            "host_pids": [pid for pid, _create_time in host_processes],
+        }
         state = "missing"
         if primary_pid is not None and any(
             _host_pid_matches(pid, create_time) for pid, create_time in host_processes
         ):
             state = "running"
+        elif (
+            primary_pid is not None
+            and (container := _current_container_runtime()) is not None
+        ):
+            state = "unknown"
+            metadata["host_pid_visibility"] = "namespace_unobservable"
+            metadata.update(container.observations())
         return RunnerRuntimeDescription(
             runner="host",
             id=handle.id,
             state=state,
-            metadata={"host_pids": [pid for pid, _create_time in host_processes]},
+            metadata=metadata,
         )
 
 

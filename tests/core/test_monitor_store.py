@@ -60,6 +60,21 @@ def _update(
     )
 
 
+def _monitor_table_count(
+    ctx,
+    table: str,
+    *,
+    where: str = "",
+    params: tuple[object, ...] = (),
+) -> int:
+    query = f"SELECT count(*) FROM {table}"
+    if where:
+        query = f"{query} WHERE {where}"
+    with ctx.broker() as broker:
+        rows = list(broker._runner.run(query, params, fetch=True))
+    return int(rows[0][0])
+
+
 class _FakeRunner:
     def __init__(self, *, fail_begin: bool = False, fail_inside: bool = False) -> None:
         self.fail_begin = fail_begin
@@ -487,7 +502,7 @@ def test_monitor_store_batch_ingest_updates_tasks_and_checkpoint(tmp_path) -> No
     assert second_record.terminal_seen is False
 
 
-def test_monitor_store_mark_messages_deleted_reconciles_parent(tmp_path) -> None:
+def test_monitor_store_deletes_task_messages_and_reconciles_parent(tmp_path) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
     store.ensure_schema()
@@ -506,18 +521,52 @@ def test_monitor_store_mark_messages_deleted_reconciles_parent(tmp_path) -> None
         checkpoint_message_id=None,
     )
 
-    store.mark_messages_deleted((start.message_id,), deleted_at_ns=1)
+    result = store.delete_task_messages_after_raw_delete(
+        (start.message_id,),
+        deleted_at_ns=1,
+    )
     record = store.get_task(tid)
     assert record is not None
+    assert result.message_rows_deleted == 1
     assert record.raw_deleted_at_ns is None
+    assert (
+        _monitor_table_count(
+            ctx,
+            "weft_monitor_task_messages",
+            where="context_key = ? AND tid = ?",
+            params=(store.context_key, tid),
+        )
+        == 1
+    )
 
-    store.mark_messages_deleted((terminal.message_id,), deleted_at_ns=2)
+    result = store.delete_task_messages_after_raw_delete(
+        (terminal.message_id,),
+        deleted_at_ns=2,
+    )
     record = store.get_task(tid)
     assert record is not None
+    assert result.message_rows_deleted == 1
     assert record.raw_deleted_at_ns == 2
+    assert (
+        _monitor_table_count(
+            ctx,
+            "weft_monitor_task_messages",
+            where="context_key = ? AND tid = ?",
+            params=(store.context_key, tid),
+        )
+        == 0
+    )
+    assert (
+        _monitor_table_count(
+            ctx,
+            "weft_monitor_task_messages",
+            where="deleted_at_ns IS NOT NULL",
+        )
+        == 0
+    )
 
 
-def test_monitor_store_mark_messages_deleted_reconciles_only_affected_tids(
+def test_monitor_store_deletes_messages_and_reconciles_only_affected_tids(
     tmp_path,
 ) -> None:
     ctx = _context(tmp_path)
@@ -546,7 +595,7 @@ def test_monitor_store_mark_messages_deleted_reconciles_only_affected_tids(
         checkpoint_message_id=None,
     )
 
-    store.mark_messages_deleted(
+    result = store.delete_task_messages_after_raw_delete(
         (first_start.message_id, first_terminal.message_id),
         deleted_at_ns=5,
     )
@@ -555,11 +604,12 @@ def test_monitor_store_mark_messages_deleted_reconciles_only_affected_tids(
     second_record = store.get_task(second_tid)
     assert first_record is not None
     assert second_record is not None
+    assert result.message_rows_deleted == 2
     assert first_record.raw_deleted_at_ns == 5
     assert second_record.raw_deleted_at_ns is None
 
 
-def test_monitor_store_reconciles_existing_child_deletions(tmp_path) -> None:
+def test_monitor_store_reconciles_existing_raw_deleted_child_refs(tmp_path) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
     store.ensure_schema()
@@ -576,26 +626,122 @@ def test_monitor_store_reconciles_existing_child_deletions(tmp_path) -> None:
         (terminal,),
         checkpoint_message_id=None,
     )
-    store.mark_messages_deleted((terminal.message_id,), deleted_at_ns=3)
+
+    result = store.delete_task_messages_after_raw_delete(
+        (terminal.message_id,),
+        deleted_at_ns=4,
+    )
+
+    record = store.get_task(tid)
+    assert record is not None
+    assert result.message_rows_deleted == 1
+    assert record.raw_deleted_at_ns == 4
+    assert (
+        _monitor_table_count(
+            ctx,
+            "weft_monitor_task_messages",
+            where="context_key = ? AND tid = ?",
+            params=(store.context_key, tid),
+        )
+        == 0
+    )
+
+
+def test_monitor_store_prunes_legacy_message_tombstones(tmp_path) -> None:
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    tid = "1779000000000000031"
+    start = _update(tid, 1779000000000008100)
+    terminal = _update(
+        tid,
+        1779000000000008200,
+        event="work_completed",
+        status="completed",
+        terminal=True,
+    )
+    store.record_task_log_updates(
+        WEFT_GLOBAL_LOG_QUEUE,
+        (start, terminal),
+        checkpoint_message_id=None,
+    )
     with ctx.broker() as broker:
         runner = broker._runner
         runner.begin_immediate()
         try:
             runner.run(
-                "UPDATE weft_monitor_task_collations "
-                "SET raw_deleted_at_ns = NULL WHERE context_key = ? AND tid = ?",
-                (store.context_key, tid),
+                "UPDATE weft_monitor_task_messages "
+                "SET deleted_at_ns = ? WHERE context_key = ? AND tid = ?",
+                (terminal.message_id + 1, store.context_key, tid),
             )
             runner.commit()
         except Exception:
             runner.rollback()
             raise
 
-    store.mark_messages_deleted((terminal.message_id,), deleted_at_ns=4)
+    result = store.prune_deleted_task_message_tombstones(
+        limit=10,
+        pruned_at_ns=terminal.message_id + 2,
+    )
 
     record = store.get_task(tid)
     assert record is not None
-    assert record.raw_deleted_at_ns == 4
+    assert result.message_tombstones_pruned == 2
+    assert record.raw_deleted_at_ns == terminal.message_id + 2
+    assert (
+        _monitor_table_count(
+            ctx,
+            "weft_monitor_task_messages",
+            where="context_key = ? AND tid = ?",
+            params=(store.context_key, tid),
+        )
+        == 0
+    )
+
+
+def test_monitor_store_retires_completed_collation_families(tmp_path) -> None:
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    tid = "1779000000000000032"
+    terminal = _update(
+        tid,
+        1779000000000008300,
+        event="work_completed",
+        status="completed",
+        terminal=True,
+    )
+    store.record_task_log_updates(
+        WEFT_GLOBAL_LOG_QUEUE,
+        (terminal,),
+        checkpoint_message_id=None,
+    )
+    store.delete_task_messages_after_raw_delete(
+        (terminal.message_id,),
+        deleted_at_ns=terminal.message_id + 1,
+    )
+    store.mark_summary_emitted(tid, terminal.message_id + 2)
+    store.mark_family_disposed(
+        tid,
+        terminal.message_id + 3,
+        disposition_reason="terminal",
+    )
+    assert (
+        store.retire_completed_collation_families(
+            limit=10,
+            retired_at_ns=terminal.message_id + 4,
+        ).families_retired
+        == 0
+    )
+    store.mark_task_control_deleted(tid, terminal.message_id + 5)
+
+    result = store.retire_completed_collation_families(
+        limit=10,
+        retired_at_ns=terminal.message_id + 6,
+    )
+
+    assert result.families_retired == 1
+    assert store.get_task(tid) is None
 
 
 def test_monitor_store_rejects_newer_schema_version(tmp_path) -> None:

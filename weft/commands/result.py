@@ -446,11 +446,11 @@ def _collect_all_results(
     """Aggregate results from completed task outboxes (Spec: [CLI-1.1.1])."""
     with context.broker() as db:
         try:
-            queue_stats = db.list_queue_stats(pattern=f"T*.{QUEUE_OUTBOX_SUFFIX}")
+            queue_names = db.list_queues(pattern=f"T*.{QUEUE_OUTBOX_SUFFIX}")
         except Exception as exc:  # pragma: no cover - command error boundary
             return 1, f"weft: failed to enumerate queues: {exc}"
 
-    outbox_names = [stats.queue for stats in queue_stats]
+    outbox_names = [str(name) for name in queue_names]
 
     streaming = _active_streaming_queues(context)
 

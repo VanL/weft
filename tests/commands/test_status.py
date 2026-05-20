@@ -32,6 +32,7 @@ from weft.context import build_context
 from weft.core.runners import host as host_runner
 from weft.core.service_convergence import build_manager_service_payload
 from weft.ext import RunnerRuntimeDescription
+from weft.helpers.container_detection import ContainerRuntimeDetection
 
 pytestmark = [pytest.mark.shared]
 
@@ -1317,6 +1318,79 @@ def test_cmd_status_keeps_internal_service_running_without_runtime_proof(
     assert snapshot.waiting_on == "weft.log.tasks"
 
 
+def test_cmd_status_does_not_call_host_pid_missing_from_container_namespace(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = "1844674407370955194"
+    started = time.time_ns()
+
+    _write_task_log_entry(
+        ctx=ctx,
+        tid=tid,
+        event="task_started",
+        status="running",
+        started_at=started,
+        completed_at=None,
+        name="task-monitor",
+        metadata={
+            "internal": True,
+            "role": "task_monitor",
+            INTERNAL_RUNTIME_TASK_CLASS_KEY: INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR,
+            INTERNAL_SERVICE_KEY_METADATA_KEY: INTERNAL_SERVICE_KEY_TASK_MONITOR,
+        },
+    )
+    ctx.queue("weft.state.tid_mappings", persistent=False).write(
+        json.dumps(
+            {
+                "short": tid[-10:],
+                "full": tid,
+                "runner": "host",
+                "runtime_handle": _runtime_handle(
+                    "host",
+                    "999999997",
+                    host_pids=[999_999_997],
+                    observations={
+                        "host_processes": [
+                            {"pid": 999_999_997, "create_time": 1_779_285_601.93}
+                        ]
+                    },
+                    metadata={"source": "weft-task-process"},
+                ),
+            }
+        )
+    )
+    monkeypatch.setattr(
+        host_runner,
+        "_current_container_runtime",
+        lambda: ContainerRuntimeDetection(
+            runtime="docker",
+            markers=("dockerenv",),
+            identifier="opsweb",
+        ),
+    )
+
+    exit_code, payload = cmd_status(
+        json_output=True,
+        include_terminal=True,
+        spec_context=root,
+    )
+
+    assert exit_code == 0
+    assert payload is not None
+    tasks = json.loads(payload)["tasks"]
+    task = next(item for item in tasks if item["tid"] == tid)
+    assert task["status"] == "running"
+    assert task["runtime"]["state"] == "unknown"
+    assert task["runtime"]["metadata"]["host_pid_visibility"] == (
+        "namespace_unobservable"
+    )
+    assert task["runtime"]["metadata"]["container_runtime"] == "docker"
+    assert "reconciliation" not in task
+
+
 def test_cmd_status_keeps_runtime_less_manager_running_when_registry_is_live(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1856,6 +1930,7 @@ def test_cmd_status_host_runtime_uses_zombie_safe_pid_liveness(
     )
 
     monkeypatch.setattr(host_runner, "pid_is_live", lambda pid: False)
+    monkeypatch.setattr(host_runner, "_current_container_runtime", lambda: None)
 
     exit_code, payload = cmd_status(
         json_output=True, include_terminal=True, spec_context=root

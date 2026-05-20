@@ -214,6 +214,26 @@ class MonitorRawMessageRef:
 
 
 @dataclass(frozen=True, slots=True)
+class MonitorStoreRetirementResult:
+    """Summary of physical Monitor-store row retirement work."""
+
+    message_rows_deleted: int = 0
+    message_tombstones_pruned: int = 0
+    families_retired: int = 0
+    affected_tids: int = 0
+
+    def to_summary(self) -> dict[str, Any]:
+        """Return a JSON-safe cached PONG summary."""
+
+        return {
+            "message_rows_deleted": self.message_rows_deleted,
+            "message_tombstones_pruned": self.message_tombstones_pruned,
+            "families_retired": self.families_retired,
+            "affected_tids": self.affected_tids,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class MonitorSummaryReadyTask:
     """One Monitor collation record ready for summary disposition."""
 
@@ -659,27 +679,46 @@ class _MonitorTableAccess:
             for row in rows
         )
 
-    def mark_message_deleted(self, message_id: int, deleted_at_ns: int) -> None:
-        """Mark one exact raw message deleted."""
-
-        self._runner.run(
-            monitor_sql.mark_message_deleted(self._tables.task_messages),
-            (int(deleted_at_ns), self._context_key, int(message_id)),
-        )
-
-    def mark_messages_deleted(
+    def task_message_refs_for_message_ids(
         self,
         message_ids: Sequence[int],
-        deleted_at_ns: int,
-    ) -> None:
-        """Mark a batch of exact raw messages deleted."""
+    ) -> tuple[tuple[str, int], ...]:
+        """Return child message refs attached to exact raw message IDs."""
+
+        ids = tuple(int(message_id) for message_id in message_ids)
+        if not ids:
+            return ()
+        rows = self._runner.run(
+            monitor_sql.select_task_message_refs_for_message_ids(
+                self._tables.task_messages,
+                len(ids),
+            ),
+            (self._context_key, *ids),
+            fetch=True,
+        )
+        return tuple((str(row[0]), int(row[1])) for row in rows)
+
+    def deleted_task_message_refs(self, *, limit: int) -> tuple[tuple[str, int], ...]:
+        """Return legacy child message tombstones for physical cleanup."""
+
+        if limit <= 0:
+            return ()
+        rows = self._runner.run(
+            monitor_sql.select_deleted_task_message_refs(self._tables.task_messages),
+            (self._context_key, int(limit)),
+            fetch=True,
+        )
+        return tuple((str(row[0]), int(row[1])) for row in rows)
+
+    def delete_task_messages(self, message_ids: Sequence[int]) -> None:
+        """Physically delete exact child raw-message references."""
 
         ids = tuple(int(message_id) for message_id in message_ids)
         if not ids:
             return
         self._runner.run(
-            monitor_sql.mark_messages_deleted(self._tables.task_messages, len(ids)),
-            (int(deleted_at_ns), self._context_key, *ids),
+            monitor_sql.delete_task_messages(self._tables.task_messages, len(ids)),
+            (self._context_key, *ids),
         )
 
     def tids_for_message_ids(self, message_ids: Sequence[int]) -> set[str]:
@@ -698,14 +737,12 @@ class _MonitorTableAccess:
         )
         return {str(row[0]) for row in rows}
 
-    def has_undeleted_messages(self, tid: str) -> bool:
-        """Return whether a task still has known undeleted raw messages."""
+    def has_task_messages(self, tid: str) -> bool:
+        """Return whether a task still has known child raw-message refs."""
 
         rows = list(
             self._runner.run(
-                monitor_sql.select_remaining_undeleted_message(
-                    self._tables.task_messages
-                ),
+                monitor_sql.select_remaining_task_message(self._tables.task_messages),
                 (self._context_key, tid),
                 fetch=True,
             )
@@ -753,6 +790,35 @@ class _MonitorTableAccess:
                 self._context_key,
                 *tid_items,
             ),
+        )
+
+    def list_retirable_task_collations(self, *, limit: int) -> tuple[str, ...]:
+        """Return completed Monitor collation families safe to remove."""
+
+        if limit <= 0:
+            return ()
+        rows = self._runner.run(
+            monitor_sql.select_retirable_task_collations(
+                self._tables.task_collations,
+                self._tables.task_messages,
+            ),
+            (self._context_key, int(limit)),
+            fetch=True,
+        )
+        return tuple(str(row[0]) for row in rows)
+
+    def delete_task_collations(self, tids: Sequence[str]) -> None:
+        """Physically delete completed Monitor collation families."""
+
+        tid_items = tuple(str(tid) for tid in tids)
+        if not tid_items:
+            return
+        self._runner.run(
+            monitor_sql.delete_task_collations(
+                self._tables.task_collations,
+                len(tid_items),
+            ),
+            (self._context_key, *tid_items),
         )
 
     def upsert_record(self, record: MonitorTaskCollationRecord) -> None:
@@ -1190,32 +1256,117 @@ class MonitorStore:
                 require_summary=require_summary,
             )
 
-    def mark_messages_deleted(
+    def delete_task_messages_after_raw_delete(
         self,
         message_ids: Sequence[int],
         *,
         deleted_at_ns: int | None = None,
-    ) -> None:
-        """Mark exact task-log messages deleted after broker deletion succeeds.
+    ) -> MonitorStoreRetirementResult:
+        """Physically delete child refs after broker raw deletion succeeds.
 
         Spec: [MF-5], [OBS.17]
         """
 
         ids = tuple(int(message_id) for message_id in message_ids)
         if not ids:
-            return
+            return MonitorStoreRetirementResult()
         timestamp = time.time_ns() if deleted_at_ns is None else int(deleted_at_ns)
+        deleted_rows = 0
+        affected_tids: set[str] = set()
         with self._context.broker() as broker:
             runner = _runner_from_broker(broker)
             access = self._access(runner)
             for chunk in _chunks(ids, self._config.write_batch_size):
                 with _write_transaction(runner):
-                    affected_tids = access.tids_for_message_ids(chunk)
-                    access.mark_messages_deleted(chunk, timestamp)
+                    refs = access.task_message_refs_for_message_ids(chunk)
+                    chunk_tids = {tid for tid, _message_id in refs}
+                    chunk_message_ids = tuple(message_id for _tid, message_id in refs)
+                    access.delete_task_messages(chunk_message_ids)
+                    deleted_rows += len(chunk_message_ids)
+                    affected_tids.update(chunk_tids)
                     access.reconcile_raw_deleted_for_tids(
-                        sorted(affected_tids),
+                        sorted(chunk_tids),
                         timestamp,
                     )
+        return MonitorStoreRetirementResult(
+            message_rows_deleted=deleted_rows,
+            affected_tids=len(affected_tids),
+        )
+
+    def prune_deleted_task_message_tombstones(
+        self,
+        *,
+        limit: int,
+        pruned_at_ns: int | None = None,
+    ) -> MonitorStoreRetirementResult:
+        """Physically remove legacy child-message tombstones.
+
+        Spec: [MF-5], [OBS.13]
+        """
+
+        if limit <= 0:
+            return MonitorStoreRetirementResult()
+        timestamp = time.time_ns() if pruned_at_ns is None else int(pruned_at_ns)
+        pruned_rows = 0
+        affected_tids: set[str] = set()
+        with self._context.broker() as broker:
+            runner = _runner_from_broker(broker)
+            access = self._access(runner)
+            remaining = int(limit)
+            while remaining > 0:
+                chunk_limit = min(remaining, self._config.write_batch_size)
+                with _write_transaction(runner):
+                    chunk = access.deleted_task_message_refs(limit=chunk_limit)
+                    if not chunk:
+                        break
+                    chunk_tids = {tid for tid, _message_id in chunk}
+                    chunk_message_ids = tuple(message_id for _tid, message_id in chunk)
+                    access.delete_task_messages(chunk_message_ids)
+                    access.reconcile_raw_deleted_for_tids(
+                        sorted(chunk_tids),
+                        timestamp,
+                    )
+                pruned_rows += len(chunk_message_ids)
+                affected_tids.update(chunk_tids)
+                remaining -= len(chunk_message_ids)
+        return MonitorStoreRetirementResult(
+            message_tombstones_pruned=pruned_rows,
+            affected_tids=len(affected_tids),
+        )
+
+    def retire_completed_collation_families(
+        self,
+        *,
+        limit: int,
+        retired_at_ns: int | None = None,
+    ) -> MonitorStoreRetirementResult:
+        """Physically remove completed Monitor collation families.
+
+        The current retirement rule is intentionally conservative: parent rows
+        are removed only after raw deletion, summary emission, disposition, and
+        task-local control cleanup are all recorded.
+
+        Spec: [MF-5], [OBS.13]
+        """
+
+        del retired_at_ns
+        if limit <= 0:
+            return MonitorStoreRetirementResult()
+        retired = 0
+        with self._context.broker() as broker:
+            runner = _runner_from_broker(broker)
+            access = self._access(runner)
+            remaining = int(limit)
+            while remaining > 0:
+                chunk_limit = min(remaining, self._config.write_batch_size)
+                with _write_transaction(runner):
+                    chunk = access.list_retirable_task_collations(limit=chunk_limit)
+                    if not chunk:
+                        break
+                    access.delete_task_collations(chunk)
+                    retired += len(chunk)
+                remaining -= len(chunk)
+        return MonitorStoreRetirementResult(families_retired=retired)
 
     def status(self) -> MonitorStoreStatus:
         """Return a store status snapshot for cached PONG fields."""
@@ -1393,7 +1544,7 @@ def _merge_record(
             existing.reserved_probe_needed or update.reserved_probe_needed
         ),
         summary_emitted_at_ns=existing.summary_emitted_at_ns,
-        raw_deleted_at_ns=existing.raw_deleted_at_ns,
+        raw_deleted_at_ns=None,
         suspect_reason=existing.suspect_reason,
         suspect_at_ns=existing.suspect_at_ns,
         disposition_reason=existing.disposition_reason,

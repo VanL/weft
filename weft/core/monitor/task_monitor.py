@@ -23,7 +23,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from simplebroker import QueueStats
 from simplebroker.ext import BrokerError
 from weft._constants import (
     CONTROL_KILL,
@@ -36,6 +35,7 @@ from weft._constants import (
     QUEUE_OUTBOX_SUFFIX,
     QUEUE_RESERVED_SUFFIX,
     TASK_MONITOR_ACTIVITY_WAIT_CAP_SECONDS,
+    TASK_MONITOR_BUILTIN_CYCLE_WORKER_LANE,
     TASK_MONITOR_CONTROL_CLEANUP_WORKER_LANE,
     TASK_MONITOR_HEARTBEAT_STARTUP_TIMEOUT_SECONDS,
     TASK_MONITOR_LOG_SUBDIR,
@@ -77,6 +77,7 @@ from weft.core.monitor.runtime import (
 from weft.core.monitor.store import (
     MonitorRawMessageRef,
     MonitorStore,
+    MonitorStoreRetirementResult,
     MonitorStoreStatus,
     MonitorSummaryReadyTask,
     MonitorTaskCollationRecord,
@@ -114,6 +115,24 @@ class _TaskMonitorProcessorWork:
     last_timestamp: int | None
     events_scanned: int
     request: TaskMonitorProcessorRequest
+
+
+@dataclass(frozen=True, slots=True)
+class _TaskMonitorBuiltinCycleWork:
+    """Built-in monitor cycle work owned by the TaskMonitor maintenance lane."""
+
+    request_id: str
+    now_ns: int
+    task_log_owner: str
+
+
+@dataclass(frozen=True, slots=True)
+class _TaskMonitorBuiltinCycleWorkerResult:
+    """Built-in monitor cycle result returned to the TaskMonitor reactor."""
+
+    work: _TaskMonitorBuiltinCycleWork
+    result: TaskMonitorProcessorResult
+    runtime_cleanup_ready: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,7 +181,10 @@ class _RetainedTaskLogIngestResult:
     raw_deleted: int = 0
     store_update_chunks: int = 0
     exact_delete_chunks: int = 0
-    deleted_mark_chunks: int = 0
+    monitor_store_delete_chunks: int = 0
+    monitor_store_message_rows_deleted: int = 0
+    monitor_store_message_tombstones_pruned: int = 0
+    monitor_store_families_retired: int = 0
     checkpoint_message_id: int | None = None
     checkpoint_written: bool = False
     store_write_errors: tuple[str, ...] = ()
@@ -188,7 +210,14 @@ class _RetainedTaskLogIngestResult:
             "raw_deleted": self.raw_deleted,
             "store_update_chunks": self.store_update_chunks,
             "exact_delete_chunks": self.exact_delete_chunks,
-            "deleted_mark_chunks": self.deleted_mark_chunks,
+            "monitor_store_delete_chunks": self.monitor_store_delete_chunks,
+            "monitor_store_message_rows_deleted": (
+                self.monitor_store_message_rows_deleted
+            ),
+            "monitor_store_message_tombstones_pruned": (
+                self.monitor_store_message_tombstones_pruned
+            ),
+            "monitor_store_families_retired": self.monitor_store_families_retired,
             "checkpoint_message_id": self.checkpoint_message_id,
             "checkpoint_written": self.checkpoint_written,
             "store_write_errors": list(self.store_write_errors),
@@ -205,6 +234,7 @@ class _TaskControlCleanupResult:
 
     families_processed: int = 0
     families_disposed: int = 0
+    families_retired: int = 0
     queues_deleted: int = 0
     rows_estimated_deleted: int = 0
     skipped_nonstandard: int = 0
@@ -231,6 +261,7 @@ class _TaskControlCleanupResult:
         return {
             "families_processed": self.families_processed,
             "families_disposed": self.families_disposed,
+            "families_retired": self.families_retired,
             "queues_deleted": self.queues_deleted,
             "rows_estimated_deleted": self.rows_estimated_deleted,
             "skipped_nonstandard": self.skipped_nonstandard,
@@ -403,7 +434,9 @@ class TaskMonitorTask(BaseTask):
         self._last_collation_tasks_updated = 0
         self._last_collation_terminal_tasks = 0
         self._last_collation_summaries_emitted = 0
-        self._last_collation_messages_marked_deleted = 0
+        self._last_monitor_store_message_rows_deleted = 0
+        self._last_monitor_store_message_tombstones_pruned = 0
+        self._last_monitor_store_families_retired = 0
         self._last_terminal_families_disposed = 0
         self._last_suspect_families_classified = 0
         self._last_control_families_processed = 0
@@ -430,6 +463,7 @@ class TaskMonitorTask(BaseTask):
             mode="collated",
             path=None,
         )
+        self._builtin_cycle_work_in_flight: _TaskMonitorBuiltinCycleWork | None = None
         self._processor_work_in_flight: _TaskMonitorProcessorWork | None = None
         self._control_cleanup_work_in_flight: _TaskControlCleanupWork | None = None
         self._heartbeat_registered = False
@@ -591,13 +625,14 @@ class TaskMonitorTask(BaseTask):
             return 0.0
         if not self._monitor_config.enabled:
             return TASK_MONITOR_ACTIVITY_WAIT_CAP_SECONDS
-        if self._first_cycle_pending or self._wake_requested:
-            return 0.0
         if (
-            self._processor_work_in_flight is not None
+            self._builtin_cycle_work_in_flight is not None
+            or self._processor_work_in_flight is not None
             or self._control_cleanup_work_in_flight is not None
         ):
             return TASK_MONITOR_ACTIVITY_WAIT_CAP_SECONDS
+        if self._first_cycle_pending or self._wake_requested:
+            return 0.0
         remaining = self._next_cycle_due_monotonic - time.monotonic()
         if remaining <= 0:
             return 0.0
@@ -640,7 +675,7 @@ class TaskMonitorTask(BaseTask):
         Spec: [CC-2.3], [MF-5]
         """
 
-        self._drain_worker_results()
+        worker_results_handled = self._drain_worker_results()
         if self.should_stop:
             return
         self._emit_task_monitor_config_once()
@@ -656,6 +691,14 @@ class TaskMonitorTask(BaseTask):
             return
 
         self._ensure_heartbeat_registered()
+        if worker_results_handled:
+            self._maybe_emit_poll_report()
+            return
+        if self._builtin_cycle_work_in_flight is not None:
+            self._set_activity("processing", waiting_on=None)
+            self._drain_worker_results()
+            self._maybe_emit_poll_report()
+            return
         if self._processor_work_in_flight is not None:
             self._set_activity("processing", waiting_on=None)
             self._drain_worker_results()
@@ -748,8 +791,14 @@ class TaskMonitorTask(BaseTask):
                 "last_collation_summaries_emitted": (
                     self._last_collation_summaries_emitted
                 ),
-                "last_collation_messages_marked_deleted": (
-                    self._last_collation_messages_marked_deleted
+                "last_monitor_store_message_rows_deleted": (
+                    self._last_monitor_store_message_rows_deleted
+                ),
+                "last_monitor_store_message_tombstones_pruned": (
+                    self._last_monitor_store_message_tombstones_pruned
+                ),
+                "last_monitor_store_families_retired": (
+                    self._last_monitor_store_families_retired
                 ),
                 "last_terminal_families_disposed": (
                     self._last_terminal_families_disposed
@@ -799,6 +848,12 @@ class TaskMonitorTask(BaseTask):
                 ),
                 "last_collation_store_error": self._last_collation_store_error,
                 "processor_in_flight": self._processor_work_in_flight is not None,
+                "builtin_cycle_in_flight": (
+                    self._builtin_cycle_work_in_flight is not None
+                ),
+                "monitor_builtin_cycle_in_flight": (
+                    self._builtin_cycle_work_in_flight is not None
+                ),
                 "control_cleanup_in_flight": (
                     self._control_cleanup_work_in_flight is not None
                 ),
@@ -858,6 +913,12 @@ class TaskMonitorTask(BaseTask):
                 "last_cycle": {
                     "success": self._last_processor_success,
                     "error": self._last_error,
+                    "builtin_cycle_in_flight": (
+                        self._builtin_cycle_work_in_flight is not None
+                    ),
+                    "monitor_builtin_cycle_in_flight": (
+                        self._builtin_cycle_work_in_flight is not None
+                    ),
                     "processor_in_flight": (self._processor_work_in_flight is not None),
                     "control_cleanup_in_flight": (
                         self._control_cleanup_work_in_flight is not None
@@ -881,8 +942,14 @@ class TaskMonitorTask(BaseTask):
                     "collation_summaries_emitted": (
                         self._last_collation_summaries_emitted
                     ),
-                    "collation_messages_marked_deleted": (
-                        self._last_collation_messages_marked_deleted
+                    "monitor_store_message_rows_deleted": (
+                        self._last_monitor_store_message_rows_deleted
+                    ),
+                    "monitor_store_message_tombstones_pruned": (
+                        self._last_monitor_store_message_tombstones_pruned
+                    ),
+                    "monitor_store_families_retired": (
+                        self._last_monitor_store_families_retired
                     ),
                     "terminal_families_disposed": (
                         self._last_terminal_families_disposed
@@ -1022,17 +1089,26 @@ class TaskMonitorTask(BaseTask):
         )
         return store
 
-    def _run_monitor_store_cycle(self, *, now_ns: int, task_log_owner: str) -> None:
+    def _run_monitor_store_cycle(
+        self,
+        *,
+        now_ns: int,
+        task_log_owner: str,
+        start_control_cleanup: bool = True,
+    ) -> bool:
         """Collate task-log rows into the durable Monitor store.
 
         Spec: [MF-5], [OBS.13]
         """
 
+        runtime_cleanup_ready = False
         self._last_collation_rows_processed = 0
         self._last_collation_tasks_updated = 0
         self._last_collation_terminal_tasks = 0
         self._last_collation_summaries_emitted = 0
-        self._last_collation_messages_marked_deleted = 0
+        self._last_monitor_store_message_rows_deleted = 0
+        self._last_monitor_store_message_tombstones_pruned = 0
+        self._last_monitor_store_families_retired = 0
         self._last_terminal_families_disposed = 0
         self._last_suspect_families_classified = 0
         self._last_control_families_processed = 0
@@ -1055,7 +1131,7 @@ class TaskMonitorTask(BaseTask):
         self._last_retained_task_log_ingest = _RetainedTaskLogIngestResult()
         store = self._ensure_monitor_store()
         if store is None:
-            return
+            return False
 
         try:
             retained_ingest = self._ingest_retained_task_log_rows(
@@ -1083,10 +1159,24 @@ class TaskMonitorTask(BaseTask):
                     self._monitor_config.processor == "delete"
                     and task_log_owner == "collated_store"
                 ):
-                    self._last_collation_messages_marked_deleted += (
+                    self._apply_monitor_store_retirement_result(
                         self._delete_monitor_store_task_log_rows(store)
                     )
-                    self._maybe_start_terminal_control_cleanup_worker(now_ns=now_ns)
+                    self._apply_monitor_store_retirement_result(
+                        store.prune_deleted_task_message_tombstones(
+                            limit=self._monitor_config.batch_size,
+                            pruned_at_ns=now_ns,
+                        )
+                    )
+                    self._apply_monitor_store_retirement_result(
+                        store.retire_completed_collation_families(
+                            limit=self._monitor_config.batch_size,
+                            retired_at_ns=now_ns,
+                        )
+                    )
+                    runtime_cleanup_ready = True
+                    if start_control_cleanup:
+                        self._maybe_start_terminal_control_cleanup_worker(now_ns=now_ns)
             checkpoint = store.get_checkpoint(WEFT_GLOBAL_LOG_QUEUE)
             self._monitor_store_status = MonitorStoreStatus(
                 enabled=True,
@@ -1104,6 +1194,19 @@ class TaskMonitorTask(BaseTask):
                 checkpoint=self._monitor_store_status.checkpoint,
                 error=str(exc),
             )
+        return runtime_cleanup_ready
+
+    def _apply_monitor_store_retirement_result(
+        self,
+        result: MonitorStoreRetirementResult,
+    ) -> None:
+        """Commit cached Monitor-store physical retirement counters."""
+
+        self._last_monitor_store_message_rows_deleted += result.message_rows_deleted
+        self._last_monitor_store_message_tombstones_pruned += (
+            result.message_tombstones_pruned
+        )
+        self._last_monitor_store_families_retired += result.families_retired
 
     def _ingest_retained_task_log_rows(
         self,
@@ -1126,27 +1229,29 @@ class TaskMonitorTask(BaseTask):
         raw_deleted = 0
         store_update_chunks = 0
         exact_delete_chunks = 0
-        deleted_mark_chunks = 0
+        monitor_store_delete_chunks = 0
         store_errors: list[str] = []
         delete_errors: list[str] = []
         stop_reason = window.stop_reason
         last_selected_message_id: int | None = None
         terminal_tasks: set[str] = set()
         updated_tasks: set[str] = set()
+        selected_count = 0
         selected_rows: list[QueueWindowRow] = []
         valid_updates: list[MonitorTaskEventUpdate] = []
         valid_message_ids: set[int] = set()
         malformed_message_ids: set[int] = set()
 
         for row in window.rows:
-            scanned += 1
-            if len(selected_rows) >= self._monitor_config.batch_size:
+            if selected_count >= self._monitor_config.batch_size:
                 stop_reason = "batch_limit"
                 break
+            scanned += 1
             if row.malformed_reason is not None:
                 selected_rows.append(row.raw)
                 malformed_message_ids.add(row.raw.message_id)
                 last_selected_message_id = row.raw.message_id
+                selected_count += 1
                 continue
 
             update = update_from_task_log_row(row)
@@ -1154,11 +1259,16 @@ class TaskMonitorTask(BaseTask):
                 selected_rows.append(row.raw)
                 malformed_message_ids.add(row.raw.message_id)
                 last_selected_message_id = row.raw.message_id
+                selected_count += 1
+                continue
+
+            if update.tid == self.tid:
                 continue
 
             valid_updates.append(update)
             valid_message_ids.add(row.raw.message_id)
             last_selected_message_id = row.raw.message_id
+            selected_count += 1
             updated_tasks.add(update.tid)
             if update.terminal_seen:
                 terminal_tasks.add(update.tid)
@@ -1185,19 +1295,19 @@ class TaskMonitorTask(BaseTask):
             exact_delete_chunks += 1
             deleted_ids = set(delete_result.deleted_ids)
             malformed_deleted += len(deleted_ids & malformed_message_ids)
-            raw_deleted += len(deleted_ids & valid_message_ids)
             delete_errors.extend(delete_result.errors)
             deleted_valid_ids = tuple(sorted(deleted_ids & valid_message_ids))
             if deleted_valid_ids:
                 try:
-                    store.mark_messages_deleted(
+                    retirement = store.delete_task_messages_after_raw_delete(
                         deleted_valid_ids,
                         deleted_at_ns=now_ns,
                     )
-                    deleted_mark_chunks += 1
+                    raw_deleted = retirement.message_rows_deleted
+                    monitor_store_delete_chunks += 1
                 except (OSError, RuntimeError, ValueError) as exc:
                     store_errors.append(str(exc))
-                    stop_reason = "store_deleted_mark_error"
+                    stop_reason = "store_child_delete_error"
             if delete_errors and stop_reason is None:
                 stop_reason = "queue_delete_error"
 
@@ -1219,16 +1329,17 @@ class TaskMonitorTask(BaseTask):
         )
         self._last_collation_tasks_updated = len(updated_tasks)
         self._last_collation_terminal_tasks = len(terminal_tasks)
-        self._last_collation_messages_marked_deleted = malformed_deleted + raw_deleted
+        self._last_monitor_store_message_rows_deleted += raw_deleted
         return _RetainedTaskLogIngestResult(
             scanned=scanned,
-            selected=len(selected_rows),
+            selected=selected_count,
             malformed_deleted=malformed_deleted,
             valid_ingested=valid_ingested,
             raw_deleted=raw_deleted,
             store_update_chunks=store_update_chunks,
             exact_delete_chunks=exact_delete_chunks,
-            deleted_mark_chunks=deleted_mark_chunks,
+            monitor_store_delete_chunks=monitor_store_delete_chunks,
+            monitor_store_message_rows_deleted=raw_deleted,
             checkpoint_message_id=last_selected_message_id,
             checkpoint_written=checkpoint_written,
             store_write_errors=tuple(store_errors),
@@ -1290,6 +1401,7 @@ class TaskMonitorTask(BaseTask):
 
         summary_marks: list[tuple[str, str | None]] = []
         family_disposition_marks: list[tuple[str, str, str | None, int | None]] = []
+        control_delete_marks: list[str] = []
         for ready in store.list_summary_ready_tasks(
             limit=self._monitor_config.batch_size,
             now_ns=now_ns,
@@ -1324,6 +1436,11 @@ class TaskMonitorTask(BaseTask):
                 continue
 
             if ready.close_reason == "terminal":
+                if _standard_task_control_queue_names(ready.record) is None:
+                    control_delete_marks.append(ready.record.tid)
+                    family_disposition_marks.append(
+                        (ready.record.tid, "terminal", None, None)
+                    )
                 continue
 
             suspect_reason = (
@@ -1340,6 +1457,8 @@ class TaskMonitorTask(BaseTask):
 
         if summary_marks:
             store.mark_summaries_emitted(summary_marks, now_ns)
+        if control_delete_marks:
+            store.mark_task_controls_deleted(control_delete_marks, now_ns)
         if family_disposition_marks:
             store.mark_families_disposed(family_disposition_marks, now_ns)
             for (
@@ -1398,7 +1517,7 @@ class TaskMonitorTask(BaseTask):
         self,
         record: MonitorTaskCollationRecord,
         *,
-        queue_totals: Mapping[str, int] | None = None,
+        existing_queue_names: set[str] | None = None,
     ) -> _TaskControlCleanupResult:
         """Delete whole standard terminal task-local control queues for a task."""
 
@@ -1411,26 +1530,37 @@ class TaskMonitorTask(BaseTask):
                 skipped_nonstandard=1,
             )
 
-        queues_deleted = 0
-        rows_estimated_deleted = 0
         errors: list[str] = []
         warnings: list[str] = []
-        ctx = self._monitor_context()
-        for queue_name in queue_names:
-            queue = ctx.queue(queue_name, persistent=False)
-            try:
-                rows_estimated_deleted += int((queue_totals or {}).get(queue_name, 0))
-                if queue.delete():
-                    queues_deleted += 1
-            except (BrokerError, OSError, RuntimeError, ValueError) as exc:
-                errors.append(f"{queue_name}: {exc}")
-            finally:
-                queue.close()
+        queue_label = ",".join(queue_names)
+        try:
+            with self._monitor_context().broker() as broker:
+                rows_deleted = int(broker.delete_from_queues(queue_names))
+        except (BrokerError, OSError, RuntimeError, ValueError) as exc:
+            errors.append(f"{queue_label}: {exc}")
+            rows_deleted = 0
+
+        if existing_queue_names is None:
+            queues_deleted = len(queue_names) if rows_deleted > 0 else 0
+            existing_standard_queues: tuple[str, ...] = ()
+        else:
+            existing_standard_queues = tuple(
+                queue_name
+                for queue_name in queue_names
+                if queue_name in existing_queue_names
+            )
+            queues_deleted = 0 if errors else len(existing_standard_queues)
+
+        if not errors and rows_deleted == 0 and existing_standard_queues:
+            warnings.append(
+                f"{queue_label}: no rows deleted for queues present in the "
+                "pre-delete names snapshot"
+            )
 
         return _TaskControlCleanupResult(
             families_processed=1,
             queues_deleted=queues_deleted,
-            rows_estimated_deleted=0 if errors else rows_estimated_deleted,
+            rows_estimated_deleted=0 if errors else rows_deleted,
             errors=tuple(errors),
             warnings=tuple(warnings),
         )
@@ -1487,17 +1617,19 @@ class TaskMonitorTask(BaseTask):
         active_tids.add(self.tid)
         return active_tids
 
-    def _queue_total_snapshot(self, *, patterns: tuple[str, ...]) -> dict[str, int]:
-        """Return queue totals for runtime cleanup estimates using public broker APIs."""
+    def _queue_name_snapshot(self, *, patterns: tuple[str, ...]) -> set[str]:
+        """Return queue names for runtime cleanup using public broker APIs."""
 
-        totals: dict[str, int] = {}
+        names: set[str] = set()
         if not patterns:
-            return totals
+            return names
         with self._monitor_context().broker() as broker:
             for pattern in patterns:
-                for stats in broker.list_queue_stats(pattern=pattern):
-                    totals[str(stats.queue)] = int(stats.total)
-        return totals
+                names.update(
+                    str(queue_name)
+                    for queue_name in broker.list_queues(pattern=pattern)
+                )
+        return names
 
     def _delete_runtime_reserved_queues(
         self,
@@ -1506,7 +1638,7 @@ class TaskMonitorTask(BaseTask):
         now_ns: int,
         limit: int,
         active_tids: set[str],
-        queue_stats: tuple[QueueStats, ...] | None = None,
+        queue_names: tuple[str, ...] | None = None,
         deadline_monotonic: float | None = None,
     ) -> _TaskControlCleanupResult:
         """Delete stale task-local reserved queues with monitor/store proof."""
@@ -1515,13 +1647,14 @@ class TaskMonitorTask(BaseTask):
             return _TaskControlCleanupResult()
 
         ctx = self._monitor_context()
-        if queue_stats is None:
+        if queue_names is None:
             with ctx.broker() as broker:
-                queue_stats = tuple(broker.list_queue_stats(pattern="T*.reserved"))
+                queue_names = tuple(
+                    str(name) for name in broker.list_queues(pattern="T*.reserved")
+                )
 
         families_processed = 0
-        queues_deleted = 0
-        rows_estimated_deleted = 0
+        selected_queue_names: list[str] = []
         skipped_active = 0
         skipped_not_ready = 0
         errors: list[str] = []
@@ -1529,7 +1662,7 @@ class TaskMonitorTask(BaseTask):
         more_pending = False
         deadline_hit = False
 
-        for stats in queue_stats:
+        for queue_name in queue_names:
             if families_processed >= limit:
                 more_pending = True
                 break
@@ -1540,7 +1673,6 @@ class TaskMonitorTask(BaseTask):
                 more_pending = True
                 deadline_hit = True
                 break
-            queue_name = str(stats.queue)
             tid = _reserved_queue_tid(queue_name)
             if tid is None:
                 continue
@@ -1569,20 +1701,23 @@ class TaskMonitorTask(BaseTask):
                 continue
 
             families_processed += 1
-            queue = ctx.queue(queue_name, persistent=False)
+            selected_queue_names.append(queue_name)
+
+        rows_deleted = 0
+        if selected_queue_names:
             try:
-                rows_estimated_deleted += int(stats.total)
-                if queue.delete():
-                    queues_deleted += 1
+                with ctx.broker() as broker:
+                    rows_deleted = int(broker.delete_from_queues(selected_queue_names))
             except (BrokerError, OSError, RuntimeError, ValueError) as exc:
-                errors.append(f"{queue_name}: {exc}")
-            finally:
-                queue.close()
+                errors.append(
+                    f"reserved queue batch delete "
+                    f"({','.join(selected_queue_names)}): {exc}"
+                )
 
         return _TaskControlCleanupResult(
             reserved_families_processed=families_processed,
-            reserved_queues_deleted=queues_deleted,
-            reserved_rows_estimated_deleted=0 if errors else rows_estimated_deleted,
+            reserved_queues_deleted=0 if errors else len(selected_queue_names),
+            reserved_rows_estimated_deleted=0 if errors else rows_deleted,
             reserved_skipped_active=skipped_active,
             reserved_skipped_not_ready=skipped_not_ready,
             pending=more_pending or bool(errors),
@@ -1720,25 +1855,28 @@ class TaskMonitorTask(BaseTask):
         )
         records = ready_records[:control_limit]
         active_tids = self._active_runtime_tids()
-        control_queue_totals = (
-            self._queue_total_snapshot(
+        control_queue_names = (
+            self._queue_name_snapshot(
                 patterns=(
                     f"T*.{QUEUE_CTRL_IN_SUFFIX}",
                     f"T*.{QUEUE_CTRL_OUT_SUFFIX}",
                 ),
             )
             if records
-            else {}
+            else set()
         )
         with self._monitor_context().broker() as broker:
-            reserved_queue_stats = tuple(broker.list_queue_stats(pattern="T*.reserved"))
+            reserved_queue_names = tuple(
+                str(name) for name in broker.list_queues(pattern="T*.reserved")
+            )
         reserved_has_work = any(
-            (tid := _reserved_queue_tid(str(stats.queue))) is not None
+            (tid := _reserved_queue_tid(queue_name)) is not None
             and tid not in active_tids
-            for stats in reserved_queue_stats
+            for queue_name in reserved_queue_names
         )
         families_processed = 0
         families_disposed = 0
+        families_retired = 0
         queues_deleted = 0
         rows_estimated_deleted = 0
         skipped_nonstandard = 0
@@ -1777,7 +1915,7 @@ class TaskMonitorTask(BaseTask):
                     continue
                 result = self._delete_terminal_control_queues(
                     record,
-                    queue_totals=control_queue_totals,
+                    existing_queue_names=control_queue_names,
                 )
                 families_processed += result.families_processed
                 queues_deleted += result.queues_deleted
@@ -1811,7 +1949,7 @@ class TaskMonitorTask(BaseTask):
                 now_ns=now_ns,
                 limit=remaining_limit,
                 active_tids=active_tids,
-                queue_stats=reserved_queue_stats,
+                queue_names=reserved_queue_names,
                 deadline_monotonic=deadline_monotonic,
             )
             family_budget_used += reserved_cleanup.reserved_families_processed
@@ -1842,6 +1980,15 @@ class TaskMonitorTask(BaseTask):
             except (OSError, RuntimeError, ValueError) as exc:
                 errors.append(f"mark_families_disposed: {exc}")
                 families_disposed = 0
+        if not errors:
+            try:
+                retirement = store.retire_completed_collation_families(
+                    limit=control_limit,
+                    retired_at_ns=now_ns,
+                )
+                families_retired = retirement.families_retired
+            except (OSError, RuntimeError, ValueError) as exc:
+                errors.append(f"retire_completed_collation_families: {exc}")
 
         pending = (
             control_index < len(ready_records)
@@ -1853,6 +2000,7 @@ class TaskMonitorTask(BaseTask):
         return _TaskControlCleanupResult(
             families_processed=families_processed,
             families_disposed=families_disposed,
+            families_retired=families_retired,
             queues_deleted=queues_deleted,
             rows_estimated_deleted=rows_estimated_deleted,
             skipped_nonstandard=skipped_nonstandard,
@@ -1870,7 +2018,10 @@ class TaskMonitorTask(BaseTask):
             deadline_hit=deadline_hit or reserved_cleanup.deadline_hit,
         )
 
-    def _delete_monitor_store_task_log_rows(self, store: MonitorStore) -> int:
+    def _delete_monitor_store_task_log_rows(
+        self,
+        store: MonitorStore,
+    ) -> MonitorStoreRetirementResult:
         """Delete exact task-log rows proven by durable Monitor collation.
 
         Spec: [MF-5], [OBS.17]
@@ -1881,22 +2032,13 @@ class TaskMonitorTask(BaseTask):
             require_summary=True,
         )
         if not refs:
-            return 0
+            return MonitorStoreRetirementResult()
         applied = apply_exact_prune_candidates(
             self._monitor_context(),
             refs,
             apply_result=_applied_monitor_raw_message,
+            reconcile_missing=True,
         )
-        if any(
-            result.error is not None and "per-row status unavailable" in result.error
-            for result in applied
-        ):
-            applied = apply_exact_prune_candidates(
-                self._monitor_context(),
-                refs,
-                apply_result=_applied_monitor_raw_message,
-                exact_status=True,
-            )
         reconciled_ids = tuple(
             result.candidate.message_id
             for result in applied
@@ -1904,11 +2046,13 @@ class TaskMonitorTask(BaseTask):
             or (result.error is None and not result.candidate.report_only)
         )
         if reconciled_ids:
-            store.mark_messages_deleted(reconciled_ids)
+            retirement = store.delete_task_messages_after_raw_delete(reconciled_ids)
+        else:
+            retirement = MonitorStoreRetirementResult()
         errors = tuple(result.error for result in applied if result.error is not None)
         if errors:
             self._last_collation_store_error = "; ".join(errors)
-        return len(reconciled_ids)
+        return retirement
 
     def _ensure_heartbeat_registered(self) -> None:
         if self._heartbeat_registered:
@@ -1968,8 +2112,15 @@ class TaskMonitorTask(BaseTask):
 
     def _run_monitor_cycle(self) -> None:
         now_ns = time.time_ns()
-        self._last_cycle_at = now_ns
         task_log_owner = self._task_log_deletion_owner()
+        if self._monitor_config.processor in WEFT_TASK_MONITOR_PROCESSOR_BUILTINS:
+            self._maybe_start_builtin_cycle_worker(
+                now_ns=now_ns,
+                task_log_owner=task_log_owner,
+            )
+            return
+
+        self._last_cycle_at = now_ns
         sink = self._external_task_log_sink
         if sink is not None:
             sink.reset_cycle_counts()
@@ -1979,7 +2130,9 @@ class TaskMonitorTask(BaseTask):
             self._last_collation_tasks_updated = 0
             self._last_collation_terminal_tasks = 0
             self._last_collation_summaries_emitted = 0
-            self._last_collation_messages_marked_deleted = 0
+            self._last_monitor_store_message_rows_deleted = 0
+            self._last_monitor_store_message_tombstones_pruned = 0
+            self._last_monitor_store_families_retired = 0
             self._last_terminal_families_disposed = 0
             self._last_suspect_families_classified = 0
             self._last_control_families_processed = 0
@@ -2034,6 +2187,139 @@ class TaskMonitorTask(BaseTask):
             last_timestamp=last_timestamp,
             events_scanned=events_scanned,
             result=result,
+        )
+
+    def _maybe_start_builtin_cycle_worker(
+        self,
+        *,
+        now_ns: int,
+        task_log_owner: str,
+    ) -> None:
+        """Start one built-in monitor cycle worker if no monitor work is active."""
+
+        if self._builtin_cycle_work_in_flight is not None:
+            self._last_catchup_pending = True
+            return
+        work = _TaskMonitorBuiltinCycleWork(
+            request_id=f"{self.tid}:{now_ns}:builtin_cycle",
+            now_ns=now_ns,
+            task_log_owner=task_log_owner,
+        )
+        self._builtin_cycle_work_in_flight = work
+        self._set_activity("processing", waiting_on=None)
+        try:
+            self._submit_builtin_cycle_worker(work)
+        except RuntimeError as exc:
+            self._builtin_cycle_work_in_flight = None
+            result = TaskMonitorProcessorResult(success=False, errors=(str(exc),))
+            self._last_cycle_at = now_ns
+            self._finish_monitor_cycle(
+                candidates=(),
+                last_timestamp=None,
+                events_scanned=0,
+                result=result,
+            )
+
+    def _submit_builtin_cycle_worker(
+        self,
+        work: _TaskMonitorBuiltinCycleWork,
+    ) -> threading.Thread:
+        """Run built-in monitor work on its dedicated durable-effects lane.
+
+        This lane is a narrow TaskMonitor exception to the generic broker-free
+        task-worker rule: it may open fresh broker/store handles, scan
+        task-log rows, write Monitor-store rows, and delete exact queue rows.
+        Cached monitor fields are committed from the returned result on the
+        reactor thread.
+
+        Spec: [CC-2.3], [MF-5]
+        """
+
+        if self._worker_stopping.is_set():
+            raise RuntimeError("Task worker lanes are stopping")
+
+        def runner() -> None:
+            try:
+                try:
+                    value = self._run_builtin_cycle_worker(work)
+                except BaseException as exc:
+                    self._publish_worker_result(
+                        TASK_MONITOR_BUILTIN_CYCLE_WORKER_LANE,
+                        error=exc,
+                    )
+                else:
+                    self._publish_worker_result(
+                        TASK_MONITOR_BUILTIN_CYCLE_WORKER_LANE,
+                        value=value,
+                    )
+            finally:
+                current = threading.current_thread()
+                with self._worker_lock:
+                    self._worker_threads.discard(current)
+
+        thread = threading.Thread(
+            target=runner,
+            name=f"weft-worker-{self.tid_short}-monitor-builtin-cycle",
+            daemon=True,
+        )
+        with self._worker_lock:
+            self._worker_threads.add(thread)
+        thread.start()
+        return thread
+
+    def _run_builtin_cycle_worker(
+        self,
+        work: _TaskMonitorBuiltinCycleWork,
+    ) -> _TaskMonitorBuiltinCycleWorkerResult:
+        """Run one bounded built-in monitor cycle with worker-local handles."""
+
+        self._last_cycle_at = work.now_ns
+        runtime_cleanup_ready = False
+        sink = self._external_task_log_sink
+        if sink is not None:
+            sink.reset_cycle_counts()
+            self._refresh_external_task_log_status()
+        if work.task_log_owner == "raw_external":
+            self._last_collation_rows_processed = 0
+            self._last_collation_tasks_updated = 0
+            self._last_collation_terminal_tasks = 0
+            self._last_collation_summaries_emitted = 0
+            self._last_monitor_store_message_rows_deleted = 0
+            self._last_monitor_store_message_tombstones_pruned = 0
+            self._last_monitor_store_families_retired = 0
+            self._last_terminal_families_disposed = 0
+            self._last_suspect_families_classified = 0
+            self._last_control_families_processed = 0
+            self._last_control_families_disposed = 0
+            self._last_control_queues_deleted = 0
+            self._last_control_rows_estimated_deleted = 0
+            self._last_control_nonstandard_skipped = 0
+            self._last_control_cleanup_pending = False
+            self._last_control_rows_deleted = 0
+            self._last_control_delete_errors = ()
+            self._last_control_delete_warnings = ()
+        else:
+            runtime_cleanup_ready = self._run_monitor_store_cycle(
+                now_ns=work.now_ns,
+                task_log_owner=work.task_log_owner,
+                start_control_cleanup=False,
+            )
+
+        self._last_candidates_seen = 0
+        self._last_candidate_class_counts = {}
+        self._last_safe_to_delete_candidates = 0
+        self._last_prune_records_scanned = 0
+        self._last_cleanup_queue_stats = ()
+        self._last_cleanup_policy_stats = ()
+        result = self._run_builtin_monitor_processor_cycle(
+            apply=self._monitor_config.processor == "delete",
+            now_ns=work.now_ns,
+            task_log_owner=work.task_log_owner,
+        )
+        return _TaskMonitorBuiltinCycleWorkerResult(
+            work=work,
+            result=result,
+            runtime_cleanup_ready=runtime_cleanup_ready,
         )
 
     def _finish_monitor_cycle(
@@ -2096,8 +2382,14 @@ class TaskMonitorTask(BaseTask):
             "collation_tasks_updated": self._last_collation_tasks_updated,
             "collation_terminal_tasks": self._last_collation_terminal_tasks,
             "collation_summaries_emitted": (self._last_collation_summaries_emitted),
-            "collation_messages_marked_deleted": (
-                self._last_collation_messages_marked_deleted
+            "monitor_store_message_rows_deleted": (
+                self._last_monitor_store_message_rows_deleted
+            ),
+            "monitor_store_message_tombstones_pruned": (
+                self._last_monitor_store_message_tombstones_pruned
+            ),
+            "monitor_store_families_retired": (
+                self._last_monitor_store_families_retired
             ),
             "terminal_families_disposed": self._last_terminal_families_disposed,
             "suspect_families_classified": self._last_suspect_families_classified,
@@ -2218,6 +2510,9 @@ class TaskMonitorTask(BaseTask):
             return TaskMonitorProcessorResult(success=False, errors=(str(exc),))
 
     def _handle_worker_result(self, result: TaskWorkerResult) -> None:
+        if result.lane == TASK_MONITOR_BUILTIN_CYCLE_WORKER_LANE:
+            self._handle_builtin_cycle_worker_result(result)
+            return
         if result.lane == TASK_MONITOR_CONTROL_CLEANUP_WORKER_LANE:
             self._handle_control_cleanup_worker_result(result)
             return
@@ -2247,6 +2542,51 @@ class TaskMonitorTask(BaseTask):
             events_scanned=work.events_scanned,
             result=processor_result,
         )
+
+    def _handle_builtin_cycle_worker_result(self, result: TaskWorkerResult) -> None:
+        """Apply built-in monitor cycle worker results on the reactor thread."""
+
+        work = self._builtin_cycle_work_in_flight
+        self._builtin_cycle_work_in_flight = None
+        if work is None:
+            return
+        if result.error is not None:
+            worker_result = _TaskMonitorBuiltinCycleWorkerResult(
+                work=work,
+                result=TaskMonitorProcessorResult(
+                    success=False,
+                    errors=(str(result.error),),
+                ),
+            )
+        else:
+            value = result.value
+            if (
+                not isinstance(value, _TaskMonitorBuiltinCycleWorkerResult)
+                or value.work.request_id != work.request_id
+            ):
+                worker_result = _TaskMonitorBuiltinCycleWorkerResult(
+                    work=work,
+                    result=TaskMonitorProcessorResult(
+                        success=False,
+                        errors=(
+                            "task-monitor built-in cycle returned an invalid result",
+                        ),
+                    ),
+                )
+            else:
+                worker_result = value
+
+        self._finish_monitor_cycle(
+            candidates=(),
+            last_timestamp=None,
+            events_scanned=0,
+            result=worker_result.result,
+        )
+        if (
+            worker_result.runtime_cleanup_ready
+            and self._control_cleanup_work_in_flight is None
+        ):
+            self._maybe_start_terminal_control_cleanup_worker(now_ns=work.now_ns)
 
     def _handle_control_cleanup_worker_result(self, result: TaskWorkerResult) -> None:
         """Apply terminal control cleanup worker results on the reactor thread."""
@@ -2278,6 +2618,7 @@ class TaskMonitorTask(BaseTask):
 
         self._last_control_families_processed = cleanup.families_processed
         self._last_control_families_disposed = cleanup.families_disposed
+        self._last_monitor_store_families_retired += cleanup.families_retired
         self._last_control_queues_deleted = cleanup.queues_deleted
         self._last_control_rows_estimated_deleted = cleanup.rows_estimated_deleted
         self._last_control_rows_deleted = cleanup.rows_estimated_deleted
@@ -2338,6 +2679,14 @@ class TaskMonitorTask(BaseTask):
     ) -> TaskMonitorProcessorResult:
         """Run built-in cleanup while honoring task-log deletion ownership."""
 
+        if self._monitor_config.processor == "jsonl_then_delete":
+            return TaskMonitorProcessorResult(
+                success=False,
+                errors=(
+                    "jsonl_then_delete task-monitor processor is reserved until "
+                    "the logging callback is implemented",
+                ),
+            )
         cleanup = self._run_task_monitor_cleanup_cycle(
             apply=apply,
             task_log_cleanup_enabled=task_log_owner == "cleanup_policy",

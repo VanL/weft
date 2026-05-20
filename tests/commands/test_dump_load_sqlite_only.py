@@ -21,7 +21,9 @@ def _snapshot_broker_state(
     with context.broker() as broker:
         aliases = dict(broker.list_aliases())
         queues: dict[str, list[str]] = {}
-        for queue_name, message_count in broker.list_queues():
+        for stats in broker.list_queue_stats():
+            queue_name = str(stats.queue)
+            message_count = int(stats.pending)
             queues[queue_name] = (
                 [
                     str(message)

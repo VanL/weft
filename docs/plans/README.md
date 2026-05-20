@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 113 plan files in this directory.
+There are currently 116 plan files in this directory.
 
 ## Curation Policy
 
@@ -22,6 +22,9 @@ There are currently 113 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-05-20-simplebroker-api-adoption-plan.md`](./2026-05-20-simplebroker-api-adoption-plan.md) | SimpleBroker API Adoption Plan | `completed` | none |
+| [`2026-05-20-monitor-collation-table-retirement-plan.md`](./2026-05-20-monitor-collation-table-retirement-plan.md) | Monitor Collation Table Retirement Plan | `completed` | none |
+| [`2026-05-20-monitor-reactor-worker-refactor-plan.md`](./2026-05-20-monitor-reactor-worker-refactor-plan.md) | Monitor Reactor Worker Refactor Plan | `completed` | none |
 | [`2026-05-20-monitor-fair-cleanup-scheduling-plan.md`](./2026-05-20-monitor-fair-cleanup-scheduling-plan.md) | Monitor Fair Cleanup Scheduling Plan | `completed` | none |
 | [`2026-05-19-monitor-terminal-retirement-and-runtime-queue-cleanup-plan.md`](./2026-05-19-monitor-terminal-retirement-and-runtime-queue-cleanup-plan.md) | Monitor Terminal Retirement And Runtime Queue Cleanup Plan | `completed` | none |
 | [`2026-05-19-task-monitor-control-cleanup-worker-plan.md`](./2026-05-19-task-monitor-control-cleanup-worker-plan.md) | Task Monitor Control Cleanup Worker Plan | `completed` | none |

@@ -41,6 +41,12 @@ Current consequences:
 - queue naming is Weft-owned, but queue mechanics are broker-owned
 - queue commands work against the resolved broker target for the active context,
   not just against a SQLite file path
+- queue-name enumeration uses SimpleBroker's names-only `list_queues()` API
+  when counts are not needed; callers that need pending/claimed/total counts
+  must use `list_queue_stats()`
+- monitor runtime cleanup uses SimpleBroker's public multi-queue delete API for
+  whole standard task-local control/reserved queue cleanup rather than
+  backend-specific queue SQL
 
 ### Message IDs and Timestamps [SB-0.2]
 
@@ -126,11 +132,16 @@ TaskMonitor durable collation store:
 
 These tables are Monitor-owned and versioned. They are derived from
 `weft.log.tasks`; they are not exposed through queue commands and do not
-replace SimpleBroker queue semantics. The Monitor may create, verify, and
-additively migrate only these Monitor tables inside an already initialized
-Weft broker database. It must use the resolved `WeftContext` and broker target;
-it must not parse DSNs, rediscover a different database target, provision
-Postgres, or create the broker database itself.
+replace SimpleBroker queue semantics. The child message table is a temporary
+pending-reference table, not a queue clone: once the corresponding raw broker
+row is deleted or reconciled as already absent, the Monitor physically deletes
+the child row. The Monitor may create, verify, and additively migrate only
+these Monitor tables inside an already initialized Weft broker database. It
+must use the resolved `WeftContext` and broker target; it must not parse DSNs,
+rediscover a different database target, provision Postgres, or create the
+broker database itself. Broker queue rows still go through public SimpleBroker
+queue APIs; Monitor-table SQL is allowed only for the Monitor-owned tables
+listed above.
 
 _Implementation mapping_: `weft/core/monitor/store.py` uses the resolved
 `WeftContext` and owns table access; `weft/core/monitor/sql.py` owns SQL
@@ -357,6 +368,9 @@ connection-pooling designs are tracked in the companion doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-05-20-monitor-collation-table-retirement-plan.md`](../plans/2026-05-20-monitor-collation-table-retirement-plan.md)
+- [`docs/plans/2026-05-20-simplebroker-api-adoption-plan.md`](../plans/2026-05-20-simplebroker-api-adoption-plan.md)
+- [`docs/plans/2026-05-20-monitor-reactor-worker-refactor-plan.md`](../plans/2026-05-20-monitor-reactor-worker-refactor-plan.md)
 - [`docs/plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md`](../plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md)
 - [`docs/plans/2026-05-16-monitor-store-hardening-and-layering-plan.md`](../plans/2026-05-16-monitor-store-hardening-and-layering-plan.md)
 - [`docs/plans/2026-04-16-autostart-hardening-and-contract-alignment-plan.md`](../plans/2026-04-16-autostart-hardening-and-contract-alignment-plan.md)

@@ -55,7 +55,7 @@ def _export_aliases(output: TextIO, db: Any) -> int:
 def _export_messages(output: TextIO, db: Any) -> tuple[int, int]:
     """Export all messages from all queues. Returns (queue_count, message_count)."""
     try:
-        queues = list(db.list_queues())
+        queue_stats = list(db.list_queue_stats())
     except (
         BrokerError,
         OSError,
@@ -66,7 +66,9 @@ def _export_messages(output: TextIO, db: Any) -> tuple[int, int]:
     total_messages = 0
 
     exported_queue_names: list[str] = []
-    for queue_name, message_count in queues:
+    for stats in queue_stats:
+        queue_name = str(stats.queue)
+        message_count = int(stats.pending)
         if queue_name.startswith(WEFT_STATE_QUEUE_PREFIX):
             continue
         # Skip empty queues

@@ -75,6 +75,26 @@ def serve_log_events(capsys: pytest.CaptureFixture[str]) -> list[dict[str, objec
     ]
 
 
+def drive_task_monitor_until_idle(
+    monitor: TaskMonitorTask,
+    *,
+    timeout: float = 20.0,
+) -> None:
+    deadline = time.monotonic() + timeout
+    while (
+        monitor._builtin_cycle_work_in_flight is not None
+        or monitor._processor_work_in_flight is not None
+        or monitor._control_cleanup_work_in_flight is not None
+        or monitor._has_pending_worker_results()
+    ) and time.monotonic() < deadline:
+        monitor.process_once()
+        monitor.wait_for_activity(timeout=0.05)
+    assert monitor._builtin_cycle_work_in_flight is None
+    assert monitor._processor_work_in_flight is None
+    assert monitor._control_cleanup_work_in_flight is None
+    monitor._drain_worker_results()
+
+
 def _taskspec_payload(
     tid: str,
     *,
@@ -196,6 +216,7 @@ def test_task_monitor_operational_log_emits_config_and_cycle(
     )
     try:
         monitor.process_once()
+        drive_task_monitor_until_idle(monitor)
     finally:
         monitor.cleanup()
 
@@ -231,6 +252,7 @@ def test_task_monitor_operational_log_off_is_silent(
     )
     try:
         monitor.process_once()
+        drive_task_monitor_until_idle(monitor)
     finally:
         monitor.cleanup()
 
@@ -258,6 +280,7 @@ def test_task_monitor_operational_log_reports_processor_error(
     )
     try:
         monitor.process_once()
+        drive_task_monitor_until_idle(monitor)
     finally:
         monitor.cleanup()
 

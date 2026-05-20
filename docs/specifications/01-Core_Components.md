@@ -14,6 +14,8 @@ See also:
 
 ## Related Plans
 
+- [`docs/plans/2026-05-20-monitor-collation-table-retirement-plan.md`](../plans/2026-05-20-monitor-collation-table-retirement-plan.md)
+- [`docs/plans/2026-05-20-monitor-reactor-worker-refactor-plan.md`](../plans/2026-05-20-monitor-reactor-worker-refactor-plan.md)
 - [`docs/plans/2026-05-19-monitor-terminal-retirement-and-runtime-queue-cleanup-plan.md`](../plans/2026-05-19-monitor-terminal-retirement-and-runtime-queue-cleanup-plan.md)
 - [`docs/plans/2026-05-16-monitor-store-hardening-and-layering-plan.md`](../plans/2026-05-16-monitor-store-hardening-and-layering-plan.md)
 - [`docs/plans/2026-05-08-agent-session-and-task-startup-observability-plan.md`](../plans/2026-05-08-agent-session-and-task-startup-observability-plan.md)
@@ -196,10 +198,14 @@ Current task families:
   `T{tid}.inbox`, scans task-log history by high-water cursor, and can build a
   Monitor-owned durable collation store from retained task-log rows. The store
   is a derived operational read model: it starts from the logged `TaskSpec`
-  summary when present, records exact raw task-log message IDs, emits compact
-  terminal task summaries through the configured monitor sink, and may support
-  table-backed exact raw deletion after any required external task-log JSONL
-  emit succeeds. External lifecycle retention output is owned by
+  summary when present, keeps exact raw task-log message IDs only while those
+  raw rows still need exact deletion or retry, emits compact terminal task
+  summaries through the configured monitor sink, and may support table-backed
+  exact raw deletion after any required external task-log JSONL emit succeeds.
+  After raw deletion is reconciled, child message rows are physically removed
+  from `weft_monitor_task_messages`; after summary, disposition, raw deletion,
+  and task-local control cleanup complete, the compact parent collation row may
+  also be physically retired. External lifecycle retention output is owned by
   `weft/core/monitor/external_log.py`; `WEFT_TASK_MONITOR_LOG_SINK` remains
   monitor operational output, not the external lifecycle-retention contract.
   The store is not lifecycle truth, result authority, queue truth, or a public
@@ -211,17 +217,21 @@ Current task families:
   queues after monitor-table proof or stale no-monitor evidence. Control
   cleanup records `task_control_deleted_at_ns` and terminal disposition when
   needed. The persistent
-  monitor also calls the configured
-  task-monitor processor. Custom processors run in the shared
-  broker-free worker lane from a candidate snapshot; the TaskMonitor reactor
-  owns checkpoint advancement, ordinary Monitor-store writes, cached
-  diagnostics, and broker effects except for one declared maintenance lane:
-  the runtime-cleanup worker may open fresh broker/store handles, delete
-  standard terminal/disposed `T{tid}.ctrl_in` and `T{tid}.ctrl_out` queues,
-  delete eligible stale standard `T{tid}.reserved` queues, and mark the
-  matching Monitor-store family complete. That worker returns cached result
-  data to the reactor; it must not answer control messages or mutate
-  reactor-owned diagnostic fields directly. Runtime cleanup is fair-sliced:
+  monitor also calls the configured task-monitor processor. The persistent
+  monitor is a reactor: it owns task-local control, heartbeat registration,
+  scheduling, and commits cached diagnostics from worker results. Custom
+  processors run in the shared broker-free worker lane from a candidate
+  snapshot. Built-in cleanup processors run in a TaskMonitor-owned built-in
+  cycle worker lane; that lane may open fresh broker/store handles, fold
+  retained task-log rows into the Monitor store, emit configured operational
+  summaries, and delete exact rows through the canonical prune implementation.
+  Runtime cleanup remains a separate declared maintenance lane: the
+  runtime-cleanup worker may open fresh broker/store handles, delete standard
+  terminal/disposed `T{tid}.ctrl_in` and `T{tid}.ctrl_out` queues, delete
+  eligible stale standard `T{tid}.reserved` queues, and mark the matching
+  Monitor-store family complete. Worker lanes return cached result data to the
+  reactor; they must not answer control messages. Runtime cleanup is
+  fair-sliced:
   one worker result handles only a bounded control/reserved slice, records
   pending/cap/deadline diagnostics, and relies on the existing catch-up
   interval for the next slice when backlog remains.
@@ -235,8 +245,9 @@ Current task families:
   prune implementation under `weft/core/pruning/`; it must not consume,
   reserve, move, unclaim, or delete active, ambiguous, claimed, malformed,
   unknown, or non-exact lifecycle messages. `report_only` remains available as
-  a non-destructive override. Built-in cleanup processors run on the reactor so
-  exact deletes stay in the canonical prune path. Successful completed
+  a non-destructive override. Built-in cleanup processors run in the
+  TaskMonitor built-in cycle worker lane so the reactor remains responsive
+  while exact deletes still stay in the canonical prune path. Successful completed
   lifecycle proof does not require a reserved-queue probe; reserved probing is
   for failure-like or suspected-loss cases. `jsonl_then_delete` remains
   fail-closed until the operational logging callback lands. Raw external
@@ -488,6 +499,7 @@ TaskMonitor runtime boundary.
 
 ## Related Plans
 
+- [`docs/plans/2026-05-20-monitor-collation-table-retirement-plan.md`](../plans/2026-05-20-monitor-collation-table-retirement-plan.md)
 - [`docs/plans/2026-05-20-monitor-fair-cleanup-scheduling-plan.md`](../plans/2026-05-20-monitor-fair-cleanup-scheduling-plan.md)
 - [`docs/plans/2026-05-19-monitor-terminal-retirement-and-runtime-queue-cleanup-plan.md`](../plans/2026-05-19-monitor-terminal-retirement-and-runtime-queue-cleanup-plan.md)
 - [`docs/plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md`](../plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md)

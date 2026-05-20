@@ -47,6 +47,7 @@ def apply_exact_prune_candidates[
     apply_result: Callable[[Candidate, bool, str | None], AppliedCandidate],
     force: bool = False,
     exact_status: bool = False,
+    reconcile_missing: bool = False,
 ) -> list[AppliedCandidate]:
     """Delete exact prune candidates and return caller-shaped apply results.
 
@@ -58,6 +59,11 @@ def apply_exact_prune_candidates[
         exact_status: Delete one ID at a time so mixed present/missing rows
             return per-candidate status. Use this when reconciliation must not
             let one stale ID block deletion of present IDs in the same queue.
+        reconcile_missing: Treat a successful batch delete call as
+            reconciliation for all requested non-report-only candidates, even
+            when the backend reports that fewer rows were physically deleted.
+            Use this only for idempotent cleanup paths where missing rows mean
+            the work is already complete.
 
     Returns:
         Per-candidate apply results in queue-grouped processing order.
@@ -113,7 +119,14 @@ def apply_exact_prune_candidates[
                                 str(exc),
                             )
                     else:
-                        if deleted_count == len(deletable):
+                        if reconcile_missing:
+                            for index, candidate in deletable:
+                                queue_results[index] = apply_result(
+                                    candidate,
+                                    True,
+                                    None,
+                                )
+                        elif deleted_count == len(deletable):
                             for index, candidate in deletable:
                                 queue_results[index] = apply_result(
                                     candidate,

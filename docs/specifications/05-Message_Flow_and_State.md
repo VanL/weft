@@ -350,12 +350,16 @@ Current rules:
   generator/high-water cursor for observation and custom processors. Custom
   processors run from the resulting candidate snapshot in a broker-free worker
   lane; the TaskMonitor reactor commits the processor result, checkpoint, and
-  cached diagnostics after the worker returns. For the built-in `delete`
-  processor with Monitor collation enabled, retained `weft.log.tasks` rows are
-  processed in FIFO order: malformed rows are exact-deleted and valid rows are
-  folded into the Monitor table without first deleting open lifecycle evidence.
-  Terminal families may be summarized and exact-deleted after the pass reaches
-  a complete FIFO high-water; open families continue to use
+  cached diagnostics after the worker returns. Built-in cleanup processors run
+  in a separate TaskMonitor-owned built-in cycle worker lane; the reactor stays
+  available for task-local PING/STATUS/STOP/KILL, heartbeat registration, and
+  schedule bookkeeping while the worker scans, writes Monitor-store rows, and
+  applies exact deletes. For the built-in `delete` processor with Monitor
+  collation enabled, retained `weft.log.tasks` rows are processed in FIFO order:
+  malformed rows are exact-deleted and valid rows are folded into the Monitor
+  table without first deleting open lifecycle evidence. Terminal families may
+  be summarized and exact-deleted after the pass reaches a complete FIFO
+  high-water; open families continue to use
   `WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS` plus stale-open policy before
   summary/deletion. Built-in cleanup still
   runs runtime-state policies such as `weft.state.tid_mappings`, but it no
@@ -365,18 +369,24 @@ Current rules:
 - when table collation is enabled, each retained FIFO pass reduces valid
   task-log rows through `weft/core/monitor/collation.py`, upserts one summary
   row per TID, and records each incorporated raw message ID in
-  `weft_monitor_task_messages` before deleting the raw broker row. Replaying
-  the same raw row after a delete failure is idempotent. A terminal family may
-  emit a compact operational summary only after the FIFO pass reaches a
+  `weft_monitor_task_messages` before deleting the raw broker row. Child rows
+  in `weft_monitor_task_messages` are temporary pending raw-message
+  references: after exact broker deletion succeeds, or after retry observes the
+  raw broker row is already absent, the Monitor physically deletes those child
+  rows and reconciles the parent `raw_deleted_at_ns` when no child refs remain.
+  Legacy child rows marked with `deleted_at_ns` from older releases are
+  physically pruned in bounded Monitor-store cleanup slices. Replaying the same
+  raw row after a delete failure is idempotent. A terminal family may emit a
+  compact operational summary only after the FIFO pass reaches a
   completed high-water mark: the scanned FIFO prefix reaches queue end before a
   scan limit or write/delete error. If the pass stops on scan limit, store
   write failure, or queue delete failure, family summary/disposition is skipped
   for that cycle. Summary
   readiness uses the family high-water (`last_message_id`/`last_seen_at_ns`),
-  not the first terminal event timestamp. Family disposition is an explicit
-  compact tombstone (`disposition_reason` plus `disposition_at_ns`), separate
-  from `summary_emitted_at_ns`, so summary emission can be retried separately
-  from task-local runtime cleanup. Terminal task-local runtime cleanup runs as
+  not the first terminal event timestamp. Family disposition is explicit
+  retryable compact state (`disposition_reason` plus `disposition_at_ns`),
+  separate from `summary_emitted_at_ns`, so summary emission can be retried
+  separately from task-local runtime cleanup. Terminal task-local runtime cleanup runs as
   a separate bounded maintenance slice selected by Monitor-store readiness
   (`summary_emitted_at_ns`, no prior `task_control_deleted_at_ns`, and either
   terminal proof past the terminal retirement high-water or an already disposed
@@ -384,13 +394,15 @@ Current rules:
   TaskMonitor maintenance worker after the summary/disposition high-water is
   reached; that worker owns only the queue-delete plus Monitor-store mark
   transaction for standard `T{tid}.ctrl_in` and `T{tid}.ctrl_out` queues.
+  Once no child message rows remain and raw deletion, summary emission,
+  disposition, and task-local control cleanup have all been recorded, the
+  Monitor may physically retire the compact parent row from
+  `weft_monitor_task_collations`.
   The same maintenance worker may delete eligible stale standard
   `T{tid}.reserved` queues after monitor-table proof or stale no-monitor
-  evidence, while preserving active runtime owners. The TaskMonitor reactor
-  remains live for PING/STATUS/STOP/KILL,
-  heartbeat wakeups, scheduling, and cached diagnostics while the worker is in
-  flight. Each cycle attempts retained raw task-log exact deletion before
-  launching another runtime-cleanup worker. The runtime worker processes one
+  evidence, while preserving active runtime owners. Each built-in cycle attempts
+  retained raw task-log exact deletion in the built-in cycle worker before the
+  reactor launches another runtime-cleanup worker. The runtime worker processes one
   fair slice at a time, interleaving eligible control and reserved cleanup when
   both are ready, and marks catch-up pending when backlog remains or the
   internal slice cap/deadline is hit. PONG reports cached store availability,
@@ -943,6 +955,9 @@ management live in the companion doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-05-20-monitor-collation-table-retirement-plan.md`](../plans/2026-05-20-monitor-collation-table-retirement-plan.md)
+- [`docs/plans/2026-05-20-simplebroker-api-adoption-plan.md`](../plans/2026-05-20-simplebroker-api-adoption-plan.md)
+- [`docs/plans/2026-05-20-monitor-reactor-worker-refactor-plan.md`](../plans/2026-05-20-monitor-reactor-worker-refactor-plan.md)
 - [`docs/plans/2026-05-20-monitor-fair-cleanup-scheduling-plan.md`](../plans/2026-05-20-monitor-fair-cleanup-scheduling-plan.md)
 - [`docs/plans/2026-05-19-monitor-terminal-retirement-and-runtime-queue-cleanup-plan.md`](../plans/2026-05-19-monitor-terminal-retirement-and-runtime-queue-cleanup-plan.md)
 - [`docs/plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md`](../plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md)
