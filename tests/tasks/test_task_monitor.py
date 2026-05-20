@@ -2335,6 +2335,11 @@ def test_task_monitor_terminal_control_cleanup_worker_error_is_retryable(
     monkeypatch.setattr(
         task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
     )
+    monkeypatch.setattr(
+        task_monitor_mod,
+        "TASK_MONITOR_RUNTIME_CLEANUP_SLICE_SECONDS",
+        30.0,
+    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
