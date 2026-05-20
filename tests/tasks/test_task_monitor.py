@@ -2046,16 +2046,6 @@ def test_task_monitor_terminal_control_cleanup_worker_does_not_block_ping(
         "state": {"status": "completed"},
         "metadata": {},
     }
-    make_queue(WEFT_GLOBAL_LOG_QUEUE).write(
-        json.dumps(
-            {
-                "event": "work_completed",
-                "status": "completed",
-                "tid": tid,
-                "taskspec": taskspec,
-            }
-        )
-    )
     make_queue(f"T{tid}.ctrl_in").write("stop")
     make_queue(f"T{tid}.ctrl_out").write("pong")
 
@@ -2077,6 +2067,25 @@ def test_task_monitor_terminal_control_cleanup_worker_does_not_block_ping(
 
     monkeypatch.setattr(task, "_delete_terminal_control_queues", slow_delete)
     try:
+        store = task._ensure_monitor_store()
+        assert store is not None
+        update = update_from_task_log_payload(
+            {
+                "event": "work_completed",
+                "status": "completed",
+                "tid": tid,
+                "taskspec": taskspec,
+            },
+            message_id=int(tid),
+        )
+        assert update is not None
+        store.record_task_log_updates(
+            WEFT_GLOBAL_LOG_QUEUE,
+            (update,),
+            checkpoint_message_id=None,
+        )
+        store.mark_summary_emitted(tid, int(tid) + 1)
+
         deadline = time.monotonic() + 10.0
         while not started.is_set() and time.monotonic() < deadline:
             task.process_once()
@@ -2118,8 +2127,6 @@ def test_task_monitor_terminal_control_cleanup_worker_does_not_block_ping(
 
         release.set()
         drive_task_monitor_until_idle(task)
-        store = task._monitor_store
-        assert store is not None
         record = store.get_task(tid)
         assert record is None
         assert task._last_monitor_store_families_retired >= 1
