@@ -385,6 +385,18 @@ def _run_parallel_manager_reuse_cycle(
                 submit_results=results,
                 detail=f"tid={tid}: {exc}",
             )
+        except RuntimeError as exc:
+            _raise_parallel_manager_reuse_failure(
+                phase="task_unexpected_terminal_state",
+                root=root,
+                env=env,
+                harness=harness,
+                max_workers=max_workers,
+                submit_timeout=submit_timeout,
+                status_timeout=status_timeout,
+                submit_results=results,
+                detail=f"tid={tid}: {exc}",
+            )
 
     deadline = time.time() + status_timeout
     payload: dict[str, object] | None = None

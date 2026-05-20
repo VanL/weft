@@ -5593,6 +5593,26 @@ def test_manager_superseded_self_record_stops_without_republishing_active(
     assert own_rows[-1]["status"] == SERVICE_STATUS_SUPERSEDED
 
 
+def test_manager_superseded_self_record_drains_children_without_stopping(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _make_queue = manager_setup
+    monkeypatch.setattr(manager, "_user_work_children", lambda: {"child-tid": object()})
+    monkeypatch.setattr(
+        manager,
+        "_signal_children_to_stop",
+        lambda: pytest.fail("superseded manager must not stop launched user work"),
+    )
+
+    manager._begin_superseded_shutdown()
+
+    assert manager._draining is True
+    assert manager._drain_stops_children is False
+    assert manager.should_stop is False
+    assert manager.taskspec.state.status == "running"
+
+
 def test_manager_leadership_observes_superseded_services_row_without_spawn_probe(
     manager_setup,
     monkeypatch: pytest.MonkeyPatch,

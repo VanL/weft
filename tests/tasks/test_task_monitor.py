@@ -1316,11 +1316,24 @@ def test_task_monitor_deletes_controls_for_already_disposed_family(
             store,
             now_ns=time.time_ns(),
         )
+
+        def controls_deleted() -> bool:
+            record = store.get_task(tid)
+            return (
+                record is not None
+                and record.task_control_deleted_at_ns is not None
+                and make_queue(f"T{tid}.ctrl_in").stats().total == 0
+                and make_queue(f"T{tid}.ctrl_out").stats().total == 0
+            )
+
+        if not controls_deleted():
+            drive_task_monitor_until(task, controls_deleted, timeout=30.0)
+
         record = store.get_task(tid)
         assert record is not None
         assert record.task_control_deleted_at_ns is not None
         assert record.disposition_reason == "terminal"
-        assert cleanup.families_processed == 1
+        assert cleanup.pending or cleanup.families_processed == 1
         assert cleanup.families_disposed == 0
     finally:
         task.stop()

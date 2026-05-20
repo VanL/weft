@@ -3011,12 +3011,20 @@ class Manager(BaseTask):
         self._unregistered = True
         self._unregistered_status = "superseded"
         if self._user_work_children():
-            self._begin_shutdown_drain(
-                message_id=None,
-                reason="Superseded by replacement manager",
+            self._draining = True
+            self._drain_signaled_children.clear()
+            self._drain_signal_started_ns.clear()
+            self._drain_started_ns = time.time_ns()
+            self._drain_reason = "Superseded by replacement manager"
+            self._drain_completion_event = "manager_superseded_drained"
+            self._drain_stops_children = False
+            self._drain_leader_tid = None
+            self._last_leadership_drain_revalidate_ns = 0
+            self._report_state_change(
                 event="manager_superseded",
-                completion_event="manager_superseded_drained",
+                draining=True,
             )
+            self._update_process_title("draining")
             return
         if self.taskspec.state.status not in {"completed", "cancelled"}:
             self.taskspec.mark_cancelled(reason="Superseded by replacement manager")
@@ -6063,6 +6071,8 @@ class Manager(BaseTask):
 
     def _revalidate_leadership_drain(self) -> bool:
         if self._drain_stops_children:
+            return True
+        if self._drain_leader_tid is None:
             return True
         now_ns = time.time_ns()
         interval_ns = int(MANAGER_LEADERSHIP_DRAIN_REVALIDATE_SECONDS * 1_000_000_000)

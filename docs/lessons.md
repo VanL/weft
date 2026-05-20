@@ -20,6 +20,14 @@ runbook needs to become stricter.
 - Treat `weft.state.*` queues as runtime-only unless a spec explicitly changes
   that rule.
 
+## 2026-05-20 Manager Reuse Replacement Drain
+
+- Manager replacement has two separate duties: stop the superseded manager from
+  accepting new public work, and preserve already launched user work. A
+  `superseded` owner row must start a non-stopping drain when children exist;
+  reusing the normal STOP drain can cancel user tasks during concurrent
+  bootstrap.
+
 ## 2026-04-03 Audit Seeds
 
 - Use `build_context()` and `WeftContext` for project resolution and broker
