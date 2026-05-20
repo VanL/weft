@@ -122,10 +122,15 @@ def drive_task_monitor_until(
 
 
 @pytest.fixture(autouse=True)
-def clear_processor_requests() -> None:
+def clear_processor_requests(monkeypatch: pytest.MonkeyPatch) -> None:
     PROCESSOR_REQUESTS.clear()
     BLOCKING_PROCESSOR_STARTED.clear()
     BLOCKING_PROCESSOR_RELEASE.clear()
+    monkeypatch.setattr(
+        task_monitor_mod,
+        "TASK_MONITOR_RUNTIME_CLEANUP_SLICE_SECONDS",
+        30.0,
+    )
 
 
 def test_task_monitor_uses_cached_base_task_context(
@@ -1994,6 +1999,11 @@ def test_task_monitor_runtime_cleanup_deadline_stops_between_families(
     db_path, make_queue = broker_env
     monkeypatch.setattr(
         task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        task_monitor_mod,
+        "TASK_MONITOR_RUNTIME_CLEANUP_SLICE_SECONDS",
+        1.0,
     )
     monotonic_calls = 0
 
