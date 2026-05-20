@@ -189,8 +189,12 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
   terminal-control-cleanup worker; it must not use private queue-table SQL.
   That worker is the only TaskMonitor worker lane allowed to own broker/store
   cleanup effects, and the reactor must continue servicing task-local control
-  while it is in flight. Manager/global/custom control queues and task-local
-  inbox/outbox/reserved queues are excluded from this default monitor cleanup.
+  while it is in flight. Runtime cleanup must run in fair bounded slices that
+  let raw task-log deletion, task-local control cleanup, and eligible reserved
+  cleanup all make progress across catch-up cycles. Manager/global/custom
+  control queues and task-local inbox/outbox queues are excluded from this
+  default monitor cleanup; task-local reserved queues are eligible only through
+  the explicit terminal/disposed/raw-deleted or stale-no-monitor rules.
   In raw external mode,
   external emit still happens before deletion of the affected raw row. External sink
   validation or emit failure must not prevent the TaskMonitor service from
@@ -444,7 +448,7 @@ table already proves the family terminal/disposed/raw-deleted, or when no
 Monitor row exists and the TID is older than the task-log retention period with
 no active runtime-owner evidence. Reserved deletion must use public
 SimpleBroker queue APIs and must remain bounded by the same runtime cleanup
-limit as task-local control queue cleanup.
+limit and internal fair-slice safeguards as task-local control queue cleanup.
 Collation summaries, cleanup policy stats, and Monitor-owned collation tables
 remain operational TaskMonitor output only. Those deletes, summaries, and
 tables do not make task-monitor output lifecycle truth or result authority.
@@ -475,6 +479,7 @@ doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-05-20-monitor-fair-cleanup-scheduling-plan.md`](../plans/2026-05-20-monitor-fair-cleanup-scheduling-plan.md)
 - [`docs/plans/2026-05-19-monitor-terminal-retirement-and-runtime-queue-cleanup-plan.md`](../plans/2026-05-19-monitor-terminal-retirement-and-runtime-queue-cleanup-plan.md)
 - [`docs/plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md`](../plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md)
 - [`docs/plans/2026-05-18-monitor-table-driven-retained-log-cleanup-plan.md`](../plans/2026-05-18-monitor-table-driven-retained-log-cleanup-plan.md)

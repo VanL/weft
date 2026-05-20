@@ -152,6 +152,38 @@ def test_apply_exact_prune_candidates_reports_deleted_rows(
     assert _read_rows(ctx, queue_name) == []
 
 
+def test_apply_exact_prune_candidates_exact_status_handles_mixed_missing_rows(
+    tmp_path: Path,
+) -> None:
+    ctx = _context(tmp_path)
+    queue_name = "test.exact-delete"
+    first_id = _write_raw(ctx, queue_name, "first")
+    second_id = _write_raw(ctx, queue_name, "second")
+    missing_id = second_id + 100_000
+
+    applied = apply_exact_prune_candidates(
+        ctx,
+        (
+            _ExactDeleteCandidate(queue=queue_name, message_id=first_id),
+            _ExactDeleteCandidate(queue=queue_name, message_id=missing_id),
+            _ExactDeleteCandidate(queue=queue_name, message_id=second_id),
+        ),
+        apply_result=lambda candidate, deleted, error: (
+            candidate.message_id,
+            deleted,
+            error,
+        ),
+        exact_status=True,
+    )
+
+    assert applied == [
+        (first_id, True, None),
+        (missing_id, False, None),
+        (second_id, True, None),
+    ]
+    assert _read_rows(ctx, queue_name) == []
+
+
 def _decoded_row(
     queue_name: str,
     message_id: int,

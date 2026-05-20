@@ -221,7 +221,10 @@ Current task families:
   delete eligible stale standard `T{tid}.reserved` queues, and mark the
   matching Monitor-store family complete. That worker returns cached result
   data to the reactor; it must not answer control messages or mutate
-  reactor-owned diagnostic fields directly.
+  reactor-owned diagnostic fields directly. Runtime cleanup is fair-sliced:
+  one worker result handles only a bounded control/reserved slice, records
+  pending/cap/deadline diagnostics, and relies on the existing catch-up
+  interval for the next slice when backlog remains.
   The launcher asks the persistent monitor for its next wait timeout so the
   monitor sleeps until heartbeat/local due time or task-local input instead of
   polling at the default task-process interval. The supervised monitor builds
@@ -485,6 +488,7 @@ TaskMonitor runtime boundary.
 
 ## Related Plans
 
+- [`docs/plans/2026-05-20-monitor-fair-cleanup-scheduling-plan.md`](../plans/2026-05-20-monitor-fair-cleanup-scheduling-plan.md)
 - [`docs/plans/2026-05-19-monitor-terminal-retirement-and-runtime-queue-cleanup-plan.md`](../plans/2026-05-19-monitor-terminal-retirement-and-runtime-queue-cleanup-plan.md)
 - [`docs/plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md`](../plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md)
 - [`docs/plans/2026-05-19-task-monitor-bounded-control-cleanup-plan.md`](../plans/2026-05-19-task-monitor-bounded-control-cleanup-plan.md)

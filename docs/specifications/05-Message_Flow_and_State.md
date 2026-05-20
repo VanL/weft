@@ -389,13 +389,19 @@ Current rules:
   evidence, while preserving active runtime owners. The TaskMonitor reactor
   remains live for PING/STATUS/STOP/KILL,
   heartbeat wakeups, scheduling, and cached diagnostics while the worker is in
-  flight. PONG reports cached store availability, checkpoint, rows processed,
+  flight. Each cycle attempts retained raw task-log exact deletion before
+  launching another runtime-cleanup worker. The runtime worker processes one
+  fair slice at a time, interleaving eligible control and reserved cleanup when
+  both are ready, and marks catch-up pending when backlog remains or the
+  internal slice cap/deadline is hit. PONG reports cached store availability,
+  checkpoint, rows processed,
   tasks updated, terminal tasks observed, summaries emitted, families
   disposed/classified, whether runtime cleanup is in flight,
   task-control families processed, task-control queues deleted, estimated
   task-control rows deleted, reserved queues deleted, reserved rows deleted,
-  and raw rows deleted from the last completed cleanup result. PONG must not
-  query the store or scan queues while answering `PING`.
+  raw rows deleted, and runtime cleanup pending/cap/deadline state from the
+  last completed cleanup result. PONG must not query the store or scan queues
+  while answering `PING`.
 - terminal Monitor collation rows may emit compact operational task summaries
   through the configured task-monitor sink. In collated mode, durable Monitor
   ingestion gates raw `weft.log.tasks` deletion; external summary emission
@@ -937,6 +943,7 @@ management live in the companion doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-05-20-monitor-fair-cleanup-scheduling-plan.md`](../plans/2026-05-20-monitor-fair-cleanup-scheduling-plan.md)
 - [`docs/plans/2026-05-19-monitor-terminal-retirement-and-runtime-queue-cleanup-plan.md`](../plans/2026-05-19-monitor-terminal-retirement-and-runtime-queue-cleanup-plan.md)
 - [`docs/plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md`](../plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md)
 - [`docs/plans/2026-05-18-monitor-table-driven-retained-log-cleanup-plan.md`](../plans/2026-05-18-monitor-table-driven-retained-log-cleanup-plan.md)

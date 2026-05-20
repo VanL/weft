@@ -546,6 +546,12 @@ WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS_DEFAULT: Final[float] = 604800.0
 WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT_DEFAULT: Final[int] = 1000
 """Default per-cycle family cap for terminal task control-queue cleanup."""
 
+TASK_MONITOR_RUNTIME_CLEANUP_SLICE_FAMILY_LIMIT: Final[int] = 50
+"""Internal max task-local runtime families handled by one cleanup worker slice."""
+
+TASK_MONITOR_RUNTIME_CLEANUP_SLICE_SECONDS: Final[float] = 1.0
+"""Internal soft wall-clock budget for one task-local runtime cleanup slice."""
+
 WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS_DEFAULT: Final[float] = 172800.0
 """Default minimum age before TaskMonitor logs/deletes task-log rows."""
 
