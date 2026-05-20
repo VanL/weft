@@ -1158,7 +1158,7 @@ def test_task_monitor_terminal_disposition_deletes_task_runtime_queues(
                 and list(reserved.peek_generator()) == []
             )
 
-        drive_task_monitor_until(task, runtime_cleanup_done)
+        drive_task_monitor_until(task, runtime_cleanup_done, timeout=30.0)
         store = task._monitor_store
         assert store is not None
         record = store.get_task(tid)
