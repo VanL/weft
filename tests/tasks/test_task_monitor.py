@@ -1567,6 +1567,11 @@ def test_task_monitor_runtime_cleanup_interleaves_control_and_reserved_work(
         "TASK_MONITOR_RUNTIME_CLEANUP_SLICE_FAMILY_LIMIT",
         2,
     )
+    monkeypatch.setattr(
+        task_monitor_mod,
+        "TASK_MONITOR_RUNTIME_CLEANUP_SLICE_SECONDS",
+        60.0,
+    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -1744,6 +1749,11 @@ def test_task_monitor_raw_store_delete_reconciles_missing_refs_without_stall(
     db_path, make_queue = broker_env
     monkeypatch.setattr(
         task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        task_monitor_mod,
+        "TASK_MONITOR_RUNTIME_CLEANUP_SLICE_SECONDS",
+        60.0,
     )
     config = load_config(
         {
