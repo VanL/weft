@@ -11,7 +11,7 @@ layered, follows SimpleBroker's SQL and transaction patterns, handles
 foreseeable crash and retry cases, remains lightweight under SQLite
 multi-process contention, and has comprehensive tests across unit, real
 SQLite, and Postgres-backed paths. As part of the cleanup, move the
-`TaskMonitorTask` implementation into `weft/core/monitor/` so the monitor
+`TaskMonitor` implementation into `weft/core/monitor/` so the monitor
 subsystem has one obvious home. The goal is technical excellence for the
 Monitor path, not a broader cleanup redesign.
 
@@ -25,7 +25,7 @@ function-level spec traceability, and insufficient contention-focused testing.
 ## 2. Source Documents
 
 - `docs/specifications/01-Core_Components.md` [CC-2.3], [CC-3.4]:
-  `TaskMonitorTask` is an internal task and owns monitoring/observation. The
+  `TaskMonitor` is an internal task and owns monitoring/observation. The
   Monitor table must stay operational and must not become task lifecycle or
   result authority.
 - `docs/specifications/04-SimpleBroker_Integration.md` [SB-0.4], [SB-0.4a]:
@@ -89,13 +89,13 @@ Read these before editing:
   cached PONG, Monitor store cycle orchestration, summary emission, and
   table-backed deletion. This plan moves that implementation to
   `weft/core/monitor/task_monitor.py` and removes the old module.
-- `weft/core/tasks/__init__.py`: currently re-exports `TaskMonitorTask` for
+- `weft/core/tasks/__init__.py`: currently re-exports `TaskMonitor` for
   callers that import task primitives from `weft.core.tasks`. Remove that
   re-export as part of the package ownership move.
 - `weft/core/manager.py`: currently resolves the internal task-monitor runtime
   class from `weft.core.tasks.task_monitor`. Update this import after the move.
 - `weft/commands/task_monitor.py`: foreground `weft system task-monitor`
-  command currently imports `TaskMonitorTask` and `make_task_monitor_taskspec`
+  command currently imports `TaskMonitor` and `make_task_monitor_taskspec`
   from the old tasks path. Update it to the new monitor path.
 - `weft/core/pruning/apply.py`: canonical exact-message delete helper. Reuse
   this for broker row deletion.
@@ -138,7 +138,7 @@ Primary code files:
   - Keep runtime values parameterized and dynamic SQL limited to validated
     code-owned identifiers.
 - `weft/core/monitor/task_monitor.py`
-  - New owner for `TaskMonitorTask`, `make_task_monitor_taskspec`,
+  - New owner for `TaskMonitor`, `make_task_monitor_taskspec`,
     `noop_task_monitor_target`, and related private helpers currently in
     `weft/core/tasks/task_monitor.py`.
   - Simplify orchestration so it gathers scan updates and delegates durable
@@ -151,7 +151,7 @@ Primary code files:
     `weft/core/monitor/task_monitor.py`.
   - Do not leave a compatibility shim or re-export module.
 - `weft/core/tasks/__init__.py`
-  - Remove the `TaskMonitorTask` re-export. The Monitor task belongs to
+  - Remove the `TaskMonitor` re-export. The Monitor task belongs to
     `weft.core.monitor`, not the generic task primitive package.
 - `weft/core/manager.py`
   - Update the task-monitor runtime class import to the new monitor path.
@@ -240,7 +240,7 @@ Files not to modify unless a failing test proves it is necessary:
 - No new ORM, migration framework, generic Weft database layer, or broad plugin
   system.
 - No public CLI shape change is part of this cleanup.
-- Moving `TaskMonitorTask` is a hard ownership move. There is no compatibility
+- Moving `TaskMonitor` is a hard ownership move. There is no compatibility
   shim for `weft.core.tasks.task_monitor`. All first-party imports, generated
   internal service specs, tests, and spec mappings must use
   `weft.core.monitor.task_monitor`.
@@ -273,12 +273,12 @@ Move the TaskMonitor implementation from `weft/core/tasks/task_monitor.py` to
 Target ownership:
 
 - `weft/core/monitor/task_monitor.py` owns the task-shaped Monitor runtime:
-  `TaskMonitorTask`, `TaskMonitorCallback`, `make_task_monitor_taskspec`,
+  `TaskMonitor`, `TaskMonitorCallback`, `make_task_monitor_taskspec`,
   `noop_task_monitor_target`, PONG construction, heartbeat registration,
   store-cycle orchestration, summary disposition, and table-backed deletion.
 - `weft/core/tasks/task_monitor.py` is deleted. Do not leave a compatibility
   module.
-- `weft/core/tasks/__init__.py` stops exposing `TaskMonitorTask`. The Monitor
+- `weft/core/tasks/__init__.py` stops exposing `TaskMonitor`. The Monitor
   runtime is not a generic task primitive.
 - `weft/core/monitor/__init__.py` should no longer say the task primitive lives
   in `weft.core.tasks.task_monitor`. Update it to describe the package as the
@@ -296,7 +296,7 @@ Import migration:
   - `core/tasks/task_monitor.py`
   - `from weft.core.tasks.task_monitor`
   - `import weft.core.tasks.task_monitor`
-  - `TaskMonitorTask`
+  - `TaskMonitor`
 - Update docs/spec implementation mappings to the new path. Do not document an
   old-path public surface.
 
@@ -344,7 +344,7 @@ not open write transactions.
 
 ### 6.2 Batch Ingest API And Cleaner Orchestration
 
-Move per-row durable write orchestration out of `TaskMonitorTask`.
+Move per-row durable write orchestration out of `TaskMonitor`.
 
 Add a store API with this shape, using exact names only if they fit the final
 code:
@@ -368,7 +368,7 @@ The method should:
 - upsert the task collation row and child raw-message row in the same chunk
   transaction;
 - advance the checkpoint only after all chunks have committed successfully;
-- return counts needed by `TaskMonitorTask` for cached PONG fields:
+- return counts needed by `TaskMonitor` for cached PONG fields:
   rows considered, updates written, distinct updated TIDs, terminal TIDs, and
   checkpoint written.
 
@@ -384,13 +384,13 @@ Chunking rule:
   multi-process load and large enough to avoid excessive connection churn.
   Start with 100 unless measurement or existing constants argue otherwise.
 
-`TaskMonitorTask._run_monitor_store_cycle()` should:
+`TaskMonitor._run_monitor_store_cycle()` should:
 
 - scan with `GeneratorTaskLogScanner`;
 - reduce rows with `update_from_task_log_row`;
 - filter out the monitor's own TID;
 - pass the updates and high-water checkpoint to `record_task_log_updates()`;
-- keep PONG/cached diagnostics in `TaskMonitorTask`;
+- keep PONG/cached diagnostics in `TaskMonitor`;
 - not call store `upsert_task_event()` in a loop.
 
 Keep `upsert_task_event()` only if tests or callers still need it. If retained,
@@ -465,9 +465,9 @@ defined by the specs. At minimum:
 - `MonitorStore.mark_summary_emitted()`
 - `MonitorStore.list_deletable_task_log_messages()`
 - `MonitorStore.mark_messages_deleted()`
-- `TaskMonitorTask._run_monitor_store_cycle()`
-- `TaskMonitorTask._emit_monitor_store_summaries()`
-- `TaskMonitorTask._delete_monitor_store_task_log_rows()`
+- `TaskMonitor._run_monitor_store_cycle()`
+- `TaskMonitor._emit_monitor_store_summaries()`
+- `TaskMonitor._delete_monitor_store_task_log_rows()`
 - new SQL-builder functions that encode exact deletion/reconciliation
 
 Do not add noisy comments to every helper. The goal is traceability for
@@ -538,7 +538,7 @@ contract boundaries, not decoration.
    - Done when:
      - real SQLite store tests pass without mocks for queue behavior.
 
-4. Move `TaskMonitorTask` into the monitor package.
+4. Move `TaskMonitor` into the monitor package.
    - Outcome: the Monitor runtime and Monitor support modules live together
      under `weft/core/monitor/`, with no old module retained.
    - Files to touch:
@@ -561,7 +561,7 @@ contract boundaries, not decoration.
      - move the implementation body to `weft/core/monitor/task_monitor.py`;
      - delete `weft/core/tasks/task_monitor.py`;
      - update first-party imports to the new path;
-     - remove `TaskMonitorTask` from `weft/core/tasks/__init__.py`;
+     - remove `TaskMonitor` from `weft/core/tasks/__init__.py`;
      - update generated internal service function targets to the new path;
      - update spec implementation mappings to the new path.
    - Old-path requirement:
@@ -585,8 +585,8 @@ contract boundaries, not decoration.
        if needed.
 
 5. Introduce the batch ingest API and move per-row store writes out of
-   `TaskMonitorTask`.
-   - Outcome: `TaskMonitorTask` orchestrates scan and cached diagnostics from
+   `TaskMonitor`.
+   - Outcome: `TaskMonitor` orchestrates scan and cached diagnostics from
      its new home in `weft/core/monitor/task_monitor.py`, while `MonitorStore`
      owns durable write sequencing and checkpoint advancement.
    - Files to touch:
@@ -615,7 +615,7 @@ contract boundaries, not decoration.
        the existing constants/config tests.
    - Stop if:
      - the implementation wants to put checkpoint logic back in
-       `TaskMonitorTask`;
+       `TaskMonitor`;
      - chunking logic starts to look like a generic batch framework.
    - Done when:
      - `uv run pytest tests/core/test_monitor_store.py tests/tasks/test_task_monitor.py -q`

@@ -1,7 +1,7 @@
 """Monitor-owned durable collation store.
 
 The tables in this module are derived operational state owned by the
-``TaskMonitorTask``. They live in an already configured Weft broker database,
+``TaskMonitor``. They live in an already configured Weft broker database,
 but they are not queues and they are not lifecycle or result authority.
 
 Spec references:
@@ -679,6 +679,37 @@ class _MonitorTableAccess:
             for row in rows
         )
 
+    def list_deletable_task_log_messages_for_tids(
+        self,
+        tids: Sequence[str],
+        *,
+        limit: int,
+        require_summary: bool,
+    ) -> tuple[MonitorRawMessageRef, ...]:
+        """Return exact task-log messages proven deletable for known TIDs."""
+
+        tid_tuple = tuple(str(tid) for tid in tids if tid)
+        if not tid_tuple or limit <= 0:
+            return ()
+        rows = self._runner.run(
+            monitor_sql.select_deletable_task_log_messages_for_tids(
+                self._tables.task_messages,
+                self._tables.task_collations,
+                len(tid_tuple),
+                require_summary=require_summary,
+            ),
+            (self._context_key, *tid_tuple, int(limit)),
+            fetch=True,
+        )
+        return tuple(
+            MonitorRawMessageRef(
+                queue=str(row[0]),
+                message_id=int(row[1]),
+                tid=str(row[2]),
+            )
+            for row in rows
+        )
+
     def task_message_refs_for_message_ids(
         self,
         message_ids: Sequence[int],
@@ -1252,6 +1283,27 @@ class MonitorStore:
             return self._access(
                 _runner_from_broker(broker)
             ).list_deletable_task_log_messages(
+                limit=limit,
+                require_summary=require_summary,
+            )
+
+    def list_deletable_task_log_messages_for_tids(
+        self,
+        tids: Sequence[str],
+        *,
+        limit: int,
+        require_summary: bool = True,
+    ) -> tuple[MonitorRawMessageRef, ...]:
+        """Return exact deletable task-log refs for known TIDs."""
+
+        tid_tuple = tuple(str(tid) for tid in tids if tid)
+        if not tid_tuple or limit <= 0:
+            return ()
+        with self._context.broker() as broker:
+            return self._access(
+                _runner_from_broker(broker)
+            ).list_deletable_task_log_messages_for_tids(
+                tid_tuple,
                 limit=limit,
                 require_summary=require_summary,
             )

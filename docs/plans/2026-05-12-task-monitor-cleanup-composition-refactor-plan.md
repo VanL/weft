@@ -102,7 +102,7 @@ Recommended new file:
 - `weft/core/tasks/task_monitor_cleanup.py`
 
 This file is still "in the TaskMonitor" ownership boundary, but keeps
-`TaskMonitorTask` from becoming a long cleanup implementation class.
+`TaskMonitor` from becoming a long cleanup implementation class.
 
 ### Queue Window Primitives
 
@@ -426,7 +426,7 @@ Actions:
    - the old result type -> `TaskMonitorCleanupResult`.
    Keep compatibility aliases only if import churn would be unsafe within the
    active branch. Do not leave stale names indefinitely.
-5. Update `TaskMonitorTask._run_task_monitor_cleanup_cycle()` to call the new
+5. Update `TaskMonitor._run_task_monitor_cleanup_cycle()` to call the new
    TaskMonitor cleanup runner.
 6. Delete `weft/core/pruning/task_monitor_cleanup.py` if it has no remaining
    cohesive responsibility. If generic code remains, move it to clearly named
@@ -440,9 +440,9 @@ Tests:
 
 Stop if:
 
-- `TaskMonitorTask` itself becomes a long queue-policy implementation. Use the
+- `TaskMonitor` itself becomes a long queue-policy implementation. Use the
   helper module under `weft/core/tasks/` to keep service orchestration readable.
-- pruning modules import `TaskMonitorTask` or TaskMonitor runtime config.
+- pruning modules import `TaskMonitor` or TaskMonitor runtime config.
 
 ### Task 6: Introduce an Action Interface Without Implementing Logging
 
@@ -462,7 +462,7 @@ Actions:
    - report-only action;
    - delete action backed by `apply_exact_prune_candidates`.
 3. Keep future logging explicit but unimplemented:
-   - `jsonl_then_delete` remains fail-closed in `TaskMonitorTask`;
+   - `jsonl_then_delete` remains fail-closed in `TaskMonitor`;
    - do not add a logger action in this refactor;
    - do not create archive files or new runtime log files.
 4. Keep the action protocol private to `task_monitor_cleanup.py` unless a
@@ -570,7 +570,7 @@ Rollout is code-only and behavior-preserving:
 
 1. Land tests that lock current behavior.
 2. Move models/policies/collation/action seams in small slices.
-3. Keep `TaskMonitorTask` using the new TaskMonitor cleanup runner.
+3. Keep `TaskMonitor` using the new TaskMonitor cleanup runner.
 4. Remove old module and type names only after all call sites are moved.
 
 Rollback:
@@ -625,7 +625,7 @@ Risks checked while writing this plan:
   Rejected because it keeps runner and policy coupled and makes future
   `collate-log-delete` ambiguous.
 - Bad direction: putting all scan/policy logic directly inside
-  `TaskMonitorTask`. Rejected because it bloats the service class and makes
+  `TaskMonitor`. Rejected because it bloats the service class and makes
   policy tests harder.
 - Bad direction: making malformed deletion globally available. Rejected
   because malformed rows are only deletable for explicitly Weft-owned queues

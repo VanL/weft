@@ -81,7 +81,7 @@ Guidance:
 
 Spec deltas required before implementation is done:
 
-- Update [CC-2.3] so `TaskMonitorTask` is no longer described only as a
+- Update [CC-2.3] so `TaskMonitor` is no longer described only as a
   foreground system-command primitive after part 1 lands.
 - Update [MA-1] and [MA-3] to say the canonical manager supervises one
   internal `TaskMonitor` child per context when enabled, restarts it with
@@ -138,7 +138,7 @@ Important distinction:
 
 ## 4. Architecture Decision
 
-Use a manager-supervised internal `TaskMonitorTask`, not manager-side scanning.
+Use a manager-supervised internal `TaskMonitor`, not manager-side scanning.
 
 The manager owns only supervision:
 
@@ -204,7 +204,7 @@ Files likely touched in part 1:
   - Extend the existing peek scanner into a persistent internal task that can
     process wake messages, expose monitor status, and call a processor.
 - `weft/core/tasks/__init__.py`
-  - Ensure `TaskMonitorTask` remains exported.
+  - Ensure `TaskMonitor` remains exported.
 - `weft/core/manager.py`
   - Resolve the new internal runtime class.
   - Add monitor supervision with backoff.
@@ -308,7 +308,7 @@ Read in this order:
 Comprehension checks before coding:
 
 - Which process is allowed to scan `weft.log.tasks` in phase 7? Answer: the
-  `TaskMonitorTask` child, not `Manager`.
+  `TaskMonitor` child, not `Manager`.
 - Does a monitor checkpoint become lifecycle truth? Answer: no.
 - Can the monitor delete from `weft.spawn.requests` or manager control queues?
   Answer: no.
@@ -435,7 +435,7 @@ class TaskMonitorProcessorResult:
 
 Required rules:
 
-- The processor receives candidates, not a `Manager` or `TaskMonitorTask`
+- The processor receives candidates, not a `Manager` or `TaskMonitor`
   instance.
 - The processor may use `request.context.queue()` for exact queue operations.
 - The processor must return a result. It should not call `sys.exit()`.
@@ -448,7 +448,7 @@ Required rules:
 ## 10. Part 1 Tasks: Supervised Monitor Skeleton
 
 Part 1 outcome: the canonical manager starts and supervises one internal
-`TaskMonitorTask`; the monitor wakes, reads config, finds candidate TIDs from
+`TaskMonitor`; the monitor wakes, reads config, finds candidate TIDs from
 real broker evidence, calls a report-only processor, and exposes health via
 PING/STATUS. It deletes nothing.
 
@@ -503,7 +503,7 @@ PING/STATUS. It deletes nothing.
 - Done when:
   - a processor can be resolved and called without a manager or CLI object.
 
-### 3. Extend `TaskMonitorTask` into a persistent wake-driven task
+### 3. Extend `TaskMonitor` into a persistent wake-driven task
 
 - Files to touch:
   - `weft/core/tasks/task_monitor.py`
@@ -548,7 +548,7 @@ PING/STATUS. It deletes nothing.
     full heartbeat service would make the test slow, monkeypatch only
     `upsert_heartbeat()` and keep broker queue behavior real.
 - Stop if:
-  - `TaskMonitorTask` imports `weft.commands.*`.
+  - `TaskMonitor` imports `weft.commands.*`.
   - the monitor deletes, moves, reserves, or claims task-log rows.
 - Done when:
   - the task can run one cycle and call a processor without mutating broker
@@ -565,11 +565,11 @@ PING/STATUS. It deletes nothing.
   - `Manager._tick_autostart()`
   - `Manager._evaluate_dispatch_ownership()`
 - Required action:
-  - Route `INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR` to `TaskMonitorTask`.
+  - Route `INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR` to `TaskMonitor`.
   - Add manager state for the supervised monitor TID and restart backoff.
   - Start the monitor by enqueuing an internal spawn request onto the manager's
     own inbox, following the existing autostart enqueue pattern. Do not call
-    `TaskMonitorTask(...)` inline inside the manager.
+    `TaskMonitor(...)` inline inside the manager.
   - Carry the internal runtime selector on the manager-owned spawn envelope
     with `INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY`, not by trusting stored
     TaskSpec metadata alone.
@@ -941,7 +941,7 @@ Preferred fixtures:
 - Use `broker_env` for direct queue semantics.
 - Use `WeftTestHarness` for manager/CLI lifecycle behavior.
 - Use real `Queue` objects for reservation, peek, delete, and generator reads.
-- Use real `TaskMonitorTask` where the behavior is task-owned.
+- Use real `TaskMonitor` where the behavior is task-owned.
 - Mock only clock/backoff, a custom processor callable, and heartbeat helper
   startup where real heartbeat would make the test slow or recursive.
 
@@ -984,7 +984,7 @@ startup or part 3 changes delete/apply helpers:
 
 ## 14. Invariants To Assert In Tests
 
-- `TaskMonitorTask.scan_once()` peeks and does not consume.
+- `TaskMonitor.scan_once()` peeks and does not consume.
 - Monitor cycles do not delete any broker messages before part 3.
 - Manager enqueues at most one monitor child per canonical context.
 - Non-leader managers do not supervise a monitor.

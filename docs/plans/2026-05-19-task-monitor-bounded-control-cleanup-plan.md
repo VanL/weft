@@ -6,7 +6,7 @@ Superseded by: none
 
 ## 1. Goal
 
-Fix the supervised `TaskMonitorTask` terminal runtime-control cleanup path so a
+Fix the supervised `TaskMonitor` terminal runtime-control cleanup path so a
 large backlog of old `T{tid}.ctrl_in` and `T{tid}.ctrl_out` queues converges
 without monopolizing the monitor reactor. The immediate change is narrow:
 summary emission must not inline long task-local control cleanup, and retained
@@ -25,7 +25,7 @@ maintenance into a worker lane with an explicit broker-effects contract.
 ## 2. Source Documents
 
 - `docs/specifications/01-Core_Components.md` [CC-2.3], [CC-3.4]:
-  `TaskMonitorTask` owns persistent monitor scheduling, cached diagnostics,
+  `TaskMonitor` owns persistent monitor scheduling, cached diagnostics,
   Monitor-store writes, and operational cleanup. The spec currently says the
   reactor owns broker effects, so do not move built-in destructive cleanup to a
   worker thread in this slice without first changing that contract.
@@ -67,16 +67,16 @@ whole-queue for terminal task-local controls.
 Read first:
 
 - `weft/core/monitor/task_monitor.py`
-  - `TaskMonitorTask.process_once`: reactor scheduling and control draining.
-  - `TaskMonitorTask._run_monitor_store_cycle`: retained task-log ingest,
+  - `TaskMonitor.process_once`: reactor scheduling and control draining.
+  - `TaskMonitor._run_monitor_store_cycle`: retained task-log ingest,
     summary emission, and current control cleanup sequencing.
-  - `TaskMonitorTask._emit_monitor_store_summaries`: currently emits summaries
+  - `TaskMonitor._emit_monitor_store_summaries`: currently emits summaries
     and then calls `_delete_terminal_control_queues()` inline for each terminal
     family.
-  - `TaskMonitorTask._delete_terminal_control_queues`: currently opens each
+  - `TaskMonitor._delete_terminal_control_queues`: currently opens each
     standard task-local control queue, peeks visible rows, calls
     `delete_many(...)`, and stats before/after.
-  - `TaskMonitorTask._finish_monitor_cycle`: cached PONG and serve-log stats.
+  - `TaskMonitor._finish_monitor_cycle`: cached PONG and serve-log stats.
 - `weft/core/monitor/store.py`
   - `MonitorStore.list_summary_ready_tasks`: current ready-family query wrapper.
   - `MonitorStore.mark_summaries_emitted`
@@ -107,7 +107,7 @@ Read first:
 Current load-bearing behavior:
 
 - The monitor watches its own inbox and `ctrl_in` at
-  `TaskMonitorTask._build_queue_configs()`. It does not watch `weft.log.tasks`
+  `TaskMonitor._build_queue_configs()`. It does not watch `weft.log.tasks`
   directly.
 - `process_once()` drains worker results, emits config once, drains local
   queues, registers heartbeat, and then runs `_run_monitor_cycle()` when due.
@@ -199,7 +199,7 @@ unbounded.
 Add a new monitor-store query and TaskMonitor method:
 
 - `MonitorStore.list_terminal_control_cleanup_ready_tasks(...)`
-- `TaskMonitorTask._run_terminal_control_cleanup_slice(...)`
+- `TaskMonitor._run_terminal_control_cleanup_slice(...)`
 
 Eligibility:
 
@@ -333,7 +333,7 @@ Do not mock:
 - `Queue.delete()`
 - `Queue.stats()`
 - Monitor store writes
-- `TaskMonitorTask.process_once()` for the main integration proof
+- `TaskMonitor.process_once()` for the main integration proof
 
 Acceptable narrow mocks:
 

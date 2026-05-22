@@ -8,7 +8,7 @@ Superseded by: ./2026-05-08-phase-7-manager-service-reconciler-cleanup-plan.md
 
 Move Weft-owned singleton runtimes onto one manager-owned service
 reconciliation contract. The immediate target is the heartbeat service and the
-manager-supervised `TaskMonitorTask`; the same reconciliation path must also
+manager-supervised `TaskMonitor`; the same reconciliation path must also
 become the path used by autostart `once` and `ensure` policies. This fixes the
 current split where heartbeat is started and selected through endpoint lookup
 while TaskMonitor is manager-supervised, and it fixes the TaskMonitor idle CPU
@@ -178,7 +178,7 @@ Comprehension questions before editing:
 
 3. TaskMonitor is not reactive enough.
    - The launcher calls `process_once()` every 50ms for every spawned task.
-   - `TaskMonitorTask.process_once()` uses local due-time state, but it does
+   - `TaskMonitor.process_once()` uses local due-time state, but it does
      not own a blocking wait the way `HeartbeatTask` does.
    - On ops the monitor reported `waiting` but consumed roughly 65% of one CPU
      core.
@@ -474,7 +474,7 @@ Tests:
 
 Do not:
 
-- instantiate `TaskMonitorTask` directly inside Manager;
+- instantiate `TaskMonitor` directly inside Manager;
 - let Manager scan `weft.log.tasks`;
 - create a separate TaskMonitor restart loop.
 
@@ -722,13 +722,13 @@ Implementation approach:
   `next_wait_timeout(self) -> float | None`.
 - The launcher should call this hook after `process_once()` when present.
   Fallback remains `TASK_PROCESS_POLL_INTERVAL` for existing task types.
-- `TaskMonitorTask` should return:
+- `TaskMonitor` should return:
   - `0.0` only when work is immediately pending;
   - seconds until `_next_cycle_due_monotonic` when heartbeat/local interval is
     the next scheduler;
   - a bounded default such as `1.0` when disabled or no due time exists, so
     STOP/parent-loss checks remain responsive.
-- `TaskMonitorTask` should also follow the `HeartbeatTask` pattern by checking
+- `TaskMonitor` should also follow the `HeartbeatTask` pattern by checking
   pending `inbox` and `ctrl_in` before sleeping. It must not watch
   `weft.log.tasks`.
 - Keep heartbeat registration failure fallback: record `last_error` and use the
@@ -738,7 +738,7 @@ Implementation approach:
 
 Tests:
 
-- Red test first: instantiate `TaskMonitorTask`, set a future due time, and
+- Red test first: instantiate `TaskMonitor`, set a future due time, and
   assert the new hook returns a wait close to the configured interval, not
   `0.05`.
 - Add a launcher unit test with a fake task class that exposes

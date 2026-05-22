@@ -116,6 +116,14 @@ class ReactorTestTask(BaseTask):
         self.worker_result_thread_ids.append(threading.get_ident())
 
 
+class ErrorRecordingReactorTestTask(ReactorTestTask):
+    """Concrete task that records worker errors instead of raising them."""
+
+    def _handle_worker_result(self, result: TaskWorkerResult) -> None:
+        self.worker_results.append(result)
+        self.worker_result_thread_ids.append(threading.get_ident())
+
+
 def drain_queue(queue) -> list[str]:
     messages: list[str] = []
     while True:
@@ -913,6 +921,74 @@ def test_base_task_applies_worker_result_on_main_thread(
     assert task.worker_result_thread_ids == [main_thread_id]
 
 
+def test_base_task_worker_lane_applies_result_on_main_thread(
+    broker_env,
+    unique_tid: str,
+) -> None:
+    db_path, _make_queue = broker_env
+    spec = make_function_taskspec(
+        unique_tid,
+        "tests.tasks.sample_targets:echo_payload",
+    )
+    task = ReactorTestTask(db_path, spec)
+    main_thread_id = threading.get_ident()
+    worker_started = threading.Event()
+
+    def worker_body() -> dict[str, int]:
+        worker_started.set()
+        return {"thread_id": threading.get_ident()}
+
+    task._submit_worker_lane("unit", worker_body)
+    assert worker_started.wait(timeout=2.0)
+
+    deadline = time.monotonic() + 2.0
+    while not task.worker_results and time.monotonic() < deadline:
+        task.process_once()
+        if not task.worker_results:
+            task.wait_for_activity(timeout=0.01)
+
+    assert task.worker_results
+    result = task.worker_results[0]
+    assert result.lane == "unit"
+    assert result.error is None
+    assert result.value["thread_id"] != main_thread_id
+    assert task.worker_result_thread_ids == [main_thread_id]
+
+
+def test_base_task_worker_lane_delivers_errors_on_main_thread(
+    broker_env,
+    unique_tid: str,
+) -> None:
+    db_path, _make_queue = broker_env
+    spec = make_function_taskspec(
+        unique_tid,
+        "tests.tasks.sample_targets:echo_payload",
+    )
+    task = ErrorRecordingReactorTestTask(db_path, spec)
+    main_thread_id = threading.get_ident()
+    worker_started = threading.Event()
+
+    def worker_body() -> None:
+        worker_started.set()
+        raise ValueError("lane failed")
+
+    task._submit_worker_lane("unit", worker_body)
+    assert worker_started.wait(timeout=2.0)
+
+    deadline = time.monotonic() + 2.0
+    while not task.worker_results and time.monotonic() < deadline:
+        task.process_once()
+        if not task.worker_results:
+            task.wait_for_activity(timeout=0.01)
+
+    assert task.worker_results
+    result = task.worker_results[0]
+    assert result.lane == "unit"
+    assert isinstance(result.error, ValueError)
+    assert str(result.error) == "lane failed"
+    assert task.worker_result_thread_ids == [main_thread_id]
+
+
 def test_base_task_wait_for_activity_caps_wait_while_worker_is_active(
     broker_env,
     unique_tid: str,
@@ -1427,6 +1503,40 @@ def test_stream_output_small_payload_single_chunk(broker_env, unique_tid: str) -
     assert decoded == "payload"
 
 
+def test_live_command_streaming_persists_stderr_after_control_cleanup(
+    broker_env,
+    unique_tid: str,
+) -> None:
+    db_path, make_queue = broker_env
+    spec = make_command_taskspec(
+        unique_tid,
+        sys.executable,
+        args=[
+            "-c",
+            "import sys; print('stdout-line'); print('stderr-line', file=sys.stderr)",
+        ],
+        stream_output=True,
+    )
+    task = Consumer(db_path, spec)
+    inbox = make_queue(spec.io.inputs["inbox"])
+    inbox.write(json.dumps({}))
+
+    _drive_consumer_until(
+        task,
+        lambda: task.taskspec.state.status == "completed",
+    )
+    task.cleanup()
+
+    ctrl_out = make_queue(spec.io.control["ctrl_out"])
+    outbox = make_queue(spec.io.outputs["outbox"])
+    messages = [json.loads(message) for message in outbox.peek_generator()]
+    assert any(
+        message.get("stream") == "stderr" and message.get("data") == "stderr-line\n"
+        for message in messages
+    )
+    assert ctrl_out.stats().total == 0
+
+
 def test_streaming_session_records_and_clears(
     monkeypatch, broker_env, unique_tid: str
 ) -> None:
@@ -1556,6 +1666,68 @@ def test_cleanup_on_exit_process_target(broker_env, unique_tid: str) -> None:
     )
 
     assert make_queue(spec.io.outputs["outbox"]).has_pending() is True
+
+
+def test_task_cleanup_removes_standard_control_queues_after_success(
+    broker_env,
+    unique_tid: str,
+) -> None:
+    db_path, make_queue = broker_env
+    spec = make_command_taskspec(
+        unique_tid,
+        sys.executable,
+        args=[PROCESS_SCRIPT, "--result", "payload"],
+        cleanup_on_exit=False,
+    )
+    task = Consumer(db_path, spec)
+
+    inbox = make_queue(spec.io.inputs["inbox"])
+    ctrl_in = make_queue(spec.io.control["ctrl_in"])
+    ctrl_out = make_queue(spec.io.control["ctrl_out"])
+    outbox = make_queue(spec.io.outputs["outbox"])
+    inbox.write(json.dumps({"args": []}))
+
+    _drive_consumer_until(
+        task,
+        lambda: task.taskspec.state.status == "completed",
+    )
+    ctrl_in.write(CONTROL_PING)
+
+    assert ctrl_in.stats().total == 1
+    assert ctrl_out.stats().total > 0
+
+    task.cleanup()
+
+    assert ctrl_in.stats().total == 0
+    assert ctrl_out.stats().total == 0
+    assert outbox.has_pending() is True
+
+
+def test_task_cleanup_removes_standard_control_queues_after_stop(
+    broker_env,
+    unique_tid: str,
+) -> None:
+    db_path, make_queue = broker_env
+    spec = make_function_taskspec(
+        unique_tid,
+        "tests.tasks.sample_targets:echo_payload",
+        cleanup_on_exit=False,
+    )
+    task = Consumer(db_path, spec)
+
+    ctrl_in = make_queue(spec.io.control["ctrl_in"])
+    ctrl_out = make_queue(spec.io.control["ctrl_out"])
+    ctrl_in.write(CONTROL_STOP)
+
+    task.process_once()
+
+    assert task.should_stop is True
+    assert ctrl_out.stats().total > 0
+
+    task.cleanup()
+
+    assert ctrl_in.stats().total == 0
+    assert ctrl_out.stats().total == 0
 
 
 def test_reserved_policy_keep_on_stop(broker_env, unique_tid: str) -> None:

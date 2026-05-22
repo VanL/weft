@@ -10,7 +10,6 @@ from __future__ import annotations
 import heapq
 import json
 import logging
-import os
 import threading
 import time
 from collections.abc import Mapping
@@ -38,8 +37,8 @@ from weft.context import WeftContext
 from weft.core.endpoints import resolve_endpoint
 from weft.core.taskspec import ReservedPolicy, TaskSpec
 
-from .base import BaseTask
 from .multiqueue_watcher import QueueMessageContext, QueueMode
+from .service import ServiceTask
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +91,7 @@ class HeartbeatRegistration:
     next_due_at: float
 
 
-class HeartbeatTask(BaseTask):
+class HeartbeatTask(ServiceTask):
     """Persistent internal task that multiplexes runtime-scoped heartbeat emits."""
 
     def __init__(
@@ -123,13 +122,7 @@ class HeartbeatTask(BaseTask):
         self._set_activity("waiting", waiting_on=self._queue_names["inbox"])
 
     def _activate_waiter(self) -> None:
-        if self.taskspec.state.status != "created":
-            return
-        self.taskspec.mark_started(pid=os.getpid())
-        self._report_state_change(event="task_spawning")
-        self.taskspec.mark_running(pid=os.getpid())
-        self._update_process_title("running")
-        self._report_state_change(event="task_started")
+        self._activate_service_task()
 
     def _build_queue_configs(self) -> dict[str, dict[str, Any]]:
         return {

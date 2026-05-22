@@ -376,7 +376,7 @@ queries must not depend on it.
 - Store writes happen before queue deletes.
 - PONG reports cached diagnostics only. It must not scan queues, open external
   log files, query Monitor tables, or recompute cleanup while answering PING.
-- `TaskMonitorTask` owns orchestration. Generic pruning policies own reusable
+- `TaskMonitor` owns orchestration. Generic pruning policies own reusable
   row policies. The Monitor store owns table state. Do not create a second
   task-log cleanup path.
 - No private SimpleBroker SQL for queue deletion. Use public
@@ -788,7 +788,7 @@ Required actions:
   `WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS`.
 - Add a named control cleanup per-queue cap, for example
   `WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT` and a default, rather than
-  hard-coding a number inside `TaskMonitorTask`.
+  hard-coding a number inside `TaskMonitor`.
 - If a cleanup cycle stops because it hit the batch or time budget while old
   eligible rows remain, set a cached catch-up flag and schedule the next
   cycle after the catch-up interval.
@@ -963,7 +963,7 @@ Required actions:
 - Specific supervised-path cleanup helpers to audit include `_task_log_candidates`,
   complete lifecycle candidate selection, terminal-without-start selection,
   broad old-without-start deletion, and any call that wires those helpers into
-  `TaskMonitorTask`.
+  `TaskMonitor`.
 - Keep generic malformed and older-than policies only where they are still
   used by runtime-state cleanup or the new FIFO ingestion path.
 - Update tests so they prove the new path, not the removed path.

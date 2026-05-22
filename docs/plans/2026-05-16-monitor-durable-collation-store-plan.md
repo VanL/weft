@@ -6,7 +6,7 @@ Superseded by: none
 
 ## 1. Goal
 
-Add a Monitor-owned durable collation store so `TaskMonitorTask` can build
+Add a Monitor-owned durable collation store so `TaskMonitor` can build
 task lifecycle summaries incrementally from `weft.log.tasks`, survive monitor
 restarts, emit information-rich operational records, and delete exact raw
 runtime-evidence rows only after durable collation has made that deletion
@@ -29,7 +29,7 @@ the existing task/manager bootstrap contract.
   monitor cleanup knobs.
 - `docs/specifications/01-Core_Components.md` [CC-2.3], [CC-3.4]: task
   ownership and monitoring ownership. The Monitor store must be operational
-  metadata owned by `TaskMonitorTask`, not public lifecycle state.
+  metadata owned by `TaskMonitor`, not public lifecycle state.
 - `docs/specifications/04-SimpleBroker_Integration.md` [SB-0.4]: backend
   neutral context resolution. The Monitor store must use the resolved
   `WeftContext` / `BrokerTarget`; it must not parse database URLs or special
@@ -168,7 +168,7 @@ Files not to modify unless a test proves it is required:
   It must not create or initialize the broker database itself. Task runtime
   context construction must keep `create_database=False`.
 - The store must work with SQLite and Postgres. Backend differences belong in
-  the store module, not in `TaskMonitorTask`.
+  the store module, not in `TaskMonitor`.
 - The store must be idempotent under replay. Reprocessing the same task-log
   message must not duplicate message IDs or regress a terminal summary.
 - PONG must stay lightweight. It may report cached store/collation diagnostics
@@ -209,7 +209,7 @@ weft.log.tasks
 
 The table is not a queue. It should not be exposed through `weft queue *`, and
 it should not use queue names. It lives beside SimpleBroker tables because
-Weft owns the database, but it is owned by `TaskMonitorTask`, not by
+Weft owns the database, but it is owned by `TaskMonitor`, not by
 SimpleBroker.
 
 The initial table set should be:
@@ -396,7 +396,7 @@ generic migration runner, or generic database abstraction, stop and remove it.
 Implementation rules:
 
 - Use `WeftContext.broker()` or the resolved `BrokerTarget` and broker config.
-- Treat an already spawned `TaskMonitorTask` as proof that the broker database
+- Treat an already spawned `TaskMonitor` as proof that the broker database
   and SimpleBroker runtime schema already exist. The store may open a
   connection to that target to create Monitor tables, but it must not perform
   project discovery, database creation, or non-Monitor schema setup.
@@ -489,7 +489,7 @@ Files:
 
 Required behavior:
 
-- `TaskMonitorTask` initializes the Monitor store only when the store feature
+- `TaskMonitor` initializes the Monitor store only when the store feature
   is enabled.
 - Initialization happens after task context is available and before the first
   table-backed collation cycle.

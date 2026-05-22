@@ -142,8 +142,8 @@ schema validity.
     "working_dir": "/tmp" | null,            // OPTIONAL. Working directory. null means not applicable or not set.
     "weft_context": "/path/to/.weft" | null,  // OPTIONAL (runtime-expanded). Resolved project context for this task. Templates omit this; the Manager fills it when available.
     "interactive": false,                     // OPTIONAL. Keep command processes alive and stream line-oriented stdin/stdout over queues. This is not a PTY/TTY terminal-emulation mode.
-    "stream_output": false,                  // OPTIONAL. Stream stdout/stderr to queues. If false, all output will be written in one message.
-    "cleanup_on_exit": true,                 // OPTIONAL. Delete empty task queues on completion (outbox retained until consumed)
+    "stream_output": false,                  // OPTIONAL. Stream stdout/stderr to queues. If false, all output will be written in one message. Non-interactive command streams use outbox for both streams; stderr frames are diagnostics, not result values.
+    "cleanup_on_exit": true,                 // OPTIONAL. Delete task-owned scratch artifacts on completion. Standard task-local control queues are runtime-only and are cleared on task cleanup regardless; outbox is retained until consumed.
     "reserved_policy_on_stop": "keep",      // OPTIONAL. Behaviour for messages left in T{tid}.reserved when STOP is received. Options: "keep", "requeue", "clear". Default is "keep".
     "reserved_policy_on_error": "keep",     // OPTIONAL. Behaviour for messages left in T{tid}.reserved when execution fails, times out, or is killed. Same options and default as above.
     "polling_interval": 1,                   // OPTIONAL. psutil polling interval in seconds. Defaults to 1 second.
@@ -264,7 +264,7 @@ _Per-field implementation status_:
 - `spec.weft_context`: Implemented. Resolved by Manager at spawn time via `resolve_taskspec_payload()`.
 - `spec.interactive`: Implemented. `InteractiveTaskMixin` in `weft/core/tasks/interactive.py`.
 - `spec.stream_output`: Implemented. One-shot command producers stream incrementally via `weft/core/runners/subprocess_runner.py`, `weft/core/runners/host.py`, and `weft/core/tasks/consumer.py`; non-command results still use the consumer chunking path.
-- `spec.cleanup_on_exit`: Implemented. `BaseTask._cleanup_reserved_on_exit()`, `BaseTask._cleanup_spill_dirs()`.
+- `spec.cleanup_on_exit`: Implemented. `BaseTask._cleanup_reserved_if_needed()`, `BaseTask._cleanup_spilled_outputs_if_needed()`. Standard task-local control queues are cleared by `BaseTask._cleanup_standard_control_queues_on_exit()` whenever task cleanup runs.
 - `spec.reserved_policy_on_stop`, `spec.reserved_policy_on_error`: Implemented. `BaseTask._apply_reserved_policy()`, `Consumer._apply_reserved_policy_on_error()`.
 - `spec.polling_interval`, `spec.reporting_interval`: Implemented. `BaseTask._maybe_emit_poll_report()`.
 - `spec.monitor_class`: Implemented. Loaded dynamically in `HostTaskRunner` and `Consumer`.

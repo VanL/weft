@@ -69,13 +69,18 @@ def process_outbox_message(
         else:
             text = str(data)
         is_stderr = stream_name == "stderr"
-        if text:
+        if text and is_stderr:
+            if emit_stream and emit_text is not None:
+                emit_text(text, is_stderr, False)
+        elif text:
             if emit_stream and emit_text is not None:
                 emit_text(text, is_stderr, False)
             stream_buffer.append(text)
         if envelope.get("final"):
             if emit_stream and emit_text is not None:
                 emit_text("", is_stderr, True)
+            if is_stderr:
+                return False, None
             value = "".join(stream_buffer)
             if envelope.get("result_transform") == "strip":
                 value = value.strip()

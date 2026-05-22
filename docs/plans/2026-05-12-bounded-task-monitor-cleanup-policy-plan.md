@@ -6,7 +6,7 @@ Superseded by: none
 
 ## 1. Goal
 
-Replace the manager-supervised `TaskMonitorTask` cleanup path with a bounded
+Replace the manager-supervised `TaskMonitor` cleanup path with a bounded
 FIFO queue-policy runner that can delete malformed rows, delete rows older than
 an explicit queue policy allows, and collate task-log rows by TID before
 deleting a completed task's lifecycle evidence. The important change is not a
@@ -56,7 +56,7 @@ The supervised monitor currently flows through these files:
 
 ```text
 weft/core/tasks/task_monitor.py
-  TaskMonitorTask._run_monitor_cycle()
+  TaskMonitor._run_monitor_cycle()
   -> _scan_task_log_candidates()
   -> _process_monitor_candidates()
   -> _run_canonical_prune_cycle()
@@ -103,7 +103,7 @@ Core implementation:
     cleanup policies in this one module. Do not split into a policy framework
     until duplication forces it.
 - `weft/core/pruning/__init__.py`
-  - Export only the public runner/types needed by `TaskMonitorTask`.
+  - Export only the public runner/types needed by `TaskMonitor`.
 - `weft/core/tasks/task_monitor.py`
   - Replace built-in `delete` and `report_only` monitor processing with the
     bounded cleanup runner.
@@ -129,7 +129,7 @@ Tests:
   - Because all `tests/core` files are audited as shared, add the new path to
     `tests/conftest.py` `_SHARED_MODULES` if the audit requires it.
 - `tests/tasks/test_task_monitor.py`
-  - Add task-level integration coverage for `TaskMonitorTask.process_once()`.
+  - Add task-level integration coverage for `TaskMonitor.process_once()`.
 - `tests/core/test_task_monitoring.py`
   - Update only if `TaskMonitorRuntimeConfig` or processor contracts change.
 - `tests/system/test_constants.py`
@@ -279,7 +279,7 @@ The first-slice collate policy is deliberately narrow:
   in the policy order only if the collate policy claimed no completed
   lifecycle group in this pass.
 - Each claimed lifecycle group should produce an operational collation summary
-  in the cleanup result so `TaskMonitorTask` can log how many task lifecycle
+  in the cleanup result so `TaskMonitor` can log how many task lifecycle
   groups were reduced. This is not a durable archive record.
 
 Terminal proof should reuse the existing terminal constants in
@@ -438,8 +438,8 @@ permanent audit-trail semantics.
      - one public function, for example
        `run_bounded_task_monitor_cleanup(ctx, cleanup_config, *, apply, exclude_tids)`;
      - keep the cleanup runner's config dataclass in the bounded cleanup module
-       or pass primitive values from `TaskMonitorTask`; do not make
-       `weft/core/pruning/` import `TaskMonitorTask`;
+       or pass primitive values from `TaskMonitor`; do not make
+       `weft/core/pruning/` import `TaskMonitor`;
      - small private helpers for raw-window scanning, JSON decoding, age checks,
        collate selection, and exact-delete adaptation.
    - Reuse:
@@ -499,7 +499,7 @@ permanent audit-trail semantics.
      - collate behavior passes with real queue rows and exact message IDs.
 
 5. Wire TaskMonitor built-ins to the bounded runner.
-   - Outcome: supervised `TaskMonitorTask` no longer calls the foreground
+   - Outcome: supervised `TaskMonitor` no longer calls the foreground
      runtime/retention prune engines for built-in `delete` and `report_only`.
    - Files to touch:
      - `weft/core/tasks/task_monitor.py`
@@ -518,7 +518,7 @@ permanent audit-trail semantics.
        count, skipped/reason counts, stop reason, and the operational
        task-log collation summaries/count.
    - Tests:
-     - add `TaskMonitorTask.process_once()` tests in
+     - add `TaskMonitor.process_once()` tests in
        `tests/tasks/test_task_monitor.py` using real queues;
      - assert built-in delete removes eligible rows and emits a successful
        cycle;
@@ -637,7 +637,7 @@ Minimum red-green tests:
   - assert `records_scanned <= batch_size` for that queue and deletes are
     bounded by selected rows in the window.
 - TaskMonitor integration:
-  - instantiate `TaskMonitorTask` with built-in `delete`;
+  - instantiate `TaskMonitor` with built-in `delete`;
   - call `process_once()`;
   - assert real queue rows are deleted and `task_monitor_cycle` reports
     bounded stats.

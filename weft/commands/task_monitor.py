@@ -35,7 +35,7 @@ from weft._constants import (
 from weft.context import WeftContext, build_context
 from weft.core import task_evidence
 from weft.core.monitor.task_monitor import (
-    TaskMonitorTask,
+    TaskMonitor,
     make_task_monitor_taskspec,
 )
 
@@ -338,7 +338,7 @@ def _scan_with_task_monitor(
         if isinstance(payload, dict):
             entries.append((payload, timestamp))
 
-    monitor = TaskMonitorTask(
+    monitor = TaskMonitor(
         ctx.broker_target,
         make_task_monitor_taskspec(),
         observer=collect,

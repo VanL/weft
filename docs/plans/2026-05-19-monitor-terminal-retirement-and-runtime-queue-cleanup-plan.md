@@ -22,7 +22,7 @@ no private SimpleBroker SQL.
 ## 2. Source Documents
 
 - `docs/specifications/01-Core_Components.md` [CC-2.3], [CC-3.4]:
-  `TaskMonitorTask` owns operational monitoring, retained lifecycle summaries,
+  `TaskMonitor` owns operational monitoring, retained lifecycle summaries,
   and monitor-owned cleanup. Base task queue ownership and reserved policy
   semantics still matter for what cleanup may delete.
 - `docs/specifications/04-SimpleBroker_Integration.md` [SB-0.4], [SB-0.4a]:

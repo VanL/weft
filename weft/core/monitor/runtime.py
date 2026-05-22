@@ -1,9 +1,9 @@
 """Task-monitor runtime config and processor contract.
 
 This module contains the command-neutral pieces used by the supervised
-``TaskMonitorTask``. It deliberately stays below the command and CLI layers:
+``TaskMonitor``. It deliberately stays below the command and CLI layers:
 processors receive typed candidates plus a context, not manager or command
-objects. Built-in processor names are handled by ``TaskMonitorTask`` and are
+objects. Built-in processor names are handled by ``TaskMonitor`` and are
 not resolved through the custom ``module:function`` processor hook.
 
 Spec references:
@@ -372,14 +372,12 @@ class TaskMonitorCycleSnapshot:
 def resolve_task_monitor_processor(name: str) -> TaskMonitorProcessor:
     """Resolve a custom ``module:function`` processor reference.
 
-    Built-in processors are handled directly by ``TaskMonitorTask`` so the
+    Built-in processors are handled directly by ``TaskMonitor`` so the
     supervised monitor has one cleanup path.
     """
 
     if name in WEFT_TASK_MONITOR_PROCESSOR_BUILTINS:
-        raise ValueError(
-            "built-in task-monitor processors are handled by TaskMonitorTask"
-        )
+        raise ValueError("built-in task-monitor processors are handled by TaskMonitor")
 
     if ":" not in name:
         raise ValueError("task-monitor processor must be a module:function reference")

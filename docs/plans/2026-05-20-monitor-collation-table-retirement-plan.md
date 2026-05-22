@@ -61,7 +61,7 @@ Read these before editing:
     Monitor-owned operational table, not a queue. Update it if nearby wording
     implies queue-like row retention.
 - `docs/specifications/01-Core_Components.md` [CC-2.3], [CC-3.4]
-  - `TaskMonitorTask` is an internal service. It may maintain Monitor-owned
+  - `TaskMonitor` is an internal service. It may maintain Monitor-owned
     operational tables but must not become task lifecycle or result authority.
 - `docs/specifications/04-SimpleBroker_Integration.md` [SB-0.4], [SB-0.4a]
   - Weft must access broker queues through public SimpleBroker APIs and

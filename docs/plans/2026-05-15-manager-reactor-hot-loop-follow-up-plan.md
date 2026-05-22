@@ -171,7 +171,7 @@ Current structure:
   `BrokerTarget`. Those inputs are process-stable after `__init__`. Rebuilding
   the context on every registry or leadership path is a short-lived-process
   habit leaking into the long-lived manager loop.
-- `TaskMonitorTask` has the same pattern in `_monitor_context()` and calls it
+- `TaskMonitor` has the same pattern in `_monitor_context()` and calls it
   during heartbeat registration/cancellation and monitor cycles. Heartbeat
   already caches a context in `__init__`, but it does so locally instead of
   through a shared task pattern.
@@ -362,7 +362,7 @@ Implementation shape:
 - Make `Manager._manager_context()` delegate to the shared cached task context.
   Cache the derived `manager_service_key(...)` on Manager because it is a
   manager-specific service-registry key.
-- Make `TaskMonitorTask._monitor_context()` delegate to the shared cached task
+- Make `TaskMonitor._monitor_context()` delegate to the shared cached task
   context.
 - Make `HeartbeatTask` use the shared cached task context instead of calling
   `build_context()` directly in its constructor.
@@ -512,7 +512,7 @@ Expected profile changes:
 Expected magnitude:
 
 - The combined visible samples for `_manager_context` / `build_context`,
-  `TaskMonitorTask._monitor_context` / `build_context`,
+  `TaskMonitor._monitor_context` / `build_context`,
   `_update_idle_activity_from_broker`, and `_pending_service_keys` should fall
   to near-zero in idle `weft manager serve` profiles when idle timeout is
   disabled and no autostart public pending work exists.

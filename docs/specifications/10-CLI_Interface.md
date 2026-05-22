@@ -253,7 +253,10 @@ Current interactive behavior:
 - `--interactive` is queue-mediated line IO, not PTY emulation
 - follow-up input goes through `T{tid}.inbox`
 - stdout goes through `T{tid}.outbox`
-- stderr, status, and terminal control replies go through `T{tid}.ctrl_out`
+- interactive stderr, status, and terminal control replies go through
+  `T{tid}.ctrl_out`; non-interactive command `stream_output` writes stdout and
+  stderr stream frames to `T{tid}.outbox`, with stderr treated as live
+  diagnostics rather than result data
 
 ### `manager serve` - Run the manager in the foreground [CLI-1.1.2]
 

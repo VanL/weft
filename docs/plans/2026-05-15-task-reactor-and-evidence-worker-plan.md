@@ -10,7 +10,7 @@ Rework long-lived tasks around a reactor-shaped runtime: the main task thread
 owns broker I/O, queue readiness, control messages, durable state commits, and
 bounded timer wakeups; worker threads own non-broker blocking work and send
 effect intents back to the main thread. Build this up in phases from
-`BaseTask` through `Consumer`, `Manager`, `TaskMonitorTask`, and
+`BaseTask` through `Consumer`, `Manager`, `TaskMonitor`, and
 `HeartbeatTask`, while preserving Weft's queue-first recovery model and
 removing hot liveness/proof loops from manager service resolution.
 
@@ -22,7 +22,7 @@ that runs liveness detection on cadence instead of inline on every manager turn.
 
 Implementation status, 2026-05-15: all phases landed. `MultiQueueWatcher`
 stayed as-is. `BaseTask` owns the shared worker-result wake path. `Consumer`,
-`Manager`, `TaskMonitorTask`, and `HeartbeatTask` now use bounded reactor
+`Manager`, `TaskMonitor`, and `HeartbeatTask` now use bounded reactor
 turns with broker effects committed on the owning main task thread. The
 `BaseTask` worker-result lane is bounded and drained in bounded batches so
 high-volume worker progress applies backpressure instead of starving queue or
@@ -115,7 +115,7 @@ service convergence, leadership checks, PING/PONG, and child cleanup. It has
 due timers through `next_wait_timeout()`, but expensive proof work could still be
 coupled to ordinary manager turns.
 
-`TaskMonitorTask` was the best existing reference for the desired outer loop:
+`TaskMonitor` was the best existing reference for the desired outer loop:
 `process_once()` is bounded, and `next_wait_timeout()` exposes scheduled work.
 Its scan and cleanup paths are broker work, so worker threads must not take
 over those commits.
@@ -232,7 +232,7 @@ Comprehension checks before editing:
   authority?
 - Which expensive manager proof paths should run on every queue wake, and
   which should be cadence-bound?
-- Why is `TaskMonitorTask` a better loop model than `HeartbeatTask` today?
+- Why is `TaskMonitor` a better loop model than `HeartbeatTask` today?
 
 ### Tooling And Style
 
@@ -310,7 +310,7 @@ but the behavior must be this narrow:
 Do not create a generic plugin-style event framework, scheduler DSL, or public
 reactor API. The first implementation should be just enough shared machinery
 to remove duplicate thread/result plumbing across Consumer, Manager,
-TaskMonitorTask, and HeartbeatTask.
+TaskMonitor, and HeartbeatTask.
 
 ### Effect Intent Model
 
@@ -702,9 +702,9 @@ manager/service liveness proof into a cadence-bound evidence worker.
 Implementation note, 2026-05-15: the child-launch worker sub-slice,
 manager-to-manager non-blocking PING probe sub-slice, and service-candidate
 non-blocking PING probe sub-slice are implemented. The next phase is
-TaskMonitorTask reactor alignment.
+TaskMonitor reactor alignment.
 
-Implementation note, 2026-05-15: TaskMonitorTask custom processor execution is
+Implementation note, 2026-05-15: TaskMonitor custom processor execution is
 implemented as a broker-free worker lane. Task-log scans, built-in cleanup,
 checkpoint advancement, cached diagnostics, and exact deletes remain on the
 TaskMonitor reactor.
@@ -840,9 +840,9 @@ Stop and re-plan if:
 - Child launch commit/delete happens in the worker thread.
 - The implementation needs a new manager registry payload schema.
 
-### Phase 4. Align TaskMonitorTask With Reactor Boundary
+### Phase 4. Align TaskMonitor With Reactor Boundary
 
-Outcome: `TaskMonitorTask` keeps broker scans/deletes on the main thread,
+Outcome: `TaskMonitor` keeps broker scans/deletes on the main thread,
 offloads only broker-free processor work when useful, and continues to expose
 bounded scheduling through `next_wait_timeout()`.
 
@@ -991,7 +991,7 @@ Required doc updates:
 - Add this plan as a related plan/backlink in specs whose implementation notes
   materially changed.
 - Update implementation mappings for BaseTask, Consumer, Manager,
-  TaskMonitorTask, and HeartbeatTask.
+  TaskMonitor, and HeartbeatTask.
 - Document the reactor-thread ownership invariant if it becomes current
   behavior.
 - Mark completed phases in this plan only after the implementation and tests
@@ -1027,7 +1027,7 @@ Prefer real production paths:
 
 - `broker_env` for queue semantics and direct task objects.
 - `WeftTestHarness` for CLI, manager lifecycle, and subprocess behavior.
-- Real `Consumer`, `Manager`, `TaskMonitorTask`, and `HeartbeatTask` where
+- Real `Consumer`, `Manager`, `TaskMonitor`, and `HeartbeatTask` where
   practical.
 - Real SimpleBroker queue reservation and timestamps.
 
@@ -1135,8 +1135,8 @@ Review pass 1 findings:
   Fix: Phase 3 now explicitly allows worker-thread `launch_task_process(...)`
   while reserving broker commits for the main thread.
 - Finding: "Monitor" was ambiguous because the codebase has both simple
-  monitor-style task classes and the manager-supervised `TaskMonitorTask`.
-  Fix: the phased plan names `TaskMonitorTask` and calls out the file paths.
+  monitor-style task classes and the manager-supervised `TaskMonitor`.
+  Fix: the phased plan names `TaskMonitor` and calls out the file paths.
 - Finding: the plan could have pushed `MultiQueueWatcher` redesign too early.
   Fix: Phase 0 makes `MultiQueueWatcher` a check gate and prohibits redesign
   unless a narrow wait-seam blocker is proven.

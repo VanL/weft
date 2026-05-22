@@ -9,7 +9,7 @@ Superseded by: none
 Make TaskMonitor PONG diagnostics prove which cleanup policies ran during the
 last cleanup cycle, without doing any live queue scanning or computation while
 answering PING. The monitor should compute small policy-level stats during the
-cleanup cycle, cache them on the live `TaskMonitorTask`, and return that cached
+cleanup cycle, cache them on the live `TaskMonitor`, and return that cached
 summary in both the existing top-level PONG fields and the extended
 `task_monitor.last_cycle` block.
 
@@ -59,20 +59,20 @@ Current flow:
 PING arrives on T{monitor_tid}.ctrl_in
   -> BaseTask._handle_control_command()
   -> BaseTask._control_response_extras()
-  -> TaskMonitorTask._control_snapshot_fields()
-  -> TaskMonitorTask._task_monitor_pong_extension()
+  -> TaskMonitor._control_snapshot_fields()
+  -> TaskMonitor._task_monitor_pong_extension()
   -> write PONG to T{monitor_tid}.ctrl_out
 ```
 
 Current cleanup cycle:
 
 ```text
-TaskMonitorTask._run_monitor_cycle()
-  -> TaskMonitorTask._run_task_monitor_cleanup_cycle()
+TaskMonitor._run_monitor_cycle()
+  -> TaskMonitor._run_task_monitor_cleanup_cycle()
   -> run_task_monitor_cleanup()
   -> _task_log_candidates() / _tid_mapping_candidates()
   -> apply_exact_prune_candidates()
-  -> cache only queue_stats_summary() on TaskMonitorTask
+  -> cache only queue_stats_summary() on TaskMonitor
 ```
 
 Important files to modify:
@@ -396,14 +396,14 @@ Do not generalize malformed cleanup to arbitrary user queues.
      - Mixed task-log test passes.
      - Existing collation and reserved cleanup tests still pass.
 
-6. Cache policy stats on `TaskMonitorTask`.
+6. Cache policy stats on `TaskMonitor`.
    - Outcome: the live monitor stores the most recent cycle's policy stats in
      memory and PONG can read them without active work.
    - Files to touch:
      - `weft/core/tasks/task_monitor.py`
    - Approach:
      - Add `self._last_cleanup_policy_stats: tuple[dict[str, Any], ...] = ()`
-       in `TaskMonitorTask.__init__()`.
+       in `TaskMonitor.__init__()`.
      - Clear `_last_cleanup_policy_stats` at the start of a built-in cleanup
        cycle along with `_last_cleanup_queue_stats`.
      - After `run_task_monitor_cleanup()`, set it from
@@ -425,7 +425,7 @@ Do not generalize malformed cleanup to arbitrary user queues.
    - Approach:
      - Extend `test_task_monitor_ping_includes_health_and_preserves_task_log`
        or add a sibling test.
-     - Let `TaskMonitorTask.process_once()` run a cleanup cycle using real
+     - Let `TaskMonitor.process_once()` run a cleanup cycle using real
        broker queues.
      - Send PING and call `process_once()` again to handle the control message.
      - Assert:
@@ -441,7 +441,7 @@ Do not generalize malformed cleanup to arbitrary user queues.
        state.
    - Test style:
      - Use real control queues (`ctrl_in`, `ctrl_out`) and a real
-       `TaskMonitorTask`.
+       `TaskMonitor`.
      - Mock only `upsert_heartbeat`, as the existing test already does.
        Do not mock SimpleBroker queues.
 

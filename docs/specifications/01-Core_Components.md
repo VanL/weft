@@ -146,8 +146,9 @@ handling, and process-title updates.
 
 _Implementation mapping_: `weft/core/tasks/base.py` — queue resolution and
 queue-config helpers, control handling, state reporting, process-title
-formatting, reserved-policy helpers, cleanup, task-run loops, and the private
-worker-result lane used by reactor-style task implementations.
+formatting, reserved-policy helpers, cleanup, task-run loops, the private
+mechanical worker-lane launcher, and the private worker-result channel used by
+reactor-style task implementations.
 
 Current responsibilities:
 
@@ -159,6 +160,9 @@ Current responsibilities:
 - optionally claim and release one stable runtime endpoint name for the live task
 - expose `process_once()`, `run_until_stopped()`, and `next_wait_timeout()`
   as the shared task-loop contract
+- own `_submit_worker_lane(...)` as the neutral thread/result plumbing for
+  local worker lanes, while `_submit_worker_call(...)` remains the
+  broker-free wrapper used for ordinary Weft runtime worker callables
 - own the broker-free worker-result queue used when a concrete task moves
   blocking work out of the main task reactor thread; this queue is bounded
   and drained in bounded batches so worker progress cannot monopolize a
@@ -173,17 +177,31 @@ Why this exists:
 ### 2.3 Specialized Task Types [CC-2.3]
 
 Concrete task classes express different queue behaviors on top of `BaseTask`.
+Long-lived services that share activation, due-time helpers, and single-flight
+worker-lane bookkeeping may inherit from the internal `ServiceTask` layer; that
+layer does not own queue readiness, service convergence, or a generic service
+turn.
 
 _Implementation mapping_: `weft/core/tasks/consumer.py`,
 `weft/core/tasks/observer.py`, `weft/core/tasks/monitor.py`,
 `weft/core/monitor/task_monitor.py`, `weft/core/tasks/pipeline.py`,
 `weft/core/tasks/debugger.py`, `weft/core/tasks/heartbeat.py`,
-`weft/core/tasks/interactive.py`, `weft/core/tasks/sessions.py`;
-task primitives are re-exported from `weft/core/tasks/__init__.py`, while the
-TaskMonitor runtime is owned by `weft/core/monitor/`.
+`weft/core/tasks/interactive.py`, `weft/core/tasks/service.py`,
+`weft/core/tasks/sessions.py`;
+task primitives are re-exported from `weft/core/tasks/__init__.py` where
+intended for package-level use. The internal `ServiceTask` helper is imported
+directly from `weft/core/tasks/service.py`, while the TaskMonitor runtime is
+owned by `weft/core/monitor/`.
 
 Current task families:
 
+- `ServiceTask`: internal helper for long-lived task-shaped services. It
+  reuses `BaseTask` queue/control behavior, publishes the common
+  `task_spawning`/`task_started` activation sequence when asked, tracks
+  single-flight service worker lanes, and exposes due-time math. It does not
+  implement `process_once()` and does not know about manager leadership,
+  service keys, cleanup selection, heartbeat registration, or queue scheduling
+  policy.
 - `Consumer`: reserves inbox messages on the main task reactor thread, runs
   blocking target execution in a broker-free worker lane, and commits
   outbox/state/reserved-policy effects back on the main thread
@@ -191,7 +209,7 @@ Current task families:
 - `SelectiveConsumer`: conditionally consumes based on a selector
 - `Monitor`: forwards while observing
 - `SamplingObserver`: observer variant with interval-based sampling
-- `TaskMonitorTask`: task-log monitor used both by the foreground
+- `TaskMonitor`: task-log monitor used both by the foreground
   `weft system task-monitor` command and by the manager-supervised internal
   monitor service. Its foreground `scan_once()` path scans `weft.log.tasks`
   with generator-based peek semantics. Its persistent path wakes from its own
@@ -305,7 +323,8 @@ specialized policies live on `Manager`, `Consumer`, `PipelineTask`, and
 
 Implementation plan backlinks:
 [`2026-04-21-run-boundary-dispatch-fence-control-contract-plan.md`](../plans/2026-04-21-run-boundary-dispatch-fence-control-contract-plan.md);
-[`2026-05-15-task-reactor-and-evidence-worker-plan.md`](../plans/2026-05-15-task-reactor-and-evidence-worker-plan.md).
+[`2026-05-15-task-reactor-and-evidence-worker-plan.md`](../plans/2026-05-15-task-reactor-and-evidence-worker-plan.md);
+[`2026-05-20-service-task-shared-reactor-extraction-plan.md`](../plans/2026-05-20-service-task-shared-reactor-extraction-plan.md).
 
 ### 2.4.1 Runtime Endpoint Registry [CC-2.4.1]
 

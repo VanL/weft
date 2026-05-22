@@ -94,7 +94,7 @@ Files to modify:
   native waiter result handling, inactive-queue discovery cadence, and
   active-queue refresh.
 - `weft/core/tasks/base.py`: shared task owner of the watcher configuration
-  used by `Consumer`, `Manager`, `TaskMonitorTask`, and `HeartbeatTask`.
+  used by `Consumer`, `Manager`, `TaskMonitor`, and `HeartbeatTask`.
   Remove or replace the effective "probe every drain" behavior.
 - `weft/core/manager.py`: manager-specific fixes for idle broker-probe timer
   scheduling, reserved-queue activity filtering, and public/internal spawn

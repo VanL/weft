@@ -63,7 +63,7 @@ from weft._constants import (
     load_config,
 )
 from weft.core.manager import DispatchOwnership, ManagedChild, Manager
-from weft.core.monitor.task_monitor import TaskMonitorTask
+from weft.core.monitor.task_monitor import TaskMonitor
 from weft.core.service_convergence import (
     build_manager_service_payload,
     build_service_owner_payload,
@@ -983,7 +983,7 @@ def test_manager_launches_pipeline_task_for_reserved_internal_class(
             },
         }
     )
-    assert manager._resolve_child_task_class(monitor_spec) is TaskMonitorTask
+    assert manager._resolve_child_task_class(monitor_spec) is TaskMonitor
 
 
 def test_manager_rejects_unknown_internal_task_class(manager_setup) -> None:

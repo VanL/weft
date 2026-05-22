@@ -146,7 +146,7 @@ Format rules and sanitization live in `01-Core_Components.md`.
 | `WEFT_MANAGER_LIFETIME_TIMEOUT` | Default manager idle timeout. Must parse as a non-negative float. |
 | `WEFT_MANAGER_REUSE_ENABLED` | Whether CLI-started managers stay alive after task completion. |
 | `WEFT_AUTOSTART_TASKS` | Whether manager boot should consider autostart manifests under the active Weft metadata directory. |
-| `WEFT_TASK_MONITOR_ENABLED` | Whether the canonical manager supervises the internal `TaskMonitorTask`. Defaults to true. |
+| `WEFT_TASK_MONITOR_ENABLED` | Whether the canonical manager supervises the internal `TaskMonitor`. Defaults to true. |
 | `WEFT_TASK_MONITOR_INTERVAL_SECONDS` | Heartbeat wake interval for the supervised task monitor. Must be at least the heartbeat minimum. |
 | `WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS` | Short wake interval used while retained task-log backlog remains after a batch-limited cycle. Defaults to 2 seconds. |
 | `WEFT_TASK_MONITOR_BATCH_SIZE` | Maximum retained task-log rows or cleanup candidates processed by one supervised monitor cycle. Defaults to 5000. |

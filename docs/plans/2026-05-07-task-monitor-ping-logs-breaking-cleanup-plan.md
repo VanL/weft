@@ -126,7 +126,7 @@ The desired public state:
 - `weft task status TID` remains passive by default.
 - `weft system task-monitor` is the only monitor command.
 - Module and class names use `task_monitor`, `TaskMonitorConfig`,
-  `TaskMonitorResult`, `TaskMonitorTask`, and `run_task_monitor`.
+  `TaskMonitorResult`, `TaskMonitor`, and `run_task_monitor`.
 - Disk output defaults use `ctx.logs_dir`, not `ctx.weft_dir / "archive"`.
 - `WEFT_LOGS_DIR` can override the logs base. Relative values resolve under
   the project root. Absolute values are used as-is.
@@ -159,12 +159,12 @@ Implementation files:
   - Update checkpoint default to `.weft/state/task-monitor/default.json`.
 - `weft/core/tasks/lifecycle_monitor.py`
   - Rename or move to `weft/core/tasks/task_monitor.py`.
-  - Rename `LifecycleMonitorTask` to `TaskMonitorTask`.
+  - Rename `LifecycleMonitorTask` to `TaskMonitor`.
   - Rename `make_lifecycle_monitor_taskspec()` to `make_task_monitor_taskspec()`.
   - Rename synthetic task name and metadata from `lifecycle-monitor` /
     `lifecycle_monitor` to `task-monitor` / `task_monitor`.
 - `weft/core/tasks/__init__.py`
-  - Export `TaskMonitorTask`.
+  - Export `TaskMonitor`.
   - Remove `LifecycleMonitorTask`.
 - `weft/_constants.py`
   - Replace `LIFECYCLE_MONITOR_*` with `TASK_MONITOR_*`.
@@ -459,7 +459,7 @@ Run:
 
 Outcome:
 
-- Core task primitive uses `TaskMonitorTask`.
+- Core task primitive uses `TaskMonitor`.
 
 Files to touch:
 
@@ -474,7 +474,7 @@ Files to touch:
 Implementation:
 
 - Rename:
-  - `LifecycleMonitorTask` to `TaskMonitorTask`
+  - `LifecycleMonitorTask` to `TaskMonitor`
   - `LifecycleMonitorCallback` to `TaskMonitorCallback`
   - `make_lifecycle_monitor_taskspec()` to `make_task_monitor_taskspec()`
   - `noop_monitor_target()` may stay if still clear, but prefer
@@ -483,7 +483,7 @@ Implementation:
   - `name="task-monitor"`
   - `function_target="weft.core.tasks.task_monitor:noop_task_monitor_target"`
   - `metadata={"internal": True, "weft_runtime": "task_monitor"}`
-- Export `TaskMonitorTask` in `weft/core/tasks/__init__.py`.
+- Export `TaskMonitor` in `weft/core/tasks/__init__.py`.
 - Remove `LifecycleMonitorTask` export. No alias.
 
 Tests:

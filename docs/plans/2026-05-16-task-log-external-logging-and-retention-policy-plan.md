@@ -11,7 +11,7 @@ inside the new `weft/core/monitor/` structure. The monitor should support a raw
 debug-style external log mode and a standard collated summary mode, with
 logging performed before deletion whenever an external log is configured.
 Deletion must fail closed for rows or families whose required external log emit
-fails, while the `TaskMonitorTask` itself should still start and report cached
+fails, while the `TaskMonitor` itself should still start and report cached
 degraded status through PONG. The plan keeps the Monitor table as the durable
 rolling collation state for standard mode and prevents two independent cleanup
 paths from owning the same `weft.log.tasks` rows.
@@ -22,7 +22,7 @@ paths from owning the same `weft.log.tasks` rows.
   This plan adds user-visible configuration and must keep the quick reference
   synchronized.
 - `docs/specifications/01-Core_Components.md` [CC-2.3], [CC-3.4]:
-  `TaskMonitorTask` is the internal monitor task and owns monitor-store
+  `TaskMonitor` is the internal monitor task and owns monitor-store
   orchestration, cached diagnostics, and broker effects on the reactor thread.
 - `docs/specifications/04-SimpleBroker_Integration.md` [SB-0.4], [SB-0.4a]:
   Monitor-owned tables are derived operational state inside the already
@@ -187,7 +187,7 @@ cycle:
   the same exact message IDs.
 
 The implementation must make that ownership decision in one place in
-`TaskMonitorTask`, not spread it across several policy helpers.
+`TaskMonitor`, not spread it across several policy helpers.
 
 ### 4.4 Raw Mode
 
@@ -438,7 +438,7 @@ Stop and re-plan if:
   - `_emit_monitor_store_summaries()`
   - `_delete_monitor_store_task_log_rows()`
 - Implement:
-  - initialize and cache the external sink in `TaskMonitorTask`;
+  - initialize and cache the external sink in `TaskMonitor`;
   - call the retention-aware store API;
   - emit collated external summary when external logging is enabled;
   - record no-op summary disposition when external logging is disabled;

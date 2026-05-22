@@ -90,7 +90,7 @@ Read first:
   `weft.state.services`.
 - `weft/core/tasks/heartbeat.py`: `HeartbeatTask.process_once`,
   `_service_ownership`, `_emit_due_registrations`, and `_wait_for_activity`.
-- `weft/core/tasks/task_monitor.py`: `TaskMonitorTask.next_wait_timeout`,
+- `weft/core/tasks/task_monitor.py`: `TaskMonitor.next_wait_timeout`,
   `_ensure_heartbeat_registered`, and `_run_monitor_cycle`.
 - `tests/core/test_manager.py` around existing managed-service convergence
   tests.
@@ -178,7 +178,7 @@ Secondary candidates:
   replay endpoint, task-status, and TID-mapping evidence. If heartbeat CPU
   remains high after manager throttling, cache idle ownership results for about
   1 second and invalidate on registration/control handling.
-- `TaskMonitorTask._ensure_heartbeat_registered()` may retry endpoint
+- `TaskMonitor._ensure_heartbeat_registered()` may retry endpoint
   resolution once per second on failure. That is already in the desired cadence;
   add evidence before changing it.
 

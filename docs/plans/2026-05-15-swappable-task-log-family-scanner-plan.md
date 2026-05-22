@@ -91,7 +91,7 @@ Tests to modify or add:
     to `tests/conftest.py` `_SHARED_MODULES`.
 - `tests/tasks/test_task_monitor.py`
   - Add one TaskMonitor-level integration test if PONG stats or live
-    `TaskMonitorTask.process_once()` behavior changes.
+    `TaskMonitor.process_once()` behavior changes.
 - `tests/system/test_constants.py`
   - Run after adding constants.
 - `tests/specs/test_plan_metadata.py`
@@ -406,7 +406,7 @@ Add or update tests that prove:
   completed-group rows and leaves the open manager/service rows.
 - Re-running cleanup against the same queue continues to make progress if more
   completed groups remain behind the open prefix.
-- `TaskMonitorTask` PONG reports cached scanner stats after a cleanup cycle if
+- `TaskMonitor` PONG reports cached scanner stats after a cleanup cycle if
   PONG fields change.
 - Existing malformed, tid-mapping, terminal-reserved, and old-without-start
   tests still pass.

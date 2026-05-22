@@ -335,6 +335,9 @@ def iter_task_realtime_events(
     terminal_payload: dict[str, Any] | None = (
         materialized.terminal_event_payload if materialized is not None else None
     )
+    terminal_observed_monotonic: float | None = (
+        time.monotonic() if terminal_payload is not None else None
+    )
     terminal_timestamp: int | None = (
         materialized.terminal_event_timestamp if materialized is not None else None
     )
@@ -351,6 +354,16 @@ def iter_task_realtime_events(
             terminal_payload["error"] = materialized.terminal_error_message
         terminal_timestamp = materialized.log_last_timestamp
     terminal_state_emitted = False
+    if terminal_payload is None and snapshot_event is not None:
+        snapshot_status = snapshot_event.payload.get("status")
+        if snapshot_status in TERMINAL_TASK_STATUSES:
+            terminal_payload = {
+                "tid": normalized_tid,
+                "status": snapshot_status,
+            }
+            terminal_timestamp = snapshot_event.timestamp
+            terminal_observed_monotonic = time.monotonic()
+            terminal_state_emitted = True
 
     try:
         while not _is_cancelled(cancel_event):
@@ -364,14 +377,18 @@ def iter_task_realtime_events(
                 since_timestamp=outbox_since,
             ):
                 last_outbox_timestamp = timestamp
-                if payload.get("type") != "stream" or payload.get("stream") != "stdout":
+                stream = payload.get("stream")
+                if payload.get("type") != "stream" or stream not in {
+                    "stdout",
+                    "stderr",
+                }:
                     continue
                 saw_event = True
                 if _is_cancelled(cancel_event):
                     return
                 yield TaskEvent(
                     tid=normalized_tid,
-                    event_type="stdout",
+                    event_type=str(stream),
                     timestamp=timestamp,
                     payload=_stream_payload(payload),
                 )
@@ -422,9 +439,27 @@ def iter_task_realtime_events(
                 if status in TERMINAL_TASK_STATUSES:
                     terminal_payload = payload
                     terminal_timestamp = timestamp
+                    if terminal_observed_monotonic is None:
+                        terminal_observed_monotonic = time.monotonic()
                     terminal_state_emitted = True
 
             if terminal_payload is not None:
+                if terminal_observed_monotonic is None:
+                    terminal_observed_monotonic = time.monotonic()
+                terminal_grace_remaining = (
+                    terminal_observed_monotonic
+                    + WEFT_COMPLETED_RESULT_GRACE_SECONDS
+                    - time.monotonic()
+                )
+                if terminal_grace_remaining > 0 and not _timed_out(deadline):
+                    remaining = _remaining_timeout(deadline)
+                    wait_timeout = (
+                        min(0.05, terminal_grace_remaining)
+                        if remaining is None
+                        else min(0.05, remaining, terminal_grace_remaining)
+                    )
+                    monitor.wait(wait_timeout)
+                    continue
                 terminal_status = (
                     terminal_status_from_event(terminal_payload) or "unknown"
                 )

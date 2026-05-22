@@ -139,8 +139,11 @@ The control plane is explicit:
 - one-shot non-persistent task success publishes a task-owned typed terminal
   `ctrl_out` envelope after the task reaches `completed`, so task-local
   terminal proof exists alongside the `work_completed` task-log event
-- readers must ignore ordinary control replies, stderr stream chunks, malformed
-  JSON, and other `ctrl_out` payloads when looking for terminal state
+- readers must ignore ordinary control replies, legacy stderr stream chunks,
+  malformed JSON, and other `ctrl_out` payloads when looking for terminal state
+- non-interactive command `stream_output` writes stdout and stderr stream frames
+  to `T{tid}.outbox`; stderr frames are diagnostics for live/event consumers
+  and do not become the public task result
 - the shared task-evidence reader may use a typed terminal `ctrl_out` envelope
   as terminal observation proof when task-log terminal proof is missing
 - CLI control waiters may accept a typed terminal `ctrl_out` envelope as
@@ -259,11 +262,11 @@ Current rules:
   launch evidence for the same TID.
 - the heartbeat service is an interval emitter, not a scheduler: there is no
   cron syntax, wall-clock scheduling, timezone handling, or missed-run replay
-- the supervised `TaskMonitorTask` uses heartbeat registrations for periodic
+- the supervised `TaskMonitor` uses heartbeat registrations for periodic
   wake messages to its own `T{tid}.inbox`; if registration is temporarily
   unavailable, the monitor records operational health and falls back to its
   bounded local interval
-- the supervised `TaskMonitorTask` includes cached operational diagnostics in
+- the supervised `TaskMonitor` includes cached operational diagnostics in
   PONG extension data under `extended.task_monitor`: configuration, heartbeat
   registration state, scheduling state, and the previous cycle summary. For
   built-in cleanup processors, the summary includes cached queue-level cleanup
@@ -327,7 +330,7 @@ Current rules:
   operational cursors only; deleting or corrupting them may affect duplicate
   log output, but it must not change task lifecycle truth, public status,
   result materialization, or cleanup decisions
-- the supervised `TaskMonitorTask` may maintain Monitor-owned durable collation
+- the supervised `TaskMonitor` may maintain Monitor-owned durable collation
   tables: `weft_monitor_meta`, `weft_monitor_task_collations`, and
   `weft_monitor_task_messages`. These tables are operational read models
   derived from retained `weft.log.tasks` rows. They are not queues, are not
@@ -346,7 +349,7 @@ Current rules:
   `jsonl_then_delete` processor remains fail-closed until the operational
   logging callback lands.
 - when enabled, the canonical manager supervises one internal
-  `TaskMonitorTask`. The supervised monitor reads task-log lifecycle evidence by
+  `TaskMonitor`. The supervised monitor reads task-log lifecycle evidence by
   generator/high-water cursor for observation and custom processors. Custom
   processors run from the resulting candidate snapshot in a broker-free worker
   lane; the TaskMonitor reactor commits the processor result, checkpoint, and
@@ -812,6 +815,13 @@ _Implementation mapping_: `weft/core/tasks/base.py` `_spill_large_output`,
 Current cleanup is task-owned unless an operator explicitly invokes foreground
 system pruning:
 
+- task-owned cleanup clears standard task-local `T{tid}.ctrl_in` and
+  `T{tid}.ctrl_out` runtime queues whenever the task unwinds through
+  `cleanup()`, including success, failure, timeout, STOP, and KILL paths. Those
+  queues are runtime control channels, not retained result surfaces. `T{tid}.outbox`
+  remains outside this cleanup and is retained until result policy consumes it.
+  Residual standard control queues after a terminal task imply forced process
+  death before cleanup, cleanup failure, or pre-existing stale state.
 - task-owned cleanup may remove spilled output when `cleanup_on_exit` is enabled
 - there is no built-in age-based output sweeper in the current contract
 - the supervised task monitor exists in the current contract. Its default
@@ -827,14 +837,22 @@ system pruning:
   pass. Rows with non-terminal events such as
   `task_activity` do not close lifecycle groups solely because they carry a
   terminal-looking status. Terminal disposition may clear standard task-local
-  `ctrl_in` and `ctrl_out` runtime queues; the same supervised runtime-cleanup
-  pass may clear eligible stale standard `reserved` queues. It must not clear
-  task-local inbox or outbox queues.
+  residual `ctrl_in` and `ctrl_out` runtime queues left by forced process death,
+  cleanup failure, or older releases; the same supervised runtime-cleanup pass
+  may clear eligible stale standard `reserved` queues. It must not clear
+  task-local inbox or outbox queues. Retained non-interactive command stream
+  frames, including stderr diagnostics, live in outbox rather than cleanup-owned
+  `ctrl_out`.
   `WEFT_TASK_MONITOR_BATCH_SIZE` caps retained task-log rows or cleanup
   candidates per cycle; it is not the task-log scan depth. Reserved rows remain
   protected recovery-sensitive evidence by default. Per-cycle collation
   summaries are operational TaskMonitor evidence only, not durable archive
-  records. Each cleanup cycle records cached policy/store stats so PONG can
+  records. The supervised monitor may also derive dead-task cleanup candidates
+  by listing standard task-local queue names, parsing `T{tid}.*` identities,
+  and subtracting live runtime TIDs. That dead-task cleanup path may delete only
+  standard stale `T{tid}.ctrl_in` and `T{tid}.ctrl_out` queues; it must not
+  delete task-local inbox, outbox, reserved, manager, service, or custom control
+  queues. Each cleanup cycle records cached policy/store stats so PONG can
   distinguish "ran and selected zero" from "did not run". The monitor must not
   delete active work,
   ambiguous task-local evidence, claimed outbox residue, user payload rows,
@@ -870,7 +888,8 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
 Current rules:
 
 - queue creation is implicit on first write
-- task cleanup closes task-owned handles
+- task cleanup closes task-owned handles and clears standard task-local
+  `T{tid}.ctrl_in` / `T{tid}.ctrl_out` rows before closing those handles
 - `weft.state.services`, `weft.state.tid_mappings`, `weft.state.streaming`,
   `weft.state.endpoints`, and `weft.state.pipelines` are runtime-only
   bookkeeping queues; they may be read for live reconciliation but are not
@@ -890,7 +909,7 @@ Current rules:
   claimed outbox residue, malformed/unknown-shape rows, and inbox/reserved work
   unless the class is safe for ordinary deletion. `--force --apply` is the
   explicit human override for those ordinary protections.
-- the manager-supervised `TaskMonitorTask` reports and deletes through the
+- the manager-supervised `TaskMonitor` reports and deletes through the
   TaskMonitor-owned cleanup runner in `weft/core/monitor/cleanup.py` for
   runtime-state queues and legacy/foreground policy surfaces. Retained
   `weft.log.tasks` cleanup is orchestrated by
@@ -899,7 +918,9 @@ Current rules:
   policy runner. All destructive paths still use the canonical exact-delete
   helper shared with foreground `weft system prune`. The supervised monitor
   must not apply archive side effects, force-only retention cleanup, or
-  task-local retention cleanup in this slice. Task-log cleanup and external
+  task-local retention cleanup in this slice. Normal task exit owns standard
+  control-queue cleanup; the monitor-owned runtime pass is a backstop for
+  forced exits, cleanup failures, and stale pre-change rows. Task-log cleanup and external
   retention output use one public minimum-age clock:
   `WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS`, defaulting to 172800 seconds.
   `WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT` remains the per-cycle task-log scan
@@ -955,6 +976,7 @@ management live in the companion doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-05-22-monitor-policy-modules-and-dead-task-cleanup-plan.md`](../plans/2026-05-22-monitor-policy-modules-and-dead-task-cleanup-plan.md)
 - [`docs/plans/2026-05-20-monitor-collation-table-retirement-plan.md`](../plans/2026-05-20-monitor-collation-table-retirement-plan.md)
 - [`docs/plans/2026-05-20-simplebroker-api-adoption-plan.md`](../plans/2026-05-20-simplebroker-api-adoption-plan.md)
 - [`docs/plans/2026-05-20-monitor-reactor-worker-refactor-plan.md`](../plans/2026-05-20-monitor-reactor-worker-refactor-plan.md)

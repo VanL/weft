@@ -165,6 +165,7 @@ from .tasks.base import (
     TaskWorkerResult,
 )
 from .tasks.multiqueue_watcher import QueueMode, QueueRuntimeConfig
+from .tasks.service import ServiceTask
 from .taskspec import (
     ReservedPolicy,
     TaskSpec,
@@ -266,7 +267,7 @@ class _ServicePendingPongProbe:
     deadline_ns: int
 
 
-class Manager(BaseTask):
+class Manager(ServiceTask):
     """Task that listens for spawn requests and runs child tasks.
 
     Spec: [MA-0], [MA-1], [MF-6], [MF-7]
@@ -379,12 +380,7 @@ class Manager(BaseTask):
         self._register_manager()
         if self._maybe_yield_leadership(force=True):
             return
-        self.taskspec.mark_started(pid=multiprocessing.current_process().pid)
-        self._update_process_title("spawning")
-        self._report_state_change(event="task_spawning")
-        self.taskspec.mark_running(pid=multiprocessing.current_process().pid)
-        self._update_process_title("running")
-        self._report_state_change(event="task_started")
+        self._activate_service_task(set_spawning_title=True)
         self._emit_manager_loop_summary(force=True)
         self._reconcile_managed_services(force=True)
         self._managed_service_duplicate_scan_pending.clear()
@@ -1233,9 +1229,9 @@ class Manager(BaseTask):
 
             return HeartbeatTask
         if runtime_class == INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR:
-            from .monitor.task_monitor import TaskMonitorTask
+            from .monitor.task_monitor import TaskMonitor
 
-            return TaskMonitorTask
+            return TaskMonitor
         raise ValueError(f"unknown internal runtime task class '{runtime_class}'")
 
     # ------------------------------------------------------------------
@@ -5672,24 +5668,6 @@ class Manager(BaseTask):
         self._terminate_children()
         self._unregister_manager()
         super().cleanup()
-
-    @staticmethod
-    def _timeout_until_ns(due_ns: int, *, now_ns: int) -> float:
-        """Return seconds until a nanosecond deadline."""
-
-        return max(0.0, (due_ns - now_ns) / 1_000_000_000)
-
-    def _interval_timeout(
-        self,
-        last_ns: int,
-        interval_seconds: float,
-        *,
-        now_ns: int,
-    ) -> float:
-        if last_ns <= 0:
-            return 0.0
-        interval_ns = int(interval_seconds * 1_000_000_000)
-        return self._timeout_until_ns(last_ns + interval_ns, now_ns=now_ns)
 
     def next_wait_timeout(self) -> float | None:
         """Return the next manager due timer for the shared task loop."""

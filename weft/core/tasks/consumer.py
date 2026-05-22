@@ -472,6 +472,8 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             if work_result.outcome is None:
                 raise RuntimeError("Consumer worker produced no outcome")
 
+            if work_result.live_command_streaming:
+                self._drain_worker_results()
             committed_value = self._commit_work_outcome(
                 work_result.outcome,
                 work_result.timestamp,
@@ -533,9 +535,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         if stream == "stdout":
             if event.final:
                 envelope["result_transform"] = "strip"
-            self._queue(self._queue_names["outbox"]).write(json.dumps(envelope))
-            return
-        self._ctrl_out_queue.write(json.dumps(envelope))
+        self._queue(self._queue_names["outbox"]).write(json.dumps(envelope))
 
     def _uses_live_command_streaming(self) -> bool:
         return bool(

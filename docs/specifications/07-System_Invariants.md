@@ -156,7 +156,7 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
 - **OBS.13**: task monitor log files, task monitor checkpoints,
   runtime-prune reports, and retention-prune reports/archives are operational
   outputs only. They must not become task lifecycle truth, status authority,
-  or result authority. The manager-supervised `TaskMonitorTask` is also
+  or result authority. The manager-supervised `TaskMonitor` is also
   operational: its lifecycle classifications, cleanup-candidate
   classifications, processor results, durable Monitor collation tables, and
   checkpoints do not change public lifecycle reconstruction. The Monitor-owned
@@ -189,13 +189,15 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
   Monitor table ingestion happens before raw `weft.log.tasks` deletion, and
   external summary failure blocks family disposition retry rather than
   resurrecting already ingested raw rows. Family disposition is explicit
-  retryable table state and is separate from summary emission. Terminal
-  disposition may remove whole standard task-local `T{tid}.ctrl_in` and
-  `T{tid}.ctrl_out` runtime
-  queues, including visible and claimed rows, after required summary emission
-  succeeds. The selection is bounded by Monitor-store readiness and the delete
-  uses public SimpleBroker queue APIs from a dedicated TaskMonitor
-  terminal-control-cleanup worker; it must not use private queue-table SQL.
+  retryable table state and is separate from summary emission. Normal task
+  cleanup clears standard task-local `T{tid}.ctrl_in` and `T{tid}.ctrl_out`
+  runtime queues before the process exits. Terminal disposition may remove
+  residual whole standard task-local control queues, including visible and
+  claimed rows, after required summary emission succeeds when those queues were
+  left by forced process death, cleanup failure, or older releases. The
+  selection is bounded by Monitor-store readiness and the delete uses public
+  SimpleBroker queue APIs from a dedicated TaskMonitor terminal-control-cleanup
+  worker; it must not use private queue-table SQL.
   Built-in task-log cleanup and runtime cleanup are the only TaskMonitor worker
   lanes allowed to own broker/store cleanup effects. The reactor must continue
   servicing task-local control while either lane is in flight. Runtime cleanup
@@ -263,20 +265,23 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
   Weft broker effects. Queue reservation, ordinary queue writes/deletes,
   reserved-policy application, lifecycle state/log publication, endpoint state,
   and task-local control responses are committed from the owning reactor thread,
-  not from task worker lanes. The declared exception is the manager-supervised
+  not from task worker lanes. `BaseTask._submit_worker_lane(...)` is only the
+  mechanical thread/result channel; it does not grant broker/store authority to
+  ordinary workers. The declared exception is the manager-supervised
   TaskMonitor's bounded maintenance lanes, which may open fresh broker/store
   handles for Monitor-owned cleanup work and return cached results to the
   reactor.
 - **IMPL.9**: task worker lanes are broker-free Weft runtime paths. They may
   run blocking target work, child process launch, or custom processor callables
-  and return local Python results, but Weft must not rely on worker-thread
-  SimpleBroker reads/writes or direct TaskSpec mutation for runtime correctness.
-  The local worker-result channel is bounded, and the reactor drains it in
-  bounded batches so worker progress applies backpressure instead of growing
-  memory or starving queue/control turns. User-supplied Python code may still
-  open its own broker connection; that is outside the Weft-owned worker-lane
-  contract. The TaskMonitor built-in cycle and runtime-cleanup lanes are the
-  only Weft-owned broker/store worker exceptions.
+  through the `_submit_worker_call(...)` broker-free wrapper and return local
+  Python results, but Weft must not rely on worker-thread SimpleBroker
+  reads/writes or direct TaskSpec mutation for runtime correctness. The local
+  worker-result channel is bounded, and the reactor drains it in bounded
+  batches so worker progress applies backpressure instead of growing memory or
+  starving queue/control turns. User-supplied Python code may still open its own
+  broker connection; that is outside the Weft-owned worker-lane contract. The
+  TaskMonitor built-in cycle and runtime-cleanup lanes are the only Weft-owned
+  broker/store worker exceptions.
 
 ### Manager Invariants
 
@@ -434,10 +439,10 @@ Current invariant visibility comes from:
 - process titles
 - CLI status/result/task inspection
 - foreground `weft system task-monitor` log scans
-- manager-supervised `TaskMonitorTask` health via task-local `PING`/`STATUS`
+- manager-supervised `TaskMonitor` health via task-local `PING`/`STATUS`
 - the test suite
 
-There is now a manager-supervised `TaskMonitorTask` in addition to the
+There is now a manager-supervised `TaskMonitor` in addition to the
 foreground `weft system task-monitor` command. In the current contract it is
 operational only. The default processor is `delete`, which may delete exact
 rows selected by supported cleanup paths. Retained task-log cleanup is
@@ -468,6 +473,11 @@ Monitor row exists and the TID is older than the task-log retention period with
 no active runtime-owner evidence. Reserved deletion must use public
 SimpleBroker queue APIs and must remain bounded by the same runtime cleanup
 limit and internal fair-slice safeguards as task-local control queue cleanup.
+The same runtime cleanup pass may identify dead tasks from standard
+`T{tid}.*` queue names minus live runtime TIDs and delete only stale standard
+`ctrl_in`/`ctrl_out` queues for those dead TIDs. That name-derived cleanup must
+not delete task inbox, outbox, reserved, manager/service controls, custom
+controls, or active runtime owners.
 Collation summaries, cleanup policy stats, and Monitor-owned collation tables
 remain operational TaskMonitor output only. Those deletes, summaries, and
 tables do not make task-monitor output lifecycle truth or result authority.
@@ -498,6 +508,7 @@ doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-05-20-service-task-shared-reactor-extraction-plan.md`](../plans/2026-05-20-service-task-shared-reactor-extraction-plan.md)
 - [`docs/plans/2026-05-20-monitor-collation-table-retirement-plan.md`](../plans/2026-05-20-monitor-collation-table-retirement-plan.md)
 - [`docs/plans/2026-05-20-monitor-reactor-worker-refactor-plan.md`](../plans/2026-05-20-monitor-reactor-worker-refactor-plan.md)
 - [`docs/plans/2026-05-20-monitor-fair-cleanup-scheduling-plan.md`](../plans/2026-05-20-monitor-fair-cleanup-scheduling-plan.md)

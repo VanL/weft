@@ -1,9 +1,10 @@
 # Manager Architecture: The Recursive Model
 
 This document describes how Weft realizes the “managers are tasks” concept. A
-Manager is implemented as a long-running `BaseTask` that consumes spawn requests
-from SimpleBroker queues, launches child tasks, and reports lifecycle events.
-The CLI component that submits work is referred to as the **Client**.
+Manager is implemented as a long-running `ServiceTask` over `BaseTask` that
+consumes spawn requests from SimpleBroker queues, launches child tasks, and
+reports lifecycle events. The CLI component that submits work is referred to as
+the **Client**.
 
 **Terminology**
 - **Task**: Any executable unit described by a TaskSpec.
@@ -61,12 +62,13 @@ always be rolled back from the public request queue.
 - [Manager Reactor Hot-Loop Follow-Up Plan](../plans/2026-05-15-manager-reactor-hot-loop-follow-up-plan.md) – completed follow-up to remove remaining manager proof churn after the reactor migration by caching process-stable context, reordering leadership proof, gating idle probes, and bounding service pending evidence.
 - [Internal State Machine Helper Plan](../plans/2026-05-13-internal-state-machine-helper-plan.md) – draft plan for a reusable pure reducer helper that can express manager-service and other transition tables without moving side effects out of their current owners.
 - [Internal Service Observability Plan](../plans/2026-05-11-internal-service-observability-plan.md) – adds an ops read model that reports heartbeat and TaskMonitor state from manager launch evidence, child task logs, TID mappings, and internal spawn queues.
+- [Service Task Shared Reactor Extraction Plan](../plans/2026-05-20-service-task-shared-reactor-extraction-plan.md) – extracts shared long-lived service helpers for Manager, TaskMonitor, and Heartbeat while keeping Manager scheduling and dispatch authority local.
 
 ## Conceptual Model: Everything is a Task [MA-0]
 
-- **No special cases** – Managers inherit from `BaseTask`, so they use the same
-  queue wiring, process-title formatting, and control semantics as regular
-  tasks.
+- **No special cases** – Managers inherit from `ServiceTask`, which inherits
+  from `BaseTask`, so they use the same queue wiring, process-title formatting,
+  and control semantics as regular tasks.
 - **Uniform observability** – Managers publish manager service-owner rows in
   `weft.state.services`, participate in the task log, and respond on the
   control channel (`STOP`, `PING`, `STATUS`).
@@ -74,7 +76,8 @@ always be rolled back from the public request queue.
   same SimpleBroker database they are monitoring.
 
 _Implementation mapping_:
-- `weft/core/manager.py` — `Manager(BaseTask)` inherits queue wiring and control semantics.
+- `weft/core/manager.py` — `Manager(ServiceTask)` inherits long-lived service activation, queue wiring, and control semantics.
+- `weft/core/tasks/service.py` — `ServiceTask` provides shared long-lived service helpers without owning manager dispatch, leadership, or service-convergence policy.
 - `weft/core/tasks/base.py` — `BaseTask` provides queue wiring, process-title formatting (`_update_process_title`), control message handling (`_handle_control_message`, `_handle_control_command`), and state reporting (`_report_state_change`).
 
 ## Manager Behaviour [MA-1]
@@ -207,13 +210,13 @@ Key responsibilities implemented in `weft/core/manager.py`:
    by `weft run --pipeline` before the manager enqueues the compiled top-level
    pipeline task on the spawn queue.
 7. **Managed services** – The manager reconciles autostarts, heartbeat, and
-   `TaskMonitorTask` through one deterministic manager-owned service path. The
+   `TaskMonitor` through one deterministic manager-owned service path. The
    live public managers may supervise built-in internal singleton services;
    correctness is enforced by manager-owned metadata and the singleton reducer,
    not by a global dispatch-owner fence. Scoped managers may still reconcile
    their own autostart manifests. The built-in heartbeat service is desired
    only when an enabled internal dependent needs it. The internal
-   `TaskMonitorTask` is an `ensure` service when `WEFT_TASK_MONITOR_ENABLED` is
+   `TaskMonitor` is an `ensure` service when `WEFT_TASK_MONITOR_ENABLED` is
    true. Draining or stopped managers do not start or restart singleton
    services. Live service ownership can be proved by a tracked child, a live
    runtime handle, including the task-process host handle published in TID

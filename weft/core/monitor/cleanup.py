@@ -11,31 +11,16 @@ Spec references:
 
 from __future__ import annotations
 
-import json
 import time
 from collections import Counter
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from simplebroker.ext import BrokerError
 from weft._constants import (
-    QUEUE_RESERVED_SUFFIX,
-    STATUS_COMPLETED,
-    TASK_LOG_START_EVENTS,
-    TASK_MONITOR_POLICY_RESERVED_DELETE_TERMINAL_PROVEN,
-    TASK_MONITOR_POLICY_TASK_LOG_COLLATE_COMPLETE_LIFECYCLE,
-    TASK_MONITOR_POLICY_TASK_LOG_COLLATE_TERMINAL_WITHOUT_START,
-    TASK_MONITOR_POLICY_TASK_LOG_DELETE_CLAIMED,
-    TASK_MONITOR_POLICY_TASK_LOG_DELETE_MALFORMED,
-    TASK_MONITOR_POLICY_TASK_LOG_DELETE_OLD_WITHOUT_START,
-    TASK_MONITOR_POLICY_TID_MAPPING_DELETE_MALFORMED,
-    TASK_MONITOR_POLICY_TID_MAPPING_DELETE_OLDER_THAN,
-    TASK_MONITOR_PONG_DETAIL_LIMIT,
     TASK_MONITOR_TASK_LOG_CLEANUP_SKIPPED_OWNER,
-    TASK_MONITOR_TASK_LOG_SELECTION_LIMIT_REACHED,
     TASK_MONITOR_TID_MAPPING_CLEANUP_MIN_AGE_SECONDS,
-    TERMINAL_TASK_EVENTS,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS_DEFAULT,
     WEFT_TASK_MONITOR_BATCH_SIZE_DEFAULT,
@@ -43,16 +28,19 @@ from weft._constants import (
     WEFT_TID_MAPPINGS_QUEUE,
 )
 from weft.context import WeftContext
-from weft.core.monitor.task_log_collation import (
-    CollatedMessageGroup,
-    is_terminal_task_log,
+from weft.core.monitor.policies.task_log import (
+    peek_rows_including_claimed as _peek_rows_including_claimed,
+)
+from weft.core.monitor.policies.task_log import (
+    task_log_candidates,
+)
+from weft.core.monitor.policies.tid_mapping import (
+    decode_tid_mapping_row,
+    tid_mapping_candidates,
 )
 from weft.core.monitor.task_log_scanner import (
     GeneratorTaskLogScanner,
-    TaskLogFamilySelection,
     TaskLogScanBackend,
-    TaskLogScanWindow,
-    select_task_log_family_groups,
 )
 from weft.core.pruning.apply import apply_exact_prune_candidates
 from weft.core.pruning.models import (
@@ -61,19 +49,9 @@ from weft.core.pruning.models import (
     CleanupPolicyStats,
     CleanupQueueStats,
     applied_cleanup_candidate,
-    cleanup_candidate_from_row,
-    cleanup_policy_stats,
-    cleanup_queue_stats,
 )
-from weft.core.pruning.policies import (
-    malformed_row_candidates,
-    older_than_candidates,
-)
-from weft.core.pruning.policies.older_than import OlderThanSelection
 from weft.core.queue_window import (
-    DecodedQueueWindowRow,
     QueueWindowRow,
-    payload_string,
     scan_queue_window,
 )
 
@@ -145,17 +123,6 @@ class TaskMonitorCleanupResult:
         return tuple(stat.to_summary() for stat in self.policy_stats)
 
 
-@dataclass(frozen=True, slots=True)
-class _CleanupPolicyRun:
-    """Internal result for one ordered cleanup-policy run."""
-
-    candidates: tuple[CleanupCandidate, ...] = ()
-    applied_candidates: tuple[AppliedCleanupCandidate, ...] = ()
-    queue_stats: tuple[CleanupQueueStats, ...] = ()
-    policy_stats: tuple[CleanupPolicyStats, ...] = ()
-    errors: tuple[str, ...] = ()
-
-
 def run_task_monitor_cleanup(
     ctx: WeftContext,
     config: TaskMonitorCleanupConfig,
@@ -207,13 +174,21 @@ def run_task_monitor_cleanup(
                     queue_name,
                     scan_limit=config.task_log_scan_limit,
                 )
-                policy_run = _task_log_candidates(
+                policy_run = task_log_candidates(
                     ctx,
                     task_log_window,
-                    config=config,
+                    batch_size=config.batch_size,
+                    min_age_seconds=config.task_log_min_age_seconds,
+                    reserved_cleanup_enabled=config.reserved_cleanup_enabled,
                     now_ns=current_ns,
                     exclude_tids=excluded,
-                    apply=apply,
+                    apply_candidates=lambda selected: _apply_policy_candidates(
+                        ctx,
+                        selected,
+                        apply=apply,
+                    ),
+                    peek_rows_including_claimed_fn=_peek_rows_including_claimed,
+                    scan_queue_window_fn=scan_queue_window,
                 )
                 selected = list(policy_run.candidates)
                 applied.extend(policy_run.applied_candidates)
@@ -271,12 +246,12 @@ def _select_queue_candidates(
     tuple[CleanupQueueStats, ...],
     tuple[CleanupPolicyStats, ...],
 ]:
-    decoded = tuple(_decode_row(row, queue_name=queue_name) for row in rows)
     if queue_name == WEFT_TID_MAPPINGS_QUEUE:
-        candidates, queue_stats, policy_stats = _tid_mapping_candidates(
+        decoded = tuple(decode_tid_mapping_row(row) for row in rows)
+        candidates, queue_stats, policy_stats = tid_mapping_candidates(
             decoded,
-            config=config,
             now_ns=now_ns,
+            min_age_seconds=config.tid_mapping_min_age_seconds,
             exclude_tids=exclude_tids,
         )
         return candidates, (queue_stats,), policy_stats
@@ -311,576 +286,6 @@ def _apply_policy_candidates(
             apply_result=applied_cleanup_candidate,
         )
     )
-
-
-def _decode_row(row: QueueWindowRow, *, queue_name: str) -> DecodedQueueWindowRow:
-    try:
-        payload = json.loads(row.body)
-    except json.JSONDecodeError:
-        return DecodedQueueWindowRow(
-            raw=row,
-            payload=None,
-            malformed_reason="invalid_json",
-        )
-    if not isinstance(payload, dict):
-        return DecodedQueueWindowRow(
-            raw=row,
-            payload=None,
-            malformed_reason="json_not_object",
-        )
-    if queue_name == WEFT_TID_MAPPINGS_QUEUE:
-        if not _valid_tid_mapping_payload(payload):
-            return DecodedQueueWindowRow(
-                raw=row,
-                payload=payload,
-                malformed_reason="invalid_tid_mapping_shape",
-            )
-    return DecodedQueueWindowRow(raw=row, payload=payload)
-
-
-def _valid_tid_mapping_payload(payload: Mapping[str, Any]) -> bool:
-    full = payload.get("full")
-    short = payload.get("short")
-    return (
-        isinstance(full, str) and bool(full) and isinstance(short, str) and bool(short)
-    )
-
-
-def _tid_mapping_candidates(
-    rows: Sequence[DecodedQueueWindowRow],
-    *,
-    config: TaskMonitorCleanupConfig,
-    now_ns: int,
-    exclude_tids: set[str],
-) -> tuple[list[CleanupCandidate], CleanupQueueStats, tuple[CleanupPolicyStats, ...]]:
-    malformed_candidates = malformed_row_candidates(
-        rows,
-        policy=TASK_MONITOR_POLICY_TID_MAPPING_DELETE_MALFORMED,
-        candidate_class="malformed_tid_mapping",
-    )
-    candidates = list(malformed_candidates)
-    claimed = {candidate.message_id for candidate in candidates}
-    old_rows = older_than_candidates(
-        rows,
-        policy=TASK_MONITOR_POLICY_TID_MAPPING_DELETE_OLDER_THAN,
-        now_ns=now_ns,
-        min_age_seconds=config.tid_mapping_min_age_seconds,
-        candidate_class="old_tid_mapping",
-        reason="older_than_tid_mapping_cleanup_min_age",
-        stop_reason="first_tid_mapping_too_young",
-        claimed_ids=claimed,
-        exclude_tids=exclude_tids,
-        tid_from_row=lambda payload, _row: payload_string(payload, "full"),
-    )
-    candidates.extend(old_rows.candidates)
-    queue_stats = cleanup_queue_stats(
-        WEFT_TID_MAPPINGS_QUEUE,
-        scanned=len(rows),
-        candidates=candidates,
-        stop_reason=old_rows.stop_reason,
-    )
-    policy_stats = (
-        cleanup_policy_stats(
-            WEFT_TID_MAPPINGS_QUEUE,
-            policy=TASK_MONITOR_POLICY_TID_MAPPING_DELETE_MALFORMED,
-            scanned=len(rows),
-            candidates=malformed_candidates,
-            stop_reason=None,
-        ),
-        cleanup_policy_stats(
-            WEFT_TID_MAPPINGS_QUEUE,
-            policy=TASK_MONITOR_POLICY_TID_MAPPING_DELETE_OLDER_THAN,
-            scanned=len(rows),
-            candidates=old_rows.candidates,
-            stop_reason=old_rows.stop_reason,
-        ),
-    )
-    return candidates, queue_stats, policy_stats
-
-
-def _task_log_candidates(
-    ctx: WeftContext,
-    scan_window: TaskLogScanWindow,
-    *,
-    config: TaskMonitorCleanupConfig,
-    now_ns: int,
-    exclude_tids: set[str],
-    apply: bool,
-) -> _CleanupPolicyRun:
-    rows = scan_window.rows
-    applied: list[AppliedCleanupCandidate] = []
-    policy_stats: list[CleanupPolicyStats] = []
-    remaining = config.batch_size
-    malformed_candidates = _select_malformed_task_log_candidates(
-        rows,
-        limit=remaining,
-    )
-    candidates = list(malformed_candidates)
-    applied.extend(_apply_policy_candidates(ctx, malformed_candidates, apply=apply))
-    claimed = {candidate.message_id for candidate in candidates}
-    remaining = max(0, config.batch_size - len(candidates))
-    policy_stats.append(
-        cleanup_policy_stats(
-            WEFT_GLOBAL_LOG_QUEUE,
-            policy=TASK_MONITOR_POLICY_TASK_LOG_DELETE_MALFORMED,
-            scanned=scan_window.scanned,
-            candidates=malformed_candidates,
-            stop_reason=None,
-        )
-    )
-    claimed_total = (
-        _queue_claimed_count(ctx, WEFT_GLOBAL_LOG_QUEUE) if remaining > 0 else 0
-    )
-    if claimed_total > 0:
-        claimed_rows = _scan_claimed_task_log_rows(
-            ctx,
-            WEFT_GLOBAL_LOG_QUEUE,
-            limit=remaining,
-        )
-        claimed_task_log_candidates = _select_claimed_task_log_candidates(
-            claimed_rows,
-            limit=remaining,
-        )
-    else:
-        claimed_rows = ()
-        claimed_task_log_candidates = []
-    candidates.extend(claimed_task_log_candidates)
-    applied.extend(
-        _apply_policy_candidates(ctx, claimed_task_log_candidates, apply=apply)
-    )
-    claimed.update(candidate.message_id for candidate in claimed_task_log_candidates)
-    remaining = max(0, config.batch_size - len(candidates))
-    claimed_stop_reason = (
-        TASK_MONITOR_TASK_LOG_SELECTION_LIMIT_REACHED
-        if claimed_total > len(claimed_task_log_candidates)
-        else None
-    )
-    policy_stats.append(
-        cleanup_policy_stats(
-            WEFT_GLOBAL_LOG_QUEUE,
-            policy=TASK_MONITOR_POLICY_TASK_LOG_DELETE_CLAIMED,
-            scanned=len(claimed_rows),
-            candidates=claimed_task_log_candidates,
-            stop_reason=claimed_stop_reason,
-        )
-    )
-
-    family_selection = select_task_log_family_groups(
-        rows,
-        now_ns=now_ns,
-        min_age_seconds=config.task_log_min_age_seconds,
-        exclude_tids=exclude_tids,
-        claimed_ids=claimed,
-        selection_limit=remaining,
-    )
-    complete_lifecycle_summaries = family_selection.complete_lifecycle_groups
-    terminal_without_start_summaries = family_selection.terminal_without_start_groups
-    complete_lifecycle_candidates = [
-        candidate
-        for group in complete_lifecycle_summaries
-        for candidate in _task_log_candidates_from_collated_group(group)
-    ]
-    candidates.extend(complete_lifecycle_candidates)
-    applied.extend(
-        _apply_policy_candidates(ctx, complete_lifecycle_candidates, apply=apply)
-    )
-    claimed.update(candidate.message_id for candidate in complete_lifecycle_candidates)
-    remaining = max(0, config.batch_size - len(candidates))
-    policy_stats.append(
-        cleanup_policy_stats(
-            WEFT_GLOBAL_LOG_QUEUE,
-            policy=TASK_MONITOR_POLICY_TASK_LOG_COLLATE_COMPLETE_LIFECYCLE,
-            scanned=scan_window.scanned,
-            candidates=complete_lifecycle_candidates,
-            stop_reason=family_selection.stop_reason,
-        )
-    )
-
-    terminal_without_start_candidates = [
-        candidate
-        for group in terminal_without_start_summaries
-        for candidate in _task_log_candidates_from_collated_group(group)
-    ]
-    candidates.extend(terminal_without_start_candidates)
-    applied.extend(
-        _apply_policy_candidates(ctx, terminal_without_start_candidates, apply=apply)
-    )
-    claimed.update(
-        candidate.message_id for candidate in terminal_without_start_candidates
-    )
-    remaining = max(0, config.batch_size - len(candidates))
-    policy_stats.append(
-        cleanup_policy_stats(
-            WEFT_GLOBAL_LOG_QUEUE,
-            policy=TASK_MONITOR_POLICY_TASK_LOG_COLLATE_TERMINAL_WITHOUT_START,
-            scanned=scan_window.scanned,
-            candidates=terminal_without_start_candidates,
-            stop_reason=None,
-        )
-    )
-
-    old_rows = _select_old_unstarted_task_log_candidates(
-        rows,
-        now_ns=now_ns,
-        min_age_seconds=config.task_log_min_age_seconds,
-        claimed_ids=claimed,
-        exclude_tids=exclude_tids,
-    )
-    old_task_log_candidates = tuple(old_rows.candidates[:remaining])
-    old_stop_reason = old_rows.stop_reason
-    if len(old_rows.candidates) > len(old_task_log_candidates):
-        old_stop_reason = TASK_MONITOR_TASK_LOG_SELECTION_LIMIT_REACHED
-    candidates.extend(old_task_log_candidates)
-    applied.extend(_apply_policy_candidates(ctx, old_task_log_candidates, apply=apply))
-    remaining = max(0, config.batch_size - len(candidates))
-    policy_stats.append(
-        cleanup_policy_stats(
-            WEFT_GLOBAL_LOG_QUEUE,
-            policy=TASK_MONITOR_POLICY_TASK_LOG_DELETE_OLD_WITHOUT_START,
-            scanned=scan_window.scanned,
-            candidates=old_task_log_candidates,
-            stop_reason=old_stop_reason,
-        )
-    )
-    stop_reason = (
-        claimed_stop_reason
-        or family_selection.stop_reason
-        or old_stop_reason
-        or scan_window.stop_reason
-    )
-    collated_summaries = (
-        *complete_lifecycle_summaries,
-        *terminal_without_start_summaries,
-    )
-    reserved_errors: tuple[str, ...] = ()
-    if config.reserved_cleanup_enabled and remaining > 0:
-        try:
-            reserved_candidates, reserved_stats, reserved_policy_stats = (
-                _terminal_reserved_candidates(
-                    ctx,
-                    collated_summaries,
-                    config=config,
-                    now_ns=now_ns,
-                    selection_limit=remaining,
-                )
-            )
-        except (BrokerError, OSError, RuntimeError, ValueError) as exc:
-            reserved_candidates = []
-            reserved_stats = ()
-            reserved_policy_stats = ()
-            reserved_errors = (f"failed to scan terminal reserved queues: {exc}",)
-    else:
-        reserved_candidates = []
-        reserved_stats = ()
-        reserved_policy_stats = ()
-    candidates.extend(reserved_candidates)
-    applied.extend(_apply_policy_candidates(ctx, reserved_candidates, apply=apply))
-    task_log_candidates = [
-        candidate
-        for candidate in candidates
-        if candidate.queue == WEFT_GLOBAL_LOG_QUEUE
-    ]
-    task_log_stats = cleanup_queue_stats(
-        WEFT_GLOBAL_LOG_QUEUE,
-        scanned=scan_window.scanned + len(claimed_rows),
-        candidates=task_log_candidates,
-        stop_reason=stop_reason,
-        collated_tasks=tuple(collated_summaries),
-        metadata=_task_log_scan_metadata(scan_window, family_selection),
-    )
-    return _CleanupPolicyRun(
-        candidates=tuple(candidates),
-        applied_candidates=tuple(applied),
-        queue_stats=(task_log_stats, *reserved_stats),
-        policy_stats=(*policy_stats, *reserved_policy_stats),
-        errors=reserved_errors,
-    )
-
-
-def _select_malformed_task_log_candidates(
-    rows: Sequence[DecodedQueueWindowRow],
-    *,
-    limit: int,
-) -> list[CleanupCandidate]:
-    return malformed_row_candidates(
-        rows,
-        policy=TASK_MONITOR_POLICY_TASK_LOG_DELETE_MALFORMED,
-        candidate_class="malformed_task_log",
-    )[:limit]
-
-
-def _queue_claimed_count(ctx: WeftContext, queue_name: str) -> int:
-    queue = ctx.queue(queue_name, persistent=False)
-    try:
-        return int(queue.stats().claimed)
-    finally:
-        queue.close()
-
-
-def _scan_claimed_task_log_rows(
-    ctx: WeftContext,
-    queue_name: str,
-    *,
-    limit: int,
-) -> tuple[QueueWindowRow, ...]:
-    if limit <= 0:
-        return ()
-    with ctx.broker() as broker:
-        all_rows = _peek_rows_including_claimed(
-            broker,
-            queue_name,
-            limit=limit + _queue_pending_count(ctx, queue_name),
-        )
-    pending_ids = {
-        row.message_id
-        for row in scan_queue_window(ctx, queue_name, limit=max(1, len(all_rows)))
-    }
-    claimed_rows = [row for row in all_rows if row.message_id not in pending_ids]
-    return tuple(claimed_rows[:limit])
-
-
-def _queue_pending_count(ctx: WeftContext, queue_name: str) -> int:
-    queue = ctx.queue(queue_name, persistent=False)
-    try:
-        return int(queue.stats().pending)
-    finally:
-        queue.close()
-
-
-def _peek_rows_including_claimed(
-    broker: Any,
-    queue_name: str,
-    *,
-    limit: int,
-) -> tuple[QueueWindowRow, ...]:
-    retrieve = getattr(broker, "_retrieve", None)
-    if not callable(retrieve):
-        raise RuntimeError("broker client cannot retrieve claimed rows")
-    raw_rows = retrieve(
-        queue_name,
-        operation="peek",
-        limit=max(1, limit),
-        require_unclaimed=False,
-    )
-    return tuple(
-        QueueWindowRow(
-            queue=queue_name,
-            body=body if isinstance(body, str) else str(body),
-            message_id=int(message_id),
-        )
-        for body, message_id in raw_rows
-    )
-
-
-def _select_claimed_task_log_candidates(
-    rows: Sequence[QueueWindowRow],
-    *,
-    limit: int,
-) -> list[CleanupCandidate]:
-    candidates: list[CleanupCandidate] = []
-    for row in rows[:limit]:
-        decoded = _decode_row(row, queue_name=WEFT_GLOBAL_LOG_QUEUE)
-        candidates.append(
-            cleanup_candidate_from_row(
-                row,
-                policy=TASK_MONITOR_POLICY_TASK_LOG_DELETE_CLAIMED,
-                candidate_class="claimed_task_log",
-                reason="claimed_task_log_row",
-                tid=decoded.tid,
-                payload=decoded.payload,
-            )
-        )
-    return candidates
-
-
-def _task_log_candidates_from_collated_group(
-    group: CollatedMessageGroup,
-) -> list[CleanupCandidate]:
-    candidate_class, reason = _collated_task_log_candidate_class(group)
-    policy = _collated_task_log_policy(group)
-    return [
-        cleanup_candidate_from_row(
-            row.raw,
-            policy=policy,
-            candidate_class=candidate_class,
-            reason=reason,
-            tid=group.tid,
-            payload=row.payload,
-        )
-        for row in group.message_rows
-    ]
-
-
-def _task_log_scan_metadata(
-    scan_window: TaskLogScanWindow,
-    family_selection: TaskLogFamilySelection,
-) -> dict[str, Any]:
-    return {
-        "scan": scan_window.to_summary(),
-        "family_selection": family_selection.to_summary(
-            skipped_open_family_limit=TASK_MONITOR_PONG_DETAIL_LIMIT,
-        ),
-    }
-
-
-def _select_old_unstarted_task_log_candidates(
-    rows: Sequence[DecodedQueueWindowRow],
-    *,
-    now_ns: int,
-    min_age_seconds: float,
-    claimed_ids: set[int],
-    exclude_tids: set[str],
-) -> OlderThanSelection:
-    protected_tids = _open_started_task_log_tids(
-        rows,
-        claimed_ids=claimed_ids,
-        exclude_tids=exclude_tids,
-    )
-    return older_than_candidates(
-        rows,
-        policy=TASK_MONITOR_POLICY_TASK_LOG_DELETE_OLD_WITHOUT_START,
-        now_ns=now_ns,
-        min_age_seconds=min_age_seconds,
-        candidate_class="old_task_log",
-        reason="older_than_task_log_cleanup_min_age",
-        stop_reason="first_task_log_too_young",
-        claimed_ids=claimed_ids,
-        exclude_tids=exclude_tids | protected_tids,
-    )
-
-
-def _terminal_reserved_candidates(
-    ctx: WeftContext,
-    groups: Sequence[CollatedMessageGroup],
-    *,
-    config: TaskMonitorCleanupConfig,
-    now_ns: int,
-    selection_limit: int,
-) -> tuple[
-    list[CleanupCandidate],
-    tuple[CleanupQueueStats, ...],
-    tuple[CleanupPolicyStats, ...],
-]:
-    if selection_limit <= 0:
-        return [], (), ()
-
-    candidates: list[CleanupCandidate] = []
-    stats: list[CleanupQueueStats] = []
-    policy_stats: list[CleanupPolicyStats] = []
-    probes_remaining = selection_limit
-    for group in groups:
-        if len(candidates) >= selection_limit or probes_remaining <= 0:
-            break
-        if _collated_group_is_successful_completion(group):
-            continue
-        probes_remaining -= 1
-        queue_name = f"T{group.tid}.{QUEUE_RESERVED_SUFFIX}"
-        remaining_candidates = max(0, selection_limit - len(candidates))
-        rows = scan_queue_window(ctx, queue_name, limit=remaining_candidates)
-        if not rows:
-            continue
-        decoded = tuple(_decode_reserved_row(row) for row in rows)
-
-        def reserved_tid(
-            _payload: Mapping[str, Any] | None,
-            _row: DecodedQueueWindowRow,
-            tid: str = group.tid,
-        ) -> str:
-            return tid
-
-        selected = older_than_candidates(
-            decoded,
-            policy=TASK_MONITOR_POLICY_RESERVED_DELETE_TERMINAL_PROVEN,
-            now_ns=now_ns,
-            min_age_seconds=config.task_log_min_age_seconds,
-            candidate_class="terminal_reserved_with_log",
-            reason="terminal_task_log_proof_for_reserved_tid",
-            stop_reason="first_reserved_row_too_young",
-            tid_from_row=reserved_tid,
-        )
-        selected_candidates = selected.candidates[:remaining_candidates]
-        candidates.extend(selected_candidates)
-        stats.append(
-            cleanup_queue_stats(
-                queue_name,
-                scanned=len(rows),
-                candidates=selected_candidates,
-                stop_reason=selected.stop_reason,
-            )
-        )
-        policy_stats.append(
-            cleanup_policy_stats(
-                queue_name,
-                policy=TASK_MONITOR_POLICY_RESERVED_DELETE_TERMINAL_PROVEN,
-                scanned=len(rows),
-                candidates=selected_candidates,
-                stop_reason=selected.stop_reason,
-            )
-        )
-    return candidates, tuple(stats), tuple(policy_stats)
-
-
-def _collated_group_is_successful_completion(group: CollatedMessageGroup) -> bool:
-    if group.terminal_status == STATUS_COMPLETED:
-        return True
-    if group.terminal_event is None:
-        return False
-    return TERMINAL_TASK_EVENTS.get(group.terminal_event) == STATUS_COMPLETED
-
-
-def _decode_reserved_row(row: QueueWindowRow) -> DecodedQueueWindowRow:
-    try:
-        payload = json.loads(row.body)
-    except json.JSONDecodeError:
-        return DecodedQueueWindowRow(raw=row, payload=None)
-    if not isinstance(payload, dict):
-        return DecodedQueueWindowRow(raw=row, payload=None)
-    return DecodedQueueWindowRow(raw=row, payload=payload)
-
-
-def _collated_task_log_candidate_class(
-    group: CollatedMessageGroup,
-) -> tuple[str, str]:
-    if _collated_group_has_visible_start(group):
-        return "collated_terminal_task_log", "anchor_tid_terminal_event_found_in_window"
-    return (
-        "truncated_terminal_task_log",
-        "terminal_event_without_visible_start_in_window",
-    )
-
-
-def _collated_task_log_policy(group: CollatedMessageGroup) -> str:
-    if _collated_group_has_visible_start(group):
-        return TASK_MONITOR_POLICY_TASK_LOG_COLLATE_COMPLETE_LIFECYCLE
-    return TASK_MONITOR_POLICY_TASK_LOG_COLLATE_TERMINAL_WITHOUT_START
-
-
-def _collated_group_has_visible_start(group: CollatedMessageGroup) -> bool:
-    return any(
-        payload_string(row.payload, "event") in TASK_LOG_START_EVENTS
-        for row in group.message_rows
-    )
-
-
-def _open_started_task_log_tids(
-    rows: Sequence[DecodedQueueWindowRow],
-    *,
-    claimed_ids: set[int],
-    exclude_tids: set[str],
-) -> set[str]:
-    starts: set[str] = set()
-    terminals: set[str] = set()
-    for row in rows:
-        if row.raw.message_id in claimed_ids or row.malformed_reason is not None:
-            continue
-        tid = row.tid
-        if tid is None or tid in exclude_tids:
-            continue
-        if payload_string(row.payload, "event") in TASK_LOG_START_EVENTS:
-            starts.add(tid)
-        if is_terminal_task_log(row.payload):
-            terminals.add(tid)
-    return starts - terminals
 
 
 def _with_apply_counts(

@@ -189,6 +189,67 @@ def test_monitor_store_upsert_is_replay_safe_and_preserves_terminal(tmp_path) ->
     ]
 
 
+def test_monitor_store_lists_deletable_task_log_messages_for_exact_tids(
+    tmp_path,
+) -> None:
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    first_tid = "1779000000000000123"
+    prefixed_tid = "17790000000000001230"
+    other_tid = "1779000000000000124"
+    updates = (
+        _update(
+            first_tid,
+            1779000000000100001,
+            event="work_completed",
+            status="completed",
+            terminal=True,
+        ),
+        _update(
+            prefixed_tid,
+            1779000000000100002,
+            event="work_completed",
+            status="completed",
+            terminal=True,
+        ),
+        _update(
+            other_tid,
+            1779000000000100003,
+            event="work_completed",
+            status="completed",
+            terminal=True,
+        ),
+    )
+    store.record_task_log_updates(
+        WEFT_GLOBAL_LOG_QUEUE,
+        updates,
+        checkpoint_message_id=None,
+    )
+    store.mark_summary_emitted(first_tid, 1779000000000100011)
+    store.mark_summary_emitted(prefixed_tid, 1779000000000100012)
+    store.mark_summary_emitted(other_tid, 1779000000000100013)
+
+    refs = store.list_deletable_task_log_messages_for_tids(
+        (first_tid, other_tid),
+        limit=10,
+        require_summary=True,
+    )
+    limited_refs = store.list_deletable_task_log_messages_for_tids(
+        (first_tid, other_tid),
+        limit=1,
+        require_summary=True,
+    )
+
+    assert [(ref.tid, ref.message_id) for ref in refs] == [
+        (first_tid, 1779000000000100001),
+        (other_tid, 1779000000000100003),
+    ]
+    assert [(ref.tid, ref.message_id) for ref in limited_refs] == [
+        (first_tid, 1779000000000100001)
+    ]
+
+
 def test_monitor_store_summary_ready_respects_terminal_retention(tmp_path) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)

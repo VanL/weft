@@ -141,7 +141,7 @@ Current structure:
   `weft/core/manager_services.py::reduce_managed_service_state()` are the
   canonical service-supervision path. Do not create a heartbeat-only or
   TaskMonitor-only reducer.
-- `TaskMonitorTask` cleanup now calls canonical prune code under
+- `TaskMonitor` cleanup now calls canonical prune code under
   `weft/core/pruning/`. Preserve that; this plan is not a prune rewrite.
 - `known_tid_evidence()` and `task_status()` are the public status path. Runtime
   liveness disagreement may appear in `reconciliation`, but no code should

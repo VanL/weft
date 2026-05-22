@@ -18,6 +18,7 @@ import base64
 import json
 import subprocess
 import sys
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -34,11 +35,15 @@ from weft._constants import (
     QUEUE_CTRL_OUT_SUFFIX,
     QUEUE_INBOX_SUFFIX,
     QUEUE_OUTBOX_SUFFIX,
+    WEFT_GLOBAL_LOG_QUEUE,
 )
 from weft.commands import specs as spec_cmd
 from weft.commands._result_wait import await_one_shot_result
 from weft.commands._streaming import (
     collect_interactive_queue_output as _collect_interactive_queue_output,
+)
+from weft.commands._streaming import (
+    poll_log_events,
 )
 from weft.commands._task_history import is_pipeline_taskspec_payload
 from weft.commands.interactive import InteractiveStreamClient
@@ -53,9 +58,14 @@ from weft.commands.manager import (
 from weft.commands.submission import (
     ensure_manager_after_submission as _shared_ensure_manager_after_submission,
 )
+from weft.commands.task_evidence import (
+    terminal_error_message,
+    terminal_status_from_event,
+)
 from weft.commands.types import RunExecutionResult
 from weft.context import WeftContext, build_context
 from weft.core.endpoints import validate_endpoint_claim_name
+from weft.core.monitor.store import open_monitor_store
 from weft.core.pipelines import (
     PipelineSpec,
     compile_linear_pipeline,
@@ -497,21 +507,17 @@ def _run_interactive_session(
     use_prompt: bool = False,
 ) -> tuple[str, Any | None, str | None]:
     assert taskspec.tid is not None
+    tid = taskspec.tid
     db_path = context.broker_target
     config = context.broker_config
-    outbox_name = (
-        taskspec.io.outputs.get("outbox") or f"T{taskspec.tid}.{QUEUE_OUTBOX_SUFFIX}"
-    )
+    outbox_name = taskspec.io.outputs.get("outbox") or f"T{tid}.{QUEUE_OUTBOX_SUFFIX}"
     ctrl_out_name = (
-        taskspec.io.control.get("ctrl_out")
-        or f"T{taskspec.tid}.{QUEUE_CTRL_OUT_SUFFIX}"
+        taskspec.io.control.get("ctrl_out") or f"T{tid}.{QUEUE_CTRL_OUT_SUFFIX}"
     )
     ctrl_in_name = (
-        taskspec.io.control.get("ctrl_in") or f"T{taskspec.tid}.{QUEUE_CTRL_IN_SUFFIX}"
+        taskspec.io.control.get("ctrl_in") or f"T{tid}.{QUEUE_CTRL_IN_SUFFIX}"
     )
-    inbox_name = (
-        taskspec.io.inputs.get("inbox") or f"T{taskspec.tid}.{QUEUE_INBOX_SUFFIX}"
-    )
+    inbox_name = taskspec.io.inputs.get("inbox") or f"T{tid}.{QUEUE_INBOX_SUFFIX}"
 
     status_holder: dict[str, str | None] = {"status": None, "error": None}
     stdout_chunks: list[str] = []
@@ -569,7 +575,7 @@ def _run_interactive_session(
 
     def _request_interactive_exit() -> bool:
         client.close_input()
-        if client.wait(timeout=1.0):
+        if _wait_for_interactive_completion(timeout=1.0):
             return True
         _send_interactive_control(CONTROL_STOP)
         if (
@@ -577,7 +583,7 @@ def _run_interactive_session(
             is not None
         ):
             return True
-        if client.wait(timeout=0.1):
+        if _wait_for_interactive_completion(timeout=0.1):
             return True
         _send_interactive_control(CONTROL_KILL)
         if (
@@ -585,12 +591,12 @@ def _run_interactive_session(
             is not None
         ):
             return True
-        return client.wait(timeout=0.1)
+        return _wait_for_interactive_completion(timeout=0.1)
 
     client = InteractiveStreamClient(
         db_path=db_path,
         config=config,
-        tid=taskspec.tid,
+        tid=tid,
         inbox=inbox_name,
         outbox=outbox_name,
         ctrl_out=ctrl_out_name,
@@ -598,6 +604,64 @@ def _run_interactive_session(
         on_stderr=_stderr_callback,
         on_state=_state_callback,
     )
+    log_queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
+    log_last_timestamp: int | None = None
+
+    def _poll_interactive_terminal_log() -> bool:
+        nonlocal log_last_timestamp
+        events, log_last_timestamp = poll_log_events(
+            log_queue,
+            log_last_timestamp,
+            tid,
+        )
+        terminal_seen = False
+        for event_payload, _timestamp in events:
+            event_status = terminal_status_from_event(event_payload)
+            if event_status is None:
+                continue
+            status_holder["status"] = event_status
+            status_holder["error"] = terminal_error_message(
+                event_payload,
+                event_status,
+            )
+            terminal_seen = True
+        return terminal_seen
+
+    def _poll_interactive_monitor_terminal() -> bool:
+        try:
+            record = open_monitor_store(
+                context,
+                config=context.config,
+            ).get_task(tid)
+        except Exception:  # pragma: no cover - monitor-store fallback best effort
+            return False
+        if record is None or not record.terminal_seen:
+            return False
+        status = record.terminal_status or record.status
+        if not isinstance(status, str) or not status:
+            return False
+        status_holder["status"] = status
+        error = record.state.get("error")
+        status_holder["error"] = str(error) if isinstance(error, str) else None
+        return True
+
+    def _wait_for_interactive_completion(timeout: float | None = None) -> bool:
+        deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
+        while True:
+            if client.wait(timeout=0):
+                return True
+            terminal_seen = (
+                _poll_interactive_terminal_log() or _poll_interactive_monitor_terminal()
+            )
+            if terminal_seen:
+                return True
+            if deadline is not None and time.monotonic() >= deadline:
+                return False
+            wait_timeout = 0.05
+            if deadline is not None:
+                wait_timeout = min(wait_timeout, max(0.0, deadline - time.monotonic()))
+            if client.wait(timeout=wait_timeout):
+                return True
 
     client.start()
     try:
@@ -616,7 +680,7 @@ def _run_interactive_session(
             completion_event = threading.Event()
 
             def _await_completion() -> None:
-                client.wait()
+                _wait_for_interactive_completion()
                 completion_event.set()
                 try:
                     session.app.exit()
@@ -656,20 +720,22 @@ def _run_interactive_session(
                     client.send_input(payload)
 
             waiter.join(timeout=0.5)
-            if not client.wait(timeout=INTERACTIVE_STOP_COMPLETION_TIMEOUT):
+            if not _wait_for_interactive_completion(
+                timeout=INTERACTIVE_STOP_COMPLETION_TIMEOUT
+            ):
                 raise RuntimeError("Interactive session did not stop after :quit")
         else:
             if stdin_data:
                 client.send_input(stdin_data)
-                if auto_close and not client.wait(timeout=0.2):
+                if auto_close and not _wait_for_interactive_completion(timeout=0.2):
                     client.close_input()
-                    client.wait()
+                    _wait_for_interactive_completion()
                 else:
-                    client.wait()
+                    _wait_for_interactive_completion()
             else:
                 if auto_close:
                     client.close_input()
-                client.wait()
+                _wait_for_interactive_completion()
         status = status_holder["status"] or client.status or "completed"
         error = status_holder["error"] or client.error
         if quit_requested and status in {"cancelled", "killed"}:
@@ -678,6 +744,7 @@ def _run_interactive_session(
         result: Any | None = None
     finally:
         client.stop()
+        log_queue.close()
         if not use_prompt:
             if stdout_chunks:
                 result = "".join(stdout_chunks)

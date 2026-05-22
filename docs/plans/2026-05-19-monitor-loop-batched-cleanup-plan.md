@@ -6,7 +6,7 @@ Superseded by: none
 
 ## 1. Goal
 
-Fix the supervised `TaskMonitorTask` cleanup loop introduced in `0.9.47` so
+Fix the supervised `TaskMonitor` cleanup loop introduced in `0.9.47` so
 the Monitor applies retained `weft.log.tasks` cleanup as a bounded batch policy,
 not as thousands of per-row mini-transactions. The behavior should preserve the
 new Monitor-table authority from the retained-log plan, but the execution shape
@@ -50,11 +50,11 @@ implementation.
 Read first:
 
 - `weft/core/monitor/task_monitor.py`
-  - `TaskMonitorTask._run_monitor_store_cycle`
-  - `TaskMonitorTask._ingest_retained_task_log_rows`
-  - `TaskMonitorTask._delete_exact_task_log_rows`
-  - `TaskMonitorTask._emit_monitor_store_summaries`
-  - `TaskMonitorTask._run_builtin_monitor_processor_cycle`
+  - `TaskMonitor._run_monitor_store_cycle`
+  - `TaskMonitor._ingest_retained_task_log_rows`
+  - `TaskMonitor._delete_exact_task_log_rows`
+  - `TaskMonitor._emit_monitor_store_summaries`
+  - `TaskMonitor._run_builtin_monitor_processor_cycle`
 - `weft/core/monitor/store.py`
   - `MonitorStore.record_task_log_updates`
   - `MonitorStore.mark_messages_deleted`
@@ -78,7 +78,7 @@ Read first:
 
 Current load-bearing behavior:
 
-- `TaskMonitorTask._task_log_deletion_owner()` returns `collated_store` when
+- `TaskMonitor._task_log_deletion_owner()` returns `collated_store` when
   Monitor table collation is enabled. In the ops deployment this is the default
   owner for `weft.log.tasks` cleanup.
 - `GeneratorTaskLogScanner.scan_window()` already materializes a bounded
@@ -242,7 +242,7 @@ The smallest compatible path is:
   indeterminate;
 - include an error string for true failures.
 
-Then update `TaskMonitorTask._delete_exact_task_log_rows()` to return the exact
+Then update `TaskMonitor._delete_exact_task_log_rows()` to return the exact
 IDs that are gone, not only a count. Monitor table state must be updated only
 for those IDs.
 
@@ -413,7 +413,7 @@ Implementation:
 Required tests:
 
 - Seed at least 25 old retained `weft.log.tasks` rows with repeated TIDs. Run
-  one `TaskMonitorTask.process_once()`. Assert:
+  one `TaskMonitor.process_once()`. Assert:
   - the log queue shrinks by the selected count;
   - Monitor task-message rows are marked deleted for the selected IDs;
   - checkpoint advances to the last selected row;

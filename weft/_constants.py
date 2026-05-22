@@ -434,6 +434,15 @@ QUEUE_RESERVED_SUFFIX: Final[str] = "reserved"
 QUEUE_INTERNAL_RESERVED_SUFFIX: Final[str] = "internal_reserved"
 """Suffix for manager-owned internal spawn reserved queues."""
 
+STANDARD_TASK_QUEUE_SUFFIXES: Final[tuple[str, ...]] = (
+    QUEUE_INBOX_SUFFIX,
+    QUEUE_RESERVED_SUFFIX,
+    QUEUE_OUTBOX_SUFFIX,
+    QUEUE_CTRL_IN_SUFFIX,
+    QUEUE_CTRL_OUT_SUFFIX,
+)
+"""Suffixes for standard task-local queues with T{tid}.<suffix> names."""
+
 QUEUE_PRIORITY_INTERNAL: Final[int] = 0
 """Queue watcher priority for manager-owned internal work. Lower runs first."""
 
@@ -554,6 +563,14 @@ TASK_MONITOR_RUNTIME_CLEANUP_SLICE_FAMILY_LIMIT: Final[int] = 50
 
 TASK_MONITOR_RUNTIME_CLEANUP_SLICE_SECONDS: Final[float] = 1.0
 """Internal soft wall-clock budget for one task-local runtime cleanup slice."""
+
+TASK_MONITOR_DEAD_TASK_CLEANUP_WORKERS: Final[int] = 1
+"""Internal worker count for dead-task control cleanup.
+
+The per-TID queue abstraction is intentionally present even with one worker
+until SimpleBroker/MonitorStore thread-safety is documented for parallel
+cleanup handles.
+"""
 
 WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS_DEFAULT: Final[float] = 172800.0
 """Default minimum age before TaskMonitor logs/deletes task-log rows."""
@@ -955,7 +972,7 @@ INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT: Final[str] = "heartbeat"
 """Reserved internal runtime-owned class selector for HeartbeatTask."""
 
 INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR: Final[str] = "task_monitor"
-"""Reserved internal runtime-owned class selector for TaskMonitorTask."""
+"""Reserved internal runtime-owned class selector for TaskMonitor."""
 
 INTERNAL_HEARTBEAT_ENDPOINT_NAME: Final[str] = "_weft.heartbeat"
 """Reserved runtime endpoint claimed by the built-in heartbeat service."""

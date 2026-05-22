@@ -6,7 +6,7 @@ Superseded by: none
 
 ## 1. Goal
 
-Unify Weft pruning so the CLI and manager-supervised `TaskMonitorTask` use one
+Unify Weft pruning so the CLI and manager-supervised `TaskMonitor` use one
 canonical candidate-selection and exact-delete path. The current foreground
 `weft system prune --family task-log` path can identify safe task-log retention
 candidates that the TaskMonitor service misses because TaskMonitor builds
@@ -17,7 +17,7 @@ caller variation explicit through configuration arguments.
 ## 2. Source Documents
 
 - `docs/specifications/01-Core_Components.md` [CC-2.3]: defines
-  `TaskMonitorTask` as an operational task-log monitor whose default `delete`
+  `TaskMonitor` as an operational task-log monitor whose default `delete`
   processor may delete exact safe cleanup candidates only.
 - `docs/specifications/03-Manager_Architecture.md` [MA-1.6a]: defines
   manager-owned internal service supervision and states that the manager
@@ -127,7 +127,7 @@ Comprehension checks before editing:
   (`--archive`, `--force`, report output) and which are core safety semantics
   (candidate classes, exact message IDs, queue scope, dry-run/apply)?
 - Can you identify why the canonical engine cannot live in `weft/commands/`
-  if `TaskMonitorTask` in `weft/core/tasks/` must use it?
+  if `TaskMonitor` in `weft/core/tasks/` must use it?
 
 ## 4. Invariants and Constraints
 
@@ -135,7 +135,7 @@ Comprehension checks before editing:
   exact-message deletion path. CLI and TaskMonitor may pass different policy
   arguments, but they must not maintain separate pruning algorithms.
 - The canonical prune engine must live below both command wrappers and
-  `TaskMonitorTask`, under `weft/core/`. Do not import `weft.commands.*` from
+  `TaskMonitor`, under `weft/core/`. Do not import `weft.commands.*` from
   `weft/core.*`.
 - Keep `weft system prune` public CLI behavior stable:
   - default family remains `runtime-state`;

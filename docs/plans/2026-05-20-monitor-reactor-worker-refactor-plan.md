@@ -6,7 +6,7 @@ Superseded by: none
 
 ## 1. Goal
 
-Refactor `TaskMonitorTask` so its main loop has the same shape as the
+Refactor `TaskMonitor` so its main loop has the same shape as the
 manager: a small reactor that owns control handling, heartbeat registration,
 scheduling, cached state, and worker-result commits, with all potentially
 long-running cleanup and Monitor-store work executed in bounded worker lanes.
@@ -24,7 +24,7 @@ is sufficient.
 ## 2. Source Documents
 
 - `docs/specifications/01-Core_Components.md` [CC-2.3], [CC-3.4]:
-  `TaskMonitorTask` is a specialized task type and manager-supervised
+  `TaskMonitor` is a specialized task type and manager-supervised
   internal service. It must remain PING responsive and must expose cached
   operational diagnostics.
 - `docs/specifications/04-SimpleBroker_Integration.md` [SB-0.4], [SB-0.4a]:
@@ -70,7 +70,7 @@ is sufficient.
 Production evidence motivating this plan:
 
 - During the 0.9.52 ops deploy, `weft.log.tasks` eventually dropped from
-  about 23k rows to about 1.7k rows, but `TaskMonitorTask` PING timed out for
+  about 23k rows to about 1.7k rows, but `TaskMonitor` PING timed out for
   multiple samples while cleanup ran.
 - `py-spy` showed the task monitor main thread inside
   `_run_monitor_store_cycle()`, `_ingest_retained_task_log_rows()`,
@@ -102,7 +102,7 @@ Read these files before editing:
     If TaskMonitor workers own broker work, document that as a narrow
     TaskMonitor-owned lane instead of weakening the whole BaseTask contract.
 - `weft/core/monitor/task_monitor.py`
-  - `TaskMonitorTask.process_once()`: currently drains control and then can
+  - `TaskMonitor.process_once()`: currently drains control and then can
     call `_run_monitor_cycle()` synchronously.
   - `_run_monitor_cycle()`: currently owns store work, custom processor
     dispatch, built-in cleanup bookkeeping, and result finalization.
@@ -255,7 +255,7 @@ Stop-and-re-evaluate gates:
 Target shape:
 
 ```text
-TaskMonitorTask.process_once()
+TaskMonitor.process_once()
   drain finished worker results
   handle control queue messages
   ensure heartbeat registration
@@ -354,7 +354,7 @@ Read first:
 
 Test design:
 
-- Use `broker_env` and a real `TaskMonitorTask`. Do not mock `Queue`.
+- Use `broker_env` and a real `TaskMonitor`. Do not mock `Queue`.
 - Arrange a monitor with enabled cleanup and a blocking built-in cycle worker
   seam. The seam may monkeypatch only the worker function or worker submit
   callback so the thread waits on a `threading.Event`.
@@ -386,7 +386,7 @@ Stop if:
 
 ### Task 2: Add A Built-In Cycle Worker Lane And In-Flight State
 
-Outcome: `TaskMonitorTask.process_once()` can start built-in monitor work and
+Outcome: `TaskMonitor.process_once()` can start built-in monitor work and
 return immediately, like the manager starts child-launch work and returns.
 
 Files to touch:
@@ -752,7 +752,7 @@ Files to touch:
 
 Required spec updates:
 
-- State that `TaskMonitorTask.process_once()` is a reactor and must not do
+- State that `TaskMonitor.process_once()` is a reactor and must not do
   unbounded Monitor-store, queue scan, or delete work.
 - State that retained task-log ingestion, summary/disposition, and raw
   deletion run through a bounded TaskMonitor worker lane.
@@ -872,7 +872,7 @@ Acceptable mocks or monkeypatches:
 
 - A worker function that waits on `threading.Event` to prove reactor
   responsiveness.
-- A clock function local to `TaskMonitorTask` if a no-sleep scheduling test
+- A clock function local to `TaskMonitor` if a no-sleep scheduling test
   needs deterministic time.
 - A broker method raising an exception for an error-path test only.
 

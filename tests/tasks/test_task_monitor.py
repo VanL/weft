@@ -30,7 +30,7 @@ from weft.core.monitor.runtime import (
 )
 from weft.core.monitor.store import MonitorStore, MonitorStoreIngestResult
 from weft.core.monitor.task_monitor import (
-    TaskMonitorTask,
+    TaskMonitor,
     make_task_monitor_taskspec,
 )
 from weft.helpers import iter_queue_entries
@@ -78,7 +78,7 @@ def blocking_processor(
 
 
 def drive_task_monitor_until_idle(
-    task: TaskMonitorTask,
+    task: TaskMonitor,
     *,
     timeout: float = 20.0,
 ) -> None:
@@ -105,7 +105,7 @@ def drive_task_monitor_until_idle(
 
 
 def drive_task_monitor_until(
-    task: TaskMonitorTask,
+    task: TaskMonitor,
     predicate: Callable[[], bool],
     *,
     timeout: float = 10.0,
@@ -147,7 +147,7 @@ def test_task_monitor_uses_cached_base_task_context(
         return real_build_context(*args, **kwargs)
 
     monkeypatch.setattr(base_task_mod, "build_context", counted_build_context)
-    task = TaskMonitorTask(
+    task = TaskMonitor(
         db_path,
         make_task_monitor_taskspec("1778089999999999910"),
         observer=lambda _queue_name, _message, _timestamp: None,
@@ -173,7 +173,7 @@ def test_task_monitor_scan_once_peeks_task_log_without_consuming(
         log_queue.write(json.dumps(payload))
 
     seen: list[tuple[str, dict[str, object], int]] = []
-    task = TaskMonitorTask(
+    task = TaskMonitor(
         db_path,
         make_task_monitor_taskspec("1778089999999999999"),
         observer=lambda queue_name, message, timestamp: seen.append(
@@ -225,7 +225,7 @@ def test_task_monitor_process_once_calls_processor_without_consuming_task_log(
     for payload in payloads:
         log_queue.write(json.dumps(payload))
 
-    task = TaskMonitorTask(
+    task = TaskMonitor(
         db_path,
         make_task_monitor_taskspec("1778089999999999999"),
         config=config,
@@ -272,7 +272,7 @@ def test_task_monitor_builtin_delete_removes_cleanup_rows(
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     log_queue.write("{not-json")
 
-    task = TaskMonitorTask(
+    task = TaskMonitor(
         db_path,
         make_task_monitor_taskspec("1778089999999999986"),
         config=config,
@@ -310,7 +310,7 @@ def test_task_monitor_builtin_report_only_keeps_cleanup_rows(
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     log_queue.write("{not-json")
 
-    task = TaskMonitorTask(
+    task = TaskMonitor(
         db_path,
         make_task_monitor_taskspec("1778089999999999985"),
         config=config,
@@ -345,7 +345,7 @@ def test_task_monitor_next_wait_timeout_is_capped_after_cycle(
             "WEFT_TASK_MONITOR_PROCESSOR": "tests.tasks.test_task_monitor:recording_processor",
         }
     )
-    task = TaskMonitorTask(
+    task = TaskMonitor(
         db_path,
         make_task_monitor_taskspec("1778089999999999988"),
         config=config,
@@ -374,7 +374,7 @@ def test_task_monitor_pending_wakeup_uses_shared_reactor_wait(
             "WEFT_TASK_MONITOR_PROCESSOR": "tests.tasks.test_task_monitor:recording_processor",
         }
     )
-    task = TaskMonitorTask(
+    task = TaskMonitor(
         db_path,
         make_task_monitor_taskspec("1778089999999999987"),
         config=config,
@@ -417,7 +417,7 @@ def test_task_monitor_disabled_uses_wait_cap_without_scanning(
             "WEFT_TASK_MONITOR_PROCESSOR": "tests.tasks.test_task_monitor:recording_processor",
         }
     )
-    task = TaskMonitorTask(
+    task = TaskMonitor(
         db_path,
         make_task_monitor_taskspec("1778089999999999984"),
         config=config,
@@ -461,17 +461,18 @@ def test_task_monitor_ping_includes_health_and_preserves_task_log(
     ctrl_out = make_queue(spec.io.control["ctrl_out"])
     ctrl_in.write(json.dumps({"command": CONTROL_PING, "request_id": "ping-before"}))
 
-    task = TaskMonitorTask(db_path, spec, config=config)
+    task = TaskMonitor(db_path, spec, config=config)
+    responses: list[dict[str, object]] = []
     try:
         task.process_once()
         drive_task_monitor_until_idle(task)
         ctrl_in.write(json.dumps({"command": CONTROL_PING, "request_id": "ping-after"}))
         task.wait_for_activity(timeout=task.next_wait_timeout())
         task.process_once()
+        responses = [json.loads(item) for item in ctrl_out.peek_generator()]
     finally:
         task.stop()
 
-    responses = [json.loads(item) for item in ctrl_out.peek_generator()]
     pong = next(
         response
         for response in responses
@@ -573,7 +574,8 @@ def test_task_monitor_ping_includes_cached_collation_store_status(
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
     ctrl_out = make_queue(spec.io.control["ctrl_out"])
 
-    task = TaskMonitorTask(db_path, spec, config=config)
+    task = TaskMonitor(db_path, spec, config=config)
+    responses: list[dict[str, object]] = []
     try:
         task.process_once()
         drive_task_monitor_until_idle(task)
@@ -586,10 +588,10 @@ def test_task_monitor_ping_includes_cached_collation_store_status(
         ctrl_in.write(json.dumps({"command": CONTROL_PING, "request_id": "store"}))
         task.wait_for_activity(timeout=task.next_wait_timeout())
         task.process_once()
+        responses = [json.loads(item) for item in ctrl_out.peek_generator()]
     finally:
         task.stop()
 
-    responses = [json.loads(item) for item in ctrl_out.peek_generator()]
     pong = next(
         response
         for response in responses
@@ -635,7 +637,7 @@ def test_task_monitor_table_delete_requires_delete_processor(
     }
     log_queue.write(json.dumps(payload))
 
-    task = TaskMonitorTask(
+    task = TaskMonitor(
         db_path,
         make_task_monitor_taskspec("1778089999999999981"),
         config=config,
@@ -685,7 +687,7 @@ def test_task_monitor_table_delete_removes_exact_task_log_rows(
         )
     )
 
-    task = TaskMonitorTask(
+    task = TaskMonitor(
         db_path,
         make_task_monitor_taskspec("1778089999999999980"),
         config=config,
@@ -732,7 +734,7 @@ def test_task_monitor_delete_retires_terminal_rows_without_general_retention_age
     }
     log_queue.write(json.dumps(payload))
 
-    task = TaskMonitorTask(
+    task = TaskMonitor(
         db_path,
         make_task_monitor_taskspec("1778089999999999975"),
         config=config,
@@ -810,7 +812,7 @@ def test_task_monitor_retained_ingest_batches_store_and_delete_work(
             )
         )
 
-    task = TaskMonitorTask(
+    task = TaskMonitor(
         db_path,
         make_task_monitor_taskspec("1778089999999999977"),
         config=config,
@@ -880,7 +882,7 @@ def test_task_monitor_skips_terminal_summary_after_partial_fifo_pass(
     log_queue.write(json.dumps(terminal_payload))
     log_queue.write(json.dumps(later_payload))
 
-    task = TaskMonitorTask(
+    task = TaskMonitor(
         db_path,
         make_task_monitor_taskspec("1778089999999999976"),
         config=config,
@@ -944,7 +946,7 @@ def test_task_monitor_retained_ingest_batch_limit_counts_valid_rows(
             )
         )
 
-    task = TaskMonitorTask(
+    task = TaskMonitor(
         db_path,
         make_task_monitor_taskspec("1778089999999999876"),
         config=config,
@@ -990,7 +992,7 @@ def test_task_monitor_table_delete_reconciles_already_absent_exact_rows(
             "WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED": "0",
         }
     )
-    report_task = TaskMonitorTask(
+    report_task = TaskMonitor(
         db_path,
         make_task_monitor_taskspec("1778089999999999979"),
         config=report_config,
@@ -1019,7 +1021,7 @@ def test_task_monitor_table_delete_reconciles_already_absent_exact_rows(
             "WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED": "1",
         }
     )
-    delete_task = TaskMonitorTask(
+    delete_task = TaskMonitor(
         db_path,
         make_task_monitor_taskspec("1778089999999999978"),
         config=delete_config,
@@ -1074,11 +1076,11 @@ def test_task_monitor_failed_summary_disposition_blocks_table_delete(
         raise OSError("summary sink failed")
 
     monkeypatch.setattr(
-        TaskMonitorTask,
+        TaskMonitor,
         "_emit_monitor_store_summary",
         fail_summary,
     )
-    task = TaskMonitorTask(
+    task = TaskMonitor(
         db_path,
         make_task_monitor_taskspec("1778089999999999977"),
         config=config,
@@ -1134,7 +1136,7 @@ def test_task_monitor_collated_external_log_precedes_table_delete(
     }
     log_queue.write(json.dumps(payload))
 
-    task = TaskMonitorTask(
+    task = TaskMonitor(
         db_path,
         make_task_monitor_taskspec("1778089999999999970"),
         config=config,
@@ -1223,7 +1225,7 @@ def test_task_monitor_terminal_disposition_deletes_task_runtime_queues(
     outbox.write("result")
     reserved.write("reserved")
 
-    task = TaskMonitorTask(
+    task = TaskMonitor(
         db_path,
         make_task_monitor_taskspec("1778089999999999967"),
         config=config,
@@ -1285,7 +1287,7 @@ def test_task_monitor_deletes_controls_for_already_disposed_family(
         "state": {"status": "completed"},
         "metadata": {},
     }
-    task = TaskMonitorTask(
+    task = TaskMonitor(
         db_path,
         make_task_monitor_taskspec("1778089999999999961"),
         config=config,
@@ -1383,7 +1385,7 @@ def test_task_monitor_control_cleanup_does_not_mark_when_queue_delete_fails(
     ctrl_in.write("stop")
     ctrl_out.write("pong")
 
-    task = TaskMonitorTask(
+    task = TaskMonitor(
         db_path,
         make_task_monitor_taskspec("1778089999999999964"),
         config=config,
@@ -1469,7 +1471,7 @@ def test_task_monitor_delete_removes_stale_reserved_queue_without_monitor_record
     reserved = make_queue(f"T{tid}.reserved")
     reserved.write("stale-reserved")
 
-    task = TaskMonitorTask(
+    task = TaskMonitor(
         db_path,
         make_task_monitor_taskspec("1778089999999999960"),
         config=config,
@@ -1527,7 +1529,7 @@ def test_task_monitor_reserved_cleanup_runs_when_task_log_ingest_is_batch_limite
     reserved = make_queue(f"T{stale_tid}.reserved")
     reserved.write("stale-reserved")
 
-    task = TaskMonitorTask(
+    task = TaskMonitor(
         db_path,
         make_task_monitor_taskspec("1778089999999999949"),
         config=config,
@@ -1580,7 +1582,7 @@ def test_task_monitor_keeps_reserved_queue_for_active_service_owner(
         )
     )
 
-    task = TaskMonitorTask(
+    task = TaskMonitor(
         db_path,
         make_task_monitor_taskspec("1778089999999999959"),
         config=config,
@@ -1601,6 +1603,269 @@ def test_task_monitor_keeps_reserved_queue_for_active_service_owner(
         task.stop()
 
     assert list(reserved.peek_generator()) == ["active-reserved"]
+
+
+def test_task_monitor_dead_task_cleanup_deletes_standard_control_queues(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    tid = "1778084345905438861"
+    ctrl_in = make_queue(f"T{tid}.ctrl_in")
+    ctrl_out = make_queue(f"T{tid}.ctrl_out")
+    inbox = make_queue(f"T{tid}.inbox")
+    outbox = make_queue(f"T{tid}.outbox")
+    ctrl_in.write("stop")
+    ctrl_out.write("pong")
+    inbox.write("input")
+    outbox.write("result")
+
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999861"),
+        config=config,
+    )
+    try:
+        store = task._ensure_monitor_store()
+        assert store is not None
+        cleanup = task._run_terminal_control_cleanup_slice(
+            store,
+            now_ns=time.time_ns(),
+        )
+    finally:
+        task.stop()
+
+    assert ctrl_in.stats().total == 0
+    assert ctrl_out.stats().total == 0
+    assert list(inbox.peek_generator()) == ["input"]
+    assert list(outbox.peek_generator()) == ["result"]
+    assert cleanup.dead_tids_processed == 1
+    assert cleanup.dead_tid_control_queues_deleted == 2
+    assert cleanup.dead_tid_control_rows_estimated_deleted == 2
+
+
+def test_task_monitor_dead_task_cleanup_deletes_indexed_task_log_refs(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "999999999",
+            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    tid = "1778084345905438865"
+    payload = {
+        "event": "work_completed",
+        "status": "completed",
+        "tid": tid,
+        "taskspec": {
+            "tid": tid,
+            "version": "1.0",
+            "name": "sample",
+            "io": {
+                "control": {
+                    "ctrl_in": f"T{tid}.ctrl_in",
+                    "ctrl_out": f"T{tid}.ctrl_out",
+                },
+            },
+            "state": {"status": "completed"},
+            "metadata": {},
+        },
+    }
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    log_queue.write(json.dumps(payload))
+    message_id = next(iter_queue_entries(log_queue))[1]
+    ctrl_in = make_queue(f"T{tid}.ctrl_in")
+    ctrl_out = make_queue(f"T{tid}.ctrl_out")
+    ctrl_in.write("stop")
+    ctrl_out.write("pong")
+
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999865"),
+        config=config,
+    )
+    try:
+        store = task._ensure_monitor_store()
+        assert store is not None
+        update = update_from_task_log_payload(payload, message_id=message_id)
+        assert update is not None
+        store.record_task_log_updates(
+            WEFT_GLOBAL_LOG_QUEUE,
+            (update,),
+            checkpoint_message_id=None,
+        )
+        store.mark_summary_emitted(tid, message_id + 1)
+        indexed_lookup_calls: list[tuple[str, ...]] = []
+        real_indexed_lookup = store.list_deletable_task_log_messages_for_tids
+
+        def counted_indexed_lookup(
+            tids: tuple[str, ...],
+            *,
+            limit: int,
+            require_summary: bool = True,
+        ):
+            indexed_lookup_calls.append(tuple(tids))
+            return real_indexed_lookup(
+                tids,
+                limit=limit,
+                require_summary=require_summary,
+            )
+
+        monkeypatch.setattr(
+            store,
+            "list_deletable_task_log_messages_for_tids",
+            counted_indexed_lookup,
+        )
+
+        cleanup = task._run_terminal_control_cleanup_slice(
+            store,
+            now_ns=time.time_ns(),
+        )
+    finally:
+        task.stop()
+
+    assert ctrl_in.stats().total == 0
+    assert ctrl_out.stats().total == 0
+    retained_task_rows = [
+        json.loads(body)
+        for body, _message_id in iter_queue_entries(log_queue)
+        if json.loads(body).get("tid") == tid
+    ]
+    assert retained_task_rows == []
+    assert indexed_lookup_calls == [(tid,)]
+    assert cleanup.dead_tid_log_refs_selected == 1
+    assert cleanup.dead_tid_log_rows_deleted == 1
+
+
+def test_task_monitor_dead_task_cleanup_skips_live_service_owner(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    tid = "1778084345905438862"
+    ctrl_in = make_queue(f"T{tid}.ctrl_in")
+    ctrl_out = make_queue(f"T{tid}.ctrl_out")
+    ctrl_in.write("stop")
+    ctrl_out.write("pong")
+    services = make_queue(WEFT_SERVICES_REGISTRY_QUEUE)
+    services.write(
+        json.dumps(
+            {
+                "schema": SERVICE_OWNER_SCHEMA,
+                "service_key": f"managed:{tid}",
+                "service_type": SERVICE_TYPE_MANAGED,
+                "owner_tid": tid,
+                "status": SERVICE_STATUS_ACTIVE,
+            }
+        )
+    )
+
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999862"),
+        config=config,
+    )
+    try:
+        store = task._ensure_monitor_store()
+        assert store is not None
+        cleanup = task._run_terminal_control_cleanup_slice(
+            store,
+            now_ns=time.time_ns(),
+        )
+    finally:
+        task.stop()
+
+    assert list(ctrl_in.peek_generator()) == ["stop"]
+    assert list(ctrl_out.peek_generator()) == ["pong"]
+    assert cleanup.dead_tids_processed == 0
+    assert cleanup.dead_tids_skipped_live >= 1
+
+
+def test_task_monitor_dead_task_cleanup_is_oldest_first_and_bounded(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        task_monitor_mod,
+        "TASK_MONITOR_RUNTIME_CLEANUP_SLICE_FAMILY_LIMIT",
+        1,
+    )
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT": 1,
+            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    oldest_tid = "1778084345905438863"
+    newest_tid = "1778084345905438864"
+    for tid in (newest_tid, oldest_tid):
+        make_queue(f"T{tid}.ctrl_in").write(f"stop-{tid}")
+        make_queue(f"T{tid}.ctrl_out").write(f"pong-{tid}")
+
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999863"),
+        config=config,
+    )
+    try:
+        store = task._ensure_monitor_store()
+        assert store is not None
+        cleanup = task._run_terminal_control_cleanup_slice(
+            store,
+            now_ns=time.time_ns(),
+        )
+    finally:
+        task.stop()
+
+    assert make_queue(f"T{oldest_tid}.ctrl_in").stats().total == 0
+    assert make_queue(f"T{oldest_tid}.ctrl_out").stats().total == 0
+    assert list(make_queue(f"T{newest_tid}.ctrl_in").peek_generator()) == [
+        f"stop-{newest_tid}"
+    ]
+    assert list(make_queue(f"T{newest_tid}.ctrl_out").peek_generator()) == [
+        f"pong-{newest_tid}"
+    ]
+    assert cleanup.dead_tids_processed == 1
+    assert cleanup.dead_tids_pending >= 1
+    assert cleanup.family_limit_hit is True
 
 
 def test_task_monitor_terminal_disposition_does_not_delete_manager_control_queue(
@@ -1640,7 +1905,7 @@ def test_task_monitor_terminal_disposition_does_not_delete_manager_control_queue
     ctrl_in.write("stop")
     ctrl_out.write("pong")
 
-    task = TaskMonitorTask(
+    task = TaskMonitor(
         db_path,
         make_task_monitor_taskspec("1778089999999999966"),
         config=config,
@@ -1731,7 +1996,7 @@ def test_task_monitor_terminal_control_cleanup_is_bounded_by_family(
         make_queue(f"T{tid}.ctrl_in").write(f"stop-{tid}")
         make_queue(f"T{tid}.ctrl_out").write(f"pong-{tid}")
 
-    task = TaskMonitorTask(
+    task = TaskMonitor(
         db_path,
         make_task_monitor_taskspec("1778089999999999965"),
         config=config,
@@ -1843,7 +2108,7 @@ def test_task_monitor_runtime_cleanup_interleaves_control_and_reserved_work(
     reserved = make_queue(f"T{tids[0]}.reserved")
     reserved.write("terminal-reserved")
 
-    task = TaskMonitorTask(
+    task = TaskMonitor(
         db_path,
         make_task_monitor_taskspec("1778089999999961761"),
         config=config,
@@ -1941,7 +2206,7 @@ def test_task_monitor_runtime_cleanup_keeps_reserved_pending_after_control_budge
     reserved = make_queue(f"T{reserved_tid}.reserved")
     reserved.write("stale-reserved")
 
-    task = TaskMonitorTask(
+    task = TaskMonitor(
         db_path,
         make_task_monitor_taskspec("1778089999999961851"),
         config=config,
@@ -2054,7 +2319,7 @@ def test_task_monitor_runtime_cleanup_deadline_stops_between_families(
         make_queue(f"T{tid}.ctrl_in").write(f"stop-{tid}")
         make_queue(f"T{tid}.ctrl_out").write(f"pong-{tid}")
 
-    task = TaskMonitorTask(
+    task = TaskMonitor(
         db_path,
         make_task_monitor_taskspec("1778089999999961771"),
         config=config,
@@ -2142,7 +2407,7 @@ def test_task_monitor_raw_store_delete_reconciles_missing_refs_without_stall(
     assert start is not None
     assert terminal is not None
 
-    task = TaskMonitorTask(
+    task = TaskMonitor(
         db_path,
         make_task_monitor_taskspec("1778089999999961763"),
         config=config,
@@ -2194,7 +2459,7 @@ def test_task_monitor_terminal_control_cleanup_worker_does_not_block_ping(
     spec = make_task_monitor_taskspec("1778089999999999964")
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
     ctrl_out = make_queue(spec.io.control["ctrl_out"])
-    task = TaskMonitorTask(db_path, spec, config=config)
+    task = TaskMonitor(db_path, spec, config=config)
     started = threading.Event()
     release = threading.Event()
 
@@ -2277,7 +2542,7 @@ def test_task_monitor_slow_builtin_cycle_does_not_block_ping(
     )
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
     ctrl_out = make_queue(spec.io.control["ctrl_out"])
-    task = TaskMonitorTask(db_path, spec, config=config)
+    task = TaskMonitor(db_path, spec, config=config)
     started = threading.Event()
     release = threading.Event()
     real_cleanup = task._run_task_monitor_cleanup_cycle
@@ -2378,7 +2643,7 @@ def test_task_monitor_terminal_control_cleanup_worker_error_is_retryable(
     make_queue(f"T{tid}.ctrl_in").write("stop")
     make_queue(f"T{tid}.ctrl_out").write("pong")
 
-    task = TaskMonitorTask(
+    task = TaskMonitor(
         db_path,
         make_task_monitor_taskspec("1778089999999999963"),
         config=config,
@@ -2470,7 +2735,7 @@ def test_task_monitor_collated_external_failure_blocks_table_delete(
     }
     log_queue.write(json.dumps(payload))
 
-    task = TaskMonitorTask(
+    task = TaskMonitor(
         db_path,
         make_task_monitor_taskspec("1778089999999999969"),
         config=config,
@@ -2528,7 +2793,7 @@ def test_task_monitor_raw_external_logs_and_deletes_without_store(
     log_queue.write(json.dumps(payload))
     log_queue.write("{not-json")
 
-    task = TaskMonitorTask(
+    task = TaskMonitor(
         db_path,
         make_task_monitor_taskspec("1778089999999999968"),
         config=config,
@@ -2581,7 +2846,8 @@ def test_task_monitor_ping_uses_cached_policy_stats_without_cleanup_scan(
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
     ctrl_out = make_queue(spec.io.control["ctrl_out"])
 
-    task = TaskMonitorTask(db_path, spec, config=config)
+    task = TaskMonitor(db_path, spec, config=config)
+    responses: list[dict[str, object]] = []
     try:
         task.process_once()
         drive_task_monitor_until_idle(task)
@@ -2596,10 +2862,10 @@ def test_task_monitor_ping_uses_cached_policy_stats_without_cleanup_scan(
         ctrl_in.write(json.dumps({"command": CONTROL_PING, "request_id": "cached"}))
         task.wait_for_activity(timeout=task.next_wait_timeout())
         task.process_once()
+        responses = [json.loads(item) for item in ctrl_out.peek_generator()]
     finally:
         task.stop()
 
-    responses = [json.loads(item) for item in ctrl_out.peek_generator()]
     pong = next(
         response
         for response in responses
@@ -2635,7 +2901,7 @@ def test_task_monitor_slow_custom_processor_does_not_block_ping(
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
     ctrl_out = make_queue(spec.io.control["ctrl_out"])
 
-    task = TaskMonitorTask(db_path, spec, config=config)
+    task = TaskMonitor(db_path, spec, config=config)
     try:
         started_at = time.monotonic()
         task.process_once()
@@ -2709,7 +2975,7 @@ def test_task_monitor_failed_processor_does_not_advance_checkpoint(
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     log_queue.write(json.dumps({"event": "work_failed", "tid": "1778084345905438720"}))
 
-    task = TaskMonitorTask(
+    task = TaskMonitor(
         db_path,
         make_task_monitor_taskspec("1778089999999999997"),
         config=config,
@@ -2747,7 +3013,7 @@ def test_task_monitor_heartbeat_failure_records_health_but_still_cycles(
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     log_queue.write(json.dumps({"event": "work_started", "tid": "1778084345905438720"}))
 
-    task = TaskMonitorTask(
+    task = TaskMonitor(
         db_path,
         make_task_monitor_taskspec("1778089999999999996"),
         config=config,

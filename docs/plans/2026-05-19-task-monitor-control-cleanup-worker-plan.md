@@ -22,7 +22,7 @@ Move terminal task-local control queue cleanup out of the TaskMonitor reactor an
 Read first:
 
 - `weft/core/tasks/base.py`: `TaskWorkerResult`, `_submit_worker_call()`, `_drain_worker_results()`, and `_handle_worker_result()`. The existing generic worker contract says workers are broker-free. Do not silently weaken that contract.
-- `weft/core/monitor/task_monitor.py`: `TaskMonitorTask.process_once()`, `next_wait_timeout()`, `_run_monitor_store_cycle()`, `_run_terminal_control_cleanup_slice()`, `_delete_terminal_control_queues()`, `_handle_worker_result()`, `_control_snapshot_fields()`, and `_task_monitor_pong_extension()`.
+- `weft/core/monitor/task_monitor.py`: `TaskMonitor.process_once()`, `next_wait_timeout()`, `_run_monitor_store_cycle()`, `_run_terminal_control_cleanup_slice()`, `_delete_terminal_control_queues()`, `_handle_worker_result()`, `_control_snapshot_fields()`, and `_task_monitor_pong_extension()`.
 - `weft/core/monitor/store.py`: `list_terminal_control_cleanup_ready_tasks()`, `mark_task_controls_deleted()`, and `mark_families_disposed()`.
 - `weft/context.py`: `WeftContext.queue()` and broker configuration handling. Worker code needs fresh queue handles through the context, not queue objects borrowed from the reactor.
 - `tests/tasks/test_task_monitor.py`: persistent monitor behavior tests and helpers.
@@ -72,7 +72,7 @@ Implement:
 - Add private dataclasses in `task_monitor.py`:
   - `_TaskControlCleanupWork`: cycle id or `now_ns`, batch limit, and any fields needed for deterministic result handling.
   - `_TaskControlCleanupWorkerResult`: wrap `_TaskControlCleanupResult` plus store status/checkpoint information if the worker refreshed it.
-- Add `_control_cleanup_work_in_flight: _TaskControlCleanupWork | None` on `TaskMonitorTask`.
+- Add `_control_cleanup_work_in_flight: _TaskControlCleanupWork | None` on `TaskMonitor`.
 - Do not reuse `_processor_work_in_flight`; custom processors and terminal control cleanup are different contracts.
 
 Testing first:

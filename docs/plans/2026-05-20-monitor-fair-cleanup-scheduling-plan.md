@@ -23,7 +23,7 @@ cleanup settings.
 ## 2. Source Documents
 
 - `docs/specifications/01-Core_Components.md` [CC-2.3], [CC-3.4]:
-  `TaskMonitorTask` owns operational monitoring, retained lifecycle summaries,
+  `TaskMonitor` owns operational monitoring, retained lifecycle summaries,
   heartbeat/PING responsiveness, and monitor-owned cleanup.
 - `docs/specifications/04-SimpleBroker_Integration.md` [SB-0.4], [SB-0.4a]:
   Weft must use `WeftContext`, public SimpleBroker queue APIs, and the Monitor
@@ -248,7 +248,7 @@ Write tests first.
 
 Test 1: worker in flight must not make PONG timeout.
 
-- Use real broker queues and `TaskMonitorTask`.
+- Use real broker queues and `TaskMonitor`.
 - Arrange a monitor with a synthetic in-flight runtime cleanup worker. If a
   real slow queue delete is too hard to force, monkeypatch only the worker
   submit function to hold a thread on an event; do not mock queue behavior for

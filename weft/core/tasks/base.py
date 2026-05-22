@@ -460,16 +460,12 @@ class BaseTask(MultiQueueWatcher, ABC):
     # ------------------------------------------------------------------
     # Lifecycle management
     # ------------------------------------------------------------------
-    def _submit_worker_call(
+    def _submit_worker_lane(
         self,
         lane: str,
         func: Callable[[], Any],
     ) -> threading.Thread:
-        """Run broker-free work on a background lane and wake the task reactor.
-
-        The callable must not use SimpleBroker queues or mutate TaskSpec state.
-        Results are delivered to ``_handle_worker_result()`` on the main task
-        thread during ``process_once()``.
+        """Run local work on a named lane and wake the task reactor.
 
         Spec: [CC-2.2], [CC-2.5]
         """
@@ -507,6 +503,22 @@ class BaseTask(MultiQueueWatcher, ABC):
             self._worker_threads.add(thread)
         thread.start()
         return thread
+
+    def _submit_worker_call(
+        self,
+        lane: str,
+        func: Callable[[], Any],
+    ) -> threading.Thread:
+        """Run broker-free work on a background lane and wake the task reactor.
+
+        The callable must not use SimpleBroker queues or mutate TaskSpec state.
+        Results are delivered to ``_handle_worker_result()`` on the main task
+        thread during ``process_once()``.
+
+        Spec: [CC-2.2], [CC-2.5]
+        """
+
+        return self._submit_worker_lane(lane, func)
 
     def _publish_worker_result(
         self,
@@ -626,6 +638,7 @@ class BaseTask(MultiQueueWatcher, ABC):
         self._reset_multi_activity_waiter()
         self.unregister_endpoint_name()
         self._end_streaming_session()
+        self._cleanup_standard_control_queues_on_exit()
         seen_queue_ids: set[int] = set()
         for queue in list(self._queue_cache.values()):
             queue_id = id(queue)
@@ -641,6 +654,37 @@ class BaseTask(MultiQueueWatcher, ABC):
         self._owned_queue_names.clear()
         self._queue_cache.clear()
         self._spilled_output_dirs.clear()
+
+    def _standard_control_queue_names(self) -> tuple[str, str] | None:
+        """Return task-local standard control queues owned by this task."""
+
+        expected_ctrl_in = f"T{self.tid}.{QUEUE_CTRL_IN_SUFFIX}"
+        expected_ctrl_out = f"T{self.tid}.{QUEUE_CTRL_OUT_SUFFIX}"
+        if (
+            self._queue_names.get("ctrl_in") != expected_ctrl_in
+            or self._queue_names.get("ctrl_out") != expected_ctrl_out
+        ):
+            return None
+        return expected_ctrl_in, expected_ctrl_out
+
+    def _cleanup_standard_control_queues_on_exit(self) -> None:
+        """Clear standard task-local control queues when the task exits.
+
+        Spec: docs/specifications/05-Message_Flow_and_State.md [MF-3]
+        """
+
+        queue_names = self._standard_control_queue_names()
+        if queue_names is None:
+            return
+        for queue_name in queue_names:
+            try:
+                self._queue(queue_name).delete()
+            except (BrokerError, OSError, RuntimeError):
+                logger.debug(
+                    "Failed to clean control queue %s during task exit",
+                    queue_name,
+                    exc_info=True,
+                )
 
     def stop(self, *, join: bool = True, timeout: float = 2.0) -> None:
         """Stop the watcher and release any cached queue handles.

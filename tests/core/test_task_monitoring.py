@@ -24,7 +24,7 @@ from weft.core.monitor.runtime import (
     task_log_seen_candidate,
 )
 from weft.core.monitor.task_monitor import (
-    TaskMonitorTask,
+    TaskMonitor,
     make_task_monitor_taskspec,
 )
 from weft.core.pruning.retention import (
@@ -55,7 +55,7 @@ def noop(_request: TaskMonitorProcessorRequest) -> TaskMonitorProcessorResult:
 def test_task_monitor_old_tasks_module_path_is_removed() -> None:
     old_module = REPO_ROOT / "weft" / "core" / "tasks" / "task_monitor.py"
     old_import = "weft.core.tasks." + "task_monitor"
-    old_reexport = "from weft.core.tasks import " + "TaskMonitorTask"
+    old_reexport = "from weft.core.tasks import " + "TaskMonitor"
     offenders: list[str] = []
     for root_name in ("weft", "tests"):
         for path in (REPO_ROOT / root_name).rglob("*.py"):
@@ -76,7 +76,7 @@ def serve_log_events(capsys: pytest.CaptureFixture[str]) -> list[dict[str, objec
 
 
 def drive_task_monitor_until_idle(
-    monitor: TaskMonitorTask,
+    monitor: TaskMonitor,
     *,
     timeout: float = 20.0,
 ) -> None:
@@ -209,7 +209,7 @@ def test_task_monitor_operational_log_emits_config_and_cycle(
     )
     spec = make_task_monitor_taskspec("1778089999999999001")
     spec.metadata["parent_tid"] = "1778089999999999000"
-    monitor = TaskMonitorTask(
+    monitor = TaskMonitor(
         weft_harness.context.broker_target,
         spec,
         config=config,
@@ -245,7 +245,7 @@ def test_task_monitor_operational_log_off_is_silent(
         }
     )
     spec = make_task_monitor_taskspec("1778089999999999002")
-    monitor = TaskMonitorTask(
+    monitor = TaskMonitor(
         weft_harness.context.broker_target,
         spec,
         config=config,
@@ -273,7 +273,7 @@ def test_task_monitor_operational_log_reports_processor_error(
         }
     )
     spec = make_task_monitor_taskspec("1778089999999999003")
-    monitor = TaskMonitorTask(
+    monitor = TaskMonitor(
         weft_harness.context.broker_target,
         spec,
         config=config,
@@ -307,7 +307,7 @@ def test_resolve_custom_processor() -> None:
 def test_builtin_processors_are_not_resolved_through_custom_hook(
     processor_name: str,
 ) -> None:
-    with pytest.raises(ValueError, match="handled by TaskMonitorTask"):
+    with pytest.raises(ValueError, match="handled by TaskMonitor"):
         resolve_task_monitor_processor(processor_name)
 
 

@@ -69,7 +69,7 @@ Related plans:
 - [`2026-05-05-simplebroker-multiqueue-waiter-integration-plan.md`](./2026-05-05-simplebroker-multiqueue-waiter-integration-plan.md):
   completed multi-queue waiter integration. This is the intended hot wait path
   to preserve.
-- `TaskMonitorTask` in `weft/core/tasks/task_monitor.py`: current reference
+- `TaskMonitor` in `weft/core/tasks/task_monitor.py`: current reference
   shape for a launched persistent task that uses `next_wait_timeout()` instead
   of the launcher's 50 ms fallback while waiting for its own due work.
 - `HeartbeatTask` in `weft/core/tasks/heartbeat.py`: adjacent pattern to align
@@ -168,7 +168,7 @@ Read first:
 - `weft/core/launcher.py`:
   `_task_process_entry` lines that already call `next_wait_timeout()`.
 - `weft/core/tasks/task_monitor.py`:
-  `TaskMonitorTask.next_wait_timeout` and `TaskMonitorTask.process_once` as the
+  `TaskMonitor.next_wait_timeout` and `TaskMonitor.process_once` as the
   reference shape.
 - `weft/core/tasks/heartbeat.py`:
   `HeartbeatTask.process_once`, `_next_wait_timeout`, and `_wait_for_activity`
@@ -218,7 +218,7 @@ Comprehension questions before editing:
    its ordinary interval?
 7. Why did `Manager.wait_for_activity()` previously avoid backend activity
    waiters under Postgres load, and how does the new plan preserve that ceiling?
-8. What does `TaskMonitorTask.next_wait_timeout()` already prove about the
+8. What does `TaskMonitor.next_wait_timeout()` already prove about the
    intended launcher contract, and which parts are Monitor-specific?
 9. Why is `HeartbeatTask` not the shape to copy directly despite having the same
    due-timer concept?
@@ -226,7 +226,7 @@ Comprehension questions before editing:
 ## 4. Target Model
 
 The target shape is a reusable task-loop contract, with Manager as the first
-hard implementation and `TaskMonitorTask` as the compatibility reference:
+hard implementation and `TaskMonitor` as the compatibility reference:
 
 1. `process_once()` drains ready work and handles local progress.
 2. `next_wait_timeout()` computes the nearest due timer across manager-owned
@@ -245,7 +245,7 @@ hook with the same semantics as `launcher._task_process_entry`: start from the
 caller-provided fallback `poll_interval`, then replace it only when
 `next_wait_timeout()` returns a non-`None` value.
 
-`TaskMonitorTask` is the model for the public hook shape: it already exposes
+`TaskMonitor` is the model for the public hook shape: it already exposes
 `next_wait_timeout()` and keeps `process_once()` bounded. Manager should follow
 that launcher-owned outer-loop shape. `HeartbeatTask` is deliberately not the
 model to copy: it has the right due-timer concept, but it hides the hook as
@@ -379,7 +379,7 @@ Add the minimal reusable contract before changing Manager behavior:
   launcher semantics for opt-in reactive tasks.
 - Do not change `BaseTask.process_once()` behavior.
 - Grep for existing `next_wait_timeout` attributes or methods before editing.
-  At the time this plan was written, `TaskMonitorTask` exposes the public hook,
+  At the time this plan was written, `TaskMonitor` exposes the public hook,
   Heartbeat exposes only private `_next_wait_timeout()`, and Manager has no
   hook.
 - Do not make the default hook account for poll reporting in this slice. A
@@ -389,7 +389,7 @@ Add the minimal reusable contract before changing Manager behavior:
 - Add a small test task subclass that returns `0.0`, a positive timeout, and
   `None` from `next_wait_timeout()` and proves `run_until_stopped()` passes the
   expected timeout to `wait_for_activity()`.
-- Add or keep a compatibility assertion that `TaskMonitorTask.next_wait_timeout`
+- Add or keep a compatibility assertion that `TaskMonitor.next_wait_timeout`
   remains a public hook consumed by the launcher.
 
 Stop gate: if this requires changing queue semantics, control handling, or the
@@ -815,7 +815,7 @@ Findings:
   `reporting_interval == "poll"`.
 - P2: `HeartbeatTask` has a similar due-timer concept, but copying its inner
   wait loop would undermine the reusable contract. The plan now uses
-  `TaskMonitorTask` as the reference shape and keeps full Heartbeat alignment
+  `TaskMonitor` as the reference shape and keeps full Heartbeat alignment
   out of scope until after the Manager implementation proves the contract.
 - P1: The earlier draft still treated the manager as a 50 ms loop with cheaper
   work hanging off it. That missed the stronger target: one reactive loop where
@@ -914,7 +914,7 @@ implementation review.
 Review date: 2026-05-15.
 
 Reason: the plan was materially revised to start with a reusable `BaseTask`
-contract inspired by `TaskMonitorTask`, while keeping Manager as the first
+contract inspired by `TaskMonitor`, while keeping Manager as the first
 behavior-changing implementation.
 
 Reviewer attempts:
@@ -927,7 +927,7 @@ Reviewer attempts:
 
 Gemini result: no plan-level blockers. Gemini confirmed that starting in
 `BaseTask` is the right place for the reusable contract, default behavior is
-preserved by returning `None`, `TaskMonitorTask` is the right reference shape,
+preserved by returning `None`, `TaskMonitor` is the right reference shape,
 and full `HeartbeatTask` alignment is correctly out of scope. Gemini repeated
 the implementation risks around leadership-cache invalidation, timer unit
 handling, duplicate precheck removal, and active-child polling.
@@ -938,7 +938,7 @@ Claude result: no plan-level blockers. Claude verified these code facts:
   `getattr` and uses `max(0.0, float(candidate_timeout))`.
 - `BaseTask.run_until_stopped()` currently ignores the hook, so adding the hook
   there is non-disruptive when the default returns `None`.
-- `TaskMonitorTask.next_wait_timeout()` is public and has no inner wait loop.
+- `TaskMonitor.next_wait_timeout()` is public and has no inner wait loop.
 - `HeartbeatTask` has an inner wait loop and only private
   `_next_wait_timeout()`, so deferring Heartbeat alignment is correct.
 - `Manager` has no `next_wait_timeout()` today.

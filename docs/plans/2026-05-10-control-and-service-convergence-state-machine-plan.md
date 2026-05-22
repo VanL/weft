@@ -658,7 +658,7 @@ One-way doors:
   backend violates its documented queue contract.
 - No public CLI option changes.
 - No new dependency.
-- No broad refactor of `Manager`, `BaseTask`, or `TaskMonitorTask`.
+- No broad refactor of `Manager`, `BaseTask`, or `TaskMonitor`.
 
 ## 10. Fresh-Eyes Review Checklist
 
