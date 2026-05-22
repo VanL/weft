@@ -474,10 +474,11 @@ no active runtime-owner evidence. Reserved deletion must use public
 SimpleBroker queue APIs and must remain bounded by the same runtime cleanup
 limit and internal fair-slice safeguards as task-local control queue cleanup.
 The same runtime cleanup pass may identify dead tasks from standard
-`T{tid}.*` queue names minus live runtime TIDs and delete only stale standard
-`ctrl_in`/`ctrl_out` queues for those dead TIDs. That name-derived cleanup must
-not delete task inbox, outbox, reserved, manager/service controls, custom
-controls, or active runtime owners.
+`T{tid}.*` queue names minus live runtime TIDs. For those dead TIDs, the
+dead-task policy may delete stale standard `ctrl_in`, `ctrl_out`, and `inbox`
+queues immediately; it may delete standard `outbox` and `reserved` queues only
+after the task-log retention period. That name-derived cleanup must not delete
+manager/service controls, custom controls, or active runtime owners.
 Collation summaries, cleanup policy stats, and Monitor-owned collation tables
 remain operational TaskMonitor output only. Those deletes, summaries, and
 tables do not make task-monitor output lifecycle truth or result authority.

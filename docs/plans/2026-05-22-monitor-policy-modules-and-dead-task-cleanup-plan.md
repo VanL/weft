@@ -4,6 +4,17 @@ Status: completed
 Source specs: docs/specifications/01-Core_Components.md [CC-2.3]; docs/specifications/05-Message_Flow_and_State.md [MF-5]; docs/specifications/07-System_Invariants.md [OBS.13], [OBS.16], [OBS.17]
 Superseded by: none
 
+Correction note, 2026-05-22: the original version of this plan was too narrow
+for dead-TID cleanup. The implemented policy is governed by the updated specs:
+dead-TID selection and per-TID queue eligibility live together in
+`weft/core/monitor/policies/dead_task.py`; the TaskMonitor reactor only
+schedules and commits worker results; the worker performs queue/API work.
+For proven-dead TIDs, `ctrl_in`, `ctrl_out`, and `inbox` are stale
+immediately. `outbox` and `reserved` are selected by the same per-TID policy
+only after the task-log retention period. The per-TID task-log coalesce lookup
+uses the released broker message-search API rather than substituting only the
+Monitor-store indexed path.
+
 ## Scope
 
 This plan has two ordered slices.
@@ -15,9 +26,10 @@ rewrite policy behavior while moving it.
 Slice B adds a dead-task cleanup policy. The policy derives historical task IDs
 from standard task-local queue names, subtracts live task IDs, and processes
 dead TIDs from oldest to newest. For each dead TID it idempotently deletes
-`T{tid}.ctrl_in` and `T{tid}.ctrl_out`. It then uses the Monitor's indexed
-task-log collation path to coalesce and retire retained task-log evidence for
-that TID where policy allows.
+stale `T{tid}.ctrl_in`, `T{tid}.ctrl_out`, and `T{tid}.inbox`. The same
+per-TID policy selects `T{tid}.outbox` and `T{tid}.reserved` only after the
+retention period. It then uses the broker task-log coalesce API to identify,
+summarize, and exact-delete retained `weft.log.tasks` rows for that TID.
 
 The goal is going forward cleanup. Standard control queues are runtime control
 channels. After a task exits, those queues are stale. A residual standard
@@ -93,14 +105,11 @@ The implementer must understand these files before starting.
   changing code.
 - Slice A must not change observable cleanup behavior. It is an extraction and
   import rewiring pass only.
-- Standard task-local control queues are `T{tid}.ctrl_in` and
-  `T{tid}.ctrl_out`. They are runtime-only and may be deleted after the owning
-  task is not live.
-- `T{tid}.outbox` must not be deleted by this work. Result retention remains a
-  separate policy.
-- `T{tid}.inbox` must not be deleted by this work.
-- `T{tid}.reserved` remains governed by the existing reserved cleanup policy.
-  Do not broaden reserved deletion while implementing dead-TID control cleanup.
+- Standard task-local `T{tid}.ctrl_in`, `T{tid}.ctrl_out`, and `T{tid}.inbox`
+  are stale after the owning TID is proven dead.
+- `T{tid}.outbox` and `T{tid}.reserved` are retention-gated for dead TIDs.
+  Select them in the same per-TID policy only when the TID is older than the
+  task-log retention period.
 - Manager and service control queues must not be deleted by task-local cleanup.
   In particular, never delete `weft.manager.ctrl_in`,
   `weft.manager.ctrl_out`, `T{monitor_tid}.ctrl_in`, or
@@ -117,9 +126,9 @@ The implementer must understand these files before starting.
   direct queue-table SQL for production cleanup.
 - Retained task-log row deletion must remain exact-message-ID deletion through
   the existing pruning/apply path.
-- The per-TID log coalescing path must not do a raw `weft.log.tasks` scan per
-  candidate TID. That is a stop gate. Use Monitor table indexes or add a
-  batched indexed lookup first.
+- The per-TID log coalescing path must use the released broker message-search
+  API for that TID and then exact-delete only the matching `weft.log.tasks`
+  message IDs after Monitor-store summarization.
 - The worker model must be bounded. Do not spawn one OS thread per historical
   TID. Use a bounded local `queue.Queue[str]` and a fixed small worker pool
   inside the existing TaskMonitor cleanup worker lane.

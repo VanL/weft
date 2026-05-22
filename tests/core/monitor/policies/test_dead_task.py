@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from weft.core.monitor.policies.dead_task import (
+    dead_task_queue_cleanup_plan,
     dead_task_tids_from_queue_names,
     select_dead_task_tids_from_queue_names,
     standard_task_queue_identity,
@@ -68,3 +69,45 @@ def test_dead_task_tids_skips_too_young_tids() -> None:
     assert selection.discovered_tids == 2
     assert selection.skipped_live == 0
     assert selection.skipped_too_young == 1
+
+
+def test_dead_task_queue_cleanup_plan_keeps_retention_queues_until_old() -> None:
+    tid = "1778000000000000001"
+    now_ns = int(tid) + 10_000_000_000
+
+    plan = dead_task_queue_cleanup_plan(
+        tid,
+        now_ns=now_ns,
+        retention_seconds=60.0,
+    )
+
+    assert plan.queue_names == (
+        f"T{tid}.ctrl_in",
+        f"T{tid}.ctrl_out",
+        f"T{tid}.inbox",
+    )
+    assert plan.outbox_queue_names == ()
+    assert plan.reserved_queue_names == ()
+    assert plan.retention_eligible is False
+
+
+def test_dead_task_queue_cleanup_plan_includes_retention_queues_when_old() -> None:
+    tid = "1778000000000000001"
+    now_ns = int(tid) + 61_000_000_000
+
+    plan = dead_task_queue_cleanup_plan(
+        tid,
+        now_ns=now_ns,
+        retention_seconds=60.0,
+    )
+
+    assert plan.queue_names == (
+        f"T{tid}.ctrl_in",
+        f"T{tid}.ctrl_out",
+        f"T{tid}.inbox",
+        f"T{tid}.outbox",
+        f"T{tid}.reserved",
+    )
+    assert plan.outbox_queue_names == (f"T{tid}.outbox",)
+    assert plan.reserved_queue_names == (f"T{tid}.reserved",)
+    assert plan.retention_eligible is True

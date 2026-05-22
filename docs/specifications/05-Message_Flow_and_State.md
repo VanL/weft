@@ -424,15 +424,13 @@ Current rules:
   ingested raw rows. Raw external mode remains emit-before-delete and does not
   write Monitor collation rows. Successful completed lifecycles do not require
   reserved-queue probes. After any required summary is emitted, terminal
-  disposition may delete the whole standard
-  task-local `T{tid}.ctrl_in` and `T{tid}.ctrl_out` runtime queues, including
-  visible and claimed rows, through public SimpleBroker queue APIs from the
-  dedicated TaskMonitor runtime-cleanup worker. The same worker may delete
-  standard `T{tid}.reserved` queues when the Monitor table proves the family is
-  terminal/disposed/raw-deleted, or when no Monitor row exists and the TID is
-  older than the task-log retention period with no active runtime owner.
-  Manager, global, and custom control queues are excluded. `T{tid}.inbox` and
-  `T{tid}.outbox` remain outside the default supervised monitor cleanup path.
+  disposition may delete whole standard task-local runtime queues through
+  public SimpleBroker queue APIs from the dedicated TaskMonitor
+  runtime-cleanup worker. For a proven-dead TID, `T{tid}.ctrl_in`,
+  `T{tid}.ctrl_out`, and `T{tid}.inbox` are stale immediately. `T{tid}.outbox`
+  and `T{tid}.reserved` remain retention-gated and are selected by the same
+  dead-TID policy only when the TID is older than the task-log retention
+  period. Manager, global, service, and custom control queues are excluded.
 - `weft system prune` is a separate foreground maintenance command.
   `--family runtime-state` reports or deletes exact message IDs from supported
   `weft.state.*` queues after conservative live/recent checks.
@@ -837,24 +835,25 @@ system pruning:
   pass. Rows with non-terminal events such as
   `task_activity` do not close lifecycle groups solely because they carry a
   terminal-looking status. Terminal disposition may clear standard task-local
-  residual `ctrl_in` and `ctrl_out` runtime queues left by forced process death,
-  cleanup failure, or older releases; the same supervised runtime-cleanup pass
-  may clear eligible stale standard `reserved` queues. It must not clear
-  task-local inbox or outbox queues. Retained non-interactive command stream
-  frames, including stderr diagnostics, live in outbox rather than cleanup-owned
-  `ctrl_out`.
+  residual `ctrl_in`, `ctrl_out`, and `inbox` queues left by forced process
+  death, cleanup failure, or older releases. For proven-dead TIDs, the same
+  policy may clear standard `outbox` and `reserved` queues only when the TID is
+  older than the configured task-log retention period. Retained non-interactive
+  command stream frames, including stderr diagnostics, live in outbox rather
+  than cleanup-owned `ctrl_out` while the retention gate protects them.
   `WEFT_TASK_MONITOR_BATCH_SIZE` caps retained task-log rows or cleanup
   candidates per cycle; it is not the task-log scan depth. Reserved rows remain
   protected recovery-sensitive evidence by default. Per-cycle collation
   summaries are operational TaskMonitor evidence only, not durable archive
   records. The supervised monitor may also derive dead-task cleanup candidates
   by listing standard task-local queue names, parsing `T{tid}.*` identities,
-  and subtracting live runtime TIDs. That dead-task cleanup path may delete only
-  standard stale `T{tid}.ctrl_in` and `T{tid}.ctrl_out` queues; it must not
-  delete task-local inbox, outbox, reserved, manager, service, or custom control
-  queues. Each cleanup cycle records cached policy/store stats so PONG can
-  distinguish "ran and selected zero" from "did not run". The monitor must not
-  delete active work,
+  and subtracting live runtime TIDs. That dead-task cleanup policy is owned by
+  `weft/core/monitor/policies/dead_task.py`: it selects standard stale
+  `T{tid}.ctrl_in`, `T{tid}.ctrl_out`, and `T{tid}.inbox` immediately, and
+  selects standard `T{tid}.outbox` and `T{tid}.reserved` only after the
+  retention period. Each cleanup cycle records cached policy/store stats so
+  PONG can distinguish "ran and selected zero" from "did not run". The monitor
+  must not delete active work,
   ambiguous task-local evidence, claimed outbox residue, user payload rows,
   spawn requests, manager control rows, or candidates without exact message
   IDs. `report_only` remains available as a non-destructive override.

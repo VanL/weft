@@ -337,6 +337,16 @@ runbook needs to become stricter.
   by the built-in cycle, and a control slice that spends the full family budget
   must preserve reserved-cleanup pending state so the next catch-up turn runs.
 
+## 2026-05-22 Dead-TID Cleanup Policy
+
+- When a user specifies a concrete cleanup API, do not replace it with a nearby
+  indexed or cached path during planning. If the API is expensive, bound it in
+  the worker policy and report the cost; do not silently change the semantics.
+- Cleanup policy selection belongs in `weft/core/monitor/policies/`, not in the
+  TaskMonitor reactor. The reactor schedules and commits results; the worker
+  performs broker/store work; the policy module decides which queues and
+  task-log rows are eligible.
+
 ## 2026-05-20 Host PID Namespace Visibility
 
 - A host-scoped PID that is not visible from a container is ambiguous evidence,

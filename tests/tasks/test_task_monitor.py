@@ -18,6 +18,7 @@ from weft._constants import (
     SERVICE_STATUS_ACTIVE,
     SERVICE_TYPE_MANAGED,
     TASK_MONITOR_ACTIVITY_WAIT_CAP_SECONDS,
+    TASK_MONITOR_TID_MAPPING_CLEANUP_MIN_AGE_SECONDS,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MONITOR_SCHEMA_VERSION,
     WEFT_SERVICES_REGISTRY_QUEUE,
@@ -1251,8 +1252,8 @@ def test_task_monitor_terminal_disposition_deletes_task_runtime_queues(
 
     assert ctrl_in.stats().total == 0
     assert ctrl_out.stats().total == 0
-    assert list(inbox.peek_generator()) == ["input"]
-    assert list(outbox.peek_generator()) == ["result"]
+    assert list(inbox.peek_generator()) == []
+    assert list(outbox.peek_generator()) == []
     assert list(reserved.peek_generator()) == []
 
 
@@ -1327,8 +1328,7 @@ def test_task_monitor_deletes_controls_for_already_disposed_family(
         def controls_deleted() -> bool:
             record = store.get_task(tid)
             return (
-                record is not None
-                and record.task_control_deleted_at_ns is not None
+                (record is None or record.task_control_deleted_at_ns is not None)
                 and make_queue(f"T{tid}.ctrl_in").stats().total == 0
                 and make_queue(f"T{tid}.ctrl_out").stats().total == 0
             )
@@ -1337,9 +1337,7 @@ def test_task_monitor_deletes_controls_for_already_disposed_family(
             drive_task_monitor_until(task, controls_deleted, timeout=30.0)
 
         record = store.get_task(tid)
-        assert record is not None
-        assert record.task_control_deleted_at_ns is not None
-        assert record.disposition_reason == "terminal"
+        assert record is None
         assert cleanup.pending or cleanup.families_processed == 1
         assert cleanup.families_disposed == 0
     finally:
@@ -1626,10 +1624,12 @@ def test_task_monitor_dead_task_cleanup_deletes_standard_control_queues(
     ctrl_out = make_queue(f"T{tid}.ctrl_out")
     inbox = make_queue(f"T{tid}.inbox")
     outbox = make_queue(f"T{tid}.outbox")
+    reserved = make_queue(f"T{tid}.reserved")
     ctrl_in.write("stop")
     ctrl_out.write("pong")
     inbox.write("input")
     outbox.write("result")
+    reserved.write("reserved")
 
     task = TaskMonitor(
         db_path,
@@ -1648,14 +1648,74 @@ def test_task_monitor_dead_task_cleanup_deletes_standard_control_queues(
 
     assert ctrl_in.stats().total == 0
     assert ctrl_out.stats().total == 0
-    assert list(inbox.peek_generator()) == ["input"]
-    assert list(outbox.peek_generator()) == ["result"]
+    assert inbox.stats().total == 0
+    assert outbox.stats().total == 0
+    assert reserved.stats().total == 0
     assert cleanup.dead_tids_processed == 1
+    assert cleanup.dead_tid_queues_deleted == 5
     assert cleanup.dead_tid_control_queues_deleted == 2
-    assert cleanup.dead_tid_control_rows_estimated_deleted == 2
+    assert cleanup.dead_tid_inbox_queues_deleted == 1
+    assert cleanup.dead_tid_outbox_queues_deleted == 1
+    assert cleanup.dead_tid_reserved_queues_deleted == 1
+    assert cleanup.dead_tid_rows_estimated_deleted == 5
 
 
-def test_task_monitor_dead_task_cleanup_deletes_indexed_task_log_refs(
+def test_task_monitor_dead_task_cleanup_retains_outbox_and_reserved_before_retention(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    now_ns = time.time_ns()
+    tid = str(
+        now_ns - int((TASK_MONITOR_TID_MAPPING_CLEANUP_MIN_AGE_SECONDS + 60.0) * 1e9)
+    )
+    ctrl_in = make_queue(f"T{tid}.ctrl_in")
+    inbox = make_queue(f"T{tid}.inbox")
+    outbox = make_queue(f"T{tid}.outbox")
+    reserved = make_queue(f"T{tid}.reserved")
+    ctrl_in.write("stop")
+    inbox.write("input")
+    outbox.write("result")
+    reserved.write("reserved")
+
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec(str(now_ns + 1_000_000)),
+        config=config,
+    )
+    try:
+        store = task._ensure_monitor_store()
+        assert store is not None
+        cleanup = task._run_terminal_control_cleanup_slice(
+            store,
+            now_ns=now_ns,
+        )
+    finally:
+        task.stop()
+
+    assert ctrl_in.stats().total == 0
+    assert inbox.stats().total == 0
+    assert list(outbox.peek_generator()) == ["result"]
+    assert list(reserved.peek_generator()) == ["reserved"]
+    assert cleanup.dead_tids_processed == 1
+    assert cleanup.dead_tid_control_queues_deleted == 1
+    assert cleanup.dead_tid_inbox_queues_deleted == 1
+    assert cleanup.dead_tid_outbox_queues_deleted == 0
+    assert cleanup.dead_tid_reserved_queues_deleted == 0
+
+
+def test_task_monitor_dead_task_cleanup_coalesces_and_deletes_task_log_refs(
     broker_env,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1693,7 +1753,6 @@ def test_task_monitor_dead_task_cleanup_deletes_indexed_task_log_refs(
     }
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     log_queue.write(json.dumps(payload))
-    message_id = next(iter_queue_entries(log_queue))[1]
     ctrl_in = make_queue(f"T{tid}.ctrl_in")
     ctrl_out = make_queue(f"T{tid}.ctrl_out")
     ctrl_in.write("stop")
@@ -1707,34 +1766,21 @@ def test_task_monitor_dead_task_cleanup_deletes_indexed_task_log_refs(
     try:
         store = task._ensure_monitor_store()
         assert store is not None
-        update = update_from_task_log_payload(payload, message_id=message_id)
-        assert update is not None
-        store.record_task_log_updates(
-            WEFT_GLOBAL_LOG_QUEUE,
-            (update,),
-            checkpoint_message_id=None,
-        )
-        store.mark_summary_emitted(tid, message_id + 1)
-        indexed_lookup_calls: list[tuple[str, ...]] = []
-        real_indexed_lookup = store.list_deletable_task_log_messages_for_tids
+        coalesce_calls: list[str] = []
+        real_coalesce = task_monitor_mod._fetch_dead_task_log_coalesce_group
 
-        def counted_indexed_lookup(
-            tids: tuple[str, ...],
-            *,
-            limit: int,
-            require_summary: bool = True,
-        ):
-            indexed_lookup_calls.append(tuple(tids))
-            return real_indexed_lookup(
-                tids,
-                limit=limit,
-                require_summary=require_summary,
+        def counted_coalesce(ctx, tid_arg: str, *, chunk_limit: int):
+            coalesce_calls.append(tid_arg)
+            return real_coalesce(
+                ctx,
+                tid_arg,
+                chunk_limit=chunk_limit,
             )
 
         monkeypatch.setattr(
-            store,
-            "list_deletable_task_log_messages_for_tids",
-            counted_indexed_lookup,
+            task_monitor_mod,
+            "_fetch_dead_task_log_coalesce_group",
+            counted_coalesce,
         )
 
         cleanup = task._run_terminal_control_cleanup_slice(
@@ -1752,7 +1798,7 @@ def test_task_monitor_dead_task_cleanup_deletes_indexed_task_log_refs(
         if json.loads(body).get("tid") == tid
     ]
     assert retained_task_rows == []
-    assert indexed_lookup_calls == [(tid,)]
+    assert coalesce_calls == [tid]
     assert cleanup.dead_tid_log_refs_selected == 1
     assert cleanup.dead_tid_log_rows_deleted == 1
 
@@ -2158,23 +2204,22 @@ def test_task_monitor_runtime_cleanup_interleaves_control_and_reserved_work(
         assert first is not None
         assert second is not None
         assert first.task_control_deleted_at_ns is not None
-        assert second.task_control_deleted_at_ns is None
-        assert cleanup.families_processed == 1
-        assert cleanup.reserved_families_processed == 1
-        assert cleanup.reserved_queues_deleted == 1
+        assert second.task_control_deleted_at_ns is not None
+        assert cleanup.families_processed == 2
+        assert cleanup.reserved_families_processed == 0
+        assert cleanup.reserved_queues_deleted == 0
         assert cleanup.pending is True
         assert cleanup.family_limit_hit is True
-        assert list(reserved.peek_generator()) == []
+        assert cleanup.dead_tids_pending >= 1
+        assert list(reserved.peek_generator()) == ["terminal-reserved"]
 
         cleanup = task._run_terminal_control_cleanup_slice(
             store,
             now_ns=time.time_ns(),
         )
 
-        second = store.get_task(tids[1])
-        assert second is not None
-        assert second.task_control_deleted_at_ns is not None
-        assert cleanup.families_processed == 1
+        assert list(reserved.peek_generator()) == []
+        assert cleanup.dead_tids_processed >= 1
     finally:
         task.stop()
 
@@ -2699,9 +2744,9 @@ def test_task_monitor_terminal_control_cleanup_worker_error_is_retryable(
         assert recovered_result.cleanup.errors == ()
 
         record = store.get_task(tid)
-        assert record is not None
-        assert record.task_control_deleted_at_ns is not None
-        assert record.disposition_reason == "terminal"
+        assert record is None
+        assert make_queue(f"T{tid}.ctrl_in").stats().total == 0
+        assert make_queue(f"T{tid}.ctrl_out").stats().total == 0
     finally:
         task.stop()
 

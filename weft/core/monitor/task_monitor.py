@@ -62,13 +62,25 @@ from weft.core.monitor.cleanup import (
     TaskMonitorCleanupConfig,
     run_task_monitor_cleanup,
 )
-from weft.core.monitor.collation import MonitorTaskEventUpdate, update_from_task_log_row
+from weft.core.monitor.collation import (
+    MonitorTaskEventUpdate,
+    update_from_task_log_payload,
+    update_from_task_log_row,
+)
 from weft.core.monitor.external_log import (
     ExternalTaskLogError,
     ExternalTaskLogSink,
     disabled_external_task_log_status,
 )
-from weft.core.monitor.policies.dead_task import select_dead_task_tids_from_queue_names
+from weft.core.monitor.policies.dead_task import (
+    dead_task_queue_cleanup_plan as _dead_task_queue_cleanup_plan,
+)
+from weft.core.monitor.policies.dead_task import (
+    fetch_dead_task_log_coalesce_group as _fetch_dead_task_log_coalesce_group,
+)
+from weft.core.monitor.policies.dead_task import (
+    select_dead_task_tids_from_queue_names,
+)
 from weft.core.monitor.policies.runtime_control import (
     TaskControlCleanupResult as _TaskControlCleanupResult,
 )
@@ -77,9 +89,6 @@ from weft.core.monitor.policies.runtime_control import (
 )
 from weft.core.monitor.policies.runtime_control import (
     standard_task_control_queue_names as _standard_task_control_queue_names,
-)
-from weft.core.monitor.policies.runtime_control import (
-    standard_task_control_queue_pair as _standard_task_control_queue_pair,
 )
 from weft.core.monitor.runtime import (
     TaskMonitorCandidate,
@@ -257,6 +266,9 @@ class _ExactTaskLogDeleteResult:
 class _DeadTaskLogDeleteResult:
     """Per-TID task-log delete result from indexed Monitor-store refs."""
 
+    api_matches: int = 0
+    coalesced_rows: int = 0
+    summaries_emitted: int = 0
     refs_selected: int = 0
     rows_deleted: int = 0
     errors: tuple[str, ...] = ()
@@ -1536,8 +1548,9 @@ class TaskMonitor(ServiceTask):
         tid: str,
         *,
         existing_queue_names: set[str],
+        now_ns: int,
     ) -> _TaskControlCleanupResult:
-        """Delete standard task-local control queues for one dead TID."""
+        """Delete standard stale task-local queues for one dead TID."""
 
         if tid in self._active_runtime_tids():
             return _TaskControlCleanupResult(
@@ -1545,33 +1558,71 @@ class TaskMonitor(ServiceTask):
                 warnings=(f"{tid}: skipped active runtime owner",),
             )
 
-        queue_names = _standard_task_control_queue_pair(tid)
+        cleanup_plan = _dead_task_queue_cleanup_plan(
+            tid,
+            now_ns=now_ns,
+            retention_seconds=self._monitor_config.task_log_retention_period_seconds,
+        )
         errors: list[str] = []
         warnings: list[str] = []
-        queue_label = ",".join(queue_names)
+        rows_deleted = 0
+
         try:
             with self._monitor_context().broker() as broker:
-                rows_deleted = int(broker.delete_from_queues(queue_names))
+                rows_deleted = int(broker.delete_from_queues(cleanup_plan.queue_names))
         except (BrokerError, OSError, RuntimeError, ValueError) as exc:
+            queue_label = ",".join(cleanup_plan.queue_names)
             errors.append(f"{queue_label}: {exc}")
             rows_deleted = 0
 
-        existing_standard_queues = tuple(
+        existing_control_queues = tuple(
             queue_name
-            for queue_name in queue_names
+            for queue_name in cleanup_plan.control_queue_names
             if queue_name in existing_queue_names
         )
-        queues_deleted = 0 if errors else len(existing_standard_queues)
-        if not errors and rows_deleted == 0 and existing_standard_queues:
+        existing_inbox_queues = tuple(
+            queue_name
+            for queue_name in cleanup_plan.inbox_queue_names
+            if queue_name in existing_queue_names
+        )
+        existing_outbox_queues = tuple(
+            queue_name
+            for queue_name in cleanup_plan.outbox_queue_names
+            if queue_name in existing_queue_names
+        )
+        existing_reserved_queues = tuple(
+            queue_name
+            for queue_name in cleanup_plan.reserved_queue_names
+            if queue_name in existing_queue_names
+        )
+        control_queues_deleted = 0 if errors else len(existing_control_queues)
+        inbox_queues_deleted = 0 if errors else len(existing_inbox_queues)
+        outbox_queues_deleted = 0 if errors else len(existing_outbox_queues)
+        reserved_queues_deleted = 0 if errors else len(existing_reserved_queues)
+        if (
+            not errors
+            and rows_deleted == 0
+            and (existing_control_queues or existing_inbox_queues)
+        ):
             warnings.append(
-                f"{queue_label}: no rows deleted for queues present in the "
-                "pre-delete names snapshot"
+                f"{','.join(cleanup_plan.queue_names)}: no rows deleted for "
+                "queues present in the pre-delete names snapshot"
             )
 
         return _TaskControlCleanupResult(
             dead_tids_processed=1,
-            dead_tid_control_queues_deleted=queues_deleted,
-            dead_tid_control_rows_estimated_deleted=0 if errors else rows_deleted,
+            dead_tid_queues_deleted=(
+                control_queues_deleted
+                + inbox_queues_deleted
+                + outbox_queues_deleted
+                + reserved_queues_deleted
+            ),
+            dead_tid_rows_estimated_deleted=rows_deleted,
+            dead_tid_control_queues_deleted=control_queues_deleted,
+            dead_tid_control_rows_estimated_deleted=0,
+            dead_tid_inbox_queues_deleted=inbox_queues_deleted,
+            dead_tid_outbox_queues_deleted=outbox_queues_deleted,
+            dead_tid_reserved_queues_deleted=reserved_queues_deleted,
             errors=tuple(errors),
             warnings=tuple(warnings),
         )
@@ -1582,6 +1633,7 @@ class TaskMonitor(ServiceTask):
         *,
         existing_queue_names: set[str],
         limit: int,
+        now_ns: int,
         deadline_monotonic: float,
     ) -> tuple[_TaskControlCleanupResult, tuple[str, ...]]:
         """Run bounded dead-task control cleanup from a local TID queue."""
@@ -1616,6 +1668,7 @@ class TaskMonitor(ServiceTask):
                 result = self._delete_dead_task_control_queues(
                     tid,
                     existing_queue_names=existing_queue_names,
+                    now_ns=now_ns,
                 )
                 with result_lock:
                     results.append((tid, result))
@@ -1631,14 +1684,24 @@ class TaskMonitor(ServiceTask):
         skipped_live = 0
         queues_deleted = 0
         rows_deleted = 0
+        control_queues_deleted = 0
+        control_rows_deleted = 0
+        inbox_queues_deleted = 0
+        outbox_queues_deleted = 0
+        reserved_queues_deleted = 0
         errors: list[str] = []
         warnings: list[str] = []
         successful_tids: list[str] = []
         for tid, result in sorted(results, key=lambda item: int(item[0])):
             processed += result.dead_tids_processed
             skipped_live += result.dead_tids_skipped_live
-            queues_deleted += result.dead_tid_control_queues_deleted
-            rows_deleted += result.dead_tid_control_rows_estimated_deleted
+            queues_deleted += result.dead_tid_queues_deleted
+            rows_deleted += result.dead_tid_rows_estimated_deleted
+            control_queues_deleted += result.dead_tid_control_queues_deleted
+            control_rows_deleted += result.dead_tid_control_rows_estimated_deleted
+            inbox_queues_deleted += result.dead_tid_inbox_queues_deleted
+            outbox_queues_deleted += result.dead_tid_outbox_queues_deleted
+            reserved_queues_deleted += result.dead_tid_reserved_queues_deleted
             errors.extend(result.errors)
             warnings.extend(result.warnings)
             if result.success and result.dead_tids_processed:
@@ -1650,8 +1713,13 @@ class TaskMonitor(ServiceTask):
                 dead_tids_processed=processed,
                 dead_tids_skipped_live=skipped_live,
                 dead_tids_pending=pending,
-                dead_tid_control_queues_deleted=queues_deleted,
-                dead_tid_control_rows_estimated_deleted=rows_deleted,
+                dead_tid_queues_deleted=queues_deleted,
+                dead_tid_rows_estimated_deleted=rows_deleted,
+                dead_tid_control_queues_deleted=control_queues_deleted,
+                dead_tid_control_rows_estimated_deleted=control_rows_deleted,
+                dead_tid_inbox_queues_deleted=inbox_queues_deleted,
+                dead_tid_outbox_queues_deleted=outbox_queues_deleted,
+                dead_tid_reserved_queues_deleted=reserved_queues_deleted,
                 pending=pending > 0 or bool(errors),
                 errors=tuple(errors),
                 warnings=tuple(warnings),
@@ -1953,14 +2021,26 @@ class TaskMonitor(ServiceTask):
             now_ns=now_ns,
             min_age_seconds=TASK_MONITOR_TID_MAPPING_CLEANUP_MIN_AGE_SECONDS,
         )
-        ready_record_tids = {record.tid for record in ready_records}
+        dead_policy_excluded_tids = {
+            record.tid for record in ready_records if record.role == "manager"
+        }
         dead_tids = tuple(
-            tid for tid in dead_selection.selected_tids if tid not in ready_record_tids
+            tid
+            for tid in dead_selection.selected_tids
+            if tid not in dead_policy_excluded_tids
         )
+        dead_tid_set = set(dead_tids)
         reserved_has_work = any(
             (tid := _reserved_queue_tid(queue_name)) is not None
             and tid not in active_tids
+            and tid not in dead_tid_set
             for queue_name in reserved_queue_names
+        )
+        reserved_queue_names_for_reserved_policy = tuple(
+            queue_name
+            for queue_name in reserved_queue_names
+            if (tid := _reserved_queue_tid(queue_name)) is not None
+            and tid not in dead_tid_set
         )
         families_processed = 0
         families_disposed = 0
@@ -1972,8 +2052,13 @@ class TaskMonitor(ServiceTask):
         dead_tids_skipped_live = dead_selection.skipped_live
         dead_tids_skipped_too_young = dead_selection.skipped_too_young
         dead_tids_pending = len(dead_tids)
+        dead_tid_queues_deleted = 0
+        dead_tid_rows_estimated_deleted = 0
         dead_tid_control_queues_deleted = 0
         dead_tid_control_rows_estimated_deleted = 0
+        dead_tid_inbox_queues_deleted = 0
+        dead_tid_outbox_queues_deleted = 0
+        dead_tid_reserved_queues_deleted = 0
         dead_tid_log_refs_selected = 0
         dead_tid_log_rows_deleted = 0
         errors: list[str] = []
@@ -2045,7 +2130,7 @@ class TaskMonitor(ServiceTask):
                 now_ns=now_ns,
                 limit=remaining_limit,
                 active_tids=active_tids,
-                queue_names=reserved_queue_names,
+                queue_names=reserved_queue_names_for_reserved_policy,
                 deadline_monotonic=deadline_monotonic,
             )
             family_budget_used += reserved_cleanup.reserved_families_processed
@@ -2068,8 +2153,9 @@ class TaskMonitor(ServiceTask):
             dead_cleanup, dead_control_delete_marks = (
                 self._run_dead_task_control_cleanup_workers(
                     dead_tids,
-                    existing_queue_names=control_queue_names,
+                    existing_queue_names=task_queue_names,
                     limit=remaining_limit,
+                    now_ns=now_ns,
                     deadline_monotonic=deadline_monotonic,
                 )
             )
@@ -2079,11 +2165,20 @@ class TaskMonitor(ServiceTask):
             dead_tids_processed = dead_cleanup.dead_tids_processed
             dead_tids_skipped_live += dead_cleanup.dead_tids_skipped_live
             dead_tids_pending = dead_cleanup.dead_tids_pending
+            dead_tid_queues_deleted = dead_cleanup.dead_tid_queues_deleted
+            dead_tid_rows_estimated_deleted = (
+                dead_cleanup.dead_tid_rows_estimated_deleted
+            )
             dead_tid_control_queues_deleted = (
                 dead_cleanup.dead_tid_control_queues_deleted
             )
             dead_tid_control_rows_estimated_deleted = (
                 dead_cleanup.dead_tid_control_rows_estimated_deleted
+            )
+            dead_tid_inbox_queues_deleted = dead_cleanup.dead_tid_inbox_queues_deleted
+            dead_tid_outbox_queues_deleted = dead_cleanup.dead_tid_outbox_queues_deleted
+            dead_tid_reserved_queues_deleted = (
+                dead_cleanup.dead_tid_reserved_queues_deleted
             )
             dead_cleanup_deadline_hit = dead_cleanup.deadline_hit
             errors.extend(dead_cleanup.errors)
@@ -2111,9 +2206,10 @@ class TaskMonitor(ServiceTask):
                 families_disposed = 0
         if dead_control_delete_marks and not errors:
             try:
-                dead_log_delete = self._delete_monitor_store_task_log_rows_for_tids(
+                dead_log_delete = self._coalesce_and_delete_dead_task_log_rows_for_tids(
                     store,
                     dead_control_delete_marks,
+                    now_ns=now_ns,
                 )
             except (OSError, RuntimeError, ValueError) as exc:
                 errors.append(f"dead_task_log_delete: {exc}")
@@ -2159,10 +2255,15 @@ class TaskMonitor(ServiceTask):
             dead_tids_skipped_live=dead_tids_skipped_live,
             dead_tids_skipped_too_young=dead_tids_skipped_too_young,
             dead_tids_pending=dead_tids_pending,
+            dead_tid_queues_deleted=dead_tid_queues_deleted,
+            dead_tid_rows_estimated_deleted=dead_tid_rows_estimated_deleted,
             dead_tid_control_queues_deleted=dead_tid_control_queues_deleted,
             dead_tid_control_rows_estimated_deleted=(
                 dead_tid_control_rows_estimated_deleted
             ),
+            dead_tid_inbox_queues_deleted=dead_tid_inbox_queues_deleted,
+            dead_tid_outbox_queues_deleted=dead_tid_outbox_queues_deleted,
+            dead_tid_reserved_queues_deleted=dead_tid_reserved_queues_deleted,
             dead_tid_log_refs_selected=dead_tid_log_refs_selected,
             dead_tid_log_rows_deleted=dead_tid_log_rows_deleted,
             pending=pending,
@@ -2212,15 +2313,117 @@ class TaskMonitor(ServiceTask):
             self._last_collation_store_error = "; ".join(errors)
         return retirement
 
+    def _coalesce_and_delete_dead_task_log_rows_for_tids(
+        self,
+        store: MonitorStore,
+        tids: tuple[str, ...],
+        *,
+        now_ns: int,
+    ) -> _DeadTaskLogDeleteResult:
+        """Coalesce and delete exact task-log rows for known dead TIDs.
+
+        Spec: [MF-5], [OBS.17]
+        """
+
+        api_matches = 0
+        coalesced_rows = 0
+        summaries_emitted = 0
+        refs_selected = 0
+        rows_deleted = 0
+        errors: list[str] = []
+        for tid in tids:
+            try:
+                group = _fetch_dead_task_log_coalesce_group(
+                    self._monitor_context(),
+                    tid,
+                    chunk_limit=max(1, self._monitor_config.batch_size),
+                )
+                api_matches += group.api_matches
+                updates: list[MonitorTaskEventUpdate] = []
+                for row in group.rows:
+                    try:
+                        payload = json.loads(row.body)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(payload, Mapping):
+                        continue
+                    update = update_from_task_log_payload(
+                        payload,
+                        queue_name=row.queue,
+                        message_id=row.message_id,
+                    )
+                    if update is not None and update.tid == tid:
+                        updates.append(update)
+                if updates:
+                    ingest = store.record_task_log_updates(
+                        WEFT_GLOBAL_LOG_QUEUE,
+                        tuple(updates),
+                        checkpoint_message_id=None,
+                    )
+                    coalesced_rows += ingest.updates_written
+                    record = store.get_task(tid)
+                    if record is not None:
+                        if record.summary_emitted_at_ns is None:
+                            close_reason = (
+                                "terminal" if record.terminal_seen else "dead_task"
+                            )
+                            self._emit_monitor_store_summary(
+                                MonitorSummaryReadyTask(
+                                    record=record,
+                                    close_reason=close_reason,
+                                ),
+                                emitted_at_ns=now_ns,
+                            )
+                            store.mark_summary_emitted(
+                                tid,
+                                now_ns,
+                                suspect_reason=(
+                                    None if close_reason == "terminal" else close_reason
+                                ),
+                            )
+                            summaries_emitted += 1
+                        if record.disposition_at_ns is None:
+                            disposition_reason = (
+                                "terminal" if record.terminal_seen else "dead_task"
+                            )
+                            store.mark_family_disposed(
+                                tid,
+                                now_ns,
+                                disposition_reason=disposition_reason,
+                                suspect_reason=(
+                                    None
+                                    if disposition_reason == "terminal"
+                                    else disposition_reason
+                                ),
+                                suspect_at_ns=(
+                                    None if disposition_reason == "terminal" else now_ns
+                                ),
+                            )
+                deleted = self._delete_monitor_store_task_log_rows_for_tids(
+                    store,
+                    (tid,),
+                )
+            except (ExternalTaskLogError, OSError, RuntimeError, ValueError) as exc:
+                errors.append(f"{tid}: {exc}")
+                continue
+            refs_selected += deleted.refs_selected
+            rows_deleted += deleted.rows_deleted
+            errors.extend(deleted.errors)
+        return _DeadTaskLogDeleteResult(
+            api_matches=api_matches,
+            coalesced_rows=coalesced_rows,
+            summaries_emitted=summaries_emitted,
+            refs_selected=refs_selected,
+            rows_deleted=rows_deleted,
+            errors=tuple(errors),
+        )
+
     def _delete_monitor_store_task_log_rows_for_tids(
         self,
         store: MonitorStore,
         tids: tuple[str, ...],
     ) -> _DeadTaskLogDeleteResult:
-        """Delete exact task-log rows proven deletable for known dead TIDs.
-
-        Spec: [MF-5], [OBS.17]
-        """
+        """Delete exact task-log rows proven deletable for known TIDs."""
 
         refs = store.list_deletable_task_log_messages_for_tids(
             tids,
