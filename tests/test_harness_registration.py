@@ -408,13 +408,13 @@ def test_locked_database_cleanup_accepts_windows_short_path(
         short_path = harness.root / "RUNNER~1" / "weft-tests.db"
         realpath = harness_mod.os.path.realpath
 
-        def fake_realpath(path: object) -> str:
+        def fake_realpath(path: object, *args: object, **kwargs: object) -> str:
             text = os.fspath(path).replace("RUNNER~1", "RunnerAdmin")
-            return realpath(text)
+            return realpath(text, *args, **kwargs)
 
         monkeypatch.setattr(harness_mod, "_is_windows", lambda: True)
         monkeypatch.setattr(harness_mod.os.path, "realpath", fake_realpath)
-        monkeypatch.setattr(harness, "_database_candidate_paths", lambda: [long_path])
+        monkeypatch.setattr(harness, "_database_artifact_paths", lambda: [long_path])
 
         exc = PermissionError(errno.EACCES, "locked", os.fspath(short_path))
 
