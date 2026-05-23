@@ -183,6 +183,11 @@ runbook needs to become stricter.
   Jumping straight to tempdir cleanup on failure skips worker teardown and can
   leak harness environment overrides into later tests, which turns one broken
   test into a misleading cascade.
+- Windows cleanup errors may report locked tempdir paths through 8.3 short-name
+  segments such as `RUNNER~1`. Harness classifiers must canonicalize both the
+  reported filename and configured database artifacts with real-path semantics,
+  and should not depend only on artifacts that still exist after partial
+  cleanup.
 
 ## 2026-04-08 Interactive Contract
 
