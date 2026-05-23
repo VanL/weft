@@ -228,14 +228,16 @@ Current task families:
   `weft/core/monitor/external_log.py`; `WEFT_TASK_MONITOR_LOG_SINK` remains
   monitor operational output, not the external lifecycle-retention contract.
   The store is not lifecycle truth, result authority, queue truth, or a public
-  status dependency. Terminal task summaries and terminal task-local control
+  status dependency. Terminal task summaries and terminal task-local runtime
   cleanup are separate maintenance slices: summary emission records
   `summary_emitted_at_ns`; retained runtime cleanup later uses Monitor-store
-  readiness to delete whole standard `T{tid}.ctrl_in` and `T{tid}.ctrl_out`
-  runtime queues, and may delete eligible stale standard `T{tid}.reserved`
-  queues after monitor-table proof or stale no-monitor evidence. Control
-  cleanup records `task_control_deleted_at_ns` and terminal disposition when
-  needed. The persistent
+  readiness to delete whole standard stale task-local queues. Standard
+  `T{tid}.ctrl_in`, `T{tid}.ctrl_out`, and `T{tid}.inbox` are stale at
+  terminal cleanup time. Standard `T{tid}.outbox` is retained until task-log
+  retention age; eligible stale standard `T{tid}.reserved` queues are deleted
+  through the reserved cleanup policy after monitor-table proof or stale
+  no-monitor evidence. Cleanup records `task_control_deleted_at_ns` and
+  terminal disposition when needed. The persistent
   monitor also calls the configured task-monitor processor. The persistent
   monitor is a reactor: it owns task-local control, heartbeat registration,
   scheduling, and commits cached diagnostics from worker results. Custom
@@ -246,13 +248,12 @@ Current task families:
   summaries, and delete exact rows through the canonical prune implementation.
   Runtime cleanup remains a separate declared maintenance lane: the
   runtime-cleanup worker may open fresh broker/store handles, delete standard
-  terminal/disposed `T{tid}.ctrl_in` and `T{tid}.ctrl_out` queues, delete
-  eligible stale standard `T{tid}.reserved` queues, and mark the matching
-  Monitor-store family complete. Worker lanes return cached result data to the
-  reactor; they must not answer control messages. Runtime cleanup is
-  fair-sliced:
-  one worker result handles only a bounded control/reserved slice, records
-  pending/cap/deadline diagnostics, and relies on the existing catch-up
+  terminal/disposed stale task-local queues, delete eligible standard reserved
+  queues, and mark the matching Monitor-store family complete. Worker lanes
+  return cached result data to the reactor; they must not answer control
+  messages. Runtime cleanup is fair-sliced: one worker result handles only a
+  bounded mixed terminal/reserved/dead-TID slice, records executor job counts
+  plus pending/cap/deadline diagnostics, and relies on the existing catch-up
   interval for the next slice when backlog remains.
   The launcher asks the persistent monitor for its next wait timeout so the
   monitor sleeps until heartbeat/local due time or task-local input instead of

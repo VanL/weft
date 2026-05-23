@@ -83,6 +83,7 @@ from weft._constants import (
     WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS_DEFAULT,
     WEFT_MANAGER_SERVE_LOG_LEVEL_DEFAULT,
     WEFT_TASK_MONITOR_BATCH_SIZE_DEFAULT,
+    WEFT_TASK_MONITOR_CLEANUP_WORKERS_DEFAULT,
     WEFT_TASK_MONITOR_ENABLED_DEFAULT,
     WEFT_TASK_MONITOR_INTERVAL_SECONDS_DEFAULT,
     WEFT_TASK_MONITOR_LOG_SINK_DEFAULT,
@@ -394,6 +395,10 @@ class TestLoadConfig:
                 == WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE_DEFAULT
             )
             assert (
+                config["WEFT_TASK_MONITOR_CLEANUP_WORKERS"]
+                == WEFT_TASK_MONITOR_CLEANUP_WORKERS_DEFAULT
+            )
+            assert (
                 config["WEFT_TASK_MONITOR_PROCESSOR"]
                 == WEFT_TASK_MONITOR_PROCESSOR_DEFAULT
             )
@@ -430,6 +435,7 @@ class TestLoadConfig:
                 "WEFT_TASK_MONITOR_BATCH_SIZE": "42",
                 "WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT": "420",
                 "WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE": "7",
+                "WEFT_TASK_MONITOR_CLEANUP_WORKERS": "1",
                 "WEFT_LOG_TASKS_EXTERNAL_PATH": "task-log.jsonl",
                 "WEFT_LOG_TASKS_EXTERNAL_MODE": "raw",
                 "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "172800",
@@ -448,6 +454,7 @@ class TestLoadConfig:
         assert config["WEFT_TASK_MONITOR_BATCH_SIZE"] == 42
         assert config["WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT"] == 420
         assert config["WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE"] == 7
+        assert config["WEFT_TASK_MONITOR_CLEANUP_WORKERS"] == 1
         assert config["WEFT_LOG_TASKS_EXTERNAL_PATH"] == "task-log.jsonl"
         assert config["WEFT_LOG_TASKS_EXTERNAL_ENABLED"] is True
         assert config["WEFT_LOG_TASKS_EXTERNAL_MODE"] == "raw"
@@ -501,6 +508,19 @@ class TestLoadConfig:
             with pytest.raises(
                 ValueError, match="WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE"
             ):
+                load_config()
+
+    @pytest.mark.parametrize("value", ["0", "4"])
+    def test_task_monitor_cleanup_workers_rejects_invalid_values(
+        self,
+        value: str,
+    ) -> None:
+        with patch.dict(
+            os.environ,
+            {"WEFT_TASK_MONITOR_CLEANUP_WORKERS": value},
+            clear=True,
+        ):
+            with pytest.raises(ValueError, match="WEFT_TASK_MONITOR_CLEANUP_WORKERS"):
                 load_config()
 
     def test_log_tasks_retention_period_rejects_zero(self) -> None:

@@ -393,10 +393,13 @@ Current rules:
   a separate bounded maintenance slice selected by Monitor-store readiness
   (`summary_emitted_at_ns`, no prior `task_control_deleted_at_ns`, and either
   terminal proof past the terminal retirement high-water or an already disposed
-  Monitor family). Terminal task-local control cleanup runs on a dedicated
+  Monitor family). Terminal task-local runtime cleanup runs on a dedicated
   TaskMonitor maintenance worker after the summary/disposition high-water is
   reached; that worker owns only the queue-delete plus Monitor-store mark
-  transaction for standard `T{tid}.ctrl_in` and `T{tid}.ctrl_out` queues.
+  transaction for standard stale task-local queues. Standard
+  `T{tid}.ctrl_in`, `T{tid}.ctrl_out`, and `T{tid}.inbox` are stale at
+  terminal cleanup time. Standard `T{tid}.outbox` is retention-gated, and
+  standard `T{tid}.reserved` is handled by the reserved cleanup policy.
   Once no child message rows remain and raw deletion, summary emission,
   disposition, and task-local control cleanup have all been recorded, the
   Monitor may physically retire the compact parent row from
@@ -405,17 +408,20 @@ Current rules:
   `T{tid}.reserved` queues after monitor-table proof or stale no-monitor
   evidence, while preserving active runtime owners. Each built-in cycle attempts
   retained raw task-log exact deletion in the built-in cycle worker before the
-  reactor launches another runtime-cleanup worker. The runtime worker processes one
-  fair slice at a time, interleaving eligible control and reserved cleanup when
-  both are ready, and marks catch-up pending when backlog remains or the
-  internal slice cap/deadline is hit. PONG reports cached store availability,
+  reactor launches another runtime-cleanup worker. The runtime worker processes
+  one fair slice at a time with a bounded mixed cleanup executor: terminal
+  stale-queue cleanup, eligible reserved cleanup, and eligible dead-TID cleanup
+  may all run in the same epoch under one total worker cap. It marks catch-up
+  pending when backlog remains or the internal slice cap/deadline is hit. PONG
+  reports cached store availability,
   checkpoint, rows processed,
   tasks updated, terminal tasks observed, summaries emitted, families
   disposed/classified, whether runtime cleanup is in flight,
   task-control families processed, task-control queues deleted, estimated
   task-control rows deleted, reserved queues deleted, reserved rows deleted,
-  raw rows deleted, and runtime cleanup pending/cap/deadline state from the
-  last completed cleanup result. PONG must not query the store or scan queues
+  raw rows deleted, runtime cleanup pending/cap/deadline state, and cleanup
+  executor job counts by kind from the last completed cleanup result. PONG must
+  not query the store or scan queues
   while answering `PING`.
 - terminal Monitor collation rows may emit compact operational task summaries
   through the configured task-monitor sink. In collated mode, durable Monitor

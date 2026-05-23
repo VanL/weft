@@ -1,6 +1,6 @@
 # Monitor Cleanup Executor Plan
 
-Status: draft
+Status: completed
 Source specs: docs/specifications/01-Core_Components.md [CC-2.3]; docs/specifications/05-Message_Flow_and_State.md [MF-5]; docs/specifications/07-System_Invariants.md [OBS.13], [OBS.16], [OBS.17]
 Superseded by: none
 
@@ -724,6 +724,7 @@ Fresh-eyes pass 2:
 - Gap found: one snapshot per epoch still permits expensive snapshots every
   catch-up tick when no queue-discovered work exists. Fixed by adding an
   explicit queue-discovery due check and regression test.
-- Remaining risk: external independent review is still warranted before code
-  implementation because this is destructive cleanup with concurrency. This
-  plan is therefore `draft`, not completed.
+- Remaining risk: external independent review is still warranted after landing
+  because this is destructive cleanup with concurrency. The implemented slice
+  matches this plan and passed the focused cleanup, lint, and type gates, so
+  the plan status is `completed`.

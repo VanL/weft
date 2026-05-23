@@ -1398,7 +1398,8 @@ def test_task_monitor_deletes_controls_for_already_disposed_family(
             drive_task_monitor_until(task, controls_deleted, timeout=30.0)
 
         record = store.get_task(tid)
-        assert record is None
+        assert record is not None
+        assert record.task_control_deleted_at_ns is not None
         assert cleanup.pending or cleanup.families_processed == 1
         assert cleanup.families_disposed == 0
     finally:
@@ -1649,11 +1650,9 @@ def test_task_monitor_keeps_reserved_queue_for_active_service_owner(
     try:
         store = task._ensure_monitor_store()
         assert store is not None
-        cleanup = task._delete_runtime_reserved_queues(
+        cleanup = task._run_terminal_control_cleanup_slice(
             store,
             now_ns=time.time_ns(),
-            limit=10,
-            active_tids=task._active_runtime_tids(),
         )
         assert cleanup.reserved_families_processed == 0
         assert cleanup.reserved_queues_deleted == 0
@@ -2262,27 +2261,168 @@ def test_task_monitor_runtime_cleanup_interleaves_control_and_reserved_work(
         )
         first = store.get_task(tids[0])
         second = store.get_task(tids[1])
-        assert first is not None
         assert second is not None
-        assert first.task_control_deleted_at_ns is not None
-        assert second.task_control_deleted_at_ns is not None
-        assert cleanup.families_processed == 2
-        assert cleanup.reserved_families_processed == 0
-        assert cleanup.reserved_queues_deleted == 0
+        assert second.task_control_deleted_at_ns is None
+        if first is not None:
+            assert first.task_control_deleted_at_ns is not None
+        assert cleanup.families_processed == 1
+        assert cleanup.reserved_families_processed == 1
+        assert cleanup.reserved_queues_deleted == 1
         assert cleanup.pending is True
         assert cleanup.family_limit_hit is True
-        assert cleanup.dead_tids_pending >= 1
-        assert list(reserved.peek_generator()) == ["terminal-reserved"]
+        assert cleanup.cleanup_jobs_by_kind == {
+            "terminal_control": 1,
+            "reserved": 1,
+        }
+        assert list(reserved.peek_generator()) == []
 
         cleanup = task._run_terminal_control_cleanup_slice(
             store,
             now_ns=time.time_ns(),
         )
 
-        assert list(reserved.peek_generator()) == []
-        assert cleanup.dead_tids_processed >= 1
+        assert cleanup.families_processed >= 1
     finally:
         task.stop()
+
+
+def test_task_monitor_runtime_cleanup_dispatches_three_cleanup_kinds(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        task_monitor_mod,
+        "TASK_MONITOR_RUNTIME_CLEANUP_SLICE_FAMILY_LIMIT",
+        3,
+    )
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
+            "WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT": 10,
+            "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
+            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    terminal_tid = "1778084345905438868"
+    dead_tid = "1778084345905438869"
+    make_queue(f"T{terminal_tid}.ctrl_in").write("stop")
+    make_queue(f"T{terminal_tid}.ctrl_out").write("pong")
+    reserved = make_queue(f"T{terminal_tid}.reserved")
+    reserved.write("reserved")
+    make_queue(f"T{dead_tid}.ctrl_in").write("dead-stop")
+    make_queue(f"T{dead_tid}.ctrl_out").write("dead-pong")
+    make_queue(f"T{dead_tid}.inbox").write("dead-input")
+
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999961868"),
+        config=config,
+    )
+    try:
+        store = task._ensure_monitor_store()
+        assert store is not None
+        update = update_from_task_log_payload(
+            {
+                "event": "work_completed",
+                "status": "completed",
+                "tid": terminal_tid,
+                "taskspec": {
+                    "tid": terminal_tid,
+                    "version": "1.0",
+                    "name": "sample",
+                    "io": {
+                        "control": {
+                            "ctrl_in": f"T{terminal_tid}.ctrl_in",
+                            "ctrl_out": f"T{terminal_tid}.ctrl_out",
+                        },
+                    },
+                    "state": {"status": "completed"},
+                    "metadata": {},
+                },
+            },
+            message_id=int(terminal_tid),
+        )
+        assert update is not None
+        store.record_task_log_updates(
+            WEFT_GLOBAL_LOG_QUEUE,
+            (update,),
+            checkpoint_message_id=None,
+        )
+        store.mark_summary_emitted(terminal_tid, int(terminal_tid) + 1)
+
+        cleanup = task._run_terminal_control_cleanup_slice(
+            store,
+            now_ns=time.time_ns(),
+        )
+    finally:
+        task.stop()
+
+    assert cleanup.cleanup_jobs_by_kind == {
+        "terminal_control": 1,
+        "reserved": 1,
+        "dead_tid": 1,
+    }
+    assert cleanup.cleanup_workers_configured == 3
+    assert cleanup.cleanup_jobs_started == 3
+    assert cleanup.families_processed == 1
+    assert cleanup.reserved_families_processed == 1
+    assert cleanup.dead_tids_processed == 1
+    assert reserved.stats().total == 0
+    assert make_queue(f"T{dead_tid}.ctrl_in").stats().total == 0
+    assert make_queue(f"T{dead_tid}.ctrl_out").stats().total == 0
+    assert make_queue(f"T{dead_tid}.inbox").stats().total == 0
+
+
+def test_task_monitor_runtime_cleanup_skips_queue_snapshot_when_not_due(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, _make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999961869"),
+        config=config,
+    )
+
+    def fail_snapshot(*args, **kwargs):
+        del args
+        del kwargs
+        raise AssertionError("queue snapshot should not run")
+
+    monkeypatch.setattr(task, "_queue_name_snapshot", fail_snapshot)
+    try:
+        store = task._ensure_monitor_store()
+        assert store is not None
+        cleanup = task._run_terminal_control_cleanup_slice(
+            store,
+            now_ns=time.time_ns(),
+            previous_queue_cleanup_pending=False,
+            queue_discovery_due_monotonic=time.monotonic() + 60.0,
+        )
+    finally:
+        task.stop()
+
+    assert cleanup.cleanup_workers_configured == 3
+    assert cleanup.cleanup_jobs_started == 0
+    assert cleanup.pending is False
 
 
 def test_task_monitor_runtime_cleanup_keeps_reserved_pending_after_control_budget(
@@ -2805,7 +2945,9 @@ def test_task_monitor_terminal_control_cleanup_worker_error_is_retryable(
         assert recovered_result.cleanup.errors == ()
 
         record = store.get_task(tid)
-        assert record is None
+        assert record is not None
+        assert record.task_control_deleted_at_ns is not None
+        assert record.disposition_at_ns is not None
         assert make_queue(f"T{tid}.ctrl_in").stats().total == 0
         assert make_queue(f"T{tid}.ctrl_out").stats().total == 0
     finally:

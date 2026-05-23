@@ -192,21 +192,27 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
   retryable table state and is separate from summary emission. Normal task
   cleanup clears standard task-local `T{tid}.ctrl_in` and `T{tid}.ctrl_out`
   runtime queues before the process exits. Terminal disposition may remove
-  residual whole standard task-local control queues, including visible and
+  residual whole standard task-local stale queues, including visible and
   claimed rows, after required summary emission succeeds when those queues were
-  left by forced process death, cleanup failure, or older releases. The
-  selection is bounded by Monitor-store readiness and the delete uses public
-  SimpleBroker queue APIs from a dedicated TaskMonitor terminal-control-cleanup
-  worker; it must not use private queue-table SQL.
+  left by forced process death, cleanup failure, or older releases. Standard
+  `T{tid}.ctrl_in`, `T{tid}.ctrl_out`, and `T{tid}.inbox` are stale at
+  terminal cleanup time. Standard `T{tid}.outbox` is retained until task-log
+  retention age, and standard `T{tid}.reserved` remains owned by the reserved
+  cleanup policy. The selection is bounded by Monitor-store readiness and the
+  delete uses public SimpleBroker queue APIs from a dedicated TaskMonitor
+  runtime-cleanup worker; it must not use private queue-table SQL.
   Built-in task-log cleanup and runtime cleanup are the only TaskMonitor worker
   lanes allowed to own broker/store cleanup effects. The reactor must continue
   servicing task-local control while either lane is in flight. Runtime cleanup
   must run in fair bounded slices that let raw task-log deletion, task-local
-  control cleanup, and eligible reserved cleanup all make progress across
-  catch-up cycles. Manager/global/custom
-  control queues and task-local inbox/outbox queues are excluded from this
-  default monitor cleanup; task-local reserved queues are eligible only through
-  the explicit terminal/disposed/raw-deleted or stale-no-monitor rules.
+  stale-queue cleanup, and eligible reserved cleanup all make progress across
+  catch-up cycles. Runtime cleanup uses a bounded mixed executor under one
+  total worker cap; terminal stale-queue cleanup, eligible reserved cleanup,
+  and eligible dead-TID cleanup may all make progress in the same epoch.
+  Manager/global/custom control queues and custom task-local queues are
+  excluded from this default monitor cleanup; standard task-local inbox queues
+  are stale once the task is terminal or proven dead, and standard task-local
+  outbox queues are retained until task-log retention age.
   In raw external mode,
   external emit still happens before deletion of the affected raw row. External sink
   validation or emit failure must not prevent the TaskMonitor service from

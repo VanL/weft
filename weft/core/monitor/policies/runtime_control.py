@@ -1,4 +1,4 @@
-"""TaskMonitor policies for task-local runtime control queues.
+"""TaskMonitor policies for task-local runtime queue cleanup.
 
 Spec references:
 - docs/specifications/05-Message_Flow_and_State.md [MF-5]
@@ -14,9 +14,12 @@ from typing import Any
 from weft._constants import (
     QUEUE_CTRL_IN_SUFFIX,
     QUEUE_CTRL_OUT_SUFFIX,
+    QUEUE_INBOX_SUFFIX,
+    QUEUE_OUTBOX_SUFFIX,
     QUEUE_RESERVED_SUFFIX,
 )
 from weft.core.monitor.store import MonitorTaskCollationRecord
+from weft.core.queue_window import is_old_enough
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +51,12 @@ class TaskControlCleanupResult:
     dead_tid_reserved_queues_deleted: int = 0
     dead_tid_log_refs_selected: int = 0
     dead_tid_log_rows_deleted: int = 0
+    cleanup_workers_configured: int = 0
+    cleanup_jobs_started: int = 0
+    cleanup_jobs_completed: int = 0
+    cleanup_jobs_pending: int = 0
+    cleanup_jobs_by_kind: Mapping[str, int] | None = None
+    cleanup_jobs_pending_by_kind: Mapping[str, int] | None = None
     pending: bool = False
     errors: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
@@ -91,12 +100,31 @@ class TaskControlCleanupResult:
             "dead_tid_reserved_queues_deleted": (self.dead_tid_reserved_queues_deleted),
             "dead_tid_log_refs_selected": self.dead_tid_log_refs_selected,
             "dead_tid_log_rows_deleted": self.dead_tid_log_rows_deleted,
+            "cleanup_workers_configured": self.cleanup_workers_configured,
+            "cleanup_jobs_started": self.cleanup_jobs_started,
+            "cleanup_jobs_completed": self.cleanup_jobs_completed,
+            "cleanup_jobs_pending": self.cleanup_jobs_pending,
+            "cleanup_jobs_by_kind": dict(self.cleanup_jobs_by_kind or {}),
+            "cleanup_jobs_pending_by_kind": dict(
+                self.cleanup_jobs_pending_by_kind or {}
+            ),
             "pending": self.pending,
             "errors": list(self.errors),
             "warnings": list(self.warnings),
             "family_limit_hit": self.family_limit_hit,
             "deadline_hit": self.deadline_hit,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalTaskRuntimeQueueCleanupPlan:
+    """Policy-selected task-local runtime queues for terminal cleanup."""
+
+    queue_names: tuple[str, ...]
+    control_queue_names: tuple[str, str]
+    inbox_queue_names: tuple[str, ...]
+    outbox_queue_names: tuple[str, ...]
+    retention_eligible: bool
 
 
 def standard_task_control_queue_pair(tid: str) -> tuple[str, str]:
@@ -125,6 +153,31 @@ def standard_task_control_queue_names(
     ):
         return None
     return expected_ctrl_in, expected_ctrl_out
+
+
+def terminal_task_runtime_queue_cleanup_plan(
+    record: MonitorTaskCollationRecord,
+    *,
+    now_ns: int,
+    retention_seconds: float,
+) -> TerminalTaskRuntimeQueueCleanupPlan | None:
+    """Return standard task-local queues eligible for terminal cleanup."""
+
+    control_queue_names = standard_task_control_queue_names(record)
+    if control_queue_names is None:
+        return None
+    retention_eligible = is_old_enough(int(record.tid), now_ns, retention_seconds)
+    inbox_queue_names = (f"T{record.tid}.{QUEUE_INBOX_SUFFIX}",)
+    outbox_queue_names = (
+        (f"T{record.tid}.{QUEUE_OUTBOX_SUFFIX}",) if retention_eligible else ()
+    )
+    return TerminalTaskRuntimeQueueCleanupPlan(
+        queue_names=(*control_queue_names, *inbox_queue_names, *outbox_queue_names),
+        control_queue_names=control_queue_names,
+        inbox_queue_names=inbox_queue_names,
+        outbox_queue_names=outbox_queue_names,
+        retention_eligible=retention_eligible,
+    )
 
 
 def reserved_queue_tid(queue_name: str) -> str | None:

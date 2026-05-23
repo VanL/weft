@@ -38,6 +38,7 @@ from weft._constants import (
     WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS_DEFAULT,
     WEFT_TASK_MONITOR_BATCH_SIZE_DEFAULT,
     WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS_DEFAULT,
+    WEFT_TASK_MONITOR_CLEANUP_WORKERS_DEFAULT,
     WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED_DEFAULT,
     WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT_DEFAULT,
     WEFT_TASK_MONITOR_ENABLED_DEFAULT,
@@ -78,6 +79,7 @@ class TaskMonitorRuntimeConfig:
     control_queue_delete_limit: int = (
         WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT_DEFAULT
     )
+    cleanup_workers: int = WEFT_TASK_MONITOR_CLEANUP_WORKERS_DEFAULT
     task_log_retention_period_seconds: float = (
         WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS_DEFAULT
     )
@@ -169,6 +171,21 @@ class TaskMonitorRuntimeConfig:
         if control_queue_delete_limit <= 0:
             raise ValueError(
                 "WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT must be positive"
+            )
+
+        cleanup_workers = int(
+            config.get(
+                "WEFT_TASK_MONITOR_CLEANUP_WORKERS",
+                WEFT_TASK_MONITOR_CLEANUP_WORKERS_DEFAULT,
+            )
+        )
+        if (
+            cleanup_workers <= 0
+            or cleanup_workers > WEFT_TASK_MONITOR_CLEANUP_WORKERS_DEFAULT
+        ):
+            raise ValueError(
+                "WEFT_TASK_MONITOR_CLEANUP_WORKERS must be between 1 and "
+                f"{WEFT_TASK_MONITOR_CLEANUP_WORKERS_DEFAULT}"
             )
 
         task_log_retention_period_seconds = float(
@@ -268,6 +285,7 @@ class TaskMonitorRuntimeConfig:
             store_write_batch_size=store_write_batch_size,
             stale_open_family_seconds=stale_open_family_seconds,
             control_queue_delete_limit=control_queue_delete_limit,
+            cleanup_workers=cleanup_workers,
             task_log_retention_period_seconds=task_log_retention_period_seconds,
             task_log_external_path=task_log_external_path,
             task_log_external_enabled=task_log_external_enabled,

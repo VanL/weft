@@ -163,6 +163,7 @@ def test_runtime_config_reads_loaded_weft_config() -> None:
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": str(HEARTBEAT_MIN_INTERVAL_SECONDS),
             "WEFT_TASK_MONITOR_BATCH_SIZE": 12,
             "WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT": 120,
+            "WEFT_TASK_MONITOR_CLEANUP_WORKERS": 1,
             "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": 172800.0,
             "WEFT_LOG_TASKS_EXTERNAL_PATH": "task-log.jsonl",
             "WEFT_LOG_TASKS_EXTERNAL_MODE": "raw",
@@ -178,6 +179,7 @@ def test_runtime_config_reads_loaded_weft_config() -> None:
     assert runtime_config.interval_seconds == HEARTBEAT_MIN_INTERVAL_SECONDS
     assert runtime_config.batch_size == 12
     assert runtime_config.task_log_scan_limit == 120
+    assert runtime_config.cleanup_workers == 1
     assert runtime_config.task_log_retention_period_seconds == 172800.0
     assert runtime_config.task_log_external_path == "task-log.jsonl"
     assert runtime_config.task_log_external_enabled is True
@@ -191,6 +193,16 @@ def test_runtime_config_defaults_to_delete_builtin() -> None:
     runtime_config = TaskMonitorRuntimeConfig.from_config(load_config({}))
 
     assert runtime_config.processor == "delete"
+    assert runtime_config.cleanup_workers == 3
+
+
+@pytest.mark.parametrize("value", [0, 4])
+def test_runtime_config_rejects_invalid_cleanup_worker_cap(value: int) -> None:
+    config = load_config({})
+    config["WEFT_TASK_MONITOR_CLEANUP_WORKERS"] = value
+
+    with pytest.raises(ValueError, match="WEFT_TASK_MONITOR_CLEANUP_WORKERS"):
+        TaskMonitorRuntimeConfig.from_config(config)
 
 
 def test_task_monitor_operational_log_emits_config_and_cycle(

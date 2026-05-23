@@ -558,19 +558,14 @@ WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS_DEFAULT: Final[float] = 604800.0
 WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT_DEFAULT: Final[int] = 1000
 """Default per-cycle family cap for terminal task control-queue cleanup."""
 
+WEFT_TASK_MONITOR_CLEANUP_WORKERS_DEFAULT: Final[int] = 3
+"""Default total worker cap for one TaskMonitor runtime cleanup epoch."""
+
 TASK_MONITOR_RUNTIME_CLEANUP_SLICE_FAMILY_LIMIT: Final[int] = 50
 """Internal max task-local runtime families handled by one cleanup worker slice."""
 
 TASK_MONITOR_RUNTIME_CLEANUP_SLICE_SECONDS: Final[float] = 1.0
 """Internal soft wall-clock budget for one task-local runtime cleanup slice."""
-
-TASK_MONITOR_DEAD_TASK_CLEANUP_WORKERS: Final[int] = 1
-"""Internal worker count for dead-task control cleanup.
-
-The per-TID queue abstraction is intentionally present even with one worker
-until SimpleBroker/MonitorStore thread-safety is documented for parallel
-cleanup handles.
-"""
 
 WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS_DEFAULT: Final[float] = 172800.0
 """Default minimum age before TaskMonitor logs/deletes task-log rows."""
@@ -1687,6 +1682,21 @@ def _parse_task_monitor_control_queue_delete_limit(value: str) -> int:
     )
 
 
+def _parse_task_monitor_cleanup_workers(value: str) -> int:
+    """Parse the task-monitor cleanup worker cap."""
+
+    parsed = _parse_positive_int(
+        value,
+        name="WEFT_TASK_MONITOR_CLEANUP_WORKERS",
+    )
+    if parsed > WEFT_TASK_MONITOR_CLEANUP_WORKERS_DEFAULT:
+        raise ValueError(
+            "WEFT_TASK_MONITOR_CLEANUP_WORKERS must be between 1 and "
+            f"{WEFT_TASK_MONITOR_CLEANUP_WORKERS_DEFAULT}, got {parsed}"
+        )
+    return parsed
+
+
 def _parse_log_tasks_retention_period_seconds(value: str) -> float:
     """Parse the task-log external retention period environment variable."""
 
@@ -1993,6 +2003,11 @@ def _load_weft_env_vars() -> dict[str, Any]:
             default=WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT_DEFAULT,
             parser=_parse_task_monitor_control_queue_delete_limit,
         ),
+        "WEFT_TASK_MONITOR_CLEANUP_WORKERS": _load_weft_env_value(
+            "WEFT_TASK_MONITOR_CLEANUP_WORKERS",
+            default=WEFT_TASK_MONITOR_CLEANUP_WORKERS_DEFAULT,
+            parser=_parse_task_monitor_cleanup_workers,
+        ),
         "WEFT_TASK_MONITOR_PROCESSOR": _load_weft_env_value(
             "WEFT_TASK_MONITOR_PROCESSOR",
             default=WEFT_TASK_MONITOR_PROCESSOR_DEFAULT,
@@ -2175,6 +2190,12 @@ def _normalize_weft_override_value(name: str, value: Any) -> Any:
         raise TypeError(
             "WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT override must be int or str"
         )
+    if name == "WEFT_TASK_MONITOR_CLEANUP_WORKERS":
+        if isinstance(value, str):
+            return _parse_task_monitor_cleanup_workers(value)
+        if isinstance(value, int):
+            return _parse_task_monitor_cleanup_workers(str(value))
+        raise TypeError("WEFT_TASK_MONITOR_CLEANUP_WORKERS override must be int or str")
     if name == "WEFT_TASK_MONITOR_PROCESSOR":
         if isinstance(value, str):
             return _parse_task_monitor_processor(value)
