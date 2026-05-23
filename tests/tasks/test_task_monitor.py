@@ -966,6 +966,67 @@ def test_task_monitor_retained_ingest_batch_limit_counts_valid_rows(
         task.stop()
 
 
+def test_task_monitor_retained_ingest_resumes_after_store_checkpoint(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS": "0.2",
+            "WEFT_TASK_MONITOR_BATCH_SIZE": 3,
+            "WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT": 20,
+            "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
+            "WEFT_TASK_MONITOR_PROCESSOR": "report_only",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    tid = "1778084345905438801"
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    for sequence in range(5):
+        log_queue.write(
+            json.dumps(
+                {
+                    "event": "task_activity",
+                    "status": "running",
+                    "tid": tid,
+                    "sequence": sequence,
+                }
+            )
+        )
+    message_ids = [
+        int(message_id) for _body, message_id in iter_queue_entries(log_queue)
+    ]
+
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999877"),
+        config=config,
+    )
+    try:
+        task.process_once()
+        drive_task_monitor_until_idle(task)
+        store = task._monitor_store
+        assert store is not None
+        assert task._last_retained_task_log_ingest.selected == 3
+        assert store.get_checkpoint(WEFT_GLOBAL_LOG_QUEUE) == message_ids[2]
+
+        task._next_cycle_due_monotonic = 0.0
+        task.process_once()
+        drive_task_monitor_until_idle(task)
+
+        assert task._last_retained_task_log_ingest.selected == 2
+        assert task._last_retained_task_log_ingest.completed_fifo_high_water is True
+        assert store.get_checkpoint(WEFT_GLOBAL_LOG_QUEUE) == message_ids[4]
+    finally:
+        task.stop()
+
+
 def test_task_monitor_table_delete_reconciles_already_absent_exact_rows(
     broker_env,
     monkeypatch: pytest.MonkeyPatch,

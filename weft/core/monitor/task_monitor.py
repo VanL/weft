@@ -1196,10 +1196,12 @@ class TaskMonitor(ServiceTask):
         """Fold retained visible task-log rows into the Monitor table."""
 
         scanner = GeneratorTaskLogScanner()
+        checkpoint_message_id = store.get_checkpoint(WEFT_GLOBAL_LOG_QUEUE)
         window = scanner.scan_window(
             self._monitor_context(),
             WEFT_GLOBAL_LOG_QUEUE,
             scan_limit=self._monitor_config.task_log_scan_limit,
+            since_timestamp=checkpoint_message_id,
         )
         scanned = 0
         malformed_deleted = 0
