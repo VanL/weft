@@ -199,10 +199,14 @@ Current task families:
 - `ServiceTask`: internal helper for long-lived task-shaped services. It
   reuses `BaseTask` queue/control behavior, publishes the common
   `task_spawning`/`task_started` activation sequence when asked, tracks
-  single-flight service worker lanes, and exposes due-time math. It does not
-  implement `process_once()` and does not know about manager leadership,
-  service keys, cleanup selection, heartbeat registration, or queue scheduling
-  policy.
+  single-flight service worker lanes, and exposes due-time math. Service
+  activity is live-only: subclasses may update activity for process titles,
+  PONG/status responses, and TID mappings, but the service layer suppresses
+  `task_activity` and poll-report rows in `weft.log.tasks` so long-lived
+  manager, heartbeat, and TaskMonitor work cannot amplify the lifecycle log
+  that cleanup itself consumes. It does not implement `process_once()` and does
+  not know about manager leadership, service keys, cleanup selection, heartbeat
+  registration, or queue scheduling policy.
 - `Consumer`: reserves inbox messages on the main task reactor thread, runs
   blocking target execution in a broker-free worker lane, and commits
   outbox/state/reserved-policy effects back on the main thread

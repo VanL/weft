@@ -56,7 +56,11 @@ class ServiceTestTask(ServiceTask):
         self.worker_results.append((work, result, threading.get_ident()))
 
 
-def make_service_taskspec(tid: str) -> TaskSpec:
+def make_service_taskspec(
+    tid: str,
+    *,
+    reporting_interval: str = "transition",
+) -> TaskSpec:
     """Create a minimal service TaskSpec with explicit queue mappings."""
 
     return TaskSpec(
@@ -65,6 +69,7 @@ def make_service_taskspec(tid: str) -> TaskSpec:
         spec=SpecSection(
             type="function",
             function_target="tests.tasks.sample_targets:echo_payload",
+            reporting_interval=reporting_interval,
         ),
         io=IOSection(
             inputs={"inbox": f"T{tid}.inbox"},
@@ -76,6 +81,17 @@ def make_service_taskspec(tid: str) -> TaskSpec:
         ),
         state=StateSection(),
     )
+
+
+def drain_log_events(log_queue) -> list[dict[str, Any]]:
+    """Read and decode all currently visible global task-log events."""
+
+    records: list[dict[str, Any]] = []
+    while True:
+        raw = log_queue.read_one()
+        if raw is None:
+            return records
+        records.append(json.loads(raw))
 
 
 def test_service_task_activation_publishes_running_lifecycle_once(
@@ -101,6 +117,51 @@ def test_service_task_activation_publishes_running_lifecycle_once(
     assert event_names.count("task_spawning") == 1
     assert event_names.count("task_started") == 1
     assert task.taskspec.state.status == "running"
+
+
+def test_service_task_activity_is_live_only_not_task_log_event(
+    broker_env,
+    unique_tid: str,
+) -> None:
+    db_path, make_queue = broker_env
+    task = ServiceTestTask(db_path, make_service_taskspec(unique_tid))
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    drain_log_events(log_queue)
+
+    try:
+        task._set_activity("working")
+        task._set_activity("waiting", waiting_on=task._queue_names["inbox"])
+    finally:
+        task.stop()
+
+    records = drain_log_events(log_queue)
+    assert [record["event"] for record in records] == []
+    snapshot = task._control_snapshot_fields()
+    assert snapshot["activity"] == "waiting"
+    assert snapshot["waiting_on"] == task._queue_names["inbox"]
+
+
+def test_service_task_poll_reporting_is_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+    broker_env,
+    unique_tid: str,
+) -> None:
+    db_path, make_queue = broker_env
+    task = ServiceTestTask(
+        db_path,
+        make_service_taskspec(unique_tid, reporting_interval="poll"),
+    )
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    drain_log_events(log_queue)
+
+    try:
+        task._last_poll_report_at = 0.0
+        monkeypatch.setattr("weft.core.tasks.base.time.monotonic", lambda: 60.0)
+        task.process_once()
+    finally:
+        task.stop()
+
+    assert drain_log_events(log_queue) == []
 
 
 def test_service_task_due_time_helpers_bound_waits(

@@ -54,6 +54,31 @@ class ServiceTask(BaseTask):
         self._report_state_change(event="task_started")
         return True
 
+    def _maybe_emit_poll_report(self) -> None:
+        """Disable poll-style lifecycle reports for long-lived services.
+
+        Services publish durable lifecycle transitions and expose current
+        activity through control/PONG and service registry surfaces. Repeating
+        status rows in ``weft.log.tasks`` would make the monitor's cleanup input
+        grow because of monitor-owned service work.
+
+        Spec: [CC-2.3], [MF-5]
+        """
+
+        return
+
+    def _emit_activity_event(self) -> None:
+        """Keep service activity live-only instead of writing task-log rows.
+
+        ``BaseTask._set_activity`` still updates the in-memory activity snapshot,
+        process title, and TID mapping. The service layer only suppresses the
+        lightweight ``task_activity`` row in ``weft.log.tasks``.
+
+        Spec: [CC-2.3], [MF-5]
+        """
+
+        return
+
     def _service_lane_in_flight(self, lane: str | None = None) -> bool:
         """Return whether one or any service lane has uncommitted work."""
 

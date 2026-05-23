@@ -851,9 +851,14 @@ system pruning:
   candidates per cycle; it is not the task-log scan depth. Reserved rows remain
   protected recovery-sensitive evidence by default. Per-cycle collation
   summaries are operational TaskMonitor evidence only, not durable archive
-  records. The supervised monitor may also derive dead-task cleanup candidates
-  by listing standard task-local queue names, parsing `T{tid}.*` identities,
-  and subtracting live runtime TIDs. That dead-task cleanup policy is owned by
+  records. Long-lived `ServiceTask` subclasses, including Manager, Heartbeat,
+  and TaskMonitor, publish durable lifecycle transitions but suppress
+  `task_activity` and poll-report rows in `weft.log.tasks`; their live activity
+  is exposed through PONG/status, service registry, process title, and TID
+  mapping surfaces. The supervised monitor may also derive dead-task cleanup
+  candidates by listing standard task-local queue names, parsing `T{tid}.*`
+  identities, and subtracting live runtime TIDs. That dead-task cleanup policy
+  is owned by
   `weft/core/monitor/policies/dead_task.py`: it selects standard stale
   `T{tid}.ctrl_in`, `T{tid}.ctrl_out`, and `T{tid}.inbox` immediately, and
   selects standard `T{tid}.outbox` and `T{tid}.reserved` only after the
