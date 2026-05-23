@@ -663,17 +663,22 @@ def watch_queue(
                 )
 
             found = False
-            for item in generator:
-                body, timestamp = cast(tuple[Any, Any], item)
-                found = True
-                last_timestamp = int(timestamp)
-                emitted += 1
-                yield QueueMessage(
-                    str(body),
-                    int(timestamp) if with_timestamps or json_output else None,
-                )
-                if max_messages is not None and emitted >= max_messages:
-                    break
+            try:
+                for item in generator:
+                    body, timestamp = cast(tuple[Any, Any], item)
+                    found = True
+                    last_timestamp = int(timestamp)
+                    emitted += 1
+                    yield QueueMessage(
+                        str(body),
+                        int(timestamp) if with_timestamps or json_output else None,
+                    )
+                    if max_messages is not None and emitted >= max_messages:
+                        break
+            finally:
+                close_generator = getattr(generator, "close", None)
+                if callable(close_generator):
+                    close_generator()
 
             if max_messages is not None and emitted >= max_messages:
                 break

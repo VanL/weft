@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 118 plan files in this directory.
+There are currently 119 plan files in this directory.
 
 ## Curation Policy
 
@@ -22,6 +22,7 @@ There are currently 118 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-05-23-monitor-cleanup-executor-plan.md`](./2026-05-23-monitor-cleanup-executor-plan.md) | Monitor Cleanup Executor Plan | `draft` | none |
 | [`2026-05-22-monitor-policy-modules-and-dead-task-cleanup-plan.md`](./2026-05-22-monitor-policy-modules-and-dead-task-cleanup-plan.md) | Monitor Policy Modules And Dead-Task Cleanup Plan | `completed` | none |
 | [`2026-05-20-service-task-shared-reactor-extraction-plan.md`](./2026-05-20-service-task-shared-reactor-extraction-plan.md) | Service Task Shared Reactor Extraction Plan | `completed` | none |
 | [`2026-05-20-simplebroker-api-adoption-plan.md`](./2026-05-20-simplebroker-api-adoption-plan.md) | SimpleBroker API Adoption Plan | `completed` | none |

@@ -85,6 +85,40 @@ class _FakeWatchQueue:
         self.closed = True
 
 
+class _ClosableIterator:
+    def __init__(self, rows: list[tuple[str, int]]) -> None:
+        self._rows = iter(rows)
+        self.closed = False
+
+    def __iter__(self):
+        return self
+
+    def __next__(self) -> tuple[str, int]:
+        return next(self._rows)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _ClosableWatchQueue(_FakeWatchQueue):
+    def __init__(self, name: str, batches: list[list[tuple[str, int]]]) -> None:
+        super().__init__(name, batches)
+        self.generators: list[_ClosableIterator] = []
+
+    def read_generator(
+        self,
+        *,
+        with_timestamps: bool,
+        after_timestamp: int | None = None,
+        before_timestamp: int | None = None,
+    ):
+        del with_timestamps, after_timestamp, before_timestamp
+        batch = self._batches.pop(0) if self._batches else []
+        generator = _ClosableIterator(batch)
+        self.generators.append(generator)
+        return generator
+
+
 def test_read_and_write_messages(tmp_path):
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
@@ -276,6 +310,40 @@ def test_watch_queue_uses_queue_monitor(
     assert len(created_monitors) == 1
     assert created_monitors[0].queue_names == ["watch.queue"]
     assert created_monitors[0].wait_calls == [0.25]
+    assert data_queue.closed
+    assert monitor_queue.closed
+
+
+def test_watch_queue_closes_generator_when_limit_stops_iteration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_queue = _ClosableWatchQueue("watch.queue", [[("payload", 5), ("extra", 6)]])
+    monitor_queue = _FakeWatchQueue("watch.queue", [])
+
+    class _FakeContext:
+        config: dict[str, Any] = {}
+
+        def __init__(self) -> None:
+            self._queues = [data_queue, monitor_queue]
+
+        def queue(self, _name: str, *, persistent: bool = True):
+            del persistent
+            return self._queues.pop(0)
+
+    monkeypatch.setattr(queue_cmd, "QueueChangeMonitor", _FakeQueueChangeMonitor)
+
+    messages = list(
+        queue_cmd.watch_queue(
+            _FakeContext(),
+            "watch.queue",
+            interval=0.25,
+            max_messages=1,
+            with_timestamps=True,
+        )
+    )
+
+    assert [message.body for message in messages] == ["payload"]
+    assert data_queue.generators[0].closed
     assert data_queue.closed
     assert monitor_queue.closed
 

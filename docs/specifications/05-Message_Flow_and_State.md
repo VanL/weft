@@ -975,6 +975,7 @@ management live in the companion doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-05-23-monitor-cleanup-executor-plan.md`](../plans/2026-05-23-monitor-cleanup-executor-plan.md)
 - [`docs/plans/2026-05-22-monitor-policy-modules-and-dead-task-cleanup-plan.md`](../plans/2026-05-22-monitor-policy-modules-and-dead-task-cleanup-plan.md)
 - [`docs/plans/2026-05-20-monitor-collation-table-retirement-plan.md`](../plans/2026-05-20-monitor-collation-table-retirement-plan.md)
 - [`docs/plans/2026-05-20-simplebroker-api-adoption-plan.md`](../plans/2026-05-20-simplebroker-api-adoption-plan.md)
