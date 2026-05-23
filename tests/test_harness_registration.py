@@ -397,6 +397,55 @@ def test_harness_cleanup_preserves_windows_tempdir_when_database_stays_locked(
 
 
 @pytest.mark.sqlite_only
+def test_locked_database_cleanup_accepts_windows_short_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = WeftTestHarness()
+    repo_cwd = os.getcwd()
+    try:
+        harness.__enter__()
+        long_path = harness.root / "RunnerAdmin" / "weft-tests.db"
+        short_path = harness.root / "RUNNER~1" / "weft-tests.db"
+        realpath = harness_mod.os.path.realpath
+
+        def fake_realpath(path: object) -> str:
+            text = os.fspath(path).replace("RUNNER~1", "RunnerAdmin")
+            return realpath(text)
+
+        monkeypatch.setattr(harness_mod, "_is_windows", lambda: True)
+        monkeypatch.setattr(harness_mod.os.path, "realpath", fake_realpath)
+        monkeypatch.setattr(harness, "_database_candidate_paths", lambda: [long_path])
+
+        exc = PermissionError(errno.EACCES, "locked", os.fspath(short_path))
+
+        assert harness._is_locked_database_cleanup_error(exc) is True
+    finally:
+        os.chdir(repo_cwd)
+        harness.cleanup()
+
+
+@pytest.mark.sqlite_only
+def test_locked_database_cleanup_uses_configured_artifacts_when_candidate_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = WeftTestHarness()
+    repo_cwd = os.getcwd()
+    try:
+        harness.__enter__()
+        database_path = harness.context.database_path
+        assert database_path is not None
+        monkeypatch.setattr(harness_mod, "_is_windows", lambda: True)
+        monkeypatch.setattr(harness, "_database_candidate_paths", lambda: [])
+
+        exc = PermissionError(errno.EACCES, "locked", os.fspath(database_path))
+
+        assert harness._is_locked_database_cleanup_error(exc) is True
+    finally:
+        os.chdir(repo_cwd)
+        harness.cleanup()
+
+
+@pytest.mark.sqlite_only
 def test_harness_stop_active_managers_stops_registered_task_and_manager_tids(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

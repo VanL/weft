@@ -1204,7 +1204,7 @@ class WeftTestHarness:
 
     @staticmethod
     def _normalized_database_path(path: Path | str) -> str:
-        return os.path.normcase(os.path.abspath(os.fspath(path)))
+        return os.path.normcase(os.path.realpath(os.fspath(path)))
 
     def _queue_targets_database(self, queue: Queue, database_path: str) -> bool:
         target = queue.db_target
@@ -1239,6 +1239,9 @@ class WeftTestHarness:
             time.sleep(0.05)
 
     def _database_candidate_paths(self) -> list[Path]:
+        return [path for path in self._database_artifact_paths() if path.exists()]
+
+    def _database_artifact_paths(self) -> list[Path]:
         if self._context is None:
             return []
 
@@ -1246,8 +1249,7 @@ class WeftTestHarness:
         if base is None:
             return []
 
-        candidates = [base, Path(f"{base}-wal"), Path(f"{base}-shm")]
-        return [path for path in candidates if path.exists()]
+        return [base, Path(f"{base}-wal"), Path(f"{base}-shm")]
 
     def _database_files_releasable(self) -> bool:
         candidates = self._database_candidate_paths()
@@ -1343,7 +1345,7 @@ class WeftTestHarness:
         locked_path = self._normalized_database_path(filename)
         database_paths = {
             self._normalized_database_path(path)
-            for path in self._database_candidate_paths()
+            for path in self._database_artifact_paths()
         }
         return locked_path in database_paths
 
