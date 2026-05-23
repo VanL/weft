@@ -2503,6 +2503,71 @@ def test_task_monitor_runtime_cleanup_keeps_reserved_pending_after_control_budge
         task.stop()
 
 
+def test_task_monitor_runtime_cleanup_starts_after_slow_queue_snapshot(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        task_monitor_mod,
+        "TASK_MONITOR_RUNTIME_CLEANUP_SLICE_SECONDS",
+        1.0,
+    )
+    current_monotonic = 0.0
+
+    def fake_monotonic() -> float:
+        return current_monotonic
+
+    monkeypatch.setattr(task_monitor_mod, "_monitor_monotonic", fake_monotonic)
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    now_ns = time.time_ns()
+    tid = str(
+        now_ns - int((TASK_MONITOR_TID_MAPPING_CLEANUP_MIN_AGE_SECONDS + 60.0) * 1e9)
+    )
+    ctrl_in = make_queue(f"T{tid}.ctrl_in")
+    ctrl_in.write("stop")
+
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec(str(now_ns + 1_000_000)),
+        config=config,
+    )
+    real_snapshot = task._queue_name_snapshot
+
+    def slow_snapshot(*args, **kwargs):
+        nonlocal current_monotonic
+        names = real_snapshot(*args, **kwargs)
+        current_monotonic += 2.0
+        return names
+
+    monkeypatch.setattr(task, "_queue_name_snapshot", slow_snapshot)
+    try:
+        store = task._ensure_monitor_store()
+        assert store is not None
+        cleanup = task._run_terminal_control_cleanup_slice(
+            store,
+            now_ns=now_ns,
+        )
+    finally:
+        task.stop()
+
+    assert cleanup.cleanup_jobs_started == 1
+    assert cleanup.cleanup_jobs_completed == 1
+    assert cleanup.dead_tids_processed == 1
+    assert cleanup.dead_tid_control_queues_deleted == 1
+    assert ctrl_in.stats().total == 0
+
+
 def test_task_monitor_runtime_cleanup_deadline_stops_between_families(
     broker_env,
     monkeypatch: pytest.MonkeyPatch,
@@ -2521,7 +2586,7 @@ def test_task_monitor_runtime_cleanup_deadline_stops_between_families(
     def fake_monotonic() -> float:
         nonlocal monotonic_calls
         monotonic_calls += 1
-        return 0.0 if monotonic_calls <= 2 else 2.0
+        return 0.0 if monotonic_calls <= 3 else 2.0
 
     monkeypatch.setattr(task_monitor_mod, "_monitor_monotonic", fake_monotonic)
     config = load_config(
@@ -2531,13 +2596,14 @@ def test_task_monitor_runtime_cleanup_deadline_stops_between_families(
             "WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS": "0.01",
             "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
             "WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT": 10,
+            "WEFT_TASK_MONITOR_CLEANUP_WORKERS": "1",
             "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
             "WEFT_TASK_MONITOR_PROCESSOR": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
     tids = ("1778084345905438771", "1778084345905438772")
-    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    updates = []
     for tid in tids:
         taskspec = {
             "tid": tid,
@@ -2552,16 +2618,17 @@ def test_task_monitor_runtime_cleanup_deadline_stops_between_families(
             "state": {"status": "completed"},
             "metadata": {},
         }
-        log_queue.write(
-            json.dumps(
-                {
-                    "event": "work_completed",
-                    "status": "completed",
-                    "tid": tid,
-                    "taskspec": taskspec,
-                }
-            )
+        update = update_from_task_log_payload(
+            {
+                "event": "work_completed",
+                "status": "completed",
+                "tid": tid,
+                "taskspec": taskspec,
+            },
+            message_id=int(tid),
         )
+        assert update is not None
+        updates.append(update)
         make_queue(f"T{tid}.ctrl_in").write(f"stop-{tid}")
         make_queue(f"T{tid}.ctrl_out").write(f"pong-{tid}")
 
@@ -2571,19 +2638,29 @@ def test_task_monitor_runtime_cleanup_deadline_stops_between_families(
         config=config,
     )
     try:
-        task.process_once()
-        drive_task_monitor_until_idle(task)
-        store = task._monitor_store
+        store = task._ensure_monitor_store()
         assert store is not None
+        store.record_task_log_updates(
+            WEFT_GLOBAL_LOG_QUEUE,
+            tuple(updates),
+            checkpoint_message_id=None,
+        )
+        for tid in tids:
+            store.mark_summary_emitted(tid, int(tid) + 1)
+
+        cleanup = task._run_terminal_control_cleanup_slice(
+            store,
+            now_ns=time.time_ns(),
+        )
         first = store.get_task(tids[0])
         second = store.get_task(tids[1])
-        assert first is None
+        assert first is not None
+        assert first.task_control_deleted_at_ns is not None
         assert second is not None
         assert second.task_control_deleted_at_ns is None
-        assert task._last_control_families_processed == 1
-        assert task._last_monitor_store_families_retired == 1
-        assert task._last_control_cleanup_pending is True
-        assert task._last_control_cleanup_deadline_hit is True
+        assert cleanup.families_processed == 1
+        assert cleanup.pending is True
+        assert cleanup.deadline_hit is True
     finally:
         task.stop()
 

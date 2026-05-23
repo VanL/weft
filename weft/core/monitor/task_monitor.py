@@ -1993,13 +1993,6 @@ class TaskMonitor(ServiceTask):
         )
         if control_limit <= 0:
             return _TaskControlCleanupResult()
-        deadline_monotonic = (
-            _monitor_monotonic() + TASK_MONITOR_RUNTIME_CLEANUP_SLICE_SECONDS
-        )
-
-        def deadline_reached() -> bool:
-            return _monitor_monotonic() >= deadline_monotonic
-
         ready_records = store.list_terminal_control_cleanup_ready_tasks(
             limit=control_limit + 1,
             now_ns=now_ns,
@@ -2053,13 +2046,16 @@ class TaskMonitor(ServiceTask):
             if (tid := _reserved_queue_tid(queue_name)) is not None
             and tid not in dead_tid_set
         )
+        selection_deadline_monotonic = (
+            _monitor_monotonic() + TASK_MONITOR_RUNTIME_CLEANUP_SLICE_SECONDS
+        )
         reserved_selection = self._select_runtime_reserved_cleanup_candidates(
             store,
             now_ns=now_ns,
             limit=control_limit + 1,
             active_tids=active_tids,
             queue_names=reserved_queue_names_for_reserved_policy,
-            deadline_monotonic=deadline_monotonic,
+            deadline_monotonic=selection_deadline_monotonic,
         )
 
         def terminal_cleanup_job(
@@ -2141,10 +2137,17 @@ class TaskMonitor(ServiceTask):
             limit=control_limit,
         )
         selected_jobs = tuple(candidate.job for candidate in selected_candidates)
+        executor_deadline_monotonic = (
+            _monitor_monotonic() + TASK_MONITOR_RUNTIME_CLEANUP_SLICE_SECONDS
+        )
+
+        def executor_deadline_reached() -> bool:
+            return _monitor_monotonic() >= executor_deadline_monotonic
+
         executor_result = run_cleanup_jobs(
             selected_jobs,
             max_workers=self._monitor_config.cleanup_workers,
-            deadline_reached=deadline_reached,
+            deadline_reached=executor_deadline_reached,
         )
 
         families_processed = 0
