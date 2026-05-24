@@ -18,9 +18,9 @@ from tests.helpers.test_backend import active_test_backend, prepare_cli_root
 from tests.helpers.weft_harness import WeftTestHarness
 from weft._constants import (
     INTERNAL_SERVICE_KEY_HEARTBEAT,
-    INTERNAL_SERVICE_KEY_METADATA_KEY,
     INTERNAL_SERVICE_KEY_TASK_MONITOR,
     MANAGER_SERVE_LOG_SCHEMA,
+    SERVICE_STATUS_TERMINAL,
     TERMINAL_TASK_STATUSES,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_SERVICES_REGISTRY_QUEUE,
@@ -194,40 +194,30 @@ def _wait_for_started_task_tid(
 
 
 def _service_records(context, *, service_key: str) -> list[dict[str, Any]]:
-    queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
+    queue = context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
     try:
         latest_by_tid: dict[str, dict[str, Any]] = {}
         for payload, timestamp in iter_queue_json_entries(queue):
-            if payload.get("event") == "task_spawned":
-                tid = payload.get("child_tid")
-                taskspec = payload.get("child_taskspec")
-            else:
-                tid = payload.get("tid")
-                taskspec = payload.get("taskspec")
+            if payload.get("service_key") != service_key:
+                continue
+            tid = payload.get("owner_tid") or payload.get("tid")
             if not isinstance(tid, str) or not tid:
                 continue
-            if not isinstance(taskspec, dict):
-                continue
-            metadata = taskspec.get("metadata")
-            if not isinstance(metadata, dict):
-                continue
-            if metadata.get(INTERNAL_SERVICE_KEY_METADATA_KEY) != service_key:
-                continue
-            state = taskspec.get("state")
-            pid = state.get("pid") if isinstance(state, dict) else None
-            io_section = taskspec.get("io")
-            control = io_section.get("control") if isinstance(io_section, dict) else {}
-            ctrl_in = control.get("ctrl_in") if isinstance(control, dict) else None
-            ctrl_out = control.get("ctrl_out") if isinstance(control, dict) else None
+            queues = payload.get("queues")
+            if not isinstance(queues, dict):
+                queues = {}
+            ctrl_in = payload.get("ctrl_in") or queues.get("ctrl_in")
+            ctrl_out = payload.get("ctrl_out") or queues.get("ctrl_out")
             record = {
                 "tid": tid,
                 "timestamp": timestamp,
-                "event": payload.get("event"),
                 "status": payload.get("status"),
-                "pid": pid if isinstance(pid, int) else None,
                 "ctrl_in": ctrl_in if isinstance(ctrl_in, str) else None,
                 "ctrl_out": ctrl_out if isinstance(ctrl_out, str) else None,
+                "runtime_handle": payload.get("runtime_handle"),
             }
+            pid = _host_pid_from_record(record)
+            record["pid"] = pid if isinstance(pid, int) else None
             existing = latest_by_tid.get(tid)
             if existing is not None and record["pid"] is None:
                 record["pid"] = existing.get("pid")
@@ -249,7 +239,10 @@ def _live_service_records(context, *, service_key: str) -> list[dict[str, Any]]:
     live_records: list[dict[str, Any]] = []
     for record in _service_records(context, service_key=service_key):
         status = record.get("status")
-        if isinstance(status, str) and status in TERMINAL_TASK_STATUSES:
+        if isinstance(status, str) and status in {
+            *TERMINAL_TASK_STATUSES,
+            SERVICE_STATUS_TERMINAL,
+        }:
             continue
         tid = record.get("tid")
         ctrl_in = record.get("ctrl_in")
