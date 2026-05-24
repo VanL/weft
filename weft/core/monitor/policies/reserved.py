@@ -18,6 +18,7 @@ from weft._constants import (
     TERMINAL_TASK_EVENTS,
 )
 from weft.context import WeftContext
+from weft.core.monitor.progress import PolicyProgress
 from weft.core.monitor.task_log_collation import CollatedMessageGroup
 from weft.core.pruning.models import (
     CleanupCandidate,
@@ -59,15 +60,17 @@ def terminal_reserved_candidates(
     list[CleanupCandidate],
     tuple[CleanupQueueStats, ...],
     tuple[CleanupPolicyStats, ...],
+    tuple[PolicyProgress, ...],
 ]:
     """Select reserved rows for terminal non-successful task-log groups."""
 
     if selection_limit <= 0:
-        return [], (), ()
+        return [], (), (), ()
 
     candidates: list[CleanupCandidate] = []
     stats: list[CleanupQueueStats] = []
     policy_stats: list[CleanupPolicyStats] = []
+    progress: list[PolicyProgress] = []
     probes_remaining = selection_limit
     scan_window = (
         scan_queue_window if scan_queue_window_fn is None else scan_queue_window_fn
@@ -121,7 +124,33 @@ def terminal_reserved_candidates(
                 stop_reason=selected.stop_reason,
             )
         )
-    return candidates, tuple(stats), tuple(policy_stats)
+        progress.append(
+            PolicyProgress(
+                policy=TASK_MONITOR_POLICY_RESERVED_DELETE_TERMINAL_PROVEN,
+                domain=queue_name,
+                scanned=len(rows),
+                selected=len(selected_candidates),
+                waypoint_reached=len(candidates) >= selection_limit,
+                base_reached=selected.stop_reason == "first_reserved_row_too_young"
+                or (not rows),
+                reason_counts={
+                    "terminal_task_log_proof_for_reserved_tid": len(selected_candidates)
+                }
+                if selected_candidates
+                else {},
+            )
+        )
+    if not progress:
+        progress.append(
+            PolicyProgress(
+                policy=TASK_MONITOR_POLICY_RESERVED_DELETE_TERMINAL_PROVEN,
+                domain="task_reserved_queues",
+                scanned=len(groups),
+                selected=0,
+                base_reached=True,
+            )
+        )
+    return candidates, tuple(stats), tuple(policy_stats), tuple(progress)
 
 
 def collated_group_is_successful_completion(group: CollatedMessageGroup) -> bool:

@@ -596,6 +596,24 @@ class _MonitorTableAccess:
         )
         return tuple(_record_from_row(row) for row in rows)
 
+    def list_terminal_control_deleted_disposition_backfill_tasks(
+        self,
+        *,
+        limit: int,
+    ) -> tuple[str, ...]:
+        """Return terminal families cleaned before disposition was marked."""
+
+        if limit <= 0:
+            return ()
+        rows = self._runner.run(
+            monitor_sql.select_terminal_control_deleted_disposition_backfill_tasks(
+                self._tables.task_collations,
+            ),
+            (self._context_key, int(limit)),
+            fetch=True,
+        )
+        return tuple(str(row[0]) for row in rows)
+
     def mark_summary_emitted(
         self,
         tid: str,
@@ -728,6 +746,21 @@ class _MonitorTableAccess:
             fetch=True,
         )
         return tuple((str(row[0]), int(row[1])) for row in rows)
+
+    def raw_deleted_task_log_recovery_tids(self, *, limit: int) -> tuple[str, ...]:
+        """Return terminal families that may have orphan raw broker rows."""
+
+        if limit <= 0:
+            return ()
+        rows = self._runner.run(
+            monitor_sql.select_raw_deleted_task_log_recovery_tids(
+                self._tables.task_collations,
+                self._tables.task_messages,
+            ),
+            (self._context_key, int(limit)),
+            fetch=True,
+        )
+        return tuple(str(row[0]) for row in rows)
 
     def deleted_task_message_refs(self, *, limit: int) -> tuple[tuple[str, int], ...]:
         """Return legacy child message tombstones for physical cleanup."""
@@ -1136,6 +1169,25 @@ class MonitorStore:
                 retention_seconds=retention_seconds,
             )
 
+    def list_terminal_control_deleted_disposition_backfill_tasks(
+        self,
+        *,
+        limit: int,
+    ) -> tuple[str, ...]:
+        """Return terminal families needing disposition repair.
+
+        Spec: [MF-5], [OBS.13]
+        """
+
+        if limit <= 0:
+            return ()
+        with self._context.broker() as broker:
+            return self._access(
+                _runner_from_broker(broker)
+            ).list_terminal_control_deleted_disposition_backfill_tasks(
+                limit=limit,
+            )
+
     def mark_summary_emitted(
         self,
         tid: str,
@@ -1307,6 +1359,20 @@ class MonitorStore:
                 limit=limit,
                 require_summary=require_summary,
             )
+
+    def list_raw_deleted_task_log_recovery_tids(
+        self,
+        *,
+        limit: int,
+    ) -> tuple[str, ...]:
+        """Return terminal families that may have orphan raw task-log rows."""
+
+        if limit <= 0:
+            return ()
+        with self._context.broker() as broker:
+            return self._access(
+                _runner_from_broker(broker)
+            ).raw_deleted_task_log_recovery_tids(limit=limit)
 
     def delete_task_messages_after_raw_delete(
         self,

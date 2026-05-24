@@ -359,12 +359,12 @@ Current rules:
   schedule bookkeeping while the worker scans, writes Monitor-store rows, and
   applies exact deletes. For the built-in `delete` processor with Monitor
   collation enabled, retained `weft.log.tasks` rows are processed in FIFO order:
-  malformed rows are exact-deleted and valid rows are folded into the Monitor
-  table without first deleting open lifecycle evidence. Terminal families may
-  be summarized and exact-deleted after the pass reaches a complete FIFO
-  high-water; open families continue to use
-  `WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS` plus stale-open policy before
-  summary/deletion. Built-in cleanup still
+  malformed rows are exact-deleted; valid rows are folded into the Monitor
+  table and then exact-deleted in the same bounded pass when running the
+  built-in `delete` processor. Terminal families may be summarized and
+  disposed only after the pass reaches a complete FIFO high-water; open
+  families continue to use `WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS` plus
+  stale-open policy before summary/disposition. Built-in cleanup still
   runs runtime-state policies such as `weft.state.tid_mappings`, but it no
   longer uses bounded task-log family windows as the supervised task-log
   deletion authority. The manager owns only child supervision; it does not scan
@@ -377,6 +377,9 @@ Current rules:
   references: after exact broker deletion succeeds, or after retry observes the
   raw broker row is already absent, the Monitor physically deletes those child
   rows and reconciles the parent `raw_deleted_at_ns` when no child refs remain.
+  A bounded orphan-recovery pass may search for and exact-delete raw task-log
+  rows for terminal/disposed families whose child refs are already absent but
+  whose raw broker rows remain from an older or inconsistent cleanup cycle.
   Legacy child rows marked with `deleted_at_ns` from older releases are
   physically pruned in bounded Monitor-store cleanup slices. Replaying the same
   raw row after a delete failure is idempotent. A terminal family may emit a
@@ -404,15 +407,15 @@ Current rules:
   disposition, and task-local control cleanup have all been recorded, the
   Monitor may physically retire the compact parent row from
   `weft_monitor_task_collations`.
-  The same maintenance worker may delete eligible stale standard
+  A separate maintenance worker slice may delete eligible stale standard
   `T{tid}.reserved` queues after monitor-table proof or stale no-monitor
   evidence, while preserving active runtime owners. Each built-in cycle attempts
   retained raw task-log exact deletion in the built-in cycle worker before the
-  reactor launches another runtime-cleanup worker. The runtime worker processes
-  one fair slice at a time with a bounded mixed cleanup executor: terminal
-  stale-queue cleanup, eligible reserved cleanup, and eligible dead-TID cleanup
-  may all run in the same epoch under one total worker cap. It marks catch-up
-  pending when backlog remains or the internal slice cap/deadline is hit. PONG
+  reactor launches another runtime-cleanup worker. The reactor launches
+  terminal cleanup, reserved cleanup, and dead-TID cleanup as discrete
+  runtime-cleanup worker slices; one worker result must not mix those cleanup
+  classes or start nested cleanup executor threads. It marks catch-up pending
+  when backlog remains or the internal slice cap/deadline is hit. PONG
   reports cached store availability,
   checkpoint, rows processed,
   tasks updated, terminal tasks observed, summaries emitted, families
@@ -859,12 +862,20 @@ system pruning:
   candidates by listing standard task-local queue names, parsing `T{tid}.*`
   identities, and subtracting live runtime TIDs. That dead-task cleanup policy
   is owned by
-  `weft/core/monitor/policies/dead_task.py`: it selects standard stale
-  `T{tid}.ctrl_in`, `T{tid}.ctrl_out`, and `T{tid}.inbox` immediately, and
-  selects standard `T{tid}.outbox` and `T{tid}.reserved` only after the
-  retention period. Each cleanup cycle records cached policy/store stats so
-  PONG can distinguish "ran and selected zero" from "did not run". The monitor
-  must not delete active work,
+  `weft/core/monitor/policies/dead_task.py`: it schedules a dead-TID cleanup
+  job only when at least one currently existing standard task-local queue is
+  eligible now. It selects standard stale `T{tid}.ctrl_in`,
+  `T{tid}.ctrl_out`, and `T{tid}.inbox` immediately, and selects standard
+  `T{tid}.outbox` and `T{tid}.reserved` only after the retention period.
+  Retention-deferred dead-TID queues are counted for diagnostics but do not
+  keep runtime cleanup pending or trigger raw task-log coalescing. Dead-TID
+  cleanup must not mark Monitor collation families; if a Monitor row exists,
+  terminal or reserved cleanup owns that family. Each cleanup cycle records
+  cached policy/store stats and `policy_progress` summaries so PONG can
+  distinguish "ran and selected zero", "reached a bounded waypoint", "reached
+  a base case for now", "deferred future work", and "blocked by an error".
+  PONG must expose only cached progress and must not perform live cleanup
+  scans or Monitor-store reads. The monitor must not delete active work,
   ambiguous task-local evidence, claimed outbox residue, user payload rows,
   spawn requests, manager control rows, or candidates without exact message
   IDs. `report_only` remains available as a non-destructive override.
@@ -986,6 +997,8 @@ management live in the companion doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-05-24-monitor-policy-progress-contract-plan.md`](../plans/2026-05-24-monitor-policy-progress-contract-plan.md)
+- [`docs/plans/2026-05-23-monitor-cleanup-policy-convergence-plan.md`](../plans/2026-05-23-monitor-cleanup-policy-convergence-plan.md)
 - [`docs/plans/2026-05-23-monitor-cleanup-executor-plan.md`](../plans/2026-05-23-monitor-cleanup-executor-plan.md)
 - [`docs/plans/2026-05-22-monitor-policy-modules-and-dead-task-cleanup-plan.md`](../plans/2026-05-22-monitor-policy-modules-and-dead-task-cleanup-plan.md)
 - [`docs/plans/2026-05-20-monitor-collation-table-retirement-plan.md`](../plans/2026-05-20-monitor-collation-table-retirement-plan.md)

@@ -8,6 +8,7 @@ Spec references:
 from __future__ import annotations
 
 import json
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -16,6 +17,7 @@ from weft._constants import (
     TASK_MONITOR_POLICY_TID_MAPPING_DELETE_OLDER_THAN,
     WEFT_TID_MAPPINGS_QUEUE,
 )
+from weft.core.monitor.progress import PolicyProgress
 from weft.core.pruning.models import (
     CleanupCandidate,
     CleanupPolicyStats,
@@ -73,7 +75,13 @@ def tid_mapping_candidates(
     now_ns: int,
     min_age_seconds: float,
     exclude_tids: set[str],
-) -> tuple[list[CleanupCandidate], CleanupQueueStats, tuple[CleanupPolicyStats, ...]]:
+    scan_limit_reached: bool = False,
+) -> tuple[
+    list[CleanupCandidate],
+    CleanupQueueStats,
+    tuple[CleanupPolicyStats, ...],
+    tuple[PolicyProgress, ...],
+]:
     """Select stale or malformed TID mapping rows for cleanup."""
 
     malformed_candidates = malformed_row_candidates(
@@ -118,4 +126,38 @@ def tid_mapping_candidates(
             stop_reason=old_rows.stop_reason,
         ),
     )
-    return candidates, queue_stats, policy_stats
+    progress = (
+        PolicyProgress(
+            policy=TASK_MONITOR_POLICY_TID_MAPPING_DELETE_MALFORMED,
+            domain=WEFT_TID_MAPPINGS_QUEUE,
+            scanned=len(rows),
+            selected=len(malformed_candidates),
+            waypoint_reached=scan_limit_reached and bool(malformed_candidates),
+            base_reached=not scan_limit_reached and not malformed_candidates,
+            reason_counts=Counter(
+                candidate.reason for candidate in malformed_candidates
+            ),
+        ),
+        PolicyProgress(
+            policy=TASK_MONITOR_POLICY_TID_MAPPING_DELETE_OLDER_THAN,
+            domain=WEFT_TID_MAPPINGS_QUEUE,
+            scanned=len(rows),
+            selected=len(old_rows.candidates),
+            deferred=len(exclude_tids),
+            waypoint_reached=(
+                scan_limit_reached
+                and old_rows.stop_reason is None
+                and bool(old_rows.candidates)
+            ),
+            base_reached=(
+                old_rows.stop_reason == "first_tid_mapping_too_young"
+                or (not scan_limit_reached and not old_rows.candidates)
+            ),
+            reason_counts={
+                "older_than_tid_mapping_cleanup_min_age": len(old_rows.candidates)
+            }
+            if old_rows.candidates
+            else {},
+        ),
+    )
+    return candidates, queue_stats, policy_stats, progress

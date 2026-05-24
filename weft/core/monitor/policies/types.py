@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from weft.core.monitor.progress import PolicyProgress
 from weft.core.pruning.models import (
     AppliedCleanupCandidate,
     CleanupCandidate,
@@ -25,4 +26,5 @@ class CleanupPolicyRun:
     applied_candidates: tuple[AppliedCleanupCandidate, ...] = ()
     queue_stats: tuple[CleanupQueueStats, ...] = ()
     policy_stats: tuple[CleanupPolicyStats, ...] = ()
+    policy_progress: tuple[PolicyProgress, ...] = ()
     errors: tuple[str, ...] = ()

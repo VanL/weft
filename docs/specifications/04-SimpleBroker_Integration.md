@@ -19,6 +19,10 @@ See also:
   [`10-CLI_Interface.md`](10-CLI_Interface.md)
 - implementation plan:
   [`docs/plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md`](../plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md)
+- cleanup policy convergence plan:
+  [`docs/plans/2026-05-23-monitor-cleanup-policy-convergence-plan.md`](../plans/2026-05-23-monitor-cleanup-policy-convergence-plan.md)
+- monitor policy progress contract plan:
+  [`docs/plans/2026-05-24-monitor-policy-progress-contract-plan.md`](../plans/2026-05-24-monitor-policy-progress-contract-plan.md)
 
 ## SimpleBroker Features Leveraged by Weft [SB-0]
 
@@ -135,7 +139,10 @@ These tables are Monitor-owned and versioned. They are derived from
 replace SimpleBroker queue semantics. The child message table is a temporary
 pending-reference table, not a queue clone: once the corresponding raw broker
 row is deleted or reconciled as already absent, the Monitor physically deletes
-the child row. The Monitor may create, verify, and additively migrate only
+the child row. A bounded recovery pass may use public SimpleBroker message
+search and exact-delete APIs to clear legacy raw `weft.log.tasks` rows for
+terminal Monitor families whose child refs were already removed by an older
+release. The Monitor may create, verify, and additively migrate only
 these Monitor tables inside an already initialized Weft broker database. It
 must use the resolved `WeftContext` and broker target; it must not parse DSNs,
 rediscover a different database target, provision Postgres, or create the

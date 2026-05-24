@@ -237,6 +237,24 @@ def select_terminal_control_cleanup_ready_tasks(
         """
 
 
+def select_terminal_control_deleted_disposition_backfill_tasks(
+    collations_table: str,
+) -> str:
+    """Build a query for terminal families missing disposition after cleanup."""
+
+    return f"""
+        SELECT tid
+        FROM {identifier(collations_table)}
+        WHERE context_key = ?
+          AND terminal_seen = 1
+          AND summary_emitted_at_ns IS NOT NULL
+          AND task_control_deleted_at_ns IS NOT NULL
+          AND disposition_at_ns IS NULL
+        ORDER BY last_message_id, tid
+        LIMIT ?
+        """
+
+
 def select_summary_ready_open_tasks(
     collations_table: str,
     columns: Sequence[str],
@@ -352,6 +370,36 @@ def select_deletable_task_log_messages_for_tids(
           {state_condition}
           {summary_condition}
         ORDER BY m.message_id
+        LIMIT ?
+        """
+
+
+def select_raw_deleted_task_log_recovery_tids(
+    collations_table: str,
+    messages_table: str,
+) -> str:
+    """Build a query for terminal families needing raw-log orphan recovery."""
+
+    collations = identifier(collations_table)
+    messages = identifier(messages_table)
+    return f"""
+        SELECT c.tid
+        FROM {collations} AS c
+        WHERE c.context_key = ?
+          AND c.raw_deleted_at_ns IS NOT NULL
+          AND (
+            c.terminal_seen = 1
+            OR c.suspect_reason IS NOT NULL
+            OR c.disposition_at_ns IS NOT NULL
+            OR c.summary_emitted_at_ns IS NOT NULL
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM {messages} AS m
+            WHERE m.context_key = c.context_key
+              AND m.tid = c.tid
+          )
+        ORDER BY c.last_message_id, c.tid
         LIMIT ?
         """
 

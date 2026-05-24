@@ -491,6 +491,7 @@ def test_task_monitor_ping_includes_health_and_preserves_task_log(
     assert pong["last_safe_to_delete_candidates"] == 0
     assert pong["last_cleanup_queue_stats"]
     assert pong["last_cleanup_policy_stats"]
+    assert pong["last_policy_progress"]
     extended = pong[PONG_EXTENSION_KEY]["task_monitor"]
     assert extended["enabled"] is True
     assert extended["mode"] == "persistent"
@@ -528,6 +529,11 @@ def test_task_monitor_ping_includes_health_and_preserves_task_log(
     assert (
         extended["last_cycle"]["cleanup_policy_stats"]
         == (pong["last_cleanup_policy_stats"])
+    )
+    assert extended["last_cycle"]["policy_progress"] == (pong["last_policy_progress"])
+    assert any(
+        progress["policy"] == "task_log.retained_fifo_ingest"
+        for progress in extended["last_cycle"]["policy_progress"]
     )
     retained = extended["last_cycle"]["retained_task_log_ingest"]
     assert retained["scanned"] >= 1
@@ -839,13 +845,85 @@ def test_task_monitor_retained_ingest_batches_store_and_delete_work(
     retained = task._last_retained_task_log_ingest
     assert retained.selected >= 5
     assert retained.valid_ingested >= 5
-    assert retained.raw_deleted == 0
+    assert retained.raw_deleted >= 5
     assert retained.store_update_chunks == 1
-    assert retained.exact_delete_chunks == 0
-    assert retained.monitor_store_delete_chunks == 0
+    assert retained.exact_delete_chunks == 1
+    assert retained.monitor_store_delete_chunks == 1
     assert retained.checkpoint_written is True
     assert task._last_monitor_store_message_rows_deleted >= 5
     assert task._last_monitor_store_families_retired >= 1
+
+
+def test_task_monitor_retained_ingest_handles_own_tid_before_checkpoint(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    monitor_tid = "1778089999999999881"
+    other_tid = "1778084345905438881"
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
+            "WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT": 20,
+            "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
+            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    log_queue.write(
+        json.dumps(
+            {
+                "event": "task_activity",
+                "status": "running",
+                "tid": monitor_tid,
+                "activity": "cleanup_scanning",
+            }
+        )
+    )
+    log_queue.write(
+        json.dumps(
+            {
+                "event": "work_completed",
+                "status": "completed",
+                "tid": other_tid,
+            }
+        )
+    )
+    message_ids = [
+        int(message_id) for _body, message_id in iter_queue_entries(log_queue)
+    ]
+
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec(monitor_tid),
+        config=config,
+    )
+    try:
+        task.process_once()
+        drive_task_monitor_until_idle(task)
+        store = task._monitor_store
+        assert store is not None
+        checkpoint = store.get_checkpoint(WEFT_GLOBAL_LOG_QUEUE)
+        assert checkpoint is not None
+        assert checkpoint >= message_ids[-1]
+        assert task._last_retained_task_log_ingest.selected >= 2
+        assert task._last_retained_task_log_ingest.valid_ingested >= 2
+    finally:
+        task.stop()
+
+    remaining_rows = {
+        int(message_id): json.loads(body)
+        for body, message_id in iter_queue_entries(log_queue)
+        if body.startswith("{")
+    }
+    assert message_ids[0] not in remaining_rows
+    assert message_ids[1] not in remaining_rows
 
 
 def test_task_monitor_skips_terminal_summary_after_partial_fifo_pass(
@@ -960,6 +1038,12 @@ def test_task_monitor_retained_ingest_batch_limit_counts_valid_rows(
         assert retained.valid_ingested == 3
         assert retained.stop_reason == "batch_limit"
         assert retained.completed_fifo_high_water is False
+        assert any(
+            progress.policy == "task_log.retained_fifo_ingest"
+            and progress.waypoint_reached
+            and not progress.base_reached
+            for progress in task._last_policy_progress
+        )
         assert task._last_collation_tasks_updated == 1
         assert task._last_catchup_pending is True
     finally:
@@ -1020,9 +1104,8 @@ def test_task_monitor_retained_ingest_resumes_after_store_checkpoint(
         task.process_once()
         drive_task_monitor_until_idle(task)
 
-        assert task._last_retained_task_log_ingest.selected == 2
-        assert task._last_retained_task_log_ingest.completed_fifo_high_water is True
-        assert store.get_checkpoint(WEFT_GLOBAL_LOG_QUEUE) == message_ids[4]
+        assert task._last_retained_task_log_ingest.selected >= 2
+        assert store.get_checkpoint(WEFT_GLOBAL_LOG_QUEUE) >= message_ids[4]
     finally:
         task.stop()
 
@@ -1106,6 +1189,90 @@ def test_task_monitor_table_delete_reconciles_already_absent_exact_rows(
     assert delete_task._last_processor_success is True
 
 
+def test_task_monitor_recovers_orphan_raw_task_log_rows_after_bad_raw_mark(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
+            "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "172800",
+            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+            "WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED": "1",
+        }
+    )
+    tid = "1778084345905438725"
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    payloads = [
+        {
+            "event": "task_activity",
+            "status": "running",
+            "tid": tid,
+            "sequence": 1,
+        },
+        {
+            "event": "work_completed",
+            "status": "completed",
+            "tid": tid,
+            "sequence": 2,
+        },
+    ]
+    for payload in payloads:
+        log_queue.write(json.dumps(payload))
+    rows = list(iter_queue_entries(log_queue))
+    updates = tuple(
+        update_from_task_log_payload(
+            json.loads(body),
+            queue_name=WEFT_GLOBAL_LOG_QUEUE,
+            message_id=int(message_id),
+        )
+        for body, message_id in rows
+    )
+    assert all(update is not None for update in updates)
+
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999875"),
+        config=config,
+    )
+    try:
+        store = task._ensure_monitor_store()
+        assert store is not None
+        store.record_task_log_updates(
+            WEFT_GLOBAL_LOG_QUEUE,
+            tuple(update for update in updates if update is not None),
+            checkpoint_message_id=None,
+        )
+        store.delete_task_messages_after_raw_delete(
+            tuple(int(message_id) for _body, message_id in rows),
+            deleted_at_ns=time.time_ns(),
+        )
+        record = store.get_task(tid)
+        assert record is not None
+        assert record.raw_deleted_at_ns is not None
+        assert list(log_queue.peek_generator()) != []
+
+        recovery = task._recover_orphan_task_log_rows(store, now_ns=time.time_ns())
+    finally:
+        task.stop()
+
+    assert recovery.refs_selected == 2
+    assert recovery.rows_deleted == 2
+    assert recovery.errors == ()
+    assert [
+        json.loads(body)
+        for body, _message_id in iter_queue_entries(log_queue)
+        if json.loads(body).get("tid") == tid
+    ] == []
+
+
 def test_task_monitor_failed_summary_disposition_blocks_table_delete(
     broker_env,
     monkeypatch: pytest.MonkeyPatch,
@@ -1155,7 +1322,7 @@ def test_task_monitor_failed_summary_disposition_blocks_table_delete(
         record = store.get_task(payload["tid"])
         assert record is not None
         assert record.summary_emitted_at_ns is None
-        assert record.raw_deleted_at_ns is None
+        assert record.raw_deleted_at_ns is not None
     finally:
         task.stop()
 
@@ -1164,8 +1331,8 @@ def test_task_monitor_failed_summary_disposition_blocks_table_delete(
         for message in log_queue.peek_generator()
         if json.loads(message).get("tid") == payload["tid"]
     ]
-    assert target_rows == [payload]
-    assert task._last_monitor_store_message_rows_deleted == 0
+    assert target_rows == []
+    assert task._last_monitor_store_message_rows_deleted >= 1
 
 
 def test_task_monitor_collated_external_log_precedes_table_delete(
@@ -1510,6 +1677,78 @@ def test_task_monitor_control_cleanup_does_not_mark_when_queue_delete_fails(
     assert ctrl_out.stats().total == 1
 
 
+def test_task_monitor_terminal_cleanup_repairs_control_deleted_without_disposition(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, _make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_BATCH_SIZE": 100,
+            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    tid = "1778084345905438766"
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999966"),
+        config=config,
+    )
+    try:
+        store = task._ensure_monitor_store()
+        assert store is not None
+        update = update_from_task_log_payload(
+            {
+                "event": "work_completed",
+                "status": "completed",
+                "tid": tid,
+                "taskspec": {
+                    "tid": tid,
+                    "version": "1.0",
+                    "name": "sample",
+                    "io": {
+                        "control": {
+                            "ctrl_in": f"T{tid}.ctrl_in",
+                            "ctrl_out": f"T{tid}.ctrl_out",
+                        },
+                    },
+                    "state": {"status": "completed"},
+                    "metadata": {},
+                },
+            },
+            message_id=int(tid),
+        )
+        assert update is not None
+        store.record_task_log_updates(
+            WEFT_GLOBAL_LOG_QUEUE,
+            (update,),
+            checkpoint_message_id=None,
+        )
+        store.delete_task_messages_after_raw_delete(
+            (update.message_id,),
+            deleted_at_ns=update.message_id + 1,
+        )
+        store.mark_summary_emitted(tid, update.message_id + 2)
+        store.mark_task_control_deleted(tid, update.message_id + 3)
+
+        cleanup = task._run_terminal_control_cleanup_slice(
+            store,
+            now_ns=time.time_ns(),
+        )
+
+        assert cleanup.families_disposed == 1
+        assert cleanup.families_retired == 1
+        assert store.get_task(tid) is None
+    finally:
+        task.stop()
+
+
 def test_task_monitor_delete_removes_stale_reserved_queue_without_monitor_record(
     broker_env,
     monkeypatch: pytest.MonkeyPatch,
@@ -1650,7 +1889,7 @@ def test_task_monitor_keeps_reserved_queue_for_active_service_owner(
     try:
         store = task._ensure_monitor_store()
         assert store is not None
-        cleanup = task._run_terminal_control_cleanup_slice(
+        cleanup = task._run_reserved_cleanup_slice(
             store,
             now_ns=time.time_ns(),
         )
@@ -1699,7 +1938,7 @@ def test_task_monitor_dead_task_cleanup_deletes_standard_control_queues(
     try:
         store = task._ensure_monitor_store()
         assert store is not None
-        cleanup = task._run_terminal_control_cleanup_slice(
+        cleanup = task._run_dead_task_cleanup_slice(
             store,
             now_ns=time.time_ns(),
         )
@@ -1757,7 +1996,7 @@ def test_task_monitor_dead_task_cleanup_retains_outbox_and_reserved_before_reten
     try:
         store = task._ensure_monitor_store()
         assert store is not None
-        cleanup = task._run_terminal_control_cleanup_slice(
+        cleanup = task._run_dead_task_cleanup_slice(
             store,
             now_ns=now_ns,
         )
@@ -1775,7 +2014,69 @@ def test_task_monitor_dead_task_cleanup_retains_outbox_and_reserved_before_reten
     assert cleanup.dead_tid_reserved_queues_deleted == 0
 
 
-def test_task_monitor_dead_task_cleanup_coalesces_and_deletes_task_log_refs(
+def test_task_monitor_dead_task_cleanup_defers_outbox_only_until_retention(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "172800",
+            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    now_ns = time.time_ns()
+    tid = str(
+        now_ns - int((TASK_MONITOR_TID_MAPPING_CLEANUP_MIN_AGE_SECONDS + 60.0) * 1e9)
+    )
+    outbox = make_queue(f"T{tid}.outbox")
+    reserved = make_queue(f"T{tid}.reserved")
+    outbox.write("result")
+    reserved.write("reserved")
+    coalesce_calls: list[str] = []
+
+    def counted_coalesce(ctx, tid_arg: str, *, chunk_limit: int):
+        del ctx, chunk_limit
+        coalesce_calls.append(tid_arg)
+        raise AssertionError("retention-deferred dead TID should not coalesce logs")
+
+    monkeypatch.setattr(
+        task_monitor_mod,
+        "_fetch_dead_task_log_coalesce_group",
+        counted_coalesce,
+    )
+
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec(str(now_ns + 1_000_000)),
+        config=config,
+    )
+    try:
+        store = task._ensure_monitor_store()
+        assert store is not None
+        cleanup = task._run_dead_task_cleanup_slice(
+            store,
+            now_ns=now_ns,
+        )
+    finally:
+        task.stop()
+
+    assert list(outbox.peek_generator()) == ["result"]
+    assert list(reserved.peek_generator()) == ["reserved"]
+    assert cleanup.dead_tids_processed == 0
+    assert cleanup.dead_tids_deferred_retention == 1
+    assert cleanup.dead_tids_pending == 0
+    assert cleanup.pending is False
+    assert coalesce_calls == []
+
+
+def test_task_monitor_dead_task_cleanup_does_not_coalesce_task_log_refs(
     broker_env,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1843,7 +2144,7 @@ def test_task_monitor_dead_task_cleanup_coalesces_and_deletes_task_log_refs(
             counted_coalesce,
         )
 
-        cleanup = task._run_terminal_control_cleanup_slice(
+        cleanup = task._run_dead_task_cleanup_slice(
             store,
             now_ns=time.time_ns(),
         )
@@ -1857,10 +2158,10 @@ def test_task_monitor_dead_task_cleanup_coalesces_and_deletes_task_log_refs(
         for body, _message_id in iter_queue_entries(log_queue)
         if json.loads(body).get("tid") == tid
     ]
-    assert retained_task_rows == []
-    assert coalesce_calls == [tid]
-    assert cleanup.dead_tid_log_refs_selected == 1
-    assert cleanup.dead_tid_log_rows_deleted == 1
+    assert retained_task_rows == [payload]
+    assert coalesce_calls == []
+    assert cleanup.dead_tid_log_refs_selected == 0
+    assert cleanup.dead_tid_log_rows_deleted == 0
 
 
 def test_task_monitor_dead_task_cleanup_skips_live_service_owner(
@@ -1905,7 +2206,7 @@ def test_task_monitor_dead_task_cleanup_skips_live_service_owner(
     try:
         store = task._ensure_monitor_store()
         assert store is not None
-        cleanup = task._run_terminal_control_cleanup_slice(
+        cleanup = task._run_dead_task_cleanup_slice(
             store,
             now_ns=time.time_ns(),
         )
@@ -1954,7 +2255,7 @@ def test_task_monitor_dead_task_cleanup_is_oldest_first_and_bounded(
     try:
         store = task._ensure_monitor_store()
         assert store is not None
-        cleanup = task._run_terminal_control_cleanup_slice(
+        cleanup = task._run_dead_task_cleanup_slice(
             store,
             now_ns=time.time_ns(),
         )
@@ -2177,7 +2478,7 @@ def test_task_monitor_terminal_control_cleanup_is_bounded_by_family(
         assert make_queue(f"T{tid}.ctrl_out").stats().total == 0
 
 
-def test_task_monitor_runtime_cleanup_interleaves_control_and_reserved_work(
+def test_task_monitor_runtime_cleanup_runs_control_before_reserved_work(
     broker_env,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2261,27 +2562,28 @@ def test_task_monitor_runtime_cleanup_interleaves_control_and_reserved_work(
         )
         first = store.get_task(tids[0])
         second = store.get_task(tids[1])
+        assert first is not None
         assert second is not None
-        assert second.task_control_deleted_at_ns is None
-        if first is not None:
-            assert first.task_control_deleted_at_ns is not None
-        assert cleanup.families_processed == 1
-        assert cleanup.reserved_families_processed == 1
-        assert cleanup.reserved_queues_deleted == 1
+        assert first.task_control_deleted_at_ns is not None
+        assert second.task_control_deleted_at_ns is not None
+        assert cleanup.families_processed == 2
+        assert cleanup.reserved_families_processed == 0
+        assert cleanup.reserved_queues_deleted == 0
         assert cleanup.pending is True
-        assert cleanup.family_limit_hit is True
+        assert cleanup.next_slice_kind == "reserved"
         assert cleanup.cleanup_jobs_by_kind == {
-            "terminal_control": 1,
-            "reserved": 1,
+            "terminal_control": 2,
         }
-        assert list(reserved.peek_generator()) == []
+        assert list(reserved.peek_generator()) == ["terminal-reserved"]
 
-        cleanup = task._run_terminal_control_cleanup_slice(
+        reserved_cleanup = task._run_reserved_cleanup_slice(
             store,
             now_ns=time.time_ns(),
         )
 
-        assert cleanup.families_processed >= 1
+        assert reserved_cleanup.reserved_families_processed == 1
+        assert reserved_cleanup.reserved_queues_deleted == 1
+        assert list(reserved.peek_generator()) == []
     finally:
         task.stop()
 
@@ -2357,23 +2659,31 @@ def test_task_monitor_runtime_cleanup_dispatches_three_cleanup_kinds(
         )
         store.mark_summary_emitted(terminal_tid, int(terminal_tid) + 1)
 
-        cleanup = task._run_terminal_control_cleanup_slice(
+        terminal_cleanup = task._run_terminal_control_cleanup_slice(
+            store,
+            now_ns=time.time_ns(),
+        )
+        reserved_cleanup = task._run_reserved_cleanup_slice(
+            store,
+            now_ns=time.time_ns(),
+        )
+        dead_cleanup = task._run_dead_task_cleanup_slice(
             store,
             now_ns=time.time_ns(),
         )
     finally:
         task.stop()
 
-    assert cleanup.cleanup_jobs_by_kind == {
-        "terminal_control": 1,
-        "reserved": 1,
-        "dead_tid": 1,
-    }
-    assert cleanup.cleanup_workers_configured == 3
-    assert cleanup.cleanup_jobs_started == 3
-    assert cleanup.families_processed == 1
-    assert cleanup.reserved_families_processed == 1
-    assert cleanup.dead_tids_processed == 1
+    assert terminal_cleanup.cleanup_jobs_by_kind == {"terminal_control": 1}
+    assert terminal_cleanup.cleanup_workers_configured == 1
+    assert terminal_cleanup.cleanup_jobs_started == 1
+    assert terminal_cleanup.families_processed == 1
+    assert terminal_cleanup.next_slice_kind == "reserved"
+    assert reserved_cleanup.cleanup_jobs_by_kind == {"reserved": 1}
+    assert reserved_cleanup.reserved_families_processed == 1
+    assert reserved_cleanup.next_slice_kind == "dead_tid"
+    assert dead_cleanup.cleanup_jobs_by_kind == {"dead_tid": 1}
+    assert dead_cleanup.dead_tids_processed == 1
     assert reserved.stats().total == 0
     assert make_queue(f"T{dead_tid}.ctrl_in").stats().total == 0
     assert make_queue(f"T{dead_tid}.ctrl_out").stats().total == 0
@@ -2420,7 +2730,7 @@ def test_task_monitor_runtime_cleanup_skips_queue_snapshot_when_not_due(
     finally:
         task.stop()
 
-    assert cleanup.cleanup_workers_configured == 3
+    assert cleanup.cleanup_workers_configured == 1
     assert cleanup.cleanup_jobs_started == 0
     assert cleanup.pending is False
 
@@ -2497,8 +2807,16 @@ def test_task_monitor_runtime_cleanup_keeps_reserved_pending_after_control_budge
         assert cleanup.families_processed == 1
         assert cleanup.reserved_families_processed == 0
         assert cleanup.pending is True
-        assert cleanup.family_limit_hit is True
+        assert cleanup.family_limit_hit is False
+        assert cleanup.next_slice_kind == "reserved"
         assert list(reserved.peek_generator()) == ["stale-reserved"]
+
+        reserved_cleanup = task._run_reserved_cleanup_slice(
+            store,
+            now_ns=time.time_ns(),
+        )
+        assert reserved_cleanup.reserved_families_processed == 1
+        assert list(reserved.peek_generator()) == []
     finally:
         task.stop()
 
@@ -2554,7 +2872,7 @@ def test_task_monitor_runtime_cleanup_starts_after_slow_queue_snapshot(
     try:
         store = task._ensure_monitor_store()
         assert store is not None
-        cleanup = task._run_terminal_control_cleanup_slice(
+        cleanup = task._run_dead_task_cleanup_slice(
             store,
             now_ns=now_ns,
         )
@@ -3073,7 +3391,7 @@ def test_task_monitor_collated_external_failure_blocks_table_delete(
         record = store.get_task(payload["tid"])
         assert record is not None
         assert record.summary_emitted_at_ns is None
-        assert record.raw_deleted_at_ns is None
+        assert record.raw_deleted_at_ns is not None
     finally:
         task.stop()
 
@@ -3082,7 +3400,7 @@ def test_task_monitor_collated_external_failure_blocks_table_delete(
         for message in log_queue.peek_generator()
         if json.loads(message).get("tid") == payload["tid"]
     ]
-    assert target_rows == [payload]
+    assert target_rows == []
     assert task._external_task_log_status.healthy is False
     assert task._external_task_log_status.last_blocked_deletions == 1
 
@@ -3202,6 +3520,7 @@ def test_task_monitor_ping_uses_cached_policy_stats_without_cleanup_scan(
         pong[PONG_EXTENSION_KEY]["task_monitor"]["last_cycle"]["cleanup_policy_stats"]
         == cached_policy_stats
     )
+    assert "policy_progress" in pong[PONG_EXTENSION_KEY]["task_monitor"]["last_cycle"]
 
 
 def test_task_monitor_slow_custom_processor_does_not_block_ping(

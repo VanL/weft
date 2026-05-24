@@ -38,6 +38,7 @@ from weft.core.monitor.policies.tid_mapping import (
     decode_tid_mapping_row,
     tid_mapping_candidates,
 )
+from weft.core.monitor.progress import PolicyProgress
 from weft.core.monitor.task_log_scanner import (
     GeneratorTaskLogScanner,
     TaskLogScanBackend,
@@ -81,6 +82,7 @@ class TaskMonitorCleanupResult:
     applied_candidates: tuple[AppliedCleanupCandidate, ...] = ()
     queue_stats: tuple[CleanupQueueStats, ...] = ()
     policy_stats: tuple[CleanupPolicyStats, ...] = ()
+    policy_progress: tuple[PolicyProgress, ...] = ()
     errors: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
 
@@ -122,6 +124,11 @@ class TaskMonitorCleanupResult:
 
         return tuple(stat.to_summary() for stat in self.policy_stats)
 
+    def policy_progress_summary(self) -> tuple[dict[str, Any], ...]:
+        """Return JSON-safe policy progress for operational logs."""
+
+        return tuple(progress.to_summary() for progress in self.policy_progress)
+
 
 def run_task_monitor_cleanup(
     ctx: WeftContext,
@@ -153,6 +160,7 @@ def run_task_monitor_cleanup(
     applied: list[AppliedCleanupCandidate] = []
     queue_stats: list[CleanupQueueStats] = []
     policy_stats: list[CleanupPolicyStats] = []
+    policy_progress: list[PolicyProgress] = []
     errors: list[str] = []
     task_log_scan_backend = config.task_log_scan_backend or GeneratorTaskLogScanner()
 
@@ -194,17 +202,21 @@ def run_task_monitor_cleanup(
                 applied.extend(policy_run.applied_candidates)
                 queue_stat_records = policy_run.queue_stats
                 policy_stat_records = policy_run.policy_stats
+                policy_progress_records = policy_run.policy_progress
                 errors.extend(policy_run.errors)
             else:
                 rows = scan_queue_window(ctx, queue_name, limit=config.batch_size)
-                selected, queue_stat_records, policy_stat_records = (
-                    _select_queue_candidates(
-                        queue_name,
-                        rows,
-                        config=config,
-                        now_ns=current_ns,
-                        exclude_tids=excluded,
-                    )
+                (
+                    selected,
+                    queue_stat_records,
+                    policy_stat_records,
+                    policy_progress_records,
+                ) = _select_queue_candidates(
+                    queue_name,
+                    rows,
+                    config=config,
+                    now_ns=current_ns,
+                    exclude_tids=excluded,
                 )
                 applied.extend(_apply_policy_candidates(ctx, selected, apply=apply))
         except (BrokerError, OSError, RuntimeError, ValueError) as exc:
@@ -213,6 +225,7 @@ def run_task_monitor_cleanup(
         candidates.extend(selected)
         queue_stats.extend(queue_stat_records)
         policy_stats.extend(policy_stat_records)
+        policy_progress.extend(policy_progress_records)
 
     applied_tuple = tuple(applied)
     final_queue_stats = tuple(
@@ -220,6 +233,13 @@ def run_task_monitor_cleanup(
     )
     final_policy_stats = tuple(
         _with_policy_apply_counts(policy_stats, applied_tuple, report_only=not apply)
+    )
+    final_policy_progress = tuple(
+        _with_policy_progress_apply_counts(
+            policy_progress,
+            applied_tuple,
+            report_only=not apply,
+        )
     )
     apply_errors = tuple(
         candidate.error for candidate in applied_tuple if candidate.error is not None
@@ -230,6 +250,7 @@ def run_task_monitor_cleanup(
         applied_candidates=applied_tuple,
         queue_stats=final_queue_stats,
         policy_stats=final_policy_stats,
+        policy_progress=final_policy_progress,
         errors=(*errors, *apply_errors),
     )
 
@@ -245,16 +266,18 @@ def _select_queue_candidates(
     list[CleanupCandidate],
     tuple[CleanupQueueStats, ...],
     tuple[CleanupPolicyStats, ...],
+    tuple[PolicyProgress, ...],
 ]:
     if queue_name == WEFT_TID_MAPPINGS_QUEUE:
         decoded = tuple(decode_tid_mapping_row(row) for row in rows)
-        candidates, queue_stats, policy_stats = tid_mapping_candidates(
+        candidates, queue_stats, policy_stats, policy_progress = tid_mapping_candidates(
             decoded,
             now_ns=now_ns,
             min_age_seconds=config.tid_mapping_min_age_seconds,
             exclude_tids=exclude_tids,
+            scan_limit_reached=len(rows) >= config.batch_size,
         )
-        return candidates, (queue_stats,), policy_stats
+        return candidates, (queue_stats,), policy_stats, policy_progress
     return (
         [],
         (
@@ -265,6 +288,7 @@ def _select_queue_candidates(
                 stop_reason="unsupported_queue",
             ),
         ),
+        (),
         (),
     )
 
@@ -359,3 +383,54 @@ def _with_policy_apply_counts(
         )
         for stat in stats
     ]
+
+
+def _with_policy_progress_apply_counts(
+    progresses: Sequence[PolicyProgress],
+    applied: Sequence[AppliedCleanupCandidate],
+    *,
+    report_only: bool,
+) -> list[PolicyProgress]:
+    applied_by_policy_queue = Counter(
+        (result.candidate.policy, result.candidate.queue)
+        for result in applied
+        if result.deleted
+    )
+    reported_by_policy_queue: Counter[tuple[str, str]] = Counter()
+    if report_only:
+        reported_by_policy_queue.update(
+            {
+                (progress.policy, progress.domain): progress.selected
+                for progress in progresses
+                if progress.selected
+            }
+        )
+    elif applied:
+        reported_by_policy_queue.update(
+            (result.candidate.policy, result.candidate.queue)
+            for result in applied
+            if not result.deleted
+        )
+    error_by_policy_queue: dict[tuple[str, str], str] = {}
+    for result in applied:
+        if result.error is not None:
+            error_by_policy_queue.setdefault(
+                (result.candidate.policy, result.candidate.queue),
+                result.error,
+            )
+
+    updated: list[PolicyProgress] = []
+    for progress in progresses:
+        key = (progress.policy, progress.domain)
+        applied_count = (
+            reported_by_policy_queue[key]
+            if report_only
+            else applied_by_policy_queue[key]
+        )
+        updated.append(
+            progress.with_apply_result(
+                applied=applied_count,
+                blocked_reason=error_by_policy_queue.get(key),
+            )
+        )
+    return updated

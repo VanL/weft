@@ -8,12 +8,14 @@ Spec references:
 from __future__ import annotations
 
 import json
+from collections import Counter
 from collections.abc import Callable, Sequence
 from typing import Any, Protocol
 
 from simplebroker.ext import BrokerError
 from weft._constants import (
     TASK_LOG_START_EVENTS,
+    TASK_MONITOR_POLICY_RESERVED_DELETE_TERMINAL_PROVEN,
     TASK_MONITOR_POLICY_TASK_LOG_COLLATE_COMPLETE_LIFECYCLE,
     TASK_MONITOR_POLICY_TASK_LOG_COLLATE_TERMINAL_WITHOUT_START,
     TASK_MONITOR_POLICY_TASK_LOG_DELETE_CLAIMED,
@@ -26,6 +28,7 @@ from weft._constants import (
 from weft.context import WeftContext
 from weft.core.monitor.policies.reserved import terminal_reserved_candidates
 from weft.core.monitor.policies.types import CleanupPolicyRun
+from weft.core.monitor.progress import PolicyProgress
 from weft.core.monitor.task_log_collation import (
     CollatedMessageGroup,
     is_terminal_task_log,
@@ -101,6 +104,7 @@ def task_log_candidates(
     rows = scan_window.rows
     applied: list[AppliedCleanupCandidate] = []
     policy_stats = []
+    policy_progress: list[PolicyProgress] = []
     remaining = batch_size
     malformed_candidates = select_malformed_task_log_candidates(
         rows,
@@ -119,10 +123,31 @@ def task_log_candidates(
             stop_reason=None,
         )
     )
-    claimed_total = (
-        queue_claimed_count(ctx, WEFT_GLOBAL_LOG_QUEUE) if remaining > 0 else 0
+    policy_progress.append(
+        PolicyProgress(
+            policy=TASK_MONITOR_POLICY_TASK_LOG_DELETE_MALFORMED,
+            domain=WEFT_GLOBAL_LOG_QUEUE,
+            scanned=scan_window.scanned,
+            selected=len(malformed_candidates),
+            waypoint_reached=(
+                scan_window.scan_limit_reached and bool(malformed_candidates)
+            )
+            or len(malformed_candidates) >= batch_size,
+            base_reached=(
+                not scan_window.scan_limit_reached and not malformed_candidates
+            ),
+            reason_counts=Counter(
+                candidate.reason for candidate in malformed_candidates
+            ),
+        )
     )
-    if claimed_total > 0:
+    claimed_scan_skipped = remaining <= 0
+    claimed_total = (
+        queue_claimed_count(ctx, WEFT_GLOBAL_LOG_QUEUE)
+        if not claimed_scan_skipped
+        else None
+    )
+    if claimed_total is not None and claimed_total > 0:
         claimed_rows = scan_claimed_task_log_rows(
             ctx,
             WEFT_GLOBAL_LOG_QUEUE,
@@ -143,7 +168,8 @@ def task_log_candidates(
     remaining = max(0, batch_size - len(candidates))
     claimed_stop_reason = (
         TASK_MONITOR_TASK_LOG_SELECTION_LIMIT_REACHED
-        if claimed_total > len(claimed_task_log_candidates)
+        if claimed_total is not None
+        and claimed_total > len(claimed_task_log_candidates)
         else None
     )
     policy_stats.append(
@@ -153,6 +179,20 @@ def task_log_candidates(
             scanned=len(claimed_rows),
             candidates=claimed_task_log_candidates,
             stop_reason=claimed_stop_reason,
+        )
+    )
+    policy_progress.append(
+        PolicyProgress(
+            policy=TASK_MONITOR_POLICY_TASK_LOG_DELETE_CLAIMED,
+            domain=WEFT_GLOBAL_LOG_QUEUE,
+            scanned=len(claimed_rows),
+            selected=len(claimed_task_log_candidates),
+            source_total=claimed_total,
+            waypoint_reached=claimed_stop_reason is not None or claimed_scan_skipped,
+            base_reached=claimed_total == 0,
+            reason_counts=Counter(
+                candidate.reason for candidate in claimed_task_log_candidates
+            ),
         )
     )
 
@@ -184,6 +224,33 @@ def task_log_candidates(
             stop_reason=family_selection.stop_reason,
         )
     )
+    complete_deferred = sum(
+        1 for family in family_selection.skipped_open_families if family.start_rows > 0
+    )
+    policy_progress.append(
+        PolicyProgress(
+            policy=TASK_MONITOR_POLICY_TASK_LOG_COLLATE_COMPLETE_LIFECYCLE,
+            domain=WEFT_GLOBAL_LOG_QUEUE,
+            scanned=scan_window.scanned,
+            selected=len(complete_lifecycle_candidates),
+            deferred=complete_deferred,
+            waypoint_reached=(
+                family_selection.stop_reason is not None
+                or (
+                    scan_window.scan_limit_reached
+                    and bool(complete_lifecycle_candidates)
+                )
+            ),
+            base_reached=(
+                not scan_window.scan_limit_reached
+                and family_selection.stop_reason is None
+                and not complete_lifecycle_candidates
+            ),
+            reason_counts=Counter(
+                candidate.reason for candidate in complete_lifecycle_candidates
+            ),
+        )
+    )
 
     terminal_without_start_candidates = [
         candidate
@@ -203,6 +270,26 @@ def task_log_candidates(
             scanned=scan_window.scanned,
             candidates=terminal_without_start_candidates,
             stop_reason=None,
+        )
+    )
+    policy_progress.append(
+        PolicyProgress(
+            policy=TASK_MONITOR_POLICY_TASK_LOG_COLLATE_TERMINAL_WITHOUT_START,
+            domain=WEFT_GLOBAL_LOG_QUEUE,
+            scanned=scan_window.scanned,
+            selected=len(terminal_without_start_candidates),
+            waypoint_reached=(
+                scan_window.scan_limit_reached
+                and bool(terminal_without_start_candidates)
+            )
+            or len(terminal_without_start_candidates) >= batch_size,
+            base_reached=(
+                not scan_window.scan_limit_reached
+                and not terminal_without_start_candidates
+            ),
+            reason_counts=Counter(
+                candidate.reason for candidate in terminal_without_start_candidates
+            ),
         )
     )
 
@@ -229,6 +316,31 @@ def task_log_candidates(
             stop_reason=old_stop_reason,
         )
     )
+    old_deferred = len(family_selection.skipped_open_families)
+    policy_progress.append(
+        PolicyProgress(
+            policy=TASK_MONITOR_POLICY_TASK_LOG_DELETE_OLD_WITHOUT_START,
+            domain=WEFT_GLOBAL_LOG_QUEUE,
+            scanned=scan_window.scanned,
+            selected=len(old_task_log_candidates),
+            deferred=old_deferred,
+            waypoint_reached=(
+                old_stop_reason == TASK_MONITOR_TASK_LOG_SELECTION_LIMIT_REACHED
+                or (
+                    scan_window.scan_limit_reached
+                    and old_stop_reason != "first_task_log_too_young"
+                    and bool(old_task_log_candidates)
+                )
+            ),
+            base_reached=(
+                old_stop_reason == "first_task_log_too_young"
+                or (not scan_window.scan_limit_reached and not old_task_log_candidates)
+            ),
+            reason_counts=Counter(
+                candidate.reason for candidate in old_task_log_candidates
+            ),
+        )
+    )
     stop_reason = (
         claimed_stop_reason
         or family_selection.stop_reason
@@ -242,25 +354,36 @@ def task_log_candidates(
     reserved_errors: tuple[str, ...] = ()
     if reserved_cleanup_enabled and remaining > 0:
         try:
-            reserved_candidates, reserved_stats, reserved_policy_stats = (
-                terminal_reserved_candidates(
-                    ctx,
-                    collated_summaries,
-                    now_ns=now_ns,
-                    min_age_seconds=min_age_seconds,
-                    selection_limit=remaining,
-                    scan_queue_window_fn=scan_queue_window_fn,
-                )
+            (
+                reserved_candidates,
+                reserved_stats,
+                reserved_policy_stats,
+                reserved_policy_progress,
+            ) = terminal_reserved_candidates(
+                ctx,
+                collated_summaries,
+                now_ns=now_ns,
+                min_age_seconds=min_age_seconds,
+                selection_limit=remaining,
+                scan_queue_window_fn=scan_queue_window_fn,
             )
         except (BrokerError, OSError, RuntimeError, ValueError) as exc:
             reserved_candidates = []
             reserved_stats = ()
             reserved_policy_stats = ()
+            reserved_policy_progress = (
+                PolicyProgress(
+                    policy=TASK_MONITOR_POLICY_RESERVED_DELETE_TERMINAL_PROVEN,
+                    domain="task_reserved_queues",
+                    blocked_reason=str(exc),
+                ),
+            )
             reserved_errors = (f"failed to scan terminal reserved queues: {exc}",)
     else:
         reserved_candidates = []
         reserved_stats = ()
         reserved_policy_stats = ()
+        reserved_policy_progress = ()
     candidates.extend(reserved_candidates)
     applied.extend(apply_candidates(reserved_candidates))
     task_log_candidate_rows = [
@@ -281,6 +404,7 @@ def task_log_candidates(
         applied_candidates=tuple(applied),
         queue_stats=(task_log_stats, *reserved_stats),
         policy_stats=(*policy_stats, *reserved_policy_stats),
+        policy_progress=(*policy_progress, *reserved_policy_progress),
         errors=reserved_errors,
     )
 

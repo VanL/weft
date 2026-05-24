@@ -884,3 +884,12 @@ runbook needs to become stricter.
   `superseded` row, then publish an active heartbeat afterward. That heartbeat
   must re-check for concurrent supersede before pruning self history, or it can
   erase the operator's replacement evidence and resurrect itself as active.
+
+## 2026-05-23 Runtime Cleanup Slices
+
+- TaskMonitor runtime cleanup policies should live in one policy module, while
+  `TaskMonitor` owns only reactor scheduling, worker launch, broker effects,
+  and worker-result commits. Mixing terminal, reserved, and dead-TID cleanup in
+  one executor result lets a slow dead-TID recovery path hold terminal cleanup
+  hostage and makes PONG counters ambiguous. Run each cleanup class as a
+  discrete worker-thread slice launched by the reactor.

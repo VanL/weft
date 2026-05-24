@@ -14,6 +14,8 @@ See also:
 
 ## Related Plans
 
+- [`docs/plans/2026-05-24-monitor-policy-progress-contract-plan.md`](../plans/2026-05-24-monitor-policy-progress-contract-plan.md)
+- [`docs/plans/2026-05-23-monitor-cleanup-policy-convergence-plan.md`](../plans/2026-05-23-monitor-cleanup-policy-convergence-plan.md)
 - [`docs/plans/2026-05-23-monitor-cleanup-executor-plan.md`](../plans/2026-05-23-monitor-cleanup-executor-plan.md)
 - [`docs/plans/2026-05-20-monitor-collation-table-retirement-plan.md`](../plans/2026-05-20-monitor-collation-table-retirement-plan.md)
 - [`docs/plans/2026-05-20-monitor-reactor-worker-refactor-plan.md`](../plans/2026-05-20-monitor-reactor-worker-refactor-plan.md)
@@ -241,7 +243,10 @@ Current task families:
   retention age; eligible stale standard `T{tid}.reserved` queues are deleted
   through the reserved cleanup policy after monitor-table proof or stale
   no-monitor evidence. Cleanup records `task_control_deleted_at_ns` and
-  terminal disposition when needed. The persistent
+  terminal disposition when needed. The monitor also caches `policy_progress`
+  summaries so PONG can explain whether each cleanup policy reached a bounded
+  waypoint, reached base for now, deferred future work, or was blocked by an
+  error without performing live scans on the control path. The persistent
   monitor also calls the configured task-monitor processor. The persistent
   monitor is a reactor: it owns task-local control, heartbeat registration,
   scheduling, and commits cached diagnostics from worker results. Custom
@@ -251,14 +256,16 @@ Current task families:
   retained task-log rows into the Monitor store, emit configured operational
   summaries, and delete exact rows through the canonical prune implementation.
   Runtime cleanup remains a separate declared maintenance lane: the
-  runtime-cleanup worker may open fresh broker/store handles, delete standard
-  terminal/disposed stale task-local queues, delete eligible standard reserved
-  queues, and mark the matching Monitor-store family complete. Worker lanes
-  return cached result data to the reactor; they must not answer control
-  messages. Runtime cleanup is fair-sliced: one worker result handles only a
-  bounded mixed terminal/reserved/dead-TID slice, records executor job counts
-  plus pending/cap/deadline diagnostics, and relies on the existing catch-up
-  interval for the next slice when backlog remains.
+  runtime-cleanup worker may open fresh broker/store handles and delete one
+  class of standard stale task-local queues per worker slice. Terminal
+  control/inbox cleanup, eligible reserved cleanup, and dead-TID queue cleanup
+  are discrete slices with shared policy definitions in
+  `weft/core/monitor/policies/runtime_control.py`. The reactor launches each
+  slice on the runtime-cleanup worker lane and only commits cached result data
+  after the worker returns; worker lanes must not answer control messages.
+  Runtime cleanup records per-slice job counts plus pending/cap/deadline
+  diagnostics, and the reactor may launch the next discrete slice only after
+  the previous worker result has been applied.
   The launcher asks the persistent monitor for its next wait timeout so the
   monitor sleeps until heartbeat/local due time or task-local input instead of
   polling at the default task-process interval. The supervised monitor builds

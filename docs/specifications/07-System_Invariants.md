@@ -204,11 +204,11 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
   Built-in task-log cleanup and runtime cleanup are the only TaskMonitor worker
   lanes allowed to own broker/store cleanup effects. The reactor must continue
   servicing task-local control while either lane is in flight. Runtime cleanup
-  must run in fair bounded slices that let raw task-log deletion, task-local
-  stale-queue cleanup, and eligible reserved cleanup all make progress across
-  catch-up cycles. Runtime cleanup uses a bounded mixed executor under one
-  total worker cap; terminal stale-queue cleanup, eligible reserved cleanup,
-  and eligible dead-TID cleanup may all make progress in the same epoch.
+  must run as bounded, discrete worker slices launched by the reactor after
+  the previous worker result is applied. Terminal stale-queue cleanup,
+  eligible reserved cleanup, and eligible dead-TID cleanup must not be mixed
+  inside one worker result, and the runtime-cleanup worker must not start
+  nested cleanup executor threads.
   Manager/global/custom control queues and custom task-local queues are
   excluded from this default monitor cleanup; standard task-local inbox queues
   are stale once the task is terminal or proven dead, and standard task-local
@@ -456,8 +456,10 @@ Monitor-table driven: malformed `weft.log.tasks` rows are exact-deleted; valid
 rows older than `WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS` are folded into
 Monitor-owned tables before exact deletion; exact raw deletion is reconciled
 by physically deleting the corresponding pending child refs from
-`weft_monitor_task_messages`; and family summaries/disposition can run only
-after the FIFO pass reaches a completed high-water mark
+`weft_monitor_task_messages`; legacy orphan raw rows for terminal/disposed
+families may be exact-deleted by a bounded recovery pass; and family
+summaries/disposition can run only after the FIFO pass reaches a completed
+high-water mark
 (`empty` or first too-young visible row). A batch-limited, scan-limited, or
 error-limited pass must not close a task family.
 Terminal family disposition records retryable compact table state while raw
@@ -473,21 +475,31 @@ size, so backlog catch-up can make progress without a hot private loop.
 Task-log cleanup must not treat diagnostic rows such as `task_activity` as
 terminal lifecycle proof solely because their status field is terminal-looking.
 Ordinary supervised cleanup may delete standard task-local `T{tid}.reserved`
-queues only through the TaskMonitor-owned runtime cleanup pass when the Monitor
+queues only through the TaskMonitor-owned runtime cleanup slice when the Monitor
 table already proves the family terminal/disposed/raw-deleted, or when no
 Monitor row exists and the TID is older than the task-log retention period with
 no active runtime-owner evidence. Reserved deletion must use public
 SimpleBroker queue APIs and must remain bounded by the same runtime cleanup
-limit and internal fair-slice safeguards as task-local control queue cleanup.
-The same runtime cleanup pass may identify dead tasks from standard
+limit and per-slice deadline safeguards as task-local control queue cleanup.
+A separate runtime cleanup slice may identify dead tasks from standard
 `T{tid}.*` queue names minus live runtime TIDs. For those dead TIDs, the
 dead-task policy may delete stale standard `ctrl_in`, `ctrl_out`, and `inbox`
 queues immediately; it may delete standard `outbox` and `reserved` queues only
-after the task-log retention period. That name-derived cleanup must not delete
-manager/service controls, custom controls, or active runtime owners.
-Collation summaries, cleanup policy stats, and Monitor-owned collation tables
-remain operational TaskMonitor output only. Those deletes, summaries, and
-tables do not make task-monitor output lifecycle truth or result authority.
+after the task-log retention period. Dead-TID cleanup is actionable-work
+driven: retention-deferred `outbox` or `reserved` queues may be reported, but
+they must not keep the runtime cleanup worker pending or trigger raw task-log
+coalescing. Dead-TID cleanup must not mark Monitor collation families; if a
+Monitor row exists, terminal or reserved cleanup owns that family. That
+name-derived cleanup must not delete manager/service controls, custom
+controls, or active runtime owners.
+Collation summaries, cleanup policy stats, cached `policy_progress`, and
+Monitor-owned collation tables remain operational TaskMonitor output only.
+Those deletes, summaries, progress records, and tables do not make
+task-monitor output lifecycle truth or result authority.
+Deferred-only cleanup work is base-for-now and must not keep catch-up pending;
+only a bounded waypoint requests catch-up cadence. Blocked cleanup reports an
+error and uses existing error/backoff behavior rather than becoming a hot
+catch-up loop by default.
 `weft.log.tasks` remains runtime lifecycle evidence while retained, not audit,
 forensic, or legal-retention evidence. `report_only` remains available as a
 non-destructive override. External task-log retention output is optional
@@ -498,9 +510,11 @@ orchestration lives in
 under `weft/core/pruning/policies/`; legacy/foreground task-log scan helpers
 live in `weft/core/monitor/task_log_scanner.py`; durable Monitor collation lives in
 `weft/core/monitor/store.py`, `weft/core/monitor/sql.py`, and
-`weft/core/monitor/collation.py`; runtime queue cleanup readiness lives in
-the Monitor store/SQL layer and TaskMonitor boundary; terminal control and
-eligible reserved queue deletion live at the TaskMonitor runtime boundary;
+`weft/core/monitor/collation.py`; runtime queue cleanup slice policy lives in
+`weft/core/monitor/policies/runtime_control.py`; runtime queue cleanup
+readiness lives in the Monitor store/SQL layer and TaskMonitor boundary;
+terminal control and eligible reserved queue deletion live at the TaskMonitor
+runtime boundary;
 external task-log file emission lives in
 `weft/core/monitor/external_log.py`; exact raw-message deletion still goes
 through `weft/core/pruning/apply.py`.
@@ -515,6 +529,8 @@ doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-05-24-monitor-policy-progress-contract-plan.md`](../plans/2026-05-24-monitor-policy-progress-contract-plan.md)
+- [`docs/plans/2026-05-23-monitor-cleanup-policy-convergence-plan.md`](../plans/2026-05-23-monitor-cleanup-policy-convergence-plan.md)
 - [`docs/plans/2026-05-23-monitor-cleanup-executor-plan.md`](../plans/2026-05-23-monitor-cleanup-executor-plan.md)
 - [`docs/plans/2026-05-20-service-task-shared-reactor-extraction-plan.md`](../plans/2026-05-20-service-task-shared-reactor-extraction-plan.md)
 - [`docs/plans/2026-05-20-monitor-collation-table-retirement-plan.md`](../plans/2026-05-20-monitor-collation-table-retirement-plan.md)

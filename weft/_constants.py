@@ -567,6 +567,13 @@ TASK_MONITOR_RUNTIME_CLEANUP_SLICE_FAMILY_LIMIT: Final[int] = 50
 TASK_MONITOR_RUNTIME_CLEANUP_SLICE_SECONDS: Final[float] = 1.0
 """Internal soft wall-clock budget for one task-local runtime cleanup slice."""
 
+TASK_MONITOR_RUNTIME_CLEANUP_SLICE_ORDER: Final[tuple[str, ...]] = (
+    "terminal_control",
+    "reserved",
+    "dead_tid",
+)
+"""Ordered TaskMonitor task-local runtime cleanup slice names."""
+
 WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS_DEFAULT: Final[float] = 172800.0
 """Default minimum age before TaskMonitor logs/deletes task-log rows."""
 

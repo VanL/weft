@@ -60,11 +60,6 @@ from weft.core.monitor.cleanup import (
     TaskMonitorCleanupConfig,
     run_task_monitor_cleanup,
 )
-from weft.core.monitor.cleanup_executor import (
-    CleanupJob,
-    CleanupJobResult,
-    run_cleanup_jobs,
-)
 from weft.core.monitor.collation import (
     MonitorTaskEventUpdate,
     update_from_task_log_payload,
@@ -81,20 +76,35 @@ from weft.core.monitor.policies.dead_task import (
 from weft.core.monitor.policies.dead_task import (
     fetch_dead_task_log_coalesce_group as _fetch_dead_task_log_coalesce_group,
 )
-from weft.core.monitor.policies.dead_task import (
-    select_dead_task_tids_from_queue_names,
-)
+from weft.core.monitor.policies.runtime_control import RuntimeCleanupSliceKind
 from weft.core.monitor.policies.runtime_control import (
     TaskControlCleanupResult as _TaskControlCleanupResult,
 )
 from weft.core.monitor.policies.runtime_control import (
+    next_runtime_cleanup_slice_kind as _next_runtime_cleanup_slice_kind,
+)
+from weft.core.monitor.policies.runtime_control import (
     reserved_queue_tid as _reserved_queue_tid,
+)
+from weft.core.monitor.policies.runtime_control import (
+    runtime_cleanup_queue_discovery_due as _runtime_cleanup_queue_discovery_due,
+)
+from weft.core.monitor.policies.runtime_control import (
+    select_runtime_dead_task_cleanup_candidates as _select_runtime_dead_task_cleanup_candidates,
+)
+from weft.core.monitor.policies.runtime_control import (
+    select_runtime_reserved_cleanup_candidates as _select_runtime_reserved_cleanup_candidates,
 )
 from weft.core.monitor.policies.runtime_control import (
     standard_task_control_queue_names as _standard_task_control_queue_names,
 )
 from weft.core.monitor.policies.runtime_control import (
     terminal_task_runtime_queue_cleanup_plan as _terminal_task_runtime_queue_cleanup_plan,
+)
+from weft.core.monitor.progress import (
+    PolicyProgress,
+    progress_requires_catchup,
+    progress_summaries,
 )
 from weft.core.monitor.runtime import (
     TaskMonitorCandidate,
@@ -173,6 +183,7 @@ class _TaskControlCleanupWork:
 
     request_id: str
     now_ns: int
+    slice_kind: RuntimeCleanupSliceKind = "terminal_control"
     previous_queue_cleanup_pending: bool = False
     queue_discovery_due_monotonic: float = 0.0
 
@@ -281,25 +292,17 @@ class _DeadTaskLogDeleteResult:
     rows_deleted: int = 0
     errors: tuple[str, ...] = ()
 
+    def to_summary(self) -> dict[str, Any]:
+        """Return a JSON-safe cached PONG summary."""
 
-@dataclass(frozen=True, slots=True)
-class _RuntimeReservedCleanupSelection:
-    """Reserved queue candidates selected by the cleanup worker coordinator."""
-
-    queue_names: tuple[str, ...] = ()
-    skipped_active: int = 0
-    skipped_not_ready: int = 0
-    pending: bool = False
-    deadline_hit: bool = False
-
-
-@dataclass(frozen=True, slots=True)
-class _RuntimeCleanupCandidate:
-    """One selected runtime cleanup candidate before executor dispatch."""
-
-    job: CleanupJob
-    sort_tid: int
-    kind_order: int
+        return {
+            "api_matches": self.api_matches,
+            "coalesced_rows": self.coalesced_rows,
+            "summaries_emitted": self.summaries_emitted,
+            "refs_selected": self.refs_selected,
+            "rows_deleted": self.rows_deleted,
+            "errors": list(self.errors),
+        }
 
 
 def _applied_monitor_raw_message(
@@ -333,6 +336,34 @@ def _applied_raw_external_message(
         ),
         deleted=deleted,
         error=error,
+    )
+
+
+def _retained_task_log_ingest_progress(
+    result: _RetainedTaskLogIngestResult,
+) -> PolicyProgress:
+    """Return cached policy progress for retained FIFO Monitor-store ingestion."""
+
+    blocked_reason = None
+    if result.store_write_errors:
+        blocked_reason = result.store_write_errors[0]
+    elif result.raw_delete_errors:
+        blocked_reason = result.raw_delete_errors[0]
+    return PolicyProgress(
+        policy="task_log.retained_fifo_ingest",
+        domain=WEFT_GLOBAL_LOG_QUEUE,
+        scanned=result.scanned,
+        selected=result.selected,
+        applied=result.raw_deleted,
+        waypoint_reached=result.stop_reason
+        in {"batch_limit", TASK_MONITOR_TASK_LOG_SCAN_LIMIT_REACHED},
+        base_reached=result.completed_fifo_high_water,
+        blocked_reason=blocked_reason,
+        reason_counts={
+            "malformed_deleted": result.malformed_deleted,
+            "valid_ingested": result.valid_ingested,
+            "raw_deleted": result.raw_deleted,
+        },
     )
 
 
@@ -406,6 +437,7 @@ class TaskMonitor(ServiceTask):
         self._last_prune_records_scanned = 0
         self._last_cleanup_queue_stats: tuple[dict[str, Any], ...] = ()
         self._last_cleanup_policy_stats: tuple[dict[str, Any], ...] = ()
+        self._last_policy_progress: tuple[PolicyProgress, ...] = ()
         self._last_catchup_pending = False
         self._monitor_store: MonitorStore | None = None
         self._monitor_store_status = MonitorStoreStatus(
@@ -447,6 +479,7 @@ class TaskMonitor(ServiceTask):
         self._last_control_delete_errors: tuple[str, ...] = ()
         self._last_control_delete_warnings: tuple[str, ...] = ()
         self._last_retained_task_log_ingest = _RetainedTaskLogIngestResult()
+        self._last_orphan_task_log_recovery = _DeadTaskLogDeleteResult()
         self._last_collation_store_error: str | None = None
         self._external_task_log_sink: ExternalTaskLogSink | None = None
         self._external_task_log_status = disabled_external_task_log_status(
@@ -793,6 +826,9 @@ class TaskMonitor(ServiceTask):
                 "last_prune_records_scanned": self._last_prune_records_scanned,
                 "last_cleanup_queue_stats": list(self._last_cleanup_queue_stats),
                 "last_cleanup_policy_stats": list(self._last_cleanup_policy_stats),
+                "last_policy_progress": list(
+                    progress_summaries(self._last_policy_progress)
+                ),
                 "last_catchup_pending": self._last_catchup_pending,
                 "collation_store_available": self._monitor_store_status.available,
                 "collation_schema_version": (self._monitor_store_status.schema_version),
@@ -867,6 +903,9 @@ class TaskMonitor(ServiceTask):
                 ),
                 "last_retained_task_log_ingest": (
                     self._last_retained_task_log_ingest.to_summary()
+                ),
+                "last_orphan_task_log_recovery": (
+                    self._last_orphan_task_log_recovery.to_summary()
                 ),
                 "last_collation_store_error": self._last_collation_store_error,
                 "processor_in_flight": self._processor_work_in_flight is not None,
@@ -958,6 +997,9 @@ class TaskMonitor(ServiceTask):
                     "cleanup_policy_stats": list(self._last_cleanup_policy_stats)[
                         :TASK_MONITOR_PONG_DETAIL_LIMIT
                     ],
+                    "policy_progress": list(
+                        progress_summaries(self._last_policy_progress)
+                    )[:TASK_MONITOR_PONG_DETAIL_LIMIT],
                     "collation_rows_processed": (self._last_collation_rows_processed),
                     "collation_tasks_updated": self._last_collation_tasks_updated,
                     "collation_terminal_tasks": (self._last_collation_terminal_tasks),
@@ -1028,6 +1070,9 @@ class TaskMonitor(ServiceTask):
                     ],
                     "retained_task_log_ingest": (
                         self._last_retained_task_log_ingest.to_summary()
+                    ),
+                    "orphan_task_log_recovery": (
+                        self._last_orphan_task_log_recovery.to_summary()
                     ),
                     "collation_store_error": self._last_collation_store_error,
                     "warnings": list(self._last_warnings)[
@@ -1173,6 +1218,7 @@ class TaskMonitor(ServiceTask):
         self._last_control_delete_errors = ()
         self._last_control_delete_warnings = ()
         self._last_retained_task_log_ingest = _RetainedTaskLogIngestResult()
+        self._last_orphan_task_log_recovery = _DeadTaskLogDeleteResult()
         store = self._ensure_monitor_store()
         if store is None:
             return False
@@ -1187,6 +1233,10 @@ class TaskMonitor(ServiceTask):
                 ),
             )
             self._last_retained_task_log_ingest = retained_ingest
+            self._last_policy_progress = (
+                *self._last_policy_progress,
+                _retained_task_log_ingest_progress(retained_ingest),
+            )
             self._last_collation_rows_processed = retained_ingest.scanned
             if retained_ingest.completed_fifo_high_water:
                 self._last_collation_summaries_emitted = (
@@ -1203,17 +1253,64 @@ class TaskMonitor(ServiceTask):
                     self._apply_monitor_store_retirement_result(
                         self._delete_monitor_store_task_log_rows(store)
                     )
-                    self._apply_monitor_store_retirement_result(
-                        store.prune_deleted_task_message_tombstones(
-                            limit=self._monitor_config.batch_size,
-                            pruned_at_ns=now_ns,
-                        )
+                    orphan_recovery = self._recover_orphan_task_log_rows(
+                        store,
+                        now_ns=now_ns,
                     )
-                    self._apply_monitor_store_retirement_result(
-                        store.retire_completed_collation_families(
-                            limit=self._monitor_config.batch_size,
-                            retired_at_ns=now_ns,
-                        )
+                    self._last_orphan_task_log_recovery = orphan_recovery
+                    self._last_monitor_store_message_rows_deleted += (
+                        orphan_recovery.rows_deleted
+                    )
+                    tombstone_prune = store.prune_deleted_task_message_tombstones(
+                        limit=self._monitor_config.batch_size,
+                        pruned_at_ns=now_ns,
+                    )
+                    self._apply_monitor_store_retirement_result(tombstone_prune)
+                    self._last_policy_progress = (
+                        *self._last_policy_progress,
+                        PolicyProgress(
+                            policy="monitor_store.child_tombstone_prune",
+                            domain="weft_monitor_task_messages",
+                            selected=tombstone_prune.message_tombstones_pruned,
+                            applied=tombstone_prune.message_tombstones_pruned,
+                            waypoint_reached=(
+                                tombstone_prune.message_tombstones_pruned
+                                >= self._monitor_config.batch_size
+                            ),
+                            base_reached=(
+                                tombstone_prune.message_tombstones_pruned == 0
+                            ),
+                            reason_counts={
+                                "message_tombstones_pruned": (
+                                    tombstone_prune.message_tombstones_pruned
+                                ),
+                                "affected_tids": tombstone_prune.affected_tids,
+                            },
+                        ),
+                    )
+                    family_retirement = store.retire_completed_collation_families(
+                        limit=self._monitor_config.batch_size,
+                        retired_at_ns=now_ns,
+                    )
+                    self._apply_monitor_store_retirement_result(family_retirement)
+                    self._last_policy_progress = (
+                        *self._last_policy_progress,
+                        PolicyProgress(
+                            policy="monitor_store.family_retirement",
+                            domain="weft_monitor_task_collations",
+                            selected=family_retirement.families_retired,
+                            applied=family_retirement.families_retired,
+                            waypoint_reached=(
+                                family_retirement.families_retired
+                                >= self._monitor_config.batch_size
+                            ),
+                            base_reached=family_retirement.families_retired == 0,
+                            reason_counts={
+                                "families_retired": (
+                                    family_retirement.families_retired
+                                ),
+                            },
+                        ),
                     )
             if runtime_cleanup_requested:
                 runtime_cleanup_ready = True
@@ -1306,10 +1403,8 @@ class TaskMonitor(ServiceTask):
                 selected_count += 1
                 continue
 
-            if update.tid == self.tid:
-                continue
-
             valid_updates.append(update)
+            selected_rows.append(row.raw)
             valid_message_ids.add(row.raw.message_id)
             last_selected_message_id = row.raw.message_id
             selected_count += 1
@@ -1446,13 +1541,17 @@ class TaskMonitor(ServiceTask):
         summary_marks: list[tuple[str, str | None]] = []
         family_disposition_marks: list[tuple[str, str, str | None, int | None]] = []
         control_delete_marks: list[str] = []
-        for ready in store.list_summary_ready_tasks(
-            limit=self._monitor_config.batch_size,
+        summary_errors: list[str] = []
+        ready_tasks = store.list_summary_ready_tasks(
+            limit=self._monitor_config.batch_size + 1,
             now_ns=now_ns,
             retention_seconds=self._monitor_config.task_log_retention_period_seconds,
             terminal_retention_seconds=0.0,
             stale_open_family_seconds=(self._monitor_config.stale_open_family_seconds),
-        ):
+        )
+        selected_ready_tasks = ready_tasks[: self._monitor_config.batch_size]
+        more_ready = len(ready_tasks) > len(selected_ready_tasks)
+        for ready in selected_ready_tasks:
             if ready.record.summary_emitted_at_ns is None:
                 try:
                     self._emit_monitor_store_summary(
@@ -1465,6 +1564,7 @@ class TaskMonitor(ServiceTask):
                         sink.record_blocked_deletions(1)
                         self._refresh_external_task_log_status()
                     self._last_collation_store_error = str(exc)
+                    summary_errors.append(str(exc))
                     continue
                 summary_marks.append(
                     (
@@ -1516,6 +1616,24 @@ class TaskMonitor(ServiceTask):
                 else:
                     self._last_suspect_families_classified += 1
         self._refresh_external_task_log_status()
+        self._last_policy_progress = (
+            *self._last_policy_progress,
+            PolicyProgress(
+                policy="monitor_store.summary_disposition",
+                domain="weft_monitor_task_collations",
+                scanned=len(ready_tasks),
+                selected=len(summary_marks) + len(family_disposition_marks),
+                applied=len(summary_marks) + len(family_disposition_marks),
+                waypoint_reached=more_ready,
+                base_reached=not ready_tasks,
+                blocked_reason=summary_errors[0] if summary_errors else None,
+                reason_counts={
+                    "summaries_marked": len(summary_marks),
+                    "families_disposed": len(family_disposition_marks),
+                    "control_delete_marks": len(control_delete_marks),
+                },
+            ),
+        )
         return len(summary_marks)
 
     def _emit_monitor_store_summary(
@@ -1638,14 +1756,20 @@ class TaskMonitor(ServiceTask):
         errors: list[str] = []
         warnings: list[str] = []
         rows_deleted = 0
+        queue_names_to_delete = tuple(
+            queue_name
+            for queue_name in cleanup_plan.queue_names
+            if queue_name in existing_queue_names
+        )
 
-        try:
-            with self._monitor_context().broker() as broker:
-                rows_deleted = int(broker.delete_from_queues(cleanup_plan.queue_names))
-        except (BrokerError, OSError, RuntimeError, ValueError) as exc:
-            queue_label = ",".join(cleanup_plan.queue_names)
-            errors.append(f"{queue_label}: {exc}")
-            rows_deleted = 0
+        if queue_names_to_delete:
+            try:
+                with self._monitor_context().broker() as broker:
+                    rows_deleted = int(broker.delete_from_queues(queue_names_to_delete))
+            except (BrokerError, OSError, RuntimeError, ValueError) as exc:
+                queue_label = ",".join(queue_names_to_delete)
+                errors.append(f"{queue_label}: {exc}")
+                rows_deleted = 0
 
         existing_control_queues = tuple(
             queue_name
@@ -1677,7 +1801,7 @@ class TaskMonitor(ServiceTask):
             and (existing_control_queues or existing_inbox_queues)
         ):
             warnings.append(
-                f"{','.join(cleanup_plan.queue_names)}: no rows deleted for "
+                f"{','.join(queue_names_to_delete)}: no rows deleted for "
                 "queues present in the pre-delete names snapshot"
             )
 
@@ -1699,72 +1823,6 @@ class TaskMonitor(ServiceTask):
             warnings=tuple(warnings),
         )
 
-    def _select_runtime_reserved_cleanup_candidates(
-        self,
-        store: MonitorStore,
-        *,
-        now_ns: int,
-        limit: int,
-        active_tids: set[str],
-        queue_names: tuple[str, ...],
-        deadline_monotonic: float,
-    ) -> _RuntimeReservedCleanupSelection:
-        """Select reserved queues with store proof, without deleting them."""
-
-        if limit <= 0:
-            return _RuntimeReservedCleanupSelection(
-                pending=bool(queue_names),
-            )
-
-        selected_queue_names: list[str] = []
-        skipped_active = 0
-        skipped_not_ready = 0
-        pending = False
-        deadline_hit = False
-        for queue_name in queue_names:
-            if len(selected_queue_names) >= limit:
-                pending = True
-                break
-            if _monitor_monotonic() >= deadline_monotonic:
-                pending = True
-                deadline_hit = True
-                break
-            tid = _reserved_queue_tid(queue_name)
-            if tid is None:
-                continue
-            if tid in active_tids:
-                skipped_active += 1
-                continue
-            record = store.get_task(tid)
-            ready = False
-            if record is not None:
-                ready = (
-                    record.raw_deleted_at_ns is not None
-                    or record.disposition_at_ns is not None
-                    or (
-                        record.terminal_seen
-                        and record.summary_emitted_at_ns is not None
-                    )
-                )
-            else:
-                ready = is_old_enough(
-                    int(tid),
-                    now_ns,
-                    self._monitor_config.task_log_retention_period_seconds,
-                )
-            if not ready:
-                skipped_not_ready += 1
-                continue
-            selected_queue_names.append(queue_name)
-
-        return _RuntimeReservedCleanupSelection(
-            queue_names=tuple(selected_queue_names),
-            skipped_active=skipped_active,
-            skipped_not_ready=skipped_not_ready,
-            pending=pending,
-            deadline_hit=deadline_hit,
-        )
-
     def _delete_runtime_reserved_queue(
         self,
         queue_name: str,
@@ -1784,47 +1842,6 @@ class TaskMonitor(ServiceTask):
             reserved_rows_estimated_deleted=0 if errors else rows_deleted,
             errors=tuple(errors),
         )
-
-    @staticmethod
-    def _cleanup_result_from_job_result(
-        job_result: CleanupJobResult,
-    ) -> _TaskControlCleanupResult | None:
-        """Return a typed cleanup result from an executor job result."""
-
-        value = job_result.value
-        if isinstance(value, _TaskControlCleanupResult):
-            return value
-        return None
-
-    @staticmethod
-    def _select_mixed_runtime_cleanup_candidates(
-        *,
-        terminal_candidates: tuple[_RuntimeCleanupCandidate, ...],
-        reserved_candidates: tuple[_RuntimeCleanupCandidate, ...],
-        dead_candidates: tuple[_RuntimeCleanupCandidate, ...],
-        limit: int,
-    ) -> tuple[_RuntimeCleanupCandidate, ...]:
-        """Select a fair mixed cleanup job slice across ready buckets."""
-
-        if limit <= 0:
-            return ()
-        buckets = [
-            list(terminal_candidates),
-            list(reserved_candidates),
-            list(dead_candidates),
-        ]
-        selected: list[_RuntimeCleanupCandidate] = []
-        non_empty_buckets = [bucket for bucket in buckets if bucket]
-        if limit >= len(non_empty_buckets):
-            for bucket in non_empty_buckets:
-                selected.append(bucket.pop(0))
-        remaining = limit - len(selected)
-        if remaining <= 0:
-            return tuple(selected)
-        rest = [candidate for bucket in buckets for candidate in bucket]
-        rest.sort(key=lambda candidate: (candidate.sort_tid, candidate.kind_order))
-        selected.extend(rest[:remaining])
-        return tuple(selected)
 
     def _active_runtime_tids(self) -> set[str]:
         """Return TIDs that have current service or live host-process evidence."""
@@ -1893,14 +1910,28 @@ class TaskMonitor(ServiceTask):
         return names
 
     def _maybe_start_terminal_control_cleanup_worker(self, *, now_ns: int) -> None:
-        """Start the TaskMonitor-owned runtime cleanup worker if idle."""
+        """Start the first TaskMonitor-owned runtime cleanup worker if idle."""
+
+        self._maybe_start_runtime_cleanup_worker(
+            now_ns=now_ns,
+            slice_kind="terminal_control",
+        )
+
+    def _maybe_start_runtime_cleanup_worker(
+        self,
+        *,
+        now_ns: int,
+        slice_kind: RuntimeCleanupSliceKind,
+    ) -> None:
+        """Start one discrete TaskMonitor-owned runtime cleanup worker if idle."""
 
         if self._control_cleanup_work_in_flight is not None:
             self._last_control_cleanup_pending = True
             return
         work = _TaskControlCleanupWork(
-            request_id=f"{self.tid}:{now_ns}:control_cleanup",
+            request_id=f"{self.tid}:{now_ns}:control_cleanup:{slice_kind}",
             now_ns=now_ns,
+            slice_kind=slice_kind,
             previous_queue_cleanup_pending=(
                 self._runtime_cleanup_queue_discovery_pending
             ),
@@ -1922,7 +1953,7 @@ class TaskMonitor(ServiceTask):
         self,
         work: _TaskControlCleanupWork,
     ) -> threading.Thread:
-        """Run runtime cleanup on its dedicated durable-effects lane.
+        """Run one runtime cleanup slice on its durable-effects lane.
 
         This lane is a narrow TaskMonitor exception to the generic broker-free
         task-worker rule: it may open fresh broker/store handles, delete
@@ -1943,17 +1974,30 @@ class TaskMonitor(ServiceTask):
         self,
         work: _TaskControlCleanupWork,
     ) -> _TaskControlCleanupWorkerResult:
-        """Run runtime cleanup with fresh thread-local broker handles."""
+        """Run one runtime cleanup slice with fresh thread-local broker handles."""
 
         try:
             store = open_monitor_store(self._monitor_context(), config=self._config)
             store.ensure_schema()
-            cleanup = self._run_terminal_control_cleanup_slice(
-                store,
-                now_ns=work.now_ns,
-                previous_queue_cleanup_pending=work.previous_queue_cleanup_pending,
-                queue_discovery_due_monotonic=work.queue_discovery_due_monotonic,
-            )
+            if work.slice_kind == "terminal_control":
+                cleanup = self._run_terminal_control_cleanup_slice(
+                    store,
+                    now_ns=work.now_ns,
+                    previous_queue_cleanup_pending=(
+                        work.previous_queue_cleanup_pending
+                    ),
+                    queue_discovery_due_monotonic=(work.queue_discovery_due_monotonic),
+                )
+            elif work.slice_kind == "reserved":
+                cleanup = self._run_reserved_cleanup_slice(
+                    store,
+                    now_ns=work.now_ns,
+                )
+            else:
+                cleanup = self._run_dead_task_cleanup_slice(
+                    store,
+                    now_ns=work.now_ns,
+                )
             status = MonitorStoreStatus(
                 enabled=True,
                 available=True,
@@ -1976,6 +2020,15 @@ class TaskMonitor(ServiceTask):
             monitor_status=status,
         )
 
+    def _runtime_cleanup_family_limit(self) -> int:
+        """Return the per-worker runtime cleanup family limit."""
+
+        configured_limit = max(0, self._monitor_config.control_queue_delete_limit)
+        return min(
+            configured_limit,
+            TASK_MONITOR_RUNTIME_CLEANUP_SLICE_FAMILY_LIMIT,
+        )
+
     def _run_terminal_control_cleanup_slice(
         self,
         store: MonitorStore,
@@ -1984,29 +2037,353 @@ class TaskMonitor(ServiceTask):
         previous_queue_cleanup_pending: bool = True,
         queue_discovery_due_monotonic: float = 0.0,
     ) -> _TaskControlCleanupResult:
-        """Run one bounded task-local runtime cleanup slice."""
+        """Run one bounded terminal-control cleanup worker slice."""
 
-        configured_limit = max(0, self._monitor_config.control_queue_delete_limit)
-        control_limit = min(
-            configured_limit,
-            TASK_MONITOR_RUNTIME_CLEANUP_SLICE_FAMILY_LIMIT,
-        )
+        control_limit = self._runtime_cleanup_family_limit()
         if control_limit <= 0:
             return _TaskControlCleanupResult()
+
+        families_disposed = 0
+        families_retired = 0
+        errors: list[str] = []
+        warnings: list[str] = []
+        backfill_tids = store.list_terminal_control_deleted_disposition_backfill_tasks(
+            limit=control_limit,
+        )
+        if backfill_tids:
+            try:
+                store.mark_families_disposed(
+                    tuple((tid, "terminal", None, None) for tid in backfill_tids),
+                    now_ns,
+                )
+                families_disposed += len(backfill_tids)
+            except (OSError, RuntimeError, ValueError) as exc:
+                errors.append(f"mark_terminal_backfill_disposed: {exc}")
+
         ready_records = store.list_terminal_control_cleanup_ready_tasks(
             limit=control_limit + 1,
             now_ns=now_ns,
             retention_seconds=self._monitor_config.task_log_retention_period_seconds,
         )
-        queue_discovery_due = (
-            bool(ready_records)
-            or previous_queue_cleanup_pending
-            or _monitor_monotonic() >= queue_discovery_due_monotonic
+        queue_discovery_due = _runtime_cleanup_queue_discovery_due(
+            has_terminal_records=bool(ready_records),
+            previous_queue_cleanup_pending=previous_queue_cleanup_pending,
+            queue_discovery_due_monotonic=queue_discovery_due_monotonic,
+            monotonic_now=_monitor_monotonic(),
         )
         if not queue_discovery_due:
             return _TaskControlCleanupResult(
-                cleanup_workers_configured=self._monitor_config.cleanup_workers,
+                families_disposed=families_disposed,
+                cleanup_workers_configured=1,
+                errors=tuple(errors),
+                pending=bool(errors),
+                policy_progress=(
+                    PolicyProgress(
+                        policy="runtime.terminal_control_cleanup",
+                        domain="task_runtime_queues",
+                        scanned=len(ready_records),
+                        selected=0,
+                        applied=0,
+                        base_reached=not ready_records and not errors,
+                        blocked_reason=errors[0] if errors else None,
+                    ),
+                ),
             )
+
+        records = ready_records[:control_limit]
+        family_limit_hit = len(ready_records) > len(records)
+        active_tids = self._active_runtime_tids() if records else set()
+        task_queue_names = (
+            self._queue_name_snapshot(
+                patterns=(
+                    f"T*.{QUEUE_INBOX_SUFFIX}",
+                    f"T*.{QUEUE_OUTBOX_SUFFIX}",
+                    f"T*.{QUEUE_CTRL_IN_SUFFIX}",
+                    f"T*.{QUEUE_CTRL_OUT_SUFFIX}",
+                )
+            )
+            if records
+            else set()
+        )
+        deadline_monotonic = (
+            _monitor_monotonic() + TASK_MONITOR_RUNTIME_CLEANUP_SLICE_SECONDS
+        )
+
+        families_processed = 0
+        queues_deleted = 0
+        rows_estimated_deleted = 0
+        skipped_nonstandard = 0
+        cleanup_jobs_started = 0
+        cleanup_jobs_completed = 0
+        cleanup_jobs_pending = 0
+        unprocessed_selected = 0
+        deadline_hit = False
+        control_delete_marks: list[str] = []
+        family_disposition_marks: list[tuple[str, str, str | None, int | None]] = []
+
+        for record in records:
+            if _monitor_monotonic() >= deadline_monotonic:
+                deadline_hit = True
+                cleanup_jobs_pending += 1
+                unprocessed_selected += 1
+                continue
+            cleanup_jobs_started += 1
+            if record.tid in active_tids:
+                cleanup = _TaskControlCleanupResult(
+                    warnings=(f"{record.tid}: skipped active runtime owner",),
+                )
+            else:
+                try:
+                    cleanup = self._delete_terminal_control_queues(
+                        record,
+                        existing_queue_names=task_queue_names,
+                        now_ns=now_ns,
+                    )
+                except (BrokerError, OSError, RuntimeError, ValueError) as exc:
+                    cleanup = _TaskControlCleanupResult(
+                        pending=True,
+                        errors=(str(exc),),
+                    )
+            cleanup_jobs_completed += 1
+            families_processed += cleanup.families_processed
+            queues_deleted += cleanup.queues_deleted
+            rows_estimated_deleted += cleanup.rows_estimated_deleted
+            skipped_nonstandard += cleanup.skipped_nonstandard
+            errors.extend(cleanup.errors)
+            warnings.extend(cleanup.warnings)
+            if not cleanup.success:
+                continue
+            if cleanup.families_processed:
+                control_delete_marks.append(record.tid)
+                if record.disposition_at_ns is None:
+                    family_disposition_marks.append(
+                        (record.tid, "terminal", None, None)
+                    )
+            else:
+                unprocessed_selected += 1
+
+        if control_delete_marks:
+            try:
+                store.mark_task_controls_deleted(control_delete_marks, now_ns)
+            except (OSError, RuntimeError, ValueError) as exc:
+                errors.append(f"mark_task_controls_deleted: {exc}")
+                family_disposition_marks = []
+        if family_disposition_marks:
+            try:
+                store.mark_families_disposed(family_disposition_marks, now_ns)
+                families_disposed += len(family_disposition_marks)
+            except (OSError, RuntimeError, ValueError) as exc:
+                errors.append(f"mark_families_disposed: {exc}")
+        if not errors:
+            try:
+                retirement = store.retire_completed_collation_families(
+                    limit=control_limit,
+                    retired_at_ns=now_ns,
+                )
+                families_retired = retirement.families_retired
+            except (OSError, RuntimeError, ValueError) as exc:
+                errors.append(f"retire_completed_collation_families: {exc}")
+
+        terminal_pending = (
+            family_limit_hit or deadline_hit or unprocessed_selected > 0 or bool(errors)
+        )
+        next_slice_kind = None
+        if not terminal_pending and queue_discovery_due:
+            next_slice_kind = _next_runtime_cleanup_slice_kind("terminal_control")
+        pending = terminal_pending or next_slice_kind is not None
+        jobs_by_kind = (
+            {"terminal_control": cleanup_jobs_completed}
+            if cleanup_jobs_completed
+            else {}
+        )
+        jobs_pending_by_kind = (
+            {"terminal_control": cleanup_jobs_pending} if cleanup_jobs_pending else {}
+        )
+        return _TaskControlCleanupResult(
+            families_processed=families_processed,
+            families_disposed=families_disposed,
+            families_retired=families_retired,
+            queues_deleted=queues_deleted,
+            rows_estimated_deleted=rows_estimated_deleted,
+            skipped_nonstandard=skipped_nonstandard,
+            cleanup_workers_configured=1,
+            cleanup_jobs_started=cleanup_jobs_started,
+            cleanup_jobs_completed=cleanup_jobs_completed,
+            cleanup_jobs_pending=cleanup_jobs_pending,
+            cleanup_jobs_by_kind=jobs_by_kind,
+            cleanup_jobs_pending_by_kind=jobs_pending_by_kind,
+            pending=pending,
+            errors=tuple(errors),
+            warnings=tuple(warnings),
+            policy_progress=(
+                PolicyProgress(
+                    policy="runtime.terminal_control_cleanup",
+                    domain="task_runtime_queues",
+                    scanned=len(ready_records),
+                    selected=len(records),
+                    applied=families_processed,
+                    deferred=skipped_nonstandard + unprocessed_selected,
+                    waypoint_reached=family_limit_hit or deadline_hit,
+                    base_reached=not terminal_pending,
+                    blocked_reason=errors[0] if errors else None,
+                    reason_counts={
+                        "families_processed": families_processed,
+                        "queues_deleted": queues_deleted,
+                        "families_disposed": families_disposed,
+                        "families_retired": families_retired,
+                    },
+                ),
+            ),
+            family_limit_hit=family_limit_hit,
+            deadline_hit=deadline_hit,
+            next_slice_kind=next_slice_kind,
+        )
+
+    def _run_reserved_cleanup_slice(
+        self,
+        store: MonitorStore,
+        *,
+        now_ns: int,
+    ) -> _TaskControlCleanupResult:
+        """Run one bounded reserved-queue cleanup worker slice."""
+
+        control_limit = self._runtime_cleanup_family_limit()
+        if control_limit <= 0:
+            return _TaskControlCleanupResult()
+
+        active_tids = self._active_runtime_tids()
+        reserved_queue_names = tuple(
+            sorted(
+                (
+                    queue_name
+                    for queue_name in self._queue_name_snapshot(
+                        patterns=(f"T*.{QUEUE_RESERVED_SUFFIX}",)
+                    )
+                    if _reserved_queue_tid(queue_name) is not None
+                ),
+                key=lambda queue_name: int(_reserved_queue_tid(queue_name) or "0"),
+            )
+        )
+        selection_deadline_monotonic = (
+            _monitor_monotonic() + TASK_MONITOR_RUNTIME_CLEANUP_SLICE_SECONDS
+        )
+
+        def selection_deadline_reached() -> bool:
+            return _monitor_monotonic() >= selection_deadline_monotonic
+
+        selection = _select_runtime_reserved_cleanup_candidates(
+            now_ns=now_ns,
+            retention_seconds=self._monitor_config.task_log_retention_period_seconds,
+            limit=control_limit,
+            active_tids=active_tids,
+            queue_names=reserved_queue_names,
+            task_record=store.get_task,
+            deadline_reached=selection_deadline_reached,
+        )
+        job_deadline_monotonic = (
+            _monitor_monotonic() + TASK_MONITOR_RUNTIME_CLEANUP_SLICE_SECONDS
+        )
+
+        def job_deadline_reached() -> bool:
+            return _monitor_monotonic() >= job_deadline_monotonic
+
+        errors: list[str] = []
+        warnings: list[str] = []
+        cleanup_jobs_started = 0
+        cleanup_jobs_completed = 0
+        cleanup_jobs_pending = 0
+        reserved_families_processed = 0
+        reserved_queues_deleted = 0
+        reserved_rows_estimated_deleted = 0
+        deadline_hit = selection.deadline_hit
+
+        for queue_name in selection.queue_names:
+            if job_deadline_reached():
+                deadline_hit = True
+                cleanup_jobs_pending += 1
+                continue
+            cleanup_jobs_started += 1
+            try:
+                cleanup = self._delete_runtime_reserved_queue(queue_name)
+            except (BrokerError, OSError, RuntimeError, ValueError) as exc:
+                cleanup = _TaskControlCleanupResult(
+                    pending=True,
+                    errors=(str(exc),),
+                )
+            cleanup_jobs_completed += 1
+            reserved_families_processed += cleanup.reserved_families_processed
+            reserved_queues_deleted += cleanup.reserved_queues_deleted
+            reserved_rows_estimated_deleted += cleanup.reserved_rows_estimated_deleted
+            errors.extend(cleanup.errors)
+            warnings.extend(cleanup.warnings)
+
+        reserved_pending = (
+            selection.pending
+            or deadline_hit
+            or cleanup_jobs_pending > 0
+            or bool(errors)
+        )
+        next_slice_kind = None
+        if not reserved_pending:
+            next_slice_kind = _next_runtime_cleanup_slice_kind("reserved")
+        pending = reserved_pending or next_slice_kind is not None
+        jobs_by_kind = (
+            {"reserved": cleanup_jobs_completed} if cleanup_jobs_completed else {}
+        )
+        jobs_pending_by_kind = (
+            {"reserved": cleanup_jobs_pending} if cleanup_jobs_pending else {}
+        )
+        return _TaskControlCleanupResult(
+            reserved_families_processed=reserved_families_processed,
+            reserved_queues_deleted=reserved_queues_deleted,
+            reserved_rows_estimated_deleted=reserved_rows_estimated_deleted,
+            reserved_skipped_active=selection.skipped_active,
+            reserved_skipped_not_ready=selection.skipped_not_ready,
+            cleanup_workers_configured=1,
+            cleanup_jobs_started=cleanup_jobs_started,
+            cleanup_jobs_completed=cleanup_jobs_completed,
+            cleanup_jobs_pending=cleanup_jobs_pending,
+            cleanup_jobs_by_kind=jobs_by_kind,
+            cleanup_jobs_pending_by_kind=jobs_pending_by_kind,
+            pending=pending,
+            errors=tuple(errors),
+            warnings=tuple(warnings),
+            policy_progress=(
+                PolicyProgress(
+                    policy="runtime.reserved_cleanup",
+                    domain="task_runtime_queues",
+                    scanned=len(reserved_queue_names),
+                    selected=len(selection.queue_names),
+                    applied=reserved_queues_deleted,
+                    deferred=(selection.skipped_active + selection.skipped_not_ready),
+                    waypoint_reached=selection.pending or deadline_hit,
+                    base_reached=not reserved_pending,
+                    blocked_reason=errors[0] if errors else None,
+                    reason_counts={
+                        "reserved_queues_deleted": reserved_queues_deleted,
+                        "reserved_rows_estimated_deleted": (
+                            reserved_rows_estimated_deleted
+                        ),
+                    },
+                ),
+            ),
+            family_limit_hit=selection.pending,
+            deadline_hit=deadline_hit,
+            next_slice_kind=next_slice_kind,
+        )
+
+    def _run_dead_task_cleanup_slice(
+        self,
+        store: MonitorStore,
+        *,
+        now_ns: int,
+    ) -> _TaskControlCleanupResult:
+        """Run one bounded dead-task queue cleanup worker slice."""
+
+        control_limit = self._runtime_cleanup_family_limit()
+        if control_limit <= 0:
+            return _TaskControlCleanupResult()
+
         active_tids = self._active_runtime_tids()
         task_queue_names = self._queue_name_snapshot(
             patterns=(
@@ -2017,151 +2394,36 @@ class TaskMonitor(ServiceTask):
                 f"T*.{QUEUE_RESERVED_SUFFIX}",
             )
         )
-        reserved_queue_names = tuple(
-            sorted(
-                (
-                    queue_name
-                    for queue_name in task_queue_names
-                    if _reserved_queue_tid(queue_name) is not None
-                ),
-                key=lambda queue_name: int(_reserved_queue_tid(queue_name) or "0"),
-            )
-        )
-        dead_selection = select_dead_task_tids_from_queue_names(
-            task_queue_names,
-            live_tids=active_tids,
-            now_ns=now_ns,
-            min_age_seconds=TASK_MONITOR_TID_MAPPING_CLEANUP_MIN_AGE_SECONDS,
-        )
-        dead_policy_excluded_tids = {record.tid for record in ready_records}
-        dead_tids = tuple(
-            tid
-            for tid in dead_selection.selected_tids
-            if tid not in dead_policy_excluded_tids
-        )
-        dead_tid_set = set(dead_tids)
-        reserved_queue_names_for_reserved_policy = tuple(
-            queue_name
-            for queue_name in reserved_queue_names
-            if (tid := _reserved_queue_tid(queue_name)) is not None
-            and tid not in dead_tid_set
-        )
         selection_deadline_monotonic = (
             _monitor_monotonic() + TASK_MONITOR_RUNTIME_CLEANUP_SLICE_SECONDS
         )
-        reserved_selection = self._select_runtime_reserved_cleanup_candidates(
-            store,
+
+        def selection_deadline_reached() -> bool:
+            return _monitor_monotonic() >= selection_deadline_monotonic
+
+        selection = _select_runtime_dead_task_cleanup_candidates(
+            task_queue_names,
             now_ns=now_ns,
-            limit=control_limit + 1,
-            active_tids=active_tids,
-            queue_names=reserved_queue_names_for_reserved_policy,
-            deadline_monotonic=selection_deadline_monotonic,
-        )
-
-        def terminal_cleanup_job(
-            record: MonitorTaskCollationRecord,
-        ) -> Callable[[], _TaskControlCleanupResult]:
-            def run() -> _TaskControlCleanupResult:
-                if record.tid in active_tids:
-                    return _TaskControlCleanupResult(
-                        warnings=(f"{record.tid}: skipped active runtime owner",)
-                    )
-                return self._delete_terminal_control_queues(
-                    record,
-                    existing_queue_names=task_queue_names,
-                    now_ns=now_ns,
-                )
-
-            return run
-
-        def reserved_cleanup_job(
-            queue_name: str,
-        ) -> Callable[[], _TaskControlCleanupResult]:
-            def run() -> _TaskControlCleanupResult:
-                return self._delete_runtime_reserved_queue(queue_name)
-
-            return run
-
-        def dead_cleanup_job(tid: str) -> Callable[[], _TaskControlCleanupResult]:
-            def run() -> _TaskControlCleanupResult:
-                return self._delete_dead_task_control_queues(
-                    tid,
-                    existing_queue_names=task_queue_names,
-                    active_tids=active_tids,
-                    now_ns=now_ns,
-                )
-
-            return run
-
-        terminal_records_by_tid = {record.tid: record for record in ready_records}
-        terminal_candidates = tuple(
-            _RuntimeCleanupCandidate(
-                job=CleanupJob(
-                    kind="terminal_control",
-                    identity=record.tid,
-                    run=terminal_cleanup_job(record),
-                ),
-                sort_tid=int(record.tid) if record.tid.isdigit() else 0,
-                kind_order=0,
-            )
-            for record in ready_records
-        )
-        reserved_candidates = tuple(
-            _RuntimeCleanupCandidate(
-                job=CleanupJob(
-                    kind="reserved",
-                    identity=queue_name,
-                    run=reserved_cleanup_job(queue_name),
-                ),
-                sort_tid=int(_reserved_queue_tid(queue_name) or "0"),
-                kind_order=1,
-            )
-            for queue_name in reserved_selection.queue_names
-        )
-        dead_candidates = tuple(
-            _RuntimeCleanupCandidate(
-                job=CleanupJob(
-                    kind="dead_tid",
-                    identity=tid,
-                    run=dead_cleanup_job(tid),
-                ),
-                sort_tid=int(tid),
-                kind_order=2,
-            )
-            for tid in dead_tids
-        )
-        selected_candidates = self._select_mixed_runtime_cleanup_candidates(
-            terminal_candidates=terminal_candidates,
-            reserved_candidates=reserved_candidates,
-            dead_candidates=dead_candidates,
+            min_age_seconds=TASK_MONITOR_TID_MAPPING_CLEANUP_MIN_AGE_SECONDS,
+            retention_seconds=self._monitor_config.task_log_retention_period_seconds,
             limit=control_limit,
+            active_tids=active_tids,
+            task_record=store.get_task,
+            deadline_reached=selection_deadline_reached,
         )
-        selected_jobs = tuple(candidate.job for candidate in selected_candidates)
-        executor_deadline_monotonic = (
+        job_deadline_monotonic = (
             _monitor_monotonic() + TASK_MONITOR_RUNTIME_CLEANUP_SLICE_SECONDS
         )
 
-        def executor_deadline_reached() -> bool:
-            return _monitor_monotonic() >= executor_deadline_monotonic
+        def job_deadline_reached() -> bool:
+            return _monitor_monotonic() >= job_deadline_monotonic
 
-        executor_result = run_cleanup_jobs(
-            selected_jobs,
-            max_workers=self._monitor_config.cleanup_workers,
-            deadline_reached=executor_deadline_reached,
-        )
-
-        families_processed = 0
-        families_disposed = 0
-        families_retired = 0
-        queues_deleted = 0
-        rows_estimated_deleted = 0
-        skipped_nonstandard = 0
-        reserved_families_processed = 0
-        reserved_queues_deleted = 0
-        reserved_rows_estimated_deleted = 0
+        errors: list[str] = []
+        warnings: list[str] = []
+        cleanup_jobs_started = 0
+        cleanup_jobs_completed = 0
+        cleanup_jobs_pending = 0
         dead_tids_processed = 0
-        dead_tids_skipped_live = dead_selection.skipped_live
-        dead_tids_skipped_too_young = dead_selection.skipped_too_young
         dead_tid_queues_deleted = 0
         dead_tid_rows_estimated_deleted = 0
         dead_tid_control_queues_deleted = 0
@@ -2169,32 +2431,28 @@ class TaskMonitor(ServiceTask):
         dead_tid_inbox_queues_deleted = 0
         dead_tid_outbox_queues_deleted = 0
         dead_tid_reserved_queues_deleted = 0
-        dead_tid_log_refs_selected = 0
-        dead_tid_log_rows_deleted = 0
-        errors: list[str] = []
-        warnings: list[str] = []
-        control_delete_marks: list[str] = []
-        family_disposition_marks: list[tuple[str, str, str | None, int | None]] = []
+        deadline_hit = selection.deadline_hit
 
-        for job_result in executor_result.results:
-            if job_result.errors:
-                errors.extend(job_result.errors)
+        for tid in selection.tids:
+            if job_deadline_reached():
+                deadline_hit = True
+                cleanup_jobs_pending += 1
                 continue
-            cleanup = self._cleanup_result_from_job_result(job_result)
-            if cleanup is None:
-                errors.append(
-                    f"{job_result.kind}:{job_result.identity}: invalid cleanup result"
+            cleanup_jobs_started += 1
+            try:
+                cleanup = self._delete_dead_task_control_queues(
+                    tid,
+                    existing_queue_names=task_queue_names,
+                    active_tids=active_tids,
+                    now_ns=now_ns,
                 )
-                continue
-            families_processed += cleanup.families_processed
-            queues_deleted += cleanup.queues_deleted
-            rows_estimated_deleted += cleanup.rows_estimated_deleted
-            skipped_nonstandard += cleanup.skipped_nonstandard
-            reserved_families_processed += cleanup.reserved_families_processed
-            reserved_queues_deleted += cleanup.reserved_queues_deleted
-            reserved_rows_estimated_deleted += cleanup.reserved_rows_estimated_deleted
+            except (BrokerError, OSError, RuntimeError, ValueError) as exc:
+                cleanup = _TaskControlCleanupResult(
+                    pending=True,
+                    errors=(str(exc),),
+                )
+            cleanup_jobs_completed += 1
             dead_tids_processed += cleanup.dead_tids_processed
-            dead_tids_skipped_live += cleanup.dead_tids_skipped_live
             dead_tid_queues_deleted += cleanup.dead_tid_queues_deleted
             dead_tid_rows_estimated_deleted += cleanup.dead_tid_rows_estimated_deleted
             dead_tid_control_queues_deleted += cleanup.dead_tid_control_queues_deleted
@@ -2206,123 +2464,27 @@ class TaskMonitor(ServiceTask):
             dead_tid_reserved_queues_deleted += cleanup.dead_tid_reserved_queues_deleted
             errors.extend(cleanup.errors)
             warnings.extend(cleanup.warnings)
-            if not cleanup.success:
-                continue
-            if job_result.kind == "terminal_control" and cleanup.families_processed:
-                control_delete_marks.append(job_result.identity)
-                record = terminal_records_by_tid.get(job_result.identity)
-                if record is not None and record.disposition_at_ns is None:
-                    families_disposed += 1
-                    family_disposition_marks.append(
-                        (record.tid, "terminal", None, None)
-                    )
-            if job_result.kind == "dead_tid" and cleanup.dead_tids_processed:
-                control_delete_marks.append(job_result.identity)
 
-        selected_terminal = sum(
-            1
-            for candidate in selected_candidates
-            if candidate.job.kind == "terminal_control"
+        dead_tids_pending = (
+            max(0, len(selection.tids) - cleanup_jobs_completed) + cleanup_jobs_pending
         )
-        selected_reserved = sum(
-            1 for candidate in selected_candidates if candidate.job.kind == "reserved"
+        if selection.pending and dead_tids_pending == 0:
+            dead_tids_pending = 1
+        dead_pending = (
+            selection.pending or deadline_hit or dead_tids_pending > 0 or bool(errors)
         )
-        selected_dead = sum(
-            1 for candidate in selected_candidates if candidate.job.kind == "dead_tid"
+        jobs_by_kind = (
+            {"dead_tid": cleanup_jobs_completed} if cleanup_jobs_completed else {}
         )
-        pending_by_kind = executor_result.jobs_pending_by_kind or {}
-        terminal_pending = (
-            len(terminal_candidates) > selected_terminal
-            or int(pending_by_kind.get("terminal_control", 0)) > 0
-        )
-        reserved_pending = (
-            reserved_selection.pending
-            or len(reserved_candidates) > selected_reserved
-            or int(pending_by_kind.get("reserved", 0)) > 0
-        )
-        dead_tids_pending = max(0, len(dead_candidates) - selected_dead) + int(
-            pending_by_kind.get("dead_tid", 0)
-        )
-        family_budget_used = len(selected_candidates)
-        deadline_hit = (
-            reserved_selection.deadline_hit or executor_result.jobs_pending > 0
-        )
-        family_limit_hit = family_budget_used >= control_limit and (
-            terminal_pending or reserved_pending or dead_tids_pending > 0
-        )
-
-        if control_delete_marks:
-            try:
-                store.mark_task_controls_deleted(control_delete_marks, now_ns)
-            except (OSError, RuntimeError, ValueError) as exc:
-                errors.append(f"mark_task_controls_deleted: {exc}")
-                family_disposition_marks = []
-                families_disposed = 0
-        if family_disposition_marks:
-            try:
-                store.mark_families_disposed(family_disposition_marks, now_ns)
-            except (OSError, RuntimeError, ValueError) as exc:
-                errors.append(f"mark_families_disposed: {exc}")
-                families_disposed = 0
-        dead_control_delete_marks = tuple(
-            job_result.identity
-            for job_result in executor_result.results
-            if job_result.kind == "dead_tid"
-            and not job_result.errors
-            and (
-                (cleanup := self._cleanup_result_from_job_result(job_result))
-                is not None
-            )
-            and cleanup.success
-            and cleanup.dead_tids_processed
-        )
-        if dead_control_delete_marks and not errors:
-            try:
-                dead_log_delete = self._coalesce_and_delete_dead_task_log_rows_for_tids(
-                    store,
-                    dead_control_delete_marks,
-                    now_ns=now_ns,
-                )
-            except (OSError, RuntimeError, ValueError) as exc:
-                errors.append(f"dead_task_log_delete: {exc}")
-            else:
-                dead_tid_log_refs_selected = dead_log_delete.refs_selected
-                dead_tid_log_rows_deleted = dead_log_delete.rows_deleted
-                errors.extend(dead_log_delete.errors)
-        if not errors:
-            try:
-                retirement = store.retire_completed_collation_families(
-                    limit=control_limit,
-                    retired_at_ns=now_ns,
-                )
-                families_retired = retirement.families_retired
-            except (OSError, RuntimeError, ValueError) as exc:
-                errors.append(f"retire_completed_collation_families: {exc}")
-
-        pending = (
-            terminal_pending
-            or reserved_pending
-            or dead_tids_pending > 0
-            or bool(errors)
-            or family_limit_hit
-            or deadline_hit
+        jobs_pending_by_kind = (
+            {"dead_tid": cleanup_jobs_pending} if cleanup_jobs_pending else {}
         )
         return _TaskControlCleanupResult(
-            families_processed=families_processed,
-            families_disposed=families_disposed,
-            families_retired=families_retired,
-            queues_deleted=queues_deleted,
-            rows_estimated_deleted=rows_estimated_deleted,
-            skipped_nonstandard=skipped_nonstandard,
-            reserved_families_processed=reserved_families_processed,
-            reserved_queues_deleted=reserved_queues_deleted,
-            reserved_rows_estimated_deleted=reserved_rows_estimated_deleted,
-            reserved_skipped_active=reserved_selection.skipped_active,
-            reserved_skipped_not_ready=reserved_selection.skipped_not_ready,
-            dead_tids_discovered=dead_selection.discovered_tids,
+            dead_tids_discovered=selection.discovered_tids,
             dead_tids_processed=dead_tids_processed,
-            dead_tids_skipped_live=dead_tids_skipped_live,
-            dead_tids_skipped_too_young=dead_tids_skipped_too_young,
+            dead_tids_skipped_live=selection.skipped_live,
+            dead_tids_skipped_too_young=selection.skipped_too_young,
+            dead_tids_deferred_retention=selection.deferred_retention,
             dead_tids_pending=dead_tids_pending,
             dead_tid_queues_deleted=dead_tid_queues_deleted,
             dead_tid_rows_estimated_deleted=dead_tid_rows_estimated_deleted,
@@ -2333,18 +2495,48 @@ class TaskMonitor(ServiceTask):
             dead_tid_inbox_queues_deleted=dead_tid_inbox_queues_deleted,
             dead_tid_outbox_queues_deleted=dead_tid_outbox_queues_deleted,
             dead_tid_reserved_queues_deleted=dead_tid_reserved_queues_deleted,
-            dead_tid_log_refs_selected=dead_tid_log_refs_selected,
-            dead_tid_log_rows_deleted=dead_tid_log_rows_deleted,
-            cleanup_workers_configured=executor_result.workers_configured,
-            cleanup_jobs_started=executor_result.jobs_started,
-            cleanup_jobs_completed=executor_result.jobs_completed,
-            cleanup_jobs_pending=executor_result.jobs_pending,
-            cleanup_jobs_by_kind=executor_result.jobs_by_kind,
-            cleanup_jobs_pending_by_kind=executor_result.jobs_pending_by_kind,
-            pending=pending,
+            cleanup_workers_configured=1,
+            cleanup_jobs_started=cleanup_jobs_started,
+            cleanup_jobs_completed=cleanup_jobs_completed,
+            cleanup_jobs_pending=cleanup_jobs_pending,
+            cleanup_jobs_by_kind=jobs_by_kind,
+            cleanup_jobs_pending_by_kind=jobs_pending_by_kind,
+            pending=dead_pending,
             errors=tuple(errors),
             warnings=tuple(warnings),
-            family_limit_hit=family_limit_hit,
+            policy_progress=(
+                PolicyProgress(
+                    policy="runtime.dead_tid_cleanup",
+                    domain="task_runtime_queues",
+                    scanned=selection.discovered_tids,
+                    selected=len(selection.tids),
+                    applied=dead_tids_processed,
+                    deferred=(
+                        selection.skipped_live
+                        + selection.skipped_too_young
+                        + selection.deferred_retention
+                    ),
+                    waypoint_reached=selection.pending or deadline_hit,
+                    base_reached=not dead_pending,
+                    blocked_reason=errors[0] if errors else None,
+                    reason_counts={
+                        "dead_tid_queues_deleted": dead_tid_queues_deleted,
+                        "dead_tid_control_queues_deleted": (
+                            dead_tid_control_queues_deleted
+                        ),
+                        "dead_tid_inbox_queues_deleted": (
+                            dead_tid_inbox_queues_deleted
+                        ),
+                        "dead_tid_outbox_queues_deleted": (
+                            dead_tid_outbox_queues_deleted
+                        ),
+                        "dead_tid_reserved_queues_deleted": (
+                            dead_tid_reserved_queues_deleted
+                        ),
+                    },
+                ),
+            ),
+            family_limit_hit=selection.pending,
             deadline_hit=deadline_hit,
         )
 
@@ -2358,14 +2550,26 @@ class TaskMonitor(ServiceTask):
         """
 
         refs = store.list_deletable_task_log_messages(
-            limit=self._monitor_config.batch_size,
+            limit=self._monitor_config.batch_size + 1,
             require_summary=True,
         )
         if not refs:
+            self._last_policy_progress = (
+                *self._last_policy_progress,
+                PolicyProgress(
+                    policy="monitor_store.raw_ref_delete",
+                    domain="weft_monitor_task_messages",
+                    scanned=0,
+                    selected=0,
+                    base_reached=True,
+                ),
+            )
             return MonitorStoreRetirementResult()
+        selected_refs = refs[: self._monitor_config.batch_size]
+        more_refs = len(refs) > len(selected_refs)
         applied = apply_exact_prune_candidates(
             self._monitor_context(),
-            refs,
+            selected_refs,
             apply_result=_applied_monitor_raw_message,
             reconcile_missing=True,
         )
@@ -2382,7 +2586,129 @@ class TaskMonitor(ServiceTask):
         errors = tuple(result.error for result in applied if result.error is not None)
         if errors:
             self._last_collation_store_error = "; ".join(errors)
+        self._last_policy_progress = (
+            *self._last_policy_progress,
+            PolicyProgress(
+                policy="monitor_store.raw_ref_delete",
+                domain="weft_monitor_task_messages",
+                scanned=len(refs),
+                selected=len(selected_refs),
+                applied=retirement.message_rows_deleted,
+                waypoint_reached=more_refs,
+                base_reached=False,
+                blocked_reason=errors[0] if errors else None,
+                reason_counts={
+                    "message_rows_deleted": retirement.message_rows_deleted,
+                    "affected_tids": retirement.affected_tids,
+                },
+            ),
+        )
         return retirement
+
+    def _recover_orphan_task_log_rows(
+        self,
+        store: MonitorStore,
+        *,
+        now_ns: int,
+    ) -> _DeadTaskLogDeleteResult:
+        """Delete raw task-log rows stranded by inconsistent Monitor state.
+
+        This is a bounded recovery path for legacy/inconsistent store rows. It
+        is not the ordinary FIFO cleanup authority.
+
+        Spec: [MF-5], [OBS.13], [OBS.17]
+        """
+
+        tids = store.list_raw_deleted_task_log_recovery_tids(
+            limit=self._monitor_config.batch_size + 1,
+        )
+        selected_tids = tids[: self._monitor_config.batch_size]
+        more_tids = len(tids) > len(selected_tids)
+        api_matches = 0
+        coalesced_rows = 0
+        refs_selected = 0
+        rows_deleted = 0
+        errors: list[str] = []
+        for tid in selected_tids:
+            try:
+                group = _fetch_dead_task_log_coalesce_group(
+                    self._monitor_context(),
+                    tid,
+                    chunk_limit=max(1, self._monitor_config.batch_size),
+                )
+            except (OSError, RuntimeError, ValueError) as exc:
+                errors.append(f"{tid}: {exc}")
+                continue
+            api_matches += group.api_matches
+            if not group.rows:
+                continue
+
+            updates: list[MonitorTaskEventUpdate] = []
+            for row in group.rows:
+                try:
+                    payload = json.loads(row.body)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(payload, Mapping):
+                    continue
+                update = update_from_task_log_payload(
+                    payload,
+                    queue_name=row.queue,
+                    message_id=row.message_id,
+                )
+                if update is not None and update.tid == tid:
+                    updates.append(update)
+
+            try:
+                if updates:
+                    ingest = store.record_task_log_updates(
+                        WEFT_GLOBAL_LOG_QUEUE,
+                        tuple(updates),
+                        checkpoint_message_id=None,
+                    )
+                    coalesced_rows += ingest.updates_written
+                delete_result = self._delete_exact_task_log_rows(
+                    tuple(group.rows),
+                    require_deleted=True,
+                )
+                refs_selected += len(group.rows)
+                errors.extend(delete_result.errors)
+                if delete_result.deleted_ids:
+                    retirement = store.delete_task_messages_after_raw_delete(
+                        delete_result.deleted_ids,
+                        deleted_at_ns=now_ns,
+                    )
+                    rows_deleted += retirement.message_rows_deleted
+            except (OSError, RuntimeError, ValueError) as exc:
+                errors.append(f"{tid}: {exc}")
+
+        result = _DeadTaskLogDeleteResult(
+            api_matches=api_matches,
+            coalesced_rows=coalesced_rows,
+            refs_selected=refs_selected,
+            rows_deleted=rows_deleted,
+            errors=tuple(errors),
+        )
+        self._last_policy_progress = (
+            *self._last_policy_progress,
+            PolicyProgress(
+                policy="monitor_store.orphan_raw_recovery",
+                domain="weft_monitor_task_collations",
+                scanned=len(tids),
+                selected=len(selected_tids),
+                applied=rows_deleted,
+                waypoint_reached=more_tids,
+                base_reached=not tids,
+                blocked_reason=errors[0] if errors else None,
+                reason_counts={
+                    "api_matches": api_matches,
+                    "coalesced_rows": coalesced_rows,
+                    "refs_selected": refs_selected,
+                    "rows_deleted": rows_deleted,
+                },
+            ),
+        )
+        return result
 
     def _coalesce_and_delete_dead_task_log_rows_for_tids(
         self,
@@ -2480,7 +2806,7 @@ class TaskMonitor(ServiceTask):
             refs_selected += deleted.refs_selected
             rows_deleted += deleted.rows_deleted
             errors.extend(deleted.errors)
-        return _DeadTaskLogDeleteResult(
+        result = _DeadTaskLogDeleteResult(
             api_matches=api_matches,
             coalesced_rows=coalesced_rows,
             summaries_emitted=summaries_emitted,
@@ -2488,6 +2814,26 @@ class TaskMonitor(ServiceTask):
             rows_deleted=rows_deleted,
             errors=tuple(errors),
         )
+        self._last_policy_progress = (
+            *self._last_policy_progress,
+            PolicyProgress(
+                policy="runtime.dead_task_log_coalesce",
+                domain=WEFT_GLOBAL_LOG_QUEUE,
+                scanned=len(tids),
+                selected=refs_selected,
+                applied=rows_deleted,
+                base_reached=not tids or refs_selected == 0,
+                blocked_reason=errors[0] if errors else None,
+                reason_counts={
+                    "api_matches": api_matches,
+                    "coalesced_rows": coalesced_rows,
+                    "summaries_emitted": summaries_emitted,
+                    "refs_selected": refs_selected,
+                    "rows_deleted": rows_deleted,
+                },
+            ),
+        )
+        return result
 
     def _delete_monitor_store_task_log_rows_for_tids(
         self,
@@ -2586,6 +2932,7 @@ class TaskMonitor(ServiceTask):
 
     def _run_monitor_cycle(self) -> None:
         now_ns = time.time_ns()
+        self._last_policy_progress = ()
         task_log_owner = self._task_log_deletion_owner()
         if self._monitor_config.processor in WEFT_TASK_MONITOR_PROCESSOR_BUILTINS:
             self._maybe_start_builtin_cycle_worker(
@@ -2726,6 +3073,7 @@ class TaskMonitor(ServiceTask):
         """Run one bounded built-in monitor cycle with worker-local handles."""
 
         self._last_cycle_at = work.now_ns
+        self._last_policy_progress = ()
         runtime_cleanup_ready = False
         sink = self._external_task_log_sink
         if sink is not None:
@@ -2802,10 +3150,8 @@ class TaskMonitor(ServiceTask):
             self._last_error = self._heartbeat_error
         else:
             self._last_error = "; ".join(result.errors) if result.errors else "failed"
-        self._last_catchup_pending = result.success and (
-            self._last_retained_task_log_ingest.stop_reason
-            in {"batch_limit", TASK_MONITOR_TASK_LOG_SCAN_LIMIT_REACHED}
-            or self._last_control_cleanup_pending
+        self._last_catchup_pending = result.success and progress_requires_catchup(
+            self._last_policy_progress
         )
         next_interval_seconds = (
             self._monitor_config.catchup_interval_seconds
@@ -2831,6 +3177,7 @@ class TaskMonitor(ServiceTask):
             "cleanup_records_scanned": self._last_prune_records_scanned,
             "cleanup_queue_stats": self._last_cleanup_queue_stats,
             "cleanup_policy_stats": self._last_cleanup_policy_stats,
+            "policy_progress": progress_summaries(self._last_policy_progress),
             "task_log_retention_period_seconds": (
                 self._monitor_config.task_log_retention_period_seconds
             ),
@@ -3115,6 +3462,10 @@ class TaskMonitor(ServiceTask):
         self._last_control_cleanup_pending = cleanup.pending
         self._last_control_delete_errors = cleanup.errors
         self._last_control_delete_warnings = cleanup.warnings
+        self._last_policy_progress = (
+            *self._last_policy_progress,
+            *cleanup.policy_progress,
+        )
         self._last_terminal_families_disposed += cleanup.families_disposed
         self._runtime_cleanup_queue_discovery_pending = (
             cleanup.pending or not cleanup.success
@@ -3132,12 +3483,14 @@ class TaskMonitor(ServiceTask):
             self._last_error = self._heartbeat_error
         else:
             self._last_error = "; ".join(cleanup.errors) if cleanup.errors else "failed"
-            self._last_processor_success = False
-            if self._last_collation_store_error is None:
-                self._last_collation_store_error = self._last_error
+        if cleanup.success and cleanup.next_slice_kind is not None:
+            self._maybe_start_runtime_cleanup_worker(
+                now_ns=work.now_ns,
+                slice_kind=cleanup.next_slice_kind,
+            )
 
-        self._last_catchup_pending = (
-            self._last_catchup_pending or cleanup.pending or not cleanup.success
+        self._last_catchup_pending = self._last_catchup_pending or (
+            cleanup.success and progress_requires_catchup(cleanup.policy_progress)
         )
         next_interval_seconds = (
             self._monitor_config.catchup_interval_seconds
@@ -3245,6 +3598,10 @@ class TaskMonitor(ServiceTask):
         self._last_prune_records_scanned = cleanup.records_scanned
         self._last_cleanup_queue_stats = cleanup.queue_stats_summary()
         self._last_cleanup_policy_stats = cleanup.policy_stats_summary()
+        self._last_policy_progress = (
+            *self._last_policy_progress,
+            *cleanup.policy_progress,
+        )
         return TaskMonitorProcessorResult(
             success=cleanup.success,
             processed=cleanup.processed,
@@ -3326,6 +3683,31 @@ class TaskMonitor(ServiceTask):
             deleted=deleted,
             reported=0,
             stop_reason=window.stop_reason,
+        )
+        raw_waypoint = (
+            len(selected) >= self._monitor_config.batch_size
+            or window.scan_limit_reached
+            or bool(errors)
+            or bool(apply_errors)
+        )
+        self._last_policy_progress = (
+            *self._last_policy_progress,
+            PolicyProgress(
+                policy=TASK_MONITOR_POLICY_TASK_LOG_EXTERNAL_RAW,
+                domain=WEFT_GLOBAL_LOG_QUEUE,
+                scanned=window.scanned,
+                selected=len(selected),
+                applied=deleted,
+                waypoint_reached=raw_waypoint,
+                base_reached=(
+                    not raw_waypoint and not selected and not window.scan_limit_reached
+                ),
+                blocked_reason=(errors[0] if errors else None)
+                or (apply_errors[0] if apply_errors else None),
+                reason_counts={"older_than_task_log_retention_period": len(selected)}
+                if selected
+                else {},
+            ),
         )
         return TaskMonitorProcessorResult(
             success=not errors and not apply_errors,

@@ -7,9 +7,9 @@ Spec references:
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal, cast
 
 from weft._constants import (
     QUEUE_CTRL_IN_SUFFIX,
@@ -17,9 +17,18 @@ from weft._constants import (
     QUEUE_INBOX_SUFFIX,
     QUEUE_OUTBOX_SUFFIX,
     QUEUE_RESERVED_SUFFIX,
+    TASK_MONITOR_RUNTIME_CLEANUP_SLICE_ORDER,
 )
+from weft.core.monitor.policies.dead_task import (
+    dead_task_queue_cleanup_plan,
+    select_dead_task_tids_from_queue_names,
+    standard_dead_task_retention_queue_names,
+)
+from weft.core.monitor.progress import PolicyProgress
 from weft.core.monitor.store import MonitorTaskCollationRecord
 from weft.core.queue_window import is_old_enough
+
+RuntimeCleanupSliceKind = Literal["terminal_control", "reserved", "dead_tid"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +50,7 @@ class TaskControlCleanupResult:
     dead_tids_processed: int = 0
     dead_tids_skipped_live: int = 0
     dead_tids_skipped_too_young: int = 0
+    dead_tids_deferred_retention: int = 0
     dead_tids_pending: int = 0
     dead_tid_queues_deleted: int = 0
     dead_tid_rows_estimated_deleted: int = 0
@@ -60,8 +70,10 @@ class TaskControlCleanupResult:
     pending: bool = False
     errors: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
+    policy_progress: tuple[PolicyProgress, ...] = ()
     family_limit_hit: bool = False
     deadline_hit: bool = False
+    next_slice_kind: RuntimeCleanupSliceKind | None = None
 
     @property
     def success(self) -> bool:
@@ -88,6 +100,7 @@ class TaskControlCleanupResult:
             "dead_tids_processed": self.dead_tids_processed,
             "dead_tids_skipped_live": self.dead_tids_skipped_live,
             "dead_tids_skipped_too_young": self.dead_tids_skipped_too_young,
+            "dead_tids_deferred_retention": self.dead_tids_deferred_retention,
             "dead_tids_pending": self.dead_tids_pending,
             "dead_tid_queues_deleted": self.dead_tid_queues_deleted,
             "dead_tid_rows_estimated_deleted": (self.dead_tid_rows_estimated_deleted),
@@ -111,8 +124,12 @@ class TaskControlCleanupResult:
             "pending": self.pending,
             "errors": list(self.errors),
             "warnings": list(self.warnings),
+            "policy_progress": [
+                progress.to_summary() for progress in self.policy_progress
+            ],
             "family_limit_hit": self.family_limit_hit,
             "deadline_hit": self.deadline_hit,
+            "next_slice_kind": self.next_slice_kind,
         }
 
 
@@ -125,6 +142,65 @@ class TerminalTaskRuntimeQueueCleanupPlan:
     inbox_queue_names: tuple[str, ...]
     outbox_queue_names: tuple[str, ...]
     retention_eligible: bool
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeReservedCleanupSelection:
+    """Policy-selected reserved queue candidates."""
+
+    queue_names: tuple[str, ...] = ()
+    skipped_active: int = 0
+    skipped_not_ready: int = 0
+    pending: bool = False
+    deadline_hit: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeDeadTaskCleanupSelection:
+    """Policy-selected dead-task queue cleanup candidates."""
+
+    tids: tuple[str, ...] = ()
+    discovered_tids: int = 0
+    skipped_live: int = 0
+    skipped_too_young: int = 0
+    skipped_monitor_records: int = 0
+    deferred_retention: int = 0
+    pending: bool = False
+    deadline_hit: bool = False
+
+
+def next_runtime_cleanup_slice_kind(
+    current: RuntimeCleanupSliceKind,
+) -> RuntimeCleanupSliceKind | None:
+    """Return the next discrete runtime-cleanup slice after ``current``."""
+
+    try:
+        index = TASK_MONITOR_RUNTIME_CLEANUP_SLICE_ORDER.index(current)
+    except ValueError:  # pragma: no cover - type checkers prevent this.
+        return None
+    next_index = index + 1
+    if next_index >= len(TASK_MONITOR_RUNTIME_CLEANUP_SLICE_ORDER):
+        return None
+    return cast(
+        RuntimeCleanupSliceKind,
+        TASK_MONITOR_RUNTIME_CLEANUP_SLICE_ORDER[next_index],
+    )
+
+
+def runtime_cleanup_queue_discovery_due(
+    *,
+    has_terminal_records: bool,
+    previous_queue_cleanup_pending: bool,
+    queue_discovery_due_monotonic: float,
+    monotonic_now: float,
+) -> bool:
+    """Return whether queue-name discovery slices should run now."""
+
+    return (
+        has_terminal_records
+        or previous_queue_cleanup_pending
+        or monotonic_now >= queue_discovery_due_monotonic
+    )
 
 
 def standard_task_control_queue_pair(tid: str) -> tuple[str, str]:
@@ -189,3 +265,129 @@ def reserved_queue_tid(queue_name: str) -> str | None:
         return None
     tid = queue_name[len(prefix) : -len(suffix)]
     return tid if tid.isdigit() else None
+
+
+def select_runtime_reserved_cleanup_candidates(
+    *,
+    now_ns: int,
+    retention_seconds: float,
+    limit: int,
+    active_tids: set[str],
+    queue_names: Sequence[str],
+    task_record: Callable[[str], MonitorTaskCollationRecord | None],
+    deadline_reached: Callable[[], bool],
+) -> RuntimeReservedCleanupSelection:
+    """Select reserved queues with Monitor proof, without deleting them."""
+
+    if limit <= 0:
+        return RuntimeReservedCleanupSelection(pending=bool(queue_names))
+
+    selected_queue_names: list[str] = []
+    skipped_active = 0
+    skipped_not_ready = 0
+    pending = False
+    deadline_hit = False
+    for queue_name in queue_names:
+        if len(selected_queue_names) >= limit:
+            pending = True
+            break
+        if deadline_reached():
+            pending = True
+            deadline_hit = True
+            break
+        tid = reserved_queue_tid(queue_name)
+        if tid is None:
+            continue
+        if tid in active_tids:
+            skipped_active += 1
+            continue
+        record = task_record(tid)
+        ready = False
+        if record is not None:
+            ready = (
+                record.raw_deleted_at_ns is not None
+                or record.disposition_at_ns is not None
+                or (record.terminal_seen and record.summary_emitted_at_ns is not None)
+            )
+        else:
+            ready = is_old_enough(int(tid), now_ns, retention_seconds)
+        if not ready:
+            skipped_not_ready += 1
+            continue
+        selected_queue_names.append(queue_name)
+
+    return RuntimeReservedCleanupSelection(
+        queue_names=tuple(selected_queue_names),
+        skipped_active=skipped_active,
+        skipped_not_ready=skipped_not_ready,
+        pending=pending,
+        deadline_hit=deadline_hit,
+    )
+
+
+def select_runtime_dead_task_cleanup_candidates(
+    queue_names: Iterable[str],
+    *,
+    now_ns: int,
+    min_age_seconds: float,
+    retention_seconds: float,
+    limit: int,
+    active_tids: set[str],
+    task_record: Callable[[str], MonitorTaskCollationRecord | None],
+    deadline_reached: Callable[[], bool],
+) -> RuntimeDeadTaskCleanupSelection:
+    """Select actionable dead-task queue cleanup candidates.
+
+    Dead-task runtime cleanup is intentionally name-derived and must not mark
+    Monitor-store families. If a Monitor collation row exists, terminal or
+    reserved cleanup owns that family instead.
+    """
+
+    dead_selection = select_dead_task_tids_from_queue_names(
+        queue_names,
+        live_tids=active_tids,
+        now_ns=now_ns,
+        min_age_seconds=min_age_seconds,
+    )
+    queue_name_set = set(queue_names)
+    selected_tids: list[str] = []
+    skipped_monitor_records = 0
+    deferred_retention = 0
+    pending = False
+    deadline_hit = False
+
+    for tid in dead_selection.selected_tids:
+        if len(selected_tids) >= limit:
+            pending = True
+            break
+        if deadline_reached():
+            pending = True
+            deadline_hit = True
+            break
+        if task_record(tid) is not None:
+            skipped_monitor_records += 1
+            continue
+        plan = dead_task_queue_cleanup_plan(
+            tid,
+            now_ns=now_ns,
+            retention_seconds=retention_seconds,
+        )
+        if any(queue_name in queue_name_set for queue_name in plan.queue_names):
+            selected_tids.append(tid)
+            continue
+        if not plan.retention_eligible and any(
+            queue_name in queue_name_set
+            for queue_name in standard_dead_task_retention_queue_names(tid)
+        ):
+            deferred_retention += 1
+
+    return RuntimeDeadTaskCleanupSelection(
+        tids=tuple(selected_tids),
+        discovered_tids=dead_selection.discovered_tids,
+        skipped_live=dead_selection.skipped_live,
+        skipped_too_young=dead_selection.skipped_too_young,
+        skipped_monitor_records=skipped_monitor_records,
+        deferred_retention=deferred_retention,
+        pending=pending,
+        deadline_hit=deadline_hit,
+    )

@@ -431,6 +431,46 @@ def test_monitor_store_disposition_tombstone_removes_family_from_ready_list(
     assert ready == ()
 
 
+def test_monitor_store_lists_control_deleted_terminal_disposition_backfill(
+    tmp_path,
+) -> None:
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    tid = "1779000000000000098"
+    terminal = _update(
+        tid,
+        1779000000000015000,
+        event="work_completed",
+        status="completed",
+        terminal=True,
+    )
+    store.record_task_log_updates(
+        WEFT_GLOBAL_LOG_QUEUE,
+        (terminal,),
+        checkpoint_message_id=None,
+    )
+    store.mark_summary_emitted(tid, terminal.message_id + 1)
+    store.mark_task_control_deleted(tid, terminal.message_id + 2)
+
+    assert store.list_terminal_control_deleted_disposition_backfill_tasks(
+        limit=10,
+    ) == (tid,)
+
+    store.mark_family_disposed(
+        tid,
+        terminal.message_id + 3,
+        disposition_reason="terminal",
+    )
+
+    assert (
+        store.list_terminal_control_deleted_disposition_backfill_tasks(
+            limit=10,
+        )
+        == ()
+    )
+
+
 def test_monitor_store_summary_ready_keeps_summary_emitted_undisposed_family(
     tmp_path,
 ) -> None:
@@ -706,6 +746,33 @@ def test_monitor_store_reconciles_existing_raw_deleted_child_refs(tmp_path) -> N
         )
         == 0
     )
+
+
+def test_monitor_store_lists_raw_deleted_task_log_recovery_tids(tmp_path) -> None:
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    tid = "1779000000000000032"
+    terminal = _update(
+        tid,
+        1779000000000008300,
+        event="work_completed",
+        status="completed",
+        terminal=True,
+    )
+    store.record_task_log_updates(
+        WEFT_GLOBAL_LOG_QUEUE,
+        (terminal,),
+        checkpoint_message_id=None,
+    )
+
+    assert store.list_raw_deleted_task_log_recovery_tids(limit=10) == ()
+    store.delete_task_messages_after_raw_delete(
+        (terminal.message_id,),
+        deleted_at_ns=terminal.message_id + 1,
+    )
+
+    assert store.list_raw_deleted_task_log_recovery_tids(limit=10) == (tid,)
 
 
 def test_monitor_store_prunes_legacy_message_tombstones(tmp_path) -> None:
