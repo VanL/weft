@@ -1260,6 +1260,9 @@ class TaskMonitor(ServiceTask):
                     self._apply_monitor_store_retirement_result(
                         self._delete_monitor_store_task_log_rows(store)
                     )
+                    self._apply_monitor_store_retirement_result(
+                        self._repair_raw_deleted_task_message_refs(store)
+                    )
                     tombstone_prune = store.prune_deleted_task_message_tombstones(
                         limit=self._monitor_config.batch_size,
                         pruned_at_ns=now_ns,
@@ -2070,7 +2073,7 @@ class TaskMonitor(ServiceTask):
         ready_records = store.list_terminal_control_cleanup_ready_tasks(
             limit=control_limit + 1,
             now_ns=now_ns,
-            retention_seconds=self._monitor_config.task_log_retention_period_seconds,
+            retention_seconds=0.0,
         )
         queue_discovery_due = _runtime_cleanup_queue_discovery_due(
             has_terminal_records=bool(ready_records),
@@ -2691,6 +2694,71 @@ class TaskMonitor(ServiceTask):
             *self._last_policy_progress,
             PolicyProgress(
                 policy="monitor_store.raw_ref_delete",
+                domain="weft_monitor_task_messages",
+                scanned=len(refs),
+                selected=len(selected_refs),
+                applied=retirement.message_rows_deleted,
+                waypoint_reached=more_refs,
+                base_reached=False,
+                blocked_reason=errors[0] if errors else None,
+                reason_counts={
+                    "message_rows_deleted": retirement.message_rows_deleted,
+                    "affected_tids": retirement.affected_tids,
+                },
+            ),
+        )
+        return retirement
+
+    def _repair_raw_deleted_task_message_refs(
+        self,
+        store: MonitorStore,
+    ) -> MonitorStoreRetirementResult:
+        """Repair child refs left after parent raw deletion was recorded.
+
+        Spec: [MF-5], [OBS.13], [OBS.17]
+        """
+
+        refs = store.list_raw_deleted_task_message_refs(
+            limit=self._monitor_config.batch_size + 1,
+        )
+        if not refs:
+            self._last_policy_progress = (
+                *self._last_policy_progress,
+                PolicyProgress(
+                    policy="monitor_store.raw_deleted_child_ref_repair",
+                    domain="weft_monitor_task_messages",
+                    scanned=0,
+                    selected=0,
+                    base_reached=True,
+                ),
+            )
+            return MonitorStoreRetirementResult()
+
+        selected_refs = refs[: self._monitor_config.batch_size]
+        more_refs = len(refs) > len(selected_refs)
+        applied = apply_exact_prune_candidates(
+            self._monitor_context(),
+            selected_refs,
+            apply_result=_applied_monitor_raw_message,
+            reconcile_missing=True,
+        )
+        reconciled_ids = tuple(
+            result.candidate.message_id
+            for result in applied
+            if result.deleted
+            or (result.error is None and not result.candidate.report_only)
+        )
+        if reconciled_ids:
+            retirement = store.delete_task_messages_after_raw_delete(reconciled_ids)
+        else:
+            retirement = MonitorStoreRetirementResult()
+        errors = tuple(result.error for result in applied if result.error is not None)
+        if errors:
+            self._last_collation_store_error = "; ".join(errors)
+        self._last_policy_progress = (
+            *self._last_policy_progress,
+            PolicyProgress(
+                policy="monitor_store.raw_deleted_child_ref_repair",
                 domain="weft_monitor_task_messages",
                 scanned=len(refs),
                 selected=len(selected_refs),

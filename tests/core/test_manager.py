@@ -3426,6 +3426,58 @@ def test_manager_closes_seeded_child_inbox_queue(
     assert seed_queue.closed is True
 
 
+def test_manager_cleanup_waits_for_active_child_launch_worker(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _make_queue = manager_setup
+    child_spec = manager._build_child_spec(make_child_spec(size=1024), time.time_ns())
+    assert child_spec is not None
+
+    launch_entered = threading.Event()
+    release_launch = threading.Event()
+    cleanup_returned = threading.Event()
+    cleanup_errors: list[BaseException] = []
+    original_stop_worker_lanes = manager._stop_worker_lanes
+
+    def blocked_launch(*args: object, **kwargs: object) -> FakeLaunchProcess:
+        del args, kwargs
+        launch_entered.set()
+        assert release_launch.wait(timeout=10.0)
+        return FakeLaunchProcess(alive=False)
+
+    def fast_stop_worker_lanes(timeout: float = 2.0) -> None:
+        del timeout
+        original_stop_worker_lanes(timeout=0.05)
+
+    def run_cleanup() -> None:
+        try:
+            manager.cleanup()
+        except BaseException as exc:  # pragma: no cover - asserted below
+            cleanup_errors.append(exc)
+        finally:
+            cleanup_returned.set()
+
+    monkeypatch.setattr(manager_mod, "launch_task_process", blocked_launch)
+    monkeypatch.setattr(manager, "_stop_worker_lanes", fast_stop_worker_lanes)
+
+    assert manager._launch_child_task(child_spec, None) is True
+    assert launch_entered.wait(timeout=3.0)
+
+    cleanup_thread = threading.Thread(target=run_cleanup, daemon=True)
+    cleanup_thread.start()
+    try:
+        assert not cleanup_returned.wait(timeout=0.25), (
+            "Manager.cleanup() returned while a child launch worker was still active"
+        )
+    finally:
+        release_launch.set()
+        cleanup_thread.join(timeout=5.0)
+
+    assert not cleanup_thread.is_alive()
+    assert not cleanup_errors
+
+
 def test_manager_terminal_envelope_does_not_cache_child_ctrl_out_queue(
     manager_setup,
     monkeypatch: pytest.MonkeyPatch,

@@ -173,6 +173,9 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
   not a shadow queue ledger. After exact raw broker deletion succeeds, or after
   retry observes the raw broker row is already absent, the Monitor physically
   deletes the corresponding child rows and reconciles the parent family.
+  If a parent family is already marked `raw_deleted_at_ns` while child refs
+  remain, the Monitor must repair that inconsistent state by exact-deleting or
+  reconciling those child refs before family retirement.
   Orphan raw-log recovery records `orphan_raw_recovery_checked_at_ns` when it
   successfully proves that a raw-deleted family has no remaining broker rows,
   and leaves the family retryable when the probe or delete fails. New raw
@@ -467,7 +470,8 @@ Monitor-owned tables before exact deletion; exact raw deletion is reconciled
 by physically deleting the corresponding pending child refs from
 `weft_monitor_task_messages`; legacy orphan raw rows for terminal/disposed
 families may be exact-deleted by a bounded recovery pass that records a
-completed no-row probe on the parent family; and family
+completed no-row probe on the parent family; parent raw-deleted rows that still
+have child refs are repaired by a bounded child-ref cleanup pass; and family
 summaries/disposition can run only after the FIFO pass reaches a completed
 high-water mark
 (`empty` or first too-young visible row). A batch-limited, scan-limited, or

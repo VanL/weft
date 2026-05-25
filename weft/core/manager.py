@@ -5664,7 +5664,28 @@ class Manager(ServiceTask):
     # ------------------------------------------------------------------
     # Cleanup
     # ------------------------------------------------------------------
+    def _drain_active_child_launches_for_cleanup(self) -> None:
+        """Commit in-flight child launches before child termination cleanup."""
+
+        while self._has_active_child_launches():
+            handled = self._drain_worker_results()
+            if not self._has_active_child_launches():
+                return
+            if handled:
+                continue
+            if not self._has_worker_activity():
+                logger.warning(
+                    "Discarding stale child launch requests during manager cleanup: %s",
+                    sorted(self._active_child_launches),
+                )
+                self._active_child_launches.clear()
+                return
+            self._sync_worker_result_event()
+            self._worker_result_event.wait(timeout=0.05)
+
     def cleanup(self) -> None:
+        self._draining = True
+        self._drain_active_child_launches_for_cleanup()
         self._terminate_children()
         self._unregister_manager()
         super().cleanup()

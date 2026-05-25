@@ -563,6 +563,36 @@ def test_monitor_store_terminal_control_cleanup_ready_requires_summary_and_age(
     assert [record.tid for record in ready] == [ready_tid, disposed_tid]
 
 
+def test_monitor_store_zero_retention_cutoff_preserves_nanosecond_precision(
+    tmp_path,
+) -> None:
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    tid = "1779680761870015000"
+    update = _update(
+        tid,
+        int(tid),
+        event="work_completed",
+        status="completed",
+        terminal=True,
+    )
+    store.record_task_log_updates(
+        WEFT_GLOBAL_LOG_QUEUE,
+        (update,),
+        checkpoint_message_id=None,
+    )
+    store.mark_summary_emitted(tid, int(tid) + 1)
+
+    ready = store.list_terminal_control_cleanup_ready_tasks(
+        limit=10,
+        now_ns=int(tid) + 2,
+        retention_seconds=0.0,
+    )
+
+    assert [record.tid for record in ready] == [tid]
+
+
 def test_monitor_store_batch_ingest_updates_tasks_and_checkpoint(tmp_path) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(
@@ -827,6 +857,50 @@ def test_monitor_store_lists_reserved_cleanup_pending_tasks(tmp_path) -> None:
     record = store.get_task(tid)
     assert record is not None
     assert record.reserved_cleanup_checked_at_ns is None
+
+
+def test_monitor_store_lists_raw_deleted_child_refs_for_repair(tmp_path) -> None:
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    tid = "1779000000000000035"
+    terminal = _update(
+        tid,
+        1779000000000008500,
+        event="work_completed",
+        status="completed",
+        terminal=True,
+    )
+    store.record_task_log_updates(
+        WEFT_GLOBAL_LOG_QUEUE,
+        (terminal,),
+        checkpoint_message_id=None,
+    )
+    with ctx.broker() as broker:
+        runner = broker._runner
+        runner.run(
+            "UPDATE weft_monitor_task_collations "
+            "SET raw_deleted_at_ns = ?, updated_at_ns = ? "
+            "WHERE context_key = ? AND tid = ?",
+            (
+                terminal.message_id + 1,
+                terminal.message_id + 1,
+                store.context_key,
+                tid,
+            ),
+        )
+        runner.commit()
+
+    refs = store.list_raw_deleted_task_message_refs(limit=10)
+
+    assert [(ref.queue, ref.message_id, ref.tid) for ref in refs] == [
+        (WEFT_GLOBAL_LOG_QUEUE, terminal.message_id, tid)
+    ]
+    store.delete_task_messages_after_raw_delete(
+        (terminal.message_id,),
+        deleted_at_ns=terminal.message_id + 2,
+    )
+    assert store.list_raw_deleted_task_message_refs(limit=10) == ()
 
 
 def test_monitor_store_prunes_legacy_message_tombstones(tmp_path) -> None:

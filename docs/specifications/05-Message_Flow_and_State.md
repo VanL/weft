@@ -377,6 +377,10 @@ Current rules:
   references: after exact broker deletion succeeds, or after retry observes the
   raw broker row is already absent, the Monitor physically deletes those child
   rows and reconciles the parent `raw_deleted_at_ns` when no child refs remain.
+  If an older or partial cleanup cycle left a parent collation row marked
+  `raw_deleted_at_ns` while child refs still exist in
+  `weft_monitor_task_messages`, a bounded repair pass must exact-delete or
+  reconcile those child refs before family retirement.
   A bounded orphan-recovery pass may search for and exact-delete raw task-log
   rows for terminal/disposed families whose child refs are already absent but
   whose raw broker rows remain from an older or inconsistent cleanup cycle.
@@ -399,8 +403,8 @@ Current rules:
   separately from task-local runtime cleanup. Terminal task-local runtime cleanup runs as
   a separate bounded maintenance slice selected by Monitor-store readiness
   (`summary_emitted_at_ns`, no prior `task_control_deleted_at_ns`, and either
-  terminal proof past the terminal retirement high-water or an already disposed
-  Monitor family). Terminal task-local runtime cleanup runs on a dedicated
+  terminal proof or an already disposed Monitor family). Terminal task-local
+  runtime cleanup runs on a dedicated
   TaskMonitor maintenance worker after the summary/disposition high-water is
   reached; that worker owns only the queue-delete plus Monitor-store mark
   transaction for standard stale task-local queues. Standard

@@ -139,12 +139,15 @@ These tables are Monitor-owned and versioned. They are derived from
 replace SimpleBroker queue semantics. The child message table is a temporary
 pending-reference table, not a queue clone: once the corresponding raw broker
 row is deleted or reconciled as already absent, the Monitor physically deletes
-the child row. A bounded recovery pass may use public SimpleBroker message
-search and exact-delete APIs to clear legacy raw `weft.log.tasks` rows for
-terminal Monitor families whose child refs were already removed by an older
-release. When that recovery pass proves no raw broker rows remain, it records
-that completed probe in the Monitor collation row so the same family does not
-stay on the recovery hot path. Reserved-queue cleanup proof for terminal
+the child row. If parent collation state was already marked raw-deleted while
+child refs still remain, a bounded repair pass uses the same public exact-delete
+path to clear or reconcile those child refs. A bounded recovery pass may use
+public SimpleBroker message search and exact-delete APIs to clear legacy raw
+`weft.log.tasks` rows for terminal Monitor families whose child refs were
+already removed by an older release. When that recovery pass proves no raw
+broker rows remain, it records that completed probe in the Monitor collation row
+so the same family does not stay on the recovery hot path. Reserved-queue cleanup
+proof for terminal
 non-completed families is also stored on the collation row as
 `reserved_cleanup_checked_at_ns`; it is set after the standard reserved queue is
 deleted or proved already absent, and left unset on probe/delete errors. The

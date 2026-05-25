@@ -398,6 +398,25 @@ def select_deletable_task_log_messages_for_tids(
         """
 
 
+def select_raw_deleted_task_message_refs(
+    messages_table: str,
+    collations_table: str,
+) -> str:
+    """Build a query for child refs left after parent raw deletion."""
+
+    return f"""
+        SELECT m.queue_name, m.message_id, m.tid
+        FROM {identifier(messages_table)} AS m
+        JOIN {identifier(collations_table)} AS c
+          ON c.context_key = m.context_key AND c.tid = m.tid
+        WHERE m.context_key = ?
+          AND m.deleted_at_ns IS NULL
+          AND c.raw_deleted_at_ns IS NOT NULL
+        ORDER BY m.message_id
+        LIMIT ?
+        """
+
+
 def select_raw_deleted_task_log_recovery_tids(
     collations_table: str,
     messages_table: str,

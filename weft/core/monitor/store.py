@@ -803,6 +803,32 @@ class _MonitorTableAccess:
             for row in rows
         )
 
+    def raw_deleted_task_message_refs(
+        self,
+        *,
+        limit: int,
+    ) -> tuple[MonitorRawMessageRef, ...]:
+        """Return child refs left after parent raw deletion was recorded."""
+
+        if limit <= 0:
+            return ()
+        rows = self._runner.run(
+            monitor_sql.select_raw_deleted_task_message_refs(
+                self._tables.task_messages,
+                self._tables.task_collations,
+            ),
+            (self._context_key, int(limit)),
+            fetch=True,
+        )
+        return tuple(
+            MonitorRawMessageRef(
+                queue=str(row[0]),
+                message_id=int(row[1]),
+                tid=str(row[2]),
+            )
+            for row in rows
+        )
+
     def task_message_refs_for_message_ids(
         self,
         message_ids: Sequence[int],
@@ -1508,6 +1534,23 @@ class MonitorStore:
                 _runner_from_broker(broker)
             ).raw_deleted_task_log_recovery_tids(limit=limit)
 
+    def list_raw_deleted_task_message_refs(
+        self,
+        *,
+        limit: int,
+    ) -> tuple[MonitorRawMessageRef, ...]:
+        """Return child refs left after parent raw deletion was recorded.
+
+        Spec: [MF-5], [OBS.13], [OBS.17]
+        """
+
+        if limit <= 0:
+            return ()
+        with self._context.broker() as broker:
+            return self._access(
+                _runner_from_broker(broker)
+            ).raw_deleted_task_message_refs(limit=limit)
+
     def delete_task_messages_after_raw_delete(
         self,
         message_ids: Sequence[int],
@@ -1855,7 +1898,8 @@ def _record_values(record: MonitorTaskCollationRecord) -> tuple[Any, ...]:
 
 
 def _retention_cutoff_ns(now_ns: int, retention_seconds: float) -> int:
-    return int(now_ns - (retention_seconds * 1_000_000_000))
+    retention_ns = int(retention_seconds * 1_000_000_000)
+    return int(now_ns) - retention_ns
 
 
 def _suspected_inactive(
