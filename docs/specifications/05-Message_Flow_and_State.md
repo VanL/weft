@@ -377,6 +377,9 @@ Current rules:
   references: after exact broker deletion succeeds, or after retry observes the
   raw broker row is already absent, the Monitor physically deletes those child
   rows and reconciles the parent `raw_deleted_at_ns` when no child refs remain.
+  Bounded retry sweeps use the same rule for already-ingested child refs from
+  older cycles; terminal summary emission is not a prerequisite for deleting a
+  raw row that has already been folded into the Monitor store.
   If an older or partial cleanup cycle left a parent collation row marked
   `raw_deleted_at_ns` while child refs still exist in
   `weft_monitor_task_messages`, a bounded repair pass must exact-delete or

@@ -3784,6 +3784,82 @@ def test_task_monitor_runtime_cleanup_deadline_stops_between_families(
         task.stop()
 
 
+def test_task_monitor_raw_store_delete_reconciles_ingested_open_refs(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
+            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    tid = "1778084345905438762"
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    log_queue.write("present-running")
+    message_id = max(
+        int(row_message_id)
+        for body, row_message_id in iter_queue_entries(log_queue)
+        if body == "present-running"
+    )
+    running = update_from_task_log_payload(
+        {
+            "event": "task_activity",
+            "status": "running",
+            "tid": tid,
+            "taskspec": {
+                "tid": tid,
+                "version": "1.0",
+                "name": "sample",
+                "io": {},
+                "state": {"status": "running"},
+                "metadata": {},
+            },
+        },
+        message_id=message_id,
+    )
+    assert running is not None
+
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999961762"),
+        config=config,
+    )
+    try:
+        store = task._ensure_monitor_store()
+        assert store is not None
+        store.record_task_log_updates(
+            WEFT_GLOBAL_LOG_QUEUE,
+            (running,),
+            checkpoint_message_id=None,
+        )
+
+        retired = task._delete_monitor_store_task_log_rows(store)
+
+        record = store.get_task(tid)
+        assert record is not None
+        assert retired.message_rows_deleted == 1
+        assert record.raw_deleted_at_ns is not None
+        assert all(
+            body != "present-running"
+            for body, _message_id in iter_queue_entries(log_queue)
+        )
+        assert (
+            store.list_deletable_task_log_messages(limit=10, require_summary=False)
+            == ()
+        )
+        assert task._last_collation_store_error is None
+    finally:
+        task.stop()
+
+
 def test_task_monitor_raw_store_delete_reconciles_missing_refs_without_stall(
     broker_env,
     monkeypatch: pytest.MonkeyPatch,

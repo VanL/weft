@@ -2683,7 +2683,7 @@ class TaskMonitor(ServiceTask):
 
         refs = store.list_deletable_task_log_messages(
             limit=self._monitor_config.batch_size + 1,
-            require_summary=True,
+            require_summary=False,
         )
         if not refs:
             self._last_policy_progress = (

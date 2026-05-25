@@ -898,3 +898,8 @@ runbook needs to become stricter.
   queue-derived scan opens broker resources per candidate, so a large stale
   `T*.outbox` backlog can hit every slice deadline, report perpetual catch-up,
   and burn CPU without draining anything.
+- `weft_monitor_task_messages` is a pending exact-delete reference table, not
+  terminal history. If a valid raw task-log row has already been folded into the
+  Monitor parent, retry sweeps must be allowed to delete that raw row and child
+  ref even when the family is still open; terminal summary gates only compact
+  summary/disposition and family retirement.

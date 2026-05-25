@@ -173,6 +173,9 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
   not a shadow queue ledger. After exact raw broker deletion succeeds, or after
   retry observes the raw broker row is already absent, the Monitor physically
   deletes the corresponding child rows and reconciles the parent family.
+  Retry may apply to already-ingested open families as well as terminal ones;
+  raw broker deletion is gated by successful Monitor collation, not by terminal
+  summary emission.
   If a parent family is already marked `raw_deleted_at_ns` while child refs
   remain, the Monitor must repair that inconsistent state by exact-deleting or
   reconciling those child refs before family retirement.

@@ -264,6 +264,35 @@ def test_monitor_store_lists_deletable_task_log_messages_for_exact_tids(
     ]
 
 
+def test_monitor_store_lists_ingested_open_task_refs_without_summary_requirement(
+    tmp_path,
+) -> None:
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    tid = "1779000000000000012"
+    running = _update(tid, 1779000000000001100)
+    store.record_task_log_updates(
+        WEFT_GLOBAL_LOG_QUEUE,
+        (running,),
+        checkpoint_message_id=None,
+    )
+
+    summary_gated_refs = store.list_deletable_task_log_messages(
+        limit=10,
+        require_summary=True,
+    )
+    ingested_refs = store.list_deletable_task_log_messages(
+        limit=10,
+        require_summary=False,
+    )
+
+    assert summary_gated_refs == ()
+    assert [(ref.tid, ref.message_id) for ref in ingested_refs] == [
+        (tid, running.message_id)
+    ]
+
+
 def test_monitor_store_summary_ready_respects_terminal_retention(tmp_path) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)

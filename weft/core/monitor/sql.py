@@ -358,14 +358,11 @@ def select_deletable_task_log_messages(
 ) -> str:
     """Build a query for exact task-log messages proven deletable."""
 
-    summary_condition = (
-        "AND c.summary_emitted_at_ns IS NOT NULL" if require_summary else ""
-    )
-    state_condition = (
-        "AND (c.terminal_seen = 1 OR c.suspect_reason IS NOT NULL)"
-        if require_summary
-        else "AND c.terminal_seen = 1"
-    )
+    summary_condition = ""
+    state_condition = ""
+    if require_summary:
+        summary_condition = "AND c.summary_emitted_at_ns IS NOT NULL"
+        state_condition = "AND (c.terminal_seen = 1 OR c.suspect_reason IS NOT NULL)"
     return f"""
         SELECT m.queue_name, m.message_id, m.tid
         FROM {identifier(messages_table)} AS m
@@ -390,14 +387,11 @@ def select_deletable_task_log_messages_for_tids(
 ) -> str:
     """Build a query for exact deletable task-log refs for known TIDs."""
 
-    summary_condition = (
-        "AND c.summary_emitted_at_ns IS NOT NULL" if require_summary else ""
-    )
-    state_condition = (
-        "AND (c.terminal_seen = 1 OR c.suspect_reason IS NOT NULL)"
-        if require_summary
-        else "AND c.terminal_seen = 1"
-    )
+    summary_condition = ""
+    state_condition = ""
+    if require_summary:
+        summary_condition = "AND c.summary_emitted_at_ns IS NOT NULL"
+        state_condition = "AND (c.terminal_seen = 1 OR c.suspect_reason IS NOT NULL)"
     return f"""
         SELECT m.queue_name, m.message_id, m.tid
         FROM {identifier(messages_table)} AS m
