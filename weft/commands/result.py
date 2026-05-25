@@ -32,6 +32,7 @@ from . import task_evidence
 from ._result_wait import (
     append_public_value,
     await_one_shot_result,
+    drain_ctrl_out_stream_messages,
     effective_result_surface_wait_interval,
     terminal_error_message,
     terminal_status_from_event,
@@ -40,7 +41,6 @@ from ._streaming import (
     DecodedOutboxValue,
     aggregate_public_outputs,
     drain_available_outbox_values,
-    handle_ctrl_stream,
     poll_log_events,
     process_outbox_message,
 )
@@ -562,11 +562,25 @@ def _await_single_result(
     try:
         while True:
             while True:
-                ctrl_raw = ctrl_queue.read_one()
-                if ctrl_raw is None:
+                terminal_envelopes = drain_ctrl_out_stream_messages(
+                    ctrl_queue,
+                    tid=tid,
+                )
+                for terminal_envelope in terminal_envelopes:
+                    event_status = terminal_status_from_event(terminal_envelope)
+                    if event_status is None:
+                        continue
+                    if event_status == "completed":
+                        if completed_at is None:
+                            completed_at = time.monotonic()
+                        continue
+                    status = event_status
+                    error_message = terminal_error_message(
+                        terminal_envelope,
+                        event_status,
+                    )
                     break
-                ctrl_payload = ctrl_raw[0] if isinstance(ctrl_raw, tuple) else ctrl_raw
-                handle_ctrl_stream(str(ctrl_payload))
+                break
 
             peeked = outbox_queue.peek_one(with_timestamps=True)
             if (
