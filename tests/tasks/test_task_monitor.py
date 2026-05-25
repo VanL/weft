@@ -6,6 +6,7 @@ import json
 import threading
 import time
 from collections.abc import Callable
+from typing import Any
 
 import pytest
 
@@ -2568,6 +2569,71 @@ def test_task_monitor_reserved_cleanup_reports_bounded_waypoint(
         task.stop()
 
 
+def test_task_monitor_reserved_cleanup_batches_fallback_record_lookup(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "999999999",
+            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    now_ns = time.time_ns()
+    base_tid = now_ns - int(
+        (TASK_MONITOR_TID_MAPPING_CLEANUP_MIN_AGE_SECONDS + 60.0) * 1e9
+    )
+    tid_count = 75
+    for offset in range(tid_count):
+        tid = str(base_tid - offset)
+        make_queue(f"T{tid}.reserved").write(f"reserved-{offset}")
+
+    class BatchOnlyStore:
+        def __init__(self, wrapped: MonitorStore) -> None:
+            self.wrapped = wrapped
+            self.get_tasks_calls = 0
+
+        def get_tasks(self, tids: tuple[str, ...]) -> tuple[Any, ...]:
+            self.get_tasks_calls += 1
+            return self.wrapped.get_tasks(tids)
+
+        def get_task(self, tid: str) -> Any:
+            raise AssertionError(f"per-TID Monitor lookup called for {tid}")
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self.wrapped, name)
+
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec(str(now_ns + 1_000_000)),
+        config=config,
+    )
+    try:
+        store = task._ensure_monitor_store()
+        assert store is not None
+        batch_store = BatchOnlyStore(store)
+        cleanup = task._run_reserved_cleanup_slice(
+            batch_store,
+            now_ns=now_ns,
+        )
+    finally:
+        task.stop()
+
+    assert batch_store.get_tasks_calls == 1
+    assert cleanup.reserved_families_processed == 0
+    assert cleanup.reserved_skipped_not_ready == tid_count
+    assert cleanup.pending is True
+    assert cleanup.deadline_hit is False
+    assert cleanup.next_slice_kind == "dead_tid"
+
+
 def test_task_monitor_dead_task_cleanup_deletes_standard_control_queues(
     broker_env,
     monkeypatch: pytest.MonkeyPatch,
@@ -2740,6 +2806,71 @@ def test_task_monitor_dead_task_cleanup_defers_outbox_only_until_retention(
     assert cleanup.dead_tids_pending == 0
     assert cleanup.pending is False
     assert coalesce_calls == []
+
+
+def test_task_monitor_dead_task_cleanup_batches_monitor_record_lookup(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "999999999",
+            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    now_ns = time.time_ns()
+    base_tid = now_ns - int(
+        (TASK_MONITOR_TID_MAPPING_CLEANUP_MIN_AGE_SECONDS + 60.0) * 1e9
+    )
+    tid_count = 75
+    for offset in range(tid_count):
+        tid = str(base_tid - offset)
+        make_queue(f"T{tid}.outbox").write(f"result-{offset}")
+
+    class BatchOnlyStore:
+        def __init__(self, wrapped: MonitorStore) -> None:
+            self.wrapped = wrapped
+            self.get_tasks_calls = 0
+
+        def get_tasks(self, tids: tuple[str, ...]) -> tuple[Any, ...]:
+            self.get_tasks_calls += 1
+            return self.wrapped.get_tasks(tids)
+
+        def get_task(self, tid: str) -> Any:
+            raise AssertionError(f"per-TID Monitor lookup called for {tid}")
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self.wrapped, name)
+
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec(str(now_ns + 1_000_000)),
+        config=config,
+    )
+    try:
+        store = task._ensure_monitor_store()
+        assert store is not None
+        batch_store = BatchOnlyStore(store)
+        cleanup = task._run_dead_task_cleanup_slice(
+            batch_store,
+            now_ns=now_ns,
+        )
+    finally:
+        task.stop()
+
+    assert batch_store.get_tasks_calls == 1
+    assert cleanup.dead_tids_processed == 0
+    assert cleanup.dead_tids_deferred_retention == tid_count
+    assert cleanup.dead_tids_pending == 0
+    assert cleanup.pending is False
+    assert cleanup.deadline_hit is False
 
 
 def test_task_monitor_dead_task_cleanup_does_not_coalesce_task_log_refs(

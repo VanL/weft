@@ -183,6 +183,22 @@ def select_task(collations_table: str, columns: Sequence[str]) -> str:
         """
 
 
+def select_tasks_by_tids(
+    collations_table: str,
+    columns: Sequence[str],
+    tid_count: int,
+) -> str:
+    """Build a Monitor task batch lookup query."""
+
+    return f"""
+        SELECT {identifier_list(columns)}
+        FROM {identifier(collations_table)}
+        WHERE context_key = ?
+          AND tid IN ({placeholders(tid_count)})
+        ORDER BY tid
+        """
+
+
 def select_unemitted_terminal_tasks(
     collations_table: str,
     columns: Sequence[str],

@@ -519,6 +519,26 @@ class _MonitorTableAccess:
             return None
         return _record_from_row(rows[0])
 
+    def fetch_tasks(
+        self,
+        tids: Sequence[str],
+    ) -> tuple[MonitorTaskCollationRecord, ...]:
+        """Read task collation records for a batch of TIDs."""
+
+        tid_tuple = tuple(str(tid) for tid in tids if tid)
+        if not tid_tuple:
+            return ()
+        rows = self._runner.run(
+            monitor_sql.select_tasks_by_tids(
+                self._tables.task_collations,
+                _task_columns,
+                len(tid_tuple),
+            ),
+            (self._context_key, *tid_tuple),
+            fetch=True,
+        )
+        return tuple(_record_from_row(row) for row in rows)
+
     def list_unemitted_terminal_tasks(
         self,
         *,
@@ -1207,6 +1227,22 @@ class MonitorStore:
             return self._access(runner).fetch_task(tid)
         with self._context.broker() as broker:
             return self._access(_runner_from_broker(broker)).fetch_task(tid)
+
+    def get_tasks(
+        self,
+        tids: Sequence[str],
+    ) -> tuple[MonitorTaskCollationRecord, ...]:
+        """Return durable task collation records for a batch of TIDs."""
+
+        tid_tuple = tuple(dict.fromkeys(str(tid) for tid in tids if tid))
+        if not tid_tuple:
+            return ()
+        records: list[MonitorTaskCollationRecord] = []
+        with self._context.broker() as broker:
+            access = self._access(_runner_from_broker(broker))
+            for chunk in _chunks(tid_tuple, self._config.write_batch_size):
+                records.extend(access.fetch_tasks(chunk))
+        return tuple(records)
 
     def list_unemitted_terminal_tasks(
         self,

@@ -189,6 +189,20 @@ def test_monitor_store_upsert_is_replay_safe_and_preserves_terminal(tmp_path) ->
     ]
 
 
+def test_monitor_store_get_tasks_fetches_records_in_one_api_call(tmp_path) -> None:
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    first_tid = "1779000000000000010"
+    second_tid = "1779000000000000011"
+    store.upsert_task_event(_update(first_tid, 1779000000000001010))
+    store.upsert_task_event(_update(second_tid, 1779000000000001011))
+
+    records = store.get_tasks((first_tid, "1779000000000000099", second_tid))
+
+    assert [record.tid for record in records] == [first_tid, second_tid]
+
+
 def test_monitor_store_lists_deletable_task_log_messages_for_exact_tids(
     tmp_path,
 ) -> None:

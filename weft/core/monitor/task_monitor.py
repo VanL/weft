@@ -90,7 +90,13 @@ from weft.core.monitor.policies.runtime_control import (
     reserved_queue_tid as _reserved_queue_tid,
 )
 from weft.core.monitor.policies.runtime_control import (
+    reserved_queue_tids as _reserved_queue_tids,
+)
+from weft.core.monitor.policies.runtime_control import (
     runtime_cleanup_queue_discovery_due as _runtime_cleanup_queue_discovery_due,
+)
+from weft.core.monitor.policies.runtime_control import (
+    runtime_dead_task_record_probe_tids as _runtime_dead_task_record_probe_tids,
 )
 from weft.core.monitor.policies.runtime_control import (
     select_runtime_dead_task_cleanup_candidates as _select_runtime_dead_task_cleanup_candidates,
@@ -2299,8 +2305,12 @@ class TaskMonitor(ServiceTask):
         def selection_deadline_reached() -> bool:
             return _monitor_monotonic() >= selection_deadline_monotonic
 
-        selection = (
-            _select_runtime_reserved_cleanup_candidates(
+        if remaining_limit > 0:
+            fallback_record_tids = _reserved_queue_tids(fallback_queue_names)
+            fallback_records_by_tid = {
+                record.tid: record for record in store.get_tasks(fallback_record_tids)
+            }
+            selection = _select_runtime_reserved_cleanup_candidates(
                 now_ns=now_ns,
                 retention_seconds=(
                     self._monitor_config.task_log_retention_period_seconds
@@ -2308,14 +2318,13 @@ class TaskMonitor(ServiceTask):
                 limit=remaining_limit,
                 active_tids=active_tids,
                 queue_names=fallback_queue_names,
-                task_record=store.get_task,
+                task_record=fallback_records_by_tid.get,
                 deadline_reached=selection_deadline_reached,
             )
-            if remaining_limit > 0
-            else _RuntimeReservedCleanupSelection(
+        else:
+            selection = _RuntimeReservedCleanupSelection(
                 pending=monitor_family_limit_hit or bool(fallback_queue_names),
             )
-        )
         job_deadline_monotonic = (
             _monitor_monotonic() + TASK_MONITOR_RUNTIME_CLEANUP_SLICE_SECONDS
         )
@@ -2498,6 +2507,13 @@ class TaskMonitor(ServiceTask):
                 f"T*.{QUEUE_RESERVED_SUFFIX}",
             )
         )
+        probe_tids = _runtime_dead_task_record_probe_tids(
+            task_queue_names,
+            now_ns=now_ns,
+            min_age_seconds=TASK_MONITOR_TID_MAPPING_CLEANUP_MIN_AGE_SECONDS,
+            active_tids=active_tids,
+        )
+        records_by_tid = {record.tid: record for record in store.get_tasks(probe_tids)}
         selection_deadline_monotonic = (
             _monitor_monotonic() + TASK_MONITOR_RUNTIME_CLEANUP_SLICE_SECONDS
         )
@@ -2512,7 +2528,7 @@ class TaskMonitor(ServiceTask):
             retention_seconds=self._monitor_config.task_log_retention_period_seconds,
             limit=control_limit,
             active_tids=active_tids,
-            task_record=store.get_task,
+            task_record=records_by_tid.get,
             deadline_reached=selection_deadline_reached,
         )
         job_deadline_monotonic = (

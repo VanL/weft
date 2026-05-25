@@ -267,6 +267,18 @@ def reserved_queue_tid(queue_name: str) -> str | None:
     return tid if tid.isdigit() else None
 
 
+def reserved_queue_tids(queue_names: Iterable[str]) -> tuple[str, ...]:
+    """Return unique TIDs encoded in standard task-local reserved queues."""
+
+    return tuple(
+        dict.fromkeys(
+            tid
+            for queue_name in queue_names
+            if (tid := reserved_queue_tid(queue_name)) is not None
+        )
+    )
+
+
 def select_runtime_reserved_cleanup_candidates(
     *,
     now_ns: int,
@@ -323,6 +335,23 @@ def select_runtime_reserved_cleanup_candidates(
         pending=pending,
         deadline_hit=deadline_hit,
     )
+
+
+def runtime_dead_task_record_probe_tids(
+    queue_names: Iterable[str],
+    *,
+    now_ns: int,
+    min_age_seconds: float,
+    active_tids: set[str],
+) -> tuple[str, ...]:
+    """Return queue-derived dead TIDs that need Monitor-record probing."""
+
+    return select_dead_task_tids_from_queue_names(
+        queue_names,
+        live_tids=active_tids,
+        now_ns=now_ns,
+        min_age_seconds=min_age_seconds,
+    ).selected_tids
 
 
 def select_runtime_dead_task_cleanup_candidates(

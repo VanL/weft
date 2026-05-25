@@ -893,3 +893,8 @@ runbook needs to become stricter.
   one executor result lets a slow dead-TID recovery path hold terminal cleanup
   hostage and makes PONG counters ambiguous. Run each cleanup class as a
   discrete worker-thread slice launched by the reactor.
+- Queue-name fallback cleanup must hydrate Monitor state in batches before
+  entering selection loops. A per-TID `MonitorStore.get_task()` call inside a
+  queue-derived scan opens broker resources per candidate, so a large stale
+  `T*.outbox` backlog can hit every slice deadline, report perpetual catch-up,
+  and burn CPU without draining anything.
