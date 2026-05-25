@@ -172,10 +172,19 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
   temporary pending-reference table for exact raw-message deletion and retry,
   not a shadow queue ledger. After exact raw broker deletion succeeds, or after
   retry observes the raw broker row is already absent, the Monitor physically
-  deletes the corresponding child rows and reconciles the parent family. After
-  raw deletion, summary emission, disposition, and task-local control cleanup
-  are all recorded and no child message refs remain, the Monitor may
-  physically retire the `weft_monitor_task_collations` parent row. For
+  deletes the corresponding child rows and reconciles the parent family.
+  Orphan raw-log recovery records `orphan_raw_recovery_checked_at_ns` when it
+  successfully proves that a raw-deleted family has no remaining broker rows,
+  and leaves the family retryable when the probe or delete fails. New raw
+  task-log evidence clears that marker through normal collation merge. After
+  raw deletion, summary emission, disposition, task-local control cleanup, and
+  any required reserved cleanup proof are all recorded and no child message refs
+  remain, the Monitor may physically retire the
+  `weft_monitor_task_collations` parent row. Reserved cleanup proof is required
+  only for rows with `reserved_probe_needed`; it is recorded as
+  `reserved_cleanup_checked_at_ns` after the standard `T{tid}.reserved` queue
+  is deleted or proven already absent. Probe/delete errors leave the marker
+  unset so the family remains retryable. For
   runtime-state queues, cleanup remains policy driven. Malformed rows are
   deletable only from Weft-owned schema queues whose policy says malformed rows
   are disposable, such as `weft.log.tasks` and
@@ -457,16 +466,18 @@ rows older than `WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS` are folded into
 Monitor-owned tables before exact deletion; exact raw deletion is reconciled
 by physically deleting the corresponding pending child refs from
 `weft_monitor_task_messages`; legacy orphan raw rows for terminal/disposed
-families may be exact-deleted by a bounded recovery pass; and family
+families may be exact-deleted by a bounded recovery pass that records a
+completed no-row probe on the parent family; and family
 summaries/disposition can run only after the FIFO pass reaches a completed
 high-water mark
 (`empty` or first too-young visible row). A batch-limited, scan-limited, or
 error-limited pass must not close a task family.
 Terminal family disposition records retryable compact table state while raw
 deletion, summary, and runtime cleanup remain incomplete. Once raw deletion,
-summary emission, disposition, and task-local control cleanup are all recorded
-and no child message refs remain, the Monitor may physically retire the compact
-parent family row. Open families are classified operationally:
+summary emission, disposition, task-local control cleanup, and any required
+reserved cleanup proof are all recorded and no child message refs remain, the
+Monitor may physically retire the compact parent family row. Open families are
+classified operationally:
 `suspected_inactive` requires a usable reporting interval and a reporting gap;
 `stale_open` requires the explicit hard-age threshold for families without a
 usable interval. Neither classification is public lifecycle truth.
@@ -478,7 +489,10 @@ Ordinary supervised cleanup may delete standard task-local `T{tid}.reserved`
 queues only through the TaskMonitor-owned runtime cleanup slice when the Monitor
 table already proves the family terminal/disposed/raw-deleted, or when no
 Monitor row exists and the TID is older than the task-log retention period with
-no active runtime-owner evidence. Reserved deletion must use public
+no active runtime-owner evidence. Monitor-table reserved cleanup is driven by
+`reserved_probe_needed` plus a missing `reserved_cleanup_checked_at_ns`; an
+already-absent reserved queue is a successful no-row check, not a reason to
+keep the family pending. Reserved deletion must use public
 SimpleBroker queue APIs and must remain bounded by the same runtime cleanup
 limit and per-slice deadline safeguards as task-local control queue cleanup.
 A separate runtime cleanup slice may identify dead tasks from standard

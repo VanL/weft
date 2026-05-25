@@ -83,6 +83,37 @@ def test_monitor_sql_retirable_family_query_is_conservative() -> None:
     assert "summary_emitted_at_ns IS NOT NULL" in query
     assert "disposition_at_ns IS NOT NULL" in query
     assert "task_control_deleted_at_ns IS NOT NULL" in query
+    assert "reserved_probe_needed = 0" in query
+    assert "reserved_cleanup_checked_at_ns IS NOT NULL" in query
+    assert "NOT EXISTS" in query
+    assert "LIMIT ?" in query
+    assert "%s" not in query
+
+
+def test_monitor_sql_reserved_cleanup_query_selects_unchecked_families() -> None:
+    query = monitor_sql.select_reserved_cleanup_pending_tasks(
+        "weft_monitor_task_collations",
+        ("context_key", "tid", "last_message_id"),
+    )
+
+    assert "reserved_probe_needed = 1" in query
+    assert "reserved_cleanup_checked_at_ns IS NULL" in query
+    assert "raw_deleted_at_ns IS NOT NULL" in query
+    assert "OR disposition_at_ns IS NOT NULL" in query
+    assert "terminal_seen = 1 AND summary_emitted_at_ns IS NOT NULL" in query
+    assert "ORDER BY last_message_id, tid" in query
+    assert "LIMIT ?" in query
+    assert "%s" not in query
+
+
+def test_monitor_sql_orphan_recovery_query_excludes_checked_families() -> None:
+    query = monitor_sql.select_raw_deleted_task_log_recovery_tids(
+        "weft_monitor_task_collations",
+        "weft_monitor_task_messages",
+    )
+
+    assert "raw_deleted_at_ns IS NOT NULL" in query
+    assert "orphan_raw_recovery_checked_at_ns IS NULL" in query
     assert "NOT EXISTS" in query
     assert "LIMIT ?" in query
     assert "%s" not in query

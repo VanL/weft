@@ -88,6 +88,8 @@ def create_task_collations_table(table: str) -> str:
           disposition_reason TEXT NULL,
           disposition_at_ns BIGINT NULL,
           task_control_deleted_at_ns BIGINT NULL,
+          reserved_cleanup_checked_at_ns BIGINT NULL,
+          orphan_raw_recovery_checked_at_ns BIGINT NULL,
           updated_at_ns BIGINT NOT NULL,
           PRIMARY KEY (context_key, tid)
         )
@@ -296,6 +298,28 @@ def mark_task_control_deleted(collations_table: str) -> str:
         """
 
 
+def mark_reserved_cleanup_checked(collations_table: str) -> str:
+    """Build a reserved-queue cleanup probe completion marker update."""
+
+    return f"""
+        UPDATE {identifier(collations_table)}
+        SET reserved_cleanup_checked_at_ns = ?,
+            updated_at_ns = ?
+        WHERE context_key = ? AND tid = ?
+        """
+
+
+def mark_orphan_raw_recovery_checked(collations_table: str) -> str:
+    """Build an orphan raw-log recovery completion marker update."""
+
+    return f"""
+        UPDATE {identifier(collations_table)}
+        SET orphan_raw_recovery_checked_at_ns = ?,
+            updated_at_ns = ?
+        WHERE context_key = ? AND tid = ?
+        """
+
+
 def mark_family_disposed(collations_table: str) -> str:
     """Build a Monitor family disposition update."""
 
@@ -387,6 +411,7 @@ def select_raw_deleted_task_log_recovery_tids(
         FROM {collations} AS c
         WHERE c.context_key = ?
           AND c.raw_deleted_at_ns IS NOT NULL
+          AND c.orphan_raw_recovery_checked_at_ns IS NULL
           AND (
             c.terminal_seen = 1
             OR c.suspect_reason IS NOT NULL
@@ -400,6 +425,28 @@ def select_raw_deleted_task_log_recovery_tids(
               AND m.tid = c.tid
           )
         ORDER BY c.last_message_id, c.tid
+        LIMIT ?
+        """
+
+
+def select_reserved_cleanup_pending_tasks(
+    collations_table: str,
+    columns: Sequence[str],
+) -> str:
+    """Build a query for task families needing reserved-queue cleanup proof."""
+
+    return f"""
+        SELECT {identifier_list(columns)}
+        FROM {identifier(collations_table)}
+        WHERE context_key = ?
+          AND reserved_probe_needed = 1
+          AND reserved_cleanup_checked_at_ns IS NULL
+          AND (
+            raw_deleted_at_ns IS NOT NULL
+            OR disposition_at_ns IS NOT NULL
+            OR (terminal_seen = 1 AND summary_emitted_at_ns IS NOT NULL)
+          )
+        ORDER BY last_message_id, tid
         LIMIT ?
         """
 
@@ -558,6 +605,10 @@ def select_retirable_task_collations(
           AND summary_emitted_at_ns IS NOT NULL
           AND disposition_at_ns IS NOT NULL
           AND task_control_deleted_at_ns IS NOT NULL
+          AND (
+            reserved_probe_needed = 0
+            OR reserved_cleanup_checked_at_ns IS NOT NULL
+          )
           AND NOT EXISTS (
             SELECT 1
             FROM {messages} AS m

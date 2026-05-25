@@ -242,8 +242,9 @@ Current task families:
   terminal cleanup time. Standard `T{tid}.outbox` is retained until task-log
   retention age; eligible stale standard `T{tid}.reserved` queues are deleted
   through the reserved cleanup policy after monitor-table proof or stale
-  no-monitor evidence. Cleanup records `task_control_deleted_at_ns` and
-  terminal disposition when needed. The monitor also caches `policy_progress`
+  no-monitor evidence. Cleanup records `task_control_deleted_at_ns`,
+  `reserved_cleanup_checked_at_ns` for required reserved probes, and terminal
+  disposition when needed. The monitor also caches `policy_progress`
   summaries so PONG can explain whether each cleanup policy reached a bounded
   waypoint, reached base for now, deferred future work, or was blocked by an
   error without performing live scans on the control path. The persistent

@@ -142,8 +142,15 @@ row is deleted or reconciled as already absent, the Monitor physically deletes
 the child row. A bounded recovery pass may use public SimpleBroker message
 search and exact-delete APIs to clear legacy raw `weft.log.tasks` rows for
 terminal Monitor families whose child refs were already removed by an older
-release. The Monitor may create, verify, and additively migrate only
-these Monitor tables inside an already initialized Weft broker database. It
+release. When that recovery pass proves no raw broker rows remain, it records
+that completed probe in the Monitor collation row so the same family does not
+stay on the recovery hot path. Reserved-queue cleanup proof for terminal
+non-completed families is also stored on the collation row as
+`reserved_cleanup_checked_at_ns`; it is set after the standard reserved queue is
+deleted or proved already absent, and left unset on probe/delete errors. The
+Monitor may create, verify, and
+additively migrate only these Monitor tables inside an already initialized
+Weft broker database. It
 must use the resolved `WeftContext` and broker target; it must not parse DSNs,
 rediscover a different database target, provision Postgres, or create the
 broker database itself. Broker queue rows still go through public SimpleBroker

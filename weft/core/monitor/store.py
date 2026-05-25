@@ -165,6 +165,8 @@ class MonitorTaskCollationRecord:
     disposition_reason: str | None = None
     disposition_at_ns: int | None = None
     task_control_deleted_at_ns: int | None = None
+    reserved_cleanup_checked_at_ns: int | None = None
+    orphan_raw_recovery_checked_at_ns: int | None = None
     updated_at_ns: int = 0
 
     def to_summary(self) -> dict[str, Any]:
@@ -200,6 +202,10 @@ class MonitorTaskCollationRecord:
             "disposition_reason": self.disposition_reason,
             "disposition_at_ns": self.disposition_at_ns,
             "task_control_deleted_at_ns": self.task_control_deleted_at_ns,
+            "reserved_cleanup_checked_at_ns": (self.reserved_cleanup_checked_at_ns),
+            "orphan_raw_recovery_checked_at_ns": (
+                self.orphan_raw_recovery_checked_at_ns
+            ),
         }
 
 
@@ -300,6 +306,8 @@ _task_columns: tuple[str, ...] = (
     "disposition_reason",
     "disposition_at_ns",
     "task_control_deleted_at_ns",
+    "reserved_cleanup_checked_at_ns",
+    "orphan_raw_recovery_checked_at_ns",
     "updated_at_ns",
 )
 
@@ -308,6 +316,8 @@ _task_collation_additive_columns: tuple[tuple[str, str], ...] = (
     ("disposition_reason", "TEXT NULL"),
     ("disposition_at_ns", "BIGINT NULL"),
     ("task_control_deleted_at_ns", "BIGINT NULL"),
+    ("reserved_cleanup_checked_at_ns", "BIGINT NULL"),
+    ("orphan_raw_recovery_checked_at_ns", "BIGINT NULL"),
 )
 
 _monitor_index_specs: tuple[_MonitorIndexSpec, ...] = (
@@ -332,6 +342,16 @@ _monitor_index_specs: tuple[_MonitorIndexSpec, ...] = (
         columns=("context_key", "reserved_probe_needed", "last_seen_at_ns"),
     ),
     _MonitorIndexSpec(
+        name="idx_weft_monitor_collations_reserved_cleanup",
+        table=_monitor_tables.task_collations,
+        columns=(
+            "context_key",
+            "reserved_probe_needed",
+            "reserved_cleanup_checked_at_ns",
+            "last_message_id",
+        ),
+    ),
+    _MonitorIndexSpec(
         name="idx_weft_monitor_collations_disposition_terminal",
         table=_monitor_tables.task_collations,
         columns=(
@@ -350,6 +370,16 @@ _monitor_index_specs: tuple[_MonitorIndexSpec, ...] = (
             "summary_emitted_at_ns",
             "task_control_deleted_at_ns",
             "disposition_at_ns",
+            "last_message_id",
+        ),
+    ),
+    _MonitorIndexSpec(
+        name="idx_weft_monitor_collations_orphan_recovery",
+        table=_monitor_tables.task_collations,
+        columns=(
+            "context_key",
+            "raw_deleted_at_ns",
+            "orphan_raw_recovery_checked_at_ns",
             "last_message_id",
         ),
     ),
@@ -614,6 +644,25 @@ class _MonitorTableAccess:
         )
         return tuple(str(row[0]) for row in rows)
 
+    def list_reserved_cleanup_pending_tasks(
+        self,
+        *,
+        limit: int,
+    ) -> tuple[MonitorTaskCollationRecord, ...]:
+        """Return retained families needing reserved-queue cleanup proof."""
+
+        if limit <= 0:
+            return ()
+        rows = self._runner.run(
+            monitor_sql.select_reserved_cleanup_pending_tasks(
+                self._tables.task_collations,
+                _task_columns,
+            ),
+            (self._context_key, int(limit)),
+            fetch=True,
+        )
+        return tuple(_record_from_row(row) for row in rows)
+
     def mark_summary_emitted(
         self,
         tid: str,
@@ -642,6 +691,32 @@ class _MonitorTableAccess:
             (
                 int(deleted_at_ns),
                 int(deleted_at_ns),
+                self._context_key,
+                tid,
+            ),
+        )
+
+    def mark_reserved_cleanup_checked(self, tid: str, checked_at_ns: int) -> None:
+        """Mark one reserved-queue cleanup probe complete."""
+
+        self._runner.run(
+            monitor_sql.mark_reserved_cleanup_checked(self._tables.task_collations),
+            (
+                int(checked_at_ns),
+                int(checked_at_ns),
+                self._context_key,
+                tid,
+            ),
+        )
+
+    def mark_orphan_raw_recovery_checked(self, tid: str, checked_at_ns: int) -> None:
+        """Mark one raw-log orphan recovery probe complete."""
+
+        self._runner.run(
+            monitor_sql.mark_orphan_raw_recovery_checked(self._tables.task_collations),
+            (
+                int(checked_at_ns),
+                int(checked_at_ns),
                 self._context_key,
                 tid,
             ),
@@ -1188,6 +1263,23 @@ class MonitorStore:
                 limit=limit,
             )
 
+    def list_reserved_cleanup_pending_tasks(
+        self,
+        *,
+        limit: int,
+    ) -> tuple[MonitorTaskCollationRecord, ...]:
+        """Return families needing reserved-queue cleanup proof.
+
+        Spec: [MF-5], [OBS.13]
+        """
+
+        if limit <= 0:
+            return ()
+        with self._context.broker() as broker:
+            return self._access(
+                _runner_from_broker(broker)
+            ).list_reserved_cleanup_pending_tasks(limit=limit)
+
     def mark_summary_emitted(
         self,
         tid: str,
@@ -1256,6 +1348,48 @@ class MonitorStore:
                 with _write_transaction(runner):
                     for tid in chunk:
                         access.mark_task_control_deleted(tid, deleted_at_ns)
+
+    def mark_reserved_cleanup_checked(
+        self,
+        tids: Sequence[str],
+        checked_at_ns: int,
+    ) -> None:
+        """Mark reserved-queue cleanup probes complete for a batch.
+
+        Spec: [MF-5], [OBS.13]
+        """
+
+        tid_tuple = tuple(str(tid) for tid in tids)
+        if not tid_tuple:
+            return
+        with self._context.broker() as broker:
+            runner = _runner_from_broker(broker)
+            access = self._access(runner)
+            for chunk in _chunks(tid_tuple, self._config.write_batch_size):
+                with _write_transaction(runner):
+                    for tid in chunk:
+                        access.mark_reserved_cleanup_checked(tid, checked_at_ns)
+
+    def mark_orphan_raw_recovery_checked(
+        self,
+        tids: Sequence[str],
+        checked_at_ns: int,
+    ) -> None:
+        """Mark raw-log orphan recovery complete for a batch of families.
+
+        Spec: [MF-5], [OBS.13], [OBS.17]
+        """
+
+        tid_tuple = tuple(str(tid) for tid in tids)
+        if not tid_tuple:
+            return
+        with self._context.broker() as broker:
+            runner = _runner_from_broker(broker)
+            access = self._access(runner)
+            for chunk in _chunks(tid_tuple, self._config.write_batch_size):
+                with _write_transaction(runner):
+                    for tid in chunk:
+                        access.mark_orphan_raw_recovery_checked(tid, checked_at_ns)
 
     def mark_family_disposed(
         self,
@@ -1549,6 +1683,12 @@ def _record_from_row(row: tuple[Any, ...]) -> MonitorTaskCollationRecord:
         disposition_reason=_str_or_none(values["disposition_reason"]),
         disposition_at_ns=_int_or_none(values["disposition_at_ns"]),
         task_control_deleted_at_ns=_int_or_none(values["task_control_deleted_at_ns"]),
+        reserved_cleanup_checked_at_ns=_int_or_none(
+            values["reserved_cleanup_checked_at_ns"]
+        ),
+        orphan_raw_recovery_checked_at_ns=_int_or_none(
+            values["orphan_raw_recovery_checked_at_ns"]
+        ),
         updated_at_ns=int(values["updated_at_ns"]),
     )
 
@@ -1668,6 +1808,8 @@ def _merge_record(
         disposition_reason=existing.disposition_reason,
         disposition_at_ns=existing.disposition_at_ns,
         task_control_deleted_at_ns=existing.task_control_deleted_at_ns,
+        reserved_cleanup_checked_at_ns=None,
+        orphan_raw_recovery_checked_at_ns=None,
         updated_at_ns=now_ns,
     )
 
@@ -1706,6 +1848,8 @@ def _record_values(record: MonitorTaskCollationRecord) -> tuple[Any, ...]:
         record.disposition_reason,
         record.disposition_at_ns,
         record.task_control_deleted_at_ns,
+        record.reserved_cleanup_checked_at_ns,
+        record.orphan_raw_recovery_checked_at_ns,
         record.updated_at_ns,
     )
 

@@ -458,7 +458,7 @@ WEFT_GLOBAL_LOG_QUEUE: Final[str] = "weft.log.tasks"
 TASK_MONITOR_SCHEMA_VERSION: Final[int] = 1
 """JSONL schema version for task monitor operational records."""
 
-WEFT_MONITOR_SCHEMA_VERSION: Final[int] = 2
+WEFT_MONITOR_SCHEMA_VERSION: Final[int] = 5
 """Schema version for Monitor-owned durable collation tables."""
 
 WEFT_MONITOR_META_TABLE: Final[str] = "weft_monitor_meta"

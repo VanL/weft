@@ -380,6 +380,10 @@ Current rules:
   A bounded orphan-recovery pass may search for and exact-delete raw task-log
   rows for terminal/disposed families whose child refs are already absent but
   whose raw broker rows remain from an older or inconsistent cleanup cycle.
+  Orphan recovery is retryable on probe/delete errors. A successful probe that
+  finds no raw broker rows records `orphan_raw_recovery_checked_at_ns` on the
+  parent collation row so the same family is not selected again until new raw
+  task-log evidence resets the recovery marker.
   Legacy child rows marked with `deleted_at_ns` from older releases are
   physically pruned in bounded Monitor-store cleanup slices. Replaying the same
   raw row after a delete failure is idempotent. A terminal family may emit a
@@ -402,14 +406,22 @@ Current rules:
   transaction for standard stale task-local queues. Standard
   `T{tid}.ctrl_in`, `T{tid}.ctrl_out`, and `T{tid}.inbox` are stale at
   terminal cleanup time. Standard `T{tid}.outbox` is retention-gated, and
-  standard `T{tid}.reserved` is handled by the reserved cleanup policy.
+  standard `T{tid}.reserved` is handled by the reserved cleanup policy. For
+  terminal non-completed families, the reserved policy is Monitor-table driven:
+  it selects rows with `reserved_probe_needed`, records
+  `reserved_cleanup_checked_at_ns` after successfully deleting the reserved
+  queue or proving it is already absent, and leaves the row retryable on
+  delete/probe errors.
   Once no child message rows remain and raw deletion, summary emission,
-  disposition, and task-local control cleanup have all been recorded, the
-  Monitor may physically retire the compact parent row from
+  disposition, task-local control cleanup, and any required reserved cleanup
+  proof have all been recorded, the Monitor may physically retire the compact
+  parent row from
   `weft_monitor_task_collations`.
   A separate maintenance worker slice may delete eligible stale standard
   `T{tid}.reserved` queues after monitor-table proof or stale no-monitor
-  evidence, while preserving active runtime owners. Each built-in cycle attempts
+  evidence, while preserving active runtime owners. Missing standard reserved
+  queues are successful no-row probes for monitor-table families, not repeated
+  work. Each built-in cycle attempts
   retained raw task-log exact deletion in the built-in cycle worker before the
   reactor launches another runtime-cleanup worker. The reactor launches
   terminal cleanup, reserved cleanup, and dead-TID cleanup as discrete
@@ -870,7 +882,10 @@ system pruning:
   Retention-deferred dead-TID queues are counted for diagnostics but do not
   keep runtime cleanup pending or trigger raw task-log coalescing. Dead-TID
   cleanup must not mark Monitor collation families; if a Monitor row exists,
-  terminal or reserved cleanup owns that family. Each cleanup cycle records
+  terminal or reserved cleanup owns that family. Reserved cleanup marks
+  `reserved_cleanup_checked_at_ns` for Monitor rows that need a reserved probe,
+  including the already-absent no-row case, so a completed check converges
+  without rediscovering queue names. Each cleanup cycle records
   cached policy/store stats and `policy_progress` summaries so PONG can
   distinguish "ran and selected zero", "reached a bounded waypoint", "reached
   a base case for now", "deferred future work", and "blocked by an error".
@@ -947,7 +962,11 @@ Current rules:
   `WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT` remains the per-cycle task-log scan
   depth and defaults to 50000 rows. Eligible standard `T{tid}.reserved` queues
   are deleted by the same supervised monitor `delete` processor path, bounded
-  by the control cleanup limit and protected by active runtime evidence. When a
+  by the control cleanup limit and protected by active runtime evidence. For
+  Monitor-owned terminal non-completed families, a successful reserved cleanup
+  or no-row reserved probe records `reserved_cleanup_checked_at_ns`; physical
+  parent-row retirement waits for that marker when `reserved_probe_needed` is
+  set. When a
   cycle stops because the FIFO pass hit its scan limit, the monitor uses
   `WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS` for the next wake instead of the
   full heartbeat interval.

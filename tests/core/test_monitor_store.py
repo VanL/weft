@@ -773,6 +773,60 @@ def test_monitor_store_lists_raw_deleted_task_log_recovery_tids(tmp_path) -> Non
     )
 
     assert store.list_raw_deleted_task_log_recovery_tids(limit=10) == (tid,)
+    store.mark_orphan_raw_recovery_checked((tid,), terminal.message_id + 2)
+    record = store.get_task(tid)
+    assert record is not None
+    assert record.orphan_raw_recovery_checked_at_ns == terminal.message_id + 2
+    assert store.list_raw_deleted_task_log_recovery_tids(limit=10) == ()
+    later = _update(tid, terminal.message_id + 3, event="task_activity")
+    store.record_task_log_updates(
+        WEFT_GLOBAL_LOG_QUEUE,
+        (later,),
+        checkpoint_message_id=None,
+    )
+    record = store.get_task(tid)
+    assert record is not None
+    assert record.raw_deleted_at_ns is None
+    assert record.orphan_raw_recovery_checked_at_ns is None
+
+
+def test_monitor_store_lists_reserved_cleanup_pending_tasks(tmp_path) -> None:
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    tid = "1779000000000000033"
+    terminal = _update(
+        tid,
+        1779000000000008310,
+        event="work_failed",
+        status="failed",
+        terminal=True,
+    )
+    store.record_task_log_updates(
+        WEFT_GLOBAL_LOG_QUEUE,
+        (terminal,),
+        checkpoint_message_id=None,
+    )
+
+    assert store.list_reserved_cleanup_pending_tasks(limit=10) == ()
+    store.mark_summary_emitted(tid, terminal.message_id + 1)
+
+    pending = store.list_reserved_cleanup_pending_tasks(limit=10)
+    assert [record.tid for record in pending] == [tid]
+    store.mark_reserved_cleanup_checked((tid,), terminal.message_id + 2)
+    record = store.get_task(tid)
+    assert record is not None
+    assert record.reserved_cleanup_checked_at_ns == terminal.message_id + 2
+    assert store.list_reserved_cleanup_pending_tasks(limit=10) == ()
+    later = _update(tid, terminal.message_id + 3, event="task_activity")
+    store.record_task_log_updates(
+        WEFT_GLOBAL_LOG_QUEUE,
+        (later,),
+        checkpoint_message_id=None,
+    )
+    record = store.get_task(tid)
+    assert record is not None
+    assert record.reserved_cleanup_checked_at_ns is None
 
 
 def test_monitor_store_prunes_legacy_message_tombstones(tmp_path) -> None:
@@ -866,6 +920,55 @@ def test_monitor_store_retires_completed_collation_families(tmp_path) -> None:
     result = store.retire_completed_collation_families(
         limit=10,
         retired_at_ns=terminal.message_id + 6,
+    )
+
+    assert result.families_retired == 1
+    assert store.get_task(tid) is None
+
+
+def test_monitor_store_retirement_requires_reserved_cleanup_when_probe_needed(
+    tmp_path,
+) -> None:
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    tid = "1779000000000000034"
+    terminal = _update(
+        tid,
+        1779000000000008400,
+        event="work_failed",
+        status="failed",
+        terminal=True,
+    )
+    store.record_task_log_updates(
+        WEFT_GLOBAL_LOG_QUEUE,
+        (terminal,),
+        checkpoint_message_id=None,
+    )
+    store.delete_task_messages_after_raw_delete(
+        (terminal.message_id,),
+        deleted_at_ns=terminal.message_id + 1,
+    )
+    store.mark_summary_emitted(tid, terminal.message_id + 2)
+    store.mark_family_disposed(
+        tid,
+        terminal.message_id + 3,
+        disposition_reason="terminal",
+    )
+    store.mark_task_control_deleted(tid, terminal.message_id + 4)
+
+    assert (
+        store.retire_completed_collation_families(
+            limit=10,
+            retired_at_ns=terminal.message_id + 5,
+        ).families_retired
+        == 0
+    )
+    store.mark_reserved_cleanup_checked((tid,), terminal.message_id + 6)
+
+    result = store.retire_completed_collation_families(
+        limit=10,
+        retired_at_ns=terminal.message_id + 7,
     )
 
     assert result.families_retired == 1

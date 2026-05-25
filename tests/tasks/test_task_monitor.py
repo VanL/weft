@@ -1265,12 +1265,245 @@ def test_task_monitor_recovers_orphan_raw_task_log_rows_after_bad_raw_mark(
 
     assert recovery.refs_selected == 2
     assert recovery.rows_deleted == 2
+    assert recovery.families_checked == 1
+    assert recovery.empty_probes == 0
     assert recovery.errors == ()
+    assert store.list_raw_deleted_task_log_recovery_tids(limit=10) == ()
+    recovered_record = store.get_task(tid)
+    assert recovered_record is not None
+    assert recovered_record.orphan_raw_recovery_checked_at_ns is not None
     assert [
         json.loads(body)
         for body, _message_id in iter_queue_entries(log_queue)
         if json.loads(body).get("tid") == tid
     ] == []
+
+
+def test_task_monitor_marks_orphan_recovery_checked_when_raw_rows_absent(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, _make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
+            "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "172800",
+            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+            "WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED": "1",
+        }
+    )
+    tid = "1778084345905438726"
+    terminal = update_from_task_log_payload(
+        {
+            "event": "work_completed",
+            "status": "completed",
+            "tid": tid,
+        },
+        queue_name=WEFT_GLOBAL_LOG_QUEUE,
+        message_id=1778084345905438727,
+    )
+    assert terminal is not None
+
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999874"),
+        config=config,
+    )
+    try:
+        store = task._ensure_monitor_store()
+        assert store is not None
+        store.record_task_log_updates(
+            WEFT_GLOBAL_LOG_QUEUE,
+            (terminal,),
+            checkpoint_message_id=None,
+        )
+        store.delete_task_messages_after_raw_delete(
+            (terminal.message_id,),
+            deleted_at_ns=terminal.message_id + 1,
+        )
+        assert store.list_raw_deleted_task_log_recovery_tids(limit=10) == (tid,)
+
+        recovery = task._recover_orphan_task_log_rows(
+            store,
+            now_ns=terminal.message_id + 2,
+        )
+        second_recovery = task._recover_orphan_task_log_rows(
+            store,
+            now_ns=terminal.message_id + 3,
+        )
+    finally:
+        task.stop()
+
+    assert recovery.refs_selected == 0
+    assert recovery.rows_deleted == 0
+    assert recovery.families_checked == 1
+    assert recovery.empty_probes == 1
+    assert recovery.errors == ()
+    assert second_recovery.families_checked == 0
+    assert second_recovery.empty_probes == 0
+    assert store.list_raw_deleted_task_log_recovery_tids(limit=10) == ()
+    record = store.get_task(tid)
+    assert record is not None
+    assert record.orphan_raw_recovery_checked_at_ns == terminal.message_id + 2
+    assert task._last_policy_progress[-1].policy == "monitor_store.orphan_raw_recovery"
+    assert task._last_policy_progress[-1].base_reached is True
+
+
+def test_task_monitor_orphan_recovery_leaves_failed_probe_retryable(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, _make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
+            "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "172800",
+            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+            "WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED": "1",
+        }
+    )
+    tid = "1778084345905438728"
+    terminal = update_from_task_log_payload(
+        {
+            "event": "work_completed",
+            "status": "completed",
+            "tid": tid,
+        },
+        queue_name=WEFT_GLOBAL_LOG_QUEUE,
+        message_id=1778084345905438729,
+    )
+    assert terminal is not None
+
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999873"),
+        config=config,
+    )
+
+    def fail_fetch(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise RuntimeError("probe failed")
+
+    monkeypatch.setattr(
+        task_monitor_mod,
+        "_fetch_dead_task_log_coalesce_group",
+        fail_fetch,
+    )
+    try:
+        store = task._ensure_monitor_store()
+        assert store is not None
+        store.record_task_log_updates(
+            WEFT_GLOBAL_LOG_QUEUE,
+            (terminal,),
+            checkpoint_message_id=None,
+        )
+        store.delete_task_messages_after_raw_delete(
+            (terminal.message_id,),
+            deleted_at_ns=terminal.message_id + 1,
+        )
+
+        recovery = task._recover_orphan_task_log_rows(
+            store,
+            now_ns=terminal.message_id + 2,
+        )
+    finally:
+        task.stop()
+
+    assert recovery.families_checked == 0
+    assert recovery.empty_probes == 0
+    assert recovery.errors == (f"{tid}: probe failed",)
+    assert store.list_raw_deleted_task_log_recovery_tids(limit=10) == (tid,)
+    record = store.get_task(tid)
+    assert record is not None
+    assert record.orphan_raw_recovery_checked_at_ns is None
+
+
+def test_task_monitor_orphan_recovery_reports_bounded_waypoint(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, _make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_BATCH_SIZE": 1,
+            "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "172800",
+            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+            "WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED": "1",
+        }
+    )
+    tids = ("1778084345905438730", "1778084345905438732")
+    terminals = []
+    for offset, tid in enumerate(tids):
+        terminal = update_from_task_log_payload(
+            {
+                "event": "work_completed",
+                "status": "completed",
+                "tid": tid,
+            },
+            queue_name=WEFT_GLOBAL_LOG_QUEUE,
+            message_id=1778084345905438731 + offset,
+        )
+        assert terminal is not None
+        terminals.append(terminal)
+
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999872"),
+        config=config,
+    )
+    try:
+        store = task._ensure_monitor_store()
+        assert store is not None
+        store.record_task_log_updates(
+            WEFT_GLOBAL_LOG_QUEUE,
+            tuple(terminals),
+            checkpoint_message_id=None,
+        )
+        store.delete_task_messages_after_raw_delete(
+            tuple(terminal.message_id for terminal in terminals),
+            deleted_at_ns=1778084345905438740,
+        )
+
+        first = task._recover_orphan_task_log_rows(store, now_ns=1778084345905438741)
+        first_progress = task._last_policy_progress[-1]
+        second = task._recover_orphan_task_log_rows(store, now_ns=1778084345905438742)
+        second_progress = task._last_policy_progress[-1]
+        third = task._recover_orphan_task_log_rows(store, now_ns=1778084345905438743)
+        third_progress = task._last_policy_progress[-1]
+    finally:
+        task.stop()
+
+    assert first.families_checked == 1
+    assert first.empty_probes == 1
+    assert first_progress.waypoint_reached is True
+    assert first_progress.base_reached is False
+    assert second.families_checked == 1
+    assert second.empty_probes == 1
+    assert second_progress.waypoint_reached is False
+    assert second_progress.base_reached is False
+    assert third.families_checked == 0
+    assert third.empty_probes == 0
+    assert third_progress.waypoint_reached is False
+    assert third_progress.base_reached is True
+    assert store.list_raw_deleted_task_log_recovery_tids(limit=10) == ()
 
 
 def test_task_monitor_failed_summary_disposition_blocks_table_delete(
@@ -1900,6 +2133,289 @@ def test_task_monitor_keeps_reserved_queue_for_active_service_owner(
         task.stop()
 
     assert list(reserved.peek_generator()) == ["active-reserved"]
+
+
+def test_task_monitor_reserved_cleanup_marks_absent_reserved_probe_checked(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, _make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    tid = "1778084345905438760"
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999961"),
+        config=config,
+    )
+    try:
+        store = task._ensure_monitor_store()
+        assert store is not None
+        update = update_from_task_log_payload(
+            {
+                "event": "work_failed",
+                "status": "failed",
+                "tid": tid,
+                "taskspec": {
+                    "tid": tid,
+                    "version": "1.0",
+                    "name": "sample",
+                    "io": {},
+                    "state": {"status": "failed"},
+                    "metadata": {},
+                },
+            },
+            message_id=int(tid),
+        )
+        assert update is not None
+        store.record_task_log_updates(
+            WEFT_GLOBAL_LOG_QUEUE,
+            (update,),
+            checkpoint_message_id=None,
+        )
+        store.mark_summary_emitted(tid, int(tid) + 1)
+
+        cleanup = task._run_reserved_cleanup_slice(
+            store,
+            now_ns=time.time_ns(),
+        )
+        second = task._run_reserved_cleanup_slice(
+            store,
+            now_ns=time.time_ns(),
+        )
+        record = store.get_task(tid)
+        assert record is not None
+        assert record.reserved_cleanup_checked_at_ns is not None
+        assert cleanup.reserved_families_processed == 1
+        assert cleanup.reserved_queues_deleted == 0
+        assert cleanup.cleanup_jobs_by_kind == {"reserved": 1}
+        assert second.policy_progress[-1].base_reached is True
+        assert second.policy_progress[-1].selected == 0
+    finally:
+        task.stop()
+
+
+def test_task_monitor_reserved_cleanup_marks_deleted_reserved_probe_checked(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    tid = "1778084345905438763"
+    reserved = make_queue(f"T{tid}.reserved")
+    reserved.write("failed-reserved")
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999963"),
+        config=config,
+    )
+    try:
+        store = task._ensure_monitor_store()
+        assert store is not None
+        update = update_from_task_log_payload(
+            {
+                "event": "work_failed",
+                "status": "failed",
+                "tid": tid,
+                "taskspec": {
+                    "tid": tid,
+                    "version": "1.0",
+                    "name": "sample",
+                    "io": {},
+                    "state": {"status": "failed"},
+                    "metadata": {},
+                },
+            },
+            message_id=int(tid),
+        )
+        assert update is not None
+        store.record_task_log_updates(
+            WEFT_GLOBAL_LOG_QUEUE,
+            (update,),
+            checkpoint_message_id=None,
+        )
+        store.mark_summary_emitted(tid, int(tid) + 1)
+
+        cleanup = task._run_reserved_cleanup_slice(
+            store,
+            now_ns=time.time_ns(),
+        )
+        record = store.get_task(tid)
+        assert record is not None
+        assert record.reserved_cleanup_checked_at_ns is not None
+        assert cleanup.reserved_families_processed == 1
+        assert cleanup.reserved_queues_deleted == 1
+        assert list(reserved.peek_generator()) == []
+    finally:
+        task.stop()
+
+
+def test_task_monitor_reserved_cleanup_keeps_failed_delete_retryable(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    tid = "1778084345905438764"
+    reserved = make_queue(f"T{tid}.reserved")
+    reserved.write("failed-reserved")
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999964"),
+        config=config,
+    )
+
+    def fail_delete(queue_name: str):
+        del queue_name
+        return task_monitor_mod._TaskControlCleanupResult(
+            pending=True,
+            errors=("delete failed",),
+        )
+
+    try:
+        store = task._ensure_monitor_store()
+        assert store is not None
+        update = update_from_task_log_payload(
+            {
+                "event": "work_failed",
+                "status": "failed",
+                "tid": tid,
+                "taskspec": {
+                    "tid": tid,
+                    "version": "1.0",
+                    "name": "sample",
+                    "io": {},
+                    "state": {"status": "failed"},
+                    "metadata": {},
+                },
+            },
+            message_id=int(tid),
+        )
+        assert update is not None
+        store.record_task_log_updates(
+            WEFT_GLOBAL_LOG_QUEUE,
+            (update,),
+            checkpoint_message_id=None,
+        )
+        store.mark_summary_emitted(tid, int(tid) + 1)
+        monkeypatch.setattr(task, "_delete_runtime_reserved_queue", fail_delete)
+
+        cleanup = task._run_reserved_cleanup_slice(
+            store,
+            now_ns=time.time_ns(),
+        )
+        record = store.get_task(tid)
+        assert record is not None
+        assert record.reserved_cleanup_checked_at_ns is None
+        assert store.list_reserved_cleanup_pending_tasks(limit=10)[0].tid == tid
+        assert cleanup.pending is True
+        assert cleanup.errors == ("delete failed",)
+        assert list(reserved.peek_generator()) == ["failed-reserved"]
+    finally:
+        task.stop()
+
+
+def test_task_monitor_reserved_cleanup_reports_bounded_waypoint(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, _make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        task_monitor_mod,
+        "TASK_MONITOR_RUNTIME_CLEANUP_SLICE_FAMILY_LIMIT",
+        1,
+    )
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT": 10,
+            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    tids = ("1778084345905438765", "1778084345905438766")
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999965"),
+        config=config,
+    )
+    try:
+        store = task._ensure_monitor_store()
+        assert store is not None
+        updates = []
+        for tid in tids:
+            update = update_from_task_log_payload(
+                {
+                    "event": "work_failed",
+                    "status": "failed",
+                    "tid": tid,
+                    "taskspec": {
+                        "tid": tid,
+                        "version": "1.0",
+                        "name": "sample",
+                        "io": {},
+                        "state": {"status": "failed"},
+                        "metadata": {},
+                    },
+                },
+                message_id=int(tid),
+            )
+            assert update is not None
+            updates.append(update)
+        store.record_task_log_updates(
+            WEFT_GLOBAL_LOG_QUEUE,
+            tuple(updates),
+            checkpoint_message_id=None,
+        )
+        for tid in tids:
+            store.mark_summary_emitted(tid, int(tid) + 1)
+
+        first = task._run_reserved_cleanup_slice(store, now_ns=time.time_ns())
+        second = task._run_reserved_cleanup_slice(store, now_ns=time.time_ns())
+        third = task._run_reserved_cleanup_slice(store, now_ns=time.time_ns())
+
+        assert first.reserved_families_processed == 1
+        assert first.policy_progress[-1].waypoint_reached is True
+        assert first.next_slice_kind is None
+        assert second.reserved_families_processed == 1
+        assert second.next_slice_kind == "dead_tid"
+        assert third.policy_progress[-1].base_reached is True
+        assert third.policy_progress[-1].selected == 0
+    finally:
+        task.stop()
 
 
 def test_task_monitor_dead_task_cleanup_deletes_standard_control_queues(
