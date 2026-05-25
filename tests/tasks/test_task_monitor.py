@@ -2805,10 +2805,12 @@ def test_task_monitor_dead_task_cleanup_defers_outbox_only_until_retention(
     assert cleanup.dead_tids_deferred_retention == 1
     assert cleanup.dead_tids_pending == 0
     assert cleanup.pending is False
+    assert cleanup.policy_progress[-1].base_reached is True
+    assert cleanup.policy_progress[-1].waypoint_reached is False
     assert coalesce_calls == []
 
 
-def test_task_monitor_dead_task_cleanup_batches_monitor_record_lookup(
+def test_task_monitor_dead_task_cleanup_skips_monitor_lookup_for_deferred_only_queues(
     broker_env,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2865,12 +2867,14 @@ def test_task_monitor_dead_task_cleanup_batches_monitor_record_lookup(
     finally:
         task.stop()
 
-    assert batch_store.get_tasks_calls == 1
+    assert batch_store.get_tasks_calls == 0
     assert cleanup.dead_tids_processed == 0
     assert cleanup.dead_tids_deferred_retention == tid_count
     assert cleanup.dead_tids_pending == 0
     assert cleanup.pending is False
     assert cleanup.deadline_hit is False
+    assert cleanup.policy_progress[-1].base_reached is True
+    assert cleanup.policy_progress[-1].waypoint_reached is False
 
 
 def test_task_monitor_dead_task_cleanup_does_not_coalesce_task_log_refs(

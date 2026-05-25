@@ -2511,9 +2511,14 @@ class TaskMonitor(ServiceTask):
             task_queue_names,
             now_ns=now_ns,
             min_age_seconds=TASK_MONITOR_TID_MAPPING_CLEANUP_MIN_AGE_SECONDS,
+            retention_seconds=self._monitor_config.task_log_retention_period_seconds,
             active_tids=active_tids,
         )
-        records_by_tid = {record.tid: record for record in store.get_tasks(probe_tids)}
+        records_by_tid = (
+            {record.tid: record for record in store.get_tasks(probe_tids)}
+            if probe_tids
+            else {}
+        )
         selection_deadline_monotonic = (
             _monitor_monotonic() + TASK_MONITOR_RUNTIME_CLEANUP_SLICE_SECONDS
         )
@@ -2634,6 +2639,7 @@ class TaskMonitor(ServiceTask):
                     deferred=(
                         selection.skipped_live
                         + selection.skipped_too_young
+                        + selection.skipped_monitor_records
                         + selection.deferred_retention
                     ),
                     waypoint_reached=selection.pending or deadline_hit,
@@ -2653,6 +2659,12 @@ class TaskMonitor(ServiceTask):
                         "dead_tid_reserved_queues_deleted": (
                             dead_tid_reserved_queues_deleted
                         ),
+                        "dead_tids_skipped_live": selection.skipped_live,
+                        "dead_tids_skipped_too_young": selection.skipped_too_young,
+                        "dead_tids_skipped_monitor_records": (
+                            selection.skipped_monitor_records
+                        ),
+                        "dead_tids_deferred_retention": (selection.deferred_retention),
                     },
                 ),
             ),

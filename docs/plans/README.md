@@ -22,7 +22,7 @@ There are currently 122 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
-| [`2026-05-25-monitor-dead-task-catchup-convergence-plan.md`](./2026-05-25-monitor-dead-task-catchup-convergence-plan.md) | Monitor Dead-Task Catch-Up Convergence Plan | `draft` | none |
+| [`2026-05-25-monitor-dead-task-catchup-convergence-plan.md`](./2026-05-25-monitor-dead-task-catchup-convergence-plan.md) | Monitor Dead-Task Catch-Up Convergence Plan | `completed` | none |
 | [`2026-05-24-monitor-policy-progress-contract-plan.md`](./2026-05-24-monitor-policy-progress-contract-plan.md) | Monitor Policy Progress Contract Plan | `completed` | none |
 | [`2026-05-23-monitor-cleanup-policy-convergence-plan.md`](./2026-05-23-monitor-cleanup-policy-convergence-plan.md) | Monitor Cleanup Policy Convergence Plan | `completed` | none |
 | [`2026-05-23-monitor-cleanup-executor-plan.md`](./2026-05-23-monitor-cleanup-executor-plan.md) | Monitor Cleanup Executor Plan | `completed` | none |
