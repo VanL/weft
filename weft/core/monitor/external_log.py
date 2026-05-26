@@ -177,7 +177,7 @@ class ExternalTaskLogSink:
         emitted_at_ns: int,
         close_reason: str,
     ) -> None:
-        """Emit one collated task lifecycle summary before raw-row deletion."""
+        """Emit one collated task lifecycle summary for a terminal family."""
 
         self._emit(
             {

@@ -226,7 +226,8 @@ Current task families:
   summary when present, keeps exact raw task-log message IDs only while those
   raw rows still need exact deletion or retry, emits compact terminal task
   summaries through the configured monitor sink, and may support table-backed
-  exact raw deletion after any required external task-log JSONL emit succeeds.
+  exact raw deletion after durable Monitor collation; external task-log JSONL
+  emit gates family summary/disposition retry, not raw deletion.
   After raw deletion is reconciled, child message rows are physically removed
   from `weft_monitor_task_messages`; after summary, disposition, raw deletion,
   and task-local control cleanup complete, the compact parent collation row may
