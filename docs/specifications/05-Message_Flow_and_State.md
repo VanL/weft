@@ -881,7 +881,10 @@ system pruning:
   candidates by listing standard task-local queue names, parsing `T{tid}.*`
   identities, and subtracting live runtime TIDs. That dead-task cleanup policy
   is owned by
-  `weft/core/monitor/policies/dead_task.py`: it schedules a dead-TID cleanup
+  `weft/core/monitor/policies/dead_task.py` (TID discovery and per-TID cleanup
+  plans) and `weft/core/monitor/policies/runtime_control.py` (candidate
+  selection, deferred-only detection, and Monitor-record probe gating): it
+  schedules a dead-TID cleanup
   job only when at least one currently existing standard task-local queue is
   eligible now. It selects standard stale `T{tid}.ctrl_in`,
   `T{tid}.ctrl_out`, and `T{tid}.inbox` immediately, and selects standard
