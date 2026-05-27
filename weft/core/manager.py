@@ -197,6 +197,9 @@ class ManagedChild:
     ctrl_out_queue: str | None = None
     internal_role: str | None = None
     service_key: str | None = None
+    source_queue: str | None = None
+    reserved_queue: str | None = None
+    message_timestamp: int | None = None
     launched_ns: int = 0
     last_liveness_probe_ns: int = 0
     terminal_proof_missing_since_ns: int = 0
@@ -1062,6 +1065,9 @@ class Manager(ServiceTask):
             autostart_source=request.autostart_source,
             internal_role=request.internal_role,
             service_key=request.service_key,
+            source_queue=request.source_queue,
+            reserved_queue=request.reserved_queue,
+            message_timestamp=request.message_timestamp,
             launched_ns=result.launched_ns or time.time_ns(),
         )
         self._invalidate_leadership_work_cache()
@@ -3028,6 +3034,20 @@ class Manager(ServiceTask):
                     pass
                 finally:
                     self._child_processes.pop(tid, None)
+                if (
+                    child.reserved_queue is not None
+                    and child.message_timestamp is not None
+                ):
+                    try:
+                        self._queue(child.reserved_queue).delete(
+                            message_id=child.message_timestamp,
+                        )
+                    except (BrokerError, OSError, RuntimeError):
+                        logger.debug(
+                            "Failed to acknowledge terminal child spawn message %s",
+                            child.message_timestamp,
+                            exc_info=True,
+                        )
                 if child.autostart_source:
                     autostart_child_exited = True
                 service_key = self._service_key_for_child(child)
@@ -6127,6 +6147,13 @@ class Manager(ServiceTask):
             # Pending reserved spawn work is already claimed by this manager.
             # Keep the manager alive even when the row's timestamp is old; a
             # slow child launch is still active work, not idle time.
+            self._last_activity_ns = time.time_ns()
+            return
+        if self._managed_service_convergence_active(include_autostart=True):
+            # Supervision-only service children do not block idle by themselves,
+            # but a missing or uncertain manager-owned service is active
+            # convergence work until it is either replaced or explicitly
+            # suppressed by policy.
             self._last_activity_ns = time.time_ns()
             return
         if self._autostart_ensure_obligation_pending():

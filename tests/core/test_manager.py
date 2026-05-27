@@ -1536,6 +1536,51 @@ def test_internal_reserved_spawn_counts_as_pending_service(
     assert pending == {INTERNAL_SERVICE_KEY_TASK_MONITOR}
 
 
+def test_terminal_service_child_retries_reserved_spawn_ack(
+    broker_env,
+    unique_tid,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    config = load_config({"WEFT_TASK_MONITOR_ENABLED": "1"})
+    manager = Manager(
+        db_path, make_manager_spec(unique_tid, idle_timeout=0.0), config=config
+    )
+    internal_reserved = make_queue(manager._queue_names["internal_reserved"])
+    drain(internal_reserved)
+    internal_reserved.write(json.dumps(manager._build_heartbeat_spawn_payload()))
+    message_id = pending_timestamps(internal_reserved)[0]
+    child_tid = "1779000000000000042"
+    manager._child_processes[child_tid] = ManagedChild(
+        process=FakeLaunchProcess(pid=4242, alive=False),
+        ctrl_queue=f"T{child_tid}.ctrl_in",
+        ctrl_out_queue=f"T{child_tid}.ctrl_out",
+        internal_role=INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
+        service_key=INTERNAL_SERVICE_KEY_HEARTBEAT,
+        reserved_queue=manager._queue_names["internal_reserved"],
+        message_timestamp=message_id,
+    )
+    manager._service_state(INTERNAL_SERVICE_KEY_HEARTBEAT).active_tid = child_tid
+    monkeypatch.setattr(
+        manager, "_child_terminal_proof_still_within_grace", lambda *_args: False
+    )
+    monkeypatch.setattr(
+        manager, "_write_manager_terminal_envelope", lambda *_args: None
+    )
+
+    try:
+        assert manager._cleanup_children() is True
+        assert internal_reserved.peek_one(exact_timestamp=message_id) is None
+        pending = manager._pending_service_keys(
+            {INTERNAL_SERVICE_KEY_HEARTBEAT},
+            queue_names=(manager._queue_names["internal_reserved"],),
+        )
+    finally:
+        manager.cleanup()
+
+    assert pending == set()
+
+
 def test_task_monitor_spawn_payload_uses_manager_owned_envelope(
     manager_setup,
 ) -> None:
@@ -3398,6 +3443,38 @@ def test_internal_task_monitor_child_does_not_block_idle_shutdown(
     finally:
         manager._child_processes.clear()
         manager.cleanup()
+
+
+def test_manager_idle_shutdown_waits_for_missing_internal_service(
+    broker_env,
+    unique_tid,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, _make_queue = broker_env
+    spec = make_manager_spec(unique_tid, idle_timeout=0.01)
+    manager = Manager(
+        db_path,
+        spec,
+        config=load_config({"WEFT_TASK_MONITOR_ENABLED": True}),
+    )
+    manager._queue_names["inbox"] = WEFT_SPAWN_REQUESTS_QUEUE
+    state = manager._service_state(INTERNAL_SERVICE_KEY_HEARTBEAT)
+    state.launched_once = True
+    state.active_tid = None
+    manager._last_activity_ns = time.time_ns() - 1_000_000_000
+    manager._last_managed_service_convergence_ns = time.time_ns()
+    monkeypatch.setattr(
+        manager,
+        "_update_idle_activity_from_broker",
+        lambda *, force=False: None,
+    )
+
+    try:
+        manager.process_once()
+    finally:
+        manager.cleanup()
+
+    assert manager.should_stop is False
 
 
 def test_manager_process_once_skips_idle_broker_probe_when_idle_disabled(
