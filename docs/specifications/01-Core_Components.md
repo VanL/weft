@@ -266,19 +266,22 @@ Current task families:
   monitor also calls the configured task-monitor processor. The persistent
   monitor is a reactor: it owns task-local control, heartbeat registration,
   scheduling, and commits cached diagnostics from worker results. Custom
-  processors run in the shared broker-free worker lane from a candidate
-  snapshot. Built-in cleanup processors run in a TaskMonitor-owned built-in
-  cycle worker lane; that lane may open fresh broker/store handles, fold
-  retained task-log rows into the Monitor store, emit configured operational
-  summaries, and delete exact rows through the canonical prune implementation.
-  Runtime cleanup remains a separate declared maintenance lane: the
+  processors run from the resulting candidate snapshot through the registered
+  `ServiceTask` processor worker group; the reactor commits the processor
+  result, checkpoint, and cached diagnostics after the typed worker event
+  returns. Built-in cleanup processors run through a separate registered
+  TaskMonitor-owned built-in cycle worker group; that group may open fresh
+  broker/store handles, fold retained task-log rows into the Monitor store,
+  emit configured operational summaries, and delete exact rows through the
+  canonical prune implementation.
+  Runtime cleanup remains a separate registered maintenance worker group: the
   runtime-cleanup worker may open fresh broker/store handles and delete one
   class of standard stale task-local queues per worker slice. Terminal
   control/inbox cleanup, eligible reserved cleanup, and dead-TID queue cleanup
   are discrete slices with shared policy definitions in
   `weft/core/monitor/policies/runtime_control.py`. The reactor launches each
-  slice on the runtime-cleanup worker lane and only commits cached result data
-  after the worker returns; worker lanes must not answer control messages.
+  slice on the registered runtime-cleanup worker group and only commits cached
+  result data after the worker returns; workers must not answer control messages.
   Runtime cleanup records per-slice job counts plus pending/cap/deadline
   diagnostics, and the reactor may launch the next discrete slice only after
   the previous worker result has been applied.
