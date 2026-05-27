@@ -259,6 +259,63 @@ def test_queue_command_filter_validation_matches_simplebroker(tmp_path) -> None:
     )
 
 
+def test_delete_queue_messages_rejects_message_with_all_queues_without_deleting(
+    tmp_path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    queue_cmd.write_message(ctx, "delete.api.one", "one")
+    queue_cmd.write_message(ctx, "delete.api.two", "two")
+    entry = queue_cmd.peek_queue(ctx, "delete.api.one")[0]
+    assert entry.timestamp is not None
+
+    with pytest.raises(ValueError, match="message_id cannot be used with all_queues"):
+        queue_cmd.delete_queue_messages(
+            ctx,
+            all_queues=True,
+            message_id=entry.timestamp,
+        )
+
+    assert [m.body for m in queue_cmd.read_messages(ctx, "delete.api.one")] == ["one"]
+    assert [m.body for m in queue_cmd.read_messages(ctx, "delete.api.two")] == ["two"]
+
+
+def test_delete_queue_messages_requires_explicit_target_without_deleting(
+    tmp_path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    queue_cmd.write_message(ctx, "delete.api.default", "keep")
+
+    with pytest.raises(
+        ValueError, match="queue_name is required unless all_queues=True"
+    ):
+        queue_cmd.delete_queue_messages(ctx)
+
+    assert [m.body for m in queue_cmd.read_messages(ctx, "delete.api.default")] == [
+        "keep"
+    ]
+
+
+def test_delete_queue_messages_rejects_queue_name_with_all_queues_without_deleting(
+    tmp_path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    queue_cmd.write_message(ctx, "delete.api.named", "keep")
+
+    with pytest.raises(ValueError, match="queue_name cannot be used with all_queues"):
+        queue_cmd.delete_queue_messages(
+            ctx,
+            "delete.api.named",
+            all_queues=True,
+        )
+
+    assert [m.body for m in queue_cmd.read_messages(ctx, "delete.api.named")] == [
+        "keep"
+    ]
+
+
 def test_watch_queue(tmp_path):
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)

@@ -314,6 +314,15 @@ MANAGER_CONTROL_DRAIN_MAX_MESSAGES: Final[int] = 32
 MANAGER_INTERNAL_SPAWN_DRAIN_MAX_MESSAGES: Final[int] = 128
 """Maximum internal spawn requests drained before yielding a manager turn."""
 
+MANAGER_STALE_INTERNAL_RESERVED_CLEANUP_INTERVAL_SECONDS: Final[float] = 300.0
+"""Minimum interval between manager stale internal-reserved cleanup passes."""
+
+MANAGER_STALE_INTERNAL_RESERVED_CLEANUP_QUEUE_LIMIT: Final[int] = 64
+"""Maximum stale manager internal-reserved queues inspected per cleanup pass."""
+
+MANAGER_STALE_INTERNAL_RESERVED_CLEANUP_MESSAGE_LIMIT: Final[int] = 64
+"""Maximum rows deleted from one stale manager internal-reserved queue per pass."""
+
 MANAGER_PUBLIC_SPAWN_DRAIN_MAX_MESSAGES: Final[int] = 128
 """Maximum public spawn requests drained before yielding a manager turn."""
 

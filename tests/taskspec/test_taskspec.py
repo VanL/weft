@@ -456,6 +456,24 @@ class TestProviderCLIValidation:
                 model="test-model",
             )
 
+    def test_agent_rejects_duplicate_tool_names(self) -> None:
+        with pytest.raises(ValueError, match="duplicate agent tool name"):
+            AgentSection(
+                runtime="llm",
+                tools=(
+                    {
+                        "name": "echo_payload",
+                        "kind": "python",
+                        "ref": "tests.tasks.sample_targets:echo_payload",
+                    },
+                    {
+                        "name": "echo_payload",
+                        "kind": "python",
+                        "ref": "tests.tasks.sample_targets:provide_payload",
+                    },
+                ),
+            )
+
     def test_provider_cli_rejects_persistent_per_message_tasks(self) -> None:
         with pytest.raises(
             ValueError,

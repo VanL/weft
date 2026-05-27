@@ -903,3 +903,13 @@ runbook needs to become stricter.
   Monitor parent, retry sweeps must be allowed to delete that raw row and child
   ref even when the family is still open; terminal summary gates only compact
   summary/disposition and family retirement.
+
+## 2026-05-27 Runner Timeout Boundary
+
+- Runner timeout loops must check authoritative runtime completion before
+  enforcing an elapsed-time timeout. A polling loop can wake after the timeout
+  boundary even when the child exited successfully inside the budget, so
+  timeout classification must be gated on the runtime still being alive. See
+  [weft/core/runners/subprocess_runner.py](/Users/van/Developer/weft/weft/core/runners/subprocess_runner.py)
+  and
+  [tests/core/test_subprocess_runner.py](/Users/van/Developer/weft/tests/core/test_subprocess_runner.py).

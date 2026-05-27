@@ -136,6 +136,57 @@ def test_pipeline_run_reads_piped_stdin_when_input_omitted(
     assert err == ""
 
 
+def test_pipeline_run_first_stage_defaults_input_does_not_override_input_flag(
+    workdir, weft_harness
+) -> None:
+    weft_harness.ensure_foreground_manager()
+    ctx = build_context(spec_context=workdir)
+    tasks_dir = ctx.weft_dir / "tasks"
+    tasks_dir.mkdir(parents=True, exist_ok=True)
+
+    _write_json(
+        tasks_dir / "stage1.json",
+        {
+            "name": "stage1",
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:echo_payload",
+            },
+            "metadata": {},
+        },
+    )
+
+    pipeline_path = workdir / "pipeline_entry_fallback.json"
+    _write_json(
+        pipeline_path,
+        {
+            "name": "pipe-entry-fallback",
+            "stages": [
+                {
+                    "name": "one",
+                    "task": "stage1",
+                    "defaults": {"input": "FALLBACK_VALUE"},
+                }
+            ],
+        },
+    )
+
+    rc, out, err = run_cli(
+        "run",
+        "--pipeline",
+        pipeline_path,
+        "--input",
+        "USER_PROVIDED_INPUT",
+        cwd=workdir,
+        harness=weft_harness,
+        timeout=PIPELINE_CLI_TIMEOUT,
+    )
+
+    assert rc == 0
+    assert out == "USER_PROVIDED_INPUT"
+    assert err == ""
+
+
 def test_pipeline_run_stage_can_be_bundle_backed_task_spec(
     workdir, weft_harness
 ) -> None:

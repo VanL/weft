@@ -817,7 +817,7 @@ def await_task_result(
         timeout=timeout,
     )
     if materialized is None:
-        if timeout is not None and timeout > 0:
+        if timeout is not None:
             return TaskResult(
                 tid=normalized_tid,
                 status="timeout",
@@ -933,7 +933,7 @@ def cmd_result(
         timeout=timeout,
     )
     if materialized is None:
-        if timeout is not None and timeout > 0:
+        if timeout is not None:
             return 124, f"Timed out after {timeout} seconds waiting for task {full_tid}"
         return 2, f"weft result: no outbox queue for task {full_tid}"
 

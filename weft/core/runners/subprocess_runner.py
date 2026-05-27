@@ -2,7 +2,7 @@
 
 Spec references:
 - docs/specifications/01-Core_Components.md [CC-3.2], [CC-3.4]
-- docs/specifications/06-Resource_Management.md [RM-5.1]
+- docs/specifications/06-Resource_Management.md [RM-5.1], [RM-5.2]
 """
 
 from __future__ import annotations
@@ -81,7 +81,10 @@ def run_monitored_subprocess(
     kill_runtime: Callable[[], None],
     worker_pid: int | None = None,
 ) -> RunnerOutcome:
-    """Run a managed subprocess with timeout, cancellation, and limit checks."""
+    """Run a managed subprocess with timeout, cancellation, and limit checks.
+
+    Spec: [RM-5.1], [RM-5.2]
+    """
     from weft.core.runners.host import RunnerOutcome
 
     last_metrics: ResourceMetrics | None = None
@@ -170,8 +173,16 @@ def run_monitored_subprocess(
                 runtime_handle=runtime_handle,
             )
 
+        process_returncode = process.poll()
+        if process_returncode is not None and stdout_closed and stderr_closed:
+            break
+
         elapsed = time.monotonic() - start_time
-        if timeout is not None and elapsed >= timeout:
+        timed_out = timeout is not None and elapsed >= timeout
+        if timed_out:
+            process_returncode = process.poll()
+        if timed_out and process_returncode is None:
+            assert timeout is not None
             _kill_process_runtime(process, kill_runtime=kill_runtime)
             stdout_closed, stderr_closed = _drain_streams_until_closed(
                 stdout_queue,
@@ -208,14 +219,11 @@ def run_monitored_subprocess(
                 ),
             )
 
-        if process.poll() is not None and stdout_closed and stderr_closed:
-            break
-
         sleep_for = ACTIVE_CONTROL_POLL_INTERVAL
         if timeout is not None:
             remaining = timeout - elapsed
             sleep_for = min(sleep_for, max(SUBPROCESS_POLL_INTERVAL_FLOOR, remaining))
-        if process.poll() is not None:
+        if process_returncode is not None:
             sleep_for = min(sleep_for, SUBPROCESS_POLL_INTERVAL_FLOOR)
         if monitor is not None:
             until_monitor = max(

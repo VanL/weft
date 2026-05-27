@@ -515,7 +515,12 @@ they must not keep the runtime cleanup worker pending or trigger raw task-log
 coalescing. Dead-TID cleanup must not mark Monitor collation families; if a
 Monitor row exists, terminal or reserved cleanup owns that family. That
 name-derived cleanup must not delete manager/service controls, custom
-controls, or active runtime owners.
+controls, manager-owned `T{manager_tid}.internal_reserved` queues, or active
+runtime owners. Manager-owned `.internal_reserved` cleanup is a Manager
+responsibility: the current manager may clear its own private internal
+reserved queue during shutdown, and active managers may immediately delete
+bounded batches from stale `.internal_reserved` queues only after the owning
+manager TID is absent from the live manager registry.
 Collation summaries, cleanup policy stats, cached `policy_progress`, and
 Monitor-owned collation tables remain operational TaskMonitor output only.
 Those deletes, summaries, progress records, and tables do not make

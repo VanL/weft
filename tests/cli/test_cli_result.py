@@ -280,3 +280,21 @@ def test_result_missing_task_reports_error(workdir, weft_harness) -> None:
     assert rc == 2
     assert out == ""
     assert "no outbox queue" in err
+
+
+def test_result_missing_task_with_zero_timeout_reports_timeout(
+    workdir,
+    weft_harness,
+) -> None:
+    rc, out, err = run_cli(
+        "result",
+        "999",
+        "--timeout",
+        "0",
+        cwd=workdir,
+        harness=weft_harness,
+    )
+
+    assert rc == 124
+    assert out == ""
+    assert "Timed out after 0.0 seconds waiting for task 999" in err

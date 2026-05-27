@@ -3718,6 +3718,9 @@ class TaskMonitor(ServiceTask):
         if isinstance(result.value, ServiceWorkerEvent):
             super()._handle_worker_result(result)
             return
+        if result.lane in self._service_worker_registrations:
+            super()._handle_worker_result(result)
+            return
         if result.lane == TASK_MONITOR_BUILTIN_CYCLE_WORKER_LANE:
             self._handle_builtin_cycle_worker_result(result)
             return

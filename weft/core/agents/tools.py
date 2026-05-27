@@ -46,7 +46,7 @@ def resolve_agent_tools(
 
     Spec: [AR-2.2], [AR-3.1]
     """
-    tools_by_name = {tool.name: tool for tool in tools}
+    tools_by_name = _index_tools_by_name(tools)
     _validate_override_names("allow", allow, tools_by_name)
     _validate_override_names("deny", deny, tools_by_name)
 
@@ -84,6 +84,22 @@ def resolve_agent_tool(
         approval_required=tool.approval_required,
         config=dict(tool.config),
     )
+
+
+def _index_tools_by_name(
+    tools: Sequence[AgentToolSection],
+) -> dict[str, AgentToolSection]:
+    tools_by_name: dict[str, AgentToolSection] = {}
+    duplicate_names: set[str] = set()
+    for tool in tools:
+        if tool.name in tools_by_name:
+            duplicate_names.add(tool.name)
+            continue
+        tools_by_name[tool.name] = tool
+    if duplicate_names:
+        joined = ", ".join(sorted(duplicate_names))
+        raise ValueError(f"duplicate agent tool name(s): {joined}")
+    return tools_by_name
 
 
 def _validate_override_names(

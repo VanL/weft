@@ -1453,7 +1453,7 @@ def test_custom_inbox_manager_does_not_consume_internal_spawn_queue(
     assert internal_queue.peek_one() is not None
 
 
-def test_internal_spawn_launch_failure_leaves_internal_reserved_visible(
+def test_internal_spawn_launch_failure_keeps_internal_reserved_until_shutdown(
     broker_env,
     unique_tid,
     monkeypatch: pytest.MonkeyPatch,
@@ -1494,12 +1494,13 @@ def test_internal_spawn_launch_failure_leaves_internal_reserved_visible(
 
     try:
         manager.process_once()
+        assert internal_queue.peek_one(exact_timestamp=message_id) is None
+        assert public_queue.peek_one(exact_timestamp=message_id) is None
+        assert internal_reserved.peek_one(exact_timestamp=message_id) is not None
     finally:
         manager.cleanup()
 
-    assert internal_queue.peek_one(exact_timestamp=message_id) is None
-    assert public_queue.peek_one(exact_timestamp=message_id) is None
-    assert internal_reserved.peek_one(exact_timestamp=message_id) is not None
+    assert internal_reserved.peek_one(exact_timestamp=message_id) is None
     events = [json.loads(item) for item in drain(log_queue)]
     assert not any(
         str(event.get("event", "")).startswith("manager_spawn_fence")
@@ -5423,6 +5424,93 @@ def test_manager_spawn_drains_require_pending_evidence(
     assert internal_reserved.peek_one() is None
     assert spawn_queue.peek_one() is not None
     assert reserved_queue.peek_one() is None
+
+
+def test_manager_cleanup_clears_own_internal_reserved_even_without_cleanup_on_exit(
+    broker_env,
+    unique_tid: str,
+) -> None:
+    db_path, make_queue = broker_env
+    config = load_config({"WEFT_TASK_MONITOR_ENABLED": "0"})
+    manager = Manager(db_path, make_manager_spec(unique_tid), config=config)
+    internal_reserved = make_queue(manager._queue_names["internal_reserved"])
+    drain(internal_reserved)
+    internal_reserved.write("stale-internal-spawn")
+
+    cleaned = False
+    try:
+        manager.stop(join=False)
+        manager.cleanup()
+        cleaned = True
+    finally:
+        if not cleaned:
+            manager.stop(join=False)
+            manager.cleanup()
+
+    assert internal_reserved.peek_one() is None
+
+
+def test_manager_deletes_stale_internal_reserved_for_inactive_manager(
+    broker_env,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    config = load_config({"WEFT_TASK_MONITOR_ENABLED": "0"})
+    manager = Manager(db_path, make_manager_spec(unique_tid), config=config)
+    stale_tid = str(int(unique_tid) - 100)
+    active_tid = str(int(unique_tid) + 100)
+    stale_reserved = make_queue(f"T{stale_tid}.internal_reserved")
+    active_reserved = make_queue(f"T{active_tid}.internal_reserved")
+    own_reserved = make_queue(manager._queue_names["internal_reserved"])
+    drain(stale_reserved)
+    drain(active_reserved)
+    drain(own_reserved)
+    stale_reserved.write("stale")
+    active_reserved.write("active")
+    own_reserved.write("own")
+    manager._manager_registry_snapshot = {
+        active_tid: {"tid": active_tid, "status": SERVICE_STATUS_ACTIVE},
+    }
+    monkeypatch.setattr(
+        manager,
+        "_read_active_manager_records",
+        lambda: {
+            manager.tid: {"tid": manager.tid},
+            active_tid: {"tid": active_tid},
+        },
+    )
+
+    try:
+        manager._cleanup_stale_internal_reserved_queues(force=True)
+        assert stale_reserved.peek_one() is None
+        assert active_reserved.peek_one() == "active"
+        assert own_reserved.peek_one() == "own"
+    finally:
+        manager.stop(join=False)
+        manager.cleanup()
+
+
+def test_manager_keeps_internal_reserved_when_manager_liveness_unknown(
+    broker_env,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    config = load_config({"WEFT_TASK_MONITOR_ENABLED": "0"})
+    manager = Manager(db_path, make_manager_spec(unique_tid), config=config)
+    stale_tid = str(int(unique_tid) - 100)
+    stale_reserved = make_queue(f"T{stale_tid}.internal_reserved")
+    drain(stale_reserved)
+    stale_reserved.write("unknown")
+    monkeypatch.setattr(manager, "_read_active_manager_records", lambda: None)
+
+    try:
+        manager._cleanup_stale_internal_reserved_queues(force=True)
+        assert stale_reserved.peek_one() == "unknown"
+    finally:
+        manager.stop(join=False)
+        manager.cleanup()
 
 
 def test_manager_service_convergence_advances_without_dispatch_ownership(

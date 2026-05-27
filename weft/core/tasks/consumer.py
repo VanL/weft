@@ -953,6 +953,17 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             self._shutdown_agent_session()
 
         if outcome.status == "timeout":
+            self._finalize_deferred_active_control()
+            if self.taskspec.state.status == "cancelled":
+                self._raise_already_terminal(
+                    RuntimeError(
+                        self.taskspec.state.error or "Target execution cancelled"
+                    )
+                )
+            if self.taskspec.state.status == "killed":
+                self._raise_already_terminal(
+                    RuntimeError(self.taskspec.state.error or "Target execution killed")
+                )
             timeout_exc = TimeoutError(outcome.error or "Target timeout")
             self.taskspec.mark_timeout(error=str(timeout_exc))
             self._finalize_terminal_outcome(
@@ -967,6 +978,17 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             )
 
         if outcome.status == "limit":
+            self._finalize_deferred_active_control()
+            if self.taskspec.state.status == "cancelled":
+                self._raise_already_terminal(
+                    RuntimeError(
+                        self.taskspec.state.error or "Target execution cancelled"
+                    )
+                )
+            if self.taskspec.state.status == "killed":
+                self._raise_already_terminal(
+                    RuntimeError(self.taskspec.state.error or "Target execution killed")
+                )
             limit_exc = RuntimeError(outcome.error or "Resource limits exceeded")
             # Spec: docs/specifications/06-Resource_Management.md#error-categories
             self.taskspec.mark_killed(reason=str(limit_exc))

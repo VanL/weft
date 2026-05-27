@@ -180,6 +180,9 @@ model defines the full `spec.agent` schema. `SpecSection.type` includes
   - `provider_cli` resolves missing values to `general` for compatibility
 - `spec.agent.output_schema` is only valid when
   `spec.agent.output_mode="json"`.
+- `spec.agent.tools[*].name` values identify configured tool descriptors for
+  per-work-item overrides and backend tool payloads; names must be unique
+  within `spec.agent.tools`.
 - `spec.agent.conversation_scope="per_task"` requires `spec.persistent=true`.
 - `llm` only supports `authority_class="bounded"`.
 - `provider_cli` requires `spec.agent.runtime_config.provider`.
@@ -206,7 +209,8 @@ model defines the full `spec.agent` schema. `SpecSection.type` includes
 _Implementation mapping:_ `weft/core/taskspec/model.py` -- `SpecSection` model
 validator `validate_type_targets` enforces mutual exclusion of
 `function_target`/`process_target`/`agent`; `AgentSection.validate_runtime_constraints`
-enforces runtime-specific schema constraints; `SpecSection` model validator
+enforces runtime-specific schema constraints and agent tool-name uniqueness;
+`SpecSection` model validator
 enforces
 `conversation_scope="per_task"` requires `persistent=true` and restricts
 `provider_cli` persistence to that shape. Provider-specific runtime validation:
@@ -222,7 +226,8 @@ enforces
 - `model`: runtime-specific model name.
 - `instructions`: static system/developer prompt.
 - `templates`: named prompt templates declared in the TaskSpec.
-- `tools`: static tool descriptors resolved at execution time.
+- `tools`: static tool descriptors resolved at execution time. Tool names are
+  unique identifiers for override filtering and backend tool declarations.
 - `output_mode`: caller-facing output shape.
 - `output_schema`: optional structured-output schema.
 - `max_turns`: maximum model/tool turns before failure.
@@ -377,7 +382,8 @@ _Implementation mapping:_ `weft/core/agents/runtime.py` --
 tool_trace, artifacts), `execute_agent_target` (normalize + resolve tools +
 dispatch), `start_agent_runtime_session` (persistent session factory).
 Tool resolution: `weft/core/agents/tools.py` (`resolve_agent_tools`,
-`ResolvedAgentTool`).
+`ResolvedAgentTool`). The resolver rejects duplicate configured tool names
+before applying `allow`/`deny` overrides.
 
 ## Persistent Session Boundary [AR-6]
 

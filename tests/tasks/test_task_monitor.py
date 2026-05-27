@@ -12,6 +12,7 @@ import pytest
 
 import weft.core.monitor.task_monitor as task_monitor_mod
 import weft.core.tasks.base as base_task_mod
+import weft.core.tasks.service as service_task_mod
 from weft._constants import (
     CONTROL_PING,
     PONG_EXTENSION_KEY,
@@ -4045,6 +4046,69 @@ def test_task_monitor_terminal_control_cleanup_worker_does_not_block_ping(
         assert task._control_cleanup_work_in_flight is None
     finally:
         release.set()
+        task.stop()
+
+
+def test_task_monitor_ignores_service_worker_sentinel_before_cleanup_result(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, _make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    spec = make_task_monitor_taskspec("1778089999999999966")
+    task = TaskMonitor(db_path, spec, config=config)
+    work = task_monitor_mod._TaskControlCleanupWork(
+        request_id="cleanup-race",
+        now_ns=time.time_ns(),
+    )
+    task._service_lane_work_items[
+        task_monitor_mod.TASK_MONITOR_CONTROL_CLEANUP_WORKER_LANE
+    ] = work
+
+    try:
+        task._handle_worker_result(
+            base_task_mod.TaskWorkerResult(
+                lane=task_monitor_mod.TASK_MONITOR_CONTROL_CLEANUP_WORKER_LANE,
+                value=service_task_mod._service_worker_thread_done,
+                error=None,
+            )
+        )
+
+        assert task._control_cleanup_work_in_flight is work
+        assert task._last_control_delete_errors == ()
+
+        task._handle_worker_result(
+            base_task_mod.TaskWorkerResult(
+                lane=task_monitor_mod.TASK_MONITOR_CONTROL_CLEANUP_WORKER_LANE,
+                value=service_task_mod.ServiceWorkerEvent(
+                    name=task_monitor_mod.TASK_MONITOR_CONTROL_CLEANUP_WORKER_LANE,
+                    request_id=work.request_id,
+                    worker_index=0,
+                    kind="result",
+                    value=task_monitor_mod._TaskControlCleanupWorkerResult(
+                        work=work,
+                        cleanup=task_monitor_mod._TaskControlCleanupResult(
+                            dead_tids_processed=1,
+                        ),
+                    ),
+                ),
+                error=None,
+            )
+        )
+
+        assert task._control_cleanup_work_in_flight is None
+        assert task._last_control_delete_errors == ()
+    finally:
         task.stop()
 
 

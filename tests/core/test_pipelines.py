@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from tests.helpers.test_backend import prepare_project_root
+from weft._constants import PIPELINE_EDGE_RUNTIME_METADATA_KEY
 from weft.commands import specs as spec_cmd
 from weft.context import build_context
 from weft.core.pipelines import (
@@ -209,6 +210,79 @@ def test_pipeline_compiler_overwrites_stage_input_queue_with_edge_binding(
     assert stage.taskspec["io"]["inputs"]["inbox"] == stage.input_queue
     assert stage.taskspec["io"]["outputs"]["outbox"] == "custom.stage1.outbox"
     assert stage.taskspec["io"]["control"]["ctrl_in"] == "custom.stage1.ctrl_in"
+
+
+def test_pipeline_compiler_keeps_entry_defaults_input_as_bootstrap_fallback(
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    _write_json(ctx.weft_dir / "tasks" / "stage1.json", _task_payload())
+    pipeline = load_pipeline_spec_payload(
+        {
+            "name": "pipe",
+            "stages": [
+                {
+                    "name": "one",
+                    "task": "stage1",
+                    "defaults": {"input": "fallback"},
+                }
+            ],
+        }
+    )
+
+    compiled = compile_linear_pipeline(
+        pipeline,
+        context=ctx,
+        task_loader=lambda name: _load_task(root, name),
+    )
+
+    entry_edge = compiled.runtime.edges[0]
+    assert compiled.bootstrap_input_fallback == "fallback"
+    assert entry_edge.source_kind == "pipeline_input"
+    assert entry_edge.override_input is None
+    runtime_payload = entry_edge.taskspec["metadata"][
+        PIPELINE_EDGE_RUNTIME_METADATA_KEY
+    ]
+    assert runtime_payload["override_input"] is None
+
+
+def test_pipeline_compiler_sets_defaults_input_override_for_interior_edge(
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    _write_json(ctx.weft_dir / "tasks" / "first.json", _task_payload())
+    _write_json(ctx.weft_dir / "tasks" / "second.json", _task_payload())
+    pipeline = load_pipeline_spec_payload(
+        {
+            "name": "pipe",
+            "stages": [
+                {"name": "first", "task": "first"},
+                {
+                    "name": "second",
+                    "task": "second",
+                    "defaults": {"input": {"payload": "override"}},
+                },
+            ],
+        }
+    )
+
+    compiled = compile_linear_pipeline(
+        pipeline,
+        context=ctx,
+        task_loader=lambda name: _load_task(root, name),
+    )
+
+    entry_edge = compiled.runtime.edges[0]
+    interior_edge = compiled.runtime.edges[1]
+    exit_edge = compiled.runtime.edges[2]
+    assert entry_edge.source_kind == "pipeline_input"
+    assert entry_edge.override_input is None
+    assert interior_edge.source_kind == "stage_output"
+    assert interior_edge.override_input == {"payload": "override"}
+    assert exit_edge.emits_pipeline_result is True
+    assert exit_edge.override_input is None
 
 
 @pytest.mark.parametrize(

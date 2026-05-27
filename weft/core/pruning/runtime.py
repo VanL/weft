@@ -745,7 +745,10 @@ def _streaming_candidates(
             is_duplicate = message_id not in protected_ids
             owner_terminal = status in TERMINAL_TASK_STATUSES
             owner_has_no_live_proof = status is None and tid not in tid_mappings
-            if not (owner_terminal or owner_has_no_live_proof or is_duplicate):
+            owner_is_prunable = owner_terminal or owner_has_no_live_proof
+            if is_duplicate and not owner_is_prunable:
+                continue
+            if not (owner_is_prunable or is_duplicate):
                 continue
             candidates.append(
                 _candidate(

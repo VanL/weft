@@ -847,6 +847,10 @@ class AgentSection(BaseModel):
         """Validate runtime-specific schema constraints (Spec: [AR-2.2])."""
         if self.output_schema is not None and self.output_mode != "json":
             raise ValueError("output_schema is only allowed when output_mode is 'json'")
+        duplicate_tool_names = self._duplicate_tool_names()
+        if duplicate_tool_names:
+            joined = ", ".join(duplicate_tool_names)
+            raise ValueError(f"duplicate agent tool name(s): {joined}")
         if self.runtime == "llm" and self.authority_class == "general":
             raise ValueError("llm only supports authority_class='bounded'")
         if self.runtime == "provider_cli":
@@ -877,6 +881,15 @@ class AgentSection(BaseModel):
                     "provider_cli does not support spec.agent.tools in Phase 2"
                 )
         return self
+
+    def _duplicate_tool_names(self) -> tuple[str, ...]:
+        seen: set[str] = set()
+        duplicate_names: set[str] = set()
+        for tool in self.tools:
+            if tool.name in seen:
+                duplicate_names.add(tool.name)
+            seen.add(tool.name)
+        return tuple(sorted(duplicate_names))
 
     @property
     def resolved_authority_class(self) -> Literal["bounded", "general"]:

@@ -603,6 +603,8 @@ Current raw queue filters and metadata helpers mirror current SimpleBroker:
   total counts
 - `exists` checks whether a queue exists, including queues with claimed rows
 - `stats` reports pending, claimed, total, and existence counts for one queue
+- `delete --message MESSAGE_ID` is queue-scoped; it requires a concrete queue
+  name and must reject `--all`
 - command-local JSON output follows SimpleBroker's newline-delimited JSON shape
   for raw queue commands
 

@@ -268,7 +268,15 @@ def plan_service_owner_history_prune(
     ttl_ns: int,
     keep_recent_per_key: int = 1,
 ) -> tuple[int, ...]:
-    """Return service-owner history rows that are safe to prune exactly."""
+    """Return service-owner history rows that are safe to prune exactly.
+
+    Non-expired latest active/draining rows are live convergence evidence, not
+    ordinary history. Retention slots only bound non-live rows after live owner
+    evidence is protected.
+
+    Spec: docs/specifications/00-Quick_Reference.md (`weft.state.services`);
+    docs/specifications/03-Manager_Architecture.md [MA-1.4].
+    """
 
     scoped = tuple(record for record in records if record.service_key == service_key)
     if not scoped:
@@ -288,13 +296,21 @@ def plan_service_owner_history_prune(
     retainable = [
         record for record in latest_by_owner if record.timestamp not in expired
     ]
-    ordered = sorted(retainable, key=lambda record: record.timestamp, reverse=True)
     keep_count = max(0, keep_recent_per_key)
-    protected = {record.timestamp for record in ordered[:keep_count]}
-    older_service_rows = {
+    protected = {
         record.timestamp
-        for record in ordered[keep_count:]
-        if record.timestamp not in protected
+        for record in retainable
+        if record.status in LIVE_SERVICE_STATUSES
+    }
+    non_live_ordered = sorted(
+        (record for record in retainable if record.status not in LIVE_SERVICE_STATUSES),
+        key=lambda record: record.timestamp,
+        reverse=True,
+    )
+    remaining_slots = max(0, keep_count - len(protected))
+    protected.update(record.timestamp for record in non_live_ordered[:remaining_slots])
+    older_service_rows = {
+        record.timestamp for record in retainable if record.timestamp not in protected
     }
     return tuple(sorted(expired | superseded_owner_rows | older_service_rows))
 

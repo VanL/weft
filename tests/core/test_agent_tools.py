@@ -62,3 +62,22 @@ def test_unknown_override_tool_name_fails() -> None:
             ],
             allow=["missing_tool"],
         )
+
+
+def test_duplicate_tool_names_fail_before_resolution() -> None:
+    with pytest.raises(ValueError, match="duplicate agent tool name"):
+        resolve_agent_tools(
+            [
+                AgentToolSection(
+                    name="echo_payload",
+                    kind="python",
+                    ref="tests.tasks.sample_targets:echo_payload",
+                ),
+                AgentToolSection(
+                    name="echo_payload",
+                    kind="python",
+                    ref="missing.module:missing_tool",
+                ),
+            ],
+            allow=["echo_payload"],
+        )

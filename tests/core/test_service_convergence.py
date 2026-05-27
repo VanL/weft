@@ -13,6 +13,7 @@ from weft.core.service_convergence import (
     build_manager_service_payload,
     collect_service_owner_records,
     parse_service_owner_record,
+    plan_service_owner_history_prune,
     project_manager_service_record,
     reduce_service_ownership,
     select_canonical_live_owner,
@@ -144,6 +145,60 @@ def test_reduce_service_ownership_prunes_expired_and_older_self_rows() -> None:
     assert decision.expired_message_ids == (10,)
     assert decision.older_self_message_ids == (100,)
     assert decision.canonical_live.owner_tid == "5"
+
+
+def test_service_owner_history_prune_prefers_live_owner_over_newer_terminal() -> None:
+    service_key = "internal:heartbeat:file:/tmp/weft.db"
+    active_id = 100
+    terminal_id = 120_000_000_000
+
+    prune_ids = plan_service_owner_history_prune(
+        (
+            _record(
+                "100", service_key=service_key, status="active", timestamp=active_id
+            ),
+            _record(
+                "200",
+                service_key=service_key,
+                status="terminal",
+                timestamp=terminal_id,
+            ),
+        ),
+        service_key=service_key,
+        now_ns=130_000_000_000,
+        ttl_ns=300_000_000_000,
+        keep_recent_per_key=1,
+    )
+
+    assert active_id not in prune_ids
+    assert terminal_id in prune_ids
+
+
+def test_service_owner_history_prune_allows_terminal_to_supersede_same_owner() -> None:
+    service_key = "internal:heartbeat:file:/tmp/weft.db"
+    active_id = 100
+    terminal_id = 120_000_000_000
+
+    prune_ids = plan_service_owner_history_prune(
+        (
+            _record(
+                "100", service_key=service_key, status="active", timestamp=active_id
+            ),
+            _record(
+                "100",
+                service_key=service_key,
+                status="terminal",
+                timestamp=terminal_id,
+            ),
+        ),
+        service_key=service_key,
+        now_ns=130_000_000_000,
+        ttl_ns=300_000_000_000,
+        keep_recent_per_key=1,
+    )
+
+    assert active_id in prune_ids
+    assert terminal_id not in prune_ids
 
 
 def test_recent_lower_live_owner_suppresses_higher_owner() -> None:

@@ -17,7 +17,7 @@ import platform
 import re
 import shutil
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -162,14 +162,52 @@ def _detect_from_cgroups(
             text = path.read_text(encoding="utf-8", errors="replace").lower()
         except OSError:
             continue
-        for runtime, patterns in CONTAINER_CGROUP_RUNTIME_PATTERNS:
-            if any(pattern in text for pattern in patterns):
-                return ContainerRuntimeDetection(
-                    runtime=runtime,
-                    markers=(f"proc-{relative_path}",),
-                    identifier=identifier,
-                )
+        for cgroup_path in _iter_cgroup_paths(text):
+            for runtime, patterns in CONTAINER_CGROUP_RUNTIME_PATTERNS:
+                if any(
+                    _cgroup_path_matches_pattern(cgroup_path, pattern)
+                    for pattern in patterns
+                ):
+                    return ContainerRuntimeDetection(
+                        runtime=runtime,
+                        markers=(f"proc-{relative_path}",),
+                        identifier=identifier,
+                    )
     return None
+
+
+def _iter_cgroup_paths(text: str) -> Iterator[str]:
+    """Yield cgroup path fields from `/proc/*/cgroup` content."""
+
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        parts = stripped.split(":", maxsplit=2)
+        cgroup_path = parts[2] if len(parts) == 3 else stripped
+        if cgroup_path.startswith("/"):
+            yield cgroup_path
+
+
+def _cgroup_path_matches_pattern(cgroup_path: str, pattern: str) -> bool:
+    segments = tuple(segment for segment in cgroup_path.split("/") if segment)
+    return any(
+        _cgroup_segment_matches_pattern(segment, pattern) for segment in segments
+    )
+
+
+def _cgroup_segment_matches_pattern(segment: str, pattern: str) -> bool:
+    if pattern == "kubepods":
+        return (
+            segment == pattern
+            or segment.startswith(f"{pattern}.")
+            or segment.startswith(f"{pattern}-")
+        )
+    if pattern == "cri-":
+        return segment.startswith(pattern) and segment.endswith(".scope")
+    return segment == pattern or (
+        segment.startswith(f"{pattern}-") and segment.endswith(".scope")
+    )
 
 
 def _detect_with_systemd(

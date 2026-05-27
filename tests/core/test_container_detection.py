@@ -81,6 +81,54 @@ def test_detect_container_runtime_uses_cgroup_hints(tmp_path: Path) -> None:
     assert detection.markers == ("proc-1/cgroup",)
 
 
+@pytest.mark.parametrize(
+    "cgroup_path",
+    [
+        "/system.slice/docker.service",
+        "/system.slice/containerd.service",
+        "/docker.slice/monitoring.scope",
+    ],
+)
+def test_detect_container_runtime_ignores_host_systemd_cgroups(
+    tmp_path: Path,
+    cgroup_path: str,
+) -> None:
+    proc = tmp_path / "proc" / "1"
+    proc.mkdir(parents=True)
+    (proc / "cgroup").write_text(f"0::{cgroup_path}\n", encoding="utf-8")
+
+    detection = detect_container_runtime(
+        environ={},
+        root=tmp_path,
+        proc_root=tmp_path / "proc",
+        use_systemd_detect_virt=False,
+    )
+
+    assert detection is None
+
+
+def test_detect_container_runtime_uses_docker_systemd_scope(
+    tmp_path: Path,
+) -> None:
+    proc = tmp_path / "proc" / "1"
+    proc.mkdir(parents=True)
+    (proc / "cgroup").write_text(
+        "0::/system.slice/docker-0123456789abcdef.scope\n",
+        encoding="utf-8",
+    )
+
+    detection = detect_container_runtime(
+        environ={},
+        root=tmp_path,
+        proc_root=tmp_path / "proc",
+        use_systemd_detect_virt=False,
+    )
+
+    assert detection is not None
+    assert detection.runtime == "docker"
+    assert detection.markers == ("proc-1/cgroup",)
+
+
 def test_detect_container_runtime_returns_none_without_signals(tmp_path: Path) -> None:
     detection = detect_container_runtime(
         environ={},

@@ -271,21 +271,21 @@ def test_entry_edge_moves_pipeline_input_and_emits_checkpoint(broker_env) -> Non
     assert any(event.get("type") == "edge_checkpoint" for event in events)
 
 
-def test_edge_uses_override_payload_when_downstream_defaults_input_is_set(
+def test_stage_output_edge_uses_override_payload_when_downstream_defaults_input_is_set(
     broker_env,
 ) -> None:
     db_path, make_queue = broker_env
     tid = str(time.time_ns())
     edge = PipelineEdgeTask(
-        db_path, _entry_edge_spec(tid, override_input={"payload": "override"})
+        db_path, _stage_output_edge_spec(tid, override_input={"payload": "override"})
     )
-    make_queue("P1775000000000000000.inbox").write(json.dumps({"payload": "hello"}))
+    make_queue("T1775000000000000001.outbox").write(json.dumps({"payload": "hello"}))
 
     edge.process_once()
 
-    assert make_queue(
-        "P1775000000000000000.pipeline-to-stage"
-    ).read_one() == json.dumps({"payload": "override"})
+    assert make_queue("P1775000000000000000.stage-to-next").read_one() == json.dumps(
+        {"payload": "override"}
+    )
 
 
 def test_stage_output_edge_moves_single_payload_without_rewriting_it(

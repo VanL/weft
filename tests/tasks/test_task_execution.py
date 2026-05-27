@@ -19,6 +19,7 @@ from tests.tasks import (
     sample_targets as targets,  # noqa: F401 - ensure module importable
 )
 from weft._constants import (
+    CONTROL_KILL,
     CONTROL_PING,
     CONTROL_STOP,
     QUEUE_CTRL_IN_SUFFIX,
@@ -373,6 +374,151 @@ def test_run_work_item_deferred_stop_without_active_message_preserves_reserved_q
     assert task.taskspec.state.status == "cancelled"
     assert reserved.read_one() == "job"
     assert make_queue(spec.io.control["ctrl_out"]).read_one() is not None
+    task.cleanup()
+
+
+def test_deferred_stop_finalizes_before_timeout_outcome(
+    broker_env,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    spec = make_command_taskspec(
+        unique_tid,
+        sys.executable,
+        reserved_stop=ReservedPolicy.CLEAR,
+    )
+    task = Consumer(db_path, spec)
+    inbox = make_queue(spec.io.inputs["inbox"])
+    ctrl_in = make_queue(spec.io.control["ctrl_in"])
+    ctrl_out = make_queue(spec.io.control["ctrl_out"])
+    reserved = make_queue(f"T{unique_tid}.{QUEUE_RESERVED_SUFFIX}")
+    worker_started = threading.Event()
+    release_worker = threading.Event()
+
+    class TimeoutTaskRunner:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        def supports_stream_callbacks(self) -> bool:
+            return False
+
+        def run_with_hooks(
+            self,
+            work_item: Any,
+            **_kwargs: Any,
+        ) -> RunnerOutcome:
+            del work_item
+            worker_started.set()
+            release_worker.wait(timeout=2.0)
+            return RunnerOutcome(
+                status="timeout",
+                value=None,
+                error="runner timed out",
+                stdout=None,
+                stderr=None,
+                returncode=None,
+                duration=0.0,
+            )
+
+    monkeypatch.setattr(consumer_module, "TaskRunner", TimeoutTaskRunner)
+    inbox.write(json.dumps({"args": []}))
+
+    try:
+        task.process_once()
+        assert worker_started.wait(timeout=2.0)
+        assert task.taskspec.state.status == "running"
+
+        ctrl_in.write(CONTROL_STOP)
+        task.process_once()
+        assert task._deferred_active_control_command == CONTROL_STOP
+    finally:
+        release_worker.set()
+
+    _drive_consumer_until(
+        task,
+        lambda: task.taskspec.state.status in {"cancelled", "timeout"},
+    )
+
+    responses = [json.loads(message) for message in drain_queue(ctrl_out)]
+    assert any(
+        response.get("command") == "STOP" and response["status"] == "ack"
+        for response in responses
+    )
+    assert task.taskspec.state.status == "cancelled"
+    assert task._deferred_active_control_command is None
+    assert reserved.has_pending() is False
+    task.cleanup()
+
+
+def test_deferred_kill_finalizes_before_limit_outcome(
+    broker_env,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    spec = make_command_taskspec(
+        unique_tid,
+        sys.executable,
+        reserved_error=ReservedPolicy.CLEAR,
+    )
+    task = Consumer(db_path, spec)
+    inbox = make_queue(spec.io.inputs["inbox"])
+    ctrl_in = make_queue(spec.io.control["ctrl_in"])
+    ctrl_out = make_queue(spec.io.control["ctrl_out"])
+    reserved = make_queue(f"T{unique_tid}.{QUEUE_RESERVED_SUFFIX}")
+    worker_started = threading.Event()
+    release_worker = threading.Event()
+
+    class LimitTaskRunner:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        def supports_stream_callbacks(self) -> bool:
+            return False
+
+        def run_with_hooks(
+            self,
+            work_item: Any,
+            **_kwargs: Any,
+        ) -> RunnerOutcome:
+            del work_item
+            worker_started.set()
+            release_worker.wait(timeout=2.0)
+            return RunnerOutcome(
+                status="limit",
+                value=None,
+                error="memory limit exceeded",
+                stdout=None,
+                stderr=None,
+                returncode=None,
+                duration=0.0,
+            )
+
+    monkeypatch.setattr(consumer_module, "TaskRunner", LimitTaskRunner)
+    inbox.write(json.dumps({"args": []}))
+
+    try:
+        task.process_once()
+        assert worker_started.wait(timeout=2.0)
+        assert task.taskspec.state.status == "running"
+
+        ctrl_in.write(CONTROL_KILL)
+        task.process_once()
+        assert task._deferred_active_control_command == CONTROL_KILL
+    finally:
+        release_worker.set()
+
+    _drive_consumer_until(task, lambda: task.taskspec.state.status == "killed")
+
+    responses = [json.loads(message) for message in drain_queue(ctrl_out)]
+    assert any(
+        response.get("command") == "KILL" and response["status"] == "ack"
+        for response in responses
+    )
+    assert task.taskspec.state.status == "killed"
+    assert task._deferred_active_control_command is None
+    assert reserved.has_pending() is False
     task.cleanup()
 
 

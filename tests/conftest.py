@@ -84,6 +84,7 @@ _SHARED_MODULES = frozenset(
         "tests/core/test_runner_plugins.py",
         "tests/core/test_runtime_handle_liveness.py",
         "tests/core/test_service_convergence.py",
+        "tests/core/test_subprocess_runner.py",
         "tests/core/test_spec_store.py",
         "tests/core/test_spec_parameterization.py",
         "tests/core/test_spec_run_input.py",

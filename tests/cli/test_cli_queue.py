@@ -381,6 +381,38 @@ def test_queue_invalid_message_id_returns_input_error(workdir):
     assert payload["error"] == "INVALID_MESSAGE_ID"
 
 
+def test_queue_delete_rejects_all_with_message_and_preserves_queues(workdir):
+    build_context(spec_context=workdir)
+    assert run_cli("queue", "write", "delete.one", "one", cwd=workdir)[0] == 0
+    assert run_cli("queue", "write", "delete.two", "two", cwd=workdir)[0] == 0
+
+    rc, out, err = run_cli(
+        "queue",
+        "peek",
+        "delete.one",
+        "--json",
+        cwd=workdir,
+    )
+    assert rc == 0
+    assert err == ""
+    message_id = str(json.loads(out)["timestamp"])
+
+    rc, out, err = run_cli(
+        "queue",
+        "delete",
+        "--all",
+        "--message",
+        message_id,
+        cwd=workdir,
+    )
+
+    assert rc == 1
+    assert out == ""
+    assert "--message cannot be used with --all" in err
+    assert run_cli("queue", "read", "delete.one", cwd=workdir) == (0, "one", "")
+    assert run_cli("queue", "read", "delete.two", cwd=workdir) == (0, "two", "")
+
+
 def test_queue_resolve_reports_named_endpoint(workdir):
     context = build_context(spec_context=workdir)
     tid = str(time.time_ns())

@@ -70,6 +70,9 @@ from weft._constants import (
     MANAGER_REGISTRY_HEARTBEAT_INTERVAL_SECONDS,
     MANAGER_SERVE_LOG_CHILD_LIMIT,
     MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS,
+    MANAGER_STALE_INTERNAL_RESERVED_CLEANUP_INTERVAL_SECONDS,
+    MANAGER_STALE_INTERNAL_RESERVED_CLEANUP_MESSAGE_LIMIT,
+    MANAGER_STALE_INTERNAL_RESERVED_CLEANUP_QUEUE_LIMIT,
     MANAGER_STALLED_CONTROL_LOG_INTERVAL_SECONDS,
     MANAGER_STALLED_CONTROL_RETRY_SECONDS,
     QUEUE_CTRL_IN_SUFFIX,
@@ -387,6 +390,7 @@ class Manager(ServiceTask):
         self._last_leadership_drain_revalidate_ns = 0
         self._last_public_spawn_drained_ns = 0
         self._last_public_dispatch_stall_log_ns = 0
+        self._last_stale_internal_reserved_cleanup_ns = 0
         self._broker_probe_interval_ns = 1_000_000_000  # probe at most once per second
         self._last_broker_probe_ns = 0
         self._last_registry_heartbeat_ns = 0
@@ -661,6 +665,19 @@ class Manager(ServiceTask):
         if internal_reserved is not None and internal_inbox is not None:
             pairs.insert(0, (internal_reserved, internal_inbox))
         return tuple(dict.fromkeys(pairs))
+
+    @staticmethod
+    def _internal_reserved_queue_tid(queue_name: str) -> str | None:
+        """Return the manager TID encoded in a ``T{tid}.internal_reserved`` name."""
+
+        prefix = "T"
+        suffix = f".{QUEUE_INTERNAL_RESERVED_SUFFIX}"
+        if not queue_name.startswith(prefix) or not queue_name.endswith(suffix):
+            return None
+        tid = queue_name[len(prefix) : -len(suffix)]
+        if not tid or not tid.isdigit():
+            return None
+        return tid
 
     def _idle_activity_queue_names(self) -> tuple[str, ...]:
         """Return manager-owned queues whose pending work should reset idle time."""
@@ -3607,6 +3624,30 @@ class Manager(ServiceTask):
         while reserved_queue.read_many(64):
             continue
 
+    def _delete_queue_messages_by_id(
+        self,
+        queue_name: str,
+        *,
+        limit: int | None,
+    ) -> int:
+        """Delete visible and claimed queue rows by exact message ID."""
+
+        queue = self._queue(queue_name)
+        message_ids: list[int] = []
+        for entry in queue.peek_generator(with_timestamps=True):
+            if limit is not None and len(message_ids) >= limit:
+                break
+            if not isinstance(entry, tuple) or len(entry) != 2:
+                continue
+            _body, timestamp = entry
+            if isinstance(timestamp, int):
+                message_ids.append(timestamp)
+        deleted = 0
+        for message_id in message_ids:
+            if queue.delete(message_id=message_id):
+                deleted += 1
+        return deleted
+
     def _cleanup_reserved_queue_if_needed(self, reserved_queue_name: str) -> None:
         """Remove one manager reserved queue's messages when cleanup is enabled."""
 
@@ -3616,6 +3657,108 @@ class Manager(ServiceTask):
         reserved_queue = self._queue(reserved_queue_name)
         while reserved_queue.read_many(64):
             continue
+
+    def _cleanup_own_internal_reserved_queue(self) -> None:
+        """Delete this manager's private internal spawn reservations on shutdown."""
+
+        internal_reserved = self._queue_names.get("internal_reserved")
+        if internal_reserved is None:
+            return
+        try:
+            deleted = self._delete_queue_messages_by_id(internal_reserved, limit=None)
+        except (BrokerError, OSError, RuntimeError):
+            logger.debug(
+                "Failed to clean manager internal reserved queue %s",
+                internal_reserved,
+                exc_info=True,
+            )
+            return
+        if deleted:
+            self._emit_serve_log(
+                "internal_reserved_cleanup",
+                component="service",
+                required_level="debug",
+                queue=internal_reserved,
+                rows_deleted=deleted,
+                owner_tid=self.tid,
+                reason="manager_shutdown",
+            )
+
+    def _cleanup_stale_internal_reserved_queues(self, *, force: bool = False) -> None:
+        """Boundedly delete internal spawn reservations for non-live managers."""
+
+        if not self._internal_spawn_queue_attached():
+            return
+        now_ns = time.time_ns()
+        interval_ns = int(
+            MANAGER_STALE_INTERNAL_RESERVED_CLEANUP_INTERVAL_SECONDS * 1_000_000_000
+        )
+        if (
+            not force
+            and self._last_stale_internal_reserved_cleanup_ns > 0
+            and now_ns - self._last_stale_internal_reserved_cleanup_ns < interval_ns
+        ):
+            return
+        self._last_stale_internal_reserved_cleanup_ns = now_ns
+
+        active = self._read_active_manager_records()
+        if active is None:
+            return
+        protected_tids = set(active)
+        protected_tids.update(
+            tid
+            for tid, record in self._manager_registry_snapshot.items()
+            if record.get("status") == SERVICE_STATUS_ACTIVE
+        )
+        protected_tids.add(self.tid)
+
+        pattern = f"T*.{QUEUE_INTERNAL_RESERVED_SUFFIX}"
+        try:
+            with self._manager_context().broker() as broker:
+                queue_names = tuple(
+                    str(name) for name in broker.list_queues(pattern=pattern)
+                )
+        except (BrokerError, OSError, RuntimeError):
+            logger.debug("Failed to list stale internal reserved queues", exc_info=True)
+            return
+
+        candidates: list[tuple[str, str]] = []
+        for queue_name in sorted(queue_names):
+            tid = self._internal_reserved_queue_tid(queue_name)
+            if tid is None or tid in protected_tids:
+                continue
+            candidates.append((queue_name, tid))
+            if len(candidates) >= MANAGER_STALE_INTERNAL_RESERVED_CLEANUP_QUEUE_LIMIT:
+                break
+
+        rows_deleted = 0
+        queues_touched = 0
+        for queue_name, _tid in candidates:
+            try:
+                deleted = self._delete_queue_messages_by_id(
+                    queue_name,
+                    limit=MANAGER_STALE_INTERNAL_RESERVED_CLEANUP_MESSAGE_LIMIT,
+                )
+            except (BrokerError, OSError, RuntimeError):
+                logger.debug(
+                    "Failed to clean stale internal reserved queue %s",
+                    queue_name,
+                    exc_info=True,
+                )
+                continue
+            if deleted:
+                queues_touched += 1
+                rows_deleted += deleted
+
+        if queues_touched:
+            self._emit_serve_log(
+                "stale_internal_reserved_cleanup",
+                component="service",
+                required_level="debug",
+                queues_touched=queues_touched,
+                rows_deleted=rows_deleted,
+                protected_tids=sorted(protected_tids),
+            )
 
     def _apply_spawn_reserved_policy(
         self,
@@ -5961,6 +6104,7 @@ class Manager(ServiceTask):
         self._draining = True
         self._drain_active_child_launches_for_cleanup()
         self._terminate_children()
+        self._cleanup_own_internal_reserved_queue()
         self._unregister_manager()
         super().cleanup()
 
@@ -6078,6 +6222,7 @@ class Manager(ServiceTask):
             self._drain_worker_results()
             return
         self._refresh_manager_registration()
+        self._cleanup_stale_internal_reserved_queues()
         if self._draining:
             # Finish an in-flight drain before reevaluating leadership. Otherwise a
             # slow turn can re-enter the yield path and skip the corresponding

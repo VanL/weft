@@ -888,6 +888,12 @@ system pruning:
   eligible now. It selects standard stale `T{tid}.ctrl_in`,
   `T{tid}.ctrl_out`, and `T{tid}.inbox` immediately, and selects standard
   `T{tid}.outbox` and `T{tid}.reserved` only after the retention period.
+  Manager-owned `T{manager_tid}.internal_reserved` queues are not standard
+  task-local queues and are not selected by `task_local.dead_tid`. The active
+  Manager owns those internal spawn reservations: it deletes its own
+  `.internal_reserved` queue on shutdown regardless of task `cleanup_on_exit`,
+  and it may immediately delete bounded batches from `.internal_reserved`
+  queues whose manager TID is no longer present in the live manager registry.
   Retention-deferred dead-TID queues are counted for diagnostics but do not
   keep runtime cleanup pending or trigger raw task-log coalescing. Dead-TID
   cleanup must not mark Monitor collation families; if a Monitor row exists,

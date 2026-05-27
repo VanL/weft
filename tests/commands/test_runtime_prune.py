@@ -407,6 +407,39 @@ def test_streaming_prune_deletes_terminal_owner_marker_only(tmp_path) -> None:
     assert active_id in remaining_ids
 
 
+def test_streaming_prune_preserves_duplicate_marker_for_running_owner(tmp_path) -> None:
+    ctx = _context(tmp_path)
+    tid = "1770000000000000022"
+    older_id = _write_json(
+        ctx,
+        WEFT_STREAMING_SESSIONS_QUEUE,
+        {"tid": tid, "session_id": "live-duplicate", "queue": f"T{tid}.outbox"},
+    )
+    newer_id = _write_json(
+        ctx,
+        WEFT_STREAMING_SESSIONS_QUEUE,
+        {"tid": tid, "session_id": "live-duplicate", "queue": f"T{tid}.outbox"},
+    )
+    _write_json(ctx, WEFT_GLOBAL_LOG_QUEUE, {"tid": tid, "status": "running"})
+
+    result = run_runtime_prune(
+        RuntimePruneConfig(
+            context_path=ctx.root,
+            queues=("streaming",),
+            min_age_seconds=0,
+            apply=True,
+        )
+    )
+
+    assert result.candidates == ()
+    remaining_ids = {
+        message_id
+        for _payload, message_id in _read_rows(ctx, WEFT_STREAMING_SESSIONS_QUEUE)
+    }
+    assert older_id in remaining_ids
+    assert newer_id in remaining_ids
+
+
 def test_endpoint_prune_preserves_live_duplicate_claimants(tmp_path) -> None:
     ctx = _context(tmp_path)
     old_id = _write_json(

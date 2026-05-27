@@ -741,7 +741,15 @@ def delete_queue_messages(
 ) -> QueueDeleteReceipt:
     """Delete a queue, all queues, or one exact message."""
 
-    if message_id is not None and queue_name is not None:
+    if all_queues and queue_name is not None:
+        raise ValueError("queue_name cannot be used with all_queues")
+
+    if message_id is not None:
+        if all_queues:
+            raise ValueError("message_id cannot be used with all_queues")
+        if queue_name is None:
+            raise ValueError("queue_name is required when message_id is used")
+
         queue = ctx.queue(queue_name, persistent=True)
         try:
             deleted = queue.delete(message_id=message_id)
@@ -752,6 +760,9 @@ def delete_queue_messages(
             )
         finally:
             queue.close()
+
+    if queue_name is None and not all_queues:
+        raise ValueError("queue_name is required unless all_queues=True")
 
     target_queue = None if all_queues else queue_name
     with ctx.broker() as db:
@@ -1056,9 +1067,17 @@ def delete_command(
     spec_context: str | None = None,
 ) -> tuple[int, str, str]:
     ctx = _context(spec_context)
+    if delete_all and queue_name is not None:
+        return 1, "", "--all cannot be used with a queue name"
     if message_id is not None:
+        if delete_all:
+            return 1, "", "--message cannot be used with --all"
+        if queue_name is None:
+            return 1, "", "Queue name is required when --message is used"
         if sb_commands.parse_exact_message_id(message_id) is None:
             return 1, "", _invalid_message_id_error()
+    if queue_name is None and not delete_all:
+        return 1, "", "Provide a queue name or use --all"
     target_queue = None if delete_all else queue_name
     return _run_simplebroker_command(
         sb_commands.cmd_delete,

@@ -499,6 +499,7 @@ def compile_linear_pipeline(
                 stage.defaults.input
                 if stage.defaults is not None
                 and "input" in stage.defaults.model_fields_set
+                and previous_stage is not None
                 else None
             ),
             "emits_pipeline_result": False,

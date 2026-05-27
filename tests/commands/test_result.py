@@ -22,6 +22,7 @@ from weft.commands.result import (
     _await_single_result,
     _load_taskspec_payload,
     await_one_shot_result,
+    await_task_result,
     cmd_result,
 )
 from weft.context import build_context
@@ -403,6 +404,39 @@ def test_cmd_result_reports_failed_task_without_outbox(tmp_path) -> None:
 
     assert exit_code == 1
     assert payload == "intentional failure"
+
+
+def test_cmd_result_zero_timeout_reports_materialization_timeout(tmp_path) -> None:
+    root = prepare_project_root(tmp_path)
+    tid = str(time.time_ns())
+
+    exit_code, payload = cmd_result(
+        tid=tid,
+        all_results=False,
+        peek=False,
+        timeout=0.0,
+        stream=False,
+        json_output=False,
+        show_stderr=False,
+        context_path=str(root),
+    )
+
+    assert exit_code == 124
+    assert payload == f"Timed out after 0.0 seconds waiting for task {tid}"
+
+
+def test_await_task_result_zero_timeout_reports_materialization_timeout(
+    tmp_path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+
+    result = await_task_result(ctx, tid, timeout=0.0)
+
+    assert result.status == "timeout"
+    assert result.value is None
+    assert result.error == f"Timed out after 0.0 seconds waiting for task {tid}"
 
 
 def test_cmd_result_reports_claimed_outbox_without_waiting(
