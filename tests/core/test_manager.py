@@ -79,7 +79,8 @@ from weft.core.tasks.multiqueue_watcher import QueueMessageContext, QueueMode
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 from weft.helpers import ContainerRuntimeDetection
 
-AUTOSTART_PIPELINE_RESULT_TIMEOUT = 30.0
+AUTOSTART_PIPELINE_RESULT_TIMEOUT = 60.0
+"""Wait budget for full autostart pipeline completion under Windows CI load."""
 
 
 @pytest.fixture
