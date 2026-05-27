@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from collections.abc import Callable
 from typing import Any
 
 import pytest
@@ -16,7 +17,12 @@ from weft._constants import (
 )
 from weft.core.tasks.base import TaskWorkerResult
 from weft.core.tasks.multiqueue_watcher import QueueMessageContext
-from weft.core.tasks.service import ServiceTask
+from weft.core.tasks.service import (
+    ServiceTask,
+    ServiceWorkerContext,
+    ServiceWorkerEvent,
+    ServiceWorkerSpec,
+)
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 
 pytestmark = [pytest.mark.shared]
@@ -34,6 +40,7 @@ class ServiceTestTask(ServiceTask):
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         self.worker_results: list[tuple[Any | None, TaskWorkerResult, int]] = []
+        self.service_worker_events: list[tuple[ServiceWorkerEvent, int]] = []
         super().__init__(*args, **kwargs)
 
     def _build_queue_configs(self) -> dict[str, dict[str, Any]]:
@@ -52,8 +59,30 @@ class ServiceTestTask(ServiceTask):
         del message, timestamp, context
 
     def _handle_worker_result(self, result: TaskWorkerResult) -> None:
+        if isinstance(result.value, ServiceWorkerEvent):
+            super()._handle_worker_result(result)
+            return
         work = self._pop_service_lane_work(result.lane)
         self.worker_results.append((work, result, threading.get_ident()))
+
+    def _handle_service_worker_event(self, event: ServiceWorkerEvent) -> None:
+        self.service_worker_events.append((event, threading.get_ident()))
+        if event.kind not in {"result", "error"}:
+            return
+        work = self._pop_service_lane_work(event.name)
+        if work is None:
+            return
+        self.worker_results.append(
+            (
+                work,
+                TaskWorkerResult(
+                    lane=event.name,
+                    value=event.value,
+                    error=event.error,
+                ),
+                threading.get_ident(),
+            )
+        )
 
 
 def make_service_taskspec(
@@ -92,6 +121,25 @@ def drain_log_events(log_queue) -> list[dict[str, Any]]:
         if raw is None:
             return records
         records.append(json.loads(raw))
+
+
+def drain_worker_results_until(
+    task: ServiceTestTask,
+    predicate: Callable[[], bool],
+    *,
+    timeout: float = 2.0,
+) -> None:
+    """Drain worker results until a predicate is true or the deadline expires."""
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        task._drain_worker_results()
+        if predicate():
+            return
+        task.wait_for_activity(timeout=0.01)
+    task._drain_worker_results()
+    if not predicate():
+        raise AssertionError("worker result predicate was not satisfied")
 
 
 def test_service_task_activation_publishes_running_lifecycle_once(
@@ -188,6 +236,245 @@ def test_service_task_due_time_helpers_bound_waits(
         )
     finally:
         task.stop()
+
+
+def test_service_worker_group_runs_registered_target_on_reactor_result_drain(
+    broker_env,
+    unique_tid: str,
+) -> None:
+    db_path, _make_queue = broker_env
+    task = ServiceTestTask(db_path, make_service_taskspec(unique_tid))
+
+    def target(context: ServiceWorkerContext) -> dict[str, Any]:
+        for item in context.iter_items():
+            return {"item": item, "worker_index": context.worker_index}
+        raise AssertionError("target did not receive an input item")
+
+    task._register_service_worker(ServiceWorkerSpec(name="api.one", target=target))
+
+    try:
+        handle = task._start_service_worker(
+            "api.one",
+            request_id="request-one",
+            initial_items=({"payload": "hello"},),
+        )
+        assert handle.name == "api.one"
+        assert task.service_worker_events == []
+
+        drain_worker_results_until(
+            task,
+            lambda: any(
+                event.name == "api.one" and event.kind == "result"
+                for event, _thread_id in task.service_worker_events
+            ),
+        )
+    finally:
+        task.stop()
+
+    result_events = [
+        event
+        for event, thread_id in task.service_worker_events
+        if event.name == "api.one"
+        and event.kind == "result"
+        and thread_id == threading.get_ident()
+    ]
+    assert len(result_events) == 1
+    assert result_events[0].request_id == "request-one"
+    assert result_events[0].value == {"item": {"payload": "hello"}, "worker_index": 0}
+
+
+def test_service_worker_groups_run_independently(
+    broker_env,
+    unique_tid: str,
+) -> None:
+    db_path, _make_queue = broker_env
+    task = ServiceTestTask(db_path, make_service_taskspec(unique_tid))
+
+    def target(context: ServiceWorkerContext, label: str) -> tuple[str, Any]:
+        for item in context.iter_items():
+            return (label, item)
+        raise AssertionError("target did not receive an input item")
+
+    task._register_service_worker(
+        ServiceWorkerSpec(name="api.alpha", target=target, args=("alpha",))
+    )
+    task._register_service_worker(
+        ServiceWorkerSpec(name="api.beta", target=target, args=("beta",))
+    )
+
+    try:
+        task._start_service_worker("api.alpha", initial_items=("a",))
+        task._start_service_worker("api.beta", initial_items=("b",))
+        drain_worker_results_until(
+            task,
+            lambda: (
+                {
+                    event.value
+                    for event, _thread_id in task.service_worker_events
+                    if event.kind == "result"
+                }
+                == {("alpha", "a"), ("beta", "b")}
+            ),
+        )
+    finally:
+        task.stop()
+
+
+def test_service_worker_group_can_run_multiple_workers_on_one_input_queue(
+    broker_env,
+    unique_tid: str,
+) -> None:
+    db_path, _make_queue = broker_env
+    task = ServiceTestTask(db_path, make_service_taskspec(unique_tid))
+
+    def target(context: ServiceWorkerContext) -> tuple[int, Any]:
+        for item in context.iter_items():
+            return (context.worker_index, item)
+        raise AssertionError("target did not receive an input item")
+
+    task._register_service_worker(
+        ServiceWorkerSpec(
+            name="api.pool",
+            target=target,
+            worker_count=2,
+        )
+    )
+
+    try:
+        task._start_service_worker("api.pool", initial_items=("a", "b"))
+        drain_worker_results_until(
+            task,
+            lambda: (
+                len(
+                    [
+                        event
+                        for event, _thread_id in task.service_worker_events
+                        if event.name == "api.pool" and event.kind == "result"
+                    ]
+                )
+                == 2
+            ),
+        )
+    finally:
+        task.stop()
+
+    result_events = [
+        event
+        for event, _thread_id in task.service_worker_events
+        if event.name == "api.pool" and event.kind == "result"
+    ]
+    assert {event.worker_index for event in result_events} == {0, 1}
+    assert {event.value[1] for event in result_events} == {"a", "b"}
+
+
+def test_service_worker_group_can_restart_after_terminal_result_before_thread_exit(
+    broker_env,
+    unique_tid: str,
+) -> None:
+    """Terminal result delivery, not thread teardown timing, releases a lane."""
+
+    db_path, _make_queue = broker_env
+    task = ServiceTestTask(db_path, make_service_taskspec(unique_tid))
+    result_published = threading.Event()
+    release_result_publish = threading.Event()
+    original_publish = task._publish_service_worker_event
+
+    def target(context: ServiceWorkerContext) -> tuple[str, Any]:
+        for item in context.iter_items():
+            return (context.request_id, item)
+        raise AssertionError("target did not receive an input item")
+
+    def blocking_publish(event: ServiceWorkerEvent) -> bool:
+        published = original_publish(event)
+        if event.request_id == "first" and event.kind == "result":
+            result_published.set()
+            release_result_publish.wait(timeout=2.0)
+        return published
+
+    task._publish_service_worker_event = blocking_publish  # type: ignore[method-assign]
+    task._register_service_worker(ServiceWorkerSpec(name="api.restart", target=target))
+
+    try:
+        task._start_service_worker(
+            "api.restart",
+            request_id="first",
+            initial_items=("one",),
+        )
+        assert result_published.wait(timeout=2.0)
+        drain_worker_results_until(
+            task,
+            lambda: any(
+                event.name == "api.restart"
+                and event.request_id == "first"
+                and event.kind == "result"
+                for event, _thread_id in task.service_worker_events
+            ),
+        )
+
+        task._start_service_worker(
+            "api.restart",
+            request_id="second",
+            initial_items=("two",),
+        )
+        release_result_publish.set()
+        drain_worker_results_until(
+            task,
+            lambda: any(
+                event.name == "api.restart"
+                and event.request_id == "second"
+                and event.kind == "result"
+                for event, _thread_id in task.service_worker_events
+            ),
+        )
+    finally:
+        release_result_publish.set()
+        task.stop()
+
+    result_values = [
+        event.value
+        for event, _thread_id in task.service_worker_events
+        if event.name == "api.restart" and event.kind == "result"
+    ]
+    assert ("first", "one") in result_values
+    assert ("second", "two") in result_values
+
+
+def test_service_worker_exception_publishes_error_and_clears_active_state(
+    broker_env,
+    unique_tid: str,
+) -> None:
+    db_path, _make_queue = broker_env
+    task = ServiceTestTask(db_path, make_service_taskspec(unique_tid))
+
+    def target(context: ServiceWorkerContext) -> None:
+        del context
+        raise RuntimeError("worker exploded")
+
+    task._register_service_worker(ServiceWorkerSpec(name="api.error", target=target))
+
+    try:
+        task._start_service_worker("api.error")
+        drain_worker_results_until(
+            task,
+            lambda: any(
+                event.name == "api.error" and event.kind == "error"
+                for event, _thread_id in task.service_worker_events
+            ),
+        )
+        snapshot = task._service_worker_snapshot("api.error")
+    finally:
+        task.stop()
+
+    error_events = [
+        event
+        for event, _thread_id in task.service_worker_events
+        if event.name == "api.error" and event.kind == "error"
+    ]
+    assert len(error_events) == 1
+    assert isinstance(error_events[0].error, RuntimeError)
+    assert str(error_events[0].error) == "worker exploded"
+    assert snapshot["active"] is False
+    assert snapshot["stopping"] is True
 
 
 def test_service_task_lanes_are_single_flight(

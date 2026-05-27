@@ -28,7 +28,12 @@ from weft._constants import (
     INTERNAL_SERVICE_KEY_HEARTBEAT,
     INTERNAL_SERVICE_KEY_METADATA_KEY,
     INTERNAL_SERVICE_KEY_TASK_MONITOR,
+    LIVE_SERVICE_STATUSES,
     NON_LIVE_RUNTIME_STATES,
+    SERVICE_STATUS_STOPPED,
+    SERVICE_STATUS_SUPERSEDED,
+    SERVICE_STATUS_TERMINAL,
+    SERVICE_TYPE_MANAGED,
     STATUS_RUNTIMELESS_STALE_AFTER_SECONDS,
     STATUS_WATCH_MIN_INTERVAL,
     TASKSPEC_TID_SHORT_LENGTH,
@@ -36,6 +41,7 @@ from weft._constants import (
     TERMINAL_TASK_STATUSES,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
+    WEFT_SERVICES_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
 )
@@ -54,6 +60,11 @@ from weft.commands.types import (
 )
 from weft.context import WeftContext, build_context
 from weft.core.queue_wait import QueueChangeMonitor
+from weft.core.service_convergence import (
+    ServiceOwnerRecord,
+    collect_service_owner_records,
+    reduce_latest_by_service_owner,
+)
 from weft.ext import RunnerHandle
 from weft.helpers import (
     format_byte_size,
@@ -590,6 +601,42 @@ def _iter_queue_json_messages(queue: Queue) -> Iterable[tuple[dict[str, Any], in
             continue
         if isinstance(payload, dict):
             yield payload, int(timestamp)
+
+
+def _service_runtime_liveness(
+    runtime_handle: Mapping[str, Any] | None,
+    runtime_description: Mapping[str, Any] | None = None,
+) -> tuple[bool, int | None]:
+    """Return live-runtime proof and the first live host PID when available."""
+
+    handle = (
+        _runtime_handle_from_mapping({"runtime_handle": runtime_handle})
+        if isinstance(runtime_handle, Mapping)
+        else None
+    )
+    if handle is None:
+        return _runtime_description_is_live(runtime_description), None
+    description = (
+        runtime_description
+        if isinstance(runtime_description, Mapping)
+        else _describe_runtime_handle(handle)
+    )
+    live, _evidence, _strength = _runtime_evidence_details(
+        handle=handle,
+        runtime_description=description,
+    )
+    pid = None
+    if live and handle.control.get("authority") == "host-pid":
+        host_pids = handle.scoped_host_pids()
+        pid = host_pids[0] if host_pids else None
+    return live, pid
+
+
+def _service_observation_is_stale(*, updated_at: int | None, now_ns: int) -> bool:
+    if not isinstance(updated_at, int) or updated_at <= 0:
+        return False
+    stale_after_ns = int(STATUS_RUNTIMELESS_STALE_AFTER_SECONDS * 1_000_000_000)
+    return now_ns - updated_at > stale_after_ns
 
 
 def _effective_public_status(
@@ -1156,6 +1203,8 @@ def _collect_task_snapshot_records(
 
 def _service_evidence_from_child_task(
     record: CollectedTaskSnapshot,
+    *,
+    now_ns: int,
 ) -> _ServiceEvidence | None:
     if record.taskspec_payload is None:
         return None
@@ -1174,6 +1223,29 @@ def _service_evidence_from_child_task(
             updated_at=snapshot.last_timestamp,
             reconciliation={"lifecycle_status": snapshot.status},
         )
+    runtime_live, pid = _service_runtime_liveness(
+        snapshot.runtime_handle,
+        snapshot.runtime,
+    )
+    if not runtime_live and _service_observation_is_stale(
+        updated_at=snapshot.last_timestamp,
+        now_ns=now_ns,
+    ):
+        return _ServiceEvidence(
+            key=key,
+            name=snapshot.name or _service_display_name(key),
+            status="uncertain",
+            evidence="child-task-log",
+            rank=20,
+            tid=snapshot.tid,
+            pid=pid,
+            updated_at=snapshot.last_timestamp,
+            reconciliation={
+                "classification": "service_liveness_uncertain",
+                "reason": "child_task_log_without_live_runtime",
+                "lifecycle_status": snapshot.status,
+            },
+        )
     return _ServiceEvidence(
         key=key,
         name=snapshot.name or _service_display_name(key),
@@ -1181,6 +1253,7 @@ def _service_evidence_from_child_task(
         evidence="child-task-log",
         rank=90,
         tid=snapshot.tid,
+        pid=pid,
         updated_at=snapshot.last_timestamp,
         reconciliation=snapshot.reconciliation,
     )
@@ -1232,6 +1305,116 @@ def _service_evidence_from_manager_spawned(
             "reason": "manager_spawned_pid_not_live",
         },
     )
+
+
+def _service_evidence_from_service_owner_record(
+    record: ServiceOwnerRecord,
+    *,
+    now_ns: int,
+) -> _ServiceEvidence | None:
+    if (
+        record.service_type != SERVICE_TYPE_MANAGED
+        or record.service_key not in _known_internal_service_keys()
+    ):
+        return None
+
+    payload = record.payload
+    raw_name = payload.get("name")
+    name = raw_name if isinstance(raw_name, str) and raw_name else None
+    metadata = payload.get("metadata")
+    manager_tid = metadata.get("manager_tid") if isinstance(metadata, Mapping) else None
+    runtime_handle = payload.get("runtime_handle")
+    runtime_live, pid = _service_runtime_liveness(
+        runtime_handle if isinstance(runtime_handle, Mapping) else None
+    )
+
+    if record.status == SERVICE_STATUS_TERMINAL:
+        return _ServiceEvidence(
+            key=record.service_key,
+            name=name or _service_display_name(record.service_key),
+            status="terminal",
+            evidence="service-registry",
+            rank=100,
+            tid=record.owner_tid,
+            manager_tid=manager_tid if isinstance(manager_tid, str) else None,
+            pid=pid,
+            updated_at=record.timestamp,
+            reconciliation={"lifecycle_status": "terminal"},
+        )
+
+    if record.status in LIVE_SERVICE_STATUSES:
+        if runtime_live or not _service_observation_is_stale(
+            updated_at=record.timestamp,
+            now_ns=now_ns,
+        ):
+            return _ServiceEvidence(
+                key=record.service_key,
+                name=name or _service_display_name(record.service_key),
+                status="running",
+                evidence="service-registry",
+                rank=95 if runtime_live else 85,
+                tid=record.owner_tid,
+                manager_tid=manager_tid if isinstance(manager_tid, str) else None,
+                pid=pid,
+                updated_at=record.timestamp,
+            )
+        return _ServiceEvidence(
+            key=record.service_key,
+            name=name or _service_display_name(record.service_key),
+            status="uncertain",
+            evidence="service-registry",
+            rank=45,
+            tid=record.owner_tid,
+            manager_tid=manager_tid if isinstance(manager_tid, str) else None,
+            updated_at=record.timestamp,
+            reconciliation={
+                "classification": "service_liveness_uncertain",
+                "reason": "service_registry_runtime_not_live",
+                "lifecycle_status": record.status,
+            },
+        )
+
+    terminal_like = {SERVICE_STATUS_STOPPED, SERVICE_STATUS_SUPERSEDED}
+    return _ServiceEvidence(
+        key=record.service_key,
+        name=name or _service_display_name(record.service_key),
+        status="terminal" if record.status in terminal_like else "uncertain",
+        evidence="service-registry",
+        rank=100 if record.status in terminal_like else 45,
+        tid=record.owner_tid,
+        manager_tid=manager_tid if isinstance(manager_tid, str) else None,
+        pid=pid,
+        updated_at=record.timestamp,
+        reconciliation={"lifecycle_status": record.status},
+    )
+
+
+def _collect_service_registry_evidence(
+    ctx: WeftContext,
+    *,
+    now_ns: int,
+) -> list[_ServiceEvidence]:
+    queue = _queue(ctx, WEFT_SERVICES_REGISTRY_QUEUE)
+    try:
+        read = collect_service_owner_records(
+            iter_queue_json_entries(queue),
+            service_type=SERVICE_TYPE_MANAGED,
+        )
+        return [
+            candidate
+            for record in reduce_latest_by_service_owner(read.records)
+            if (
+                candidate := _service_evidence_from_service_owner_record(
+                    record,
+                    now_ns=now_ns,
+                )
+            )
+            is not None
+        ]
+    except (BrokerError, OSError, RuntimeError):
+        return []
+    finally:
+        queue.close()
 
 
 def _service_evidence_from_spawn_payload(
@@ -1409,11 +1592,12 @@ def _collect_internal_service_snapshots(
 ) -> list[ServiceSnapshot]:
     """Return queue-derived status for manager-owned internal services."""
 
+    now_ns = time.time_ns()
     candidates_by_key: dict[str, list[_ServiceEvidence]] = {
         key: [] for key in _known_internal_service_keys()
     }
     for record in task_records:
-        candidate = _service_evidence_from_child_task(record)
+        candidate = _service_evidence_from_child_task(record, now_ns=now_ns)
         if candidate is not None:
             candidates_by_key.setdefault(candidate.key, []).append(candidate)
 
@@ -1425,6 +1609,9 @@ def _collect_internal_service_snapshots(
                 candidates_by_key.setdefault(candidate.key, []).append(candidate)
     finally:
         log_queue.close()
+
+    for candidate in _collect_service_registry_evidence(ctx, now_ns=now_ns):
+        candidates_by_key.setdefault(candidate.key, []).append(candidate)
 
     for candidate in _collect_internal_spawn_queue_evidence(
         ctx,

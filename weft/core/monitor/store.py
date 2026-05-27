@@ -977,7 +977,12 @@ class _MonitorTableAccess:
             ),
         )
 
-    def list_retirable_task_collations(self, *, limit: int) -> tuple[str, ...]:
+    def list_retirable_task_collations(
+        self,
+        *,
+        limit: int,
+        older_than_ns: int | None = None,
+    ) -> tuple[str, ...]:
         """Return completed Monitor collation families safe to remove."""
 
         if limit <= 0:
@@ -986,8 +991,13 @@ class _MonitorTableAccess:
             monitor_sql.select_retirable_task_collations(
                 self._tables.task_collations,
                 self._tables.task_messages,
+                apply_retention_cutoff=older_than_ns is not None,
             ),
-            (self._context_key, int(limit)),
+            (
+                (self._context_key, older_than_ns, int(limit))
+                if older_than_ns is not None
+                else (self._context_key, int(limit))
+            ),
             fetch=True,
         )
         return tuple(str(row[0]) for row in rows)
@@ -1670,19 +1680,23 @@ class MonitorStore:
         *,
         limit: int,
         retired_at_ns: int | None = None,
+        retention_seconds: float = 0.0,
     ) -> MonitorStoreRetirementResult:
         """Physically remove completed Monitor collation families.
 
         The current retirement rule is intentionally conservative: parent rows
-        are removed only after raw deletion, summary emission, disposition, and
-        task-local control cleanup are all recorded.
+        are removed only after raw deletion, summary emission, disposition,
+        task-local control cleanup, and the configured status-retention window.
 
         Spec: [MF-5], [OBS.13]
         """
 
-        del retired_at_ns
         if limit <= 0:
             return MonitorStoreRetirementResult()
+        older_than_ns: int | None = None
+        if retention_seconds > 0:
+            now_ns = int(retired_at_ns if retired_at_ns is not None else time.time_ns())
+            older_than_ns = now_ns - int(float(retention_seconds) * 1_000_000_000)
         retired = 0
         with self._context.broker() as broker:
             runner = _runner_from_broker(broker)
@@ -1691,7 +1705,10 @@ class MonitorStore:
             while remaining > 0:
                 chunk_limit = min(remaining, self._config.write_batch_size)
                 with _write_transaction(runner):
-                    chunk = access.list_retirable_task_collations(limit=chunk_limit)
+                    chunk = access.list_retirable_task_collations(
+                        limit=chunk_limit,
+                        older_than_ns=older_than_ns,
+                    )
                     if not chunk:
                         break
                     access.delete_task_collations(chunk)

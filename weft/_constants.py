@@ -305,6 +305,9 @@ MANAGER_PID_LIVENESS_RECHECK_INTERVAL: Final[float] = 0.5
 MANAGER_CHILD_EXIT_POLL_INTERVAL: Final[float] = 0.05
 """Timer cadence for Manager parent-side user child process reaping."""
 
+MANAGER_CHILD_LAUNCH_STALE_RETRY_LIMIT: Final[int] = 1
+"""Retries for a child-launch worker that disappears before returning a result."""
+
 MANAGER_CONTROL_DRAIN_MAX_MESSAGES: Final[int] = 32
 """Maximum manager control messages handled before yielding a manager turn."""
 
@@ -325,6 +328,9 @@ MANAGER_STALLED_CONTROL_RETRY_SECONDS: Final[float] = 1.0
 
 MANAGER_CHILD_STARTUP_LIVENESS_GRACE_SECONDS: Final[float] = 1.0
 """Grace window before negative liveness can reap a just-launched Manager child."""
+
+MANAGER_CHILD_TERMINAL_PROOF_GRACE_SECONDS: Final[float] = 1.0
+"""Grace window for terminal proof after a clean Manager child wrapper exit."""
 
 MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS: Final[float] = 5.0
 """Maximum time a Manager drain waits before forcefully reaping child processes."""
@@ -485,46 +491,31 @@ TASK_MONITOR_CHECKPOINT_PATH: Final[str] = "state/task-monitor/default.json"
 TASK_MONITOR_PONG_DETAIL_LIMIT: Final[int] = 20
 """Maximum list entries included in TaskMonitor extended PONG diagnostics."""
 
-TASK_MONITOR_POLICY_TID_MAPPING_DELETE_MALFORMED: Final[str] = (
-    "tid_mapping.delete_malformed"
+TASK_MONITOR_POLICY_TASK_LOG_RETENTION: Final[str] = "task_log.retention"
+"""TaskMonitor cleanup policy for retained raw task-log rows."""
+
+TASK_MONITOR_POLICY_MONITOR_STORE_LIFECYCLE: Final[str] = "monitor_store.lifecycle"
+"""TaskMonitor cleanup policy for durable Monitor-store lifecycle work."""
+
+TASK_MONITOR_POLICY_TASK_LOCAL_TERMINAL_RUNTIME: Final[str] = (
+    "task_local.terminal_runtime"
 )
-"""TaskMonitor cleanup policy for malformed TID mapping runtime rows."""
+"""TaskMonitor cleanup policy for terminal task-local runtime queues."""
 
-TASK_MONITOR_POLICY_TID_MAPPING_DELETE_OLDER_THAN: Final[str] = (
-    "tid_mapping.delete_older_than"
+TASK_MONITOR_POLICY_TASK_LOCAL_DEAD_TID: Final[str] = "task_local.dead_tid"
+"""TaskMonitor cleanup policy for proven-dead task-local TIDs."""
+
+TASK_MONITOR_POLICY_RUNTIME_STATE_RETENTION: Final[str] = "runtime_state.retention"
+"""TaskMonitor cleanup policy for monitor-owned runtime state retention."""
+
+TASK_MONITOR_CLEANUP_POLICY_NAMES: Final[tuple[str, ...]] = (
+    TASK_MONITOR_POLICY_TASK_LOG_RETENTION,
+    TASK_MONITOR_POLICY_MONITOR_STORE_LIFECYCLE,
+    TASK_MONITOR_POLICY_TASK_LOCAL_TERMINAL_RUNTIME,
+    TASK_MONITOR_POLICY_TASK_LOCAL_DEAD_TID,
+    TASK_MONITOR_POLICY_RUNTIME_STATE_RETENTION,
 )
-"""TaskMonitor cleanup policy for old TID mapping runtime rows."""
-
-TASK_MONITOR_POLICY_TASK_LOG_DELETE_MALFORMED: Final[str] = "task_log.delete_malformed"
-"""TaskMonitor cleanup policy for malformed task-log runtime rows."""
-
-TASK_MONITOR_POLICY_TASK_LOG_DELETE_CLAIMED: Final[str] = "task_log.delete_claimed"
-"""TaskMonitor cleanup policy for already claimed task-log runtime rows."""
-
-TASK_MONITOR_POLICY_TASK_LOG_COLLATE_COMPLETE_LIFECYCLE: Final[str] = (
-    "task_log.collate_complete_lifecycle"
-)
-"""TaskMonitor cleanup policy for complete task-log lifecycle groups."""
-
-TASK_MONITOR_POLICY_TASK_LOG_COLLATE_TERMINAL_WITHOUT_START: Final[str] = (
-    "task_log.collate_terminal_without_start"
-)
-"""TaskMonitor cleanup policy for terminal task-log groups without visible start."""
-
-TASK_MONITOR_POLICY_TASK_LOG_DELETE_OLD_WITHOUT_START: Final[str] = (
-    "task_log.delete_old_without_start"
-)
-"""TaskMonitor cleanup policy for old task-log rows without open start evidence."""
-
-TASK_MONITOR_POLICY_TASK_LOG_EXTERNAL_RAW: Final[str] = (
-    "task_log.external_raw_log_then_delete"
-)
-"""TaskMonitor cleanup policy for raw external log-before-delete mode."""
-
-TASK_MONITOR_POLICY_RESERVED_DELETE_TERMINAL_PROVEN: Final[str] = (
-    "reserved.delete_terminal_proven"
-)
-"""TaskMonitor cleanup policy for reserved rows proven terminal by task logs."""
+"""The complete set of TaskMonitor top-level cleanup policy names."""
 
 TASK_MONITOR_TASK_LOG_SCAN_LIMIT_REACHED: Final[str] = "task_log_scan_limit_reached"
 """TaskMonitor task-log cleanup stop reason for scan limit exhaustion."""

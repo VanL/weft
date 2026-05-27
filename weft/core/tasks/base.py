@@ -560,6 +560,25 @@ class BaseTask(MultiQueueWatcher, ABC):
             }
             return bool(self._worker_threads)
 
+    def _worker_activity_snapshot(self) -> dict[str, Any]:
+        """Return a compact in-memory worker-lane snapshot for diagnostics."""
+
+        with self._worker_lock:
+            threads = tuple(self._worker_threads)
+        thread_rows = [
+            {
+                "name": thread.name,
+                "alive": thread.is_alive(),
+                "daemon": thread.daemon,
+            }
+            for thread in threads
+        ]
+        return {
+            "pending_results": self._has_pending_worker_results(),
+            "active_thread_count": sum(1 for row in thread_rows if row["alive"]),
+            "threads": thread_rows,
+        }
+
     def _sync_worker_result_event(self) -> None:
         """Keep the worker-result wake event aligned with queued local results."""
         if not self._worker_result_queue.empty():

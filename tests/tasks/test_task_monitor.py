@@ -19,6 +19,9 @@ from weft._constants import (
     SERVICE_STATUS_ACTIVE,
     SERVICE_TYPE_MANAGED,
     TASK_MONITOR_ACTIVITY_WAIT_CAP_SECONDS,
+    TASK_MONITOR_CLEANUP_POLICY_NAMES,
+    TASK_MONITOR_POLICY_MONITOR_STORE_LIFECYCLE,
+    TASK_MONITOR_POLICY_TASK_LOG_RETENTION,
     TASK_MONITOR_TID_MAPPING_CLEANUP_MIN_AGE_SECONDS,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MONITOR_SCHEMA_VERSION,
@@ -532,8 +535,11 @@ def test_task_monitor_ping_includes_health_and_preserves_task_log(
         == (pong["last_cleanup_policy_stats"])
     )
     assert extended["last_cycle"]["policy_progress"] == (pong["last_policy_progress"])
+    assert {
+        progress["policy"] for progress in extended["last_cycle"]["policy_progress"]
+    } <= set(TASK_MONITOR_CLEANUP_POLICY_NAMES)
     assert any(
-        progress["policy"] == "task_log.retained_fifo_ingest"
+        progress["policy"] == TASK_MONITOR_POLICY_TASK_LOG_RETENTION
         for progress in extended["last_cycle"]["policy_progress"]
     )
     retained = extended["last_cycle"]["retained_task_log_ingest"]
@@ -715,7 +721,7 @@ def test_task_monitor_table_delete_removes_exact_task_log_rows(
     assert task._last_monitor_store_message_rows_deleted >= 1
 
 
-def test_task_monitor_delete_retires_terminal_rows_without_general_retention_age(
+def test_task_monitor_delete_retains_terminal_rows_until_retention_age(
     broker_env,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -753,9 +759,13 @@ def test_task_monitor_delete_retires_terminal_rows_without_general_retention_age
         store = task._monitor_store
         assert store is not None
         record = store.get_task(tid)
-        assert record is None
+        assert record is not None
+        assert record.summary_emitted_at_ns is not None
+        assert record.raw_deleted_at_ns is not None
+        assert record.disposition_at_ns is not None
+        assert record.task_control_deleted_at_ns is not None
         assert task._last_monitor_store_message_rows_deleted >= 1
-        assert task._last_monitor_store_families_retired >= 1
+        assert task._last_monitor_store_families_retired == 0
     finally:
         task.stop()
 
@@ -1040,7 +1050,7 @@ def test_task_monitor_retained_ingest_batch_limit_counts_valid_rows(
         assert retained.stop_reason == "batch_limit"
         assert retained.completed_fifo_high_water is False
         assert any(
-            progress.policy == "task_log.retained_fifo_ingest"
+            progress.policy == TASK_MONITOR_POLICY_TASK_LOG_RETENTION
             and progress.waypoint_reached
             and not progress.base_reached
             for progress in task._last_policy_progress
@@ -1352,7 +1362,9 @@ def test_task_monitor_marks_orphan_recovery_checked_when_raw_rows_absent(
     record = store.get_task(tid)
     assert record is not None
     assert record.orphan_raw_recovery_checked_at_ns == terminal.message_id + 2
-    assert task._last_policy_progress[-1].policy == "monitor_store.orphan_raw_recovery"
+    assert task._last_policy_progress[-1].policy == (
+        TASK_MONITOR_POLICY_MONITOR_STORE_LIFECYCLE
+    )
     assert task._last_policy_progress[-1].base_reached is True
 
 
@@ -2128,7 +2140,7 @@ def test_task_monitor_repairs_raw_deleted_parent_with_child_refs(
     assert second_repair.message_rows_deleted == 0
     assert store.list_raw_deleted_task_message_refs(limit=10) == ()
     assert task._last_policy_progress[-1].policy == (
-        "monitor_store.raw_deleted_child_ref_repair"
+        TASK_MONITOR_POLICY_MONITOR_STORE_LIFECYCLE
     )
     assert task._last_policy_progress[-1].base_reached is True
 

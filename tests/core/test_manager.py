@@ -40,6 +40,7 @@ from weft._constants import (
     MANAGED_SERVICE_CONVERGENCE_INTERVAL_SECONDS,
     MANAGED_SERVICE_STABLE_AUDIT_INTERVAL_SECONDS,
     MANAGER_CHILD_EXIT_POLL_INTERVAL,
+    MANAGER_CHILD_TERMINAL_PROOF_GRACE_SECONDS,
     MANAGER_DISPATCH_STALL_LOG_INTERVAL_SECONDS,
     MANAGER_LEADERSHIP_CHECK_INTERVAL_SECONDS,
     MANAGER_REGISTRY_HEARTBEAT_INTERVAL_SECONDS,
@@ -1363,6 +1364,53 @@ def test_manager_processes_internal_spawn_before_public_spawn(
     assert launched == ["internal-first", "public-second"]
 
 
+def test_manager_stops_spawn_drain_after_child_launch_starts(
+    broker_env,
+    unique_tid,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    config = load_config({"WEFT_TASK_MONITOR_ENABLED": "0"})
+    manager = Manager(
+        db_path, make_manager_spec(unique_tid, idle_timeout=0.0), config=config
+    )
+    internal_queue = make_queue(WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE)
+    public_queue = make_queue(WEFT_SPAWN_REQUESTS_QUEUE)
+    public_reserved = make_queue(manager._queue_names["reserved"])
+    drain(internal_queue)
+    drain(public_queue)
+    drain(public_reserved)
+
+    def spawn_payload(name: str) -> dict[str, object]:
+        return {
+            "name": name,
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:echo_payload",
+            },
+        }
+
+    internal_queue.write(json.dumps(spawn_payload("internal-first")))
+    public_queue.write(json.dumps(spawn_payload("public-second")))
+    launched: list[str] = []
+
+    def record_launch(child_spec: TaskSpec, *_args: object, **_kwargs: object) -> bool:
+        launched.append(child_spec.name)
+        manager._child_launch_started_this_turn = True
+        return True
+
+    monkeypatch.setattr(manager, "_launch_child_task", record_launch)
+
+    try:
+        manager.process_once()
+    finally:
+        manager.cleanup()
+
+    assert launched == ["internal-first"]
+    assert public_queue.peek_one() is not None
+    assert public_reserved.peek_one() is None
+
+
 def test_custom_inbox_manager_does_not_consume_internal_spawn_queue(
     broker_env,
     unique_tid,
@@ -1456,6 +1504,35 @@ def test_internal_spawn_launch_failure_leaves_internal_reserved_visible(
         str(event.get("event", "")).startswith("manager_spawn_fence")
         for event in events
     )
+
+
+def test_internal_reserved_spawn_counts_as_pending_service(
+    broker_env,
+    unique_tid,
+) -> None:
+    db_path, make_queue = broker_env
+    config = load_config({"WEFT_TASK_MONITOR_ENABLED": "0"})
+    manager = Manager(
+        db_path, make_manager_spec(unique_tid, idle_timeout=0.0), config=config
+    )
+    internal_queue = make_queue(WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE)
+    internal_reserved = make_queue(manager._queue_names["internal_reserved"])
+    drain(internal_queue)
+    drain(internal_reserved)
+    internal_reserved.write(json.dumps(manager._build_task_monitor_spawn_payload()))
+
+    try:
+        pending = manager._pending_service_keys(
+            {INTERNAL_SERVICE_KEY_TASK_MONITOR},
+            queue_names=(
+                manager._queue_names["internal_inbox"],
+                manager._queue_names["internal_reserved"],
+            ),
+        )
+    finally:
+        manager.cleanup()
+
+    assert pending == {INTERNAL_SERVICE_KEY_TASK_MONITOR}
 
 
 def test_task_monitor_spawn_payload_uses_manager_owned_envelope(
@@ -5796,6 +5873,60 @@ def test_cleanup_children_reaps_os_dead_child_without_mapping_scan(
 
     assert manager._child_processes == {}
     assert fake_process.join_calls == [0.0, 0.1]
+
+
+def test_cleanup_children_waits_for_terminal_proof_after_clean_exit(
+    manager_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, make_queue = manager_setup
+    tid = "1777000000000000061"
+    ctrl_out = f"T{tid}.ctrl_out"
+
+    class FakeProcess:
+        pid = 424245
+        exitcode = 0
+
+        def __init__(self) -> None:
+            self.join_calls: list[float] = []
+
+        def is_alive(self) -> bool:
+            return False
+
+        def join(self, timeout: float | None = None) -> None:
+            self.join_calls.append(0.0 if timeout is None else float(timeout))
+
+    now_ns = 2_000_000_000_000
+    fake_process = FakeProcess()
+    child = ManagedChild(
+        process=fake_process,
+        ctrl_queue=None,
+        ctrl_out_queue=ctrl_out,
+        launched_ns=now_ns - 1,
+    )
+    manager._child_processes[tid] = child
+    monkeypatch.setattr(manager_mod.time, "time_ns", lambda: now_ns)
+    monkeypatch.setattr(manager, "_child_terminal_proof_visible", lambda *_args: False)
+
+    manager._cleanup_children()
+
+    assert manager._child_processes[tid] is child
+    assert child.terminal_proof_missing_since_ns == now_ns
+    assert fake_process.join_calls == []
+    assert make_queue(ctrl_out).peek_one() is None
+
+    later_ns = now_ns + int(
+        (MANAGER_CHILD_TERMINAL_PROOF_GRACE_SECONDS + 0.1) * 1_000_000_000
+    )
+    monkeypatch.setattr(manager_mod.time, "time_ns", lambda: later_ns)
+
+    manager._cleanup_children()
+
+    assert tid not in manager._child_processes
+    assert fake_process.join_calls == [0.1]
+    payload = json.loads(str(make_queue(ctrl_out).read_one()))
+    assert payload["status"] == "failed"
+    assert payload["error"] == WRAPPER_LOST_ERROR
 
 
 def test_child_has_exited_trusts_live_host_pid_before_process_view(

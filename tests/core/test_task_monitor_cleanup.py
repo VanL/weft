@@ -13,14 +13,9 @@ import weft.core.monitor.cleanup as cleanup_mod
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import (
     QUEUE_RESERVED_SUFFIX,
-    TASK_MONITOR_POLICY_RESERVED_DELETE_TERMINAL_PROVEN,
-    TASK_MONITOR_POLICY_TASK_LOG_COLLATE_COMPLETE_LIFECYCLE,
-    TASK_MONITOR_POLICY_TASK_LOG_COLLATE_TERMINAL_WITHOUT_START,
-    TASK_MONITOR_POLICY_TASK_LOG_DELETE_CLAIMED,
-    TASK_MONITOR_POLICY_TASK_LOG_DELETE_MALFORMED,
-    TASK_MONITOR_POLICY_TASK_LOG_DELETE_OLD_WITHOUT_START,
-    TASK_MONITOR_POLICY_TID_MAPPING_DELETE_MALFORMED,
-    TASK_MONITOR_POLICY_TID_MAPPING_DELETE_OLDER_THAN,
+    TASK_MONITOR_POLICY_RUNTIME_STATE_RETENTION,
+    TASK_MONITOR_POLICY_TASK_LOCAL_TERMINAL_RUNTIME,
+    TASK_MONITOR_POLICY_TASK_LOG_RETENTION,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
 )
@@ -343,16 +338,8 @@ def test_task_monitor_cleanup_deletes_malformed_task_log(tmp_path: Path) -> None
         "malformed_task_log"
     ]
     stats = _policy_summary_by_policy(result)
-    assert stats[TASK_MONITOR_POLICY_TASK_LOG_DELETE_MALFORMED]["selected"] == 1
-    assert stats[TASK_MONITOR_POLICY_TASK_LOG_DELETE_MALFORMED]["deleted"] == 1
-    assert (
-        stats[TASK_MONITOR_POLICY_TASK_LOG_COLLATE_COMPLETE_LIFECYCLE]["selected"] == 0
-    )
-    assert (
-        stats[TASK_MONITOR_POLICY_TASK_LOG_COLLATE_TERMINAL_WITHOUT_START]["selected"]
-        == 0
-    )
-    assert stats[TASK_MONITOR_POLICY_TASK_LOG_DELETE_OLD_WITHOUT_START]["selected"] == 0
+    assert stats[TASK_MONITOR_POLICY_TASK_LOG_RETENTION]["selected"] == 1
+    assert stats[TASK_MONITOR_POLICY_TASK_LOG_RETENTION]["deleted"] == 1
     assert [body for body, _message_id in _read_rows(ctx, WEFT_GLOBAL_LOG_QUEUE)] == [
         json.dumps({"event": "work_started", "tid": "1778000000000000001"})
     ]
@@ -421,9 +408,9 @@ def test_task_monitor_cleanup_deletes_claimed_task_log_before_collation(
     assert result.success
     assert result.deleted == 3
     assert [candidate.policy for candidate in result.candidates] == [
-        TASK_MONITOR_POLICY_TASK_LOG_DELETE_CLAIMED,
-        TASK_MONITOR_POLICY_TASK_LOG_COLLATE_COMPLETE_LIFECYCLE,
-        TASK_MONITOR_POLICY_TASK_LOG_COLLATE_COMPLETE_LIFECYCLE,
+        TASK_MONITOR_POLICY_TASK_LOG_RETENTION,
+        TASK_MONITOR_POLICY_TASK_LOG_RETENTION,
+        TASK_MONITOR_POLICY_TASK_LOG_RETENTION,
     ]
     assert [candidate.candidate_class for candidate in result.candidates] == [
         "claimed_task_log",
@@ -431,11 +418,8 @@ def test_task_monitor_cleanup_deletes_claimed_task_log_before_collation(
         "collated_terminal_task_log",
     ]
     stats = _policy_summary_by_policy(result)
-    assert stats[TASK_MONITOR_POLICY_TASK_LOG_DELETE_CLAIMED]["selected"] == 1
-    assert stats[TASK_MONITOR_POLICY_TASK_LOG_DELETE_CLAIMED]["deleted"] == 1
-    assert (
-        stats[TASK_MONITOR_POLICY_TASK_LOG_COLLATE_COMPLETE_LIFECYCLE]["selected"] == 2
-    )
+    assert stats[TASK_MONITOR_POLICY_TASK_LOG_RETENTION]["selected"] == 3
+    assert stats[TASK_MONITOR_POLICY_TASK_LOG_RETENTION]["deleted"] == 3
     assert _queue_stats(ctx, WEFT_GLOBAL_LOG_QUEUE) == (0, 0, 0)
 
 
@@ -470,7 +454,7 @@ def test_task_monitor_cleanup_skips_claimed_scan_when_queue_has_no_claimed_rows(
     assert result.success
     assert result.deleted == 0
     stats = _policy_summary_by_policy(result)
-    assert stats[TASK_MONITOR_POLICY_TASK_LOG_DELETE_CLAIMED]["selected"] == 0
+    assert stats[TASK_MONITOR_POLICY_TASK_LOG_RETENTION]["selected"] == 0
 
 
 def test_task_monitor_cleanup_deletes_malformed_tid_mapping(tmp_path: Path) -> None:
@@ -495,9 +479,8 @@ def test_task_monitor_cleanup_deletes_malformed_tid_mapping(tmp_path: Path) -> N
         "malformed_tid_mapping"
     ]
     stats = _policy_summary_by_policy(result)
-    assert stats[TASK_MONITOR_POLICY_TID_MAPPING_DELETE_MALFORMED]["selected"] == 1
-    assert stats[TASK_MONITOR_POLICY_TID_MAPPING_DELETE_MALFORMED]["deleted"] == 1
-    assert stats[TASK_MONITOR_POLICY_TID_MAPPING_DELETE_OLDER_THAN]["selected"] == 0
+    assert stats[TASK_MONITOR_POLICY_RUNTIME_STATE_RETENTION]["selected"] == 1
+    assert stats[TASK_MONITOR_POLICY_RUNTIME_STATE_RETENTION]["deleted"] == 1
     rows = _read_rows(ctx, WEFT_TID_MAPPINGS_QUEUE)
     assert len(rows) == 1
     assert json.loads(rows[0][0])["full"] == "1778000000000000001"
@@ -518,9 +501,9 @@ def test_task_monitor_cleanup_report_only_keeps_selected_rows(tmp_path: Path) ->
     assert result.reported == 1
     assert result.deleted == 0
     stats = _policy_summary_by_policy(result)
-    assert stats[TASK_MONITOR_POLICY_TASK_LOG_DELETE_MALFORMED]["selected"] == 1
-    assert stats[TASK_MONITOR_POLICY_TASK_LOG_DELETE_MALFORMED]["reported"] == 1
-    assert stats[TASK_MONITOR_POLICY_TASK_LOG_DELETE_MALFORMED]["deleted"] == 0
+    assert stats[TASK_MONITOR_POLICY_TASK_LOG_RETENTION]["selected"] == 1
+    assert stats[TASK_MONITOR_POLICY_TASK_LOG_RETENTION]["reported"] == 1
+    assert stats[TASK_MONITOR_POLICY_TASK_LOG_RETENTION]["deleted"] == 0
     assert len(_read_rows(ctx, WEFT_GLOBAL_LOG_QUEUE)) == 1
 
 
@@ -545,9 +528,8 @@ def test_task_monitor_cleanup_deletes_old_tid_mapping(tmp_path: Path) -> None:
         "old_tid_mapping"
     ]
     stats = _policy_summary_by_policy(result)
-    assert stats[TASK_MONITOR_POLICY_TID_MAPPING_DELETE_MALFORMED]["selected"] == 0
-    assert stats[TASK_MONITOR_POLICY_TID_MAPPING_DELETE_OLDER_THAN]["selected"] == 1
-    assert stats[TASK_MONITOR_POLICY_TID_MAPPING_DELETE_OLDER_THAN]["deleted"] == 1
+    assert stats[TASK_MONITOR_POLICY_RUNTIME_STATE_RETENTION]["selected"] == 1
+    assert stats[TASK_MONITOR_POLICY_RUNTIME_STATE_RETENTION]["deleted"] == 1
     assert _read_rows(ctx, WEFT_TID_MAPPINGS_QUEUE) == []
 
 
@@ -570,10 +552,10 @@ def test_task_monitor_cleanup_preserves_young_tid_mapping(tmp_path: Path) -> Non
     assert result.deleted == 0
     assert result.queue_stats[0].stop_reason == "first_tid_mapping_too_young"
     stats = _policy_summary_by_policy(result)
-    assert stats[TASK_MONITOR_POLICY_TID_MAPPING_DELETE_MALFORMED]["selected"] == 0
-    assert stats[TASK_MONITOR_POLICY_TID_MAPPING_DELETE_OLDER_THAN]["selected"] == 0
+    assert stats[TASK_MONITOR_POLICY_RUNTIME_STATE_RETENTION]["selected"] == 0
+    assert stats[TASK_MONITOR_POLICY_RUNTIME_STATE_RETENTION]["selected"] == 0
     assert (
-        stats[TASK_MONITOR_POLICY_TID_MAPPING_DELETE_OLDER_THAN]["stop_reason"]
+        stats[TASK_MONITOR_POLICY_RUNTIME_STATE_RETENTION]["stop_reason"]
         == "first_tid_mapping_too_young"
     )
     assert len(_read_rows(ctx, WEFT_TID_MAPPINGS_QUEUE)) == 1
@@ -616,18 +598,10 @@ def test_task_monitor_cleanup_collates_terminal_task_log_for_anchor_tid(
         candidate.candidate.message_id for candidate in result.applied_candidates
     }
     stats = _policy_summary_by_policy(result)
-    assert (
-        stats[TASK_MONITOR_POLICY_TASK_LOG_COLLATE_COMPLETE_LIFECYCLE]["selected"] == 2
-    )
-    assert (
-        stats[TASK_MONITOR_POLICY_TASK_LOG_COLLATE_COMPLETE_LIFECYCLE]["deleted"] == 2
-    )
-    assert (
-        stats[TASK_MONITOR_POLICY_TASK_LOG_COLLATE_TERMINAL_WITHOUT_START]["selected"]
-        == 0
-    )
+    assert stats[TASK_MONITOR_POLICY_TASK_LOG_RETENTION]["selected"] == 2
+    assert stats[TASK_MONITOR_POLICY_TASK_LOG_RETENTION]["deleted"] == 2
     assert all(
-        stat.policy != TASK_MONITOR_POLICY_RESERVED_DELETE_TERMINAL_PROVEN
+        stat.policy != TASK_MONITOR_POLICY_TASK_LOCAL_TERMINAL_RUNTIME
         for stat in result.policy_stats
     )
     remaining = [
@@ -681,9 +655,7 @@ def test_task_monitor_cleanup_collates_complete_family_behind_open_prefix(
         complete_terminal_id,
     }
     stats = _policy_summary_by_policy(result)
-    assert (
-        stats[TASK_MONITOR_POLICY_TASK_LOG_COLLATE_COMPLETE_LIFECYCLE]["selected"] == 2
-    )
+    assert stats[TASK_MONITOR_POLICY_TASK_LOG_RETENTION]["selected"] == 2
     queue_summary = next(
         stat.to_summary()
         for stat in result.queue_stats
@@ -737,7 +709,7 @@ def test_task_monitor_cleanup_deletes_reserved_work_with_terminal_log_proof(
     reserved_policy_stats = [
         stat
         for stat in result.policy_stats
-        if stat.policy == TASK_MONITOR_POLICY_RESERVED_DELETE_TERMINAL_PROVEN
+        if stat.policy == TASK_MONITOR_POLICY_TASK_LOCAL_TERMINAL_RUNTIME
     ]
     assert len(reserved_policy_stats) == 1
     assert reserved_policy_stats[0].queue == reserved_queue
@@ -894,7 +866,7 @@ def test_task_monitor_cleanup_does_not_probe_reserved_for_successful_completion(
     assert result.success
     assert result.deleted == 2
     assert all(
-        stat.policy != TASK_MONITOR_POLICY_RESERVED_DELETE_TERMINAL_PROVEN
+        stat.policy != TASK_MONITOR_POLICY_TASK_LOCAL_TERMINAL_RUNTIME
         for stat in result.policy_stats
     )
 
@@ -943,7 +915,7 @@ def test_task_monitor_cleanup_default_does_not_probe_reserved_for_failure(
     assert result.deleted == 2
     assert _read_rows(ctx, reserved_queue) != []
     assert all(
-        stat.policy != TASK_MONITOR_POLICY_RESERVED_DELETE_TERMINAL_PROVEN
+        stat.policy != TASK_MONITOR_POLICY_TASK_LOCAL_TERMINAL_RUNTIME
         for stat in result.policy_stats
     )
 
@@ -1055,9 +1027,9 @@ def test_task_monitor_cleanup_policy_order_collates_complete_before_truncated(
 
     assert result.success
     assert [candidate.policy for candidate in result.candidates] == [
-        TASK_MONITOR_POLICY_TASK_LOG_COLLATE_COMPLETE_LIFECYCLE,
-        TASK_MONITOR_POLICY_TASK_LOG_COLLATE_COMPLETE_LIFECYCLE,
-        TASK_MONITOR_POLICY_TASK_LOG_COLLATE_TERMINAL_WITHOUT_START,
+        TASK_MONITOR_POLICY_TASK_LOG_RETENTION,
+        TASK_MONITOR_POLICY_TASK_LOG_RETENTION,
+        TASK_MONITOR_POLICY_TASK_LOG_RETENTION,
     ]
 
 
@@ -1130,11 +1102,8 @@ def test_task_monitor_cleanup_deletes_old_rows_after_collation(
         "old_task_log",
     ]
     stats = _policy_summary_by_policy(result)
-    assert (
-        stats[TASK_MONITOR_POLICY_TASK_LOG_COLLATE_COMPLETE_LIFECYCLE]["selected"] == 2
-    )
-    assert stats[TASK_MONITOR_POLICY_TASK_LOG_DELETE_OLD_WITHOUT_START]["selected"] == 1
-    assert stats[TASK_MONITOR_POLICY_TASK_LOG_DELETE_OLD_WITHOUT_START]["deleted"] == 1
+    assert stats[TASK_MONITOR_POLICY_TASK_LOG_RETENTION]["selected"] == 3
+    assert stats[TASK_MONITOR_POLICY_TASK_LOG_RETENTION]["deleted"] == 3
     assert _read_rows(ctx, WEFT_GLOBAL_LOG_QUEUE) == []
 
 
@@ -1193,17 +1162,8 @@ def test_task_monitor_cleanup_classifies_terminal_without_visible_start_as_trunc
         "truncated_terminal_task_log"
     ]
     stats = _policy_summary_by_policy(result)
-    assert (
-        stats[TASK_MONITOR_POLICY_TASK_LOG_COLLATE_TERMINAL_WITHOUT_START]["selected"]
-        == 1
-    )
-    assert (
-        stats[TASK_MONITOR_POLICY_TASK_LOG_COLLATE_TERMINAL_WITHOUT_START]["deleted"]
-        == 1
-    )
-    assert (
-        stats[TASK_MONITOR_POLICY_TASK_LOG_COLLATE_COMPLETE_LIFECYCLE]["selected"] == 0
-    )
+    assert stats[TASK_MONITOR_POLICY_TASK_LOG_RETENTION]["selected"] == 1
+    assert stats[TASK_MONITOR_POLICY_TASK_LOG_RETENTION]["deleted"] == 1
     assert _read_rows(ctx, WEFT_GLOBAL_LOG_QUEUE) == []
 
 

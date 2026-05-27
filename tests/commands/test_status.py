@@ -20,6 +20,7 @@ from weft._constants import (
     INTERNAL_SERVICE_KEY_METADATA_KEY,
     INTERNAL_SERVICE_KEY_TASK_MONITOR,
     INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY,
+    SERVICE_TYPE_MANAGED,
     WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
     WEFT_MANAGER_OUTBOX_QUEUE,
     WEFT_SERVICES_REGISTRY_QUEUE,
@@ -30,7 +31,10 @@ from weft.commands import tasks as task_cmd
 from weft.commands.status import cmd_status, collect_status
 from weft.context import build_context
 from weft.core.runners import host as host_runner
-from weft.core.service_convergence import build_manager_service_payload
+from weft.core.service_convergence import (
+    build_manager_service_payload,
+    build_service_owner_payload,
+)
 from weft.ext import RunnerRuntimeDescription
 from weft.helpers.container_detection import ContainerRuntimeDetection
 
@@ -474,6 +478,92 @@ def test_status_services_report_pending_internal_spawn_request(
     assert monitor.status == "pending"
     assert monitor.evidence == "internal-spawn-pending"
     assert monitor.queue == WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE
+
+
+def test_status_services_prefer_live_service_owner_over_stale_child_log(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    manager_tid = "1779744647005904800"
+    stale_tid = "1779555792870776832"
+    live_tid = "1779744647005904896"
+    stale_started = time.time_ns() - 10_000_000_000_000
+    registry = ctx.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
+    registry.write(
+        json.dumps(
+            _manager_service_payload(
+                ctx,
+                tid=manager_tid,
+                runtime_handle=_runtime_handle(
+                    "host",
+                    str(os.getpid()),
+                    host_pids=[os.getpid()],
+                ),
+            )
+        )
+    )
+    registry.write(
+        json.dumps(
+            build_service_owner_payload(
+                service_key=INTERNAL_SERVICE_KEY_TASK_MONITOR,
+                service_type=SERVICE_TYPE_MANAGED,
+                owner_tid=live_tid,
+                status="active",
+                name="task-monitor",
+                queues={
+                    "ctrl_in": f"T{live_tid}.ctrl_in",
+                    "ctrl_out": f"T{live_tid}.ctrl_out",
+                    "inbox": f"T{live_tid}.inbox",
+                    "outbox": f"T{live_tid}.outbox",
+                },
+                runtime_handle=_runtime_handle(
+                    "host",
+                    str(os.getpid()),
+                    host_pids=[os.getpid()],
+                ),
+                metadata={"manager_tid": manager_tid},
+            )
+        )
+    )
+    registry.close()
+    _write_task_log_entry(
+        ctx=ctx,
+        tid=stale_tid,
+        event="task_started",
+        status="running",
+        started_at=stale_started,
+        completed_at=None,
+        name="task-monitor",
+        metadata={
+            "internal": True,
+            "role": "task_monitor",
+            INTERNAL_RUNTIME_TASK_CLASS_KEY: INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR,
+            INTERNAL_SERVICE_KEY_METADATA_KEY: INTERNAL_SERVICE_KEY_TASK_MONITOR,
+            INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY: "ensure",
+        },
+    )
+    observed_now = time.time_ns()
+    monkeypatch.setattr(
+        status_cmd.time,
+        "time_ns",
+        lambda: observed_now + 2_000_000_000_000,
+    )
+
+    exit_code, payload = cmd_status(json_output=True, spec_context=root)
+
+    assert exit_code == 0
+    assert payload is not None
+    services = json.loads(payload)["services"]
+    monitor = next(
+        service
+        for service in services
+        if service["key"] == INTERNAL_SERVICE_KEY_TASK_MONITOR
+    )
+    assert monitor["status"] == "running"
+    assert monitor["tid"] == live_tid
+    assert monitor["evidence"] == "service-registry"
 
 
 def test_cmd_status_text_output(tmp_path):

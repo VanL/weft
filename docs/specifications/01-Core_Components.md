@@ -14,6 +14,8 @@ See also:
 
 ## Related Plans
 
+- [`docs/plans/2026-05-26-monitor-five-cleanup-policy-consolidation-plan.md`](../plans/2026-05-26-monitor-five-cleanup-policy-consolidation-plan.md)
+- [`docs/plans/2026-05-26-service-task-worker-api-plan.md`](../plans/2026-05-26-service-task-worker-api-plan.md)
 - [`docs/plans/2026-05-24-monitor-policy-progress-contract-plan.md`](../plans/2026-05-24-monitor-policy-progress-contract-plan.md)
 - [`docs/plans/2026-05-23-monitor-cleanup-policy-convergence-plan.md`](../plans/2026-05-23-monitor-cleanup-policy-convergence-plan.md)
 - [`docs/plans/2026-05-23-monitor-cleanup-executor-plan.md`](../plans/2026-05-23-monitor-cleanup-executor-plan.md)
@@ -200,15 +202,22 @@ Current task families:
 
 - `ServiceTask`: internal helper for long-lived task-shaped services. It
   reuses `BaseTask` queue/control behavior, publishes the common
-  `task_spawning`/`task_started` activation sequence when asked, tracks
-  single-flight service worker lanes, and exposes due-time math. Service
-  activity is live-only: subclasses may update activity for process titles,
-  PONG/status responses, and TID mappings, but the service layer suppresses
-  `task_activity` and poll-report rows in `weft.log.tasks` so long-lived
-  manager, heartbeat, and TaskMonitor work cannot amplify the lifecycle log
-  that cleanup itself consumes. It does not implement `process_once()` and does
-  not know about manager leadership, service keys, cleanup selection, heartbeat
-  registration, or queue scheduling policy.
+  `task_spawning`/`task_started` activation sequence when asked, exposes
+  due-time math, and owns the internal service-worker API for registered
+  in-memory worker groups. A service-worker group has a callable target,
+  positional/keyword arguments, one local Python input queue, one or more local
+  worker threads, typed `ServiceWorkerEvent` publication through
+  `BaseTask._publish_worker_result(...)`, cached in-memory snapshots, and
+  best-effort stop sentinels during cleanup. Compatibility single-flight lane
+  helpers use the same worker registry while concrete services keep their own
+  policy and result-commit logic. Service activity is live-only: subclasses may
+  update activity for process titles, PONG/status responses, and TID mappings,
+  but the service layer suppresses `task_activity` and poll-report rows in
+  `weft.log.tasks` so long-lived manager, heartbeat, and TaskMonitor work
+  cannot amplify the lifecycle log that cleanup itself consumes. It does not
+  implement `process_once()` and does not know about manager leadership,
+  service keys, cleanup selection, heartbeat registration, or queue scheduling
+  policy.
 - `Consumer`: reserves inbox messages on the main task reactor thread, runs
   blocking target execution in a broker-free worker lane, and commits
   outbox/state/reserved-policy effects back on the main thread
@@ -247,7 +256,13 @@ Current task families:
   disposition when needed. The monitor also caches `policy_progress`
   summaries so PONG can explain whether each cleanup policy reached a bounded
   waypoint, reached base for now, deferred future work, or was blocked by an
-  error without performing live scans on the control path. The persistent
+  error without performing live scans on the control path. The monitor exposes
+  exactly five top-level cleanup policy identities:
+  `task_log.retention`, `monitor_store.lifecycle`,
+  `task_local.terminal_runtime`, `task_local.dead_tid`, and
+  `runtime_state.retention`. Policy work and result values share the internal
+  API in `weft/core/monitor/policies/api.py`; private helper phases must not
+  create additional policy identities. The persistent
   monitor also calls the configured task-monitor processor. The persistent
   monitor is a reactor: it owns task-local control, heartbeat registration,
   scheduling, and commits cached diagnostics from worker results. Custom
@@ -338,7 +353,8 @@ specialized policies live on `Manager`, `Consumer`, `PipelineTask`, and
 Implementation plan backlinks:
 [`2026-04-21-run-boundary-dispatch-fence-control-contract-plan.md`](../plans/2026-04-21-run-boundary-dispatch-fence-control-contract-plan.md);
 [`2026-05-15-task-reactor-and-evidence-worker-plan.md`](../plans/2026-05-15-task-reactor-and-evidence-worker-plan.md);
-[`2026-05-20-service-task-shared-reactor-extraction-plan.md`](../plans/2026-05-20-service-task-shared-reactor-extraction-plan.md).
+[`2026-05-20-service-task-shared-reactor-extraction-plan.md`](../plans/2026-05-20-service-task-shared-reactor-extraction-plan.md);
+[`2026-05-26-service-task-worker-api-plan.md`](../plans/2026-05-26-service-task-worker-api-plan.md).
 
 ### 2.4.1 Runtime Endpoint Registry [CC-2.4.1]
 
@@ -532,6 +548,7 @@ TaskMonitor runtime boundary.
 
 ## Related Plans
 
+- [`docs/plans/2026-05-26-monitor-five-cleanup-policy-consolidation-plan.md`](../plans/2026-05-26-monitor-five-cleanup-policy-consolidation-plan.md)
 - [`docs/plans/2026-05-20-monitor-collation-table-retirement-plan.md`](../plans/2026-05-20-monitor-collation-table-retirement-plan.md)
 - [`docs/plans/2026-05-20-monitor-fair-cleanup-scheduling-plan.md`](../plans/2026-05-20-monitor-fair-cleanup-scheduling-plan.md)
 - [`docs/plans/2026-05-19-monitor-terminal-retirement-and-runtime-queue-cleanup-plan.md`](../plans/2026-05-19-monitor-terminal-retirement-and-runtime-queue-cleanup-plan.md)

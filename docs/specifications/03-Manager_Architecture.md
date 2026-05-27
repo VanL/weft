@@ -26,6 +26,7 @@ always be rolled back from the public request queue.
 
 ## Related Plans
 
+- [Service Task Worker API Plan](../plans/2026-05-26-service-task-worker-api-plan.md) - consolidate Manager child launch and TaskMonitor maintenance lanes onto the shared internal `ServiceTask` service-worker API.
 - [Config Precedence and Parsing Alignment Plan](../plans/2026-04-14-config-precedence-and-parsing-alignment-plan.md) – align broker target precedence, Weft env parsing, and manager-timeout config semantics with the documented contract.
 - [Spawn Request Reconciliation Plan](../plans/2026-04-14-spawn-request-reconciliation-plan.md) – tighten queue-first submission error handling so post-enqueue failures reconcile by TID instead of assuming rollback, and keep late bootstrap acknowledgement failures from downgrading successful startup.
 - [Manager Bootstrap Unification Plan](../plans/2026-04-09-manager-bootstrap-unification-plan.md) – Collapse `weft manager start` onto the canonical manager bootstrap path used by `weft run`.
@@ -286,7 +287,7 @@ Key responsibilities implemented in `weft/core/manager.py`:
 
 _Implementation mapping_:
 - [MA-1.1] Spawn queue consumption — `Manager._build_queue_configs`, `Manager._handle_work_message`, `Manager._build_child_spec`, `Manager._drain_public_spawn_requests`, `Manager._drain_spawn_requests_from_queue`, `Manager._handle_child_launch_result`.
-- [MA-1.2] Child process launch — `Manager._launch_child_task` prepares the launch request, `Manager._run_child_launch_worker` calls `launch_task_process` (`weft/core/launcher.py`) on the broker-free worker lane, and `Manager._commit_child_launch_success` applies durable effects on the manager reactor.
+- [MA-1.2] Child process launch — `Manager._launch_child_task` prepares the launch request, enqueues it through the registered `ServiceTask` child-launch worker group, `Manager._run_child_launch_service_worker` reads the local Python input queue, `Manager._run_child_launch_worker` calls `launch_task_process` (`weft/core/launcher.py`) on the broker-free worker lane, and `Manager._commit_child_launch_success` applies durable effects on the manager reactor.
 - [MA-1.3] Initial payload delivery — `Manager._launch_child_task` (inbox seeding block).
 - [MA-1.4] Registry heartbeat and leadership view — `weft/core/service_convergence.py`, `Manager._register_manager`, `Manager._unregister_manager`, `Manager._atexit_unregister`, `Manager._update_manager_registry_snapshot`, `Manager._publish_superseded_manager_record`, `Manager._read_active_manager_records`, `Manager._active_manager_records`, `Manager._leader_tid`, `Manager._evaluate_dispatch_ownership`, `Manager._manager_pong_dispatch_proof`, `Manager._advance_manager_pong_probe`, `Manager._maybe_yield_leadership`, `weft/commands/system.py::_collect_task_snapshot_records`, plus manager-record projection in `weft/core/manager_runtime.py`.
 - [MA-1.5] Idle timeout — `Manager.process_once` (idle-timeout check), `Manager._read_broker_timestamp`, `Manager._update_idle_activity_from_broker`.

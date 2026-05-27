@@ -13,8 +13,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from weft._constants import (
-    TASK_MONITOR_POLICY_TID_MAPPING_DELETE_MALFORMED,
-    TASK_MONITOR_POLICY_TID_MAPPING_DELETE_OLDER_THAN,
+    TASK_MONITOR_POLICY_RUNTIME_STATE_RETENTION,
     WEFT_TID_MAPPINGS_QUEUE,
 )
 from weft.core.monitor.progress import PolicyProgress
@@ -86,14 +85,14 @@ def tid_mapping_candidates(
 
     malformed_candidates = malformed_row_candidates(
         rows,
-        policy=TASK_MONITOR_POLICY_TID_MAPPING_DELETE_MALFORMED,
+        policy=TASK_MONITOR_POLICY_RUNTIME_STATE_RETENTION,
         candidate_class="malformed_tid_mapping",
     )
     candidates = list(malformed_candidates)
     claimed = {candidate.message_id for candidate in candidates}
     old_rows = older_than_candidates(
         rows,
-        policy=TASK_MONITOR_POLICY_TID_MAPPING_DELETE_OLDER_THAN,
+        policy=TASK_MONITOR_POLICY_RUNTIME_STATE_RETENTION,
         now_ns=now_ns,
         min_age_seconds=min_age_seconds,
         candidate_class="old_tid_mapping",
@@ -113,51 +112,35 @@ def tid_mapping_candidates(
     policy_stats = (
         cleanup_policy_stats(
             WEFT_TID_MAPPINGS_QUEUE,
-            policy=TASK_MONITOR_POLICY_TID_MAPPING_DELETE_MALFORMED,
+            policy=TASK_MONITOR_POLICY_RUNTIME_STATE_RETENTION,
             scanned=len(rows),
-            candidates=malformed_candidates,
-            stop_reason=None,
-        ),
-        cleanup_policy_stats(
-            WEFT_TID_MAPPINGS_QUEUE,
-            policy=TASK_MONITOR_POLICY_TID_MAPPING_DELETE_OLDER_THAN,
-            scanned=len(rows),
-            candidates=old_rows.candidates,
+            candidates=candidates,
             stop_reason=old_rows.stop_reason,
         ),
     )
+    reason_counts = Counter(candidate.reason for candidate in candidates)
+    waypoint_reached = scan_limit_reached and (
+        bool(malformed_candidates)
+        or (old_rows.stop_reason is None and bool(old_rows.candidates))
+    )
+    base_reached = (
+        not waypoint_reached
+        and not candidates
+        and (
+            old_rows.stop_reason == "first_tid_mapping_too_young"
+            or not scan_limit_reached
+        )
+    )
     progress = (
         PolicyProgress(
-            policy=TASK_MONITOR_POLICY_TID_MAPPING_DELETE_MALFORMED,
+            policy=TASK_MONITOR_POLICY_RUNTIME_STATE_RETENTION,
             domain=WEFT_TID_MAPPINGS_QUEUE,
             scanned=len(rows),
-            selected=len(malformed_candidates),
-            waypoint_reached=scan_limit_reached and bool(malformed_candidates),
-            base_reached=not scan_limit_reached and not malformed_candidates,
-            reason_counts=Counter(
-                candidate.reason for candidate in malformed_candidates
-            ),
-        ),
-        PolicyProgress(
-            policy=TASK_MONITOR_POLICY_TID_MAPPING_DELETE_OLDER_THAN,
-            domain=WEFT_TID_MAPPINGS_QUEUE,
-            scanned=len(rows),
-            selected=len(old_rows.candidates),
+            selected=len(candidates),
             deferred=len(exclude_tids),
-            waypoint_reached=(
-                scan_limit_reached
-                and old_rows.stop_reason is None
-                and bool(old_rows.candidates)
-            ),
-            base_reached=(
-                old_rows.stop_reason == "first_tid_mapping_too_young"
-                or (not scan_limit_reached and not old_rows.candidates)
-            ),
-            reason_counts={
-                "older_than_tid_mapping_cleanup_min_age": len(old_rows.candidates)
-            }
-            if old_rows.candidates
-            else {},
+            waypoint_reached=waypoint_reached,
+            base_reached=base_reached,
+            reason_counts=reason_counts,
         ),
     )
     return candidates, queue_stats, policy_stats, progress

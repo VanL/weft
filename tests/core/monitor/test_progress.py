@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import pytest
 
+from weft._constants import TASK_MONITOR_POLICY_TASK_LOG_RETENTION
 from weft.core.monitor.progress import PolicyProgress, progress_requires_catchup
 
 
 def test_policy_progress_summary_is_json_safe() -> None:
     progress = PolicyProgress(
-        policy="task_log.delete_malformed",
+        policy=TASK_MONITOR_POLICY_TASK_LOG_RETENTION,
         domain="weft.log.tasks",
         scanned=10,
         selected=2,
@@ -21,7 +22,7 @@ def test_policy_progress_summary_is_json_safe() -> None:
     )
 
     assert progress.to_summary() == {
-        "policy": "task_log.delete_malformed",
+        "policy": TASK_MONITOR_POLICY_TASK_LOG_RETENTION,
         "domain": "weft.log.tasks",
         "scanned": 10,
         "selected": 2,

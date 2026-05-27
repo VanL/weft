@@ -1043,6 +1043,54 @@ def test_monitor_store_retires_completed_collation_families(tmp_path) -> None:
     assert store.get_task(tid) is None
 
 
+def test_monitor_store_retirement_honors_retention_window(tmp_path) -> None:
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    tid = "1779000000000000033"
+    terminal = _update(
+        tid,
+        1779000000000008350,
+        event="work_completed",
+        status="completed",
+        terminal=True,
+    )
+    store.record_task_log_updates(
+        WEFT_GLOBAL_LOG_QUEUE,
+        (terminal,),
+        checkpoint_message_id=None,
+    )
+    store.delete_task_messages_after_raw_delete(
+        (terminal.message_id,),
+        deleted_at_ns=terminal.message_id + 1,
+    )
+    store.mark_summary_emitted(tid, terminal.message_id + 2)
+    store.mark_family_disposed(
+        tid,
+        terminal.message_id + 3,
+        disposition_reason="terminal",
+    )
+    store.mark_task_control_deleted(tid, terminal.message_id + 4)
+
+    retained = store.retire_completed_collation_families(
+        limit=10,
+        retired_at_ns=terminal.message_id + 5,
+        retention_seconds=60.0,
+    )
+
+    assert retained.families_retired == 0
+    assert store.get_task(tid) is not None
+
+    retired = store.retire_completed_collation_families(
+        limit=10,
+        retired_at_ns=terminal.message_id + 61_000_000_000,
+        retention_seconds=60.0,
+    )
+
+    assert retired.families_retired == 1
+    assert store.get_task(tid) is None
+
+
 def test_monitor_store_retirement_requires_reserved_cleanup_when_probe_needed(
     tmp_path,
 ) -> None:

@@ -154,7 +154,7 @@ class WeftContext:
     def broker_display_target(self) -> str:
         """Return a human-readable target string for logs and CLI output."""
 
-        return self.broker_target.target
+        return self.broker_target.display_target
 
     @property
     def backend_name(self) -> str:

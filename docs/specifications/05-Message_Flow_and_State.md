@@ -351,13 +351,14 @@ Current rules:
 - when enabled, the canonical manager supervises one internal
   `TaskMonitor`. The supervised monitor reads task-log lifecycle evidence by
   generator/high-water cursor for observation and custom processors. Custom
-  processors run from the resulting candidate snapshot in a broker-free worker
-  lane; the TaskMonitor reactor commits the processor result, checkpoint, and
-  cached diagnostics after the worker returns. Built-in cleanup processors run
-  in a separate TaskMonitor-owned built-in cycle worker lane; the reactor stays
-  available for task-local PING/STATUS/STOP/KILL, heartbeat registration, and
-  schedule bookkeeping while the worker scans, writes Monitor-store rows, and
-  applies exact deletes. For the built-in `delete` processor with Monitor
+  processors run from the resulting candidate snapshot through the registered
+  `ServiceTask` processor worker group; the TaskMonitor reactor commits the
+  processor result, checkpoint, and cached diagnostics after the typed worker
+  event returns. Built-in cleanup processors run through a separate registered
+  TaskMonitor-owned built-in cycle worker group; the reactor stays available
+  for task-local PING/STATUS/STOP/KILL, heartbeat registration, and schedule
+  bookkeeping while the worker scans, writes Monitor-store rows, and applies
+  exact deletes. For the built-in `delete` processor with Monitor
   collation enabled, retained `weft.log.tasks` rows are processed in FIFO order:
   malformed rows are exact-deleted; valid rows are folded into the Monitor
   table and then exact-deleted in the same bounded pass when running the
@@ -430,7 +431,7 @@ Current rules:
   queues are successful no-row probes for monitor-table families, not repeated
   work. Each built-in cycle attempts
   retained raw task-log exact deletion in the built-in cycle worker before the
-  reactor launches another runtime-cleanup worker. The reactor launches
+  reactor launches another registered runtime-cleanup worker. The reactor launches
   terminal cleanup, reserved cleanup, and dead-TID cleanup as discrete
   runtime-cleanup worker slices; one worker result must not mix those cleanup
   classes or start nested cleanup executor threads. It marks catch-up pending
@@ -647,7 +648,8 @@ autostart child exits.
 
 _Implementation mapping_: `weft/core/manager.py` — `Manager._handle_work_message`,
 `Manager._build_child_spec`, `Manager._launch_child_task`,
-`Manager._run_child_launch_worker`, `Manager._handle_child_launch_result`,
+`Manager._run_child_launch_service_worker`, `Manager._run_child_launch_worker`,
+`Manager._handle_service_worker_event`, `Manager._handle_child_launch_result`,
 `Manager._commit_child_launch_success`, `Manager._control_allows_child_launch`,
 `Manager._tick_managed_service`,
 `Manager._enqueue_managed_service_request`, `Manager.process_once`;
@@ -896,6 +898,14 @@ system pruning:
   cached policy/store stats and `policy_progress` summaries so PONG can
   distinguish "ran and selected zero", "reached a bounded waypoint", "reached
   a base case for now", "deferred future work", and "blocked by an error".
+  The supervised monitor reports exactly five top-level cleanup policies:
+  `task_log.retention` for retained raw task-log ingestion/deletion,
+  `monitor_store.lifecycle` for durable store summary, repair, retirement, and
+  orphan recovery work, `task_local.terminal_runtime` for terminal task-local
+  queue cleanup, `task_local.dead_tid` for name-derived dead-TID fallback
+  cleanup, and `runtime_state.retention` for monitor-owned runtime state
+  queues. Private cleanup phases may remain in reason counts or details, but
+  they must not create additional `policy_progress[*].policy` identities.
   PONG must expose only cached progress and must not perform live cleanup
   scans or Monitor-store reads. The monitor must not delete active work,
   ambiguous task-local evidence, claimed outbox residue, user payload rows,
@@ -954,7 +964,7 @@ Current rules:
   explicit human override for those ordinary protections.
 - the manager-supervised `TaskMonitor` reports and deletes through the
   TaskMonitor-owned cleanup runner in `weft/core/monitor/cleanup.py` for
-  runtime-state queues and legacy/foreground policy surfaces. Retained
+  runtime-state queues and foreground cleanup surfaces. Retained
   `weft.log.tasks` cleanup is orchestrated by
   `weft/core/monitor/task_monitor.py` with durable collation in
   `weft/core/monitor/store.py`, not by the old bounded family-window task-log
@@ -1023,6 +1033,8 @@ management live in the companion doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-05-26-monitor-five-cleanup-policy-consolidation-plan.md`](../plans/2026-05-26-monitor-five-cleanup-policy-consolidation-plan.md)
+- [`docs/plans/2026-05-26-service-task-worker-api-plan.md`](../plans/2026-05-26-service-task-worker-api-plan.md)
 - [`docs/plans/2026-05-25-monitor-dead-task-catchup-convergence-plan.md`](../plans/2026-05-25-monitor-dead-task-catchup-convergence-plan.md)
 - [`docs/plans/2026-05-24-monitor-policy-progress-contract-plan.md`](../plans/2026-05-24-monitor-policy-progress-contract-plan.md)
 - [`docs/plans/2026-05-23-monitor-cleanup-policy-convergence-plan.md`](../plans/2026-05-23-monitor-cleanup-policy-convergence-plan.md)

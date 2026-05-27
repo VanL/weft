@@ -53,8 +53,10 @@ from weft._constants import (
     MANAGED_SERVICE_RECENT_EVIDENCE_GRACE_SECONDS,
     MANAGED_SERVICE_STABLE_AUDIT_INTERVAL_SECONDS,
     MANAGER_CHILD_EXIT_POLL_INTERVAL,
+    MANAGER_CHILD_LAUNCH_STALE_RETRY_LIMIT,
     MANAGER_CHILD_LAUNCH_WORKER_LANE,
     MANAGER_CHILD_STARTUP_LIVENESS_GRACE_SECONDS,
+    MANAGER_CHILD_TERMINAL_PROOF_GRACE_SECONDS,
     MANAGER_CONTROL_DRAIN_MAX_MESSAGES,
     MANAGER_DISPATCH_STALL_LOG_INTERVAL_SECONDS,
     MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS,
@@ -165,7 +167,12 @@ from .tasks.base import (
     TaskWorkerResult,
 )
 from .tasks.multiqueue_watcher import QueueMode, QueueRuntimeConfig
-from .tasks.service import ServiceTask
+from .tasks.service import (
+    ServiceTask,
+    ServiceWorkerContext,
+    ServiceWorkerEvent,
+    ServiceWorkerSpec,
+)
 from .taskspec import (
     ReservedPolicy,
     TaskSpec,
@@ -192,6 +199,7 @@ class ManagedChild:
     service_key: str | None = None
     launched_ns: int = 0
     last_liveness_probe_ns: int = 0
+    terminal_proof_missing_since_ns: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -291,8 +299,16 @@ class Manager(ServiceTask):
     ) -> None:
         thread_event = cast(threading.Event | None, stop_event)
         super().__init__(db, taskspec, stop_event=thread_event, config=config)
+        self._register_service_worker(
+            ServiceWorkerSpec(
+                name=MANAGER_CHILD_LAUNCH_WORKER_LANE,
+                target=self._run_child_launch_service_worker,
+            )
+        )
         self._child_processes: dict[str, ManagedChild] = {}
         self._active_child_launches: dict[str, _ManagerChildLaunchRequest] = {}
+        self._child_launch_started_ns: dict[str, int] = {}
+        self._child_launch_stale_retries: dict[str, int] = {}
         self._child_launch_started_this_turn = False
         self._idle_timeout: float = float(
             taskspec.metadata.get(
@@ -739,6 +755,27 @@ class Manager(ServiceTask):
                 "outbox": self._queue_names["outbox"],
             }
         )
+        payload["active_child_launches"] = [
+            {
+                "tid": request.child_spec.tid,
+                "name": request.child_spec.name,
+                "internal_role": request.internal_role,
+                "service_key": request.service_key,
+                "source_queue": request.source_queue,
+                "reserved_queue": request.reserved_queue,
+                "message_timestamp": request.message_timestamp,
+                "started_ns": self._child_launch_started_ns.get(
+                    str(request.child_spec.tid)
+                ),
+                "stale_retries": self._child_launch_stale_retries.get(
+                    str(request.child_spec.tid),
+                    0,
+                ),
+            }
+            for request in self._active_child_launches.values()
+        ]
+        payload["worker_activity"] = self._worker_activity_snapshot()
+        payload["service_workers"] = self._service_worker_snapshot()
         if self._internal_spawn_queue_attached():
             payload["internal_requests"] = self._queue_names["internal_inbox"]
             payload["internal_reserved"] = self._queue_names["internal_reserved"]
@@ -751,6 +788,98 @@ class Manager(ServiceTask):
         """Return whether child launch work is waiting for main-thread commit."""
 
         return bool(self._active_child_launches)
+
+    def _child_launch_runtime_evidence_seen(self, tid: str) -> bool:
+        """Return whether a child launch produced durable runtime evidence."""
+
+        if self._latest_tid_runtime_handle(tid) is not None:
+            return True
+        log_queue = self._queue(WEFT_GLOBAL_LOG_QUEUE)
+        since_timestamp = int(tid) - 1 if tid.isdigit() else None
+        for payload, _timestamp in iter_queue_json_entries(
+            log_queue,
+            since_timestamp=since_timestamp,
+        ):
+            if payload.get("tid") == tid:
+                return True
+            if (
+                payload.get("child_tid") == tid
+                and payload.get("event") == "task_spawned"
+            ):
+                return True
+        return False
+
+    def _clear_active_child_launch(self, tid: str) -> _ManagerChildLaunchRequest | None:
+        """Remove active child-launch bookkeeping for one TID."""
+
+        self._child_launch_started_ns.pop(tid, None)
+        self._child_launch_stale_retries.pop(tid, None)
+        return self._active_child_launches.pop(tid, None)
+
+    def _retry_stale_child_launches(self) -> bool:
+        """Recover child-launch requests whose worker vanished without a result."""
+
+        if not self._active_child_launches or self._has_worker_activity():
+            return False
+
+        now_ns = time.time_ns()
+        grace_ns = int(MANAGER_CHILD_STARTUP_LIVENESS_GRACE_SECONDS * 1_000_000_000)
+        recovered = False
+        for child_tid, request in tuple(self._active_child_launches.items()):
+            started_ns = self._child_launch_started_ns.get(child_tid, now_ns)
+            if now_ns - started_ns < grace_ns:
+                continue
+
+            if self._child_launch_runtime_evidence_seen(child_tid):
+                self._clear_active_child_launch(child_tid)
+                if (
+                    request.reserved_queue is not None
+                    and request.message_timestamp is not None
+                ):
+                    try:
+                        self._queue(request.reserved_queue).delete(
+                            message_id=request.message_timestamp
+                        )
+                    except (BrokerError, OSError, RuntimeError):
+                        logger.debug(
+                            "Failed to acknowledge stale child launch %s",
+                            child_tid,
+                            exc_info=True,
+                        )
+                recovered = True
+                continue
+
+            retries = self._child_launch_stale_retries.get(child_tid, 0)
+            if retries >= MANAGER_CHILD_LAUNCH_STALE_RETRY_LIMIT:
+                self._clear_active_child_launch(child_tid)
+                self._handle_child_launch_failure(
+                    _ManagerChildLaunchResult(
+                        request=request,
+                        error=RuntimeError(
+                            "child launch worker exited without returning a result"
+                        ),
+                    )
+                )
+                recovered = True
+                continue
+
+            self._child_launch_stale_retries[child_tid] = retries + 1
+            self._child_launch_started_ns[child_tid] = now_ns
+            try:
+                self._start_service_worker(
+                    MANAGER_CHILD_LAUNCH_WORKER_LANE,
+                    request_id=child_tid,
+                    initial_items=(request,),
+                )
+            except Exception as exc:
+                self._clear_active_child_launch(child_tid)
+                self._handle_child_launch_failure(
+                    _ManagerChildLaunchResult(request=request, error=exc)
+                )
+            else:
+                self._child_launch_started_this_turn = True
+            recovered = True
+        return recovered
 
     def _handle_control_command(
         self, request: ControlRequest, context: QueueMessageContext
@@ -863,12 +992,33 @@ class Manager(ServiceTask):
             message_timestamp=message_timestamp,
         )
         self._active_child_launches[child_spec.tid] = request
+        self._child_launch_started_ns[child_spec.tid] = time.time_ns()
         self._child_launch_started_this_turn = True
-        self._submit_worker_call(
-            MANAGER_CHILD_LAUNCH_WORKER_LANE,
-            lambda: self._run_child_launch_worker(request),
-        )
+        try:
+            self._start_service_worker(
+                MANAGER_CHILD_LAUNCH_WORKER_LANE,
+                request_id=child_spec.tid,
+                initial_items=(request,),
+            )
+        except Exception as exc:
+            self._clear_active_child_launch(child_spec.tid)
+            self._handle_child_launch_failure(
+                _ManagerChildLaunchResult(request=request, error=exc)
+            )
+            return False
         return True
+
+    def _run_child_launch_service_worker(
+        self,
+        context: ServiceWorkerContext,
+    ) -> _ManagerChildLaunchResult | None:
+        """Run one queued child-launch request through the service-worker API."""
+
+        for item in context.iter_items():
+            if not isinstance(item, _ManagerChildLaunchRequest):
+                raise TypeError("manager child-launch worker received invalid work")
+            return self._run_child_launch_worker(item)
+        return None
 
     def _run_child_launch_worker(
         self,
@@ -972,6 +1122,12 @@ class Manager(ServiceTask):
         child_spec = request.child_spec
         error = result.error or RuntimeError("child launch failed")
         logger.warning("Child launch failed for %s: %s", child_spec.tid, error)
+        self._report_state_change(
+            event="task_spawn_rejected",
+            child_tid=child_spec.tid,
+            error=str(error),
+            reason="launch_worker_failed",
+        )
         self._emit_serve_log(
             "child_launch_result",
             component="spawn",
@@ -1011,7 +1167,7 @@ class Manager(ServiceTask):
 
         child_tid = result.request.child_spec.tid
         if child_tid is not None:
-            self._active_child_launches.pop(child_tid, None)
+            self._clear_active_child_launch(child_tid)
         self._child_launch_started_this_turn = True
         if result.error is not None:
             self._handle_child_launch_failure(result)
@@ -1053,15 +1209,56 @@ class Manager(ServiceTask):
                 success=False,
             )
 
+    def _handle_service_worker_event(self, event: ServiceWorkerEvent) -> None:
+        """Route child-launch service-worker events on the manager reactor."""
+
+        if event.name != MANAGER_CHILD_LAUNCH_WORKER_LANE:
+            super()._handle_service_worker_event(event)
+            return
+        if event.kind in {"started", "stopped"}:
+            return
+        if event.kind == "error":
+            request = next(iter(self._active_child_launches.values()), None)
+            if request is None:
+                return
+            self._handle_child_launch_result(
+                _ManagerChildLaunchResult(
+                    request=request,
+                    error=event.error
+                    or RuntimeError("manager child launch worker failed"),
+                )
+            )
+            return
+        if event.kind != "result":
+            return
+        if not isinstance(event.value, _ManagerChildLaunchResult):
+            request = next(iter(self._active_child_launches.values()), None)
+            if request is None:
+                return
+            self._handle_child_launch_result(
+                _ManagerChildLaunchResult(
+                    request=request,
+                    error=RuntimeError(
+                        "manager child launch worker returned invalid result"
+                    ),
+                )
+            )
+            return
+        self._handle_child_launch_result(event.value)
+
     def _handle_worker_result(self, result: TaskWorkerResult) -> None:
+        if isinstance(result.value, ServiceWorkerEvent):
+            super()._handle_worker_result(result)
+            return
         if result.lane == MANAGER_CHILD_LAUNCH_WORKER_LANE:
             if result.error is not None:
                 raise RuntimeError(
                     "Manager child launch worker failed"
                 ) from result.error
-            self._handle_child_launch_result(
-                cast(_ManagerChildLaunchResult, result.value)
-            )
+            if not isinstance(result.value, _ManagerChildLaunchResult):
+                super()._handle_worker_result(result)
+                return
+            self._handle_child_launch_result(result.value)
             return
         super()._handle_worker_result(result)
 
@@ -2743,6 +2940,27 @@ class Manager(ServiceTask):
             return True
         return False
 
+    def _child_terminal_proof_still_within_grace(
+        self,
+        tid: str,
+        child: ManagedChild,
+    ) -> bool:
+        """Return whether a cleanly exited child gets more time for proof writes."""
+
+        exitcode = child.process.exitcode
+        if child.launched_ns <= 0:
+            return False
+        if exitcode not in (None, 0):
+            return False
+        if self._child_terminal_proof_visible(tid, child):
+            return False
+        now_ns = time.time_ns()
+        if child.terminal_proof_missing_since_ns <= 0:
+            child.terminal_proof_missing_since_ns = now_ns
+            return True
+        grace_ns = int(MANAGER_CHILD_TERMINAL_PROOF_GRACE_SECONDS * 1_000_000_000)
+        return now_ns - child.terminal_proof_missing_since_ns < grace_ns
+
     def _write_manager_terminal_envelope(
         self,
         tid: str,
@@ -2791,6 +3009,8 @@ class Manager(ServiceTask):
         child_exited = False
         for tid, child in list(self._child_processes.items()):
             if self._child_has_exited(child):
+                if self._child_terminal_proof_still_within_grace(tid, child):
+                    continue
                 child_exited = True
                 self._write_manager_terminal_envelope(tid, child)
                 try:
@@ -3272,6 +3492,27 @@ class Manager(ServiceTask):
             return False
         self._drain_control_queue_first()
         return not self._draining and not self.should_stop
+
+    def _process_queue_message(
+        self,
+        queue_name: str,
+        inactive_candidates: set[str],
+    ) -> bool:
+        """Stop spawn-source draining once one child launch is in flight.
+
+        ``MultiQueueWatcher`` can process more than one active queue in a
+        scheduling pass. Manager child launch is intentionally single-flight,
+        so spawn sources must not reserve another row after the first launch
+        starts. Leaving the source row unreserved lets the next reactor turn
+        claim it after the child-launch worker reports back.
+        """
+
+        if queue_name in self._spawn_inbox_queue_names() and (
+            self._has_active_child_launches() or self._child_launch_started_this_turn
+        ):
+            inactive_candidates.add(queue_name)
+            return False
+        return super()._process_queue_message(queue_name, inactive_candidates)
 
     def _read_broker_timestamp(self, *, force: bool = False) -> int:
         """Return newest pending manager-owned input timestamp for idle tracking.
@@ -4497,10 +4738,20 @@ class Manager(ServiceTask):
             for request in self._active_child_launches.values()
             if request.service_key in desired_keys
         }
-        scan_queue_names = (
-            self._spawn_inbox_queue_names()
-            if queue_names is None
-            else tuple(dict.fromkeys(queue_names))
+        scan_queue_names = tuple(
+            dict.fromkeys(
+                (
+                    *self._spawn_inbox_queue_names(),
+                    *(
+                        reserved_queue
+                        for reserved_queue, _source_queue in (
+                            self._spawn_reserved_queue_pairs()
+                        )
+                    ),
+                )
+                if queue_names is None
+                else queue_names
+            )
         )
         for queue_name in scan_queue_names:
             queue = self._queue(queue_name)
@@ -4842,7 +5093,10 @@ class Manager(ServiceTask):
                 pending_keys.update(
                     self._pending_service_keys(
                         internal_keys,
-                        queue_names=(self._queue_names["internal_inbox"],),
+                        queue_names=(
+                            self._queue_names["internal_inbox"],
+                            self._queue_names["internal_reserved"],
+                        ),
                     )
                 )
             else:
@@ -5797,6 +6051,7 @@ class Manager(ServiceTask):
         self._leader_actionable_work_cache = None
         self._leader_check_turn = None
         self._drain_worker_results()
+        self._retry_stale_child_launches()
         self._emit_manager_loop_summary()
         self._process_pending_termination_signal()
         if self.should_stop:

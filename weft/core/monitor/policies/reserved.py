@@ -14,7 +14,7 @@ from typing import Any, Protocol
 from weft._constants import (
     QUEUE_RESERVED_SUFFIX,
     STATUS_COMPLETED,
-    TASK_MONITOR_POLICY_RESERVED_DELETE_TERMINAL_PROVEN,
+    TASK_MONITOR_POLICY_TASK_LOCAL_TERMINAL_RUNTIME,
     TERMINAL_TASK_EVENTS,
 )
 from weft.context import WeftContext
@@ -70,8 +70,9 @@ def terminal_reserved_candidates(
     candidates: list[CleanupCandidate] = []
     stats: list[CleanupQueueStats] = []
     policy_stats: list[CleanupPolicyStats] = []
-    progress: list[PolicyProgress] = []
     probes_remaining = selection_limit
+    scanned_rows = 0
+    stop_reasons: list[str] = []
     scan_window = (
         scan_queue_window if scan_queue_window_fn is None else scan_queue_window_fn
     )
@@ -97,7 +98,7 @@ def terminal_reserved_candidates(
 
         selected = older_than_candidates(
             decoded,
-            policy=TASK_MONITOR_POLICY_RESERVED_DELETE_TERMINAL_PROVEN,
+            policy=TASK_MONITOR_POLICY_TASK_LOCAL_TERMINAL_RUNTIME,
             now_ns=now_ns,
             min_age_seconds=min_age_seconds,
             candidate_class="terminal_reserved_with_log",
@@ -107,6 +108,9 @@ def terminal_reserved_candidates(
         )
         selected_candidates = selected.candidates[:remaining_candidates]
         candidates.extend(selected_candidates)
+        scanned_rows += len(rows)
+        if selected.stop_reason is not None:
+            stop_reasons.append(selected.stop_reason)
         stats.append(
             cleanup_queue_stats(
                 queue_name,
@@ -118,39 +122,31 @@ def terminal_reserved_candidates(
         policy_stats.append(
             cleanup_policy_stats(
                 queue_name,
-                policy=TASK_MONITOR_POLICY_RESERVED_DELETE_TERMINAL_PROVEN,
+                policy=TASK_MONITOR_POLICY_TASK_LOCAL_TERMINAL_RUNTIME,
                 scanned=len(rows),
                 candidates=selected_candidates,
                 stop_reason=selected.stop_reason,
             )
         )
-        progress.append(
-            PolicyProgress(
-                policy=TASK_MONITOR_POLICY_RESERVED_DELETE_TERMINAL_PROVEN,
-                domain=queue_name,
-                scanned=len(rows),
-                selected=len(selected_candidates),
-                waypoint_reached=len(candidates) >= selection_limit,
-                base_reached=selected.stop_reason == "first_reserved_row_too_young"
-                or (not rows),
-                reason_counts={
-                    "terminal_task_log_proof_for_reserved_tid": len(selected_candidates)
-                }
-                if selected_candidates
-                else {},
-            )
-        )
-    if not progress:
-        progress.append(
-            PolicyProgress(
-                policy=TASK_MONITOR_POLICY_RESERVED_DELETE_TERMINAL_PROVEN,
-                domain="task_reserved_queues",
-                scanned=len(groups),
-                selected=0,
-                base_reached=True,
-            )
-        )
-    return candidates, tuple(stats), tuple(policy_stats), tuple(progress)
+    waypoint_reached = len(candidates) >= selection_limit
+    progress = (
+        PolicyProgress(
+            policy=TASK_MONITOR_POLICY_TASK_LOCAL_TERMINAL_RUNTIME,
+            domain="task_runtime_queues",
+            scanned=scanned_rows or len(groups),
+            selected=len(candidates),
+            deferred=max(0, len(groups) - (selection_limit - probes_remaining)),
+            waypoint_reached=waypoint_reached,
+            base_reached=not waypoint_reached and not candidates,
+            reason_counts={
+                "terminal_task_log_proof_for_reserved_tid": len(candidates),
+                "reserved_stop_reasons": len(stop_reasons),
+            }
+            if candidates or stop_reasons
+            else {},
+        ),
+    )
+    return candidates, tuple(stats), tuple(policy_stats), progress
 
 
 def collated_group_is_successful_completion(group: CollatedMessageGroup) -> bool:

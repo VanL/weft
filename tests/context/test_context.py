@@ -87,6 +87,34 @@ def test_service_context_key_strips_non_file_backend_password(tmp_path: Path) ->
     assert "example.test" not in key
 
 
+def test_broker_display_target_redacts_non_file_backend_password(
+    tmp_path: Path,
+) -> None:
+    target = BrokerTarget(
+        backend_name="postgres",
+        target="postgresql://weft:s3cr3t@example.test:5432/weft",
+        backend_options={"schema": "weft_state"},
+    )
+    ctx = WeftContext(
+        root=tmp_path,
+        weft_dir=tmp_path / ".weft",
+        outputs_dir=tmp_path / ".weft" / "outputs",
+        logs_dir=tmp_path / ".weft" / "logs",
+        config_path=tmp_path / ".weft" / "config.json",
+        broker_target=target,
+        database_path=None,
+        config={},
+        broker_config={},
+        project_config={},
+        discovered=True,
+        autostart_dir=tmp_path / ".weft" / "autostart",
+        autostart_enabled=True,
+    )
+
+    assert ctx.broker_target.target == "postgresql://weft:s3cr3t@example.test:5432/weft"
+    assert ctx.broker_display_target == "postgresql://weft:***@example.test:5432/weft"
+
+
 def test_build_context_creates_structure(tmp_path: Path) -> None:
     """Building a context for a fresh directory materializes all assets."""
     root = prepare_project_root(tmp_path)

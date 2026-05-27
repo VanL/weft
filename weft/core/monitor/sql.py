@@ -618,6 +618,8 @@ def reconcile_raw_deleted_tasks_for_tids(
 def select_retirable_task_collations(
     collations_table: str,
     messages_table: str,
+    *,
+    apply_retention_cutoff: bool,
 ) -> str:
     """Build a query for completed Monitor collation families.
 
@@ -626,10 +628,16 @@ def select_retirable_task_collations(
 
     collations = identifier(collations_table)
     messages = identifier(messages_table)
+    retention_predicate = (
+        "AND COALESCE(completed_at_ns, last_seen_at_ns, last_message_id) <= ?"
+        if apply_retention_cutoff
+        else ""
+    )
     return f"""
         SELECT tid
         FROM {collations}
         WHERE context_key = ?
+          {retention_predicate}
           AND raw_deleted_at_ns IS NOT NULL
           AND summary_emitted_at_ns IS NOT NULL
           AND disposition_at_ns IS NOT NULL

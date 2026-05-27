@@ -17,6 +17,7 @@ import json
 import os
 import threading
 import time
+from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -39,7 +40,11 @@ from weft._constants import (
     TASK_MONITOR_CONTROL_CLEANUP_WORKER_LANE,
     TASK_MONITOR_HEARTBEAT_STARTUP_TIMEOUT_SECONDS,
     TASK_MONITOR_LOG_SUBDIR,
-    TASK_MONITOR_POLICY_TASK_LOG_EXTERNAL_RAW,
+    TASK_MONITOR_POLICY_MONITOR_STORE_LIFECYCLE,
+    TASK_MONITOR_POLICY_RUNTIME_STATE_RETENTION,
+    TASK_MONITOR_POLICY_TASK_LOCAL_DEAD_TID,
+    TASK_MONITOR_POLICY_TASK_LOCAL_TERMINAL_RUNTIME,
+    TASK_MONITOR_POLICY_TASK_LOG_RETENTION,
     TASK_MONITOR_PONG_DETAIL_LIMIT,
     TASK_MONITOR_PROCESSOR_WORKER_LANE,
     TASK_MONITOR_RUNTIME_CLEANUP_SLICE_FAMILY_LIMIT,
@@ -150,7 +155,12 @@ from weft.core.service_convergence import (
 )
 from weft.core.tasks.base import ControlRequest, TaskWorkerResult
 from weft.core.tasks.multiqueue_watcher import QueueMessageContext
-from weft.core.tasks.service import ServiceTask
+from weft.core.tasks.service import (
+    ServiceTask,
+    ServiceWorkerContext,
+    ServiceWorkerEvent,
+    ServiceWorkerSpec,
+)
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 from weft.ext import RunnerHandle
 from weft.helpers import handle_has_live_host_process, iter_queue_entries
@@ -363,7 +373,7 @@ def _retained_task_log_ingest_progress(
     elif result.raw_delete_errors:
         blocked_reason = result.raw_delete_errors[0]
     return PolicyProgress(
-        policy="task_log.retained_fifo_ingest",
+        policy=TASK_MONITOR_POLICY_TASK_LOG_RETENTION,
         domain=WEFT_GLOBAL_LOG_QUEUE,
         scanned=result.scanned,
         selected=result.selected,
@@ -378,6 +388,66 @@ def _retained_task_log_ingest_progress(
             "raw_deleted": result.raw_deleted,
         },
     )
+
+
+_policy_progress_domain_by_policy = {
+    TASK_MONITOR_POLICY_TASK_LOG_RETENTION: WEFT_GLOBAL_LOG_QUEUE,
+    TASK_MONITOR_POLICY_MONITOR_STORE_LIFECYCLE: "monitor_store",
+    TASK_MONITOR_POLICY_TASK_LOCAL_TERMINAL_RUNTIME: "task_runtime_queues",
+    TASK_MONITOR_POLICY_TASK_LOCAL_DEAD_TID: "task_runtime_queues",
+    TASK_MONITOR_POLICY_RUNTIME_STATE_RETENTION: WEFT_TID_MAPPINGS_QUEUE,
+}
+
+
+def _consolidate_task_monitor_policy_progress(
+    progresses: tuple[PolicyProgress, ...],
+) -> tuple[PolicyProgress, ...]:
+    """Merge private cleanup phases into the five top-level policy rows."""
+
+    grouped: dict[str, list[PolicyProgress]] = {}
+    for progress in progresses:
+        grouped.setdefault(progress.policy, []).append(progress)
+
+    consolidated: list[PolicyProgress] = []
+    for policy, records in grouped.items():
+        if len(records) == 1:
+            consolidated.append(records[0])
+            continue
+        reason_counts: Counter[str] = Counter()
+        source_total = 0
+        has_source_total = False
+        blocked_reason: str | None = None
+        for record in records:
+            reason_counts.update(record.reason_counts or {})
+            if record.source_total is not None:
+                source_total += record.source_total
+                has_source_total = True
+            if blocked_reason is None and record.blocked_reason is not None:
+                blocked_reason = record.blocked_reason
+        waypoint_reached = any(record.waypoint_reached for record in records)
+        consolidated.append(
+            PolicyProgress(
+                policy=policy,
+                domain=_policy_progress_domain_by_policy.get(
+                    policy,
+                    records[0].domain,
+                ),
+                scanned=sum(record.scanned for record in records),
+                selected=sum(record.selected for record in records),
+                applied=sum(record.applied for record in records),
+                deferred=sum(record.deferred for record in records),
+                source_total=source_total if has_source_total else None,
+                waypoint_reached=waypoint_reached,
+                base_reached=(
+                    blocked_reason is None
+                    and not waypoint_reached
+                    and all(record.base_reached for record in records)
+                ),
+                blocked_reason=blocked_reason,
+                reason_counts=reason_counts,
+            )
+        )
+    return tuple(consolidated)
 
 
 def make_task_monitor_taskspec(tid: str | None = None) -> TaskSpec:
@@ -509,10 +579,33 @@ class TaskMonitor(ServiceTask):
         self._serve_log_last_state: dict[str, str] = {}
         super().__init__(db=db, taskspec=taskspec, stop_event=stop_event, config=config)
         self._monitor_config = TaskMonitorRuntimeConfig.from_config(self._config)
+        self._register_task_monitor_service_workers()
         self._configure_external_task_log_sink()
         self.register_pong_extension_provider(self._task_monitor_pong_extension)
         if self._persistent_service:
             self._activate_monitor()
+
+    def _register_task_monitor_service_workers(self) -> None:
+        """Register TaskMonitor worker groups used by the reactor."""
+
+        self._register_service_worker(
+            ServiceWorkerSpec(
+                name=TASK_MONITOR_BUILTIN_CYCLE_WORKER_LANE,
+                target=self._run_builtin_cycle_service_worker,
+            )
+        )
+        self._register_service_worker(
+            ServiceWorkerSpec(
+                name=TASK_MONITOR_PROCESSOR_WORKER_LANE,
+                target=self._run_processor_service_worker,
+            )
+        )
+        self._register_service_worker(
+            ServiceWorkerSpec(
+                name=TASK_MONITOR_CONTROL_CLEANUP_WORKER_LANE,
+                target=self._run_control_cleanup_service_worker,
+            )
+        )
 
     def _manager_tid_for_log(self) -> str:
         parent_tid = self.taskspec.metadata.get("parent_tid")
@@ -653,6 +746,42 @@ class TaskMonitor(ServiceTask):
             _TaskControlCleanupWork | None,
             self._service_lane_work(TASK_MONITOR_CONTROL_CLEANUP_WORKER_LANE),
         )
+
+    def _run_builtin_cycle_service_worker(
+        self,
+        context: ServiceWorkerContext,
+    ) -> _TaskMonitorBuiltinCycleWorkerResult | None:
+        """Run one queued built-in cycle work item."""
+
+        for item in context.iter_items():
+            if not isinstance(item, _TaskMonitorBuiltinCycleWork):
+                raise TypeError("task-monitor built-in worker received invalid work")
+            return self._run_builtin_cycle_worker(item)
+        return None
+
+    def _run_processor_service_worker(
+        self,
+        context: ServiceWorkerContext,
+    ) -> TaskMonitorProcessorResult | None:
+        """Run one queued custom processor work item."""
+
+        for item in context.iter_items():
+            if not isinstance(item, _TaskMonitorProcessorWork):
+                raise TypeError("task-monitor processor worker received invalid work")
+            return self._run_custom_monitor_processor(item.request)
+        return None
+
+    def _run_control_cleanup_service_worker(
+        self,
+        context: ServiceWorkerContext,
+    ) -> _TaskControlCleanupWorkerResult | None:
+        """Run one queued runtime-cleanup work item."""
+
+        for item in context.iter_items():
+            if not isinstance(item, _TaskControlCleanupWork):
+                raise TypeError("task-monitor cleanup worker received invalid work")
+            return self._run_terminal_control_cleanup_worker(item)
+        return None
 
     def _build_queue_configs(self) -> dict[str, dict[str, Any]]:
         """Configure task-local wake and control queues.
@@ -1277,7 +1406,7 @@ class TaskMonitor(ServiceTask):
                     self._last_policy_progress = (
                         *self._last_policy_progress,
                         PolicyProgress(
-                            policy="monitor_store.child_tombstone_prune",
+                            policy=TASK_MONITOR_POLICY_MONITOR_STORE_LIFECYCLE,
                             domain="weft_monitor_task_messages",
                             selected=tombstone_prune.message_tombstones_pruned,
                             applied=tombstone_prune.message_tombstones_pruned,
@@ -1299,12 +1428,15 @@ class TaskMonitor(ServiceTask):
                     family_retirement = store.retire_completed_collation_families(
                         limit=self._monitor_config.batch_size,
                         retired_at_ns=now_ns,
+                        retention_seconds=(
+                            self._monitor_config.task_log_retention_period_seconds
+                        ),
                     )
                     self._apply_monitor_store_retirement_result(family_retirement)
                     self._last_policy_progress = (
                         *self._last_policy_progress,
                         PolicyProgress(
-                            policy="monitor_store.family_retirement",
+                            policy=TASK_MONITOR_POLICY_MONITOR_STORE_LIFECYCLE,
                             domain="weft_monitor_task_collations",
                             selected=family_retirement.families_retired,
                             applied=family_retirement.families_retired,
@@ -1635,7 +1767,7 @@ class TaskMonitor(ServiceTask):
         self._last_policy_progress = (
             *self._last_policy_progress,
             PolicyProgress(
-                policy="monitor_store.summary_disposition",
+                policy=TASK_MONITOR_POLICY_MONITOR_STORE_LIFECYCLE,
                 domain="weft_monitor_task_collations",
                 scanned=len(ready_tasks),
                 selected=len(summary_marks) + len(family_disposition_marks),
@@ -1980,10 +2112,10 @@ class TaskMonitor(ServiceTask):
         Spec: [CC-2.3], [MF-5]
         """
 
-        return self._start_service_lane(
+        return self._start_registered_service_lane(
             TASK_MONITOR_CONTROL_CLEANUP_WORKER_LANE,
             work,
-            lambda: self._run_terminal_control_cleanup_worker(work),
+            request_id=work.request_id,
         )
 
     def _run_terminal_control_cleanup_worker(
@@ -2095,7 +2227,7 @@ class TaskMonitor(ServiceTask):
                 pending=bool(errors),
                 policy_progress=(
                     PolicyProgress(
-                        policy="runtime.terminal_control_cleanup",
+                        policy=TASK_MONITOR_POLICY_TASK_LOCAL_TERMINAL_RUNTIME,
                         domain="task_runtime_queues",
                         scanned=len(ready_records),
                         selected=0,
@@ -2195,6 +2327,9 @@ class TaskMonitor(ServiceTask):
                 retirement = store.retire_completed_collation_families(
                     limit=control_limit,
                     retired_at_ns=now_ns,
+                    retention_seconds=(
+                        self._monitor_config.task_log_retention_period_seconds
+                    ),
                 )
                 families_retired = retirement.families_retired
             except (OSError, RuntimeError, ValueError) as exc:
@@ -2233,7 +2368,7 @@ class TaskMonitor(ServiceTask):
             warnings=tuple(warnings),
             policy_progress=(
                 PolicyProgress(
-                    policy="runtime.terminal_control_cleanup",
+                    policy=TASK_MONITOR_POLICY_TASK_LOCAL_TERMINAL_RUNTIME,
                     domain="task_runtime_queues",
                     scanned=len(ready_records),
                     selected=len(records),
@@ -2412,6 +2547,9 @@ class TaskMonitor(ServiceTask):
                 retirement = store.retire_completed_collation_families(
                     limit=control_limit,
                     retired_at_ns=now_ns,
+                    retention_seconds=(
+                        self._monitor_config.task_log_retention_period_seconds
+                    ),
                 )
                 families_retired = retirement.families_retired
             except (OSError, RuntimeError, ValueError) as exc:
@@ -2459,7 +2597,7 @@ class TaskMonitor(ServiceTask):
             warnings=tuple(warnings),
             policy_progress=(
                 PolicyProgress(
-                    policy="runtime.reserved_cleanup",
+                    policy=TASK_MONITOR_POLICY_TASK_LOCAL_TERMINAL_RUNTIME,
                     domain="task_runtime_queues",
                     scanned=len(pending_records) + len(reserved_queue_names),
                     selected=monitor_selected + len(selection.queue_names),
@@ -2631,7 +2769,7 @@ class TaskMonitor(ServiceTask):
             warnings=tuple(warnings),
             policy_progress=(
                 PolicyProgress(
-                    policy="runtime.dead_tid_cleanup",
+                    policy=TASK_MONITOR_POLICY_TASK_LOCAL_DEAD_TID,
                     domain="task_runtime_queues",
                     scanned=selection.discovered_tids,
                     selected=len(selection.tids),
@@ -2689,7 +2827,7 @@ class TaskMonitor(ServiceTask):
             self._last_policy_progress = (
                 *self._last_policy_progress,
                 PolicyProgress(
-                    policy="monitor_store.raw_ref_delete",
+                    policy=TASK_MONITOR_POLICY_MONITOR_STORE_LIFECYCLE,
                     domain="weft_monitor_task_messages",
                     scanned=0,
                     selected=0,
@@ -2721,7 +2859,7 @@ class TaskMonitor(ServiceTask):
         self._last_policy_progress = (
             *self._last_policy_progress,
             PolicyProgress(
-                policy="monitor_store.raw_ref_delete",
+                policy=TASK_MONITOR_POLICY_MONITOR_STORE_LIFECYCLE,
                 domain="weft_monitor_task_messages",
                 scanned=len(refs),
                 selected=len(selected_refs),
@@ -2753,7 +2891,7 @@ class TaskMonitor(ServiceTask):
             self._last_policy_progress = (
                 *self._last_policy_progress,
                 PolicyProgress(
-                    policy="monitor_store.raw_deleted_child_ref_repair",
+                    policy=TASK_MONITOR_POLICY_MONITOR_STORE_LIFECYCLE,
                     domain="weft_monitor_task_messages",
                     scanned=0,
                     selected=0,
@@ -2786,7 +2924,7 @@ class TaskMonitor(ServiceTask):
         self._last_policy_progress = (
             *self._last_policy_progress,
             PolicyProgress(
-                policy="monitor_store.raw_deleted_child_ref_repair",
+                policy=TASK_MONITOR_POLICY_MONITOR_STORE_LIFECYCLE,
                 domain="weft_monitor_task_messages",
                 scanned=len(refs),
                 selected=len(selected_refs),
@@ -2908,7 +3046,7 @@ class TaskMonitor(ServiceTask):
         self._last_policy_progress = (
             *self._last_policy_progress,
             PolicyProgress(
-                policy="monitor_store.orphan_raw_recovery",
+                policy=TASK_MONITOR_POLICY_MONITOR_STORE_LIFECYCLE,
                 domain="weft_monitor_task_collations",
                 scanned=len(tids),
                 selected=len(selected_tids),
@@ -3035,7 +3173,7 @@ class TaskMonitor(ServiceTask):
         self._last_policy_progress = (
             *self._last_policy_progress,
             PolicyProgress(
-                policy="runtime.dead_task_log_coalesce",
+                policy=TASK_MONITOR_POLICY_TASK_LOCAL_DEAD_TID,
                 domain=WEFT_GLOBAL_LOG_QUEUE,
                 scanned=len(tids),
                 selected=refs_selected,
@@ -3278,10 +3416,10 @@ class TaskMonitor(ServiceTask):
         Spec: [CC-2.3], [MF-5]
         """
 
-        return self._start_service_lane(
+        return self._start_registered_service_lane(
             TASK_MONITOR_BUILTIN_CYCLE_WORKER_LANE,
             work,
-            lambda: self._run_builtin_cycle_worker(work),
+            request_id=work.request_id,
         )
 
     def _run_builtin_cycle_worker(
@@ -3368,6 +3506,9 @@ class TaskMonitor(ServiceTask):
             self._last_error = self._heartbeat_error
         else:
             self._last_error = "; ".join(result.errors) if result.errors else "failed"
+        self._last_policy_progress = _consolidate_task_monitor_policy_progress(
+            self._last_policy_progress
+        )
         self._last_catchup_pending = result.success and progress_requires_catchup(
             self._last_policy_progress
         )
@@ -3518,10 +3659,10 @@ class TaskMonitor(ServiceTask):
         )
         self._set_activity("processing", waiting_on=None)
         try:
-            self._start_service_call_lane(
+            self._start_registered_service_lane(
                 TASK_MONITOR_PROCESSOR_WORKER_LANE,
                 work,
-                lambda: self._run_custom_monitor_processor(work.request),
+                request_id=work.request.cycle_id,
             )
         except RuntimeError as exc:
             return TaskMonitorProcessorResult(success=False, errors=(str(exc),))
@@ -3539,7 +3680,44 @@ class TaskMonitor(ServiceTask):
         except Exception as exc:  # pragma: no cover - custom processor boundary
             return TaskMonitorProcessorResult(success=False, errors=(str(exc),))
 
+    def _handle_service_worker_event(self, event: ServiceWorkerEvent) -> None:
+        """Route TaskMonitor service-worker events to existing result handlers."""
+
+        if event.kind in {"started", "stopped"}:
+            return
+        if event.name == TASK_MONITOR_BUILTIN_CYCLE_WORKER_LANE:
+            self._handle_builtin_cycle_worker_result(
+                TaskWorkerResult(
+                    lane=event.name,
+                    value=event.value,
+                    error=event.error,
+                )
+            )
+            return
+        if event.name == TASK_MONITOR_CONTROL_CLEANUP_WORKER_LANE:
+            self._handle_control_cleanup_worker_result(
+                TaskWorkerResult(
+                    lane=event.name,
+                    value=event.value,
+                    error=event.error,
+                )
+            )
+            return
+        if event.name == TASK_MONITOR_PROCESSOR_WORKER_LANE:
+            self._handle_processor_worker_result(
+                TaskWorkerResult(
+                    lane=event.name,
+                    value=event.value,
+                    error=event.error,
+                )
+            )
+            return
+        super()._handle_service_worker_event(event)
+
     def _handle_worker_result(self, result: TaskWorkerResult) -> None:
+        if isinstance(result.value, ServiceWorkerEvent):
+            super()._handle_worker_result(result)
+            return
         if result.lane == TASK_MONITOR_BUILTIN_CYCLE_WORKER_LANE:
             self._handle_builtin_cycle_worker_result(result)
             return
@@ -3549,6 +3727,11 @@ class TaskMonitor(ServiceTask):
         if result.lane != TASK_MONITOR_PROCESSOR_WORKER_LANE:
             super()._handle_worker_result(result)
             return
+
+        self._handle_processor_worker_result(result)
+
+    def _handle_processor_worker_result(self, result: TaskWorkerResult) -> None:
+        """Apply custom processor worker results on the reactor thread."""
 
         work = cast(
             _TaskMonitorProcessorWork | None,
@@ -3683,6 +3866,9 @@ class TaskMonitor(ServiceTask):
         self._last_policy_progress = (
             *self._last_policy_progress,
             *cleanup.policy_progress,
+        )
+        self._last_policy_progress = _consolidate_task_monitor_policy_progress(
+            self._last_policy_progress
         )
         self._last_terminal_families_disposed += cleanup.families_disposed
         self._runtime_cleanup_queue_discovery_pending = (
@@ -3911,7 +4097,7 @@ class TaskMonitor(ServiceTask):
         self._last_policy_progress = (
             *self._last_policy_progress,
             PolicyProgress(
-                policy=TASK_MONITOR_POLICY_TASK_LOG_EXTERNAL_RAW,
+                policy=TASK_MONITOR_POLICY_TASK_LOG_RETENTION,
                 domain=WEFT_GLOBAL_LOG_QUEUE,
                 scanned=window.scanned,
                 selected=len(selected),
@@ -3955,7 +4141,7 @@ class TaskMonitor(ServiceTask):
             ),
         )
         policy_stat = CleanupPolicyStats(
-            policy=TASK_MONITOR_POLICY_TASK_LOG_EXTERNAL_RAW,
+            policy=TASK_MONITOR_POLICY_TASK_LOG_RETENTION,
             queue=WEFT_GLOBAL_LOG_QUEUE,
             scanned=scanned,
             selected=selected,

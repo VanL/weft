@@ -287,22 +287,25 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
   reserved-policy application, lifecycle state/log publication, endpoint state,
   and task-local control responses are committed from the owning reactor thread,
   not from task worker lanes. `BaseTask._submit_worker_lane(...)` is only the
-  mechanical thread/result channel; it does not grant broker/store authority to
+  mechanical thread/result channel; `ServiceTask` builds its internal
+  registered service-worker API on top of that channel with local Python input
+  queues and typed events. Neither layer grants broker/store authority to
   ordinary workers. The declared exception is the manager-supervised
   TaskMonitor's bounded maintenance lanes, which may open fresh broker/store
   handles for Monitor-owned cleanup work and return cached results to the
   reactor.
 - **IMPL.9**: task worker lanes are broker-free Weft runtime paths. They may
   run blocking target work, child process launch, or custom processor callables
-  through the `_submit_worker_call(...)` broker-free wrapper and return local
-  Python results, but Weft must not rely on worker-thread SimpleBroker
-  reads/writes or direct TaskSpec mutation for runtime correctness. The local
-  worker-result channel is bounded, and the reactor drains it in bounded
-  batches so worker progress applies backpressure instead of growing memory or
-  starving queue/control turns. User-supplied Python code may still open its own
-  broker connection; that is outside the Weft-owned worker-lane contract. The
-  TaskMonitor built-in cycle and runtime-cleanup lanes are the only Weft-owned
-  broker/store worker exceptions.
+  through the `_submit_worker_call(...)` broker-free wrapper or the internal
+  `ServiceTask` service-worker API and return local Python results/events, but
+  Weft must not rely on worker-thread SimpleBroker reads/writes or direct
+  TaskSpec mutation for runtime correctness. The local worker-result channel is
+  bounded, and the reactor drains it in bounded batches so worker progress
+  applies backpressure instead of growing memory or starving queue/control
+  turns. User-supplied Python code may still open its own broker connection;
+  that is outside the Weft-owned worker-lane contract. The TaskMonitor built-in
+  cycle and runtime-cleanup lanes are the only Weft-owned broker/store worker
+  exceptions.
 
 ### Manager Invariants
 
@@ -517,6 +520,14 @@ Collation summaries, cleanup policy stats, cached `policy_progress`, and
 Monitor-owned collation tables remain operational TaskMonitor output only.
 Those deletes, summaries, progress records, and tables do not make
 task-monitor output lifecycle truth or result authority.
+The monitor has exactly five top-level cleanup policy identities:
+`task_log.retention`, `monitor_store.lifecycle`,
+`task_local.terminal_runtime`, `task_local.dead_tid`, and
+`runtime_state.retention`. Each policy run must remain bounded, must report
+whether it reached base, reached a bounded waypoint, or blocked, and must not
+spin when only future-eligible or blocked work remains. Private cleanup phases
+must be represented through reason counts or cached details rather than new
+policy identities.
 Deferred-only cleanup work is base-for-now and must not keep catch-up pending;
 only a bounded waypoint requests catch-up cadence. Blocked cleanup reports an
 error and uses existing error/backoff behavior rather than becoming a hot
@@ -550,6 +561,8 @@ doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-05-26-monitor-five-cleanup-policy-consolidation-plan.md`](../plans/2026-05-26-monitor-five-cleanup-policy-consolidation-plan.md)
+- [`docs/plans/2026-05-26-service-task-worker-api-plan.md`](../plans/2026-05-26-service-task-worker-api-plan.md)
 - [`docs/plans/2026-05-25-monitor-dead-task-catchup-convergence-plan.md`](../plans/2026-05-25-monitor-dead-task-catchup-convergence-plan.md)
 - [`docs/plans/2026-05-24-monitor-policy-progress-contract-plan.md`](../plans/2026-05-24-monitor-policy-progress-contract-plan.md)
 - [`docs/plans/2026-05-23-monitor-cleanup-policy-convergence-plan.md`](../plans/2026-05-23-monitor-cleanup-policy-convergence-plan.md)

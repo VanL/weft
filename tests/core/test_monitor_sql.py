@@ -77,8 +77,10 @@ def test_monitor_sql_retirable_family_query_is_conservative() -> None:
     query = monitor_sql.select_retirable_task_collations(
         "weft_monitor_task_collations",
         "weft_monitor_task_messages",
+        apply_retention_cutoff=True,
     )
 
+    assert "COALESCE(completed_at_ns, last_seen_at_ns, last_message_id) <= ?" in query
     assert "raw_deleted_at_ns IS NOT NULL" in query
     assert "summary_emitted_at_ns IS NOT NULL" in query
     assert "disposition_at_ns IS NOT NULL" in query
@@ -88,6 +90,21 @@ def test_monitor_sql_retirable_family_query_is_conservative() -> None:
     assert "NOT EXISTS" in query
     assert "LIMIT ?" in query
     assert "%s" not in query
+
+
+def test_monitor_sql_retirable_family_query_omits_null_cutoff_probe() -> None:
+    query = monitor_sql.select_retirable_task_collations(
+        "weft_monitor_task_collations",
+        "weft_monitor_task_messages",
+        apply_retention_cutoff=False,
+    )
+
+    assert (
+        "COALESCE(completed_at_ns, last_seen_at_ns, last_message_id) <= ?" not in query
+    )
+    assert "? IS NULL" not in query
+    assert "raw_deleted_at_ns IS NOT NULL" in query
+    assert "LIMIT ?" in query
 
 
 def test_monitor_sql_reserved_cleanup_query_selects_unchecked_families() -> None:
