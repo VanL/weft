@@ -43,7 +43,7 @@ def _drain_json(queue) -> list[dict[str, Any]]:
 def _drive_consumer_once_until_idle(
     consumer: Consumer,
     *,
-    timeout: float = 5.0,
+    timeout: float = 20.0,
 ) -> None:
     deadline = time.monotonic() + timeout
     consumer.process_once()

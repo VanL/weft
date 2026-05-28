@@ -267,6 +267,15 @@ runbook needs to become stricter.
   a terminal control envelope is already visible adds avoidable SQLite
   contention in long mixed-workload release gates.
 
+## 2026-05-27 Terminal Proof Grace
+
+- A cleanly exited child wrapper is not proof that task-owned terminal evidence
+  is absent. Under release-load PG and Windows runs, process exit can beat the
+  durable `ctrl_out` or task-log terminal write by more than a local smoke-test
+  interval. Keep the manager's wrapper-lost grace window large enough for CI
+  backend pressure, and keep worker-completion tests from using narrow local
+  timing as a correctness oracle.
+
 ## 2026-05-13 Plan Review Gates
 
 - Metadata-valid plans are not necessarily implementation-ready. Every plan
