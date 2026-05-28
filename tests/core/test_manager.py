@@ -6815,7 +6815,7 @@ def test_manager_autostart_ensure_restarts(
         )
         first_child_tid = first_spawn.get("child_tid")
         assert isinstance(first_child_tid, str)
-        wait_for_log_event(
+        completed_event = wait_for_log_event(
             manager,
             log_queue,
             lambda event: (
@@ -6824,7 +6824,10 @@ def test_manager_autostart_ensure_restarts(
             ),
             timeout=30.0 if os.name == "nt" else 20.0,
         )
-        wait_for_children(manager, timeout=10.0)
+        # This helper consumes log rows. Reinsert the terminal row so manager
+        # cleanup can observe the same lifecycle proof real queue readers retain.
+        log_queue.write(json.dumps(completed_event))
+        wait_for_children(manager, timeout=20.0 if os.name == "nt" else 10.0)
         assert not manager._user_work_children()
         second_spawn = wait_for_log_event(
             manager,
