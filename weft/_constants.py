@@ -350,7 +350,7 @@ MANAGER_STALLED_CONTROL_RETRY_SECONDS: Final[float] = 1.0
 MANAGER_CHILD_STARTUP_LIVENESS_GRACE_SECONDS: Final[float] = 1.0
 """Grace window before negative liveness can reap a just-launched Manager child."""
 
-MANAGER_CHILD_TERMINAL_PROOF_GRACE_SECONDS: Final[float] = 5.0
+MANAGER_CHILD_TERMINAL_PROOF_GRACE_SECONDS: Final[float] = 15.0
 """Grace window for terminal proof after a clean Manager child wrapper exit."""
 
 MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS: Final[float] = 5.0
