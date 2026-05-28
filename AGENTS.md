@@ -174,9 +174,9 @@ User ──► weft run ──► Manager (background) ──► Consumer (child
 **Queue naming**:
 ```
 Per-task:           T{tid}.inbox, T{tid}.reserved, T{tid}.outbox, T{tid}.ctrl_in, T{tid}.ctrl_out
-Global logs:        weft.log.tasks, weft.spawn.requests
+Global logs:        weft.log.tasks, weft.spawn.requests, weft.spawn.internal
 Manager:            weft.manager.ctrl_in, weft.manager.ctrl_out, weft.manager.outbox
-Runtime state:      weft.state.managers, weft.state.tid_mappings, weft.state.streaming
+Runtime state:      weft.state.services, weft.state.tid_mappings, weft.state.streaming, weft.state.endpoints, weft.state.pipelines
 ```
 
 ## 3. Invariants

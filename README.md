@@ -507,9 +507,12 @@ T{tid}.ctrl_out   # Status responses
 
 weft.log.tasks           # Global state log (all tasks)
 weft.spawn.requests      # Task spawn requests to manager
-weft.state.managers       # Manager liveness tracking (runtime state)
+weft.spawn.internal      # Manager-owned internal service spawn requests
+weft.state.services      # Runtime service-owner registry, including managers (runtime state)
 weft.state.tid_mappings  # Short->full TID mappings (runtime state)
 weft.state.streaming     # Active streaming sessions (runtime state)
+weft.state.endpoints     # Active named endpoint registry (runtime state)
+weft.state.pipelines     # Active pipeline registry (runtime state)
 ```
 
 Queues under `weft.state.*` are runtime-only and excluded from dumps by default.
