@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
@@ -179,18 +180,21 @@ class ExternalTaskLogSink:
     ) -> None:
         """Emit one collated task lifecycle summary before raw-row deletion."""
 
-        self._emit(
-            {
-                "schema_version": WEFT_LOG_TASKS_EXTERNAL_SCHEMA_VERSION,
-                "record_type": "task_log_collated",
-                "monitor_tid": self._monitor_tid,
-                "emitted_at_ns": int(emitted_at_ns),
-                "close_reason": close_reason,
-                "task": task_summary,
-            },
-            emitted_at_ns=emitted_at_ns,
-            level=logging.INFO,
-        )
+        record: dict[str, Any] = {
+            "schema_version": WEFT_LOG_TASKS_EXTERNAL_SCHEMA_VERSION,
+            "record_type": "task_log_collated",
+            "monitor_tid": self._monitor_tid,
+            "emitted_at_ns": int(emitted_at_ns),
+            "close_reason": close_reason,
+            "task": task_summary,
+        }
+        collation_kind = task_summary.get("collation_kind")
+        if isinstance(collation_kind, str):
+            record["collation_kind"] = collation_kind
+        service_summary = task_summary.get("service")
+        if isinstance(service_summary, Mapping):
+            record["service"] = dict(service_summary)
+        self._emit(record, emitted_at_ns=emitted_at_ns, level=logging.INFO)
 
     def _ensure_handler(self) -> logging.Handler:
         if self._handler is not None:

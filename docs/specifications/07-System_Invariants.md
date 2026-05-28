@@ -11,9 +11,9 @@ See also:
 - current task/runtime contracts:
   [`01-Core_Components.md`](01-Core_Components.md),
   [`05-Message_Flow_and_State.md`](05-Message_Flow_and_State.md)
-- active service-health convergence plan:
+- related service-health convergence plan:
   [`docs/plans/2026-05-09-service-liveness-and-health-convergence-plan.md`](../plans/2026-05-09-service-liveness-and-health-convergence-plan.md)
-- draft internal state-machine helper plan:
+- related internal state-machine helper plan:
   [`docs/plans/2026-05-13-internal-state-machine-helper-plan.md`](../plans/2026-05-13-internal-state-machine-helper-plan.md)
 
 ## System Invariants
@@ -525,6 +525,17 @@ Collation summaries, cleanup policy stats, cached `policy_progress`, and
 Monitor-owned collation tables remain operational TaskMonitor output only.
 Those deletes, summaries, progress records, and tables do not make
 task-monitor output lifecycle truth or result authority.
+Monitor collation summaries must classify Weft-owned manager/service rows
+separately from ordinary user-task rows without creating another cleanup
+policy. Ordinary user-task rows use `collation_kind=user_task` and
+`record_type=task_summary`. Manager, built-in service, and manager-authored
+managed-service rows use a service classification and
+`record_type=service_summary` on the task-monitor sink. External collated JSONL
+keeps its compatibility `task_log_collated` record type and carries
+`collation_kind`/`service` fields when present. Service classification must be
+derived from Weft-owned role, reserved service/autostart metadata, or internal
+runtime class markers; domain-specific metadata alone must not remove failed
+work from the generic task bucket.
 The monitor has exactly five top-level cleanup policy identities:
 `task_log.retention`, `monitor_store.lifecycle`,
 `task_local.terminal_runtime`, `task_local.dead_tid`, and
@@ -566,6 +577,7 @@ doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-05-27-service-collation-reporting-plan.md`](../plans/2026-05-27-service-collation-reporting-plan.md)
 - [`docs/plans/2026-05-26-monitor-five-cleanup-policy-consolidation-plan.md`](../plans/2026-05-26-monitor-five-cleanup-policy-consolidation-plan.md)
 - [`docs/plans/2026-05-26-service-task-worker-api-plan.md`](../plans/2026-05-26-service-task-worker-api-plan.md)
 - [`docs/plans/2026-05-25-monitor-dead-task-catchup-convergence-plan.md`](../plans/2026-05-25-monitor-dead-task-catchup-convergence-plan.md)

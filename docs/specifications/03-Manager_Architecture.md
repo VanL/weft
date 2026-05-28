@@ -49,19 +49,19 @@ always be rolled back from the public request queue.
 - [Deterministic Manager Service Reconciler Plan](../plans/2026-05-08-deterministic-manager-service-reconciler-plan.md) – supersedes the cleanup plan for the pure reducer, transition-table, and full test support work.
 - [Manager Stop Timeout Hardening Plan](../plans/2026-05-09-manager-stop-timeout-hardening-plan.md) – separates the manager's internal child-drain timeout from caller-side stop confirmation defaults so slower backends have observation margin.
 - [Internal Spawn Priority Queue Plan](../plans/2026-05-09-internal-spawn-priority-queue-plan.md) – adds `weft.spawn.internal` as strict-priority manager-owned service spawn work while preserving the shared manager launch path.
-- [Runtime Liveness Probe Registry Plan](../plans/2026-05-09-runtime-liveness-probe-registry-plan.md) – draft plan to move runtime-specific manager liveness checks behind a lightweight core registry with Docker-specific probing owned by `weft_docker`.
-- [Prune Path Unification Plan](../plans/2026-05-09-prune-path-unification-plan.md) – draft plan to make CLI pruning and manager-supervised TaskMonitor cleanup share one core prune engine.
-- [Service Liveness And Health Convergence Plan](../plans/2026-05-09-service-liveness-and-health-convergence-plan.md) – draft plan to make manager ownership, heartbeat supersession, singleton restart timing, and status liveness diagnostics share one interpretation path.
+- [Runtime Liveness Probe Registry Plan](../plans/2026-05-09-runtime-liveness-probe-registry-plan.md) – runtime-specific manager liveness checks behind a lightweight core registry with Docker-specific probing owned by `weft_docker`.
+- [Prune Path Unification Plan](../plans/2026-05-09-prune-path-unification-plan.md) – CLI pruning and manager-supervised TaskMonitor cleanup share one core prune engine.
+- [Service Liveness And Health Convergence Plan](../plans/2026-05-09-service-liveness-and-health-convergence-plan.md) – manager ownership, heartbeat supersession, singleton restart timing, and status liveness diagnostics share one interpretation path.
 - [Manager Service Authority Boundary Hardening Plan](../plans/2026-05-10-manager-service-authority-boundary-hardening-plan.md) – tighten manager-owned singleton evidence authority, duplicate PID force-kill authority, and service-key helper structure.
-- [Manager Work-Stealing Dispatch Plan](../plans/2026-05-11-manager-work-stealing-dispatch-plan.md) – draft plan to make atomic spawn-request reservation the public dispatch authority while keeping singleton service correctness in the manager-owned reducer.
-- [Manager Serve Operational Log Plan](../plans/2026-05-11-manager-serve-operational-log-plan.md) – draft plan for level-controlled foreground `manager serve` operational logs that expose registry, loop, service-convergence, spawn, and TaskMonitor decisions without writing lifecycle state.
-- [Manager Replace Start And Serve Plan](../plans/2026-05-13-manager-replace-start-serve-plan.md) – completed plan for explicit `weft manager start --replace` and `weft manager serve --replace` operator replacement semantics using the existing STOP control path.
-- [Manager Liveness And Leadership Robustness Plan](../plans/2026-05-13-manager-liveness-and-leadership-robustness-plan.md) – completed plan requiring strong live dispatch-authority proof before leadership yield, keeping external-supervisor `unknown` evidence from acting as authority, and bounding leadership-drain recovery without broad status scans.
+- [Manager Work-Stealing Dispatch Plan](../plans/2026-05-11-manager-work-stealing-dispatch-plan.md) – atomic spawn-request reservation is the public dispatch authority while singleton service correctness stays in the manager-owned reducer.
+- [Manager Serve Operational Log Plan](../plans/2026-05-11-manager-serve-operational-log-plan.md) – level-controlled foreground `manager serve` operational logs expose registry, loop, service-convergence, spawn, and TaskMonitor decisions without writing lifecycle state.
+- [Manager Replace Start And Serve Plan](../plans/2026-05-13-manager-replace-start-serve-plan.md) – explicit `weft manager start --replace` and `weft manager serve --replace` operator replacement semantics use the existing STOP control path.
+- [Manager Liveness And Leadership Robustness Plan](../plans/2026-05-13-manager-liveness-and-leadership-robustness-plan.md) – strong live dispatch-authority proof is required before leadership yield, external-supervisor `unknown` evidence cannot act as authority, and leadership-drain recovery remains bounded without broad status scans.
 - [Manager Liveness And List Diagnostics Plan](../plans/2026-05-14-manager-list-diagnostics-plan.md) – improves cross-namespace manager liveness fallback through keyed PING/PONG and adds an explicit operator diagnostic list mode for manager registry liveness, proof source, and canonical-owner visibility without changing election behavior.
-- [Manager Hot-Loop Reduction Plan](../plans/2026-05-15-manager-hot-loop-reduction-plan.md) – superseded draft that identified manager supervisory hot loops before the broader reactor migration.
-- [Task Reactor And Evidence Worker Plan](../plans/2026-05-15-task-reactor-and-evidence-worker-plan.md) – completed phased plan that moved blocking task work behind broker-free worker lanes while keeping queue reservation, acknowledgement, lifecycle state, and control responses on the task reactor.
-- [Manager Reactor Hot-Loop Follow-Up Plan](../plans/2026-05-15-manager-reactor-hot-loop-follow-up-plan.md) – completed follow-up to remove remaining manager proof churn after the reactor migration by caching process-stable context, reordering leadership proof, gating idle probes, and bounding service pending evidence.
-- [Internal State Machine Helper Plan](../plans/2026-05-13-internal-state-machine-helper-plan.md) – draft plan for a reusable pure reducer helper that can express manager-service and other transition tables without moving side effects out of their current owners.
+- [Manager Hot-Loop Reduction Plan](../plans/2026-05-15-manager-hot-loop-reduction-plan.md) – identified manager supervisory hot loops before the broader reactor migration.
+- [Task Reactor And Evidence Worker Plan](../plans/2026-05-15-task-reactor-and-evidence-worker-plan.md) – phased plan that moved blocking task work behind broker-free worker lanes while keeping queue reservation, acknowledgement, lifecycle state, and control responses on the task reactor.
+- [Manager Reactor Hot-Loop Follow-Up Plan](../plans/2026-05-15-manager-reactor-hot-loop-follow-up-plan.md) – follow-up that removed remaining manager proof churn after the reactor migration by caching process-stable context, reordering leadership proof, gating idle probes, and bounding service pending evidence.
+- [Internal State Machine Helper Plan](../plans/2026-05-13-internal-state-machine-helper-plan.md) – reusable pure reducer helper that can express manager-service and other transition tables without moving side effects out of their current owners.
 - [Internal Service Observability Plan](../plans/2026-05-11-internal-service-observability-plan.md) – adds an ops read model that reports heartbeat and TaskMonitor state from manager launch evidence, child task logs, TID mappings, and internal spawn queues.
 - [Service Task Shared Reactor Extraction Plan](../plans/2026-05-20-service-task-shared-reactor-extraction-plan.md) – extracts shared long-lived service helpers for Manager, TaskMonitor, and Heartbeat while keeping Manager scheduling and dispatch authority local.
 
@@ -374,10 +374,10 @@ task-local queue. The canonical
    observe its `superseded` row.
    `weft manager start --replace` and `weft manager serve --replace` explicitly
    send STOP to each selected incumbent manager control queue, write a
-   `superseded` manager service-owner row for that owner, reselect until no active
-manager remains, and then start or serve the replacement. Replacement does not
-wait for stopped confirmation in v1; ordinary `weft manager stop` still waits
-for stopped registry/process evidence. External
+   `superseded` manager service-owner row for that owner, reselect until no
+   active manager remains, and then start or serve the replacement.
+   Replacement does not wait for stopped confirmation in v1; ordinary
+   `weft manager stop` still waits for stopped registry/process evidence.
 Voluntary leadership drain does not kill user children. It waits for already
 owned non-persistent children while the lower-TID leader remains positively
 proved; if that proof disappears, the manager publishes

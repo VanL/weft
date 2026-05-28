@@ -96,7 +96,7 @@ def _load_taskspec_payload_bounded(
 ) -> dict[str, Any] | None:
     """Return the latest TaskSpec for a full TID without old global replay.
 
-    Spec: docs/specifications/13C-Using_Weft_With_Django.md [DJ-2.2]
+    Spec: docs/specifications/10-CLI_Interface.md [CLI-1.2.1]
     """
 
     if not tid.isdigit():
@@ -380,7 +380,8 @@ def task_terminal_snapshot(
 ) -> TaskTerminalSnapshot:
     """Return a bounded, non-consuming known-TID terminal/live snapshot.
 
-    Spec: docs/specifications/13C-Using_Weft_With_Django.md [DJ-2.2]
+    Spec: docs/specifications/09-Implementation_Plan.md [IP-1.1];
+    docs/specifications/05-Message_Flow_and_State.md [MF-5]
     """
 
     ctx = _coerce_context(context=context, context_path=context_path)

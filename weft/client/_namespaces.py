@@ -1,4 +1,9 @@
-"""Namespace adapters for the public Python client."""
+"""Namespace adapters for the public Python client.
+
+Spec references:
+- docs/specifications/09-Implementation_Plan.md [IP-1]
+- docs/specifications/10-CLI_Interface.md [CLI-1.2], [CLI-4], [CLI-6]
+"""
 
 from __future__ import annotations
 

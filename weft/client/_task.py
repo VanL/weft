@@ -1,7 +1,8 @@
 """Task handle for the public Python client.
 
 Spec references:
-- docs/specifications/13C-Using_Weft_With_Django.md [DJ-2.1], [DJ-2.2]
+- docs/specifications/09-Implementation_Plan.md [IP-1]
+- docs/specifications/05-Message_Flow_and_State.md [MF-3], [MF-5]
 """
 
 from __future__ import annotations

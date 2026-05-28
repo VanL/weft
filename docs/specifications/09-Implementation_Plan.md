@@ -21,6 +21,9 @@ The current codebase is intentionally narrower than the old roadmap:
   are not builtin helpers.
 - Submission-time spec materialization and run-input shaping are current
   shipped behavior, not roadmap-only ideas.
+- The public Python client is a thin adapter over the same command capability
+  layer and `WeftContext` resolution used by the CLI. It does not own a second
+  runtime, state model, or broker-targeting path.
 
 The reason for that shape is simplicity. Weft keeps the visible command
 surface small and routes work through the current task, queue, manager, and
@@ -33,6 +36,10 @@ packages.
   loading, local materialization, and delegation into the current manager,
   submission, result, and streaming helpers; `weft/cli/run.py` is the Typer
   adapter over that shared surface.
+- `weft/client/` owns the public Python client adapter. It wraps the same
+  command-layer capabilities and public command result dataclasses used by the
+  CLI, returning object handles and namespace helpers without bypassing the
+  queue-first manager/runtime path.
 - `weft/commands/init.py` owns project initialization and broker-facing
   project bootstrap for the root `weft init` command.
 - `weft/core/manager_runtime.py` owns detached manager bootstrap,
@@ -64,6 +71,30 @@ packages.
   `weft/core/tasks/consumer.py`, `weft/core/tasks/interactive.py`,
   `weft/core/tasks/pipeline.py`, `weft/core/tasks/runner.py`, and
   `weft/core/manager.py`.
+
+## Public Python Client Surface [IP-1.1]
+
+The current `weft.client` package is a stable adapter over shipped command
+capabilities, not a separate runtime API.
+
+- `connect()` and `WeftClient` resolve a `WeftContext` and expose namespace
+  helpers for tasks, queues, specs, managers, and system status.
+- `Task` is a lazy handle around a TID. It exposes status snapshots, terminal
+  snapshots, result waits, lifecycle event iteration, read-only realtime event
+  iteration, follow-with-final-result iteration, and task stop/kill.
+- Client-facing dataclasses are re-exported from `weft.commands.types` so the
+  CLI and Python client share one result/status shape.
+- Known-TID terminal snapshots are non-consuming observations. When they include
+  exact acknowledgement targets, callers must acknowledge explicitly. This
+  keeps read-only observers from stealing task results or mutating queue state.
+- Realtime event iteration peeks task-log, outbox, and terminal-control
+  surfaces instead of consuming them. That lets HTTP/SSE/WebSocket-style
+  diagnostics coexist with `weft result`, `weft run`, and Python result waits.
+
+This shape exists because framework integrations need a small stable substrate
+API, but Weft still needs one queue-first source of truth. Django or other
+higher-level systems may wrap this client, but they must not depend on internal
+command modules or invent their own task lifecycle model.
 
 ## Why This Shape Exists [IP-2]
 

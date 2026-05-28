@@ -425,7 +425,7 @@ def _enqueue_taskspec(
     seed_start_envelope: bool = True,
     allow_internal_runtime: bool = False,
 ) -> int:
-    # Spec: docs/specifications/03-Manager_Architecture.md#tid-correlation-wa-2, [MF-1]
+    # Spec: docs/specifications/03-Manager_Architecture.md [MA-2], [MF-1]
     task_tid = taskspec.tid or _generate_tid(context)
     return submit_spawn_request(
         context.broker_target,

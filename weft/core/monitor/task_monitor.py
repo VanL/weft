@@ -1790,29 +1790,34 @@ class TaskMonitor(ServiceTask):
         *,
         emitted_at_ns: int,
     ) -> None:
-        """Emit one terminal task summary to the configured monitor sink."""
+        """Emit one terminal task or service summary to the monitor sink."""
 
         record = ready.record
+        task_summary = record.to_summary()
+        service_summary = task_summary.get("service")
+        is_service_summary = isinstance(service_summary, dict)
         if self._monitor_config.task_log_external_enabled:
             sink = self._external_task_log_sink
             if sink is None:
                 raise ExternalTaskLogError("external task-log sink is not configured")
             sink.emit_collated(
-                task_summary=record.to_summary(),
+                task_summary=task_summary,
                 emitted_at_ns=emitted_at_ns,
                 close_reason=ready.close_reason,
             )
 
         if self._monitor_config.log_sink == "none":
             return
-        payload = {
+        payload: dict[str, Any] = {
             "schema_version": TASK_MONITOR_SCHEMA_VERSION,
-            "record_type": "task_summary",
+            "record_type": "service_summary" if is_service_summary else "task_summary",
             "emitted_at": emitted_at_ns,
             "monitor_tid": self.tid,
             "close_reason": ready.close_reason,
-            "task": record.to_summary(),
+            "task": task_summary,
         }
+        if is_service_summary:
+            payload["service"] = service_summary
         if self._monitor_config.log_sink == "disk":
             log_dir = self._monitor_context().logs_dir / TASK_MONITOR_LOG_SUBDIR
             run_date = datetime.now(UTC).date().isoformat()

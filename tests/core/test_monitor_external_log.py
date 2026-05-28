@@ -59,6 +59,36 @@ def test_external_task_log_sink_writes_collated_jsonl(tmp_path) -> None:
     assert record["task"]["tid"] == "1779100000000000011"
 
 
+def test_external_task_log_sink_surfaces_service_classification(tmp_path) -> None:
+    path = tmp_path / "service-summary.jsonl"
+    sink = ExternalTaskLogSink(
+        path=path,
+        mode="collated",
+        monitor_tid="1779100000000000013",
+    )
+
+    sink.emit_collated(
+        task_summary={
+            "tid": "1779100000000000014",
+            "status": "cancelled",
+            "collation_kind": "internal_service",
+            "service": {
+                "kind": "internal_service",
+                "service_key": "_weft.service.task_monitor",
+            },
+        },
+        emitted_at_ns=1779100000000000015,
+        close_reason="terminal",
+    )
+
+    [line] = path.read_text(encoding="utf-8").splitlines()
+    record = json.loads(line)
+    assert record["record_type"] == "task_log_collated"
+    assert record["collation_kind"] == "internal_service"
+    assert record["service"]["kind"] == "internal_service"
+    assert record["task"]["tid"] == "1779100000000000014"
+
+
 def test_external_task_log_sink_represents_malformed_raw_payload(tmp_path) -> None:
     path = tmp_path / "malformed.jsonl"
     sink = ExternalTaskLogSink(

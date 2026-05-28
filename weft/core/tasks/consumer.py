@@ -1,3 +1,12 @@
+"""Concrete task consumer runtime.
+
+Spec references:
+- docs/specifications/01-Core_Components.md [CC-2.3], [CC-2.5]
+- docs/specifications/05-Message_Flow_and_State.md [MF-2], [MF-3], [MF-5]
+- docs/specifications/06-Resource_Management.md [RM-5], [RM-5.2]
+- docs/specifications/13-Agent_Runtime.md [AR-1], [AR-4.1], [AR-6]
+"""
+
 from __future__ import annotations
 
 import json

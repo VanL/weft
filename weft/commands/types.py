@@ -1,8 +1,9 @@
 """Shared runtime dataclasses for ops and client surfaces.
 
 Spec references:
+- docs/specifications/09-Implementation_Plan.md [IP-1.1]
 - docs/specifications/10-CLI_Interface.md [CLI-1], [CLI-4], [CLI-6]
-- docs/specifications/13C-Using_Weft_With_Django.md [DJ-2.2]
+- docs/specifications/05-Message_Flow_and_State.md [MF-5]
 """
 
 from __future__ import annotations

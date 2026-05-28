@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 124 plan files in this directory.
+There are currently 125 plan files in this directory.
 
 ## Curation Policy
 
@@ -22,6 +22,7 @@ There are currently 124 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-05-27-service-collation-reporting-plan.md`](./2026-05-27-service-collation-reporting-plan.md) | Service Collation Reporting Plan | `draft` | none |
 | [`2026-05-26-monitor-five-cleanup-policy-consolidation-plan.md`](./2026-05-26-monitor-five-cleanup-policy-consolidation-plan.md) | Monitor Five Cleanup Policy Consolidation Plan | `completed` | none |
 | [`2026-05-26-service-task-worker-api-plan.md`](./2026-05-26-service-task-worker-api-plan.md) | Service Task Worker API Plan | `completed` | none |
 | [`2026-05-25-monitor-dead-task-catchup-convergence-plan.md`](./2026-05-25-monitor-dead-task-catchup-convergence-plan.md) | Monitor Dead-Task Catch-Up Convergence Plan | `completed` | none |

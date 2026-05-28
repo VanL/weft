@@ -6,6 +6,15 @@ import pytest
 
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import (
+    INTERNAL_AUTOSTART_ENABLED_METADATA_KEY,
+    INTERNAL_AUTOSTART_SOURCE_METADATA_KEY,
+    INTERNAL_RUNTIME_TASK_CLASS_KEY,
+    INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR,
+    INTERNAL_SERVICE_AUTHORITY_MANAGER,
+    INTERNAL_SERVICE_AUTHORITY_METADATA_KEY,
+    INTERNAL_SERVICE_KEY_HEARTBEAT,
+    INTERNAL_SERVICE_KEY_METADATA_KEY,
+    INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MONITOR_SCHEMA_VERSION,
 )
@@ -14,6 +23,7 @@ from weft.core.monitor import store as monitor_store_mod
 from weft.core.monitor.collation import MonitorTaskEventUpdate
 from weft.core.monitor.store import (
     MonitorStoreUnavailable,
+    MonitorTaskCollationRecord,
     open_monitor_store,
 )
 
@@ -57,6 +67,40 @@ def _update(
         resources={"peak_memory": 10},
         bookkeeping={"last_message_id": message_id},
         reserved_probe_needed=terminal and status != "completed",
+    )
+
+
+def _collation_record(
+    tid: str = "1779000000000000900",
+    *,
+    role: str | None = None,
+    metadata: dict[str, object] | None = None,
+) -> MonitorTaskCollationRecord:
+    return MonitorTaskCollationRecord(
+        context_key="test",
+        tid=tid,
+        name="sample",
+        runner="host",
+        parent_tid="1779000000000000001",
+        role=role,
+        status="completed",
+        terminal_seen=True,
+        terminal_event="work_completed",
+        terminal_status="completed",
+        terminal_message_id=int(tid) + 2,
+        return_code=0,
+        first_message_id=int(tid) + 1,
+        last_message_id=int(tid) + 2,
+        first_seen_at_ns=int(tid) + 1,
+        last_seen_at_ns=int(tid) + 2,
+        started_at_ns=int(tid) + 1,
+        completed_at_ns=int(tid) + 2,
+        taskspec_summary={
+            "tid": tid,
+            "name": "sample",
+            "metadata": dict(metadata or {}),
+        },
+        state={"status": "completed"},
     )
 
 
@@ -133,6 +177,64 @@ def test_monitor_store_write_transaction_does_not_rollback_begin_failure() -> No
             runner.run("INSERT")
 
     assert runner.calls == ["begin"]
+
+
+def test_monitor_collation_summary_classifies_user_tasks_without_service() -> None:
+    summary = _collation_record().to_summary()
+
+    assert summary["collation_kind"] == "user_task"
+    assert "service" not in summary
+
+
+def test_monitor_collation_summary_classifies_manager_rows() -> None:
+    summary = _collation_record(role="manager").to_summary()
+
+    assert summary["collation_kind"] == "manager"
+    assert summary["service"]["kind"] == "manager"
+    assert summary["service"]["reason"] == "role"
+
+
+def test_monitor_collation_summary_classifies_internal_services() -> None:
+    summary = _collation_record(
+        role="task_monitor",
+        metadata={
+            INTERNAL_RUNTIME_TASK_CLASS_KEY: INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR,
+        },
+    ).to_summary()
+
+    assert summary["collation_kind"] == "internal_service"
+    assert summary["service"]["runtime_class"] == (
+        INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR
+    )
+    assert summary["service"]["role"] == "task_monitor"
+
+
+def test_monitor_collation_summary_classifies_managed_services() -> None:
+    summary = _collation_record(
+        metadata={
+            INTERNAL_SERVICE_KEY_METADATA_KEY: "sec.wazuh-alert-capture",
+            INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY: "ensure",
+            INTERNAL_SERVICE_AUTHORITY_METADATA_KEY: INTERNAL_SERVICE_AUTHORITY_MANAGER,
+            INTERNAL_AUTOSTART_SOURCE_METADATA_KEY: "wazuh-alert-capture",
+            INTERNAL_AUTOSTART_ENABLED_METADATA_KEY: True,
+        },
+    ).to_summary()
+
+    assert summary["collation_kind"] == "managed_service"
+    assert summary["service"]["kind"] == "managed_service"
+    assert summary["service"]["service_key"] == "sec.wazuh-alert-capture"
+    assert summary["service"]["autostart"] is True
+
+
+def test_monitor_collation_summary_classifies_builtin_service_keys() -> None:
+    summary = _collation_record(
+        metadata={
+            INTERNAL_SERVICE_KEY_METADATA_KEY: INTERNAL_SERVICE_KEY_HEARTBEAT,
+        },
+    ).to_summary()
+
+    assert summary["collation_kind"] == "internal_service"
+    assert summary["service"]["service_key"] == INTERNAL_SERVICE_KEY_HEARTBEAT
 
 
 def test_monitor_store_schema_creation_is_idempotent(tmp_path) -> None:

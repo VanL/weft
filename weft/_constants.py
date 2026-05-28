@@ -19,6 +19,12 @@ Usage:
     _config = load_config()
     use_logging = _config["WEFT_LOGGING_ENABLED"]
 
+Spec references:
+    - docs/specifications/00-Quick_Reference.md
+    - docs/specifications/02-TaskSpec.md [TS-1]
+    - docs/specifications/04-SimpleBroker_Integration.md [SB-0.4]
+    - docs/specifications/10-CLI_Interface.md [CLI-5]
+
 """
 
 from __future__ import annotations
@@ -1011,6 +1017,21 @@ INTERNAL_SERVICE_KEY_HEARTBEAT: Final[str] = "_weft.service.heartbeat"
 
 INTERNAL_SERVICE_KEY_TASK_MONITOR: Final[str] = "_weft.service.task_monitor"
 """Manager-supervised singleton key for the built-in task monitor service."""
+
+INTERNAL_SERVICE_ROLES: Final[frozenset[str]] = frozenset(
+    ("heartbeat_service", "task_monitor")
+)
+"""Task roles classified as internal service lifecycle rows."""
+
+INTERNAL_SERVICE_KEYS: Final[frozenset[str]] = frozenset(
+    (INTERNAL_SERVICE_KEY_HEARTBEAT, INTERNAL_SERVICE_KEY_TASK_MONITOR)
+)
+"""Manager-supervised singleton service keys for built-in internal services."""
+
+INTERNAL_SERVICE_RUNTIME_CLASSES: Final[frozenset[str]] = frozenset(
+    (INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT, INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR)
+)
+"""Runtime task classes classified as internal service lifecycle rows."""
 
 HEARTBEAT_MIN_INTERVAL_SECONDS: Final[int] = 60
 """Minimum interval accepted by the first-slice heartbeat service."""

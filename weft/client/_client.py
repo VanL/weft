@@ -1,4 +1,10 @@
-"""Public Weft client surface built on shared ops."""
+"""Public Weft client surface built on shared command capabilities.
+
+Spec references:
+- docs/specifications/09-Implementation_Plan.md [IP-1]
+- docs/specifications/04-SimpleBroker_Integration.md [SB-0.4]
+- docs/specifications/05-Message_Flow_and_State.md [MF-1], [MF-5]
+"""
 
 from __future__ import annotations
 

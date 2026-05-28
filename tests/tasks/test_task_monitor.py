@@ -15,6 +15,11 @@ import weft.core.tasks.base as base_task_mod
 import weft.core.tasks.service as service_task_mod
 from weft._constants import (
     CONTROL_PING,
+    INTERNAL_RUNTIME_TASK_CLASS_KEY,
+    INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR,
+    INTERNAL_SERVICE_KEY_METADATA_KEY,
+    INTERNAL_SERVICE_KEY_TASK_MONITOR,
+    INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY,
     PONG_EXTENSION_KEY,
     SERVICE_OWNER_SCHEMA,
     SERVICE_STATUS_ACTIVE,
@@ -34,7 +39,12 @@ from weft.core.monitor.runtime import (
     TaskMonitorProcessorRequest,
     TaskMonitorProcessorResult,
 )
-from weft.core.monitor.store import MonitorStore, MonitorStoreIngestResult
+from weft.core.monitor.store import (
+    MonitorStore,
+    MonitorStoreIngestResult,
+    MonitorSummaryReadyTask,
+    MonitorTaskCollationRecord,
+)
 from weft.core.monitor.task_monitor import (
     TaskMonitor,
     make_task_monitor_taskspec,
@@ -1638,6 +1648,77 @@ def test_task_monitor_collated_external_log_precedes_table_delete(
     assert external["record_type"] == "task_log_collated"
     assert external["task"]["tid"] == payload["tid"]
     assert task._external_task_log_status.healthy is True
+
+
+def test_task_monitor_emits_service_summary_for_service_collation(
+    broker_env,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    db_path, _make_queue = broker_env
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_LOG_SINK": "stdout",
+        }
+    )
+    service_tid = "1778084345905438731"
+    record = MonitorTaskCollationRecord(
+        context_key="test",
+        tid=service_tid,
+        name="task-monitor",
+        runner="host",
+        parent_tid="1778084345905438700",
+        role="task_monitor",
+        status="cancelled",
+        terminal_seen=True,
+        terminal_event="work_cancelled",
+        terminal_status="cancelled",
+        terminal_message_id=int(service_tid) + 2,
+        return_code=None,
+        first_message_id=int(service_tid) + 1,
+        last_message_id=int(service_tid) + 2,
+        first_seen_at_ns=int(service_tid) + 1,
+        last_seen_at_ns=int(service_tid) + 2,
+        started_at_ns=int(service_tid) + 1,
+        completed_at_ns=int(service_tid) + 2,
+        taskspec_summary={
+            "tid": service_tid,
+            "name": "task-monitor",
+            "metadata": {
+                INTERNAL_RUNTIME_TASK_CLASS_KEY: (
+                    INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR
+                ),
+                INTERNAL_SERVICE_KEY_METADATA_KEY: INTERNAL_SERVICE_KEY_TASK_MONITOR,
+                INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY: "ensure",
+                "role": "task_monitor",
+            },
+        },
+        state={"status": "cancelled"},
+    )
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999971"),
+        observer=lambda _queue, _message, _timestamp: None,
+        config=config,
+    )
+    try:
+        task._emit_monitor_store_summary(
+            MonitorSummaryReadyTask(record=record, close_reason="terminal"),
+            emitted_at_ns=1778084345905439999,
+        )
+    finally:
+        task.stop()
+
+    [line] = capsys.readouterr().out.splitlines()
+    payload = json.loads(line)
+    assert payload["record_type"] == "service_summary"
+    assert payload["service"]["kind"] == "internal_service"
+    assert payload["service"]["runtime_class"] == (
+        INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR
+    )
+    assert payload["task"]["collation_kind"] == "internal_service"
+    assert payload["task"]["tid"] == service_tid
 
 
 def test_task_monitor_terminal_disposition_deletes_task_runtime_queues(

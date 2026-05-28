@@ -2,7 +2,7 @@
 
 Spec references:
 - docs/specifications/07-System_Invariants.md
-- docs/specifications/13C-Using_Weft_With_Django.md [DJ-2.1], [DJ-2.2]
+- docs/specifications/09-Implementation_Plan.md [IP-1], [IP-1.1]
 """
 
 from __future__ import annotations

@@ -53,7 +53,8 @@ class TaskTerminalSnapshot:
     This is a non-consuming reconciliation surface. Callers that want cleanup
     must pass ``ack_targets`` to the explicit acknowledgement helper.
 
-    Spec: docs/specifications/13C-Using_Weft_With_Django.md [DJ-2.2]
+    Spec: docs/specifications/09-Implementation_Plan.md [IP-1.1];
+    docs/specifications/05-Message_Flow_and_State.md [MF-5]
     """
 
     tid: str

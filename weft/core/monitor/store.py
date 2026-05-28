@@ -18,9 +18,19 @@ import time
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Protocol, cast
+from typing import Any, Literal, Protocol, cast
 
 from weft._constants import (
+    INTERNAL_AUTOSTART_ENABLED_METADATA_KEY,
+    INTERNAL_AUTOSTART_SOURCE_METADATA_KEY,
+    INTERNAL_RUNTIME_TASK_CLASS_KEY,
+    INTERNAL_SERVICE_AUTHORITY_MANAGER,
+    INTERNAL_SERVICE_AUTHORITY_METADATA_KEY,
+    INTERNAL_SERVICE_KEY_METADATA_KEY,
+    INTERNAL_SERVICE_KEYS,
+    INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY,
+    INTERNAL_SERVICE_ROLES,
+    INTERNAL_SERVICE_RUNTIME_CLASSES,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MONITOR_CHECKPOINT_META_PREFIX,
     WEFT_MONITOR_META_TABLE,
@@ -34,6 +44,13 @@ from weft._constants import (
 from weft.context import WeftContext, service_context_key
 from weft.core.monitor import sql as monitor_sql
 from weft.core.monitor.collation import MonitorTaskEventUpdate
+
+ServiceCollationKind = Literal[
+    "user_task",
+    "manager",
+    "internal_service",
+    "managed_service",
+]
 
 
 class MonitorStoreError(RuntimeError):
@@ -130,6 +147,42 @@ class MonitorStoreIngestResult:
 
 
 @dataclass(frozen=True, slots=True)
+class MonitorTaskCollationClassification:
+    """Weft-owned service classification for a Monitor collation row."""
+
+    kind: ServiceCollationKind
+    reason: str
+    service_key: str | None = None
+    service_lifecycle: str | None = None
+    service_authority: str | None = None
+    autostart_source: str | None = None
+    autostart: bool = False
+    runtime_class: str | None = None
+    role: str | None = None
+
+    @property
+    def is_service_record(self) -> bool:
+        """Return whether this row is operational service/manager lifecycle."""
+
+        return self.kind != "user_task"
+
+    def to_summary(self) -> dict[str, Any]:
+        """Return a compact JSON-safe classification summary."""
+
+        return {
+            "kind": self.kind,
+            "reason": self.reason,
+            "service_key": self.service_key,
+            "service_lifecycle": self.service_lifecycle,
+            "service_authority": self.service_authority,
+            "autostart_source": self.autostart_source,
+            "autostart": self.autostart,
+            "runtime_class": self.runtime_class,
+            "role": self.role,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class MonitorTaskCollationRecord:
     """One durable task collation record."""
 
@@ -169,10 +222,16 @@ class MonitorTaskCollationRecord:
     orphan_raw_recovery_checked_at_ns: int | None = None
     updated_at_ns: int = 0
 
+    def service_classification(self) -> MonitorTaskCollationClassification:
+        """Classify this row using only Weft-owned service metadata."""
+
+        return classify_monitor_task_collation(self)
+
     def to_summary(self) -> dict[str, Any]:
         """Return a compact JSON-safe operational summary."""
 
-        return {
+        classification = self.service_classification()
+        summary: dict[str, Any] = {
             "tid": self.tid,
             "name": self.name,
             "runner": self.runner,
@@ -206,7 +265,108 @@ class MonitorTaskCollationRecord:
             "orphan_raw_recovery_checked_at_ns": (
                 self.orphan_raw_recovery_checked_at_ns
             ),
+            "collation_kind": classification.kind,
         }
+        if classification.is_service_record:
+            summary["service"] = classification.to_summary()
+        return summary
+
+
+def classify_monitor_task_collation(
+    record: MonitorTaskCollationRecord,
+) -> MonitorTaskCollationClassification:
+    """Classify a Monitor collation row as user work, manager, or service.
+
+    This is intentionally conservative. It relies only on Weft-owned role,
+    service metadata, autostart metadata, and internal runtime class markers.
+    Domain-specific metadata such as ``runtime=internal`` is not enough to
+    remove a failed row from the generic task bucket.
+    """
+
+    metadata = _task_metadata(record.taskspec_summary)
+    role = _metadata_string(metadata, "role") or record.role
+    service_key = _metadata_string(metadata, INTERNAL_SERVICE_KEY_METADATA_KEY)
+    service_lifecycle = _metadata_string(
+        metadata,
+        INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY,
+    )
+    service_authority = _metadata_string(
+        metadata,
+        INTERNAL_SERVICE_AUTHORITY_METADATA_KEY,
+    )
+    autostart_source = _metadata_string(
+        metadata,
+        INTERNAL_AUTOSTART_SOURCE_METADATA_KEY,
+    )
+    autostart = metadata.get(INTERNAL_AUTOSTART_ENABLED_METADATA_KEY) is True
+    runtime_class = _metadata_string(metadata, INTERNAL_RUNTIME_TASK_CLASS_KEY)
+
+    if role == "manager":
+        return MonitorTaskCollationClassification(
+            kind="manager",
+            reason="role",
+            service_key=service_key,
+            service_lifecycle=service_lifecycle,
+            service_authority=service_authority,
+            autostart_source=autostart_source,
+            autostart=autostart,
+            runtime_class=runtime_class,
+            role=role,
+        )
+    if (
+        role in INTERNAL_SERVICE_ROLES
+        or service_key in INTERNAL_SERVICE_KEYS
+        or runtime_class in INTERNAL_SERVICE_RUNTIME_CLASSES
+    ):
+        return MonitorTaskCollationClassification(
+            kind="internal_service",
+            reason="internal_service_marker",
+            service_key=service_key,
+            service_lifecycle=service_lifecycle,
+            service_authority=service_authority,
+            autostart_source=autostart_source,
+            autostart=autostart,
+            runtime_class=runtime_class,
+            role=role,
+        )
+    if (
+        service_key is not None
+        or service_lifecycle is not None
+        or service_authority == INTERNAL_SERVICE_AUTHORITY_MANAGER
+        or autostart_source is not None
+        or autostart
+    ):
+        return MonitorTaskCollationClassification(
+            kind="managed_service",
+            reason="managed_service_metadata",
+            service_key=service_key,
+            service_lifecycle=service_lifecycle,
+            service_authority=service_authority,
+            autostart_source=autostart_source,
+            autostart=autostart,
+            runtime_class=runtime_class,
+            role=role,
+        )
+    return MonitorTaskCollationClassification(
+        kind="user_task",
+        reason="no_service_marker",
+        role=role,
+        runtime_class=runtime_class,
+    )
+
+
+def _task_metadata(taskspec_summary: Mapping[str, Any]) -> Mapping[str, Any]:
+    metadata = taskspec_summary.get("metadata")
+    if isinstance(metadata, Mapping):
+        return metadata
+    return {}
+
+
+def _metadata_string(metadata: Mapping[str, Any], key: str) -> str | None:
+    value = metadata.get(key)
+    if isinstance(value, str) and value:
+        return value
+    return None
 
 
 @dataclass(frozen=True, slots=True)

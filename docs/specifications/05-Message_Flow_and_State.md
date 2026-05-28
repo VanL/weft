@@ -25,11 +25,11 @@ See also:
   [`07-System_Invariants.md`](07-System_Invariants.md)
 - implementation plan:
   [`docs/plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md`](../plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md)
-- active service-health convergence plan:
+- related service-health convergence plan:
   [`docs/plans/2026-05-09-service-liveness-and-health-convergence-plan.md`](../plans/2026-05-09-service-liveness-and-health-convergence-plan.md)
-- active manager-service authority hardening plan:
+- related manager-service authority hardening plan:
   [`docs/plans/2026-05-10-manager-service-authority-boundary-hardening-plan.md`](../plans/2026-05-10-manager-service-authority-boundary-hardening-plan.md)
-- active reactive task-loop hot-probe plan:
+- related reactive task-loop hot-probe plan:
   [`docs/plans/2026-05-18-reactive-task-loop-hot-probe-plan.md`](../plans/2026-05-18-reactive-task-loop-hot-probe-plan.md)
 
 ## Message Flow Patterns [MF-0]
@@ -446,15 +446,24 @@ Current rules:
   executor job counts by kind from the last completed cleanup result. PONG must
   not query the store or scan queues
   while answering `PING`.
-- terminal Monitor collation rows may emit compact operational task summaries
-  through the configured task-monitor sink. In collated mode, durable Monitor
-  ingestion gates raw `weft.log.tasks` deletion; external summary emission
-  gates only family summary/disposition retry, not resurrection of already
-  ingested raw rows. Raw external mode remains emit-before-delete and does not
-  write Monitor collation rows. Successful completed lifecycles do not require
-  reserved-queue probes. After any required summary is emitted, terminal
-  disposition may delete whole standard task-local runtime queues through
-  public SimpleBroker queue APIs from the dedicated TaskMonitor
+- terminal Monitor collation rows may emit compact operational summaries
+  through the configured task-monitor sink. Ordinary user-task rows emit
+  `record_type=task_summary`. Manager, built-in service, and manager-authored
+  managed-service rows emit `record_type=service_summary`, keep the compact
+  task row under `task`, and include a service classification under `service`.
+  The classification is conservative: it may use `role=manager`, built-in
+  service roles, reserved service metadata, autostart metadata, and internal
+  runtime class metadata, but it must not classify domain-specific metadata
+  such as `runtime=internal` as service evidence by itself. External collated
+  JSONL keeps `record_type=task_log_collated` for compatibility and surfaces
+  `collation_kind` plus `service` when present. In collated mode, durable
+  Monitor ingestion gates raw `weft.log.tasks` deletion; external summary
+  emission gates only family summary/disposition retry, not resurrection of
+  already ingested raw rows. Raw external mode remains emit-before-delete and
+  does not write Monitor collation rows. Successful completed lifecycles do not
+  require reserved-queue probes. After any required summary is emitted,
+  terminal disposition may delete whole standard task-local runtime queues
+  through public SimpleBroker queue APIs from the dedicated TaskMonitor
   runtime-cleanup worker. For a proven-dead TID, `T{tid}.ctrl_in`,
   `T{tid}.ctrl_out`, and `T{tid}.inbox` are stale immediately. `T{tid}.outbox`
   and `T{tid}.reserved` remain retention-gated and are selected by the same
@@ -1039,6 +1048,7 @@ management live in the companion doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-05-27-service-collation-reporting-plan.md`](../plans/2026-05-27-service-collation-reporting-plan.md)
 - [`docs/plans/2026-05-26-monitor-five-cleanup-policy-consolidation-plan.md`](../plans/2026-05-26-monitor-five-cleanup-policy-consolidation-plan.md)
 - [`docs/plans/2026-05-26-service-task-worker-api-plan.md`](../plans/2026-05-26-service-task-worker-api-plan.md)
 - [`docs/plans/2026-05-25-monitor-dead-task-catchup-convergence-plan.md`](../plans/2026-05-25-monitor-dead-task-catchup-convergence-plan.md)

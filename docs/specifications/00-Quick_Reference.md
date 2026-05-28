@@ -180,7 +180,8 @@ Format rules and sanitization live in `01-Core_Components.md`.
   `weft.state.streaming`.
 - Task state peak metrics renamed: `max_*` → `peak_*`.
 - `spec.process_target` is now a **string** (executable path). `args` are
-  appended to form argv. Implementation must be updated to match.
+  appended to form argv. Current implementation follows this shape through
+  `SpecSection` validation and `build_argv()`.
 
 _Implementation mapping_: `weft/core/taskspec/model.py` (process_target, peak_* fields), `weft/core/targets.py` (argv construction).
 

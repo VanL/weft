@@ -28,7 +28,7 @@ See also:
   [`11-CLI_Architecture_Crosswalk.md`](11-CLI_Architecture_Crosswalk.md)
 - implementation plan:
   [`docs/plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md`](../plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md)
-- active service-health convergence plan:
+- related service-health convergence plan:
   [`docs/plans/2026-05-09-service-liveness-and-health-convergence-plan.md`](../plans/2026-05-09-service-liveness-and-health-convergence-plan.md)
 
 ## Design Principles [CLI-0.1]

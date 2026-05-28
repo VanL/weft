@@ -1,9 +1,9 @@
 """Shared task event iteration helpers for CLI and Python clients.
 
 Spec references:
+- docs/specifications/09-Implementation_Plan.md [IP-1.1]
 - docs/specifications/05-Message_Flow_and_State.md [MF-5], [MF-6]
-- docs/specifications/13C-Using_Weft_With_Django.md [DJ-2.1], [DJ-2.2],
-  [DJ-12.1], [DJ-12.3]
+- docs/specifications/10-CLI_Interface.md [CLI-1.2]
 """
 
 from __future__ import annotations
