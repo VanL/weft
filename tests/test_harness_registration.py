@@ -789,6 +789,7 @@ def test_harness_cleanup_preserve_database_detaches_tempdir_finalizer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     harness = WeftTestHarness()
+    original_tempdir = harness._tempdir
     repo_cwd = os.getcwd()
     calls: list[str] = []
 
@@ -815,6 +816,7 @@ def test_harness_cleanup_preserve_database_detaches_tempdir_finalizer(
     finally:
         os.chdir(repo_cwd)
         harness._closed = True
+        original_tempdir.cleanup()
 
 
 @pytest.mark.sqlite_only

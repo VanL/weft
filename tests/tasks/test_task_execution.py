@@ -410,7 +410,7 @@ def test_deferred_stop_finalizes_before_timeout_outcome(
         ) -> RunnerOutcome:
             del work_item
             worker_started.set()
-            release_worker.wait(timeout=2.0)
+            release_worker.wait()
             return RunnerOutcome(
                 status="timeout",
                 value=None,
@@ -484,7 +484,7 @@ def test_deferred_kill_finalizes_before_limit_outcome(
         ) -> RunnerOutcome:
             del work_item
             worker_started.set()
-            release_worker.wait(timeout=2.0)
+            release_worker.wait()
             return RunnerOutcome(
                 status="limit",
                 value=None,
