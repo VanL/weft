@@ -94,7 +94,7 @@ Trace the end-to-end flow and ask what assumes the current shape or timing.
 Common Weft hidden couplings:
 
 - CLI startup to manager registry state
-- manager lifecycle to `weft.state.managers` and PID liveness
+- manager lifecycle to `weft.state.services` and PID liveness
 - task completion to outbox visibility and completion-event timing
 - append-only queue histories to generator-based readers
 - template TaskSpecs to resolved TaskSpecs and downstream consumers

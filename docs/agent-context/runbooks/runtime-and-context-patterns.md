@@ -70,7 +70,7 @@ Many important Weft queues are append-only histories:
 
 - `weft.log.tasks`
 - `weft.state.tid_mappings`
-- `weft.state.managers`
+- `weft.state.services`
 - task outboxes in some CLI/result flows
 
 Rules:
@@ -112,9 +112,11 @@ Why:
 
 These queues are runtime aids, not durable application state:
 
-- `weft.state.managers`
+- `weft.state.services`
 - `weft.state.tid_mappings`
 - `weft.state.streaming`
+- `weft.state.endpoints`
+- `weft.state.pipelines`
 
 Rules:
 
