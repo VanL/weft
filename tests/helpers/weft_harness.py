@@ -59,6 +59,12 @@ TERMINAL_TASK_EVENTS = {
 TEMP_DIR_CLEANUP_RETRY_SLEEP_SECONDS: Final[float] = 0.05
 TEMP_DIR_CLEANUP_MAX_ATTEMPTS: Final[int] = 5
 WINDOWS_TEMP_DIR_CLEANUP_TIMEOUT_SECONDS: Final[float] = 30.0
+CONTEXT_SETUP_RETRY_MAX_ATTEMPTS: Final[int] = 3
+CONTEXT_SETUP_RETRY_SLEEP_SECONDS: Final[float] = 1.0
+SQLITE_SETUP_DEADLINE_MARKERS: Final[tuple[str, ...]] = (
+    "setup deadline expired",
+    "could not make progress within 10.0s",
+)
 
 
 def _is_windows() -> bool:
@@ -100,7 +106,7 @@ class WeftTestHarness:
         prepare_project_root(self.root)
         os.chdir(self.root)
         # Ensure context and database are initialized early.
-        _ = self.context
+        self._initialize_context_with_retry()
         return self
 
     def __exit__(
@@ -637,6 +643,30 @@ class WeftTestHarness:
             if key not in self._original_env:
                 self._original_env[key] = os.environ.get(key)
             os.environ[key] = value
+
+    def _initialize_context_with_retry(self) -> None:
+        """Initialize the harness context, retrying transient SQLite setup stalls."""
+
+        for attempt in range(CONTEXT_SETUP_RETRY_MAX_ATTEMPTS):
+            try:
+                _ = self.context
+                return
+            except RuntimeError as exc:
+                if (
+                    attempt >= CONTEXT_SETUP_RETRY_MAX_ATTEMPTS - 1
+                    or not self._is_transient_sqlite_setup_error(exc)
+                ):
+                    raise
+                self._context = None
+                gc.collect()
+                time.sleep(CONTEXT_SETUP_RETRY_SLEEP_SECONDS * (attempt + 1))
+
+    @staticmethod
+    def _is_transient_sqlite_setup_error(exc: RuntimeError) -> bool:
+        if os.environ.get("BROKER_TEST_BACKEND", "sqlite") != "sqlite":
+            return False
+        message = str(exc).lower()
+        return any(marker in message for marker in SQLITE_SETUP_DEADLINE_MARKERS)
 
     def _restore_environment(self) -> None:
         for key, original in self._original_env.items():

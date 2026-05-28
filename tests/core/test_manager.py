@@ -604,6 +604,12 @@ def wait_for_log_event(
     )
 
 
+def preserve_consumed_log_event(log_queue: Any, event: dict[str, object]) -> None:
+    """Reinsert a consumed task-log event needed as manager cleanup proof."""
+
+    log_queue.write(json.dumps(event))
+
+
 def drive_manager_until(
     manager: Manager,
     predicate: Callable[[], bool],
@@ -6824,9 +6830,7 @@ def test_manager_autostart_ensure_restarts(
             ),
             timeout=30.0 if os.name == "nt" else 20.0,
         )
-        # This helper consumes log rows. Reinsert the terminal row so manager
-        # cleanup can observe the same lifecycle proof real queue readers retain.
-        log_queue.write(json.dumps(completed_event))
+        preserve_consumed_log_event(log_queue, completed_event)
         wait_for_children(manager, timeout=20.0 if os.name == "nt" else 10.0)
         assert not manager._user_work_children()
         second_spawn = wait_for_log_event(
@@ -7381,7 +7385,7 @@ def test_manager_autostart_ensure_allows_one_restart_after_initial_launch(
         )
         first_child_tid = first_spawn.get("child_tid")
         assert isinstance(first_child_tid, str)
-        wait_for_log_event(
+        completed_event = wait_for_log_event(
             manager,
             log_queue,
             lambda event: (
@@ -7390,6 +7394,7 @@ def test_manager_autostart_ensure_allows_one_restart_after_initial_launch(
             ),
             timeout=30.0 if os.name == "nt" else 20.0,
         )
+        preserve_consumed_log_event(log_queue, completed_event)
         wait_for_children(manager, timeout=20.0 if os.name == "nt" else 10.0)
 
         second_spawn = wait_for_log_event(
@@ -7459,7 +7464,10 @@ def test_manager_autostart_ensure_applies_backoff_to_restart_only(
         )
         first_child_tid = first_spawn.get("child_tid")
         assert isinstance(first_child_tid, str)
-        wait_for_log_event(
+        initial_restart_due_ns = manager._autostart_state[source]["next_allowed_ns"]
+        assert isinstance(initial_restart_due_ns, int)
+        assert initial_restart_due_ns > 0
+        completed_event = wait_for_log_event(
             manager,
             log_queue,
             lambda event: (
@@ -7468,6 +7476,7 @@ def test_manager_autostart_ensure_applies_backoff_to_restart_only(
             ),
             timeout=30.0 if os.name == "nt" else 20.0,
         )
+        preserve_consumed_log_event(log_queue, completed_event)
         wait_for_children(manager, timeout=20.0 if os.name == "nt" else 10.0)
         assert not manager._user_work_children()
 
@@ -7485,6 +7494,9 @@ def test_manager_autostart_ensure_applies_backoff_to_restart_only(
                     restart_events.append(event)
 
         assert len(restart_events) == 1
+        restart_timestamp = restart_events[0].get("timestamp")
+        assert isinstance(restart_timestamp, int)
+        assert restart_timestamp >= initial_restart_due_ns
     finally:
         manager.cleanup()
 
