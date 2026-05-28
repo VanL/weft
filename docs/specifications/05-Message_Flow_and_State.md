@@ -32,6 +32,33 @@ See also:
 - related reactive task-loop hot-probe plan:
   [`docs/plans/2026-05-18-reactive-task-loop-hot-probe-plan.md`](../plans/2026-05-18-reactive-task-loop-hot-probe-plan.md)
 
+## Table of Contents
+
+- [Message Flow Patterns [MF-0]](#message-flow-patterns-mf-0)
+  - [1. Task Submission Flow [MF-1]](#1-task-submission-flow-mf-1)
+  - [2. Message Processing Flow with Reservation [MF-2]](#2-message-processing-flow-with-reservation-mf-2)
+  - [3. Control Flow [MF-3]](#3-control-flow-mf-3)
+  - [3.1 Named Endpoint Discovery [MF-3.1]](#31-named-endpoint-discovery-mf-31)
+  - [3.2 Heartbeat Service Flow [MF-3.2]](#32-heartbeat-service-flow-mf-32)
+  - [4. Pipeline Flow [MF-4]](#4-pipeline-flow-mf-4)
+  - [5. State Observation Flow [MF-5]](#5-state-observation-flow-mf-5)
+  - [6. Manager Spawn Flow [MF-6]](#6-manager-spawn-flow-mf-6)
+  - [7. Manager Bootstrap Flow [MF-7]](#7-manager-bootstrap-flow-mf-7)
+  - [8. Failure Recovery Flow](#8-failure-recovery-flow)
+- [State Machine](#state-machine)
+- [TaskSpec Redaction](#taskspec-redaction)
+- [Large Output Handling](#large-output-handling)
+  - [Strategy for Outputs Exceeding the Broker Message Limit](#strategy-for-outputs-exceeding-the-broker-message-limit)
+  - [Current Consumer and CLI Behavior](#current-consumer-and-cli-behavior)
+  - [Large-Output Reference Format [MF-2.1]](#large-output-reference-format-mf-21)
+  - [Cleanup Boundary](#cleanup-boundary)
+- [Queue Management Patterns](#queue-management-patterns)
+  - [Unified Reservation Pattern](#unified-reservation-pattern)
+  - [Current Queue Lifecycle Management](#current-queue-lifecycle-management)
+- [Scope Boundary](#scope-boundary)
+- [Related Documents](#related-documents)
+- [Related Plans](#related-plans)
+
 ## Message Flow Patterns [MF-0]
 
 ### 1. Task Submission Flow [MF-1]
@@ -310,6 +337,15 @@ Current rules:
 - `weft.log.tasks` is runtime lifecycle evidence. Status, result, and debugging
   surfaces may use it while retained, but it is not legal, forensic, or audit
   evidence. Its retention requirements are operational.
+- Owner, boundary, and verification: BaseTask and task implementations emit
+  task-owned lifecycle evidence; status/result/task command helpers reconstruct
+  public observations from that evidence; the TaskMonitor owns operational
+  collation, cleanup selection, and cleanup diagnostics only. This split exists
+  because process cleanup has to survive crashes, partial writes, and older
+  releases without letting cleanup machinery become a second lifecycle
+  authority. Verification must assert both sides: public status/result
+  reconstruction remains correct from retained task evidence, and monitor
+  cleanup/collation can delete only exact rows selected by an explicit policy.
 - opt-in `weft manager serve` operational JSONL records are process-log
   diagnostics only. They must not be written to `weft.log.tasks`, per-task
   queues, control queues, or runtime-state queues, and they must not be used as
@@ -404,8 +440,9 @@ Current rules:
   not the first terminal event timestamp. Family disposition is explicit
   retryable compact state (`disposition_reason` plus `disposition_at_ns`),
   separate from `summary_emitted_at_ns`, so summary emission can be retried
-  separately from task-local runtime cleanup. Terminal task-local runtime cleanup runs as
-  a separate bounded maintenance slice selected by Monitor-store readiness
+  separately from task-local runtime cleanup. Terminal task-local runtime
+  cleanup runs as a separate bounded maintenance slice selected by
+  Monitor-store readiness
   (`summary_emitted_at_ns`, no prior `task_control_deleted_at_ns`, and either
   terminal proof or an already disposed Monitor family). Terminal task-local
   runtime cleanup runs on a dedicated
@@ -415,8 +452,20 @@ Current rules:
   `T{tid}.ctrl_in`, `T{tid}.ctrl_out`, and `T{tid}.inbox` are stale at
   terminal cleanup time. Standard `T{tid}.outbox` is retention-gated, and
   standard `T{tid}.reserved` is handled by the reserved cleanup policy. For
-  terminal non-completed families, the reserved policy is Monitor-table driven:
-  it selects rows with `reserved_probe_needed`, records
+  old nonterminal manager or manager-supervised service owner rows, the
+  Monitor may record a `stale_service_owner` or `superseded_service_owner`
+  disposition without rewriting task lifecycle truth only after same-service
+  registry evidence proves the row stale: either the same owner has a latest
+  non-live owner row, or a different live owner exists for the same service
+  key, and no active runtime evidence protects the old TID. Ambiguous rows,
+  missing service-key proof, active owner rows, and rows with live runtime
+  handles stay open for the normal stale-open path. Disposed stale
+  service-owner rows are eligible only for standard task-local
+  `T{tid}.ctrl_in` and `T{tid}.ctrl_out` cleanup through
+  `task_local.terminal_runtime`; their inbox, outbox, reserved queue, global
+  manager queues, spawn queues, and custom queues remain out of this authority.
+  For terminal non-completed families, the reserved policy is Monitor-table
+  driven: it selects rows with `reserved_probe_needed`, records
   `reserved_cleanup_checked_at_ns` after successfully deleting the reserved
   queue or proving it is already absent, and leaves the row retryable on
   delete/probe errors.
@@ -468,7 +517,10 @@ Current rules:
   `T{tid}.ctrl_out`, and `T{tid}.inbox` are stale immediately. `T{tid}.outbox`
   and `T{tid}.reserved` remain retention-gated and are selected by the same
   dead-TID policy only when the TID is older than the task-log retention
-  period. Manager, global, service, and custom control queues are excluded.
+  period. Dead-TID cleanup excludes manager, global, service, and custom
+  control queues; the only manager/service exception is the disposed
+  stale-service-owner path above, and that exception is limited to the standard
+  task-local control pair.
 - `weft system prune` is a separate foreground maintenance command.
   `--family runtime-state` reports or deletes exact message IDs from supported
   `weft.state.*` queues after conservative live/recent checks.
@@ -892,7 +944,10 @@ system pruning:
   candidates by listing standard task-local queue names, parsing `T{tid}.*`
   identities, and subtracting live runtime TIDs. That dead-task cleanup policy
   is owned by
-  `weft/core/monitor/policies/dead_task.py`: it schedules a dead-TID cleanup
+  `weft/core/monitor/policies/dead_task.py` (TID discovery and per-TID cleanup
+  plans) and `weft/core/monitor/policies/runtime_control.py` (candidate
+  selection, deferred-only detection, and Monitor-record probe gating): it
+  schedules a dead-TID cleanup
   job only when at least one currently existing standard task-local queue is
   eligible now. It selects standard stale `T{tid}.ctrl_in`,
   `T{tid}.ctrl_out`, and `T{tid}.inbox` immediately, and selects standard
@@ -1048,6 +1103,7 @@ management live in the companion doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-05-28-stale-service-owner-runtime-cleanup-plan.md`](../plans/2026-05-28-stale-service-owner-runtime-cleanup-plan.md)
 - [`docs/plans/2026-05-27-service-collation-reporting-plan.md`](../plans/2026-05-27-service-collation-reporting-plan.md)
 - [`docs/plans/2026-05-26-monitor-five-cleanup-policy-consolidation-plan.md`](../plans/2026-05-26-monitor-five-cleanup-policy-consolidation-plan.md)
 - [`docs/plans/2026-05-26-service-task-worker-api-plan.md`](../plans/2026-05-26-service-task-worker-api-plan.md)

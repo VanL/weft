@@ -155,6 +155,8 @@ class MultiQueueWatcher(BaseWatcher):
             db,
             resolve_context_broker_target(Path.cwd(), config=self._config),
         )
+        # Direct Queue ok here: MultiQueueWatcher is creating its owned primary
+        # handle; see runtime-and-context-patterns.md section 2.
         initial_queue = Queue(
             first_queue_name,
             db_path=shared_target,
@@ -190,16 +192,17 @@ class MultiQueueWatcher(BaseWatcher):
                 else QueueMode(str(mode_value))
             )
 
-            queue_obj = (
-                initial_queue
-                if queue_name == first_queue_name
-                else Queue(
+            if queue_name == first_queue_name:
+                queue_obj = initial_queue
+            else:
+                # Direct Queue ok here: MultiQueueWatcher owns watched queue
+                # handles by design; see runtime-and-context-patterns.md section 2.
+                queue_obj = Queue(
                     queue_name,
                     db_path=self._db_path,
                     persistent=persistent,
                     config=self._config,
                 )
-            )
 
             _detach_queue_stop_event(queue_obj)
 
@@ -305,6 +308,8 @@ class MultiQueueWatcher(BaseWatcher):
         if not isinstance(priority, int):
             raise TypeError(f"priority must be an int, got {type(priority).__name__}")
 
+        # Direct Queue ok here: MultiQueueWatcher owns dynamically watched queue
+        # handles by design; see runtime-and-context-patterns.md section 2.
         queue_obj = Queue(
             queue_name,
             db_path=self._db_path,
@@ -519,7 +524,7 @@ class MultiQueueWatcher(BaseWatcher):
                 break
             except KeyboardInterrupt:
                 raise
-            except Exception as exc:
+            except Exception as exc:  # pragma: no cover - watcher retry boundary
                 retry_count += 1
                 if not self._handle_retry(exc, retry_count, max_retries):
                     break

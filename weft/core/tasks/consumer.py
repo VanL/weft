@@ -232,7 +232,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
                     initial_transition=initial_transition,
                 ),
             )
-        except Exception:
+        except Exception:  # pragma: no cover - restore reactor state before re-raise
             self._active_work_in_flight = False
             self._active_raw_message = None
             self._active_message_timestamp = None
@@ -332,7 +332,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
     ) -> _ConsumerWorkResult:
         try:
             outcome, live_command_streaming = self._run_task_for_reactor(work_item)
-        except Exception as exc:
+        except Exception as exc:  # pragma: no cover - worker exception transport
             return _ConsumerWorkResult(
                 timestamp=timestamp,
                 initial_transition=initial_transition,
@@ -489,7 +489,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
                 initial_transition=work_result.initial_transition,
                 live_command_streaming=work_result.live_command_streaming,
             )
-        except Exception as exc:
+        except Exception as exc:  # pragma: no cover - worker result finalization
             if self._direct_work_waiting:
                 self._direct_work_exception = exc
             elif (

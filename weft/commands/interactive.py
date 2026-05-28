@@ -68,6 +68,8 @@ class InteractiveStreamClient:
         self._stdout_history: list[str] = []
         self._stderr_history: list[str] = []
 
+        # Interactive stdin needs a durable queue handle independent of
+        # WeftContext because this adapter is constructed from CLI queue names.
         self._inbox_queue = Queue(
             inbox,
             db_path=db_path,

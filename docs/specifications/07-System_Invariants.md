@@ -16,6 +16,26 @@ See also:
 - related internal state-machine helper plan:
   [`docs/plans/2026-05-13-internal-state-machine-helper-plan.md`](../plans/2026-05-13-internal-state-machine-helper-plan.md)
 
+## Table of Contents
+
+- [System Invariants](#system-invariants)
+  - [Immutability Invariants](#immutability-invariants)
+  - [State Machine Invariants](#state-machine-invariants)
+  - [Deterministic Reducer Helper Invariants](#deterministic-reducer-helper-invariants)
+  - [Queue Invariants](#queue-invariants)
+  - [Resource Invariants](#resource-invariants)
+  - [Execution Invariants](#execution-invariants)
+  - [Observability Invariants](#observability-invariants)
+  - [Implementation Invariants](#implementation-invariants)
+  - [Manager Invariants](#manager-invariants)
+  - [Context Invariants](#context-invariants)
+- [Validation and Enforcement](#validation-and-enforcement)
+- [Error Classes](#error-classes)
+- [Monitoring and Alerting](#monitoring-and-alerting)
+- [Scope Boundary](#scope-boundary)
+- [Related Plans](#related-plans)
+- [Related Documents](#related-documents)
+
 ## System Invariants
 
 ### Immutability Invariants
@@ -154,91 +174,106 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
   runner fallback, and process termination remain owned by
   `weft/commands/tasks.py`.
 - **OBS.13**: task monitor log files, task monitor checkpoints,
-  runtime-prune reports, and retention-prune reports/archives are operational
-  outputs only. They must not become task lifecycle truth, status authority,
-  or result authority. The manager-supervised `TaskMonitor` is also
-  operational: its lifecycle classifications, cleanup-candidate
-  classifications, processor results, durable Monitor collation tables, and
-  checkpoints do not change public lifecycle reconstruction. The Monitor-owned
-  tables `weft_monitor_meta`, `weft_monitor_task_collations`, and
-  `weft_monitor_task_messages` are derived operational state. The Monitor may
-  create, verify, and additively migrate only those tables inside an already
-  initialized Weft broker database; it must not create or initialize the broker
-  database. If configured with the built-in `delete`
-  processor, it may delete exact cleanup rows selected by explicit supported
-  paths only. For retained `weft.log.tasks`, the supported supervised path is:
-  delete malformed rows, fold valid retained rows into Monitor-owned tables,
-  then delete those exact raw rows. `weft_monitor_task_messages` is a
-  temporary pending-reference table for exact raw-message deletion and retry,
-  not a shadow queue ledger. After exact raw broker deletion succeeds, or after
-  retry observes the raw broker row is already absent, the Monitor physically
-  deletes the corresponding child rows and reconciles the parent family.
-  Retry may apply to already-ingested open families as well as terminal ones;
-  raw broker deletion is gated by successful Monitor collation, not by terminal
-  summary emission.
-  If a parent family is already marked `raw_deleted_at_ns` while child refs
-  remain, the Monitor must repair that inconsistent state by exact-deleting or
-  reconciling those child refs before family retirement.
-  Orphan raw-log recovery records `orphan_raw_recovery_checked_at_ns` when it
-  successfully proves that a raw-deleted family has no remaining broker rows,
-  and leaves the family retryable when the probe or delete fails. New raw
-  task-log evidence clears that marker through normal collation merge. After
-  raw deletion, summary emission, disposition, task-local control cleanup, and
-  any required reserved cleanup proof are all recorded and no child message refs
-  remain, the Monitor may physically retire the
-  `weft_monitor_task_collations` parent row. Reserved cleanup proof is required
-  only for rows with `reserved_probe_needed`; it is recorded as
-  `reserved_cleanup_checked_at_ns` after the standard `T{tid}.reserved` queue
-  is deleted or proven already absent. Probe/delete errors leave the marker
-  unset so the family remains retryable. For
-  runtime-state queues, cleanup remains policy driven. Malformed rows are
-  deletable only from Weft-owned schema queues whose policy says malformed rows
-  are disposable, such as `weft.log.tasks` and
-  `weft.state.tid_mappings`. It must not delete active work, ambiguous
-  task-local evidence, claimed outbox residue, user payload rows, unknown rows
-  outside an explicit cleanup policy, inbox/reserved work without terminal
-  task-log proof for the same TID in the cleanup pass, or non-exact lifecycle
-  evidence. Task-log collation summaries emitted by the
-  monitor are operational evidence about cleanup work performed; they are not
-  durable task lifecycle truth or archival records. In collated mode, durable
-  Monitor table ingestion happens before raw `weft.log.tasks` deletion, and
-  external summary failure blocks family disposition retry rather than
-  resurrecting already ingested raw rows. Family disposition is explicit
-  retryable table state and is separate from summary emission. Normal task
-  cleanup clears standard task-local `T{tid}.ctrl_in` and `T{tid}.ctrl_out`
-  runtime queues before the process exits. Terminal disposition may remove
-  residual whole standard task-local stale queues, including visible and
-  claimed rows, after required summary emission succeeds when those queues were
-  left by forced process death, cleanup failure, or older releases. Standard
-  `T{tid}.ctrl_in`, `T{tid}.ctrl_out`, and `T{tid}.inbox` are stale at
-  terminal cleanup time. Standard `T{tid}.outbox` is retained until task-log
-  retention age, and standard `T{tid}.reserved` remains owned by the reserved
-  cleanup policy. The selection is bounded by Monitor-store readiness and the
-  delete uses public SimpleBroker queue APIs from a dedicated TaskMonitor
-  runtime-cleanup worker; it must not use private queue-table SQL.
-  Built-in task-log cleanup and runtime cleanup are the only TaskMonitor worker
-  lanes allowed to own broker/store cleanup effects. The reactor must continue
-  servicing task-local control while either lane is in flight. Runtime cleanup
-  must run as bounded, discrete worker slices launched by the reactor after
-  the previous worker result is applied. Terminal stale-queue cleanup,
-  eligible reserved cleanup, and eligible dead-TID cleanup must not be mixed
-  inside one worker result, and the runtime-cleanup worker must not start
-  nested cleanup executor threads.
-  Manager/global/custom control queues and custom task-local queues are
-  excluded from this default monitor cleanup; standard task-local inbox queues
-  are stale once the task is terminal or proven dead, and standard task-local
-  outbox queues are retained until task-log retention age.
-  In raw external mode,
-  external emit still happens before deletion of the affected raw row. External sink
-  validation or emit failure must not prevent the TaskMonitor service from
-  starting. TaskMonitor PONG cleanup
-  diagnostics are cached from the last cleanup cycle. They may report both
-  queue-level stats and policy-level stats, including zero-selected policy
-  rows, plus cached Monitor-store availability, checkpoint, collation, summary,
-  external-log health, table-backed deletion counts, and whether terminal
-  control cleanup is currently in flight. PONG must not perform queue scans,
-  open or validate external log files, query the Monitor store, recompute
-  cleanup candidates, or delete/report rows while answering a liveness request.
+  runtime-prune reports, retention-prune reports/archives, processor results,
+  and Monitor-owned collation tables are operational evidence only. They must
+  not become task lifecycle truth, result authority, control authority, or a
+  replacement for task-owned queues and `weft.log.tasks`. The sub-invariants
+  below define the manager-supervised `TaskMonitor` cleanup and collation
+  contract.
+  - **OBS.13.1**: Monitor-owned tables `weft_monitor_meta`,
+    `weft_monitor_task_collations`, and `weft_monitor_task_messages` are
+    derived operational state. The Monitor may create, verify, and additively
+    migrate only those tables inside an already initialized Weft broker
+    database; it must not create or initialize the broker database. The store
+    may support command-layer derived status fallback after raw task-log
+    retirement, but it must not become result authority, control authority, or
+    lifecycle truth.
+  - **OBS.13.2**: Dealing with processes can be messy: children may die between
+    probes, managers may restart, retained logs may outlive queues, and cleanup
+    passes may stop after partial progress. The Monitor exists to make that
+    operational cleanup bounded, retryable, and observable while keeping
+    lifecycle truth in task-owned queues and logs. Tests for this boundary must
+    prove both that Monitor tables and reports are derived evidence only and
+    that cleanup effects are exact, policy-selected, and retryable after
+    partial failure.
+  - **OBS.13.3**: With the built-in `delete` processor, retained
+    `weft.log.tasks` cleanup may delete exact cleanup rows selected by explicit
+    supported paths only: malformed rows are deleted, valid retained rows are
+    folded into Monitor-owned tables, and then those exact raw rows are
+    deleted. `weft_monitor_task_messages` is a temporary pending-reference
+    table for exact raw-message deletion and retry, not a shadow queue ledger.
+    After exact raw broker deletion succeeds, or retry observes the raw row is
+    already absent, the Monitor deletes the child refs and reconciles the
+    parent family. Raw deletion is gated by successful Monitor collation, not
+    by terminal summary emission.
+  - **OBS.13.4**: Family disposition and parent retirement are explicit,
+    retryable table state. Parents may be physically retired only after raw
+    deletion, summary emission, disposition, task-local control cleanup, any
+    required reserved cleanup proof, and zero remaining child refs are all
+    recorded. Parent rows already marked `raw_deleted_at_ns` while child refs
+    remain must be repaired before retirement. Orphan raw-log recovery records
+    `orphan_raw_recovery_checked_at_ns` only after proving no raw broker rows
+    remain; probe/delete errors leave the family retryable, and new raw
+    task-log evidence clears the marker through normal collation merge.
+  - **OBS.13.5**: Reserved cleanup proof is required only for rows with
+    `reserved_probe_needed`. The Monitor records
+    `reserved_cleanup_checked_at_ns` after the standard `T{tid}.reserved`
+    queue is deleted or proven already absent. Probe/delete errors leave the
+    marker unset so the family remains retryable. Reserved cleanup uses public
+    SimpleBroker queue APIs from the TaskMonitor runtime-cleanup worker, never
+    private queue-table SQL.
+  - **OBS.13.6**: Runtime-state queue cleanup is policy driven. Malformed rows
+    are deletable only from Weft-owned schema queues whose policy says
+    malformed rows are disposable, such as `weft.log.tasks` and
+    `weft.state.tid_mappings`. Runtime cleanup does not create new lifecycle
+    evidence and remains bounded by the selected cleanup policy.
+  - **OBS.13.7**: Monitor cleanup must not delete active work, ambiguous
+    task-local evidence, claimed outbox residue, user payload rows, unknown
+    rows outside an explicit cleanup policy, inbox/reserved work without
+    terminal task-log proof for the same TID in the cleanup pass, or non-exact
+    lifecycle evidence. Manager/global/custom control queues and custom
+    task-local queues are excluded from default monitor cleanup.
+  - **OBS.13.8**: Task-log collation summaries are operational evidence about
+    cleanup work performed, not durable lifecycle truth or archival records.
+    User-task rows use `collation_kind=user_task`; manager, built-in service,
+    and manager-authored service rows use service classification and
+    `record_type=service_summary`; external collated JSONL keeps
+    `record_type=task_log_collated` for compatibility. In collated mode,
+    Monitor ingestion precedes raw deletion, and external summary failure
+    blocks family disposition retry rather than resurrecting ingested rows. In
+    raw external mode, external emit precedes raw deletion; external sink
+    validation or emit failure must not prevent TaskMonitor service startup.
+  - **OBS.13.9**: Normal task cleanup clears standard task-local
+    `T{tid}.ctrl_in` and `T{tid}.ctrl_out` runtime queues before process exit.
+    Terminal disposition may later remove residual standard `T{tid}.ctrl_in`,
+    `T{tid}.ctrl_out`, and `T{tid}.inbox` queues, including visible and claimed
+    rows, after required summary emission when those queues were left by forced
+    process death, cleanup failure, or older releases. Standard
+    `T{tid}.outbox` is retained until task-log retention age, and standard
+    `T{tid}.reserved` remains owned by the reserved cleanup policy.
+  - **OBS.13.10**: Built-in task-log cleanup and runtime cleanup are the only
+    TaskMonitor worker lanes allowed to own broker/store cleanup effects. The
+    reactor must continue servicing task-local control while either lane is in
+    flight. Runtime cleanup runs as bounded, discrete worker slices launched by
+    the reactor after the previous worker result is applied. Terminal
+    stale-queue cleanup, eligible reserved cleanup, and eligible dead-TID
+    cleanup must not be mixed inside one worker result, and the runtime-cleanup
+    worker must not start nested cleanup executor threads.
+  - **OBS.13.11**: TaskMonitor PONG cleanup diagnostics are cached from the
+    last cleanup cycle. They may report queue-level stats, policy-level stats
+    including zero-selected policy rows, cached Monitor-store availability,
+    checkpoint, collation, summary, external-log health, table-backed deletion
+    counts, and whether terminal control cleanup is currently in flight. PONG
+    must not perform queue scans, open or validate external log files, query
+    the Monitor store, recompute cleanup candidates, or delete/report rows
+    while answering a liveness request.
+  - **OBS.13.12**: The top-level cleanup policy identities are exactly
+    `task_log.retention`, `monitor_store.lifecycle`,
+    `task_local.terminal_runtime`, `task_local.dead_tid`, and
+    `runtime_state.retention`. Each policy run must remain bounded, report
+    base/waypoint/blocked status, and avoid spinning when only future-eligible
+    or blocked work remains. Private cleanup phases belong in reason counts or
+    cached details, not new policy identities.
 - **OBS.14**: claimed outbox residue is recovery evidence, not decoded result
   evidence. Status/result readers may surface
   `claimed_result_without_terminal`, but they must not delete, unclaim, or
@@ -403,7 +438,11 @@ _Implementation mapping_: `weft/core/manager.py`,
   non-canonical live owners must be signaled to terminate. The manager may
   force-reap only PIDs tied to the current scoped authority that proved the
   non-canonical owner live, such as a tracked child process or a `host-pid`
-  runtime handle.
+  runtime handle. Monitor cleanup may dispose an old nonterminal service-owner
+  collation as `stale_service_owner` or `superseded_service_owner` only after
+  same-service registry proof shows that owner is non-live or replaced and no
+  active runtime evidence protects the TID; that disposition is cleanup
+  authority, not terminal lifecycle truth.
 - **MANAGER.16**: managers must drain manager-owned internal spawn work before
   ordinary public spawn work whenever both are pending and launch is otherwise
   authorized by local control/drain state. Manager-authored singleton-service
@@ -577,6 +616,7 @@ doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-05-28-stale-service-owner-runtime-cleanup-plan.md`](../plans/2026-05-28-stale-service-owner-runtime-cleanup-plan.md)
 - [`docs/plans/2026-05-27-service-collation-reporting-plan.md`](../plans/2026-05-27-service-collation-reporting-plan.md)
 - [`docs/plans/2026-05-26-monitor-five-cleanup-policy-consolidation-plan.md`](../plans/2026-05-26-monitor-five-cleanup-policy-consolidation-plan.md)
 - [`docs/plans/2026-05-26-service-task-worker-api-plan.md`](../plans/2026-05-26-service-task-worker-api-plan.md)

@@ -1,6 +1,6 @@
 # Phase 7 Task Monitor Supervision And Cleanup Plan
 
-Status: draft
+Status: completed
 Source specs: see Source Documents below
 Superseded by: none
 

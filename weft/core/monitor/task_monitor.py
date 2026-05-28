@@ -4,6 +4,8 @@ This module provides the task-shaped non-consuming scanner used by the
 foreground task monitor command and the manager-supervised TaskMonitor service.
 Built-in destructive cleanup is orchestrated by the TaskMonitor boundary and
 uses reusable pruning policies for row eligibility.
+The cleanup machinery exists because process cleanup is partial and retryable;
+it remains operational evidence only, per [OBS.13].
 
 Spec references:
 - docs/specifications/01-Core_Components.md [CC-2.1], [CC-2.3]
@@ -29,6 +31,10 @@ from weft._constants import (
     CONTROL_KILL,
     CONTROL_STOP,
     DEFAULT_FUNCTION_TARGET,
+    INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
+    INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR,
+    INTERNAL_SERVICE_KEY_HEARTBEAT,
+    INTERNAL_SERVICE_KEY_TASK_MONITOR,
     LIVE_SERVICE_STATUSES,
     QUEUE_CTRL_IN_SUFFIX,
     QUEUE_CTRL_OUT_SUFFIX,
@@ -110,6 +116,9 @@ from weft.core.monitor.policies.runtime_control import (
     select_runtime_reserved_cleanup_candidates as _select_runtime_reserved_cleanup_candidates,
 )
 from weft.core.monitor.policies.runtime_control import (
+    stale_service_owner_runtime_queue_cleanup_plan as _stale_service_owner_runtime_queue_cleanup_plan,
+)
+from weft.core.monitor.policies.runtime_control import (
     standard_task_control_queue_names as _standard_task_control_queue_names,
 )
 from weft.core.monitor.policies.runtime_control import (
@@ -150,7 +159,9 @@ from weft.core.serve_log import (
     truncate_serve_log_value,
 )
 from weft.core.service_convergence import (
+    ServiceOwnerRecord,
     collect_service_owner_records,
+    manager_service_key,
     reduce_latest_by_service_owner,
 )
 from weft.core.tasks.base import ControlRequest, TaskWorkerResult
@@ -491,6 +502,20 @@ class TaskMonitor(ServiceTask):
     bounded exact-delete path; custom processors receive non-consuming
     task-log candidates.
     """
+
+    # --- Section map ------------------------------------------------------
+    # Operational evidence only; lifecycle truth lives in task-owned queues
+    # and task-log events (see [OBS.13]).
+    #
+    #   1. Reactor and tick scheduling    - see [OBS.13.10]
+    #   2. Built-in cleanup cycle         - see [OBS.13.3], [OBS.13.10]
+    #   3. Runtime cleanup worker lane    - see [OBS.13.5], [OBS.13.9]
+    #   4. Cleanup policy selection       - see [OBS.13.6], [OBS.13.7]
+    #   5. PONG diagnostics               - see [OBS.13.11]
+    #   6. External sink emission         - see [OBS.13.8]
+    #
+    # All cleanup effects are exact, policy-selected, and retryable.
+    # ---------------------------------------------------------------------
 
     def __init__(
         self,
@@ -1690,15 +1715,34 @@ class TaskMonitor(ServiceTask):
         family_disposition_marks: list[tuple[str, str, str | None, int | None]] = []
         control_delete_marks: list[str] = []
         summary_errors: list[str] = []
-        ready_tasks = store.list_summary_ready_tasks(
-            limit=self._monitor_config.batch_size + 1,
-            now_ns=now_ns,
-            retention_seconds=self._monitor_config.task_log_retention_period_seconds,
-            terminal_retention_seconds=0.0,
-            stale_open_family_seconds=(self._monitor_config.stale_open_family_seconds),
+        ready_tasks = list(
+            store.list_summary_ready_tasks(
+                limit=self._monitor_config.batch_size + 1,
+                now_ns=now_ns,
+                retention_seconds=(
+                    self._monitor_config.task_log_retention_period_seconds
+                ),
+                terminal_retention_seconds=0.0,
+                stale_open_family_seconds=(
+                    self._monitor_config.stale_open_family_seconds
+                ),
+            )
         )
-        selected_ready_tasks = ready_tasks[: self._monitor_config.batch_size]
-        more_ready = len(ready_tasks) > len(selected_ready_tasks)
+        if len(ready_tasks) <= self._monitor_config.batch_size:
+            seen_tids = {ready.record.tid for ready in ready_tasks}
+            remaining = self._monitor_config.batch_size + 1 - len(ready_tasks)
+            ready_tasks.extend(
+                ready
+                for ready in self._stale_service_owner_summary_ready_tasks(
+                    store,
+                    now_ns=now_ns,
+                    limit=remaining,
+                )
+                if ready.record.tid not in seen_tids
+            )
+        ready_tasks_tuple = tuple(ready_tasks)
+        selected_ready_tasks = ready_tasks_tuple[: self._monitor_config.batch_size]
+        more_ready = len(ready_tasks_tuple) > len(selected_ready_tasks)
         for ready in selected_ready_tasks:
             if ready.record.summary_emitted_at_ns is None:
                 try:
@@ -1839,11 +1883,15 @@ class TaskMonitor(ServiceTask):
 
         if record.task_control_deleted_at_ns is not None:
             return _TaskControlCleanupResult(families_processed=1)
-        cleanup_plan = _terminal_task_runtime_queue_cleanup_plan(
-            record,
-            now_ns=now_ns,
-            retention_seconds=self._monitor_config.task_log_retention_period_seconds,
-        )
+        cleanup_plan = _stale_service_owner_runtime_queue_cleanup_plan(record)
+        if cleanup_plan is None:
+            cleanup_plan = _terminal_task_runtime_queue_cleanup_plan(
+                record,
+                now_ns=now_ns,
+                retention_seconds=(
+                    self._monitor_config.task_log_retention_period_seconds
+                ),
+            )
         if cleanup_plan is None:
             return _TaskControlCleanupResult(
                 families_processed=1,
@@ -1996,12 +2044,10 @@ class TaskMonitor(ServiceTask):
             errors=tuple(errors),
         )
 
-    def _active_runtime_tids(self) -> set[str]:
-        """Return TIDs that have current service or live host-process evidence."""
+    def _latest_service_owner_records(self) -> tuple[ServiceOwnerRecord, ...]:
+        """Return latest service-owner rows from the runtime service registry."""
 
-        active_tids: set[str] = set()
         ctx = self._monitor_context()
-
         services = ctx.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
         service_entries: list[tuple[Mapping[str, Any], int]] = []
         try:
@@ -2016,7 +2062,15 @@ class TaskMonitor(ServiceTask):
             services.close()
 
         service_read = collect_service_owner_records(service_entries)
-        latest_services = reduce_latest_by_service_owner(service_read.records)
+        return reduce_latest_by_service_owner(service_read.records)
+
+    def _active_runtime_tids(self) -> set[str]:
+        """Return TIDs that have current service or live host-process evidence."""
+
+        active_tids: set[str] = set()
+        ctx = self._monitor_context()
+
+        latest_services = self._latest_service_owner_records()
         active_tids.update(
             record.owner_tid
             for record in latest_services
@@ -2047,6 +2101,114 @@ class TaskMonitor(ServiceTask):
 
         active_tids.add(self.tid)
         return active_tids
+
+    def _stale_service_owner_summary_ready_tasks(
+        self,
+        store: MonitorStore,
+        *,
+        now_ns: int,
+        limit: int,
+    ) -> tuple[MonitorSummaryReadyTask, ...]:
+        """Return old open service-owner rows proved stale by live evidence."""
+
+        if limit <= 0:
+            return ()
+        candidates = store.list_stale_service_owner_candidates(
+            limit=limit,
+            now_ns=now_ns,
+            retention_seconds=self._monitor_config.task_log_retention_period_seconds,
+        )
+        if not candidates:
+            return ()
+        active_tids = self._active_runtime_tids()
+        latest_services = self._latest_service_owner_records()
+        live_service_owner_tids = {
+            record.owner_tid
+            for record in latest_services
+            if record.status in LIVE_SERVICE_STATUSES
+        }
+        service_records_by_key: dict[str, list[ServiceOwnerRecord]] = {}
+        for service_record in latest_services:
+            service_records_by_key.setdefault(
+                service_record.service_key,
+                [],
+            ).append(service_record)
+        ready: list[MonitorSummaryReadyTask] = []
+        for record in candidates:
+            if record.tid in active_tids or record.tid in live_service_owner_tids:
+                continue
+            service_key = self._stale_service_owner_key(record)
+            if service_key is None:
+                continue
+            service_records = service_records_by_key.get(service_key, [])
+            if not self._stale_service_owner_proved(
+                record,
+                service_records=service_records,
+            ):
+                continue
+            ready.append(
+                MonitorSummaryReadyTask(
+                    record=record,
+                    close_reason="stale_service_owner",
+                )
+            )
+        return tuple(ready)
+
+    def _stale_service_owner_key(
+        self,
+        record: MonitorTaskCollationRecord,
+    ) -> str | None:
+        """Return the service key needed for stale service-owner proof."""
+
+        classification = record.service_classification()
+        if not classification.is_service_record:
+            return None
+        if classification.service_key:
+            return classification.service_key
+        if classification.kind == "manager":
+            return manager_service_key(self._monitor_context())
+        if (
+            classification.role == "task_monitor"
+            or classification.runtime_class == INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR
+        ):
+            return INTERNAL_SERVICE_KEY_TASK_MONITOR
+        if (
+            classification.role == "heartbeat_service"
+            or classification.runtime_class == INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT
+        ):
+            return INTERNAL_SERVICE_KEY_HEARTBEAT
+        return None
+
+    @staticmethod
+    def _stale_service_owner_proved(
+        record: MonitorTaskCollationRecord,
+        *,
+        service_records: list[ServiceOwnerRecord],
+    ) -> bool:
+        """Return whether same-service registry rows prove ``record`` stale."""
+
+        if not service_records:
+            return False
+        same_owner = [
+            service_record
+            for service_record in service_records
+            if service_record.owner_tid == record.tid
+        ]
+        if any(
+            service_record.status in LIVE_SERVICE_STATUSES
+            for service_record in same_owner
+        ):
+            return False
+        if any(
+            service_record.status not in LIVE_SERVICE_STATUSES
+            for service_record in same_owner
+        ):
+            return True
+        return any(
+            service_record.owner_tid != record.tid
+            and service_record.status in LIVE_SERVICE_STATUSES
+            for service_record in service_records
+        )
 
     def _queue_name_snapshot(self, *, patterns: tuple[str, ...]) -> set[str]:
         """Return queue names for runtime cleanup using public broker APIs."""

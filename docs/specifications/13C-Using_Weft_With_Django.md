@@ -1309,9 +1309,9 @@ Once the package is split into a sibling repo:
 
 ## Backlinks
 
-- Active hardening plan:
+- Client follow hardening plan:
   [../plans/2026-04-21-client-follow-hardening-plan.md](../plans/2026-04-21-client-follow-hardening-plan.md)
-- Completed hardening plan:
+- Client and Django hardening plan:
   [../plans/2026-04-21-weft-client-and-django-first-class-hardening-plan.md](../plans/2026-04-21-weft-client-and-django-first-class-hardening-plan.md)
 - Core higher-level integration guidance:
   [13B-Using_Weft_In_Higher_Level_Systems.md](13B-Using_Weft_In_Higher_Level_Systems.md)

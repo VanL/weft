@@ -53,6 +53,8 @@ from weft._constants import (
     MANAGED_SERVICE_RECENT_EVIDENCE_GRACE_SECONDS,
     MANAGED_SERVICE_STABLE_AUDIT_INTERVAL_SECONDS,
     MANAGER_CHILD_EXIT_POLL_INTERVAL,
+    MANAGER_CHILD_INBOX_SEED_ATTEMPTS,
+    MANAGER_CHILD_INBOX_SEED_RETRY_DELAY_BASE_SECONDS,
     MANAGER_CHILD_LAUNCH_STALE_RETRY_LIMIT,
     MANAGER_CHILD_LAUNCH_WORKER_LANE,
     MANAGER_CHILD_STARTUP_LIVENESS_GRACE_SECONDS,
@@ -113,6 +115,7 @@ from weft.helpers import (
     detect_container_runtime,
     handle_has_live_host_process,
     is_canonical_manager_record,
+    iter_queue_entries,
     iter_queue_json_entries,
     kill_process_tree,
     live_host_processes_from_handle,
@@ -264,6 +267,7 @@ class _ManagerPendingPongProbe:
     ctrl_out_name: str
     request_id: str
     deadline_ns: int
+    ctrl_in_message_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -279,6 +283,7 @@ class _ServicePendingPongProbe:
     ctrl_out_name: str
     request_id: str
     deadline_ns: int
+    ctrl_in_message_id: int | None = None
 
 
 class Manager(ServiceTask):
@@ -286,6 +291,21 @@ class Manager(ServiceTask):
 
     Spec: [MA-0], [MA-1], [MF-6], [MF-7]
     """
+
+    # --- Section map ------------------------------------------------------
+    # Section map only names ownership clusters. The spec mapping in
+    # 03-Manager_Architecture.md is normative if these labels drift.
+    #
+    #   1. Bootstrap and queue binding       - see [MA-1.1], [MA-3]
+    #   2. Spawn dispatch and reservation    - see [MA-1.1], [MA-1.7]
+    #   3. Child launch and inbox seeding    - see [MA-1.2], [MA-1.3]
+    #   4. Registry heartbeat and leadership - see [MA-1.4]
+    #   5. Idle timing and reactor waits     - see [MA-1.5], [MA-1.6a]
+    #   6. Autostart reconciliation          - see [MA-1.6]
+    #   7. Managed internal services         - see [MA-1.6a]
+    #   8. Control handling                  - see [MA-1.7]
+    #   9. Shutdown and unregister           - see [MA-1.4], [MA-3]
+    # ---------------------------------------------------------------------
 
     control_policy = TaskControlPolicy(
         stop="drain-children",
@@ -891,7 +911,7 @@ class Manager(ServiceTask):
                     request_id=child_tid,
                     initial_items=(request,),
                 )
-            except Exception as exc:
+            except Exception as exc:  # pragma: no cover - child-launch worker startup
                 self._clear_active_child_launch(child_tid)
                 self._handle_child_launch_failure(
                     _ManagerChildLaunchResult(request=request, error=exc)
@@ -1020,7 +1040,7 @@ class Manager(ServiceTask):
                 request_id=child_spec.tid,
                 initial_items=(request,),
             )
-        except Exception as exc:
+        except Exception as exc:  # pragma: no cover - child-launch worker startup
             self._clear_active_child_launch(child_spec.tid)
             self._handle_child_launch_failure(
                 _ManagerChildLaunchResult(request=request, error=exc)
@@ -1399,14 +1419,18 @@ class Manager(ServiceTask):
             else inbox_message
         )
         last_error: BaseException | None = None
-        for attempt in range(3):
+        for attempt in range(MANAGER_CHILD_INBOX_SEED_ATTEMPTS):
             try:
                 self._queue(inbox_name).write(payload)
                 return True
             except (BrokerError, OSError, RuntimeError) as exc:
                 last_error = exc
-                if attempt < 2:
-                    time.sleep(0.05 * (attempt + 1))
+                if attempt < MANAGER_CHILD_INBOX_SEED_ATTEMPTS - 1:
+                    # The constant documents why child-launch inbox writes use backoff.
+                    time.sleep(
+                        MANAGER_CHILD_INBOX_SEED_RETRY_DELAY_BASE_SECONDS
+                        * (attempt + 1)
+                    )
 
         error = (
             f"Failed to seed inbox {inbox_name} for child {child_spec.tid}: "
@@ -2162,6 +2186,10 @@ class Manager(ServiceTask):
                     record=record,
                     now_ns=now_ns,
                 )
+            self._delete_exact_probe_message(
+                pending.ctrl_in_name,
+                pending.ctrl_in_message_id,
+            )
             self._leader_probe_pending.pop(cache_key, None)
         if self._leader_probe_used_this_turn:
             return ManagerLeadershipProof(
@@ -2173,12 +2201,11 @@ class Manager(ServiceTask):
         ctrl_in_name = self._manager_ctrl_queue_name(tid, record)
         ctrl_out_name = self._manager_ctrl_out_queue_name(tid, record)
         request_id = uuid.uuid4().hex
+        ping_message = self._control_ping_probe_message(request_id)
         try:
             ctrl_in = self._manager_context().queue(ctrl_in_name, persistent=True)
             try:
-                ctrl_in.write(
-                    json.dumps({"command": CONTROL_PING, "request_id": request_id})
-                )
+                ctrl_in.write(ping_message)
             finally:
                 ctrl_in.close()
         except (BrokerError, OSError, RuntimeError) as exc:
@@ -2189,6 +2216,10 @@ class Manager(ServiceTask):
             )
             self._leader_probe_cache[cache_key] = (now_ns, row_timestamp, proof)
             return proof
+        ctrl_in_message_id = self._find_exact_probe_message_id(
+            ctrl_in_name,
+            ping_message,
+        )
 
         timeout_ns = int(MANAGER_LEADERSHIP_PING_TIMEOUT_SECONDS * 1_000_000_000)
         self._leader_probe_pending[cache_key] = _ManagerPendingPongProbe(
@@ -2198,12 +2229,49 @@ class Manager(ServiceTask):
             ctrl_out_name=ctrl_out_name,
             request_id=request_id,
             deadline_ns=now_ns + max(0, timeout_ns),
+            ctrl_in_message_id=ctrl_in_message_id,
         )
         return ManagerLeadershipProof(
             "unknown",
             source="control-pong",
             reason="ping_pending",
         )
+
+    @staticmethod
+    def _control_ping_probe_message(request_id: str) -> str:
+        """Return the canonical manager-owned PING probe payload."""
+
+        return json.dumps({"command": CONTROL_PING, "request_id": request_id})
+
+    def _find_exact_probe_message_id(
+        self,
+        queue_name: str,
+        message: str,
+    ) -> int | None:
+        """Find the exact row id for a manager-owned probe payload."""
+
+        # Use a short-lived direct handle for manager-owned probe queues so the
+        # context cache does not retain transient control rows.
+        queue = Queue(
+            queue_name,
+            db_path=self._db_path,
+            config=self._config,
+        )
+        try:
+            latest_message_id: int | None = None
+            for body, message_id in iter_queue_entries(queue):
+                if body == message:
+                    latest_message_id = message_id
+            return latest_message_id
+        except (BrokerError, OSError, RuntimeError):
+            logger.debug(
+                "Failed to locate internal probe row",
+                extra={"queue": queue_name},
+                exc_info=True,
+            )
+            return None
+        finally:
+            queue.close()
 
     def _advance_manager_pong_probe(
         self,
@@ -2214,6 +2282,8 @@ class Manager(ServiceTask):
     ) -> ManagerLeadershipProof:
         """Advance one non-blocking manager PING probe without sleeping."""
 
+        matched_proof: ManagerLeadershipProof | None = None
+        matched_message_id: int | None = None
         try:
             ctrl_out = self._manager_context().queue(
                 probe.ctrl_out_name,
@@ -2231,14 +2301,14 @@ class Manager(ServiceTask):
                     )
                     if payload is None:
                         continue
-                    proof = self._manager_pong_payload_proof(
+                    matched_proof = self._manager_pong_payload_proof(
                         payload,
                         record=record,
                         ctrl_in_name=probe.ctrl_in_name,
                         ctrl_out_name=probe.ctrl_out_name,
                     )
-                    self._complete_manager_pong_probe(probe, proof, now_ns=now_ns)
-                    return proof
+                    matched_message_id = int(_timestamp)
+                    break
             finally:
                 ctrl_out.close()
         except (BrokerError, OSError, RuntimeError) as exc:
@@ -2247,14 +2317,27 @@ class Manager(ServiceTask):
                 source="control-pong",
                 reason=str(exc),
             )
+            self._delete_exact_probe_message(
+                probe.ctrl_in_name,
+                probe.ctrl_in_message_id,
+            )
             self._complete_manager_pong_probe(probe, proof, now_ns=now_ns)
             return proof
+
+        if matched_proof is not None:
+            self._delete_exact_probe_message(probe.ctrl_out_name, matched_message_id)
+            self._complete_manager_pong_probe(probe, matched_proof, now_ns=now_ns)
+            return matched_proof
 
         if now_ns >= probe.deadline_ns:
             proof = ManagerLeadershipProof(
                 "unknown",
                 source="control-pong",
                 reason="ping_timeout",
+            )
+            self._delete_exact_probe_message(
+                probe.ctrl_in_name,
+                probe.ctrl_in_message_id,
             )
             self._complete_manager_pong_probe(probe, proof, now_ns=now_ns)
             return proof
@@ -2290,6 +2373,33 @@ class Manager(ServiceTask):
             source="control-pong",
             reason="pong_not_dispatch_eligible",
         )
+
+    def _delete_exact_probe_message(
+        self,
+        queue_name: str,
+        message_id: int | None,
+    ) -> None:
+        """Best-effort exact cleanup for manager-owned internal probe rows."""
+
+        if message_id is None:
+            return
+        # Use a short-lived direct handle for exact probe cleanup so the context
+        # cache does not retain transient control queues.
+        queue = Queue(
+            queue_name,
+            db_path=self._db_path,
+            config=self._config,
+        )
+        try:
+            queue.delete(message_id=message_id)
+        except (BrokerError, OSError, RuntimeError):
+            logger.debug(
+                "Failed to delete internal probe row",
+                extra={"queue": queue_name, "message_id": message_id},
+                exc_info=True,
+            )
+        finally:
+            queue.close()
 
     def _complete_manager_pong_probe(
         self,
@@ -2906,6 +3016,8 @@ class Manager(ServiceTask):
 
     def _child_terminal_proof_visible(self, tid: str, child: ManagedChild) -> bool:
         ctrl_out_name = child.ctrl_out_queue or f"T{tid}.{QUEUE_CTRL_OUT_SUFFIX}"
+        # Use a short-lived direct handle for child-local queues so the manager
+        # cache does not retain per-child control queues after reaping.
         ctrl_out = Queue(
             ctrl_out_name,
             db_path=self._db_path,
@@ -3003,6 +3115,8 @@ class Manager(ServiceTask):
         }
         if exitcode is not None:
             payload["return_code"] = int(exitcode)
+        # Use a short-lived direct handle for child-local queues so wrapper-lost
+        # evidence is written without extending the manager's queue cache.
         ctrl_out = Queue(
             ctrl_out_name,
             db_path=self._db_path,
@@ -3346,6 +3460,8 @@ class Manager(ServiceTask):
         )
 
     def _send_child_control_command(self, queue_name: str, command: str) -> None:
+        # Child control queues are caller-selected task-local queues; keep the
+        # handle short-lived rather than caching arbitrary child queue names.
         queue = Queue(
             queue_name,
             db_path=self._db_path,
@@ -4509,12 +4625,11 @@ class Manager(ServiceTask):
             )
 
         request_id = uuid.uuid4().hex
+        ping_message = self._control_ping_probe_message(request_id)
         try:
             ctrl_in = self._manager_context().queue(ctrl_in_name, persistent=True)
             try:
-                ctrl_in.write(
-                    json.dumps({"command": CONTROL_PING, "request_id": request_id})
-                )
+                ctrl_in.write(ping_message)
             finally:
                 ctrl_in.close()
         except (BrokerError, OSError, RuntimeError) as exc:
@@ -4527,6 +4642,10 @@ class Manager(ServiceTask):
                 reason=str(exc),
                 metadata=metadata,
             )
+        ctrl_in_message_id = self._find_exact_probe_message_id(
+            ctrl_in_name,
+            ping_message,
+        )
 
         timeout_ns = int(MANAGED_SERVICE_PING_TIMEOUT_SECONDS * 1_000_000_000)
         self._service_probe_pending[key] = _ServicePendingPongProbe(
@@ -4539,6 +4658,7 @@ class Manager(ServiceTask):
             ctrl_out_name=ctrl_out_name,
             request_id=request_id,
             deadline_ns=now_ns + max(0, timeout_ns),
+            ctrl_in_message_id=ctrl_in_message_id,
         )
         return ServiceCandidate(
             key=service_key,
@@ -4560,6 +4680,8 @@ class Manager(ServiceTask):
     ) -> ServiceCandidate | None:
         """Advance one pending service-owner PING without sleeping."""
 
+        matched_message_id: int | None = None
+        matched = False
         try:
             ctrl_out = self._manager_context().queue(
                 probe.ctrl_out_name,
@@ -4577,18 +4699,16 @@ class Manager(ServiceTask):
                     )
                     if payload is None:
                         continue
-                    self._service_probe_pending.pop(probe.key, None)
-                    return ServiceCandidate(
-                        key=probe.service_key,
-                        tid=probe.tid,
-                        state="live",
-                        source=probe.source,
-                        timestamp=timestamp,
-                        metadata=metadata,
-                    )
+                    matched_message_id = int(_message_timestamp)
+                    matched = True
+                    break
             finally:
                 ctrl_out.close()
         except (BrokerError, OSError, RuntimeError) as exc:
+            self._delete_exact_probe_message(
+                probe.ctrl_in_name,
+                probe.ctrl_in_message_id,
+            )
             self._service_probe_pending.pop(probe.key, None)
             return ServiceCandidate(
                 key=probe.service_key,
@@ -4600,7 +4720,26 @@ class Manager(ServiceTask):
                 metadata=metadata,
             )
 
+        if matched:
+            self._delete_exact_probe_message(
+                probe.ctrl_out_name,
+                matched_message_id,
+            )
+            self._service_probe_pending.pop(probe.key, None)
+            return ServiceCandidate(
+                key=probe.service_key,
+                tid=probe.tid,
+                state="live",
+                source=probe.source,
+                timestamp=timestamp,
+                metadata=metadata,
+            )
+
         if now_ns >= probe.deadline_ns:
+            self._delete_exact_probe_message(
+                probe.ctrl_in_name,
+                probe.ctrl_in_message_id,
+            )
             self._service_probe_pending.pop(probe.key, None)
             return None
 

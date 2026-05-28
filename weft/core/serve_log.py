@@ -146,13 +146,13 @@ def emit_serve_log_record(record: Mapping[str, Any]) -> None:
 
     try:
         line = json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
-    except Exception:
+    except Exception:  # pragma: no cover - best-effort diagnostic serialization
         return
     fd = _stderr_fd()
     if fd is None:
         try:
             print(line, end="", file=sys.stderr, flush=True)
-        except Exception:
+        except Exception:  # pragma: no cover - best-effort diagnostic emission
             return
         return
     log_queue = _ensure_log_queue(fd)

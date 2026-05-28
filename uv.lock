@@ -1476,7 +1476,7 @@ provides-extras = ["channels", "realtime", "dev"]
 
 [[package]]
 name = "weft-docker"
-version = "0.9.26"
+version = "0.9.70"
 source = { editable = "extensions/weft_docker" }
 dependencies = [
     { name = "docker" },
@@ -1487,7 +1487,7 @@ dependencies = [
 requires-dist = [
     { name = "docker", specifier = ">=7.1.0,<8" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
-    { name = "weft", specifier = ">=0.9.26,<1" },
+    { name = "weft", specifier = ">=0.9.67" },
 ]
 provides-extras = ["dev"]
 

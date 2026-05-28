@@ -7,6 +7,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -1270,3 +1271,69 @@ def test_command_session_terminate_kills_descendants(tmp_path: Path) -> None:
                 psutil.Process(child_pid).kill()
             except psutil.Error:
                 pass
+
+
+def test_task_runner_materializes_docker_container_profile_at_plugin_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plugin_module = pytest.importorskip("weft_docker.plugin")
+    if plugin_module.os.name == "nt":
+        pytest.skip("Docker runner is currently unsupported on Windows")
+    profile_file = tmp_path / ".weft" / "docker-profiles.toml"
+    profile_file.parent.mkdir(parents=True)
+    profile_file.write_text(
+        """
+        [profiles.ops]
+        image = "busybox:latest"
+        network = "project_ops"
+        mount_workdir = false
+        container_workdir = "/app/project"
+
+        [profiles.ops.env]
+        SERVICE_URL = "https://internal-service:8443"
+        """.strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    class FakeDockerClient:
+        def ping(self) -> None:
+            return None
+
+    @contextmanager
+    def fake_docker_client(*, timeout: int = 10):  # noqa: ANN202
+        del timeout
+        yield FakeDockerClient()
+
+    monkeypatch.setattr(plugin_module, "_load_docker_sdk", lambda: object())
+    monkeypatch.setattr(plugin_module, "_docker_client", fake_docker_client)
+
+    runner = TaskRunner(
+        target_type="command",
+        tid="1844674407370955161",
+        function_target=None,
+        process_target="python3",
+        agent=None,
+        args=["-c", "print('ok')"],
+        kwargs=None,
+        env={"SERVICE_URL": "https://explicit.example.test"},
+        working_dir=str(tmp_path),
+        timeout=5.0,
+        limits=None,
+        monitor_class=None,
+        monitor_interval=0.05,
+        runner_name="docker",
+        runner_options={
+            "container_profile": "ops",
+            "container_profile_file": str(profile_file),
+        },
+    )
+
+    backend = runner._backend
+    assert isinstance(backend, plugin_module.DockerCommandRunner)
+    assert backend._image == "busybox:latest"
+    assert backend._network == "project_ops"
+    assert backend._mount_workdir is False
+    assert backend._container_workdir == "/app/project"
+    assert backend._env["SERVICE_URL"] == "https://explicit.example.test"

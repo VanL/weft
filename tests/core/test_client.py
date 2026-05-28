@@ -21,6 +21,15 @@ from weft.client import (
     TaskTerminalSnapshot,
     WeftClient,
     WeftError,
+    connect,
+)
+from weft.client._namespaces import (
+    ManagersNamespace,
+    QueueAliasesNamespace,
+    QueuesNamespace,
+    SpecsNamespace,
+    SystemNamespace,
+    TasksNamespace,
 )
 from weft.core.taskspec import TaskSpec
 
@@ -68,6 +77,140 @@ def test_public_names_are_importable() -> None:
     assert TaskTerminalSnapshot is not None
     assert WeftClient is not None
     assert WeftError is not None
+    assert connect is not None
+
+
+CLIENT_API_PARITY_EXPECTATIONS = {
+    "client": (
+        WeftClient,
+        {
+            "from_context",
+            "from_weft_context",
+            "prepare",
+            "prepare_pipeline",
+            "prepare_spec",
+            "submit",
+            "submit_command",
+            "submit_pipeline",
+            "submit_spec",
+            "task",
+        },
+    ),
+    "task_handle": (
+        Task,
+        {
+            "events",
+            "follow",
+            "kill",
+            "ping",
+            "realtime_events",
+            "result",
+            "snapshot",
+            "stop",
+            "terminal_snapshot",
+        },
+    ),
+    "tasks": (
+        TasksNamespace,
+        {
+            "ack_terminal_snapshot",
+            "kill",
+            "kill_many",
+            "list",
+            "ping",
+            "resolve_tid",
+            "stats",
+            "status",
+            "stop",
+            "stop_many",
+            "terminal_snapshot",
+            "watch",
+        },
+    ),
+    "queues": (
+        QueuesNamespace,
+        {
+            "broadcast",
+            "delete",
+            "exists",
+            "list",
+            "move",
+            "peek",
+            "read",
+            "resolve",
+            "stats",
+            "watch",
+            "write",
+            "write_endpoint",
+        },
+    ),
+    "queue_aliases": (QueueAliasesNamespace, {"add", "list", "remove"}),
+    "managers": (
+        ManagersNamespace,
+        {"list", "serve", "start", "status", "stop"},
+    ),
+    "specs": (
+        SpecsNamespace,
+        {"create", "delete", "generate", "list", "show", "validate"},
+    ),
+    "system": (
+        SystemNamespace,
+        {"builtins", "dump", "load", "status", "tidy"},
+    ),
+}
+
+CLIENT_API_OMISSIONS = {
+    "manager diagnostics": (
+        "operator/debug output does not yet have a typed public result contract"
+    ),
+    "system task-monitor": (
+        "foreground monitor scans are operator maintenance, not a stable library API"
+    ),
+    "system prune runtime-state": (
+        "destructive/reporting maintenance remains CLI-only until scoped result "
+        "types are promoted"
+    ),
+    "system prune retention": (
+        "archive-producing cleanup is an operator workflow, not a task client "
+        "capability"
+    ),
+}
+
+
+def test_client_api_parity_guard_matches_current_public_matrix() -> None:
+    missing: list[str] = []
+    for group, (owner, methods) in CLIENT_API_PARITY_EXPECTATIONS.items():
+        for method in sorted(methods):
+            if not hasattr(owner, method):
+                missing.append(f"{group}.{method}")
+
+    assert not missing
+
+
+def test_client_api_omissions_are_explicitly_classified() -> None:
+    assert CLIENT_API_OMISSIONS
+    assert all(reason.strip() for reason in CLIENT_API_OMISSIONS.values())
+
+
+def test_connect_resolves_context() -> None:
+    with WeftTestHarness() as harness:
+        client = connect(harness.root)
+
+        assert isinstance(client, WeftClient)
+        assert client.context.root.resolve() == harness.root.resolve()
+
+
+def test_connect_resolves_context_from_path_keyword() -> None:
+    with WeftTestHarness() as harness:
+        client = connect(path=harness.root)
+
+        assert isinstance(client, WeftClient)
+        assert client.context.root.resolve() == harness.root.resolve()
+
+
+def test_connect_rejects_ambiguous_context_arguments(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="either spec_context or path"):
+        connect(tmp_path, path=tmp_path)
 
 
 def test_submitted_task_is_not_public() -> None:
@@ -278,16 +421,27 @@ def test_tasks_watch_yields_terminal_snapshot() -> None:
 def test_task_stop_and_kill_delegate_through_shared_task_ops(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[tuple[str, str, object]] = []
+    calls: list[tuple[str, str, object, float | None]] = []
 
     def _fake_stop(tid: str, *, context=None, context_path=None) -> None:
-        calls.append(("stop", tid, context or context_path))
+        calls.append(("stop", tid, context or context_path, None))
 
     def _fake_kill(tid: str, *, context=None, context_path=None) -> None:
-        calls.append(("kill", tid, context or context_path))
+        calls.append(("kill", tid, context or context_path, None))
+
+    def _fake_ping(
+        tid: str,
+        *,
+        timeout: float,
+        context=None,
+        context_path=None,
+    ) -> dict[str, object]:
+        calls.append(("ping", tid, context or context_path, timeout))
+        return {"timed_out": False, "error": None, "observed_at": 123, "pong": {}}
 
     monkeypatch.setattr("weft.commands.tasks.stop_task", _fake_stop)
     monkeypatch.setattr("weft.commands.tasks.kill_task", _fake_kill)
+    monkeypatch.setattr("weft.commands.tasks.task_ping", _fake_ping)
 
     with WeftTestHarness() as harness:
         client = WeftClient(path=harness.root)
@@ -295,10 +449,14 @@ def test_task_stop_and_kill_delegate_through_shared_task_ops(
 
         task.stop()
         task.kill()
+        assert task.ping(timeout=1.25)["observed_at"] == 123
+        assert client.tasks.ping(task.tid, timeout=2.5)["observed_at"] == 123
 
         assert calls == [
-            ("stop", "1776000000000000001", client.context),
-            ("kill", "1776000000000000001", client.context),
+            ("stop", "1776000000000000001", client.context, None),
+            ("kill", "1776000000000000001", client.context, None),
+            ("ping", "1776000000000000001", client.context, 1.25),
+            ("ping", "1776000000000000001", client.context, 2.5),
         ]
 
 

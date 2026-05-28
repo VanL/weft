@@ -314,6 +314,12 @@ MANAGER_CHILD_EXIT_POLL_INTERVAL: Final[float] = 0.05
 MANAGER_CHILD_LAUNCH_STALE_RETRY_LIMIT: Final[int] = 1
 """Retries for a child-launch worker that disappears before returning a result."""
 
+MANAGER_CHILD_INBOX_SEED_ATTEMPTS: Final[int] = 3
+"""Attempts to durably seed a child inbox before rejecting child launch."""
+
+MANAGER_CHILD_INBOX_SEED_RETRY_DELAY_BASE_SECONDS: Final[float] = 0.05
+"""Linear retry base while seeding child inboxes before process launch."""
+
 MANAGER_CONTROL_DRAIN_MAX_MESSAGES: Final[int] = 32
 """Maximum manager control messages handled before yielding a manager turn."""
 
@@ -579,6 +585,11 @@ TASK_MONITOR_RUNTIME_CLEANUP_SLICE_ORDER: Final[tuple[str, ...]] = (
     "dead_tid",
 )
 """Ordered TaskMonitor task-local runtime cleanup slice names."""
+
+STALE_SERVICE_OWNER_DISPOSITION_REASONS: Final[frozenset[str]] = frozenset(
+    {"stale_service_owner", "superseded_service_owner"}
+)
+"""Monitor disposition reasons for stale service-owner runtime cleanup."""
 
 WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS_DEFAULT: Final[float] = 172800.0
 """Default minimum age before TaskMonitor logs/deletes task-log rows."""
@@ -1455,6 +1466,46 @@ DOCKERIZED_AGENT_PROVIDER_CHOICES: Final[frozenset[str]] = frozenset(
     {"claude_code", "codex", "gemini", "opencode", "qwen"}
 )
 """Supported provider names for the shipped Dockerized agent builtin."""
+
+DOCKER_CONTAINER_PROFILE_DEFAULT_FILE: Final[str] = ".weft/docker-profiles.toml"
+"""Default Docker container profile file path relative to the bundle root."""
+
+DOCKER_CONTAINER_PROFILE_CONTROL_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "container_profile",
+        "container_profile_file",
+        "container_profile_root",
+    }
+)
+"""Runner option keys that select profile loading rather than Docker options."""
+
+DOCKER_CONTAINER_PROFILE_DOCKER_OPTION_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "build",
+        "container_workdir",
+        "docker_args",
+        "docker_binary",
+        "image",
+        "mount_workdir",
+        "mounts",
+        "network",
+    }
+)
+"""Profile keys materialized into Docker runner options."""
+
+DOCKER_CONTAINER_PROFILE_METADATA_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "env",
+        "env_from_host",
+        "required_env_from_host",
+    }
+)
+"""Profile keys materialized into task environment metadata."""
+
+DOCKER_CONTAINER_PROFILE_SUPPORTED_KEYS: Final[frozenset[str]] = (
+    DOCKER_CONTAINER_PROFILE_DOCKER_OPTION_KEYS | DOCKER_CONTAINER_PROFILE_METADATA_KEYS
+)
+"""All supported top-level keys in one Docker container profile."""
 
 DOCKERIZED_AGENT_DEFAULT_ENVIRONMENT_PROFILE_REF: Final[str] = (
     "dockerized_agent:dockerized_agent_environment_profile"

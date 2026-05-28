@@ -1,6 +1,6 @@
 # Internal Service Observability Plan
 
-Status: draft
+Status: completed
 Source specs: docs/specifications/00-Quick_Reference.md; docs/specifications/03-Manager_Architecture.md [MA-1], [MA-1.6a], [MA-2]; docs/specifications/05-Message_Flow_and_State.md [MF-5], [MF-6]; docs/specifications/07-System_Invariants.md [OBS.9], [OBS.12], [MANAGER.15], [MANAGER.16]; docs/specifications/10-CLI_Interface.md [CLI-1.2.1]
 Superseded by: none
 

@@ -45,9 +45,12 @@ _SHARED_MODULES = frozenset(
         "tests/cli/test_cli_init.py",
         "tests/cli/test_cli_queue.py",
         "tests/cli/test_cli_result.py",
+        "tests/cli/test_cli_spec.py",
         "tests/cli/test_cli_system.py",
+        "tests/cli/test_rearrange_args.py",
         "tests/cli/test_status.py",
         "tests/commands/test_queue.py",
+        "tests/system/test_release_script.py",
         "tests/shell/test_known_interpreters.py",
         "tests/core/test_agent_resolution.py",
         "tests/core/test_agent_runtime.py",
@@ -146,9 +149,6 @@ _UNAUDITED_MODULE_ALLOWLIST_REASONS = {
     "tests/cli/test_cli_run.py": (
         "large end-to-end CLI run surface still needs explicit backend-scope review"
     ),
-    "tests/cli/test_cli_spec.py": (
-        "legacy CLI spec coverage still needs explicit backend-scope review"
-    ),
     "tests/cli/test_cli_tidy.py": (
         "legacy CLI tidy coverage still needs explicit backend-scope review"
     ),
@@ -157,12 +157,6 @@ _UNAUDITED_MODULE_ALLOWLIST_REASONS = {
     ),
     "tests/cli/test_manager_proctitle.py": (
         "platform-sensitive process-title coverage still needs explicit backend-scope review"
-    ),
-    "tests/cli/test_rearrange_args.py": (
-        "legacy CLI argv-shaping coverage still needs explicit backend-scope review"
-    ),
-    "tests/system/test_release_script.py": (
-        "release-helper tooling coverage still needs explicit backend-scope review"
     ),
 }
 _EAGER_FAILURE_TRACEBACK_ENV = "WEFT_EAGER_FAILURE_TRACEBACK"

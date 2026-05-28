@@ -2,7 +2,7 @@
 
 Status: draft
 Source specs: see Source Documents below
-Superseded by: ./2026-05-08-phase-7-manager-service-reconciler-cleanup-plan.md
+Superseded by: [2026-05-08-phase-7-manager-service-reconciler-cleanup-plan.md](./2026-05-08-phase-7-manager-service-reconciler-cleanup-plan.md)
 
 ## 1. Goal
 

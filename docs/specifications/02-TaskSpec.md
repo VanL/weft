@@ -447,6 +447,11 @@ inside Docker, or in another supported backend.
   - runner-specific mapping
   - must remain JSON-serializable so stored TaskSpecs and queue payloads can
     round-trip safely
+  - first-party Docker command tasks may set
+    `spec.runner.options.container_profile` to select a data-only TOML profile
+    from the Docker extension. That profile materializes ordinary Docker
+    runner options and env at the plugin boundary; it is not core TaskSpec
+    schema and is rejected for Docker-backed agent tasks.
 
 Validation is layered:
 
@@ -561,6 +566,7 @@ _Implementation mapping_: `weft/core/tasks/base.py` (`BaseTask._apply_reserved_p
 
 ## Related Plans
 
+- [`docs/plans/2026-05-28-docker-container-profiles-plan.md`](../plans/2026-05-28-docker-container-profiles-plan.md)
 - [`docs/plans/2026-04-06-piped-input-support-plan.md`](../plans/2026-04-06-piped-input-support-plan.md)
 - [`docs/plans/2026-04-13-pipeline-spec-expansion-plan.md`](../plans/2026-04-13-pipeline-spec-expansion-plan.md)
 - [`docs/plans/2026-04-06-runner-extension-point-plan.md`](../plans/2026-04-06-runner-extension-point-plan.md)

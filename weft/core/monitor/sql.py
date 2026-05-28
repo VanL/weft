@@ -291,6 +291,24 @@ def select_summary_ready_open_tasks(
         """
 
 
+def select_stale_service_owner_candidate_tasks(
+    collations_table: str,
+    columns: Sequence[str],
+) -> str:
+    """Build a query for old open task rows needing service-owner filtering."""
+
+    return f"""
+        SELECT {identifier_list(columns)}
+        FROM {identifier(collations_table)}
+        WHERE context_key = ?
+          AND terminal_seen = 0
+          AND disposition_at_ns IS NULL
+          AND last_message_id <= ?
+        ORDER BY last_message_id, tid
+        LIMIT ?
+        """
+
+
 def mark_summary_emitted(collations_table: str) -> str:
     """Build a summary-emitted update."""
 

@@ -285,7 +285,7 @@ class ServiceTask(BaseTask):
                 request_id=request_id,
                 initial_items=(work,) if initial_items is None else initial_items,
             )
-        except Exception:
+        except Exception:  # pragma: no cover - restore lane state before re-raise
             self._service_lane_work_items.pop(lane, None)
             raise
         with self._service_worker_lock:
@@ -371,7 +371,7 @@ class ServiceTask(BaseTask):
                 )
                 for index in range(handle.worker_count)
             )
-        except Exception:
+        except Exception:  # pragma: no cover - unwind partially started workers
             self._stop_service_worker(name)
             with self._service_worker_lock:
                 registration = self._service_worker_registrations.get(name)

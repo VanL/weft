@@ -103,16 +103,25 @@ def serve_manager(context: WeftContext) -> None:
 
 def stop_manager(
     context: WeftContext,
-    tid: str,
+    tid: str | None = None,
     *,
     force: bool = False,
     timeout: float = MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
 ) -> None:
-    """Stop one manager or raise a typed exception."""
+    """Stop one manager or the active manager, or raise a typed exception."""
 
+    record: dict[str, Any] | None = None
+    if tid is None:
+        record = _select_active_manager(context, probe_stale=True, probe_cache={})
+        if record is None:
+            raise ManagerNotRunning("No active manager")
+        tid_value = record.get("tid")
+        if not isinstance(tid_value, str) or not tid_value:
+            raise ManagerNotRunning("Active manager record is missing a TID")
+        tid = tid_value
     stopped, message = _stop_manager(
         context,
-        None,
+        record,
         tid=tid,
         timeout=timeout,
         force=force,

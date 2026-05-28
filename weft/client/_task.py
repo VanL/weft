@@ -11,6 +11,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
+from weft._constants import TASK_PING_TIMEOUT_SECONDS
 from weft.commands import events
 from weft.commands import result as result_cmd
 from weft.commands import tasks as task_ops
@@ -41,6 +42,9 @@ class Task:
             timeout=timeout,
             context=self._context,
         )
+
+    def ping(self, *, timeout: float = TASK_PING_TIMEOUT_SECONDS) -> dict[str, Any]:
+        return task_ops.task_ping(self.tid, timeout=timeout, context=self._context)
 
     def result(self, timeout: float | None = None) -> TaskResult:
         return result_cmd.await_task_result(self._context, self.tid, timeout=timeout)

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import sys
 import threading
 import time
+import traceback
 from collections.abc import Callable
 from typing import Any
 
@@ -21,17 +23,21 @@ from weft._constants import (
     INTERNAL_SERVICE_KEY_TASK_MONITOR,
     INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY,
     PONG_EXTENSION_KEY,
+    QUEUE_INTERNAL_RESERVED_SUFFIX,
     SERVICE_OWNER_SCHEMA,
     SERVICE_STATUS_ACTIVE,
     SERVICE_TYPE_MANAGED,
+    SERVICE_TYPE_MANAGER,
     TASK_MONITOR_ACTIVITY_WAIT_CAP_SECONDS,
     TASK_MONITOR_CLEANUP_POLICY_NAMES,
     TASK_MONITOR_POLICY_MONITOR_STORE_LIFECYCLE,
     TASK_MONITOR_POLICY_TASK_LOG_RETENTION,
     TASK_MONITOR_TID_MAPPING_CLEANUP_MIN_AGE_SECONDS,
     WEFT_GLOBAL_LOG_QUEUE,
+    WEFT_MANAGER_OUTBOX_QUEUE,
     WEFT_MONITOR_SCHEMA_VERSION,
     WEFT_SERVICES_REGISTRY_QUEUE,
+    WEFT_SPAWN_REQUESTS_QUEUE,
     load_config,
 )
 from weft.core.monitor.collation import update_from_task_log_payload
@@ -49,6 +55,7 @@ from weft.core.monitor.task_monitor import (
     TaskMonitor,
     make_task_monitor_taskspec,
 )
+from weft.core.service_convergence import manager_service_key
 from weft.helpers import iter_queue_entries
 
 pytestmark = [pytest.mark.shared]
@@ -110,14 +117,45 @@ def drive_task_monitor_until_idle(
         ):
             break
         task.wait_for_activity(timeout=0.05)
-    assert task._builtin_cycle_work_in_flight is None
-    assert task._processor_work_in_flight is None
-    assert task._control_cleanup_work_in_flight is None
+    diagnostics = _task_monitor_idle_diagnostics(task)
+    assert task._builtin_cycle_work_in_flight is None, diagnostics
+    assert task._processor_work_in_flight is None, diagnostics
+    assert task._control_cleanup_work_in_flight is None, diagnostics
     task._drain_worker_results()
-    assert task._builtin_cycle_work_in_flight is None
-    assert task._processor_work_in_flight is None
-    assert task._control_cleanup_work_in_flight is None
-    assert not task._has_pending_worker_results()
+    diagnostics = _task_monitor_idle_diagnostics(task)
+    assert task._builtin_cycle_work_in_flight is None, diagnostics
+    assert task._processor_work_in_flight is None, diagnostics
+    assert task._control_cleanup_work_in_flight is None, diagnostics
+    assert not task._has_pending_worker_results(), diagnostics
+
+
+def _task_monitor_idle_diagnostics(task: TaskMonitor) -> str:
+    """Return enough state to diagnose async worker drain failures."""
+
+    frames = sys._current_frames()
+    stacks: list[str] = []
+    for thread in threading.enumerate():
+        if not thread.name.startswith(f"weft-worker-{task.tid_short}-"):
+            continue
+        frame = frames.get(thread.ident)
+        if frame is None:
+            continue
+        stack = "".join(traceback.format_stack(frame, limit=12))
+        stacks.append(f"{thread.name}:\n{stack}")
+    return json.dumps(
+        {
+            "builtin_cycle_work_in_flight": repr(task._builtin_cycle_work_in_flight),
+            "processor_work_in_flight": repr(task._processor_work_in_flight),
+            "control_cleanup_work_in_flight": repr(
+                task._control_cleanup_work_in_flight
+            ),
+            "service_snapshot": task._service_worker_snapshot(),
+            "worker_snapshot": task._worker_activity_snapshot(),
+            "worker_stacks": stacks,
+        },
+        sort_keys=True,
+        default=str,
+    )
 
 
 def drive_task_monitor_until(
@@ -3247,6 +3285,368 @@ def test_task_monitor_terminal_disposition_does_not_delete_manager_control_queue
 
     assert list(ctrl_in.peek_generator()) == ["stop"]
     assert list(ctrl_out.peek_generator()) == ["pong"]
+
+
+def test_task_monitor_skips_ambiguous_old_service_owner_collation(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
+            "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
+            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    tid = "1778084345905438745"
+    taskspec = {
+        "tid": tid,
+        "version": "1.0",
+        "name": "manager",
+        "io": {
+            "control": {
+                "ctrl_in": f"T{tid}.ctrl_in",
+                "ctrl_out": f"T{tid}.ctrl_out",
+            },
+        },
+        "state": {"status": "running"},
+        "metadata": {"role": "manager"},
+    }
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999967"),
+        config=config,
+    )
+    try:
+        store = task._ensure_monitor_store()
+        assert store is not None
+        update = update_from_task_log_payload(
+            {
+                "event": "work_started",
+                "status": "running",
+                "tid": tid,
+                "taskspec": taskspec,
+            },
+            message_id=int(tid),
+        )
+        assert update is not None
+        store.record_task_log_updates(
+            WEFT_GLOBAL_LOG_QUEUE,
+            (update,),
+            checkpoint_message_id=None,
+        )
+
+        emitted = task._emit_monitor_store_summaries(
+            store,
+            now_ns=time.time_ns(),
+            apply_disposition=True,
+        )
+        record = store.get_task(tid)
+        assert record is not None
+        assert emitted == 0
+        assert record.terminal_seen is False
+        assert record.status == "running"
+        assert record.summary_emitted_at_ns is None
+        assert record.disposition_reason is None
+        assert record.suspect_reason is None
+    finally:
+        task.stop()
+
+
+def test_task_monitor_disposes_old_stale_service_owner_collation(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
+            "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
+            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    tid = "1778084345905438745"
+    active_tid = "1778084345905438755"
+    taskspec = {
+        "tid": tid,
+        "version": "1.0",
+        "name": "manager",
+        "io": {
+            "control": {
+                "ctrl_in": f"T{tid}.ctrl_in",
+                "ctrl_out": f"T{tid}.ctrl_out",
+            },
+        },
+        "state": {"status": "running"},
+        "metadata": {"role": "manager"},
+    }
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999967"),
+        config=config,
+    )
+    try:
+        store = task._ensure_monitor_store()
+        assert store is not None
+        make_queue(WEFT_SERVICES_REGISTRY_QUEUE).write(
+            json.dumps(
+                {
+                    "schema": SERVICE_OWNER_SCHEMA,
+                    "service_key": manager_service_key(task._monitor_context()),
+                    "service_type": SERVICE_TYPE_MANAGER,
+                    "owner_tid": active_tid,
+                    "status": SERVICE_STATUS_ACTIVE,
+                }
+            )
+        )
+        update = update_from_task_log_payload(
+            {
+                "event": "work_started",
+                "status": "running",
+                "tid": tid,
+                "taskspec": taskspec,
+            },
+            message_id=int(tid),
+        )
+        assert update is not None
+        store.record_task_log_updates(
+            WEFT_GLOBAL_LOG_QUEUE,
+            (update,),
+            checkpoint_message_id=None,
+        )
+
+        emitted = task._emit_monitor_store_summaries(
+            store,
+            now_ns=time.time_ns(),
+            apply_disposition=True,
+        )
+        record = store.get_task(tid)
+        assert record is not None
+        assert emitted == 1
+        assert record.terminal_seen is False
+        assert record.status == "running"
+        assert record.summary_emitted_at_ns is not None
+        assert record.disposition_reason == "stale_service_owner"
+        assert record.suspect_reason == "stale_service_owner"
+    finally:
+        task.stop()
+
+
+def test_task_monitor_stale_service_owner_cleanup_deletes_only_control_queues(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
+            "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
+            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    tid = "1778084345905438746"
+    taskspec = {
+        "tid": tid,
+        "version": "1.0",
+        "name": "manager",
+        "io": {
+            "control": {
+                "ctrl_in": f"T{tid}.ctrl_in",
+                "ctrl_out": f"T{tid}.ctrl_out",
+            },
+        },
+        "state": {"status": "running"},
+        "metadata": {"role": "manager"},
+    }
+    ctrl_in = make_queue(f"T{tid}.ctrl_in")
+    ctrl_out = make_queue(f"T{tid}.ctrl_out")
+    inbox = make_queue(f"T{tid}.inbox")
+    internal_reserved = make_queue(f"T{tid}.{QUEUE_INTERNAL_RESERVED_SUFFIX}")
+    spawn_requests = make_queue(WEFT_SPAWN_REQUESTS_QUEUE)
+    manager_outbox = make_queue(WEFT_MANAGER_OUTBOX_QUEUE)
+    ctrl_in.write("stale-ping")
+    ctrl_out.write("stale-pong")
+    inbox.write("payload")
+    internal_reserved.write("internal")
+    spawn_requests.write("spawn")
+    manager_outbox.write("manager-output")
+
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999968"),
+        config=config,
+    )
+    try:
+        store = task._ensure_monitor_store()
+        assert store is not None
+        update = update_from_task_log_payload(
+            {
+                "event": "work_started",
+                "status": "running",
+                "tid": tid,
+                "taskspec": taskspec,
+            },
+            message_id=int(tid),
+        )
+        assert update is not None
+        store.record_task_log_updates(
+            WEFT_GLOBAL_LOG_QUEUE,
+            (update,),
+            checkpoint_message_id=None,
+        )
+        store.mark_summary_emitted(
+            tid,
+            int(tid) + 1,
+            suspect_reason="stale_service_owner",
+        )
+        store.mark_family_disposed(
+            tid,
+            int(tid) + 2,
+            disposition_reason="stale_service_owner",
+            suspect_reason="stale_service_owner",
+            suspect_at_ns=int(tid) + 2,
+        )
+
+        cleanup = task._run_terminal_control_cleanup_slice(
+            store,
+            now_ns=time.time_ns(),
+        )
+        record = store.get_task(tid)
+        assert record is not None
+        assert record.task_control_deleted_at_ns is not None
+        assert cleanup.families_processed == 1
+        assert cleanup.skipped_nonstandard == 0
+    finally:
+        task.stop()
+
+    assert ctrl_in.stats().total == 0
+    assert ctrl_out.stats().total == 0
+    assert list(inbox.peek_generator()) == ["payload"]
+    assert list(internal_reserved.peek_generator()) == ["internal"]
+    assert list(spawn_requests.peek_generator()) == ["spawn"]
+    assert list(manager_outbox.peek_generator()) == ["manager-output"]
+
+
+def test_task_monitor_stale_service_owner_cleanup_skips_active_owner(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
+            "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
+            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    tid = "1778084345905438747"
+    taskspec = {
+        "tid": tid,
+        "version": "1.0",
+        "name": "task-monitor",
+        "io": {
+            "control": {
+                "ctrl_in": f"T{tid}.ctrl_in",
+                "ctrl_out": f"T{tid}.ctrl_out",
+            },
+        },
+        "state": {"status": "running"},
+        "metadata": {
+            "role": "task_monitor",
+            INTERNAL_RUNTIME_TASK_CLASS_KEY: INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR,
+            INTERNAL_SERVICE_KEY_METADATA_KEY: INTERNAL_SERVICE_KEY_TASK_MONITOR,
+        },
+    }
+    ctrl_in = make_queue(f"T{tid}.ctrl_in")
+    ctrl_out = make_queue(f"T{tid}.ctrl_out")
+    ctrl_in.write("active-ping")
+    ctrl_out.write("active-pong")
+    make_queue(WEFT_SERVICES_REGISTRY_QUEUE).write(
+        json.dumps(
+            {
+                "schema": SERVICE_OWNER_SCHEMA,
+                "service_key": INTERNAL_SERVICE_KEY_TASK_MONITOR,
+                "service_type": SERVICE_TYPE_MANAGED,
+                "owner_tid": tid,
+                "status": SERVICE_STATUS_ACTIVE,
+            }
+        )
+    )
+
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999969"),
+        config=config,
+    )
+    try:
+        store = task._ensure_monitor_store()
+        assert store is not None
+        update = update_from_task_log_payload(
+            {
+                "event": "work_started",
+                "status": "running",
+                "tid": tid,
+                "taskspec": taskspec,
+            },
+            message_id=int(tid),
+        )
+        assert update is not None
+        store.record_task_log_updates(
+            WEFT_GLOBAL_LOG_QUEUE,
+            (update,),
+            checkpoint_message_id=None,
+        )
+        store.mark_summary_emitted(
+            tid,
+            int(tid) + 1,
+            suspect_reason="stale_service_owner",
+        )
+        store.mark_family_disposed(
+            tid,
+            int(tid) + 2,
+            disposition_reason="stale_service_owner",
+            suspect_reason="stale_service_owner",
+            suspect_at_ns=int(tid) + 2,
+        )
+
+        cleanup = task._run_terminal_control_cleanup_slice(
+            store,
+            now_ns=time.time_ns(),
+        )
+        record = store.get_task(tid)
+        assert record is not None
+        assert record.task_control_deleted_at_ns is None
+        assert cleanup.families_processed == 0
+    finally:
+        task.stop()
+
+    assert list(ctrl_in.peek_generator()) == ["active-ping"]
+    assert list(ctrl_out.peek_generator()) == ["active-pong"]
 
 
 def test_task_monitor_terminal_control_cleanup_is_bounded_by_family(

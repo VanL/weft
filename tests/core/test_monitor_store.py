@@ -42,11 +42,18 @@ def _update(
     status: str = "running",
     terminal: bool = False,
     reporting_interval: float | str | None = None,
+    role: str | None = None,
+    metadata: dict[str, object] | None = None,
 ) -> MonitorTaskEventUpdate:
     terminal_status = status if terminal else None
     taskspec_summary: dict[str, object] = {"tid": tid, "name": "sample"}
     if reporting_interval is not None:
         taskspec_summary["spec"] = {"reporting_interval": reporting_interval}
+    metadata_summary = dict(metadata or {})
+    if role is not None:
+        metadata_summary["role"] = role
+    if metadata_summary:
+        taskspec_summary["metadata"] = metadata_summary
     return MonitorTaskEventUpdate(
         tid=tid,
         queue_name=WEFT_GLOBAL_LOG_QUEUE,
@@ -56,6 +63,7 @@ def _update(
         observed_at_ns=message_id,
         name="sample",
         runner="host",
+        role=role,
         terminal_seen=terminal,
         terminal_event=event if terminal else None,
         terminal_status=terminal_status,
@@ -532,6 +540,65 @@ def test_monitor_store_summary_ready_classifies_stale_open_without_interval(
     assert [(item.record.tid, item.close_reason) for item in stale] == [
         (tid, "stale_open")
     ]
+
+
+def test_monitor_store_lists_old_open_service_owner_candidates(tmp_path) -> None:
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    now_ns = 1_779_000_010_000_000_000
+    old_manager_tid = "1779000000000000201"
+    old_service_tid = "1779000000000000202"
+    old_user_tid = "1779000000000000203"
+    recent_service_tid = "1779000000000000204"
+    terminal_service_tid = "1779000000000000205"
+    old_manager = _update(
+        old_manager_tid,
+        now_ns - 4_000_000_000,
+        role="manager",
+    )
+    old_service = _update(
+        old_service_tid,
+        now_ns - 3_000_000_000,
+        role="task_monitor",
+        metadata={
+            INTERNAL_RUNTIME_TASK_CLASS_KEY: INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR
+        },
+    )
+    old_user = _update(old_user_tid, now_ns - 2_000_000_000)
+    recent_service = _update(
+        recent_service_tid,
+        now_ns - 500_000_000,
+        role="task_monitor",
+        metadata={
+            INTERNAL_RUNTIME_TASK_CLASS_KEY: INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR
+        },
+    )
+    terminal_service = _update(
+        terminal_service_tid,
+        now_ns - 5_000_000_000,
+        role="manager",
+        terminal=True,
+    )
+    store.record_task_log_updates(
+        WEFT_GLOBAL_LOG_QUEUE,
+        (
+            old_manager,
+            old_service,
+            old_user,
+            recent_service,
+            terminal_service,
+        ),
+        checkpoint_message_id=None,
+    )
+
+    ready = store.list_stale_service_owner_candidates(
+        limit=10,
+        now_ns=now_ns,
+        retention_seconds=1.0,
+    )
+
+    assert [record.tid for record in ready] == [old_manager_tid, old_service_tid]
 
 
 def test_monitor_store_disposition_tombstone_removes_family_from_ready_list(

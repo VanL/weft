@@ -1,6 +1,6 @@
 # Service Collation Reporting Plan
 
-Status: draft
+Status: completed
 Source specs: docs/specifications/05-Message_Flow_and_State.md [MF-5]; docs/specifications/07-System_Invariants.md [OBS.13]
 Superseded by: none
 

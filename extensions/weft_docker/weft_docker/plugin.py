@@ -31,7 +31,7 @@ from weft.core.runners.subprocess_runner import (
     run_monitored_subprocess,
 )
 from weft.core.tasks.runner import AgentSession, CommandSession
-from weft.core.taskspec import AgentSection
+from weft.core.taskspec import AgentSection, bundle_root_from_taskspec_payload
 from weft.ext import (
     RunnerCapabilities,
     RunnerHandle,
@@ -53,6 +53,7 @@ from .agent_runner import (
     _normalize_work_item_mounts,
     _validate_mount_target_conflicts,
 )
+from .profiles import MaterializedContainerProfile, materialize_container_profile
 
 
 class DockerContainerMonitor:
@@ -341,6 +342,7 @@ class DockerCommandRunner:
         elif max_connections == 0:
             docker_command.extend(["--network", "none"])
 
+        container_workdir: str | None = None
         if self._mount_workdir and self._working_dir:
             host_workdir = str(Path(self._working_dir).expanduser().resolve())
             container_workdir = self._container_workdir or host_workdir
@@ -348,10 +350,13 @@ class DockerCommandRunner:
                 [
                     "--volume",
                     f"{host_workdir}:{container_workdir}",
-                    "--workdir",
-                    container_workdir,
                 ]
             )
+        elif self._container_workdir is not None:
+            container_workdir = self._container_workdir
+
+        if container_workdir is not None:
+            docker_command.extend(["--workdir", container_workdir])
 
         for mount in self._mounts:
             docker_command.extend(["--volume", _docker_volume_arg(mount)])
@@ -402,6 +407,7 @@ class DockerRunnerPlugin:
 
         spec_type = spec.get("type")
         if spec_type == "agent":
+            self._reject_agent_container_profile(spec)
             self._validate_agent_taskspec(spec, preflight=preflight)
             return
         if spec_type != "command":
@@ -413,6 +419,13 @@ class DockerRunnerPlugin:
             raise ValueError("Docker runner does not support persistent tasks")
         runner = _require_mapping(spec.get("runner"), name="spec.runner")
         options = _require_mapping(runner.get("options"), name="spec.runner.options")
+        materialized_profile = _materialize_command_container_profile(
+            taskspec_payload,
+            spec=spec,
+            options=options,
+            preflight=preflight,
+        )
+        options = materialized_profile.runner_options
         image = options.get("image")
         build = options.get("build")
         normalized_image = (
@@ -448,8 +461,11 @@ class DockerRunnerPlugin:
             name="spec.runner.options.mounts",
         )
         network = options.get("network")
+        normalized_network: str | None = None
         if network is not None:
-            _normalize_optional_text(network, name="spec.runner.options.network")
+            normalized_network = _normalize_optional_text(
+                network, name="spec.runner.options.network"
+            )
 
         limits = spec.get("limits")
         if isinstance(limits, Mapping):
@@ -471,6 +487,8 @@ class DockerRunnerPlugin:
             )
         with _docker_client(timeout=5) as client:
             client.ping()
+            if preflight and normalized_network is not None:
+                _validate_docker_network_exists(client, normalized_network)
 
     def create_runner(
         self,
@@ -501,6 +519,14 @@ class DockerRunnerPlugin:
                 "Docker runner is currently supported only on Linux and macOS"
             )
         if target_type == "agent":
+            if (
+                isinstance(runner_options, Mapping)
+                and runner_options.get("container_profile") is not None
+            ):
+                raise ValueError(
+                    "spec.runner.options.container_profile currently supports "
+                    "command tasks only"
+                )
             return DockerProviderCLIRunner(
                 tid=tid,
                 agent=agent,
@@ -514,20 +540,34 @@ class DockerRunnerPlugin:
                 db_path=db_path,
                 config=config,
             )
+        materialized_profile = materialize_container_profile(
+            runner_options=runner_options,
+            env=env,
+            bundle_root=bundle_root,
+        )
         return DockerCommandRunner(
             tid=tid,
             process_target=process_target,
             args=args,
-            env=env,
+            env=materialized_profile.env,
             working_dir=working_dir,
             timeout=timeout,
             limits=limits,
             monitor_class=monitor_class,
             monitor_interval=monitor_interval,
-            runner_options=runner_options,
+            runner_options=materialized_profile.runner_options,
             db_path=db_path,
             config=config,
         )
+
+    def _reject_agent_container_profile(self, spec: Mapping[str, Any]) -> None:
+        runner = _require_mapping(spec.get("runner"), name="spec.runner")
+        options = _require_mapping(runner.get("options"), name="spec.runner.options")
+        if options.get("container_profile") is not None:
+            raise ValueError(
+                "spec.runner.options.container_profile currently supports command "
+                "tasks only"
+            )
 
     def _validate_agent_taskspec(
         self,
@@ -645,6 +685,22 @@ class DockerRunnerPlugin:
                     **dict(handle.metadata),
                 },
             )
+
+
+def _materialize_command_container_profile(
+    taskspec_payload: Mapping[str, Any],
+    *,
+    spec: Mapping[str, Any],
+    options: Mapping[str, Any],
+    preflight: bool,
+) -> MaterializedContainerProfile:
+    env = _mapping_of_strings(spec.get("env") or {}, name="spec.env")
+    return materialize_container_profile(
+        runner_options=options,
+        env=env,
+        bundle_root=bundle_root_from_taskspec_payload(taskspec_payload),
+        preflight=preflight,
+    )
 
 
 _PLUGIN = DockerRunnerPlugin()
@@ -1341,6 +1397,14 @@ def _validate_build_paths(build: Mapping[str, Any]) -> None:
     dockerfile_path = Path(str(dockerfile)).expanduser()
     if not dockerfile_path.exists() or not dockerfile_path.is_file():
         raise ValueError(f"Docker build Dockerfile does not exist: {dockerfile_path}")
+
+
+def _validate_docker_network_exists(client: Any, network: str) -> None:
+    docker = _load_docker_sdk()
+    try:
+        client.networks.get(network)
+    except docker.errors.NotFound as exc:
+        raise ValueError(f"Docker network does not exist: {network}") from exc
 
 
 def _normalize_mounts(

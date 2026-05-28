@@ -10,6 +10,7 @@ import signal
 import sys
 import threading
 import time
+import traceback
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
@@ -220,6 +221,7 @@ def _expire_service_probe(manager: Manager, probe: Any) -> None:
         ctrl_out_name=probe.ctrl_out_name,
         request_id=probe.request_id,
         deadline_ns=time.time_ns() - 1,
+        ctrl_in_message_id=probe.ctrl_in_message_id,
     )
 
 
@@ -2735,6 +2737,55 @@ def test_managed_service_pong_probe_is_nonblocking(
     )
     assert live_candidate.state == "live"
     assert live_candidate.source == "service-registry-pong"
+    assert list(make_queue(probe.ctrl_out_name).peek_generator()) == []
+
+
+def test_managed_service_pong_probe_timeout_deletes_exact_ping(
+    manager_setup,
+) -> None:
+    manager, make_queue = manager_setup
+    service_key = INTERNAL_SERVICE_KEY_TASK_MONITOR
+    old_tid = "1777000000000000151"
+    _write_managed_service_owner(
+        make_queue,
+        service_key=service_key,
+        tid=old_tid,
+    )
+
+    candidates = manager._observed_service_candidates_by_key({service_key})[service_key]
+    pending_candidate = next(
+        candidate for candidate in candidates if candidate.tid == old_tid
+    )
+    assert pending_candidate.reason == "ping_pending"
+    probe = _service_probe_for(
+        manager,
+        tid=old_tid,
+        source="service-registry-pong",
+    )
+    assert make_queue(probe.ctrl_in_name).stats().total == 1
+    expired_probe = probe.__class__(
+        key=probe.key,
+        service_key=probe.service_key,
+        tid=probe.tid,
+        row_timestamp=probe.row_timestamp,
+        source=probe.source,
+        ctrl_in_name=probe.ctrl_in_name,
+        ctrl_out_name=probe.ctrl_out_name,
+        request_id=probe.request_id,
+        deadline_ns=time.time_ns() - 1,
+        ctrl_in_message_id=probe.ctrl_in_message_id,
+    )
+
+    candidate = manager._advance_service_pong_probe(
+        expired_probe,
+        timestamp=probe.row_timestamp,
+        metadata={},
+        now_ns=time.time_ns(),
+    )
+
+    assert candidate is None
+    assert make_queue(probe.ctrl_in_name).stats().total == 0
+    assert probe.key not in manager._service_probe_pending
 
 
 def test_managed_service_observation_prunes_superseded_service_history(
@@ -3630,7 +3681,14 @@ def test_manager_cleanup_waits_for_active_child_launch_worker(
         release_launch.set()
         cleanup_thread.join(timeout=5.0)
 
-    assert not cleanup_thread.is_alive()
+    if cleanup_thread.is_alive():
+        frame = sys._current_frames().get(cleanup_thread.ident)
+        stack = (
+            "".join(traceback.format_stack(frame, limit=24))
+            if frame is not None
+            else "<no frame>"
+        )
+        pytest.fail(f"cleanup thread did not exit:\n{stack}")
     assert not cleanup_errors
 
 
@@ -4027,6 +4085,42 @@ def test_manager_leadership_ping_probe_is_nonblocking(
     assert lower_tid not in manager._leader_probe_pending
 
 
+def test_manager_leadership_ping_probe_timeout_deletes_exact_ping(
+    manager_setup,
+) -> None:
+    manager, make_queue = manager_setup
+    lower_tid = str(int(manager.tid) - 1)
+    ctrl_in_name = f"T{lower_tid}.ctrl_in"
+    ctrl_out_name = f"T{lower_tid}.ctrl_out"
+    record = _manager_service_payload(
+        manager,
+        tid=lower_tid,
+        runtime_handle=_external_supervisor_runtime_handle(),
+        ctrl_in=ctrl_in_name,
+        ctrl_out=ctrl_out_name,
+    )
+
+    initial = manager._manager_pong_dispatch_proof(record, now_ns=time.time_ns())
+    assert initial.reason == "ping_pending"
+    pending = manager._leader_probe_pending[lower_tid]
+    assert make_queue(ctrl_in_name).stats().total == 1
+    manager._leader_probe_pending[lower_tid] = pending.__class__(
+        tid=pending.tid,
+        row_timestamp=pending.row_timestamp,
+        ctrl_in_name=pending.ctrl_in_name,
+        ctrl_out_name=pending.ctrl_out_name,
+        request_id=pending.request_id,
+        deadline_ns=time.time_ns() - 1,
+        ctrl_in_message_id=pending.ctrl_in_message_id,
+    )
+
+    expired = manager._manager_pong_dispatch_proof(record, now_ns=time.time_ns())
+
+    assert expired.reason == "ping_timeout"
+    assert make_queue(ctrl_in_name).stats().total == 0
+    assert lower_tid not in manager._leader_probe_pending
+
+
 def test_manager_leadership_ping_probe_accepts_later_pong(
     manager_setup,
     monkeypatch: pytest.MonkeyPatch,
@@ -4072,6 +4166,7 @@ def test_manager_leadership_ping_probe_accepts_later_pong(
     assert proof.dispatch_eligible is True
     assert proof.source == "control-pong"
     assert lower_tid not in manager._leader_probe_pending
+    assert list(make_queue(ctrl_out_name).peek_generator()) == []
 
 
 def test_manager_leadership_keeps_namespace_ambiguous_host_row_after_ping_timeout(

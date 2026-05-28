@@ -1,6 +1,6 @@
 # Canonical Service Reducer Fix Plan
 
-Status: draft
+Status: completed
 Source specs: docs/specifications/03-Manager_Architecture.md [MA-0], [MA-1], [MA-3]; docs/specifications/07-System_Invariants.md [MANAGER.3], [MANAGER.8], [MANAGER.12], [MANAGER.12a], [MANAGER.13], [MANAGER.15], [MANAGER.16], [OBS.15], [OBS.16]
 Superseded by: none
 

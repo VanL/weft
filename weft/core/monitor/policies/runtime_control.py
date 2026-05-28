@@ -17,6 +17,7 @@ from weft._constants import (
     QUEUE_INBOX_SUFFIX,
     QUEUE_OUTBOX_SUFFIX,
     QUEUE_RESERVED_SUFFIX,
+    STALE_SERVICE_OWNER_DISPOSITION_REASONS,
     TASK_MONITOR_RUNTIME_CLEANUP_SLICE_ORDER,
 )
 from weft.core.monitor.policies.dead_task import (
@@ -254,6 +255,38 @@ def terminal_task_runtime_queue_cleanup_plan(
         inbox_queue_names=inbox_queue_names,
         outbox_queue_names=outbox_queue_names,
         retention_eligible=retention_eligible,
+    )
+
+
+def stale_service_owner_runtime_queue_cleanup_plan(
+    record: MonitorTaskCollationRecord,
+) -> TerminalTaskRuntimeQueueCleanupPlan | None:
+    """Return standard control queues for a disposed stale service owner."""
+
+    if record.disposition_reason not in STALE_SERVICE_OWNER_DISPOSITION_REASONS:
+        return None
+    if not record.tid.isdigit():
+        return None
+    if not record.service_classification().is_service_record:
+        return None
+    expected_ctrl_in, expected_ctrl_out = standard_task_control_queue_pair(record.tid)
+    io_summary = record.taskspec_summary.get("io")
+    if not isinstance(io_summary, Mapping):
+        return None
+    control = io_summary.get("control")
+    if not isinstance(control, Mapping):
+        return None
+    if (
+        control.get("ctrl_in") != expected_ctrl_in
+        or control.get("ctrl_out") != expected_ctrl_out
+    ):
+        return None
+    return TerminalTaskRuntimeQueueCleanupPlan(
+        queue_names=(expected_ctrl_in, expected_ctrl_out),
+        control_queue_names=(expected_ctrl_in, expected_ctrl_out),
+        inbox_queue_names=(),
+        outbox_queue_names=(),
+        retention_eligible=False,
     )
 
 

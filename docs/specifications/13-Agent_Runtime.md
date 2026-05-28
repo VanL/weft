@@ -590,6 +590,9 @@ Backend-specific notes:
   the raw work item at execution time and bind-mount them into fixed container
   targets; this is a Docker runner feature, not a generic cross-runner Weft
   abstraction
+- Docker container profiles are a Docker command-runner feature. Docker-backed
+  agent tasks reject `spec.runner.options.container_profile` and continue to
+  use provider image recipes and provider container runtime descriptors.
 - in both lanes, timeout, cancellation, reserved-queue policy, and outbox
   writes stay on the existing durable spine
 
@@ -715,6 +718,7 @@ This slice does not attempt to:
 
 ## Related Plans
 
+- [`docs/plans/2026-05-28-docker-container-profiles-plan.md`](../plans/2026-05-28-docker-container-profiles-plan.md)
 - [`docs/plans/2026-05-08-agent-session-and-task-startup-observability-plan.md`](../plans/2026-05-08-agent-session-and-task-startup-observability-plan.md)
 - [`docs/plans/2026-04-14-agent-runtime-package-refactor-plan.md`](../plans/2026-04-14-agent-runtime-package-refactor-plan.md)
 - [`docs/plans/2026-04-13-result-stream-implementation-plan.md`](../plans/2026-04-13-result-stream-implementation-plan.md)

@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 125 plan files in this directory.
+There are currently 129 plan files in this directory.
 
 ## Curation Policy
 
@@ -16,13 +16,18 @@ There are currently 125 plan files in this directory.
 
 - `completed`: the planned slice landed and still describes current behavior or tooling.
 - `draft`: the plan is an active implementation slice or meta-plan that has
-  not landed yet.
+  not landed yet, or a retained historical draft whose `Superseded by` column
+  points to the successor plan.
 
 ## Index
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
-| [`2026-05-27-service-collation-reporting-plan.md`](./2026-05-27-service-collation-reporting-plan.md) | Service Collation Reporting Plan | `draft` | none |
+| [`2026-05-28-docker-container-profiles-plan.md`](./2026-05-28-docker-container-profiles-plan.md) | Docker Container Profiles Plan | `completed` | none |
+| [`2026-05-28-documentation-clarity-and-plan-curation-plan.md`](./2026-05-28-documentation-clarity-and-plan-curation-plan.md) | Documentation Clarity And Plan Curation Plan | `completed` | none |
+| [`2026-05-28-stale-service-owner-runtime-cleanup-plan.md`](./2026-05-28-stale-service-owner-runtime-cleanup-plan.md) | Stale Service Owner Runtime Cleanup Plan | `completed` | none |
+| [`2026-05-28-codebase-excellence-cleanup-plan.md`](./2026-05-28-codebase-excellence-cleanup-plan.md) | Codebase Excellence Cleanup Plan | `completed` | none |
+| [`2026-05-27-service-collation-reporting-plan.md`](./2026-05-27-service-collation-reporting-plan.md) | Service Collation Reporting Plan | `completed` | none |
 | [`2026-05-26-monitor-five-cleanup-policy-consolidation-plan.md`](./2026-05-26-monitor-five-cleanup-policy-consolidation-plan.md) | Monitor Five Cleanup Policy Consolidation Plan | `completed` | none |
 | [`2026-05-26-service-task-worker-api-plan.md`](./2026-05-26-service-task-worker-api-plan.md) | Service Task Worker API Plan | `completed` | none |
 | [`2026-05-25-monitor-dead-task-catchup-convergence-plan.md`](./2026-05-25-monitor-dead-task-catchup-convergence-plan.md) | Monitor Dead-Task Catch-Up Convergence Plan | `completed` | none |
@@ -39,13 +44,13 @@ There are currently 125 plan files in this directory.
 | [`2026-05-19-task-monitor-control-cleanup-worker-plan.md`](./2026-05-19-task-monitor-control-cleanup-worker-plan.md) | Task Monitor Control Cleanup Worker Plan | `completed` | none |
 | [`2026-05-19-task-monitor-bounded-control-cleanup-plan.md`](./2026-05-19-task-monitor-bounded-control-cleanup-plan.md) | Task Monitor Bounded Control Cleanup Plan | `completed` | none |
 | [`2026-05-19-monitor-loop-batched-cleanup-plan.md`](./2026-05-19-monitor-loop-batched-cleanup-plan.md) | Monitor Loop Batched Cleanup Plan | `completed` | none |
-| [`2026-05-18-monitor-table-driven-retained-log-cleanup-plan.md`](./2026-05-18-monitor-table-driven-retained-log-cleanup-plan.md) | Monitor Table Driven Retained Log Cleanup Plan | `draft` | none |
+| [`2026-05-18-monitor-table-driven-retained-log-cleanup-plan.md`](./2026-05-18-monitor-table-driven-retained-log-cleanup-plan.md) | Monitor Table Driven Retained Log Cleanup Plan | `completed` | none |
 | [`2026-05-18-reactive-task-loop-hot-probe-plan.md`](./2026-05-18-reactive-task-loop-hot-probe-plan.md) | Reactive Task Loop Hot-Probe Plan | `completed` | none |
 | [`2026-05-18-monitor-cleanup-reserved-hot-path-plan.md`](./2026-05-18-monitor-cleanup-reserved-hot-path-plan.md) | Monitor Cleanup Reserved Hot Path Plan | `completed` | none |
 | [`2026-05-16-task-log-external-logging-and-retention-policy-plan.md`](./2026-05-16-task-log-external-logging-and-retention-policy-plan.md) | Task Log External Logging And Retention Policy Plan | `completed` | none |
 | [`2026-05-16-monitor-store-hardening-and-layering-plan.md`](./2026-05-16-monitor-store-hardening-and-layering-plan.md) | Monitor Store Hardening And Layering Plan | `completed` | none |
 | [`2026-05-16-monitor-durable-collation-store-plan.md`](./2026-05-16-monitor-durable-collation-store-plan.md) | Monitor Durable Collation Store Plan | `completed` | none |
-| [`2026-05-15-swappable-task-log-family-scanner-plan.md`](./2026-05-15-swappable-task-log-family-scanner-plan.md) | Swappable Task Log Family Scanner Plan | `draft` | none |
+| [`2026-05-15-swappable-task-log-family-scanner-plan.md`](./2026-05-15-swappable-task-log-family-scanner-plan.md) | Swappable Task Log Family Scanner Plan | `completed` | none |
 | [`2026-05-15-manager-reactor-hot-loop-follow-up-plan.md`](./2026-05-15-manager-reactor-hot-loop-follow-up-plan.md) | Manager Reactor Hot-Loop Follow-Up Plan | `completed` | none |
 | [`2026-05-15-task-reactor-and-evidence-worker-plan.md`](./2026-05-15-task-reactor-and-evidence-worker-plan.md) | Task Reactor And Evidence Worker Plan | `completed` | none |
 | [`2026-05-15-manager-hot-loop-reduction-plan.md`](./2026-05-15-manager-hot-loop-reduction-plan.md) | Manager Hot-Loop Reduction Plan | `draft` | [`2026-05-15-task-reactor-and-evidence-worker-plan.md`](./2026-05-15-task-reactor-and-evidence-worker-plan.md) |
@@ -53,41 +58,41 @@ There are currently 125 plan files in this directory.
 | [`2026-05-13-task-monitor-pong-policy-stats-plan.md`](./2026-05-13-task-monitor-pong-policy-stats-plan.md) | Task Monitor PONG Policy Stats Plan | `completed` | none |
 | [`2026-05-13-service-convergence-throttle-plan.md`](./2026-05-13-service-convergence-throttle-plan.md) | Service Convergence Throttle Plan | `draft` | [`2026-05-15-manager-hot-loop-reduction-plan.md`](./2026-05-15-manager-hot-loop-reduction-plan.md) |
 | [`2026-05-13-early-env-file-bootstrap-plan.md`](./2026-05-13-early-env-file-bootstrap-plan.md) | Early Env File Bootstrap Plan | `completed` | none |
-| [`2026-05-13-internal-state-machine-helper-plan.md`](./2026-05-13-internal-state-machine-helper-plan.md) | Internal State Machine Helper Plan | `draft` | none |
+| [`2026-05-13-internal-state-machine-helper-plan.md`](./2026-05-13-internal-state-machine-helper-plan.md) | Internal State Machine Helper Plan | `completed` | none |
 | [`2026-05-13-manager-liveness-and-leadership-robustness-plan.md`](./2026-05-13-manager-liveness-and-leadership-robustness-plan.md) | Manager Liveness And Leadership Robustness Plan | `completed` | none |
 | [`2026-05-13-manager-replace-start-serve-plan.md`](./2026-05-13-manager-replace-start-serve-plan.md) | Manager Replace Start And Serve Plan | `completed` | none |
 | [`2026-05-12-task-monitor-cleanup-composition-refactor-plan.md`](./2026-05-12-task-monitor-cleanup-composition-refactor-plan.md) | Task Monitor Cleanup Composition Refactor Plan | `completed` | none |
 | [`2026-05-12-bounded-task-monitor-cleanup-policy-plan.md`](./2026-05-12-bounded-task-monitor-cleanup-policy-plan.md) | Bounded Task Monitor Cleanup Policy Plan | `completed` | none |
-| [`2026-05-11-canonical-service-reducer-fix-plan.md`](./2026-05-11-canonical-service-reducer-fix-plan.md) | Canonical Service Reducer Fix Plan | `draft` | none |
-| [`2026-05-11-service-convergence-and-manager-registry-bounding-plan.md`](./2026-05-11-service-convergence-and-manager-registry-bounding-plan.md) | Service Convergence And Manager Registry Bounding Plan | `draft` | none |
-| [`2026-05-11-internal-service-observability-plan.md`](./2026-05-11-internal-service-observability-plan.md) | Internal Service Observability Plan | `draft` | none |
-| [`2026-05-11-manager-serve-operational-log-plan.md`](./2026-05-11-manager-serve-operational-log-plan.md) | Manager Serve Operational Log Plan | `draft` | none |
-| [`2026-05-11-manager-work-stealing-dispatch-plan.md`](./2026-05-11-manager-work-stealing-dispatch-plan.md) | Manager Work-Stealing Dispatch Plan | `draft` | none |
+| [`2026-05-11-canonical-service-reducer-fix-plan.md`](./2026-05-11-canonical-service-reducer-fix-plan.md) | Canonical Service Reducer Fix Plan | `completed` | none |
+| [`2026-05-11-service-convergence-and-manager-registry-bounding-plan.md`](./2026-05-11-service-convergence-and-manager-registry-bounding-plan.md) | Service Convergence And Manager Registry Bounding Plan | `completed` | none |
+| [`2026-05-11-internal-service-observability-plan.md`](./2026-05-11-internal-service-observability-plan.md) | Internal Service Observability Plan | `completed` | none |
+| [`2026-05-11-manager-serve-operational-log-plan.md`](./2026-05-11-manager-serve-operational-log-plan.md) | Manager Serve Operational Log Plan | `completed` | none |
+| [`2026-05-11-manager-work-stealing-dispatch-plan.md`](./2026-05-11-manager-work-stealing-dispatch-plan.md) | Manager Work-Stealing Dispatch Plan | `completed` | none |
 | [`2026-05-10-manager-service-authority-boundary-hardening-plan.md`](./2026-05-10-manager-service-authority-boundary-hardening-plan.md) | Manager Service Authority Boundary Hardening Plan | `completed` | none |
 | [`2026-05-10-control-and-service-convergence-state-machine-plan.md`](./2026-05-10-control-and-service-convergence-state-machine-plan.md) | Control And Service Convergence State Machine Plan | `completed` | none |
-| [`2026-05-09-service-liveness-and-health-convergence-plan.md`](./2026-05-09-service-liveness-and-health-convergence-plan.md) | Service Liveness And Health Convergence Plan | `draft` | none |
+| [`2026-05-09-service-liveness-and-health-convergence-plan.md`](./2026-05-09-service-liveness-and-health-convergence-plan.md) | Service Liveness And Health Convergence Plan | `completed` | none |
 | [`2026-05-09-prune-path-unification-plan.md`](./2026-05-09-prune-path-unification-plan.md) | Prune Path Unification Plan | `completed` | none |
 | [`2026-05-09-runtime-liveness-probe-registry-plan.md`](./2026-05-09-runtime-liveness-probe-registry-plan.md) | Runtime Liveness Probe Registry Plan | `completed` | none |
 | [`2026-05-09-managed-service-restart-clock-hardening-plan.md`](./2026-05-09-managed-service-restart-clock-hardening-plan.md) | Managed Service Restart Clock Hardening Plan | `completed` | none |
 | [`2026-05-09-internal-spawn-priority-queue-plan.md`](./2026-05-09-internal-spawn-priority-queue-plan.md) | Internal Spawn Priority Queue Plan | `completed` | none |
 | [`2026-05-09-manager-stop-timeout-hardening-plan.md`](./2026-05-09-manager-stop-timeout-hardening-plan.md) | Manager Stop Timeout Hardening Plan | `completed` | none |
-| [`2026-05-08-agent-session-and-task-startup-observability-plan.md`](./2026-05-08-agent-session-and-task-startup-observability-plan.md) | Agent Session And Task Startup Observability Plan | `draft` | none |
+| [`2026-05-08-agent-session-and-task-startup-observability-plan.md`](./2026-05-08-agent-session-and-task-startup-observability-plan.md) | Agent Session And Task Startup Observability Plan | `completed` | none |
 | [`2026-05-08-deterministic-manager-service-reconciler-plan.md`](./2026-05-08-deterministic-manager-service-reconciler-plan.md) | Deterministic Manager Service Reconciler Plan | `completed` | none |
 | [`2026-05-08-phase-7-manager-service-reconciler-cleanup-plan.md`](./2026-05-08-phase-7-manager-service-reconciler-cleanup-plan.md) | Phase 7 Manager Service Reconciler Cleanup Plan | `draft` | [`2026-05-08-deterministic-manager-service-reconciler-plan.md`](./2026-05-08-deterministic-manager-service-reconciler-plan.md) |
 | [`2026-05-08-planning-guidance-zero-context-hardening-plan.md`](./2026-05-08-planning-guidance-zero-context-hardening-plan.md) | Planning Guidance Zero-Context Hardening Plan | `completed` | none |
 | [`2026-05-08-manager-owned-internal-service-supervision-plan.md`](./2026-05-08-manager-owned-internal-service-supervision-plan.md) | Manager-Owned Internal Service Supervision Plan | `draft` | [`2026-05-08-phase-7-manager-service-reconciler-cleanup-plan.md`](./2026-05-08-phase-7-manager-service-reconciler-cleanup-plan.md) |
-| [`2026-05-07-phase-7-task-monitor-supervision-and-cleanup-plan.md`](./2026-05-07-phase-7-task-monitor-supervision-and-cleanup-plan.md) | Phase 7 Task Monitor Supervision And Cleanup Plan | `draft` | none |
+| [`2026-05-07-phase-7-task-monitor-supervision-and-cleanup-plan.md`](./2026-05-07-phase-7-task-monitor-supervision-and-cleanup-plan.md) | Phase 7 Task Monitor Supervision And Cleanup Plan | `completed` | none |
 | [`2026-05-07-task-monitor-ping-logs-breaking-cleanup-plan.md`](./2026-05-07-task-monitor-ping-logs-breaking-cleanup-plan.md) | Task Monitor, Ping Flag, And Logs Directory Breaking Cleanup Plan | `completed` | none |
 | [`2026-05-07-task-local-reaper-retention-policy-plan.md`](./2026-05-07-task-local-reaper-retention-policy-plan.md) | Task Local Reaper And Retention Policy Plan | `completed` | none |
 | [`2026-05-07-runtime-state-pruning-plan.md`](./2026-05-07-runtime-state-pruning-plan.md) | Runtime State Pruning Plan | `completed` | none |
 | [`2026-05-07-lifecycle-monitor-archive-sink-plan.md`](./2026-05-07-lifecycle-monitor-archive-sink-plan.md) | Lifecycle Monitor Archive Sink Plan | `completed` | none |
 | [`2026-05-07-result-evidence-and-superseded-manager-reconciliation-plan.md`](./2026-05-07-result-evidence-and-superseded-manager-reconciliation-plan.md) | Result Evidence And Superseded Manager Reconciliation Plan | `completed` | none |
 | [`2026-05-07-manager-selection-ping-pong-liveness-plan.md`](./2026-05-07-manager-selection-ping-pong-liveness-plan.md) | Manager Selection PING/PONG Liveness Plan | `completed` | none |
-| [`2026-05-07-extended-ping-pong-state-probe-plan.md`](./2026-05-07-extended-ping-pong-state-probe-plan.md) | Extended PING/PONG State Probe Plan | `draft` | none |
-| [`2026-05-06-terminal-publication-hardening-plan.md`](./2026-05-06-terminal-publication-hardening-plan.md) | Terminal Publication And Wrapper-Loss Hardening Plan | `draft` | none |
-| [`2026-05-06-task-evidence-reconciliation-model-plan.md`](./2026-05-06-task-evidence-reconciliation-model-plan.md) | Task Evidence Reconciliation Model Plan | `draft` | none |
-| [`2026-05-06-status-coherence-and-stale-pid-liveness-plan.md`](./2026-05-06-status-coherence-and-stale-pid-liveness-plan.md) | Status Coherence And Stale PID Liveness Plan | `draft` | none |
-| [`2026-05-06-lifecycle-reconciliation-architecture-plan.md`](./2026-05-06-lifecycle-reconciliation-architecture-plan.md) | Lifecycle Reconciliation Architecture Plan | `draft` | none |
+| [`2026-05-07-extended-ping-pong-state-probe-plan.md`](./2026-05-07-extended-ping-pong-state-probe-plan.md) | Extended PING/PONG State Probe Plan | `completed` | none |
+| [`2026-05-06-terminal-publication-hardening-plan.md`](./2026-05-06-terminal-publication-hardening-plan.md) | Terminal Publication And Wrapper-Loss Hardening Plan | `completed` | none |
+| [`2026-05-06-task-evidence-reconciliation-model-plan.md`](./2026-05-06-task-evidence-reconciliation-model-plan.md) | Task Evidence Reconciliation Model Plan | `completed` | none |
+| [`2026-05-06-status-coherence-and-stale-pid-liveness-plan.md`](./2026-05-06-status-coherence-and-stale-pid-liveness-plan.md) | Status Coherence And Stale PID Liveness Plan | `completed` | none |
+| [`2026-05-06-lifecycle-reconciliation-architecture-plan.md`](./2026-05-06-lifecycle-reconciliation-architecture-plan.md) | Lifecycle Reconciliation Architecture Plan | `completed` | none |
 | [`2026-05-05-simplebroker-multiqueue-waiter-integration-plan.md`](./2026-05-05-simplebroker-multiqueue-waiter-integration-plan.md) | SimpleBroker Multi-Queue Waiter Integration | `completed` | none |
 | [`2026-04-30-task-log-cursor-high-water-mark-plan.md`](./2026-04-30-task-log-cursor-high-water-mark-plan.md) | Task Log Cursor High-Water Mark Plan | `completed` | none |
 | [`2026-04-30-known-tid-terminal-snapshot-api-plan.md`](./2026-04-30-known-tid-terminal-snapshot-api-plan.md) | Known-TID Terminal Snapshot API Plan | `completed` | none |

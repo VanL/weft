@@ -1,6 +1,6 @@
 # Monitor Table Driven Retained Log Cleanup Plan
 
-Status: draft
+Status: completed
 Source specs: docs/specifications/00-Quick_Reference.md; docs/specifications/05-Message_Flow_and_State.md [MF-5]; docs/specifications/07-System_Invariants.md [OBS.13], [OBS.16], [OBS.17]
 Superseded by: none
 

@@ -147,3 +147,19 @@ class WeftClient:
 
     def task(self, tid: str) -> Task:
         return Task(self, submission.normalize_tid(tid))
+
+
+def connect(
+    spec_context: str | Path | None = None,
+    *,
+    path: str | Path | None = None,
+    autostart: bool | None = None,
+) -> WeftClient:
+    """Resolve a Weft context and return a bound public client adapter."""
+
+    if spec_context is not None and path is not None:
+        raise ValueError("Pass either spec_context or path, not both")
+    return WeftClient.from_context(
+        path if path is not None else spec_context,
+        autostart=autostart,
+    )

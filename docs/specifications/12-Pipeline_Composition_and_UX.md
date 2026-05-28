@@ -216,8 +216,12 @@ closure.
 - piped stdin may provide initial input when `--input` is absent
 - providing both `--input` and piped stdin is a validation error
 - if neither `--input` nor piped stdin is present, the run falls back to the
-  first stage's `defaults.input` when it exists
-- stage-local `defaults.input` overrides the inherited input for that stage
+  first stage's `defaults.input` when it exists; the first stage's
+  `defaults.input` is a bootstrap fallback only and does not override an
+  explicit `--input` or piped stdin value
+- stage-local `defaults.input` on an interior stage overrides the upstream
+  payload for that edge; the override payload is written instead of forwarding
+  the upstream stage's output
 
 Pipeline input is stage input, not a live stream. If a user needs true stream
 plumbing, they should use direct queue wiring or an external Unix pipeline.

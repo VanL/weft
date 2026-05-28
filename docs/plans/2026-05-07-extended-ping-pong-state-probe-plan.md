@@ -1,6 +1,6 @@
 # Extended PING/PONG State Probe Plan
 
-Status: draft
+Status: completed
 Source specs: see Source Documents below
 Superseded by: none
 

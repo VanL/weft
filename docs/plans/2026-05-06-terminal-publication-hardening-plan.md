@@ -1,6 +1,6 @@
 # Terminal Publication And Wrapper-Loss Hardening Plan
 
-Status: draft
+Status: completed
 Source specs: see Source Documents below
 Superseded by: none
 

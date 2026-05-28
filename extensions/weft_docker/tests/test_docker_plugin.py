@@ -19,6 +19,43 @@ from weft.ext import RunnerHandle, RunnerRuntimeDescription
 pytestmark = [pytest.mark.shared]
 
 
+def _write_profile(path: Path, content: str) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content.strip() + "\n", encoding="utf-8")
+    return path
+
+
+class _FakeDockerClient:
+    def __init__(self, *, missing_networks: set[str] | None = None) -> None:
+        self.ping_count = 0
+        self.network_gets: list[str] = []
+        self._missing_networks = missing_networks or set()
+        self.networks = self
+
+    def ping(self) -> None:
+        self.ping_count += 1
+
+    def get(self, network: str) -> object:
+        self.network_gets.append(network)
+        if network in self._missing_networks:
+            raise _FakeDockerNotFound(network)
+        return object()
+
+
+class _FakeDockerNotFound(Exception):
+    pass
+
+
+class _FakeDockerModule:
+    class errors:
+        NotFound = _FakeDockerNotFound
+
+
+@contextmanager
+def _fake_docker_client_context(client: object) -> Iterator[object]:
+    yield client
+
+
 def _docker_manager_handle() -> RunnerHandle:
     return RunnerHandle(
         runner="manager-supervisor",
@@ -286,6 +323,176 @@ def test_docker_runner_rejects_command_work_item_mounts() -> None:
                 }
             }
         )
+
+
+def test_docker_runner_validation_accepts_command_container_profile(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    if os.name == "nt":
+        pytest.skip("Docker runner is currently unsupported on Windows")
+    runner_plugin = get_runner_plugin()
+    profile_file = _write_profile(
+        tmp_path / ".weft" / "docker-profiles.toml",
+        """
+        [profiles.ops]
+        image = "busybox:latest"
+        network = "project_ops"
+        """,
+    )
+    fake_client = _FakeDockerClient()
+    monkeypatch.setattr(
+        plugin,
+        "_docker_client",
+        lambda timeout=10: _fake_docker_client_context(fake_client),
+    )
+
+    runner_plugin.validate_taskspec(
+        {
+            "spec": {
+                "type": "command",
+                "process_target": "python3",
+                "runner": {
+                    "name": "docker",
+                    "options": {
+                        "container_profile": "ops",
+                        "container_profile_file": str(profile_file),
+                    },
+                },
+            }
+        }
+    )
+
+    assert fake_client.ping_count == 1
+    assert fake_client.network_gets == []
+
+
+def test_docker_runner_rejects_container_profile_for_agent_tasks() -> None:
+    if os.name == "nt":
+        pytest.skip("Docker runner is currently unsupported on Windows")
+    runner_plugin = get_runner_plugin()
+
+    with pytest.raises(ValueError, match="container_profile.*command"):
+        runner_plugin.validate_taskspec(
+            {
+                "spec": {
+                    "type": "agent",
+                    "runner": {
+                        "name": "docker",
+                        "options": {"container_profile": "ops"},
+                    },
+                    "agent": {
+                        "runtime": "provider_cli",
+                        "authority_class": "general",
+                        "conversation_scope": "per_message",
+                        "runtime_config": {"provider": "codex"},
+                    },
+                }
+            }
+        )
+
+
+def test_docker_runner_create_runner_materializes_container_profile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile_file = _write_profile(
+        tmp_path / ".weft" / "docker-profiles.toml",
+        """
+        [profiles.ops]
+        image = "busybox:latest"
+        network = "project_ops"
+        mount_workdir = false
+        container_workdir = "/app/project"
+        env_from_host = ["OPTIONAL_TOKEN"]
+
+        [profiles.ops.env]
+        SERVICE_URL = "https://internal-service:8443"
+        """,
+    )
+    monkeypatch.setenv("OPTIONAL_TOKEN", "from-host")
+
+    runner = plugin.DockerRunnerPlugin().create_runner(
+        target_type="command",
+        tid="1844674407370955161",
+        function_target=None,
+        process_target="python3",
+        agent=None,
+        args=["-c", "print('ok')"],
+        kwargs=None,
+        env={"SERVICE_URL": "https://explicit.example.test"},
+        working_dir=str(tmp_path),
+        timeout=5.0,
+        limits=None,
+        monitor_class=None,
+        monitor_interval=0.05,
+        runner_options={
+            "container_profile": "ops",
+            "container_profile_file": str(profile_file),
+            "docker_args": ["--pull=never"],
+        },
+        bundle_root=None,
+        persistent=False,
+        interactive=False,
+    )
+
+    assert isinstance(runner, plugin.DockerCommandRunner)
+    assert runner._image == "busybox:latest"
+    assert runner._network == "project_ops"
+    assert runner._mount_workdir is False
+    assert runner._container_workdir == "/app/project"
+    assert runner._docker_args == ["--pull=never"]
+    assert runner._env == {
+        "SERVICE_URL": "https://explicit.example.test",
+        "OPTIONAL_TOKEN": "from-host",
+    }
+
+
+def test_docker_runner_preflight_checks_profile_network_only_during_preflight(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    if os.name == "nt":
+        pytest.skip("Docker runner is currently unsupported on Windows")
+    runner_plugin = get_runner_plugin()
+    profile_file = _write_profile(
+        tmp_path / ".weft" / "docker-profiles.toml",
+        """
+        [profiles.ops]
+        image = "busybox:latest"
+        network = "missing_network"
+        """,
+    )
+    fake_client = _FakeDockerClient(missing_networks={"missing_network"})
+    monkeypatch.setattr(plugin, "_load_docker_sdk", lambda: _FakeDockerModule)
+    monkeypatch.setattr(plugin, "_resolve_docker_binary", lambda value: value)
+    monkeypatch.setattr(
+        plugin,
+        "_docker_client",
+        lambda timeout=10: _fake_docker_client_context(fake_client),
+    )
+    payload = {
+        "spec": {
+            "type": "command",
+            "process_target": "python3",
+            "runner": {
+                "name": "docker",
+                "options": {
+                    "container_profile": "ops",
+                    "container_profile_file": str(profile_file),
+                },
+            },
+        }
+    }
+
+    runner_plugin.validate_taskspec(payload, preflight=False)
+
+    assert fake_client.network_gets == []
+
+    with pytest.raises(ValueError, match="Docker network does not exist"):
+        runner_plugin.validate_taskspec(payload, preflight=True)
+
+    assert fake_client.network_gets == ["missing_network"]
 
 
 def test_docker_runner_rejects_conflicting_agent_mount_targets() -> None:
@@ -621,6 +828,72 @@ def test_command_runner_waits_for_container_to_leave_created_before_runtime_hand
 
     assert outcome.status == "ok"
     assert callback_state["status"] == "running"
+
+
+def test_command_runner_uses_container_workdir_without_mounting_host_workdir(
+    tmp_path: Path,
+) -> None:
+    runner = plugin.DockerCommandRunner(
+        tid="1234567890",
+        process_target="python3",
+        args=["-c", "print('hello')"],
+        env={},
+        working_dir=str(tmp_path),
+        timeout=5.0,
+        limits=None,
+        monitor_class=None,
+        monitor_interval=0.01,
+        runner_options={
+            "image": "busybox:latest",
+            "mount_workdir": False,
+            "container_workdir": "/app/project",
+        },
+    )
+
+    command, stdin_data = runner._build_docker_command(
+        {},
+        "weft-workdir-test",
+        executable="docker",
+        image="busybox:latest",
+    )
+
+    assert stdin_data is None
+    assert "--workdir" in command
+    assert command[command.index("--workdir") + 1] == "/app/project"
+    assert "--volume" not in command
+
+
+def test_command_runner_avoids_duplicate_workdir_when_mounting_host_workdir(
+    tmp_path: Path,
+) -> None:
+    runner = plugin.DockerCommandRunner(
+        tid="1234567890",
+        process_target="python3",
+        args=["-c", "print('hello')"],
+        env={},
+        working_dir=str(tmp_path),
+        timeout=5.0,
+        limits=None,
+        monitor_class=None,
+        monitor_interval=0.01,
+        runner_options={
+            "image": "busybox:latest",
+            "mount_workdir": True,
+            "container_workdir": "/app/project",
+        },
+    )
+
+    command, _stdin_data = runner._build_docker_command(
+        {},
+        "weft-workdir-test",
+        executable="docker",
+        image="busybox:latest",
+    )
+
+    assert command.count("--workdir") == 1
+    assert command[command.index("--workdir") + 1] == "/app/project"
+    assert "--volume" in command
+    assert f"{tmp_path.resolve()}:/app/project" in command
 
 
 def test_wait_for_container_runtime_start_fails_when_created_state_sticks(

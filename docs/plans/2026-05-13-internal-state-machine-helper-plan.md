@@ -1,6 +1,6 @@
 # Internal State Machine Helper Plan
 
-Status: draft
+Status: completed
 Source specs: docs/specifications/01-Core_Components.md [CC-1], [CC-2.4], [CC-2.5]; docs/specifications/03-Manager_Architecture.md [MA-1.6a]; docs/specifications/05-Message_Flow_and_State.md [MF-2], [MF-3], [MF-5]; docs/specifications/07-System_Invariants.md [STATE.1]-[STATE.6], [MANAGER.15]; docs/specifications/08-Testing_Strategy.md [TS-0], [TS-1]
 Superseded by: none
 

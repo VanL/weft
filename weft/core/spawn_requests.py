@@ -71,6 +71,8 @@ def generate_spawn_request_timestamp(
     """Return a broker-valid task timestamp from the spawn-request queue."""
 
     queue_config = dict(config) if config is not None else None
+    # Direct Queue ok here: TID allocation happens before a WeftContext or task
+    # object is available; see runtime-and-context-patterns.md section 2.
     queue = Queue(
         WEFT_SPAWN_REQUESTS_QUEUE,
         db_path=_normalize_broker_target(broker_target),
@@ -213,6 +215,8 @@ def submit_spawn_request(
     message_timestamp = int(resolved_tid)
 
     queue_config = dict(config) if config is not None else None
+    # Direct Queue ok here: spawn submission receives only a broker target, before
+    # a context-bound queue helper is available; see runtime-and-context-patterns.md section 2.
     queue = Queue(
         spawn_queue_name,
         db_path=_normalize_broker_target(broker_target),
@@ -242,6 +246,8 @@ def delete_spawn_request(
     """Best-effort removal of a queued spawn request after setup failure."""
 
     queue_config = dict(config) if config is not None else None
+    # Direct Queue ok here: rollback cleanup receives only a broker target, before
+    # a context-bound queue helper is available; see runtime-and-context-patterns.md section 2.
     queue = Queue(
         WEFT_SPAWN_REQUESTS_QUEUE,
         db_path=_normalize_broker_target(broker_target),

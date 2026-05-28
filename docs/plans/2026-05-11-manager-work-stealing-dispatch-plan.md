@@ -1,6 +1,6 @@
 # Manager Work-Stealing Dispatch Plan
 
-Status: draft
+Status: completed
 Source specs: docs/specifications/03-Manager_Architecture.md [MA-1], [MA-1.4], [MA-1.6a]; docs/specifications/05-Message_Flow_and_State.md [MF-2], [MF-6], [MF-7]; docs/specifications/07-System_Invariants.md [MANAGER.8]-[MANAGER.16]
 Superseded by: none
 

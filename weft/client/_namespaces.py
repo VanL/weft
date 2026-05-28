@@ -12,7 +12,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from weft._constants import MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS
+from weft._constants import (
+    MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
+    TASK_PING_TIMEOUT_SECONDS,
+)
 from weft.commands import manager as managers
 from weft.commands import queue as queues
 from weft.commands import specs, tasks
@@ -90,6 +93,14 @@ class TasksNamespace:
             timeout=timeout,
             context=self.client.context,
         )
+
+    def ping(
+        self,
+        tid: str,
+        *,
+        timeout: float = TASK_PING_TIMEOUT_SECONDS,
+    ) -> dict[str, Any]:
+        return tasks.task_ping(tid, timeout=timeout, context=self.client.context)
 
     def ack_terminal_snapshot(self, snapshot: TaskTerminalSnapshot) -> bool:
         return tasks.ack_terminal_snapshot(snapshot, context=self.client.context)
@@ -333,7 +344,7 @@ class ManagersNamespace:
 
     def stop(
         self,
-        tid: str,
+        tid: str | None = None,
         *,
         force: bool = False,
         timeout: float = MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,

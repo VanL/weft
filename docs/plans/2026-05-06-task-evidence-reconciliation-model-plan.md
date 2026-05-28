@@ -1,6 +1,6 @@
 # Task Evidence Reconciliation Model Plan
 
-Status: draft
+Status: completed
 Source specs: see Source Documents below
 Superseded by: none
 

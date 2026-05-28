@@ -1,5 +1,89 @@
 # Changelog
 
+## 0.9.70 - 2026-05-28
+
+This is a cumulative feature entry since 0.9.10. The intervening releases were
+small, iterative hardening releases; this entry describes the resulting product
+state rather than the sequence of intermediate changes.
+
+### Added
+
+- Added the manager-supervised TaskMonitor as a durable operational cleanup and
+  observability service. The Monitor now folds retained task-log rows into
+  derived Monitor tables, emits compact operational summaries, tracks cleanup
+  progress, and keeps task status available after raw task-log retirement while
+  preserving task-owned queues and `weft.log.tasks` as the lifecycle source of
+  truth.
+- Added bounded Monitor cleanup policies for retained task logs, Monitor-store
+  lifecycle rows, terminal task-local runtime queues, dead task-local queues,
+  and runtime-state retention. Cleanup is policy-selected, retryable, and
+  observable, with cached diagnostics surfaced through TaskMonitor liveness
+  responses.
+- Added shared `ServiceTask` infrastructure for long-running internal services.
+  Manager, TaskMonitor, and Heartbeat now share common reactor, control,
+  heartbeat, and service-worker mechanics without moving manager dispatch or
+  service-convergence policy out of the Manager.
+- Added manager-owned internal service supervision for Heartbeat, TaskMonitor,
+  and autostart services. Managers reconcile these services through a reserved
+  internal spawn path, service-owner records, keyed liveness probes, restart
+  backoff, and explicit service status evidence.
+- Added operator-facing diagnostics for manager and internal-service liveness,
+  including registry evidence, host/PING proof, service-owner state, pending
+  launches, and Monitor cleanup health.
+- Added Docker-backed runner capabilities, including first-party Docker command
+  execution, Docker-backed one-shot `provider_cli` agent execution, deterministic
+  provider image recipes/cache warming, runtime-specific liveness probing, and
+  command container profiles loaded from project-local TOML files.
+- Added public Python client conveniences and parity guards, including
+  `weft.client.connect()`, task PING helpers, active-manager stop parity, and a
+  test-backed matrix for the stable client namespace surface.
+
+### Changed
+
+- Changed manager startup, selection, and replacement to use stronger bounded
+  liveness evidence. Manager registry rows, service-owner rows, host runtime
+  handles, and keyed PING/PONG probes now feed a shared convergence model
+  instead of relying on stale-looking process records alone.
+- Changed internal service launches to drain through a manager-owned priority
+  path before ordinary public spawn work, so singleton services can converge
+  deterministically without starving public tasks or orphaning reserved work.
+- Changed task-log and runtime cleanup from ad hoc pruning into Monitor-owned
+  cleanup slices. Expensive cleanup work runs in bounded service-worker lanes;
+  the TaskMonitor reactor remains available for STOP, STATUS, PING, and cached
+  diagnostics while cleanup is in flight.
+- Changed Monitor diagnostics so PONG responses report cached cleanup state
+  instead of scanning queues, opening external log sinks, querying Monitor
+  tables, or recomputing cleanup candidates on the liveness path.
+- Changed stale service-owner cleanup so old Manager, TaskMonitor, and Heartbeat
+  service rows can be summarized, disposed, and cleaned only when same-service
+  registry evidence proves the owner is no longer live or has been superseded.
+  This cleanup authority does not turn Monitor state into lifecycle truth.
+- Changed Docker integration so runner-specific Docker defaults can be
+  materialized at the plugin boundary while Weft core continues to see ordinary
+  TaskSpec runner options, environment, working directory, lifecycle, and queue
+  semantics.
+- Changed the specs and tests to make the current architecture easier to audit:
+  Monitor invariants are split into explicit sub-contracts, dense runtime
+  modules have section maps, plan metadata is normalized, and import-boundary
+  tests guard against Monitor-derived state becoming public lifecycle authority.
+
+### Fixed
+
+- Fixed manager, result-wait, and shutdown races that showed up under release
+  load, parallel CI, Windows cleanup, and Postgres-backed test runs.
+- Fixed stale manager and service-owner records that could previously keep old
+  managers, TaskMonitor instances, Heartbeat services, or their task-local
+  control queues visible after restart or replacement paths.
+- Fixed cleanup paths that could either do too much work on a hot path or leave
+  retained task-log, terminal control, reserved, dead-task, and runtime-state
+  cleanup work without durable retry/progress evidence.
+- Fixed manager and managed-service probe residue by exact-deleting
+  manager-owned PING/PONG probe rows after success, timeout, or probe failure.
+- Fixed Docker runner validation and materialization edge cases for missing
+  images/builds, network isolation, profile files, required environment,
+  profile-sourced mounts/build contexts, and unsupported agent/profile
+  combinations.
+
 ## 0.9.10 - 2026-04-30
 
 ### Changed

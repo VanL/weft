@@ -12,9 +12,30 @@ See also:
 - context and broker integration:
   [`04-SimpleBroker_Integration.md`](04-SimpleBroker_Integration.md)
 
+## Table of Contents
+
+- [Related Plans](#related-plans)
+- [1. TaskSpec (`weft/core/taskspec/model.py`) [CC-1]](#1-taskspec-weftcoretaskspecmodelpy-cc-1)
+  - [1.1 Internal State-Machine Helper (`weft/core/state_machines.py`) [CC-1.1]](#11-internal-state-machine-helper-weftcorestate_machinespy-cc-11)
+- [2. Task Execution Architecture](#2-task-execution-architecture)
+  - [2.1 MultiQueueWatcher (`weft/core/tasks/multiqueue_watcher.py`) [CC-2.1]](#21-multiqueuewatcher-weftcoretasksmultiqueue_watcherpy-cc-21)
+  - [2.2 BaseTask (`weft/core/tasks/base.py`) [CC-2.2]](#22-basetask-weftcoretasksbasepy-cc-22)
+  - [2.3 Specialized Task Types [CC-2.3]](#23-specialized-task-types-cc-23)
+  - [2.4 Control and State Expectations [CC-2.4]](#24-control-and-state-expectations-cc-24)
+  - [2.4.1 Runtime Endpoint Registry [CC-2.4.1]](#241-runtime-endpoint-registry-cc-241)
+  - [2.5 Execution Flow [CC-2.5]](#25-execution-flow-cc-25)
+- [3. TaskRunner (`weft/core/tasks/runner.py`) [CC-3]](#3-taskrunner-weftcoretasksrunnerpy-cc-3)
+  - [3.1 Runner Plugin Boundary [CC-3.1]](#31-runner-plugin-boundary-cc-31)
+  - [3.2 Runtime Handles and Control [CC-3.2]](#32-runtime-handles-and-control-cc-32)
+  - [3.3 Validation and Preflight [CC-3.3]](#33-validation-and-preflight-cc-33)
+  - [3.4 Monitoring Ownership [CC-3.4]](#34-monitoring-ownership-cc-34)
+- [Related Plans](#related-plans-1)
+- [Related Documents](#related-documents)
+
 ## Related Plans
 
 - [`docs/plans/2026-05-26-monitor-five-cleanup-policy-consolidation-plan.md`](../plans/2026-05-26-monitor-five-cleanup-policy-consolidation-plan.md)
+- [`docs/plans/2026-05-28-docker-container-profiles-plan.md`](../plans/2026-05-28-docker-container-profiles-plan.md)
 - [`docs/plans/2026-05-26-service-task-worker-api-plan.md`](../plans/2026-05-26-service-task-worker-api-plan.md)
 - [`docs/plans/2026-05-24-monitor-policy-progress-contract-plan.md`](../plans/2026-05-24-monitor-policy-progress-contract-plan.md)
 - [`docs/plans/2026-05-23-monitor-cleanup-policy-convergence-plan.md`](../plans/2026-05-23-monitor-cleanup-policy-convergence-plan.md)
@@ -235,11 +256,13 @@ Current task families:
   summary when present, keeps exact raw task-log message IDs only while those
   raw rows still need exact deletion or retry, emits compact terminal task
   summaries through the configured monitor sink, and may support table-backed
-  exact raw deletion after any required external task-log JSONL emit succeeds.
+  exact raw deletion after durable Monitor collation; external task-log JSONL
+  emit gates family summary/disposition retry, not raw deletion.
   After raw deletion is reconciled, child message rows are physically removed
   from `weft_monitor_task_messages`; after summary, disposition, raw deletion,
-  and task-local control cleanup complete, the compact parent collation row may
-  also be physically retired. External lifecycle retention output is owned by
+  task-local control cleanup, and any required reserved cleanup proof complete,
+  the compact parent collation row may also be physically retired. External
+  lifecycle retention output is owned by
   `weft/core/monitor/external_log.py`; `WEFT_TASK_MONITOR_LOG_SINK` remains
   monitor operational output, not the external lifecycle-retention contract.
   The store is not lifecycle truth, result authority, queue truth, or a public
@@ -249,7 +272,11 @@ Current task families:
   readiness to delete whole standard stale task-local queues. Standard
   `T{tid}.ctrl_in`, `T{tid}.ctrl_out`, and `T{tid}.inbox` are stale at
   terminal cleanup time. Standard `T{tid}.outbox` is retained until task-log
-  retention age; eligible stale standard `T{tid}.reserved` queues are deleted
+  retention age. For old nonterminal service-owner rows, same-service
+  registry proof may authorize only standard `T{tid}.ctrl_in` and
+  `T{tid}.ctrl_out` cleanup after a stale/superseded disposition; it does
+  not turn the row into terminal lifecycle truth. Eligible stale standard
+  `T{tid}.reserved` queues are deleted
   through the reserved cleanup policy after monitor-table proof or stale
   no-monitor evidence. Cleanup records `task_control_deleted_at_ns`,
   `reserved_cleanup_checked_at_ns` for required reserved probes, and terminal
@@ -266,19 +293,22 @@ Current task families:
   monitor also calls the configured task-monitor processor. The persistent
   monitor is a reactor: it owns task-local control, heartbeat registration,
   scheduling, and commits cached diagnostics from worker results. Custom
-  processors run in the shared broker-free worker lane from a candidate
-  snapshot. Built-in cleanup processors run in a TaskMonitor-owned built-in
-  cycle worker lane; that lane may open fresh broker/store handles, fold
-  retained task-log rows into the Monitor store, emit configured operational
-  summaries, and delete exact rows through the canonical prune implementation.
-  Runtime cleanup remains a separate declared maintenance lane: the
+  processors run from the resulting candidate snapshot through the registered
+  `ServiceTask` processor worker group; the reactor commits the processor
+  result, checkpoint, and cached diagnostics after the typed worker event
+  returns. Built-in cleanup processors run through a separate registered
+  TaskMonitor-owned built-in cycle worker group; that group may open fresh
+  broker/store handles, fold retained task-log rows into the Monitor store,
+  emit configured operational summaries, and delete exact rows through the
+  canonical prune implementation.
+  Runtime cleanup remains a separate registered maintenance worker group: the
   runtime-cleanup worker may open fresh broker/store handles and delete one
   class of standard stale task-local queues per worker slice. Terminal
   control/inbox cleanup, eligible reserved cleanup, and dead-TID queue cleanup
   are discrete slices with shared policy definitions in
   `weft/core/monitor/policies/runtime_control.py`. The reactor launches each
-  slice on the runtime-cleanup worker lane and only commits cached result data
-  after the worker returns; worker lanes must not answer control messages.
+  slice on the registered runtime-cleanup worker group and only commits cached
+  result data after the worker returns; workers must not answer control messages.
   Runtime cleanup records per-slice job counts plus pending/cap/deadline
   diagnostics, and the reactor may launch the next discrete slice only after
   the previous worker result has been applied.
@@ -293,7 +323,7 @@ Current task families:
   reserve, move, unclaim, or delete active, ambiguous, claimed, malformed,
   unknown, or non-exact lifecycle messages. `report_only` remains available as
   a non-destructive override. Built-in cleanup processors run in the
-  TaskMonitor built-in cycle worker lane so the reactor remains responsive
+  TaskMonitor built-in cycle worker group so the reactor remains responsive
   while exact deletes still stay in the canonical prune path. Successful completed
   lifecycle proof does not require a reserved-queue probe; reserved probing is
   for failure-like or suspected-loss cases. `jsonl_then_delete` remains
@@ -453,6 +483,11 @@ Current rules:
 - runners resolve by name through the plugin surface
 - `host` is always available and is the default
 - plugins own runtime-specific execution details
+- plugins may materialize runner-specific declarative defaults before runner
+  construction, but core still sees ordinary runner options, env, and working
+  directory values. The first-party Docker extension owns
+  `spec.runner.options.container_profile` for command tasks; core does not
+  interpret Docker profile files.
 - core owns lifecycle, queues, and control semantics
 
 ### 3.2 Runtime Handles and Control [CC-3.2]

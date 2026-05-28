@@ -3,13 +3,29 @@
 The tables in this module are derived operational state owned by the
 ``TaskMonitor``. They live in an already configured Weft broker database,
 but they are not queues and they are not lifecycle or result authority.
+They support bounded retryable cleanup for messy process lifecycles; the
+justification lives at [OBS.13], and the store remains operational evidence
+rather than task-state truth.
 
 Spec references:
 - docs/specifications/01-Core_Components.md [CC-2.3], [CC-3.4]
 - docs/specifications/04-SimpleBroker_Integration.md [SB-0.4]
 - docs/specifications/05-Message_Flow_and_State.md [MF-5]
-- docs/specifications/07-System_Invariants.md [OBS.13], [OBS.17]
+- docs/specifications/07-System_Invariants.md [OBS.13], [OBS.13.1], [OBS.17]
 """
+
+# --- Section map ----------------------------------------------------------
+# Derived operational state, not lifecycle truth.
+#
+#   1. Schema initialization/migration - see [OBS.13.1]
+#   2. Collation merge                 - see [OBS.13.3]
+#   3. Family disposition state        - see [OBS.13.4]
+#   4. Raw-deletion reconciliation     - see [OBS.13.3], [OBS.13.4]
+#   5. Orphan recovery/retirement      - see [OBS.13.4]
+#   6. Reserved cleanup proof          - see [OBS.13.5]
+#
+# Read [OBS.13] before changing schema, deletion, or disposition rules.
+# -------------------------------------------------------------------------
 
 from __future__ import annotations
 
@@ -85,7 +101,7 @@ def _write_transaction(runner: _SQLRunner) -> Iterator[None]:
     try:
         yield
         runner.commit()
-    except Exception:
+    except Exception:  # pragma: no cover - rollback must preserve original failure
         runner.rollback()
         raise
 
@@ -766,6 +782,8 @@ class _MonitorTableAccess:
             )
             for row in open_rows:
                 record = _record_from_row(row)
+                if record.service_classification().is_service_record:
+                    continue
                 if _suspected_inactive(record, now_ns=now_ns):
                     ready.append(
                         MonitorSummaryReadyTask(
@@ -805,6 +823,36 @@ class _MonitorTableAccess:
             fetch=True,
         )
         return tuple(_record_from_row(row) for row in rows)
+
+    def list_stale_service_owner_candidates(
+        self,
+        *,
+        limit: int,
+        now_ns: int,
+        retention_seconds: float,
+    ) -> tuple[MonitorTaskCollationRecord, ...]:
+        """Return old open service-owner rows for runtime staleness proof."""
+
+        if limit <= 0:
+            return ()
+        cutoff_ns = _retention_cutoff_ns(now_ns, retention_seconds)
+        scan_limit = max(int(limit), int(limit) * 4)
+        rows = self._runner.run(
+            monitor_sql.select_stale_service_owner_candidate_tasks(
+                self._tables.task_collations,
+                _task_columns,
+            ),
+            (self._context_key, cutoff_ns, scan_limit),
+            fetch=True,
+        )
+        records = (
+            record
+            for row in rows
+            if (record := _record_from_row(row))
+            .service_classification()
+            .is_service_record
+        )
+        return tuple(records)[: int(limit)]
 
     def list_terminal_control_deleted_disposition_backfill_tasks(
         self,
@@ -1476,6 +1524,26 @@ class MonitorStore:
                 retention_seconds=retention_seconds,
             )
 
+    def list_stale_service_owner_candidates(
+        self,
+        *,
+        limit: int,
+        now_ns: int,
+        retention_seconds: float,
+    ) -> tuple[MonitorTaskCollationRecord, ...]:
+        """Return old open service-owner rows for runtime staleness proof."""
+
+        if limit <= 0:
+            return ()
+        with self._context.broker() as broker:
+            return self._access(
+                _runner_from_broker(broker)
+            ).list_stale_service_owner_candidates(
+                limit=limit,
+                now_ns=now_ns,
+                retention_seconds=retention_seconds,
+            )
+
     def list_terminal_control_deleted_disposition_backfill_tasks(
         self,
         *,
@@ -1846,7 +1914,9 @@ class MonitorStore:
 
         The current retirement rule is intentionally conservative: parent rows
         are removed only after raw deletion, summary emission, disposition,
-        task-local control cleanup, and the configured status-retention window.
+        task-local control cleanup, any required reserved cleanup proof
+        (``reserved_cleanup_checked_at_ns`` when ``reserved_probe_needed``),
+        and the configured status-retention window are all recorded.
 
         Spec: [MF-5], [OBS.13]
         """
@@ -1881,7 +1951,7 @@ class MonitorStore:
 
         try:
             checkpoint = self.get_checkpoint(WEFT_GLOBAL_LOG_QUEUE)
-        except Exception as exc:
+        except Exception as exc:  # pragma: no cover - status snapshot fallback
             return MonitorStoreStatus(
                 enabled=True,
                 available=False,

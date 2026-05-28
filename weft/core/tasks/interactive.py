@@ -228,7 +228,7 @@ class InteractiveTaskMixin(ABC):
         runner = self._make_task_runner(interactive=True)
         try:
             session = runner.start_session()
-        except Exception as exc:
+        except Exception as exc:  # pragma: no cover - session startup failure surface
             diagnostics = runner_diagnostics(
                 phase="process_spawn",
                 runner=self.taskspec.spec.runner.name,

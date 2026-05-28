@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from weft._constants import TASK_MONITOR_TID_MAPPING_CLEANUP_MIN_AGE_SECONDS
 from weft.core.monitor.policies.runtime_control import (
     runtime_dead_task_record_probe_tids,
     select_runtime_dead_task_cleanup_candidates,
+    stale_service_owner_runtime_queue_cleanup_plan,
     standard_task_control_queue_names,
     terminal_task_runtime_queue_cleanup_plan,
 )
@@ -99,6 +102,47 @@ def test_terminal_runtime_cleanup_plan_rejects_nonstandard_controls() -> None:
         )
         is None
     )
+
+
+def test_stale_service_owner_cleanup_plan_allows_standard_manager_controls() -> None:
+    tid = "1778084345905438801"
+    record = _record(tid, role="manager")
+    record = replace(
+        record,
+        status="running",
+        terminal_seen=False,
+        terminal_event=None,
+        terminal_status=None,
+        terminal_message_id=None,
+        return_code=None,
+        completed_at_ns=None,
+        summary_emitted_at_ns=int(tid) + 2,
+        disposition_reason="stale_service_owner",
+        disposition_at_ns=int(tid) + 3,
+    )
+
+    plan = stale_service_owner_runtime_queue_cleanup_plan(record)
+
+    assert plan is not None
+    assert plan.queue_names == (f"T{tid}.ctrl_in", f"T{tid}.ctrl_out")
+    assert plan.control_queue_names == (f"T{tid}.ctrl_in", f"T{tid}.ctrl_out")
+    assert plan.inbox_queue_names == ()
+    assert plan.outbox_queue_names == ()
+
+
+def test_stale_service_owner_cleanup_plan_rejects_user_tasks() -> None:
+    tid = "1778084345905438801"
+    record = _record(tid)
+
+    assert stale_service_owner_runtime_queue_cleanup_plan(record) is None
+
+
+def test_stale_service_owner_cleanup_plan_rejects_nonstandard_controls() -> None:
+    tid = "1778084345905438801"
+    record = _record(tid, role="manager")
+    record.taskspec_summary["io"]["control"]["ctrl_in"] = "weft.manager.ctrl_in"
+
+    assert stale_service_owner_runtime_queue_cleanup_plan(record) is None
 
 
 def test_dead_task_selection_treats_deferred_outbox_only_as_base_for_now() -> None:

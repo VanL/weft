@@ -8,7 +8,7 @@ Spec references:
 
 from __future__ import annotations
 
-from ._client import WeftClient
+from ._client import WeftClient, connect
 from ._errors import (
     ControlRejected,
     InvalidTID,
@@ -44,4 +44,5 @@ __all__ = [
     "TaskTerminalSnapshot",
     "WeftClient",
     "WeftError",
+    "connect",
 ]
