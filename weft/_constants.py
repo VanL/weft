@@ -353,8 +353,13 @@ MANAGER_CHILD_STARTUP_LIVENESS_GRACE_SECONDS: Final[float] = 1.0
 MANAGER_CHILD_TERMINAL_PROOF_GRACE_SECONDS: Final[float] = 15.0
 """Grace window for terminal proof after a clean Manager child wrapper exit."""
 
-MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS: Final[float] = 5.0
-"""Maximum time a Manager drain waits before forcefully reaping child processes."""
+MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS: Final[float] = 15.0
+"""Maximum time a Manager drain waits before forcefully reaping child processes.
+
+Postgres-backed control queues and CI-loaded hosts can take several seconds to
+deliver STOP, publish terminal service state, and expose that evidence to the
+manager. Keep this as an operational drain budget, not a quick test timeout.
+"""
 
 MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS: Final[float] = (
     MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS + 40.0
