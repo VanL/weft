@@ -35,7 +35,7 @@ class TestCLI:
         """Test --help flag shows help text."""
         result = runner.invoke(app, ["--help"])
         assert result.exit_code == 0
-        assert "Weft: The Multi-Agent Weaving Toolkit" in result.stdout
+        assert "Weft: the durable task substrate for agent systems" in result.stdout
         assert "Options:" in result.stdout
         assert "--version" in result.stdout
         assert "--help" in result.stdout
@@ -47,7 +47,7 @@ class TestCLI:
         assert result.exit_code in (0, 2)
         # Help output may be in stdout or stderr depending on version
         output = result.stdout or result.output
-        assert "Weft: The Multi-Agent Weaving Toolkit" in output
+        assert "Weft: the durable task substrate for agent systems" in output
         assert "Options:" in output
 
     def test_no_error_box_on_no_args(self):
@@ -80,7 +80,7 @@ class TestModuleExecution:
             text=True,
         )
         assert result.returncode == 0
-        assert "Weft: The Multi-Agent Weaving Toolkit" in result.stdout
+        assert "Weft: the durable task substrate for agent systems" in result.stdout
 
     def test_module_no_args(self):
         """Test python -m weft with no arguments."""
@@ -93,7 +93,7 @@ class TestModuleExecution:
         assert result.returncode in (0, 2)
         # Help output may be in stdout or stderr depending on version
         output = result.stdout or result.stderr
-        assert "Weft: The Multi-Agent Weaving Toolkit" in output
+        assert "Weft: the durable task substrate for agent systems" in output
 
 
 class TestCLIConstants:

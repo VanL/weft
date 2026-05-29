@@ -78,7 +78,7 @@ from weft.core.tasks import (
 )
 from weft.core.tasks.multiqueue_watcher import QueueMessageContext, QueueMode
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
-from weft.helpers import ContainerRuntimeDetection
+from weft.helpers import ContainerRuntimeDetection, process_create_time
 
 AUTOSTART_PIPELINE_RESULT_TIMEOUT = 60.0
 """Wait budget for full autostart pipeline completion under Windows CI load."""
@@ -1629,7 +1629,7 @@ def test_manager_task_monitor_supervision_ignores_dispatch_ownership(
         ),
     )
 
-    manager._tick_task_monitor(force=True)
+    manager._tick_internal_services(force=True)
 
     payloads = [
         json.loads(item) for item in drain(make_queue(WEFT_SPAWN_REQUESTS_QUEUE))
@@ -1686,13 +1686,13 @@ def test_manager_restarts_dead_task_monitor_after_backoff(
     )
 
     manager._cleanup_children()
-    manager._tick_task_monitor()
+    manager._tick_internal_services()
 
     assert manager._task_monitor_tid is None
     assert INTERNAL_SERVICE_KEY_TASK_MONITOR not in enqueued
 
     manager._task_monitor_next_start_allowed_ns = 0
-    manager._tick_task_monitor()
+    manager._tick_internal_services()
 
     assert INTERNAL_SERVICE_KEY_TASK_MONITOR in enqueued
 
@@ -1754,7 +1754,7 @@ def test_task_monitor_terminal_tracked_child_allows_restart(
         lambda service: enqueued.append(service.key) or True,
     )
 
-    manager._tick_task_monitor()
+    manager._tick_internal_services()
 
     assert manager._task_monitor_tid is None
     assert INTERNAL_SERVICE_KEY_TASK_MONITOR in enqueued
@@ -2515,7 +2515,7 @@ def test_task_monitor_terminal_log_overrides_tracked_live_child(
         lambda service: enqueued.append(service.key) or True,
     )
 
-    manager._tick_task_monitor(force=True)
+    manager._tick_internal_services(force=True)
 
     assert manager._task_monitor_tid is None
     assert INTERNAL_SERVICE_KEY_TASK_MONITOR in enqueued
@@ -2547,7 +2547,7 @@ def test_task_monitor_manager_spawned_pid_counts_as_live_owner(
         lambda service: enqueued.append(service.key) or True,
     )
 
-    manager._tick_task_monitor()
+    manager._tick_internal_services()
 
     assert manager._task_monitor_tid == child_tid
     assert INTERNAL_SERVICE_KEY_TASK_MONITOR not in enqueued
@@ -2617,7 +2617,7 @@ def test_task_monitor_terminal_tracked_child_does_not_hide_new_live_owner(
         lambda service: enqueued.append(service.key) or True,
     )
 
-    manager._tick_task_monitor()
+    manager._tick_internal_services()
 
     assert manager._task_monitor_tid == new_tid
     assert INTERNAL_SERVICE_KEY_TASK_MONITOR not in enqueued
@@ -2669,7 +2669,7 @@ def test_task_monitor_stale_log_without_liveness_does_not_block_restart(
         lambda service: enqueued.append(service.key) or True,
     )
 
-    manager._tick_task_monitor(force=True)
+    manager._tick_internal_services(force=True)
 
     assert enqueued == [
         INTERNAL_SERVICE_KEY_HEARTBEAT,
@@ -2702,7 +2702,7 @@ def test_task_monitor_recent_log_without_liveness_blocks_duplicate_restart(
         lambda service: enqueued.append(service.key) or True,
     )
 
-    manager._tick_task_monitor(force=True)
+    manager._tick_internal_services(force=True)
 
     assert enqueued == [INTERNAL_SERVICE_KEY_HEARTBEAT]
 
@@ -2890,7 +2890,7 @@ def test_task_monitor_duplicate_live_candidates_get_kill_signal(
         lambda service: enqueued.append(service.key) or True,
     )
 
-    manager._tick_task_monitor(force=True)
+    manager._tick_internal_services(force=True)
 
     assert make_queue(f"T{canonical_tid}.ctrl_in").read_one() is None
     assert make_queue(f"T{duplicate_tid}.ctrl_in").read_one() == CONTROL_KILL
@@ -2939,7 +2939,7 @@ def test_task_monitor_duplicate_manager_spawned_candidates_do_not_force_kill_raw
         lambda service: enqueued.append(service.key) or True,
     )
 
-    manager._tick_task_monitor(force=True)
+    manager._tick_internal_services(force=True)
 
     assert make_queue(f"T{canonical_tid}.ctrl_in").read_one() is None
     assert make_queue(f"T{duplicate_tid}.ctrl_in").read_one() == CONTROL_KILL
@@ -3049,7 +3049,7 @@ def test_task_monitor_duplicate_runtime_handle_force_kills_scoped_host_pid(
 
     monkeypatch.setattr(manager_mod, "kill_process_tree", _record_kill)
 
-    manager._tick_task_monitor(force=True)
+    manager._tick_internal_services(force=True)
 
     assert make_queue(f"T{canonical_tid}.ctrl_in").read_one() is None
     assert make_queue(f"T{duplicate_tid}.ctrl_in").read_one() == CONTROL_KILL
@@ -3080,7 +3080,7 @@ def test_task_monitor_internal_pending_spawn_request_blocks_duplicate_restart(
         lambda service: enqueued.append(service.key) or True,
     )
 
-    manager._tick_task_monitor(force=True)
+    manager._tick_internal_services(force=True)
 
     assert enqueued == [INTERNAL_SERVICE_KEY_HEARTBEAT]
     assert manager._task_monitor_spawn_pending is True
@@ -3110,7 +3110,7 @@ def test_task_monitor_public_pending_spawn_request_does_not_block_internal_resta
         lambda service: enqueued.append(service.key) or True,
     )
 
-    manager._tick_task_monitor(force=True)
+    manager._tick_internal_services(force=True)
 
     assert enqueued == [
         INTERNAL_SERVICE_KEY_HEARTBEAT,
@@ -3157,7 +3157,7 @@ def test_task_monitor_spoofed_pending_spawn_without_internal_envelope_does_not_b
         lambda service: enqueued.append(service.key) or True,
     )
 
-    manager._tick_task_monitor(force=True)
+    manager._tick_internal_services(force=True)
 
     assert enqueued == [
         INTERNAL_SERVICE_KEY_HEARTBEAT,
@@ -3344,7 +3344,7 @@ def test_task_monitor_spoofed_public_metadata_does_not_claim_singleton(
         lambda service: enqueued.append(service.key) or True,
     )
 
-    manager._tick_task_monitor(force=True)
+    manager._tick_internal_services(force=True)
 
     assert enqueued == [
         INTERNAL_SERVICE_KEY_HEARTBEAT,
@@ -3414,7 +3414,7 @@ def test_task_monitor_latest_terminal_log_overrides_older_running_evidence(
         lambda service: enqueued.append(service.key) or True,
     )
 
-    manager._tick_task_monitor(force=True)
+    manager._tick_internal_services(force=True)
 
     assert enqueued == [
         INTERNAL_SERVICE_KEY_HEARTBEAT,
@@ -3449,7 +3449,7 @@ def test_task_monitor_matching_pong_blocks_duplicate_restart(
         lambda service: enqueued.append(service.key) or True,
     )
 
-    manager._tick_task_monitor(force=True)
+    manager._tick_internal_services(force=True)
 
     assert enqueued == [INTERNAL_SERVICE_KEY_HEARTBEAT]
     assert manager._task_monitor_tid == old_tid
@@ -7645,4 +7645,76 @@ def test_manager_autostart_ensure_restarts_after_abrupt_child_kill(
         spawn_events.append(second_spawn)
         assert len(spawn_events) >= 2
     finally:
+        manager.cleanup()
+
+
+def _host_runtime_handle_with_create_time(
+    pid: int, create_time: float
+) -> dict[str, object]:
+    """Host runtime handle carrying both bare PIDs and create-time identities."""
+    return {
+        "runner": "host",
+        "kind": "process",
+        "id": str(pid),
+        "control": {"authority": "host-pid"},
+        "observations": {
+            "host_pids": [pid],
+            "host_processes": [{"pid": pid, "create_time": create_time}],
+        },
+        "metadata": {},
+    }
+
+
+def test_managed_pids_for_child_excludes_create_time_mismatch(
+    tmp_path: Path,
+    broker_env,
+    unique_tid: str,
+) -> None:
+    """Shutdown reap must not target a recycled PID (create-time mismatch).
+
+    A stale ``weft.state.tid_mappings`` row may hold a PID the OS has recycled to
+    an unrelated process. ``_managed_pids_for_child`` feeds the forced-shutdown
+    ``terminate_process_tree`` loop, so it must return only PIDs whose recorded
+    creation time still matches the live process. The bare-PID path would return
+    the recycled PID and kill an unrelated process tree.
+
+    Spec: [MA-1] item 4 (create-time validation), item 7 (force-reap authority).
+    """
+    db_path, make_queue = broker_env
+    spec = make_manager_spec(unique_tid, weft_context=str(tmp_path / "project"))
+    manager = Manager(db_path, spec, config=load_config())
+    try:
+        live_pid = os.getpid()
+        actual_create_time = process_create_time(live_pid)
+        assert actual_create_time is not None
+
+        # Recycled PID: live, but the recorded create_time no longer matches.
+        stale_tid = "100000000000000001"
+        make_queue(WEFT_TID_MAPPINGS_QUEUE).write(
+            json.dumps(
+                {
+                    "full": stale_tid,
+                    "runtime_handle": _host_runtime_handle_with_create_time(
+                        live_pid, actual_create_time - 100.0
+                    ),
+                }
+            )
+        )
+        assert manager._managed_pids_for_child(stale_tid) == set()
+
+        # Genuine match: same PID with its actual create_time stays targetable.
+        match_tid = "100000000000000002"
+        make_queue(WEFT_TID_MAPPINGS_QUEUE).write(
+            json.dumps(
+                {
+                    "full": match_tid,
+                    "runtime_handle": _host_runtime_handle_with_create_time(
+                        live_pid, actual_create_time
+                    ),
+                }
+            )
+        )
+        assert manager._managed_pids_for_child(match_tid) == {live_pid}
+    finally:
+        manager.stop(join=False)
         manager.cleanup()

@@ -6,6 +6,16 @@ This extension adds the `docker` runner via the `weft.runners` entry-point
 group. It supports one-shot `command` TaskSpecs and the Docker-backed
 one-shot provider CLI agent lane documented in Weft's agent runtime spec.
 
+**Security note.** Weft assumes user-level trust (see
+`docs/specifications/00-Overview_and_Architecture.md`).
+`spec.runner.options.docker_args` is a passthrough to `docker run`: managed flags
+(`--memory`, `--network`, `--volume`, …) are validated against collisions, but
+escape-hatch flags such as `--privileged`, `--cap-add`, `--security-opt`,
+`--pid=host`, and `-v /:/host` are not blocked. A task author who can set
+`docker_args` can therefore weaken or defeat the container isolation; treat
+`docker_args` as equivalent to local `docker run` access, not as a sandbox
+boundary.
+
 Current host support:
 
 - Linux: supported

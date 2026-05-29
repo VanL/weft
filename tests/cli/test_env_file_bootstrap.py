@@ -213,7 +213,7 @@ def test_missing_env_file_fails_before_cli_import(tmp_path: Path) -> None:
     assert str(missing) in result.stderr
     assert "file does not exist" in result.stderr
     assert result.stdout == ""
-    assert "Weft: The Multi-Agent Weaving Toolkit" not in result.stderr
+    assert "Weft: the durable task substrate for agent systems" not in result.stderr
 
 
 def test_malformed_env_file_does_not_echo_secret_value(tmp_path: Path) -> None:

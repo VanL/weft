@@ -45,7 +45,7 @@ from .run import cmd_run, render_spec_aware_run_help
 
 app = typer.Typer(
     name=PROG_NAME,
-    help="Weft: The Multi-Agent Weaving Toolkit",
+    help="Weft: the durable task substrate for agent systems",
     no_args_is_help=True,
     pretty_exceptions_enable=False,
     rich_markup_mode=None,
@@ -478,9 +478,10 @@ def main(
     ] = None,
 ) -> None:
     """
-    Weft: The Multi-Agent Weaving Toolkit
+    Weft: the durable task substrate for agent systems.
 
-    A Python tool for orchestrating multi-agent workflows.
+    Durable task execution on SimpleBroker queues: persistent managers,
+    multiprocess isolation, and comprehensive observability.
     """
     pass
 

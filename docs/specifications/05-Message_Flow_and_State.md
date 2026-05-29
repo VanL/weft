@@ -548,6 +548,13 @@ Current rules:
 - when task-log terminal proof is missing, a typed terminal `ctrl_out` envelope
   may classify the task as terminal, including `wrapper_lost` for
   manager-authored wrapper-exit envelopes
+- among terminal `ctrl_out` envelopes, a task-owned terminal envelope takes
+  precedence over a manager-authored `wrapper_lost` envelope regardless of
+  timestamp; the `wrapper_lost` failsafe classifies the task as terminal only when
+  no task-owned terminal envelope is present, and within the same source class the
+  latest envelope wins. This keeps the manager terminal-proof grace window a
+  liveness mechanism rather than a correctness arbiter: a real task verdict that
+  becomes durable after the grace window is not overwritten by the failsafe
 - for new one-shot non-persistent success paths, terminal proof should normally
   include both `work_completed` in `weft.log.tasks` and a task-owned typed
   terminal `ctrl_out` envelope
@@ -825,7 +832,7 @@ _Implementation mapping_: `weft/core/taskspec/model.py` state helpers and valida
 Task-log events redact configured secret fields before writing TaskSpec data to
 `weft.log.tasks`.
 
-_Implementation mapping_: `weft/helpers.py` `redact_taskspec_dump`;
+_Implementation mapping_: `weft/helpers/__init__.py` `redact_taskspec_dump`;
 `weft/core/tasks/base.py` and manager state-reporting paths.
 
 ## Large Output Handling
@@ -1155,3 +1162,4 @@ management live in the companion doc:
 - [`docs/plans/2026-05-16-monitor-durable-collation-store-plan.md`](../plans/2026-05-16-monitor-durable-collation-store-plan.md)
 - [`docs/plans/2026-05-19-task-monitor-bounded-control-cleanup-plan.md`](../plans/2026-05-19-task-monitor-bounded-control-cleanup-plan.md)
 - [`docs/plans/2026-05-18-reactive-task-loop-hot-probe-plan.md`](../plans/2026-05-18-reactive-task-loop-hot-probe-plan.md)
+- [`docs/plans/2026-05-29-reliability-and-doc-fixes-plan.md`](../plans/2026-05-29-reliability-and-doc-fixes-plan.md)

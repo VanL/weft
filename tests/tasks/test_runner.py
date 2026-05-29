@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import multiprocessing
+import queue
 import subprocess
 import sys
 import threading
@@ -18,6 +19,7 @@ from weft.core.resource_monitor import ResourceMetrics
 from weft.core.runner_diagnostics import runner_diagnostics
 from weft.core.runners import RunnerOutcome
 from weft.core.runners import host as host_module
+from weft.core.runners.host import HostTaskRunner
 from weft.core.runners.subprocess_runner import run_monitored_subprocess
 from weft.core.tasks.agent_session_protocol import (
     make_booted_response,
@@ -1337,3 +1339,136 @@ def test_task_runner_materializes_docker_container_profile_at_plugin_boundary(
     assert backend._mount_workdir is False
     assert backend._container_workdir == "/app/project"
     assert backend._env["SERVICE_URL"] == "https://explicit.example.test"
+
+
+def _build_function_host_runner(timeout: float) -> HostTaskRunner:
+    return HostTaskRunner(
+        target_type="function",
+        tid=None,
+        function_target="tests.tasks.sample_targets:echo_payload",
+        process_target=None,
+        agent=None,
+        args=[],
+        kwargs={},
+        env={},
+        working_dir=None,
+        timeout=timeout,
+        limits=None,
+        monitor_class=None,
+        monitor_interval=0.1,
+    )
+
+
+class _DeadlineFakeProcess:
+    """Worker process stub that stays 'alive' and never touches a real PID."""
+
+    def __init__(self) -> None:
+        self.started = False
+        self.terminated = False
+        self.closed = False
+
+    @property
+    def pid(self) -> None:
+        return None
+
+    def start(self) -> None:
+        self.started = True
+
+    def is_alive(self) -> bool:
+        return True
+
+    def join(self, timeout: float | None = None) -> None:
+        return None
+
+    def terminate(self) -> None:
+        self.terminated = True
+
+    def kill(self) -> None:
+        self.terminated = True
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _PreloadedResultQueue:
+    """Result-queue stub pre-loaded with zero or one worker outcome."""
+
+    def __init__(self, outcome: RunnerOutcome | None) -> None:
+        self._items: list[RunnerOutcome] = [outcome] if outcome is not None else []
+
+    def get(self, timeout: float | None = None) -> RunnerOutcome:
+        if self._items:
+            return self._items.pop(0)
+        raise queue.Empty
+
+    def get_nowait(self) -> RunnerOutcome:
+        if self._items:
+            return self._items.pop(0)
+        raise queue.Empty
+
+    def close(self) -> None:
+        return None
+
+    def join_thread(self) -> None:
+        return None
+
+
+class _DeadlineFakeContext:
+    def __init__(self, result_queue: _PreloadedResultQueue) -> None:
+        self._result_queue = result_queue
+        self.process = _DeadlineFakeProcess()
+
+    def Queue(self) -> _PreloadedResultQueue:  # noqa: N802 - mirror mp context API
+        return self._result_queue
+
+    def Process(self, **_kwargs: Any) -> _DeadlineFakeProcess:  # noqa: N802
+        return self.process
+
+
+def test_function_timeout_honors_result_already_on_queue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A function result visible at the deadline is reported, not dropped.
+
+    Regression for the timeout race: the function runner must re-check the result
+    queue before declaring a timeout. With a zero deadline and a result already on
+    the queue, the runner returns the worker's successful (``ok``) outcome instead
+    of ``timeout``. A real function worker emits ``status="ok"`` (see
+    ``_worker_entry`` in ``host.py``); the Consumer maps ``ok`` to a completed task
+    (covered by ``tests/tasks/test_task_execution.py``), so returning the queued
+    ``ok`` outcome here is what yields the public completed-not-timeout behavior.
+
+    Spec: [RM-5.2]
+    """
+    worker_outcome = RunnerOutcome(
+        status="ok",
+        value="hello",
+        error=None,
+        stdout=None,
+        stderr=None,
+        returncode=0,
+        duration=0.0,
+    )
+    runner = _build_function_host_runner(timeout=0.0)
+    monkeypatch.setattr(
+        runner, "_ctx", _DeadlineFakeContext(_PreloadedResultQueue(worker_outcome))
+    )
+
+    outcome = runner.run_with_hooks(None)
+
+    assert outcome.status == "ok"
+    assert outcome.value == "hello"
+
+
+def test_function_timeout_reports_timeout_when_no_result_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no result on the queue at the deadline, the runner still times out."""
+    runner = _build_function_host_runner(timeout=0.0)
+    monkeypatch.setattr(
+        runner, "_ctx", _DeadlineFakeContext(_PreloadedResultQueue(None))
+    )
+
+    outcome = runner.run_with_hooks(None)
+
+    assert outcome.status == "timeout"

@@ -39,7 +39,11 @@ Current behavior:
 
 - memory usage is sampled from the runtime process tree on psutil-backed
   runtimes and from runner-native stats on Docker-backed runtimes
-- configured memory limits are treated as hard limits
+- configured memory limits are treated as hard limits: "hard" describes the
+  response (terminate on a confirmed violation, no throttling), not an
+  instantaneous ceiling. Host (psutil) detection is bounded by the sample window,
+  so a fast allocator can transiently exceed `memory_mb` between samples before
+  termination; Docker-backed runners map the limit to a native runtime quota.
 - violations terminate the task and surface a limit failure
 
 _Implementation mapping_: `weft/core/resource_monitor.py`
@@ -229,6 +233,7 @@ controls stay here only when they are already shipped and observable:
 
 ## Related Plans
 
+- [`docs/plans/2026-05-29-reliability-and-doc-fixes-plan.md`](../plans/2026-05-29-reliability-and-doc-fixes-plan.md)
 - [`docs/plans/2026-05-08-agent-session-and-task-startup-observability-plan.md`](../plans/2026-05-08-agent-session-and-task-startup-observability-plan.md)
 - [`docs/plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md`](../plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md)
 - [`docs/plans/2026-04-06-runner-extension-point-plan.md`](../plans/2026-04-06-runner-extension-point-plan.md)

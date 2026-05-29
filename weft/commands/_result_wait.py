@@ -27,6 +27,7 @@ from ._streaming import (
 )
 from .task_evidence import (
     coerce_terminal_envelope,
+    select_terminal_envelope,
     terminal_error_message,
     terminal_status_from_event,
 )
@@ -68,16 +69,20 @@ def drain_ctrl_out_stream_messages(
     ctrl_queue: Any,
     *,
     tid: str,
-) -> list[dict[str, Any]]:
+) -> list[tuple[dict[str, Any], int]]:
     """Render non-terminal ctrl_out messages while retaining terminal proof.
 
     Terminal ctrl_out envelopes are a task-local lifecycle evidence surface. The
     result waiter may observe them, but it must not consume them as ordinary
     stream/control output because later status surfaces may need the same proof
     if the global task log races or is unavailable.
+
+    Returns ``(envelope, message_id)`` candidates so callers can apply the shared
+    source-precedence selection (Spec: [MF-5]); the broker ``message_id`` is the
+    timestamp the selector uses for same-source latest-wins.
     """
 
-    terminal_envelopes: list[dict[str, Any]] = []
+    terminal_candidates: list[tuple[dict[str, Any], int]] = []
     for entry in ctrl_queue.peek_generator(with_timestamps=True):
         if not isinstance(entry, tuple) or len(entry) < 2:
             continue
@@ -85,11 +90,11 @@ def drain_ctrl_out_stream_messages(
         raw = str(ctrl_payload)
         terminal_envelope = coerce_terminal_envelope(raw, tid=tid)
         if terminal_envelope is not None:
-            terminal_envelopes.append(terminal_envelope)
+            terminal_candidates.append((terminal_envelope, int(message_id)))
             continue
         handle_ctrl_stream(raw)
         ctrl_queue.delete(message_id=message_id)
-    return terminal_envelopes
+    return terminal_candidates
 
 
 def await_one_shot_result(
@@ -141,24 +146,23 @@ def await_one_shot_result(
             while True:
                 if ctrl_queue is None:
                     break
-                terminal_envelopes = drain_ctrl_out_stream_messages(
+                terminal_candidates = drain_ctrl_out_stream_messages(
                     ctrl_queue,
                     tid=tid,
                 )
-                for terminal_envelope in terminal_envelopes:
+                selected = select_terminal_envelope(terminal_candidates)
+                if selected is not None:
+                    terminal_envelope = selected[0]
                     event_status = terminal_status_from_event(terminal_envelope)
-                    if event_status is None:
-                        continue
                     if event_status == "completed":
                         if completed_at is None:
                             completed_at = time.monotonic()
-                        continue
-                    status = event_status
-                    error_message = terminal_error_message(
-                        terminal_envelope,
-                        event_status,
-                    )
-                    break
+                    elif event_status is not None:
+                        status = event_status
+                        error_message = terminal_error_message(
+                            terminal_envelope,
+                            event_status,
+                        )
                 break
 
             ready_values, drained_outbox = drain_available_outbox_values(

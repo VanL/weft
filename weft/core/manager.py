@@ -126,7 +126,7 @@ from weft.helpers import (
 )
 from weft.runtime_liveness import runtime_liveness_from_registered_probe
 
-from .control_probe import coerce_pong_response
+from .control_probe import coerce_pong_response, pong_proves_dispatch_eligible
 from .launcher import launch_task_process
 from .manager_services import (
     ManagedServiceDecision,
@@ -2128,37 +2128,13 @@ class Manager(ServiceTask):
         ctrl_in_name: str,
         ctrl_out_name: str,
     ) -> bool:
-        task_status = payload.get("task_status")
-        if task_status in {
-            SERVICE_STATUS_DRAINING,
-            "stopping",
-            "cancelled",
-            "completed",
-            "failed",
-            "timeout",
-            "killed",
-        }:
-            return False
-        if payload.get("should_stop") is True:
-            return False
-        role = payload.get("role")
-        if role is not None and role != "manager":
-            return False
-        requests = payload.get("requests")
-        if requests is not None and requests != WEFT_SPAWN_REQUESTS_QUEUE:
-            return False
-        ctrl_in = payload.get("ctrl_in")
-        if ctrl_in is not None and ctrl_in != ctrl_in_name:
-            return False
-        ctrl_out = payload.get("ctrl_out")
-        if ctrl_out is not None and ctrl_out != ctrl_out_name:
-            return False
-        weft_context = payload.get("weft_context")
-        expected_context = str(self._manager_context().root)
-        record_context = record.get("weft_context")
-        if isinstance(record_context, str) and record_context:
-            expected_context = record_context
-        return weft_context is None or weft_context == expected_context
+        return pong_proves_dispatch_eligible(
+            payload,
+            record=record,
+            ctrl_in_name=ctrl_in_name,
+            ctrl_out_name=ctrl_out_name,
+            root_context=str(self._manager_context().root),
+        )
 
     def _manager_pong_dispatch_proof(
         self,
@@ -5471,17 +5447,12 @@ class Manager(ServiceTask):
                     self._managed_service_duplicate_scan_pending.discard(service.key)
 
     def _tick_internal_services(self, *, force: bool = False) -> None:
-        """Ensure built-in Manager-owned services for this live manager."""
+        """Drive one convergence pass over all built-in Manager-owned services.
 
-        self._reconcile_managed_services(
-            force=force,
-            include_internal=True,
-            include_autostart=False,
-            scan_terminal_proof=True,
-        )
-
-    def _tick_task_monitor(self, *, force: bool = False) -> None:
-        """Ensure one supervised TaskMonitor child exists for this live manager."""
+        Test/diagnostic seam only. Production scheduling of internal-service
+        convergence is owned by ``_run_managed_service_convergence``; this wrapper
+        is not on the production reactor path.
+        """
 
         self._reconcile_managed_services(
             force=force,
@@ -5783,7 +5754,10 @@ class Manager(ServiceTask):
             handle = RunnerHandle.from_dict(handle_payload)
         except ValueError:
             return set()
-        return set(handle.scoped_host_pids())
+        # Create-time-gated so a recycled PID held by a stale mapping is never
+        # force-reaped ([MA-1] item 4); falls back to liveness when no create_time
+        # was recorded. Mirrors the liveness path's resolution.
+        return {pid for pid, _create_time in live_host_processes_from_handle(handle)}
 
     def _enqueue_autostart_request(
         self, payload: dict[str, Any], inbox_message: Any

@@ -56,7 +56,7 @@
 ## 1. Orientation
 
 **What**: Durable task execution built on SimpleBroker queues.
-**Tagline**: "SimpleBroker for processes" - same zero-config philosophy, adds process isolation and resource control.
+**Tagline**: "the durable task substrate for agent systems" - inherits SimpleBroker's zero-config philosophy (safe defaults, no magic, no cleverness), adding process isolation, resource control, and a first-class agent runtime. The hard `llm` dependency is intentional: it is the bounded-agent call path, not scope creep.
 
 **When to use weft**:
 - Tasks that might outlive your session
@@ -608,37 +608,21 @@ def mutations_allowed(obj: TaskSpec) -> Iterator[None]:
 
 ### 4.11 Security
 
-**Path validation** (follow SimpleBroker patterns):
-```python
-def validate_safe_path(path: str) -> str:
-    """Validate path is safe for use.
+Weft assumes user-level trust, not hostile multi-tenancy (see
+`docs/specifications/00-Overview_and_Architecture.md`). The security boundary is
+the OS/filesystem, not a Weft input sanitizer.
 
-    Raises:
-        ValueError: If path contains dangerous patterns.
-    """
-    # Reject traversal
-    if ".." in path:
-        raise ValueError(f"Path contains traversal: {path}")
+**No shell; argv only.** Commands are passed to `subprocess` as argv lists, never
+through a shell (`submit_command(..., shell=True)` is explicitly rejected), and
+string command input is tokenized with `shlex.split`. Because there is no shell,
+there is no shell-injection surface — do not add a `validate_safe_path`-style path
+sanitizer expecting it to be a security boundary; it would imply a boundary that
+does not exist (there is no such helper in the codebase).
 
-    # Reject shell metacharacters
-    dangerous = set(';&|`$(){}[]<>"\'\\')
-    if any(c in path for c in dangerous):
-        raise ValueError(f"Path contains shell metacharacters: {path}")
-
-    return path
-```
-
-**Input validation at boundaries**:
-```python
-# Validate user input at CLI boundary
-def handle_command(user_input: str) -> None:
-    # Validate early
-    if not user_input.strip():
-        raise ValueError("Command cannot be empty")
-
-    command = validate_safe_path(user_input)
-    # Now safe to use
-```
+**Validate at the boundary, then stay strict** (see
+`docs/agent-context/engineering-principles.md` §3): normalize CLI/TaskSpec input
+once, reject unsupported fields explicitly instead of silently ignoring them, and
+operate on the canonical form afterward.
 
 ## 5. Common Tasks
 

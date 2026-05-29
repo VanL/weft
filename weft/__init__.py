@@ -1,6 +1,7 @@
-"""Weft: The Multi-Agent Weaving Toolkit.
+"""Weft: the durable task substrate for agent systems.
 
-A Python framework for orchestrating multi-agent workflows.
+Durable task execution on SimpleBroker queues: persistent managers,
+multiprocess isolation, and comprehensive observability.
 """
 
 from ._constants import PROG_NAME, __version__

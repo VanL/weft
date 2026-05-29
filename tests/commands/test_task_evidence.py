@@ -615,3 +615,89 @@ def test_project_status_does_not_active_ping_tasks_by_default(tmp_path) -> None:
         assert ctrl_in.peek_one() is None
     finally:
         ctrl_in.close()
+
+
+def _task_completed_envelope(tid: str) -> str:
+    return json.dumps(
+        {
+            "type": "terminal",
+            "source": "task",
+            "tid": tid,
+            "status": "completed",
+            "return_code": 0,
+            "timestamp": time.time_ns(),
+        }
+    )
+
+
+def _manager_wrapper_lost_envelope(tid: str) -> str:
+    return json.dumps(
+        {
+            "type": "terminal",
+            "source": "manager",
+            "tid": tid,
+            "status": "failed",
+            "error": task_evidence.WRAPPER_LOST_ERROR,
+            "return_code": 1,
+            "timestamp": time.time_ns(),
+        }
+    )
+
+
+def test_task_terminal_ctrl_out_beats_manager_wrapper_lost(tmp_path) -> None:
+    """A task-sourced terminal envelope outranks a manager wrapper_lost failsafe.
+
+    Regression for the completed->failed inversion: when a task ``completed``
+    terminal envelope and a manager ``wrapper_lost`` envelope coexist on the same
+    ctrl_out, the task-sourced verdict wins regardless of queue-timestamp order.
+    Pure latest-timestamp-wins would report ``failed`` in the manager-later case.
+
+    Spec: [MF-5]
+    """
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+
+    # Order A: task completed first, manager wrapper_lost LATER (the bug case).
+    tid_a = str(time.time_ns())
+    ctrl_a = ctx.queue(f"T{tid_a}.ctrl_out", persistent=False)
+    try:
+        ctrl_a.write(_task_completed_envelope(tid_a))
+        ctrl_a.write(_manager_wrapper_lost_envelope(tid_a))
+    finally:
+        ctrl_a.close()
+    snap_a = task_evidence.peek_terminal_ctrl_out_evidence(
+        ctx, tid=tid_a, ctrl_out_name=f"T{tid_a}.ctrl_out"
+    )
+    assert snap_a is not None
+    assert snap_a.status == "completed"
+    assert snap_a.classification == "terminal_ctrl_out"
+    assert snap_a.metadata["terminal_source"] == "task"
+
+    # Order B: manager wrapper_lost first, task completed LATER (order-independence).
+    tid_b = str(time.time_ns() + 1)
+    ctrl_b = ctx.queue(f"T{tid_b}.ctrl_out", persistent=False)
+    try:
+        ctrl_b.write(_manager_wrapper_lost_envelope(tid_b))
+        ctrl_b.write(_task_completed_envelope(tid_b))
+    finally:
+        ctrl_b.close()
+    snap_b = task_evidence.peek_terminal_ctrl_out_evidence(
+        ctx, tid=tid_b, ctrl_out_name=f"T{tid_b}.ctrl_out"
+    )
+    assert snap_b is not None
+    assert snap_b.status == "completed"
+    assert snap_b.classification == "terminal_ctrl_out"
+
+    # Manager wrapper_lost alone still classifies as wrapper_lost/failed.
+    tid_c = str(time.time_ns() + 2)
+    ctrl_c = ctx.queue(f"T{tid_c}.ctrl_out", persistent=False)
+    try:
+        ctrl_c.write(_manager_wrapper_lost_envelope(tid_c))
+    finally:
+        ctrl_c.close()
+    snap_c = task_evidence.peek_terminal_ctrl_out_evidence(
+        ctx, tid=tid_c, ctrl_out_name=f"T{tid_c}.ctrl_out"
+    )
+    assert snap_c is not None
+    assert snap_c.status == "failed"
+    assert snap_c.classification == "wrapper_lost"

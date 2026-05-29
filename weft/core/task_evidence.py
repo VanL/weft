@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -445,6 +446,48 @@ def ping_pong_evidence(
     )
 
 
+def _candidate_is_wrapper_lost(payload: Mapping[str, Any]) -> bool:
+    """Whether a terminal envelope is a manager-authored wrapper-lost failsafe.
+
+    Spec: [MF-5]
+    """
+
+    return (
+        payload.get("source") == "manager"
+        and payload.get("error") == WRAPPER_LOST_ERROR
+    )
+
+
+def select_terminal_envelope(
+    candidates: Iterable[tuple[dict[str, Any], int]],
+) -> tuple[dict[str, Any], int] | None:
+    """Select the authoritative terminal ctrl_out envelope from candidates.
+
+    Each candidate is ``(payload, message_id)`` where ``payload`` is a coerced
+    terminal envelope and ``message_id`` is its broker queue timestamp. A
+    task-owned terminal envelope takes precedence over a manager-authored
+    ``wrapper_lost`` failsafe regardless of timestamp: the manager only writes
+    ``wrapper_lost`` when no task proof was visible at write time, so a real task
+    verdict that becomes durable late must not be overwritten by that failsafe.
+    Within the same precedence class, the latest ``message_id`` wins.
+
+    Returns the chosen ``(payload, message_id)`` candidate, or ``None`` when there
+    are no candidates.
+
+    Spec: [MF-5]
+    """
+
+    best: tuple[dict[str, Any], int] | None = None
+    best_key: tuple[int, int] | None = None
+    for payload, message_id in candidates:
+        message_id_int = int(message_id)
+        key = (0 if _candidate_is_wrapper_lost(payload) else 1, message_id_int)
+        if best_key is None or key > best_key:
+            best = (payload, message_id_int)
+            best_key = key
+    return best
+
+
 def peek_terminal_ctrl_out_evidence(
     ctx: WeftContext,
     *,
@@ -455,7 +498,7 @@ def peek_terminal_ctrl_out_evidence(
     """Peek typed terminal ctrl_out evidence without consuming it."""
 
     queue = ctx.queue(ctrl_out_name, persistent=False)
-    latest: tuple[dict[str, Any], int] | None = None
+    candidates: list[tuple[dict[str, Any], int]] = []
     try:
         for item in queue.peek_generator(with_timestamps=True):
             if not isinstance(item, tuple) or len(item) != 2:
@@ -464,15 +507,14 @@ def peek_terminal_ctrl_out_evidence(
             payload = coerce_terminal_envelope(str(body), tid=tid)
             if payload is None:
                 continue
-            timestamp_int = int(timestamp)
-            if latest is None or latest[1] <= timestamp_int:
-                latest = (payload, timestamp_int)
+            candidates.append((payload, int(timestamp)))
     finally:
         queue.close()
 
-    if latest is None:
+    selected = select_terminal_envelope(candidates)
+    if selected is None:
         return None
-    payload, timestamp = latest
+    payload, timestamp = selected
     source = str(payload.get("source"))
     error = payload.get("error")
     error_text = error if isinstance(error, str) else None

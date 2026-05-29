@@ -731,6 +731,77 @@ def test_await_one_shot_result_retains_terminal_ctrl_out_proof(
     assert retained is not None
 
 
+def test_await_one_shot_result_prefers_task_completed_over_manager_wrapper_lost(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`weft result` honors a task ``completed`` over a later manager wrapper_lost.
+
+    Regression for the completed->failed inversion on the result-wait path: with
+    no terminal task-log event, the ctrl_out drain is the selected source, and a
+    manager ``wrapper_lost`` envelope written after the task ``completed`` envelope
+    must not flip the reported result to failed.
+
+    Spec: [MF-5]
+    """
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    outbox_name = f"T{tid}.outbox"
+    ctrl_out_name = f"T{tid}.ctrl_out"
+    outbox_queue = ctx.queue(outbox_name, persistent=True)
+    ctrl_queue = ctx.queue(ctrl_out_name, persistent=False)
+    outbox_queue.write("hello")
+    ctrl_queue.write(
+        json.dumps(
+            {
+                "type": "terminal",
+                "source": "task",
+                "tid": tid,
+                "status": "completed",
+                "timestamp": time.time_ns(),
+            }
+        )
+    )
+    ctrl_queue.write(
+        json.dumps(
+            {
+                "type": "terminal",
+                "source": "manager",
+                "tid": tid,
+                "status": "failed",
+                "error": task_evidence.WRAPPER_LOST_ERROR,
+                "return_code": 1,
+                "timestamp": time.time_ns(),
+            }
+        )
+    )
+    # No terminal task-log event: force the ctrl_out drain to be the selected source.
+    monkeypatch.setattr(
+        result_wait,
+        "poll_log_events",
+        lambda log_queue, last_timestamp, target_tid: ([], last_timestamp),
+    )
+    monkeypatch.setattr(result_wait, "WEFT_COMPLETED_RESULT_GRACE_SECONDS", 0.0)
+
+    try:
+        status, result, error = await_one_shot_result(
+            ctx,
+            tid,
+            outbox_name=outbox_name,
+            ctrl_out_name=ctrl_out_name,
+            timeout=RESULT_WAIT_TIMEOUT,
+            show_stderr=False,
+        )
+    finally:
+        outbox_queue.close()
+        ctrl_queue.close()
+
+    assert status == "completed"
+    assert result == "hello"
+    assert error is None
+
+
 def test_await_one_shot_result_accepts_prewritten_outbox_when_log_event_is_missed(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,

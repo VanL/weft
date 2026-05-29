@@ -457,10 +457,25 @@ class HostTaskRunner:
 
                 elapsed = time.monotonic() - start_time
                 if self._timeout is not None and elapsed >= self._timeout:
+                    # Honor a result the worker already published in the race
+                    # window before declaring a timeout (Spec: [MF-5], [RM-5.2];
+                    # mirrors the command runner's re-poll). Only a result already
+                    # visible on the queue at the deadline is caught.
+                    try:
+                        outcome = result_queue.get_nowait()
+                    except queue.Empty:
+                        outcome = None
                     self._stop_process(process)
                     if monitor:
                         last_metrics = monitor.last_metrics()
                         monitor.stop()
+                    if outcome is not None:
+                        outcome.metrics = outcome.metrics or last_metrics
+                        outcome.worker_pid = worker_pid
+                        outcome.runtime_handle = (
+                            outcome.runtime_handle or runtime_handle
+                        )
+                        return outcome
                     return RunnerOutcome(
                         status="timeout",
                         value=None,

@@ -345,9 +345,10 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
 ### Manager Invariants
 
 _Implementation mapping_: `weft/core/manager.py`,
-`weft/core/manager_runtime.py`, `weft/commands/manager.py`,
+`weft/core/manager_runtime.py`, `weft/core/control_probe.py`,
+`weft/commands/manager.py`,
 `weft/cli/run.py`, `weft/commands/serve.py`,
-`weft/core/spawn_requests.py`, `weft/helpers.py`,
+`weft/core/spawn_requests.py`, `weft/helpers/__init__.py`,
 `weft/manager_detached_launcher.py`, `weft/manager_process.py`.
 
 - **MANAGER.1**: managers are task-shaped runtimes with a long-lived dispatcher
@@ -616,6 +617,7 @@ doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-05-29-reliability-and-doc-fixes-plan.md`](../plans/2026-05-29-reliability-and-doc-fixes-plan.md)
 - [`docs/plans/2026-05-28-stale-service-owner-runtime-cleanup-plan.md`](../plans/2026-05-28-stale-service-owner-runtime-cleanup-plan.md)
 - [`docs/plans/2026-05-27-service-collation-reporting-plan.md`](../plans/2026-05-27-service-collation-reporting-plan.md)
 - [`docs/plans/2026-05-26-monitor-five-cleanup-policy-consolidation-plan.md`](../plans/2026-05-26-monitor-five-cleanup-policy-consolidation-plan.md)

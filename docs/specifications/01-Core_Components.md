@@ -395,7 +395,7 @@ _Implementation mapping_: `weft/core/endpoints.py` — `EndpointRecord`,
 `ResolvedEndpoint`, `list_resolved_endpoints()`, `resolve_endpoint()`;
 `weft/core/tasks/base.py` — `register_endpoint_name()`,
 `unregister_endpoint_name()`;
-`weft/helpers.py` — `canonical_owner_tid()`;
+`weft/helpers/__init__.py` — `canonical_owner_tid()`;
 `weft.state.endpoints` — runtime queue used for the registry records.
 
 Current rules:
@@ -583,6 +583,7 @@ TaskMonitor runtime boundary.
 
 ## Related Plans
 
+- [`docs/plans/2026-05-29-reliability-and-doc-fixes-plan.md`](../plans/2026-05-29-reliability-and-doc-fixes-plan.md)
 - [`docs/plans/2026-05-26-monitor-five-cleanup-policy-consolidation-plan.md`](../plans/2026-05-26-monitor-five-cleanup-policy-consolidation-plan.md)
 - [`docs/plans/2026-05-20-monitor-collation-table-retirement-plan.md`](../plans/2026-05-20-monitor-collation-table-retirement-plan.md)
 - [`docs/plans/2026-05-20-monitor-fair-cleanup-scheduling-plan.md`](../plans/2026-05-20-monitor-fair-cleanup-scheduling-plan.md)

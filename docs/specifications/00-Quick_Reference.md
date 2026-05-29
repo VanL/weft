@@ -134,7 +134,8 @@ State transitions and rules live in `05-Message_Flow_and_State.md`.
 
 `weft-{context_short}-{tid_short}:{name}:{status}[:details]`
 
-Format rules and sanitization live in `01-Core_Components.md`.
+Format rules and sanitization are defined by [OBS.4], [OBS.5], [OBS.7], and
+[OBS.8] in `07-System_Invariants.md`.
 
 ## Environment Variables
 
@@ -187,6 +188,7 @@ _Implementation mapping_: `weft/core/taskspec/model.py` (process_target, peak_* 
 
 ## Related Plans
 
+- [`docs/plans/2026-05-29-reliability-and-doc-fixes-plan.md`](../plans/2026-05-29-reliability-and-doc-fixes-plan.md)
 - [`docs/plans/2026-05-20-monitor-collation-table-retirement-plan.md`](../plans/2026-05-20-monitor-collation-table-retirement-plan.md)
 - [`docs/plans/2026-05-20-monitor-fair-cleanup-scheduling-plan.md`](../plans/2026-05-20-monitor-fair-cleanup-scheduling-plan.md)
 - [`docs/plans/2026-05-19-monitor-terminal-retirement-and-runtime-queue-cleanup-plan.md`](../plans/2026-05-19-monitor-terminal-retirement-and-runtime-queue-cleanup-plan.md)

@@ -49,7 +49,10 @@ from weft._constants import (
 )
 from weft._exceptions import ManagerStartFailed
 from weft.context import WeftContext
-from weft.core.control_probe import send_keyed_ping_probe
+from weft.core.control_probe import (
+    pong_proves_dispatch_eligible,
+    send_keyed_ping_probe,
+)
 from weft.core.spawn_requests import generate_spawn_request_timestamp
 from weft.core.taskspec import TaskSpec, resolve_taskspec_payload
 from weft.ext import RunnerHandle
@@ -695,37 +698,13 @@ def _matched_pong_proves_manager_record(
     ctrl_in_name: str,
     ctrl_out_name: str,
 ) -> bool:
-    task_status = payload.get("task_status")
-    if task_status in {
-        SERVICE_STATUS_DRAINING,
-        "stopping",
-        "cancelled",
-        "completed",
-        "failed",
-        "timeout",
-        "killed",
-    }:
-        return False
-    if payload.get("should_stop") is True:
-        return False
-    role = payload.get("role")
-    if role is not None and role != "manager":
-        return False
-    requests = payload.get("requests")
-    if requests is not None and requests != WEFT_SPAWN_REQUESTS_QUEUE:
-        return False
-    ctrl_in = payload.get("ctrl_in")
-    if ctrl_in is not None and ctrl_in != ctrl_in_name:
-        return False
-    ctrl_out = payload.get("ctrl_out")
-    if ctrl_out is not None and ctrl_out != ctrl_out_name:
-        return False
-    weft_context = payload.get("weft_context")
-    record_context = record.get("weft_context")
-    expected_context = (
-        record_context if isinstance(record_context, str) else str(context.root)
-    )
-    if weft_context is not None and weft_context != expected_context:
+    if not pong_proves_dispatch_eligible(
+        payload,
+        record=record,
+        ctrl_in_name=ctrl_in_name,
+        ctrl_out_name=ctrl_out_name,
+        root_context=str(context.root),
+    ):
         return False
     outbox = payload.get("outbox")
     return outbox is None or outbox == WEFT_MANAGER_OUTBOX_QUEUE
@@ -1496,6 +1475,60 @@ def _view_contains_registered_launch(
     )
 
 
+def _acknowledge_competing_and_return(
+    launch: _DetachedManagerLaunch,
+    *,
+    manager_tid: str,
+    record: dict[str, Any],
+) -> tuple[dict[str, Any], bool, None]:
+    """Acknowledge a competing live manager and return its non-owning result.
+
+    On acknowledgement failure, abort the launcher via ``_fail_manager_start``
+    (which does not return). Always clean up the startup stderr file.
+    """
+
+    try:
+        _acknowledge_competing_launched_manager(launch, manager_tid=manager_tid)
+    except _ManagerLaunchAcknowledgementError as exc:
+        _fail_manager_start(launch=launch, message=str(exc), abort_launcher=True)
+    _cleanup_startup_stderr(launch.stderr_path)
+    return record, False, None
+
+
+def _reconcile_competing_manager_start(
+    context: WeftContext,
+    *,
+    launch: _DetachedManagerLaunch,
+    manager_tid: str,
+    record: dict[str, Any],
+) -> tuple[dict[str, Any], bool, None]:
+    """Resolve a post-loop competing/settled manager into a non-owning result.
+
+    If a fresh registry view shows this launch registered, acknowledge the
+    competitor; otherwise signal the launcher to abort. Either way clean up and
+    return ``record`` as a non-owning start result.
+    """
+
+    view = _registry_view(
+        context,
+        target_tid=manager_tid,
+        probe_stale=True,
+        probe_cache={},
+    )
+    if _view_contains_registered_launch(
+        view,
+        manager_tid=manager_tid,
+        launch_pid=launch.pid,
+    ):
+        return _acknowledge_competing_and_return(
+            launch, manager_tid=manager_tid, record=record
+        )
+    _send_launcher_signal(launch.launcher_process, MANAGER_LAUNCHER_SIGNAL_ABORT)
+    _communicate_launcher(launch.launcher_process, timeout=1.0)
+    _cleanup_startup_stderr(launch.stderr_path)
+    return record, False, None
+
+
 def _start_manager(
     context: WeftContext, *, verbose: bool
 ) -> tuple[dict[str, Any], bool, subprocess.Popen[Any] | None]:
@@ -1528,19 +1561,11 @@ def _start_manager(
                         manager_tid=manager_tid,
                         launch_pid=launch.pid,
                     ):
-                        try:
-                            _acknowledge_competing_launched_manager(
-                                launch,
-                                manager_tid=manager_tid,
-                            )
-                        except _ManagerLaunchAcknowledgementError as exc:
-                            _fail_manager_start(
-                                launch=launch,
-                                message=str(exc),
-                                abort_launcher=True,
-                            )
-                        _cleanup_startup_stderr(launch.stderr_path)
-                        return selected_record, False, None
+                        return _acknowledge_competing_and_return(
+                            launch,
+                            manager_tid=manager_tid,
+                            record=selected_record,
+                        )
                 else:
                     if _manager_start_record_matches_launch(
                         selected_record,
@@ -1642,34 +1667,12 @@ def _start_manager(
         registry_queue.close()
 
     if competing_record is not None:
-        view = _registry_view(
+        return _reconcile_competing_manager_start(
             context,
-            target_tid=manager_tid,
-            probe_stale=True,
-            probe_cache={},
-        )
-        if _view_contains_registered_launch(
-            view,
+            launch=launch,
             manager_tid=manager_tid,
-            launch_pid=launch.pid,
-        ):
-            try:
-                _acknowledge_competing_launched_manager(
-                    launch,
-                    manager_tid=manager_tid,
-                )
-            except _ManagerLaunchAcknowledgementError as exc:
-                _fail_manager_start(
-                    launch=launch,
-                    message=str(exc),
-                    abort_launcher=True,
-                )
-            _cleanup_startup_stderr(launch.stderr_path)
-            return competing_record, False, None
-        _send_launcher_signal(launch.launcher_process, MANAGER_LAUNCHER_SIGNAL_ABORT)
-        _communicate_launcher(launch.launcher_process, timeout=1.0)
-        _cleanup_startup_stderr(launch.stderr_path)
-        return competing_record, False, None
+            record=competing_record,
+        )
 
     settled_record = _await_manager_start_settlement(
         context,
@@ -1677,34 +1680,12 @@ def _start_manager(
         deadline=time.monotonic() + MANAGER_COMPETING_STARTUP_GRACE_SECONDS,
     )
     if settled_record is not None:
-        view = _registry_view(
+        return _reconcile_competing_manager_start(
             context,
-            target_tid=manager_tid,
-            probe_stale=True,
-            probe_cache={},
-        )
-        if _view_contains_registered_launch(
-            view,
+            launch=launch,
             manager_tid=manager_tid,
-            launch_pid=launch.pid,
-        ):
-            try:
-                _acknowledge_competing_launched_manager(
-                    launch,
-                    manager_tid=manager_tid,
-                )
-            except _ManagerLaunchAcknowledgementError as exc:
-                _fail_manager_start(
-                    launch=launch,
-                    message=str(exc),
-                    abort_launcher=True,
-                )
-            _cleanup_startup_stderr(launch.stderr_path)
-            return settled_record, False, None
-        _send_launcher_signal(launch.launcher_process, MANAGER_LAUNCHER_SIGNAL_ABORT)
-        _communicate_launcher(launch.launcher_process, timeout=1.0)
-        _cleanup_startup_stderr(launch.stderr_path)
-        return settled_record, False, None
+            record=settled_record,
+        )
 
     _fail_manager_start(
         launch=launch,

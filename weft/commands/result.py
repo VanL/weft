@@ -34,6 +34,7 @@ from ._result_wait import (
     await_one_shot_result,
     drain_ctrl_out_stream_messages,
     effective_result_surface_wait_interval,
+    select_terminal_envelope,
     terminal_error_message,
     terminal_status_from_event,
 )
@@ -562,24 +563,23 @@ def _await_single_result(
     try:
         while True:
             while True:
-                terminal_envelopes = drain_ctrl_out_stream_messages(
+                terminal_candidates = drain_ctrl_out_stream_messages(
                     ctrl_queue,
                     tid=tid,
                 )
-                for terminal_envelope in terminal_envelopes:
+                selected = select_terminal_envelope(terminal_candidates)
+                if selected is not None:
+                    terminal_envelope = selected[0]
                     event_status = terminal_status_from_event(terminal_envelope)
-                    if event_status is None:
-                        continue
                     if event_status == "completed":
                         if completed_at is None:
                             completed_at = time.monotonic()
-                        continue
-                    status = event_status
-                    error_message = terminal_error_message(
-                        terminal_envelope,
-                        event_status,
-                    )
-                    break
+                    elif event_status is not None:
+                        status = event_status
+                        error_message = terminal_error_message(
+                            terminal_envelope,
+                            event_status,
+                        )
                 break
 
             peeked = outbox_queue.peek_one(with_timestamps=True)

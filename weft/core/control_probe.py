@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -18,6 +19,8 @@ from weft._constants import (
     CONTROL_PING,
     CONTROL_SURFACE_WAIT_INTERVAL,
     CONTROL_SURFACE_WAIT_TIMEOUT,
+    SERVICE_STATUS_DRAINING,
+    WEFT_SPAWN_REQUESTS_QUEUE,
 )
 from weft.context import WeftContext
 
@@ -74,6 +77,61 @@ def coerce_pong_response(
     if not isinstance(task_status, str) or not task_status:
         return None
     return payload
+
+
+def pong_proves_dispatch_eligible(
+    payload: Mapping[str, Any],
+    *,
+    record: Mapping[str, Any],
+    ctrl_in_name: str,
+    ctrl_out_name: str,
+    root_context: str,
+) -> bool:
+    """Whether a matched PONG proves a record is a dispatch-eligible manager.
+
+    Shared authority gate for the in-process Manager and the out-of-process
+    runtime so both reach the same decision from the same fields. Absent
+    manager-selection fields are accepted (legacy-compatible); only
+    present-but-mismatched values reject. An empty ``weft_context`` string means
+    "no context present" and falls back to ``root_context``.
+
+    Callers may add their own narrowing (for example, the runtime additionally
+    requires the manager outbox queue) after this gate passes.
+
+    Spec: [MA-1] item 4, [MANAGER.8]
+    """
+
+    task_status = payload.get("task_status")
+    if task_status in {
+        SERVICE_STATUS_DRAINING,
+        "stopping",
+        "cancelled",
+        "completed",
+        "failed",
+        "timeout",
+        "killed",
+    }:
+        return False
+    if payload.get("should_stop") is True:
+        return False
+    role = payload.get("role")
+    if role is not None and role != "manager":
+        return False
+    requests = payload.get("requests")
+    if requests is not None and requests != WEFT_SPAWN_REQUESTS_QUEUE:
+        return False
+    ctrl_in = payload.get("ctrl_in")
+    if ctrl_in is not None and ctrl_in != ctrl_in_name:
+        return False
+    ctrl_out = payload.get("ctrl_out")
+    if ctrl_out is not None and ctrl_out != ctrl_out_name:
+        return False
+    record_context = record.get("weft_context")
+    expected_context = root_context
+    if isinstance(record_context, str) and record_context:
+        expected_context = record_context
+    weft_context = payload.get("weft_context")
+    return weft_context is None or weft_context == expected_context
 
 
 def send_keyed_ping_probe(
