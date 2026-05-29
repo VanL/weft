@@ -156,7 +156,7 @@ jobs:
 
     - name: Type check with mypy
       run: |
-        mypy weft integrations/weft_django/weft_django extensions/weft_docker/weft_docker extensions/weft_macos_sandbox/weft_macos_sandbox --config-file pyproject.toml
+        mypy weft bin integrations/weft_django/weft_django extensions/weft_docker/weft_docker extensions/weft_macos_sandbox/weft_macos_sandbox --config-file pyproject.toml
 
   test-django-integration:
     # Release commits are covered by the root tag release gate, which keeps

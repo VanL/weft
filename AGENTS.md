@@ -635,7 +635,7 @@ uv sync --all-extras             # Install dev tools into the repo env
 ./.venv/bin/python -m pytest     # Fast tests only
 ./.venv/bin/python -m pytest -m ""  # All tests including slow
 ./.venv/bin/python -m pytest tests/cli/ -v  # Specific directory
-./.venv/bin/mypy weft extensions/weft_docker extensions/weft_macos_sandbox  # Type check
+./.venv/bin/mypy weft bin extensions/weft_docker extensions/weft_macos_sandbox  # Type check
 ./.venv/bin/ruff check weft      # Lint
 ```
 
@@ -739,7 +739,7 @@ weft task list --json | jq '.[] | select(.status=="completed")'
 
 **Before claiming "done"**:
 - [ ] Tests pass (`uv run pytest`)
-- [ ] Type check passes (`uv run mypy weft extensions/weft_docker extensions/weft_macos_sandbox`)
+- [ ] Type check passes (`uv run mypy weft bin extensions/weft_docker extensions/weft_macos_sandbox`)
 - [ ] Lint passes (`uv run ruff check weft`)
 - [ ] Changes are minimal (no drive-by refactoring)
 

@@ -19,9 +19,12 @@ from weft._constants import (
     QUEUE_CTRL_OUT_SUFFIX,
     QUEUE_INBOX_SUFFIX,
     QUEUE_OUTBOX_SUFFIX,
+    SERVICE_STATUS_ACTIVE,
+    SERVICE_TYPE_MANAGER,
     WEFT_SERVICES_REGISTRY_QUEUE,
 )
 from weft.context import WeftContext, build_context
+from weft.core.service_convergence import parse_service_owner_record
 from weft.core.taskspec import TaskSpec
 
 
@@ -79,14 +82,23 @@ def _wait_for_registry(
             raw_entries = None
 
         if raw_entries:
-            for entry, _timestamp in raw_entries:
+            for entry, timestamp in raw_entries:
                 try:
                     data = cast(dict[str, Any], json.loads(entry))
                 except json.JSONDecodeError:
                     continue
-                if data.get("tid") == tid:
+                # Manager records live in the shared services registry as
+                # schema-validated service-owner rows; match the canonical fields
+                # (service_type + owner_tid) the runtime uses, not the legacy
+                # top-level "tid" alias.
+                record = parse_service_owner_record(data, timestamp=timestamp)
+                if (
+                    record is not None
+                    and record.service_type == SERVICE_TYPE_MANAGER
+                    and record.owner_tid == tid
+                ):
                     latest = data
-        if latest and latest.get("status") == "active":
+        if latest and latest.get("status") == SERVICE_STATUS_ACTIVE:
             return latest
         time.sleep(0.1)
     return latest
