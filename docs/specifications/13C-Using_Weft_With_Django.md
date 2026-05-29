@@ -201,6 +201,7 @@ Weft should expose a public package:
 
 with these stable entry points:
 
+- `connect(...)` — convenience context resolver; preferred for new callers
 - `WeftClient.from_context(...)`
 - `WeftClient.submit(...)`
 - `WeftClient.prepare(...)`
@@ -224,6 +225,7 @@ Submission methods should return a `Task` handle whose stable minimum surface is
 - `events(..., timeout=None)`
 - `realtime_events(follow=True, timeout=None)`
 - `follow(timeout=None)`
+- `ping(*, timeout=...)`
 - `stop()`
 - `kill()`
 
