@@ -54,6 +54,28 @@ def _wait_for_path(path: Path, *, timeout: float = 20.0) -> bool:
     return path.exists()
 
 
+def _wait_for_stream_chunk(
+    harness, tid: str, chunk: str, timeout: float = 20.0
+) -> bool:
+    queue_name = f"T{tid}.outbox"
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        queue = harness.context.queue(queue_name, persistent=True)
+        try:
+            for raw in queue.peek_many(limit=20) or []:
+                payload = raw[0] if isinstance(raw, tuple) else raw
+                try:
+                    data = json.loads(payload)
+                except json.JSONDecodeError:
+                    continue
+                if data.get("type") == "stream" and data.get("data") == chunk:
+                    return True
+        finally:
+            queue.close()
+        time.sleep(0.05)
+    return False
+
+
 def test_result_returns_payload_for_completed_task(workdir, weft_harness) -> None:
     tid = _submit_task(
         workdir,
@@ -169,6 +191,10 @@ def test_result_stream_attaches_to_running_command_and_emits_live_output(
     weft_harness.register_tid(tid)
     assert _wait_for_path(ready_path), (
         "streaming command did not publish readiness marker"
+    )
+    assert _wait_for_stream_chunk(weft_harness, tid, "first\n"), (
+        "streaming command readiness marker appeared before the stdout chunk was "
+        "broker-visible"
     )
 
     try:

@@ -7,13 +7,18 @@ import os
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from simplebroker import Queue
-from tests.helpers.test_backend import prepare_project_root
+from tests.helpers.test_backend import (
+    POSTGRES_TEST_BACKEND,
+    active_test_backend,
+    prepare_project_root,
+)
 from weft._constants import WEFT_GLOBAL_LOG_QUEUE, WEFT_TID_MAPPINGS_QUEUE
 from weft._runner_plugins import require_runner_plugin
 from weft.commands import status as status_cmd
@@ -38,6 +43,8 @@ DOCKER_PYTHON_IMAGE = "python:3.13-alpine"
 DOCKER_IMAGE_INSPECT_TIMEOUT = 5.0
 DOCKER_IMAGE_PULL_TIMEOUT = 120.0
 RUNNER_NAMES = ("host", "docker", "macos-sandbox")
+CONSUMER_LIFECYCLE_TIMEOUT_SECONDS = 10.0
+SLOW_CONSUMER_LIFECYCLE_TIMEOUT_SECONDS = 30.0
 
 
 @pytest.fixture
@@ -358,6 +365,7 @@ def _drive_consumer_until(
     predicate,
     *,
     timeout: float = 10.0,
+    timeout_detail: Callable[[], str] | None = None,
 ) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -365,7 +373,29 @@ def _drive_consumer_until(
         if predicate():
             return
         task.wait_for_activity(timeout=0.02)
-    raise AssertionError("Consumer did not reach expected state before timeout")
+    detail = f": {timeout_detail()}" if timeout_detail is not None else ""
+    raise AssertionError(
+        f"Consumer did not reach expected state before timeout{detail}"
+    )
+
+
+def _consumer_lifecycle_timeout_seconds(runner_name: str) -> float:
+    if runner_name == "docker" or active_test_backend() == POSTGRES_TEST_BACKEND:
+        return SLOW_CONSUMER_LIFECYCLE_TIMEOUT_SECONDS
+    return CONSUMER_LIFECYCLE_TIMEOUT_SECONDS
+
+
+def _peek_json_payloads(queue: Queue, *, limit: int = 20) -> list[dict[str, Any]]:
+    payloads: list[dict[str, Any]] = []
+    for raw in queue.peek_many(limit=limit) or []:
+        payload = raw[0] if isinstance(raw, tuple) else raw
+        try:
+            data = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict):
+            payloads.append(data)
+    return payloads
 
 
 def _build_consumer_spec(
@@ -808,6 +838,15 @@ def test_consumer_command_runners_share_basic_lifecycle(
         _drive_consumer_until(
             task,
             lambda: task.taskspec.state.status == "completed",
+            timeout=_consumer_lifecycle_timeout_seconds(runner_name),
+            timeout_detail=lambda: (
+                f"runner={runner_name!r}, backend={active_test_backend()!r}, "
+                f"status={task.taskspec.state.status!r}, "
+                "events="
+                f"{[event.get('event') for event in _peek_json_payloads(log_queue)]!r}, "
+                f"outbox_pending={outbox.peek_one() is not None}, "
+                f"mapping_count={len(_peek_json_payloads(mapping_queue))}"
+            ),
         )
 
         assert task.taskspec.state.status == "completed"
