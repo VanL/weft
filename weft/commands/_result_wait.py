@@ -14,6 +14,7 @@ from weft._constants import (
     RESULT_SURFACE_WAIT_INTERVAL,
     WEFT_COMPLETED_RESULT_GRACE_SECONDS,
     WEFT_GLOBAL_LOG_QUEUE,
+    WRAPPER_LOST_ERROR,
 )
 from weft.context import WeftContext
 from weft.core.queue_wait import QueueChangeMonitor
@@ -63,6 +64,15 @@ def effective_result_surface_wait_interval(timeout: float | None) -> float:
     if timeout is None or timeout <= 0:
         return RESULT_SURFACE_WAIT_INTERVAL
     return min(RESULT_SURFACE_WAIT_INTERVAL, max(0.01, timeout / 10.0))
+
+
+def _is_manager_wrapper_lost_envelope(payload: dict[str, Any]) -> bool:
+    """Return whether *payload* is the manager's fallback wrapper-lost proof."""
+
+    return (
+        payload.get("source") == "manager"
+        and payload.get("error") == WRAPPER_LOST_ERROR
+    )
 
 
 def drain_ctrl_out_stream_messages(
@@ -127,6 +137,7 @@ def await_one_shot_result(
     result_values: list[Any] = []
     result_value: Any | None = None
     error_message: str | None = initial_error_message
+    pending_wrapper_lost_error: str | None = None
     emitted_result_seen = False
     completed_at: float | None = (
         time.monotonic() if initial_terminal_status == "completed" else None
@@ -154,7 +165,14 @@ def await_one_shot_result(
                 if selected is not None:
                     terminal_envelope = selected[0]
                     event_status = terminal_status_from_event(terminal_envelope)
-                    if event_status == "completed":
+                    if event_status is not None and _is_manager_wrapper_lost_envelope(
+                        terminal_envelope
+                    ):
+                        pending_wrapper_lost_error = terminal_error_message(
+                            terminal_envelope,
+                            event_status,
+                        )
+                    elif event_status == "completed":
                         if completed_at is None:
                             completed_at = time.monotonic()
                     elif event_status is not None:
@@ -187,6 +205,12 @@ def await_one_shot_result(
                     output,
                     show_stderr=show_stderr,
                 )
+            if pending_wrapper_lost_error is not None and (
+                result_values or emitted_result_seen
+            ):
+                result_value = aggregate_public_outputs(result_values)
+                status = "completed"
+                break
             if materialized_completed and (result_values or emitted_result_seen):
                 result_value = aggregate_public_outputs(result_values)
                 status = "completed"
@@ -212,6 +236,11 @@ def await_one_shot_result(
                 break
 
             if status != "running":
+                break
+
+            if pending_wrapper_lost_error is not None:
+                status = "failed"
+                error_message = pending_wrapper_lost_error
                 break
 
             if completed_at is not None and (

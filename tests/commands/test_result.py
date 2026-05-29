@@ -802,6 +802,57 @@ def test_await_one_shot_result_prefers_task_completed_over_manager_wrapper_lost(
     assert error is None
 
 
+def test_await_one_shot_result_prefers_outbox_over_manager_wrapper_lost(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A real one-shot result outranks manager wrapper_lost fallback evidence."""
+
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    outbox_name = f"T{tid}.outbox"
+    ctrl_out_name = f"T{tid}.ctrl_out"
+    outbox_queue = ctx.queue(outbox_name, persistent=True)
+    ctrl_queue = ctx.queue(ctrl_out_name, persistent=False)
+    ctrl_queue.write(
+        json.dumps(
+            {
+                "type": "terminal",
+                "source": "manager",
+                "tid": tid,
+                "status": "failed",
+                "error": task_evidence.WRAPPER_LOST_ERROR,
+                "return_code": 0,
+                "timestamp": time.time_ns(),
+            }
+        )
+    )
+    outbox_queue.write("hello")
+    monkeypatch.setattr(
+        result_wait,
+        "poll_log_events",
+        lambda log_queue, last_timestamp, target_tid: ([], last_timestamp),
+    )
+
+    try:
+        status, result, error = await_one_shot_result(
+            ctx,
+            tid,
+            outbox_name=outbox_name,
+            ctrl_out_name=ctrl_out_name,
+            timeout=RESULT_WAIT_TIMEOUT,
+            show_stderr=False,
+        )
+    finally:
+        outbox_queue.close()
+        ctrl_queue.close()
+
+    assert status == "completed"
+    assert result == "hello"
+    assert error is None
+
+
 def test_await_one_shot_result_accepts_prewritten_outbox_when_log_event_is_missed(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
