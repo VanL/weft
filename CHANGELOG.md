@@ -10,6 +10,9 @@
   unchanged.
 - Changed realtime task events so a terminal state derived from a final
   snapshot still emits the public `state` event before the result/end events.
+- Raised the SimpleBroker dependency floor to 4.0.1 so broker handle close and
+  finalization no longer run process-wide garbage collection in monitor cleanup
+  hot paths.
 
 ### Fixed
 
