@@ -1819,6 +1819,8 @@ def test_task_monitor_external_log_probe_reports_regression_on_monitor_cadence(
     try:
         assert task._external_task_log_status.healthy is True
 
+        assert task._external_task_log_sink is not None
+        task._external_task_log_sink.close()
         external_path.unlink()
         external_path.mkdir()
         task.process_once()

@@ -674,6 +674,7 @@ class TaskMonitor(ServiceTask):
         """Release resources without cross-talk from worker-local copies."""
 
         if not getattr(self, "_worker_lane_snapshot_only", False):
+            self._close_external_task_log_sink()
             super().cleanup()
             return
 
@@ -698,6 +699,17 @@ class TaskMonitor(ServiceTask):
             except (BrokerError, OSError, RuntimeError):  # pragma: no cover - defensive
                 logger.debug("Failed to close worker-local queue", exc_info=True)
         self._queue_cache = {}
+
+    def _close_external_task_log_sink(self) -> None:
+        """Close the external task-log sink owned by the reactor instance."""
+
+        sink = self._external_task_log_sink
+        if sink is None:
+            return
+        try:
+            sink.close()
+        except (OSError, RuntimeError, ValueError):  # pragma: no cover - defensive
+            logger.debug("Failed to close external task-log sink", exc_info=True)
 
     def _worker_local_monitor_clone(self) -> TaskMonitor:
         """Return a worker-local monitor copy for durable cleanup effects.

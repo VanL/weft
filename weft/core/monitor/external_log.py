@@ -160,6 +160,12 @@ class ExternalTaskLogSink:
 
         return self.probe()
 
+    def close(self) -> None:
+        """Close the external JSONL handler and release its file handle."""
+
+        with self._lock:
+            self._close_handler_locked()
+
     def probe(self) -> bool:
         """Reopen the handler to validate current path writability."""
 
