@@ -382,3 +382,84 @@ def test_realtime_events_uses_terminal_state_seen_during_materialization(
         "end",
     ]
     assert events[-2].payload == {"status": "completed", "value": "done", "error": None}
+
+
+def test_realtime_events_emits_state_when_terminal_derived_from_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tid = "1776000000000000001"
+
+    class _FakeQueue:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def close(self) -> None:
+            return None
+
+    class _FakeContext:
+        config: dict[str, object] = {}
+
+        def queue(self, name: str, *, persistent: bool = False) -> _FakeQueue:
+            del persistent
+            return _FakeQueue(name)
+
+    class _FakeMonitor:
+        def __init__(self, queues, *, config=None) -> None:
+            del queues, config
+
+        def wait(self, timeout=None) -> bool:
+            del timeout
+            return False
+
+        def close(self) -> None:
+            return None
+
+    materialized = result_mod.ResultMaterialization(
+        taskspec_payload=None,
+        outbox_name=f"T{tid}.outbox",
+        ctrl_out_name=f"T{tid}.ctrl_out",
+        log_last_timestamp=42,
+        terminal_status=None,
+        terminal_event_payload=None,
+        terminal_event_timestamp=None,
+    )
+
+    monkeypatch.setattr(
+        events_mod,
+        "_await_result_materialization",
+        lambda *args, **kwargs: materialized,
+    )
+    monkeypatch.setattr(events_mod, "QueueChangeMonitor", _FakeMonitor)
+    monkeypatch.setattr(
+        events_mod, "iter_queue_json_entries", lambda *args, **kwargs: iter(())
+    )
+    monkeypatch.setattr(
+        events_mod, "_peek_result_value", lambda *args, **kwargs: "done"
+    )
+    monkeypatch.setattr(
+        events_mod,
+        "_task_snapshot_event",
+        lambda context, normalized_tid: TaskEvent(
+            tid=normalized_tid,
+            event_type="snapshot",
+            timestamp=100,
+            payload={"tid": normalized_tid, "status": "completed"},
+        ),
+    )
+
+    events = list(
+        events_mod.iter_task_realtime_events(
+            _FakeContext(),
+            tid,
+            timeout=1.0,
+        )
+    )
+
+    assert [event.event_type for event in events] == [
+        "snapshot",
+        "state",
+        "result",
+        "end",
+    ]
+    assert events[1].payload == {"status": "completed"}
+    assert events[-2].payload == {"status": "completed", "value": "done", "error": None}

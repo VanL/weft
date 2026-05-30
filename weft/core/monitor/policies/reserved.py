@@ -129,6 +129,7 @@ def terminal_reserved_candidates(
             )
         )
     waypoint_reached = len(candidates) >= selection_limit
+    too_young_boundary_reached = "first_reserved_row_too_young" in stop_reasons
     progress = (
         PolicyProgress(
             policy=TASK_MONITOR_POLICY_TASK_LOCAL_TERMINAL_RUNTIME,
@@ -137,7 +138,8 @@ def terminal_reserved_candidates(
             selected=len(candidates),
             deferred=max(0, len(groups) - (selection_limit - probes_remaining)),
             waypoint_reached=waypoint_reached,
-            base_reached=not waypoint_reached and not candidates,
+            base_reached=not waypoint_reached
+            and (too_young_boundary_reached or not candidates),
             reason_counts={
                 "terminal_task_log_proof_for_reserved_tid": len(candidates),
                 "reserved_stop_reasons": len(stop_reasons),

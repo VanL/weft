@@ -297,7 +297,9 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
   protections, but it does not override explicit scope, dry-run/apply mode,
   exact-message identity, or backend deletion capability.
 
-_Plan backlink_: [`docs/plans/2026-05-07-task-local-reaper-retention-policy-plan.md`](../plans/2026-05-07-task-local-reaper-retention-policy-plan.md).
+_Plan backlinks_:
+- [`docs/plans/2026-05-07-task-local-reaper-retention-policy-plan.md`](../plans/2026-05-07-task-local-reaper-retention-policy-plan.md)
+- [`docs/plans/2026-05-30-cleanup-progress-fifo-boundary-plan.md`](../plans/2026-05-30-cleanup-progress-fifo-boundary-plan.md)
 
 ### Implementation Invariants
 

@@ -363,7 +363,6 @@ def iter_task_realtime_events(
             }
             terminal_timestamp = snapshot_event.timestamp
             terminal_observed_monotonic = time.monotonic()
-            terminal_state_emitted = True
 
     try:
         while not _is_cancelled(cancel_event):

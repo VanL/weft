@@ -276,6 +276,16 @@ runbook needs to become stricter.
   backend pressure, and keep worker-completion tests from using narrow local
   timing as a correctness oracle.
 
+## 2026-05-30 Cleanup Progress Boundaries
+
+- Cleanup progress must distinguish "selected work this pass" from "more work
+  is eligible now." When a FIFO age scan selects old rows and then stops at
+  `first_*_too_young`, the remaining rows are future-eligible only, so the
+  policy is base-for-now even though candidates were selected earlier in the
+  same pass. Consolidating private cleanup phases into top-level policy rows
+  must preserve that stop-reason meaning instead of adding a blanket
+  `not candidates` gate.
+
 ## 2026-05-13 Plan Review Gates
 
 - Metadata-valid plans are not necessarily implementation-ready. Every plan

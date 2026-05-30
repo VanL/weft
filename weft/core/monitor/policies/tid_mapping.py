@@ -123,13 +123,9 @@ def tid_mapping_candidates(
         bool(malformed_candidates)
         or (old_rows.stop_reason is None and bool(old_rows.candidates))
     )
-    base_reached = (
-        not waypoint_reached
-        and not candidates
-        and (
-            old_rows.stop_reason == "first_tid_mapping_too_young"
-            or not scan_limit_reached
-        )
+    base_reached = not waypoint_reached and (
+        old_rows.stop_reason == "first_tid_mapping_too_young"
+        or (not candidates and not scan_limit_reached)
     )
     progress = (
         PolicyProgress(

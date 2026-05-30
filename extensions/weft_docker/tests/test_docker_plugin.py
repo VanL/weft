@@ -367,6 +367,46 @@ def test_docker_runner_validation_accepts_command_container_profile(
     assert fake_client.network_gets == []
 
 
+def test_docker_runner_profile_image_build_conflict_names_profile(
+    tmp_path: Path,
+) -> None:
+    if os.name == "nt":
+        pytest.skip("Docker runner is currently unsupported on Windows")
+    runner_plugin = get_runner_plugin()
+    profile_file = _write_profile(
+        tmp_path / ".weft" / "docker-profiles.toml",
+        """
+        version = 1
+
+        [profiles.broken]
+        image = "busybox:latest"
+        build = { context = "." }
+        """,
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        runner_plugin.validate_taskspec(
+            {
+                "spec": {
+                    "type": "command",
+                    "process_target": "python3",
+                    "runner": {
+                        "name": "docker",
+                        "options": {
+                            "container_profile": "broken",
+                            "container_profile_file": str(profile_file),
+                        },
+                    },
+                }
+            }
+        )
+
+    assert str(exc_info.value) == (
+        f"Docker profile 'broken' (from {profile_file.resolve()}) cannot specify "
+        "both 'image' and 'build'"
+    )
+
+
 def test_docker_runner_rejects_container_profile_for_agent_tasks() -> None:
     if os.name == "nt":
         pytest.skip("Docker runner is currently unsupported on Windows")

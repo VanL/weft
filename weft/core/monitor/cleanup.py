@@ -410,46 +410,45 @@ def _with_policy_progress_apply_counts(
     *,
     report_only: bool,
 ) -> list[PolicyProgress]:
+    """Attach apply counts to policy-level progress records."""
+
     applied_by_policy_queue = Counter(
         (result.candidate.policy, result.candidate.queue)
         for result in applied
         if result.deleted
     )
-    reported_by_policy_queue: Counter[tuple[str, str]] = Counter()
-    if report_only:
-        reported_by_policy_queue.update(
-            {
-                (progress.policy, progress.domain): progress.selected
-                for progress in progresses
-                if progress.selected
-            }
-        )
-    elif applied:
-        reported_by_policy_queue.update(
-            (result.candidate.policy, result.candidate.queue)
-            for result in applied
-            if not result.deleted
-        )
+    applied_by_policy = Counter(
+        result.candidate.policy for result in applied if result.deleted
+    )
     error_by_policy_queue: dict[tuple[str, str], str] = {}
+    error_by_policy: dict[str, str] = {}
     for result in applied:
         if result.error is not None:
             error_by_policy_queue.setdefault(
                 (result.candidate.policy, result.candidate.queue),
                 result.error,
             )
+            error_by_policy.setdefault(result.candidate.policy, result.error)
 
     updated: list[PolicyProgress] = []
     for progress in progresses:
         key = (progress.policy, progress.domain)
-        applied_count = (
-            reported_by_policy_queue[key]
-            if report_only
-            else applied_by_policy_queue[key]
-        )
+        if report_only:
+            applied_count = progress.selected
+        else:
+            applied_count = applied_by_policy_queue[key]
+            if key not in applied_by_policy_queue and progress.selected:
+                applied_count = min(
+                    applied_by_policy[progress.policy],
+                    progress.selected,
+                )
+        blocked_reason = error_by_policy_queue.get(key)
+        if blocked_reason is None and progress.selected:
+            blocked_reason = error_by_policy.get(progress.policy)
         updated.append(
             progress.with_apply_result(
                 applied=applied_count,
-                blocked_reason=error_by_policy_queue.get(key),
+                blocked_reason=blocked_reason,
             )
         )
     return updated

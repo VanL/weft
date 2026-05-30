@@ -442,10 +442,7 @@ class DockerRunnerPlugin:
                 "or spec.runner.options.build"
             )
         if normalized_image is not None and normalized_build is not None:
-            raise ValueError(
-                "Docker runner requires exactly one of spec.runner.options.image "
-                "or spec.runner.options.build"
-            )
+            raise ValueError(_image_build_conflict_message(materialized_profile))
         if options.get("work_item_mounts") is not None:
             raise ValueError(
                 "Docker command tasks do not accept "
@@ -700,6 +697,23 @@ def _materialize_command_container_profile(
         env=env,
         bundle_root=bundle_root_from_taskspec_payload(taskspec_payload),
         preflight=preflight,
+    )
+
+
+def _image_build_conflict_message(
+    materialized_profile: MaterializedContainerProfile,
+) -> str:
+    profile_name = materialized_profile.profile_name
+    if profile_name is None:
+        return (
+            "Docker runner requires exactly one of spec.runner.options.image "
+            "or spec.runner.options.build"
+        )
+    profile_file = materialized_profile.profile_file
+    source = f" (from {profile_file})" if profile_file is not None else ""
+    return (
+        f"Docker profile '{profile_name}'{source} cannot specify both 'image' "
+        "and 'build'"
     )
 
 

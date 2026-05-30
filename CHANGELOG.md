@@ -1,6 +1,29 @@
 # Changelog
 
-## 2.7.2 - 2026-05-30
+## 0.9.73 - 2026-05-30
+
+### Changed
+
+- Updated Weft's SimpleBroker dependency floor to `simplebroker>=4.0.0` and
+  `simplebroker-pg>=2.0.0`, with the lockfile refreshed for the new backend
+  release line.
+- Changed TaskMonitor cleanup progress so FIFO age scans that select eligible
+  rows and then stop at the first too-young row report base-for-now instead of
+  leaving catch-up pending. Candidate selection and exact deletion behavior are
+  unchanged.
+- Changed realtime task events so a terminal state derived from a final
+  snapshot still emits the public `state` event before the result/end events.
+
+### Fixed
+
+- Fixed cleanup progress accounting when policy-level progress records are
+  folded from queue-local cleanup phases, including selected/applied counts and
+  blocked reasons for consolidated Monitor policies.
+- Fixed Docker command-container profile validation so image/build conflicts
+  identify the profile name and source file instead of returning a generic
+  runner-options error.
+
+## 0.9.72 - 2026-05-30
 
 ### Added
 

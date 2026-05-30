@@ -158,10 +158,6 @@ def task_log_candidates(
     applied.extend(apply_candidates(complete_lifecycle_candidates))
     claimed.update(candidate.message_id for candidate in complete_lifecycle_candidates)
     remaining = max(0, batch_size - len(candidates))
-    complete_deferred = sum(
-        1 for family in family_selection.skipped_open_families if family.start_rows > 0
-    )
-
     terminal_without_start_candidates = [
         candidate
         for group in terminal_without_start_summaries
@@ -187,7 +183,7 @@ def task_log_candidates(
     candidates.extend(old_task_log_candidates)
     applied.extend(apply_candidates(old_task_log_candidates))
     remaining = max(0, batch_size - len(candidates))
-    old_deferred = len(family_selection.skipped_open_families)
+    skipped_open_deferred = len(family_selection.skipped_open_families)
     stop_reason = (
         claimed_stop_reason
         or family_selection.stop_reason
@@ -271,7 +267,7 @@ def task_log_candidates(
             domain=WEFT_GLOBAL_LOG_QUEUE,
             scanned=scan_window.scanned + len(claimed_rows),
             selected=len(task_log_candidate_rows),
-            deferred=complete_deferred + old_deferred,
+            deferred=skipped_open_deferred,
             source_total=claimed_total,
             waypoint_reached=task_log_waypoint,
             base_reached=task_log_base,

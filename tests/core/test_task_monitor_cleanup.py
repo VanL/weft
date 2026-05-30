@@ -656,6 +656,12 @@ def test_task_monitor_cleanup_collates_complete_family_behind_open_prefix(
     }
     stats = _policy_summary_by_policy(result)
     assert stats[TASK_MONITOR_POLICY_TASK_LOG_RETENTION]["selected"] == 2
+    progress = next(
+        progress
+        for progress in result.policy_progress
+        if progress.policy == TASK_MONITOR_POLICY_TASK_LOG_RETENTION
+    )
+    assert progress.deferred == 1
     queue_summary = next(
         stat.to_summary()
         for stat in result.queue_stats
@@ -715,6 +721,15 @@ def test_task_monitor_cleanup_deletes_reserved_work_with_terminal_log_proof(
     assert reserved_policy_stats[0].queue == reserved_queue
     assert reserved_policy_stats[0].selected == 1
     assert reserved_policy_stats[0].deleted == 1
+    reserved_progress = [
+        progress
+        for progress in result.policy_progress
+        if progress.policy == TASK_MONITOR_POLICY_TASK_LOCAL_TERMINAL_RUNTIME
+    ]
+    assert len(reserved_progress) == 1
+    assert reserved_progress[0].domain == "task_runtime_queues"
+    assert reserved_progress[0].selected == 1
+    assert reserved_progress[0].applied == 1
     reserved_stats = next(
         stat for stat in result.queue_stats if stat.queue == reserved_queue
     )
