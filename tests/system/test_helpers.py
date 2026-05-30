@@ -24,6 +24,7 @@ from weft.helpers import (  # noqa: D401 - module already documented
     format_tid,
     is_debug_enabled,
     is_logging_enabled,
+    iter_queue_entries,
     log_critical,
     log_debug,
     log_error,
@@ -57,6 +58,38 @@ def test_safe_cancel_handles_missing_truthy_and_raising_callbacks() -> None:
         raise RuntimeError("bad cancel hook")
 
     assert safe_cancel(_raise) is False
+
+
+def test_iter_queue_entries_closes_underlying_generator_on_early_close() -> None:
+    class ClosingGenerator:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def __iter__(self) -> ClosingGenerator:
+            return self
+
+        def __next__(self) -> tuple[str, int]:
+            if self.closed:
+                raise StopIteration
+            return "payload", 123
+
+        def close(self) -> None:
+            self.closed = True
+
+    class QueueWithGenerator:
+        def __init__(self) -> None:
+            self.raw_entries = ClosingGenerator()
+
+        def peek_generator(self, **_kwargs: object) -> ClosingGenerator:
+            return self.raw_entries
+
+    queue = QueueWithGenerator()
+    entries = iter_queue_entries(queue)  # type: ignore[arg-type]
+
+    assert next(entries) == ("payload", 123)
+    entries.close()
+
+    assert queue.raw_entries.closed is True
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX only")

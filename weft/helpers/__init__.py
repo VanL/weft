@@ -269,15 +269,20 @@ def iter_queue_entries(
         return iter(())
 
     def _generator() -> Iterator[tuple[str, int]]:
-        for entry in cast(Iterable[Any], raw_entries):
-            if not isinstance(entry, tuple) or len(entry) != 2:
-                continue
-            body, timestamp = entry
-            try:
-                timestamp_value = int(timestamp)
-            except (TypeError, ValueError):
-                continue
-            yield str(body), timestamp_value
+        try:
+            for entry in cast(Iterable[Any], raw_entries):
+                if not isinstance(entry, tuple) or len(entry) != 2:
+                    continue
+                body, timestamp = entry
+                try:
+                    timestamp_value = int(timestamp)
+                except (TypeError, ValueError):
+                    continue
+                yield str(body), timestamp_value
+        finally:
+            close_generator = getattr(raw_entries, "close", None)
+            if callable(close_generator):
+                close_generator()
 
     return _generator()
 
