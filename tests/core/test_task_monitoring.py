@@ -363,6 +363,8 @@ def test_task_monitor_operational_log_warns_when_external_log_regresses_on_cycle
     )
     try:
         assert monitor._external_task_log_status.healthy is True
+        assert monitor._external_task_log_sink is not None
+        monitor._external_task_log_sink.close()
         external_path.unlink()
         external_path.mkdir()
 
