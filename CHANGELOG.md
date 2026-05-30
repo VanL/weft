@@ -4,9 +4,6 @@
 
 ### Changed
 
-- Updated Weft's SimpleBroker dependency floor to `simplebroker>=4.0.0` and
-  `simplebroker-pg>=2.0.0`, with the lockfile refreshed for the new backend
-  release line.
 - Changed TaskMonitor cleanup progress so FIFO age scans that select eligible
   rows and then stop at the first too-young row report base-for-now instead of
   leaving catch-up pending. Candidate selection and exact deletion behavior are
