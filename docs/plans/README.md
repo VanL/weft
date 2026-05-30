@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 130 plan files in this directory.
+There are currently 134 plan files in this directory.
 
 ## Curation Policy
 
@@ -23,6 +23,10 @@ There are currently 130 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-05-30-task-monitor-external-log-health-plan.md`](./2026-05-30-task-monitor-external-log-health-plan.md) | TaskMonitor External Log Health Plan | `completed` | none |
+| [`2026-05-30-task-monitor-mode-and-rotating-log-plan.md`](./2026-05-30-task-monitor-mode-and-rotating-log-plan.md) | TaskMonitor Mode And Rotating Log Plan | `completed` | none |
+| [`2026-05-29-task-monitor-general-lifetime-reporting-plan.md`](./2026-05-29-task-monitor-general-lifetime-reporting-plan.md) | TaskMonitor General Lifetime Reporting Plan | `completed` | none |
+| [`2026-05-29-task-monitor-config-and-reactor-cache-cleanup-plan.md`](./2026-05-29-task-monitor-config-and-reactor-cache-cleanup-plan.md) | TaskMonitor Config And Reactor Cache Cleanup Plan | `completed` | none |
 | [`2026-05-29-reliability-and-doc-fixes-plan.md`](./2026-05-29-reliability-and-doc-fixes-plan.md) | Reliability And Doc Fixes Plan | `completed` | none |
 | [`2026-05-28-docker-container-profiles-plan.md`](./2026-05-28-docker-container-profiles-plan.md) | Docker Container Profiles Plan | `completed` | none |
 | [`2026-05-28-documentation-clarity-and-plan-curation-plan.md`](./2026-05-28-documentation-clarity-and-plan-curation-plan.md) | Documentation Clarity And Plan Curation Plan | `completed` | none |

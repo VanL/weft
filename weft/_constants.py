@@ -502,6 +502,9 @@ WEFT_MONITOR_TASK_COLLATIONS_TABLE: Final[str] = "weft_monitor_task_collations"
 WEFT_MONITOR_TASK_MESSAGES_TABLE: Final[str] = "weft_monitor_task_messages"
 """Monitor-owned table for exact task-log message IDs included in summaries."""
 
+WEFT_MONITOR_DEFERRED_WRITES_TABLE: Final[str] = "weft_monitor_deferred_writes"
+"""Monitor-owned operational outbox for deferred external JSONL writes."""
+
 WEFT_MONITOR_SCHEMA_VERSION_KEY: Final[str] = "schema_version"
 """Monitor metadata key storing the durable store schema version."""
 
@@ -575,9 +578,6 @@ WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS_DEFAULT: Final[float] = 604800.0
 WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT_DEFAULT: Final[int] = 1000
 """Default per-cycle family cap for terminal task control-queue cleanup."""
 
-WEFT_TASK_MONITOR_CLEANUP_WORKERS_DEFAULT: Final[int] = 3
-"""Default total worker cap for one TaskMonitor runtime cleanup epoch."""
-
 TASK_MONITOR_RUNTIME_CLEANUP_SLICE_FAMILY_LIMIT: Final[int] = 50
 """Internal max task-local runtime families handled by one cleanup worker slice."""
 
@@ -599,11 +599,11 @@ STALE_SERVICE_OWNER_DISPOSITION_REASONS: Final[frozenset[str]] = frozenset(
 WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS_DEFAULT: Final[float] = 172800.0
 """Default minimum age before TaskMonitor logs/deletes task-log rows."""
 
-WEFT_LOG_TASKS_EXTERNAL_PATH_DEFAULT: Final[str] = ""
-"""Default external task-log JSONL path. Empty disables external logging."""
+WEFT_LOG_TASKS_EXTERNAL_PATH_DEFAULT: Final[str] = "logs/weft.log"
+"""Default external task-log JSONL path relative to the Weft project root."""
 
 WEFT_LOG_TASKS_EXTERNAL_ENABLED_DEFAULT: Final[bool] = False
-"""Default external task-log logging enablement when no path is configured."""
+"""Default external task-log logging enablement outside log-then-delete mode."""
 
 WEFT_LOG_TASKS_EXTERNAL_MODE_DEFAULT: Final[str] = "collated"
 """Default external task-log logging mode when a path is configured."""
@@ -614,6 +614,15 @@ WEFT_LOG_TASKS_EXTERNAL_MODES: Final[frozenset[str]] = frozenset({"collated", "r
 WEFT_LOG_TASKS_EXTERNAL_SCHEMA_VERSION: Final[int] = 1
 """JSONL schema version for external task-log operational records."""
 
+WEFT_LOG_TASKS_EXTERNAL_ROTATE_MAX_BYTES: Final[int] = 10 * 1024 * 1024
+"""Maximum external JSONL log size before rotating the file."""
+
+WEFT_LOG_TASKS_EXTERNAL_ROTATE_BACKUP_COUNT: Final[int] = 5
+"""Number of rotated external JSONL log files retained by the handler."""
+
+TASK_LIFETIME_REPORT_RECORD_TYPE: Final[str] = "task_lifetime_report"
+"""External JSONL record type for TaskMonitor lifetime reports."""
+
 WEFT_LOG_TASKS_RAW_BODY_PREVIEW_BYTES: Final[int] = 8192
 """Maximum malformed raw task-log body bytes included in external records."""
 
@@ -622,13 +631,16 @@ TASK_MONITOR_TASK_LOG_CLEANUP_SKIPPED_OWNER: Final[str] = (
 )
 """Stop reason when broad task-log cleanup is disabled for a cycle owner."""
 
-WEFT_TASK_MONITOR_PROCESSOR_DEFAULT: Final[str] = "delete"
-"""Default processor for supervised task-monitor candidates."""
+WEFT_TASK_MONITOR_MODE_DEFAULT: Final[str] = "delete"
+"""Default supervised task-monitor cleanup mode."""
 
-WEFT_TASK_MONITOR_PROCESSOR_BUILTINS: Final[frozenset[str]] = frozenset(
-    {"report_only", "delete", "jsonl_then_delete"}
+WEFT_TASK_MONITOR_MODES: Final[frozenset[str]] = frozenset(
+    {"report_only", "delete", "jsonl_then_delete", "custom"}
 )
-"""Built-in task-monitor processor names accepted by configuration."""
+"""Supported supervised task-monitor modes."""
+
+WEFT_TASK_MONITOR_PROCESSOR_DEFAULT: Final[str] = ""
+"""Default custom task-monitor processor reference. Empty means none."""
 
 WEFT_TASK_MONITOR_LOG_SINK_DEFAULT: Final[str] = "stdout"
 """Default operational output sink selected for the supervised task monitor."""
@@ -643,9 +655,6 @@ WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS_DEFAULT: Final[float] = 60.0
 
 WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED_DEFAULT: Final[bool] = True
 """Default for the supervised monitor's durable collation store."""
-
-WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED_DEFAULT: Final[bool] = False
-"""Default for raw task-log deletion from durable Monitor collation proof."""
 
 MANAGER_SERVE_LOG_SCHEMA: Final[str] = "weft.manager_serve_log"
 """JSONL schema name for foreground manager operational log records."""
@@ -1766,21 +1775,6 @@ def _parse_task_monitor_control_queue_delete_limit(value: str) -> int:
     )
 
 
-def _parse_task_monitor_cleanup_workers(value: str) -> int:
-    """Parse the task-monitor cleanup worker cap."""
-
-    parsed = _parse_positive_int(
-        value,
-        name="WEFT_TASK_MONITOR_CLEANUP_WORKERS",
-    )
-    if parsed > WEFT_TASK_MONITOR_CLEANUP_WORKERS_DEFAULT:
-        raise ValueError(
-            "WEFT_TASK_MONITOR_CLEANUP_WORKERS must be between 1 and "
-            f"{WEFT_TASK_MONITOR_CLEANUP_WORKERS_DEFAULT}, got {parsed}"
-        )
-    return parsed
-
-
 def _parse_log_tasks_retention_period_seconds(value: str) -> float:
     """Parse the task-log external retention period environment variable."""
 
@@ -1806,18 +1800,30 @@ def _parse_log_tasks_external_mode(value: str) -> str:
     return parsed
 
 
+def _parse_task_monitor_mode(value: str) -> str:
+    """Parse the task-monitor cleanup mode."""
+
+    parsed = value.strip().lower()
+    if parsed not in WEFT_TASK_MONITOR_MODES:
+        allowed = ", ".join(sorted(WEFT_TASK_MONITOR_MODES))
+        raise ValueError(f"WEFT_TASK_MONITOR_MODE must be one of: {allowed}")
+    return parsed
+
+
 def _parse_task_monitor_processor(value: str) -> str:
-    """Parse the task-monitor processor name or dotted callable reference."""
+    """Parse the custom task-monitor processor callable reference."""
 
     parsed = value.strip()
     if not parsed:
-        raise ValueError("WEFT_TASK_MONITOR_PROCESSOR must be non-empty")
-    if parsed in WEFT_TASK_MONITOR_PROCESSOR_BUILTINS:
-        return parsed
+        return ""
+    if parsed in WEFT_TASK_MONITOR_MODES:
+        raise ValueError(
+            "WEFT_TASK_MONITOR_PROCESSOR no longer selects built-in modes; use "
+            f"WEFT_TASK_MONITOR_MODE={parsed}"
+        )
     if ":" not in parsed:
         raise ValueError(
-            "WEFT_TASK_MONITOR_PROCESSOR must be a built-in processor name "
-            "or a module:function reference"
+            "WEFT_TASK_MONITOR_PROCESSOR must be a module:function reference"
         )
     module_name, function_name = parsed.split(":", 1)
     if not module_name.strip() or not function_name.strip():
@@ -1974,11 +1980,28 @@ def _load_weft_env_vars() -> dict[str, Any]:
     Returns:
         Dict with WEFT_* configuration values
     """
-    if "WEFT_TASK_MONITOR_TASK_LOG_CUTOFF_SECONDS" in os.environ:
-        raise ValueError(
+    removed_task_monitor_env = {
+        "WEFT_TASK_MONITOR_TASK_LOG_CUTOFF_SECONDS": (
             "WEFT_TASK_MONITOR_TASK_LOG_CUTOFF_SECONDS was removed; use "
             "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS"
-        )
+        ),
+        "WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED": (
+            "WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED was removed; use "
+            "WEFT_TASK_MONITOR_MODE=report_only to disable destructive cleanup"
+        ),
+        "WEFT_TASK_MONITOR_CLEANUP_WORKERS": (
+            "WEFT_TASK_MONITOR_CLEANUP_WORKERS was removed; TaskMonitor runtime "
+            "cleanup uses bounded reactor-launched worker slices"
+        ),
+    }
+    for env_name, message in removed_task_monitor_env.items():
+        if env_name in os.environ:
+            raise ValueError(message)
+    task_monitor_mode = _load_weft_env_value(
+        "WEFT_TASK_MONITOR_MODE",
+        default=WEFT_TASK_MONITOR_MODE_DEFAULT,
+        parser=_parse_task_monitor_mode,
+    )
     external_task_log_path = _load_weft_env_value(
         "WEFT_LOG_TASKS_EXTERNAL_PATH",
         default=WEFT_LOG_TASKS_EXTERNAL_PATH_DEFAULT,
@@ -1986,7 +2009,7 @@ def _load_weft_env_vars() -> dict[str, Any]:
     )
     external_task_log_enabled = _load_weft_env_value(
         "WEFT_LOG_TASKS_EXTERNAL_ENABLED",
-        default=bool(external_task_log_path),
+        default=(task_monitor_mode == "jsonl_then_delete"),
         parser=_parse_bool,
     )
     env_vars = {
@@ -2087,11 +2110,7 @@ def _load_weft_env_vars() -> dict[str, Any]:
             default=WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT_DEFAULT,
             parser=_parse_task_monitor_control_queue_delete_limit,
         ),
-        "WEFT_TASK_MONITOR_CLEANUP_WORKERS": _load_weft_env_value(
-            "WEFT_TASK_MONITOR_CLEANUP_WORKERS",
-            default=WEFT_TASK_MONITOR_CLEANUP_WORKERS_DEFAULT,
-            parser=_parse_task_monitor_cleanup_workers,
-        ),
+        "WEFT_TASK_MONITOR_MODE": task_monitor_mode,
         "WEFT_TASK_MONITOR_PROCESSOR": _load_weft_env_value(
             "WEFT_TASK_MONITOR_PROCESSOR",
             default=WEFT_TASK_MONITOR_PROCESSOR_DEFAULT,
@@ -2110,11 +2129,6 @@ def _load_weft_env_vars() -> dict[str, Any]:
         "WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED": _load_weft_env_value(
             "WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED",
             default=WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED_DEFAULT,
-            parser=_parse_bool,
-        ),
-        "WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED": _load_weft_env_value(
-            "WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED",
-            default=WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED_DEFAULT,
             parser=_parse_bool,
         ),
         WEFT_MANAGER_SERVE_LOG_LEVEL: _load_weft_env_value(
@@ -2181,6 +2195,10 @@ def _normalize_weft_override_value(name: str, value: Any) -> Any:
         if isinstance(value, str):
             return _parse_log_tasks_external_mode(value)
         raise TypeError("WEFT_LOG_TASKS_EXTERNAL_MODE override must be str")
+    if name == "WEFT_TASK_MONITOR_MODE":
+        if isinstance(value, str):
+            return _parse_task_monitor_mode(value)
+        raise TypeError("WEFT_TASK_MONITOR_MODE override must be str")
     if name == "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS":
         if isinstance(value, str):
             return _parse_log_tasks_retention_period_seconds(value)
@@ -2194,6 +2212,16 @@ def _normalize_weft_override_value(name: str, value: Any) -> Any:
         raise ValueError(
             "WEFT_TASK_MONITOR_TASK_LOG_CUTOFF_SECONDS was removed; use "
             "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS"
+        )
+    if name == "WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED":
+        raise ValueError(
+            "WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED was removed; use "
+            "WEFT_TASK_MONITOR_MODE=report_only to disable destructive cleanup"
+        )
+    if name == "WEFT_TASK_MONITOR_CLEANUP_WORKERS":
+        raise ValueError(
+            "WEFT_TASK_MONITOR_CLEANUP_WORKERS was removed; TaskMonitor runtime "
+            "cleanup uses bounded reactor-launched worker slices"
         )
     if name == "WEFT_DIRECTORY_NAME":
         if isinstance(value, str):
@@ -2215,7 +2243,6 @@ def _normalize_weft_override_value(name: str, value: Any) -> Any:
         "WEFT_AUTOSTART_TASKS",
         "WEFT_TASK_MONITOR_ENABLED",
         "WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED",
-        "WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED",
     }:
         return _parse_bool(value) if isinstance(value, str) else bool(value)
     if name == "WEFT_TASK_MONITOR_INTERVAL_SECONDS":
@@ -2274,12 +2301,6 @@ def _normalize_weft_override_value(name: str, value: Any) -> Any:
         raise TypeError(
             "WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT override must be int or str"
         )
-    if name == "WEFT_TASK_MONITOR_CLEANUP_WORKERS":
-        if isinstance(value, str):
-            return _parse_task_monitor_cleanup_workers(value)
-        if isinstance(value, int):
-            return _parse_task_monitor_cleanup_workers(str(value))
-        raise TypeError("WEFT_TASK_MONITOR_CLEANUP_WORKERS override must be int or str")
     if name == "WEFT_TASK_MONITOR_PROCESSOR":
         if isinstance(value, str):
             return _parse_task_monitor_processor(value)
@@ -2383,11 +2404,11 @@ def compile_config(overrides: Mapping[str, Any] | None = None) -> dict[str, Any]
     resolved_config = dict(base_config)
     resolved_config.update(normalized_overrides)
     if (
-        "WEFT_LOG_TASKS_EXTERNAL_PATH" in normalized_overrides
+        "WEFT_TASK_MONITOR_MODE" in normalized_overrides
         and "WEFT_LOG_TASKS_EXTERNAL_ENABLED" not in normalized_overrides
     ):
-        resolved_config["WEFT_LOG_TASKS_EXTERNAL_ENABLED"] = bool(
-            resolved_config["WEFT_LOG_TASKS_EXTERNAL_PATH"]
+        resolved_config["WEFT_LOG_TASKS_EXTERNAL_ENABLED"] = (
+            resolved_config["WEFT_TASK_MONITOR_MODE"] == "jsonl_then_delete"
         )
 
     base_broker_config = {

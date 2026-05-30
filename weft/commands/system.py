@@ -1548,6 +1548,7 @@ def _service_snapshot_from_evidence(
     key: str,
     desired: bool,
     evidence: _ServiceEvidence | None,
+    diagnostics: Mapping[str, Any] | None = None,
 ) -> ServiceSnapshot:
     enabled = _service_enabled(ctx, key)
     if not enabled:
@@ -1558,6 +1559,7 @@ def _service_snapshot_from_evidence(
             enabled=False,
             status="disabled",
             evidence="config-disabled",
+            diagnostics=dict(diagnostics) if diagnostics is not None else None,
         )
     if evidence is None:
         return ServiceSnapshot(
@@ -1567,6 +1569,7 @@ def _service_snapshot_from_evidence(
             enabled=True,
             status="unknown",
             evidence="none",
+            diagnostics=dict(diagnostics) if diagnostics is not None else None,
         )
     return ServiceSnapshot(
         key=key,
@@ -1581,7 +1584,27 @@ def _service_snapshot_from_evidence(
         pid=evidence.pid,
         updated_at=evidence.updated_at,
         reconciliation=evidence.reconciliation,
+        diagnostics=dict(diagnostics) if diagnostics is not None else None,
     )
+
+
+def _service_diagnostics_from_mapping(
+    *,
+    key: str,
+    evidence: _ServiceEvidence | None,
+    tid_mapping_entries: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    if key != INTERNAL_SERVICE_KEY_TASK_MONITOR or evidence is None:
+        return None
+    if evidence.tid is None:
+        return None
+    mapping = tid_mapping_entries.get(evidence.tid)
+    if not isinstance(mapping, Mapping):
+        return None
+    task_monitor = mapping.get("task_monitor")
+    if not isinstance(task_monitor, Mapping):
+        return None
+    return {"task_monitor": dict(task_monitor)}
 
 
 def _collect_internal_service_snapshots(
@@ -1652,15 +1675,24 @@ def _collect_internal_service_snapshots(
 
     active_managers = _active_canonical_manager_records(managers)
     desired = bool(active_managers)
-    return [
-        _service_snapshot_from_evidence(
-            ctx=ctx,
-            key=key,
-            desired=desired,
-            evidence=_best_service_evidence(candidates_by_key.get(key, ())),
+    tid_mapping_entries = _latest_tid_mapping_entries(ctx)
+    snapshots: list[ServiceSnapshot] = []
+    for key in _known_internal_service_keys():
+        evidence = _best_service_evidence(candidates_by_key.get(key, ()))
+        snapshots.append(
+            _service_snapshot_from_evidence(
+                ctx=ctx,
+                key=key,
+                desired=desired,
+                evidence=evidence,
+                diagnostics=_service_diagnostics_from_mapping(
+                    key=key,
+                    evidence=evidence,
+                    tid_mapping_entries=tid_mapping_entries,
+                ),
+            )
         )
-        for key in _known_internal_service_keys()
-    ]
+    return snapshots
 
 
 def _collect_task_snapshots(
@@ -1744,6 +1776,16 @@ def _format_service_summary(snapshots: Sequence[ServiceSnapshot]) -> str:
         if snap.tid is not None:
             parts.append(f"tid={snap.tid}")
         parts.append(f"evidence={snap.evidence}")
+        diagnostics = snap.diagnostics or {}
+        task_monitor = diagnostics.get("task_monitor")
+        if isinstance(task_monitor, Mapping):
+            external = task_monitor.get("task_log_external")
+            if isinstance(external, Mapping):
+                if external.get("healthy") is False:
+                    parts.append("diagnostics=external-log-unhealthy")
+                pending = external.get("deferred_pending")
+                if isinstance(pending, int) and pending > 0:
+                    parts.append(f"deferred_writes={pending}")
         if snap.queue is not None:
             parts.append(f"queue={snap.queue}")
         lines.append(" ".join(parts))
@@ -1766,6 +1808,8 @@ def _service_snapshot_to_dict(snapshot: ServiceSnapshot) -> dict[str, Any]:
     }
     if snapshot.reconciliation is not None:
         payload["reconciliation"] = snapshot.reconciliation
+    if snapshot.diagnostics is not None:
+        payload["diagnostics"] = snapshot.diagnostics
     return payload
 
 

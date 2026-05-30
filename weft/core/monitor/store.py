@@ -49,6 +49,7 @@ from weft._constants import (
     INTERNAL_SERVICE_RUNTIME_CLASSES,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MONITOR_CHECKPOINT_META_PREFIX,
+    WEFT_MONITOR_DEFERRED_WRITES_TABLE,
     WEFT_MONITOR_META_TABLE,
     WEFT_MONITOR_SCHEMA_VERSION,
     WEFT_MONITOR_SCHEMA_VERSION_KEY,
@@ -416,6 +417,40 @@ class MonitorStoreRetirementResult:
 
 
 @dataclass(frozen=True, slots=True)
+class MonitorDeferredWriteRecord:
+    """One Monitor-owned deferred external JSONL write."""
+
+    context_key: str
+    report_id: str
+    record_type: str
+    body_json: str
+    created_at_ns: int
+    updated_at_ns: int
+    first_external_error: str | None
+    last_external_error: str | None
+    attempt_count: int
+    last_attempt_at_ns: int
+    flushed_at_ns: int | None = None
+
+    def body(self) -> dict[str, Any]:
+        """Return the JSON body for this deferred write."""
+
+        try:
+            parsed = json.loads(self.body_json)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+
+@dataclass(frozen=True, slots=True)
+class MonitorDeferredWriteStatus:
+    """Cached status for Monitor-owned deferred external writes."""
+
+    pending: int = 0
+    last_error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class MonitorSummaryReadyTask:
     """One Monitor collation record ready for summary disposition."""
 
@@ -438,6 +473,7 @@ class _MonitorTableNames:
     meta: str = WEFT_MONITOR_META_TABLE
     task_collations: str = WEFT_MONITOR_TASK_COLLATIONS_TABLE
     task_messages: str = WEFT_MONITOR_TASK_MESSAGES_TABLE
+    deferred_writes: str = WEFT_MONITOR_DEFERRED_WRITES_TABLE
 
 
 @dataclass(frozen=True, slots=True)
@@ -494,6 +530,20 @@ _task_collation_additive_columns: tuple[tuple[str, str], ...] = (
     ("task_control_deleted_at_ns", "BIGINT NULL"),
     ("reserved_cleanup_checked_at_ns", "BIGINT NULL"),
     ("orphan_raw_recovery_checked_at_ns", "BIGINT NULL"),
+)
+
+_deferred_write_columns: tuple[str, ...] = (
+    "context_key",
+    "report_id",
+    "record_type",
+    "body_json",
+    "created_at_ns",
+    "updated_at_ns",
+    "first_external_error",
+    "last_external_error",
+    "attempt_count",
+    "last_attempt_at_ns",
+    "flushed_at_ns",
 )
 
 _monitor_index_specs: tuple[_MonitorIndexSpec, ...] = (
@@ -574,6 +624,11 @@ _monitor_index_specs: tuple[_MonitorIndexSpec, ...] = (
         table=_monitor_tables.task_messages,
         columns=("context_key", "deleted_at_ns", "message_id"),
     ),
+    _MonitorIndexSpec(
+        name="idx_weft_monitor_deferred_pending",
+        table=_monitor_tables.deferred_writes,
+        columns=("context_key", "flushed_at_ns", "created_at_ns"),
+    ),
 )
 
 
@@ -620,6 +675,9 @@ class _MonitorTableAccess:
         )
         self._runner.run(
             monitor_sql.create_task_messages_table(self._tables.task_messages)
+        )
+        self._runner.run(
+            monitor_sql.create_deferred_writes_table(self._tables.deferred_writes)
         )
         for column, definition in _task_collation_additive_columns:
             if not self._column_exists(self._tables.task_collations, column):
@@ -680,6 +738,125 @@ class _MonitorTableAccess:
             monitor_sql.upsert_meta(self._tables.meta),
             (key, _json(value), time.time_ns()),
         )
+
+    def upsert_deferred_write(
+        self,
+        *,
+        report_id: str,
+        record_type: str,
+        body_json: str,
+        external_error: str,
+        now_ns: int,
+    ) -> None:
+        """Insert or update one deferred external JSONL write."""
+
+        self._runner.run(
+            monitor_sql.upsert_deferred_write(self._tables.deferred_writes),
+            (
+                self._context_key,
+                report_id,
+                record_type,
+                body_json,
+                int(now_ns),
+                int(now_ns),
+                external_error,
+                external_error,
+                int(now_ns),
+            ),
+        )
+
+    def list_pending_deferred_writes(
+        self,
+        *,
+        limit: int,
+    ) -> tuple[MonitorDeferredWriteRecord, ...]:
+        """Return pending deferred external writes."""
+
+        if limit <= 0:
+            return ()
+        rows = self._runner.run(
+            monitor_sql.select_pending_deferred_writes(
+                self._tables.deferred_writes,
+                _deferred_write_columns,
+            ),
+            (self._context_key, int(limit)),
+            fetch=True,
+        )
+        return tuple(_deferred_write_from_row(row) for row in rows)
+
+    def mark_deferred_writes_flushed(
+        self,
+        report_ids: Sequence[str],
+        flushed_at_ns: int,
+    ) -> None:
+        """Mark deferred external writes flushed."""
+
+        ids = tuple(str(report_id) for report_id in report_ids if report_id)
+        if not ids:
+            return
+        self._runner.run(
+            monitor_sql.mark_deferred_writes_flushed(
+                self._tables.deferred_writes,
+                len(ids),
+            ),
+            (int(flushed_at_ns), int(flushed_at_ns), self._context_key, *ids),
+        )
+
+    def deferred_write_status(self) -> MonitorDeferredWriteStatus:
+        """Return pending deferred-write count and latest pending error."""
+
+        pending_rows = list(
+            self._runner.run(
+                monitor_sql.count_pending_deferred_writes(
+                    self._tables.deferred_writes,
+                ),
+                (self._context_key,),
+                fetch=True,
+            )
+        )
+        pending = int(pending_rows[0][0]) if pending_rows else 0
+        error_rows = list(
+            self._runner.run(
+                monitor_sql.select_latest_deferred_write_error(
+                    self._tables.deferred_writes,
+                ),
+                (self._context_key,),
+                fetch=True,
+            )
+        )
+        last_error = str(error_rows[0][0]) if error_rows else None
+        return MonitorDeferredWriteStatus(pending=pending, last_error=last_error)
+
+    def prune_flushed_deferred_writes(
+        self,
+        *,
+        flushed_before_ns: int,
+        limit: int,
+    ) -> int:
+        """Prune flushed deferred writes for this context."""
+
+        if limit <= 0:
+            return 0
+        selected = tuple(
+            str(row[0])
+            for row in self._runner.run(
+                monitor_sql.select_flushed_deferred_write_ids(
+                    self._tables.deferred_writes,
+                ),
+                (self._context_key, int(flushed_before_ns), int(limit)),
+                fetch=True,
+            )
+        )
+        if not selected:
+            return 0
+        self._runner.run(
+            monitor_sql.prune_flushed_deferred_writes(
+                self._tables.deferred_writes,
+                len(selected),
+            ),
+            (self._context_key, *selected),
+        )
+        return len(selected)
 
     def fetch_task(self, tid: str) -> MonitorTaskCollationRecord | None:
         """Read one task collation record."""
@@ -1946,6 +2123,94 @@ class MonitorStore:
                 remaining -= len(chunk)
         return MonitorStoreRetirementResult(families_retired=retired)
 
+    def upsert_deferred_write(
+        self,
+        *,
+        report: Mapping[str, Any],
+        external_error: str,
+        now_ns: int | None = None,
+    ) -> None:
+        """Durably record one external JSONL write for later flush.
+
+        Spec: [MF-5], [OBS.13]
+        """
+
+        report_id = report.get("report_id")
+        record_type = report.get("record_type")
+        if not isinstance(report_id, str) or not report_id:
+            raise ValueError("deferred write report_id must be a non-empty string")
+        if not isinstance(record_type, str) or not record_type:
+            raise ValueError("deferred write record_type must be a non-empty string")
+        timestamp = time.time_ns() if now_ns is None else int(now_ns)
+        body_json = _json(report)
+        with self._context.broker() as broker:
+            runner = _runner_from_broker(broker)
+            access = self._access(runner)
+            with _write_transaction(runner):
+                access.upsert_deferred_write(
+                    report_id=report_id,
+                    record_type=record_type,
+                    body_json=body_json,
+                    external_error=external_error,
+                    now_ns=timestamp,
+                )
+
+    def list_pending_deferred_writes(
+        self,
+        *,
+        limit: int,
+    ) -> tuple[MonitorDeferredWriteRecord, ...]:
+        """Return pending deferred external writes for bounded flushing."""
+
+        if limit <= 0:
+            return ()
+        with self._context.broker() as broker:
+            return self._access(
+                _runner_from_broker(broker)
+            ).list_pending_deferred_writes(limit=limit)
+
+    def mark_deferred_writes_flushed(
+        self,
+        report_ids: Sequence[str],
+        flushed_at_ns: int,
+    ) -> None:
+        """Mark deferred writes flushed to the external JSONL sink."""
+
+        ids = tuple(str(report_id) for report_id in report_ids if report_id)
+        if not ids:
+            return
+        with self._context.broker() as broker:
+            runner = _runner_from_broker(broker)
+            access = self._access(runner)
+            for chunk in _chunks(ids, self._config.write_batch_size):
+                with _write_transaction(runner):
+                    access.mark_deferred_writes_flushed(chunk, flushed_at_ns)
+
+    def deferred_write_status(self) -> MonitorDeferredWriteStatus:
+        """Return deferred-write status for cached monitor diagnostics."""
+
+        with self._context.broker() as broker:
+            return self._access(_runner_from_broker(broker)).deferred_write_status()
+
+    def prune_flushed_deferred_writes(
+        self,
+        *,
+        flushed_before_ns: int,
+        limit: int,
+    ) -> int:
+        """Prune flushed deferred writes in a bounded batch."""
+
+        if limit <= 0:
+            return 0
+        with self._context.broker() as broker:
+            runner = _runner_from_broker(broker)
+            access = self._access(runner)
+            with _write_transaction(runner):
+                return access.prune_flushed_deferred_writes(
+                    flushed_before_ns=flushed_before_ns,
+                    limit=limit,
+                )
+
     def status(self) -> MonitorStoreStatus:
         """Return a store status snapshot for cached PONG fields."""
 
@@ -2016,6 +2281,23 @@ def _record_from_row(row: tuple[Any, ...]) -> MonitorTaskCollationRecord:
             values["orphan_raw_recovery_checked_at_ns"]
         ),
         updated_at_ns=int(values["updated_at_ns"]),
+    )
+
+
+def _deferred_write_from_row(row: tuple[Any, ...]) -> MonitorDeferredWriteRecord:
+    values = dict(zip(_deferred_write_columns, row, strict=True))
+    return MonitorDeferredWriteRecord(
+        context_key=str(values["context_key"]),
+        report_id=str(values["report_id"]),
+        record_type=str(values["record_type"]),
+        body_json=str(values["body_json"]),
+        created_at_ns=int(values["created_at_ns"]),
+        updated_at_ns=int(values["updated_at_ns"]),
+        first_external_error=_str_or_none(values["first_external_error"]),
+        last_external_error=_str_or_none(values["last_external_error"]),
+        attempt_count=int(values["attempt_count"]),
+        last_attempt_at_ns=int(values["last_attempt_at_ns"]),
+        flushed_at_ns=_int_or_none(values["flushed_at_ns"]),
     )
 
 

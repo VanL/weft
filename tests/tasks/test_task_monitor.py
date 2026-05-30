@@ -38,6 +38,7 @@ from weft._constants import (
     WEFT_MONITOR_SCHEMA_VERSION,
     WEFT_SERVICES_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
+    WEFT_TID_MAPPINGS_QUEUE,
     load_config,
 )
 from weft.core.monitor.collation import update_from_task_log_payload
@@ -56,6 +57,7 @@ from weft.core.monitor.task_monitor import (
     make_task_monitor_taskspec,
 )
 from weft.core.service_convergence import manager_service_key
+from weft.core.taskspec import TaskSpec
 from weft.helpers import iter_queue_entries
 
 pytestmark = [pytest.mark.shared]
@@ -158,6 +160,22 @@ def _task_monitor_idle_diagnostics(task: TaskMonitor) -> str:
     )
 
 
+def _latest_tid_mapping_payload(
+    make_queue: Callable[[str], Any],
+    tid: str,
+) -> dict[str, Any]:
+    queue = make_queue(WEFT_TID_MAPPINGS_QUEUE)
+    latest: tuple[int, dict[str, Any]] | None = None
+    for body, timestamp in iter_queue_entries(queue):
+        payload = json.loads(body)
+        if payload.get("full") != tid:
+            continue
+        if latest is None or timestamp >= latest[0]:
+            latest = (timestamp, payload)
+    assert latest is not None
+    return latest[1]
+
+
 def drive_task_monitor_until(
     task: TaskMonitor,
     predicate: Callable[[], bool],
@@ -185,6 +203,12 @@ def clear_processor_requests(monkeypatch: pytest.MonkeyPatch) -> None:
         "TASK_MONITOR_RUNTIME_CLEANUP_SLICE_SECONDS",
         30.0,
     )
+
+
+def _task_monitor_taskspec_for_context(tid: str, context_path: str) -> TaskSpec:
+    payload = make_task_monitor_taskspec(tid).model_dump(mode="python")
+    payload["spec"]["weft_context"] = context_path
+    return TaskSpec(**payload)
 
 
 def test_task_monitor_uses_cached_base_task_context(
@@ -268,6 +292,7 @@ def test_task_monitor_process_once_calls_processor_without_consuming_task_log(
             "WEFT_TASK_MONITOR_ENABLED": "1",
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
             "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
+            "WEFT_TASK_MONITOR_MODE": "custom",
             "WEFT_TASK_MONITOR_PROCESSOR": "tests.tasks.test_task_monitor:recording_processor",
         }
     )
@@ -320,7 +345,7 @@ def test_task_monitor_builtin_delete_removes_cleanup_rows(
             "WEFT_TASK_MONITOR_ENABLED": "1",
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
             "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
         }
     )
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
@@ -358,7 +383,7 @@ def test_task_monitor_builtin_report_only_keeps_cleanup_rows(
             "WEFT_TASK_MONITOR_ENABLED": "1",
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
             "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
-            "WEFT_TASK_MONITOR_PROCESSOR": "report_only",
+            "WEFT_TASK_MONITOR_MODE": "report_only",
         }
     )
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
@@ -396,6 +421,7 @@ def test_task_monitor_next_wait_timeout_is_capped_after_cycle(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_MODE": "custom",
             "WEFT_TASK_MONITOR_PROCESSOR": "tests.tasks.test_task_monitor:recording_processor",
         }
     )
@@ -425,6 +451,7 @@ def test_task_monitor_pending_wakeup_uses_shared_reactor_wait(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_MODE": "custom",
             "WEFT_TASK_MONITOR_PROCESSOR": "tests.tasks.test_task_monitor:recording_processor",
         }
     )
@@ -468,6 +495,7 @@ def test_task_monitor_disabled_uses_wait_cap_without_scanning(
         {
             "WEFT_TASK_MONITOR_ENABLED": False,
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_MODE": "custom",
             "WEFT_TASK_MONITOR_PROCESSOR": "tests.tasks.test_task_monitor:recording_processor",
         }
     )
@@ -505,7 +533,7 @@ def test_task_monitor_ping_includes_health_and_preserves_task_log(
             "WEFT_TASK_MONITOR_ENABLED": "1",
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
             "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
-            "WEFT_TASK_MONITOR_PROCESSOR": "report_only",
+            "WEFT_TASK_MONITOR_MODE": "report_only",
         }
     )
     spec = make_task_monitor_taskspec("1778089999999999998")
@@ -537,7 +565,8 @@ def test_task_monitor_ping_includes_health_and_preserves_task_log(
     assert pong["message"] == "PONG"
     assert pong["role"] == "task_monitor"
     assert pong["task_status"] == "running"
-    assert pong["processor"] == "report_only"
+    assert pong["task_monitor_mode"] == "report_only"
+    assert pong["processor"] is None
     assert pong["interval_seconds"] == 60
     assert pong["batch_size"] == 10
     assert pong["last_candidate_class_counts"] == {}
@@ -548,7 +577,8 @@ def test_task_monitor_ping_includes_health_and_preserves_task_log(
     extended = pong[PONG_EXTENSION_KEY]["task_monitor"]
     assert extended["enabled"] is True
     assert extended["mode"] == "persistent"
-    assert extended["processor"] == "report_only"
+    assert extended["task_monitor_mode"] == "report_only"
+    assert extended["processor"] is None
     assert extended["interval_seconds"] == 60
     assert extended["batch_size"] == 10
     assert extended["log_sink"] == "stdout"
@@ -613,7 +643,7 @@ def test_task_monitor_ping_includes_cached_collation_store_status(
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
             "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
             "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
-            "WEFT_TASK_MONITOR_PROCESSOR": "report_only",
+            "WEFT_TASK_MONITOR_MODE": "report_only",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
@@ -673,7 +703,7 @@ def test_task_monitor_ping_includes_cached_collation_store_status(
     assert last_cycle["monitor_store_message_rows_deleted"] == 0
 
 
-def test_task_monitor_table_delete_requires_delete_processor(
+def test_task_monitor_processor_delete_requires_delete_processor(
     broker_env,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -687,9 +717,8 @@ def test_task_monitor_table_delete_requires_delete_processor(
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
             "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
             "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
-            "WEFT_TASK_MONITOR_PROCESSOR": "report_only",
+            "WEFT_TASK_MONITOR_MODE": "report_only",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
-            "WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED": "1",
         }
     )
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
@@ -720,7 +749,7 @@ def test_task_monitor_table_delete_requires_delete_processor(
     assert task._last_monitor_store_message_rows_deleted == 0
 
 
-def test_task_monitor_table_delete_removes_exact_task_log_rows(
+def test_task_monitor_processor_delete_removes_exact_task_log_rows(
     broker_env,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -734,9 +763,8 @@ def test_task_monitor_table_delete_removes_exact_task_log_rows(
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
             "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
             "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
-            "WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED": "1",
         }
     )
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
@@ -784,7 +812,7 @@ def test_task_monitor_delete_retains_terminal_rows_until_retention_age(
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
             "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
             "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "172800",
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
@@ -858,9 +886,8 @@ def test_task_monitor_retained_ingest_batches_store_and_delete_work(
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
             "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
             "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
-            "WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED": "1",
         }
     )
     tid = "1778084345905438729"
@@ -931,7 +958,7 @@ def test_task_monitor_retained_ingest_handles_own_tid_before_checkpoint(
             "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
             "WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT": 20,
             "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
@@ -1002,7 +1029,7 @@ def test_task_monitor_skips_terminal_summary_after_partial_fifo_pass(
             "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
             "WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT": 1,
             "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
@@ -1067,7 +1094,7 @@ def test_task_monitor_retained_ingest_batch_limit_counts_valid_rows(
             "WEFT_TASK_MONITOR_BATCH_SIZE": 3,
             "WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT": 20,
             "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
-            "WEFT_TASK_MONITOR_PROCESSOR": "report_only",
+            "WEFT_TASK_MONITOR_MODE": "report_only",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
@@ -1126,7 +1153,7 @@ def test_task_monitor_retained_ingest_resumes_after_store_checkpoint(
             "WEFT_TASK_MONITOR_BATCH_SIZE": 3,
             "WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT": 20,
             "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
-            "WEFT_TASK_MONITOR_PROCESSOR": "report_only",
+            "WEFT_TASK_MONITOR_MODE": "report_only",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
@@ -1170,7 +1197,7 @@ def test_task_monitor_retained_ingest_resumes_after_store_checkpoint(
         task.stop()
 
 
-def test_task_monitor_table_delete_reconciles_already_absent_exact_rows(
+def test_task_monitor_processor_delete_reconciles_already_absent_exact_rows(
     broker_env,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1192,9 +1219,8 @@ def test_task_monitor_table_delete_reconciles_already_absent_exact_rows(
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
             "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
             "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
-            "WEFT_TASK_MONITOR_PROCESSOR": "report_only",
+            "WEFT_TASK_MONITOR_MODE": "report_only",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
-            "WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED": "0",
         }
     )
     report_task = TaskMonitor(
@@ -1221,9 +1247,8 @@ def test_task_monitor_table_delete_reconciles_already_absent_exact_rows(
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
             "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
             "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
-            "WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED": "1",
         }
     )
     delete_task = TaskMonitor(
@@ -1263,9 +1288,8 @@ def test_task_monitor_recovers_orphan_raw_task_log_rows_after_bad_raw_mark(
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
             "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
             "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "172800",
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
-            "WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED": "1",
         }
     )
     tid = "1778084345905438725"
@@ -1353,9 +1377,8 @@ def test_task_monitor_marks_orphan_recovery_checked_when_raw_rows_absent(
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
             "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
             "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "172800",
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
-            "WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED": "1",
         }
     )
     tid = "1778084345905438726"
@@ -1431,9 +1454,8 @@ def test_task_monitor_orphan_recovery_leaves_failed_probe_retryable(
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
             "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
             "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "172800",
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
-            "WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED": "1",
         }
     )
     tid = "1778084345905438728"
@@ -1506,9 +1528,8 @@ def test_task_monitor_orphan_recovery_reports_bounded_waypoint(
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
             "WEFT_TASK_MONITOR_BATCH_SIZE": 1,
             "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "172800",
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
-            "WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED": "1",
         }
     )
     tids = ("1778084345905438730", "1778084345905438732")
@@ -1568,7 +1589,7 @@ def test_task_monitor_orphan_recovery_reports_bounded_waypoint(
     assert store.list_raw_deleted_task_log_recovery_tids(limit=10) == ()
 
 
-def test_task_monitor_failed_summary_disposition_blocks_table_delete(
+def test_task_monitor_failed_summary_disposition_blocks_processor_delete(
     broker_env,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1582,9 +1603,8 @@ def test_task_monitor_failed_summary_disposition_blocks_table_delete(
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
             "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
             "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "stdout",
-            "WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED": "1",
         }
     )
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
@@ -1630,7 +1650,7 @@ def test_task_monitor_failed_summary_disposition_blocks_table_delete(
     assert task._last_monitor_store_message_rows_deleted >= 1
 
 
-def test_task_monitor_collated_external_log_precedes_table_delete(
+def test_task_monitor_collated_external_log_precedes_processor_delete(
     broker_env,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
@@ -1647,8 +1667,9 @@ def test_task_monitor_collated_external_log_precedes_table_delete(
             "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
             "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
             "WEFT_LOG_TASKS_EXTERNAL_PATH": str(external_path),
+            "WEFT_LOG_TASKS_EXTERNAL_ENABLED": "1",
             "WEFT_LOG_TASKS_EXTERNAL_MODE": "collated",
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
@@ -1686,6 +1707,415 @@ def test_task_monitor_collated_external_log_precedes_table_delete(
     assert external["record_type"] == "task_log_collated"
     assert external["task"]["tid"] == payload["tid"]
     assert task._external_task_log_status.healthy is True
+
+
+def test_task_monitor_jsonl_then_delete_uses_project_default_log_path(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    db_path, _make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_MODE": "jsonl_then_delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    task = TaskMonitor(
+        db_path,
+        _task_monitor_taskspec_for_context(
+            "1778089999999999968",
+            str(tmp_path),
+        ),
+        config=config,
+    )
+    try:
+        assert task._external_task_log_status.enabled is True
+        assert task._external_task_log_status.path == str(
+            tmp_path / "logs" / "weft.log"
+        )
+    finally:
+        task.stop()
+
+
+def test_task_monitor_external_log_probe_recovers_on_monitor_cadence(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    external_path = tmp_path / "external-target"
+    external_path.mkdir()
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
+            "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
+            "WEFT_LOG_TASKS_EXTERNAL_PATH": str(external_path),
+            "WEFT_LOG_TASKS_EXTERNAL_MODE": "collated",
+            "WEFT_TASK_MONITOR_MODE": "jsonl_then_delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999963"),
+        config=config,
+    )
+    try:
+        assert task._external_task_log_status.healthy is False
+
+        external_path.rmdir()
+        task.process_once()
+        drive_task_monitor_until_idle(task)
+
+        assert task._external_task_log_status.healthy is True
+        assert external_path.is_file()
+        mapping = _latest_tid_mapping_payload(make_queue, task.tid)
+        task_monitor = mapping["task_monitor"]
+        external = task_monitor["task_log_external"]
+        assert external["healthy"] is True
+        assert external["path"] == str(external_path)
+    finally:
+        task.stop()
+
+
+def test_task_monitor_external_log_probe_reports_regression_on_monitor_cadence(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    external_path = tmp_path / "task-lifetime.jsonl"
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
+            "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
+            "WEFT_LOG_TASKS_EXTERNAL_PATH": str(external_path),
+            "WEFT_LOG_TASKS_EXTERNAL_MODE": "collated",
+            "WEFT_TASK_MONITOR_MODE": "jsonl_then_delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999960"),
+        config=config,
+    )
+    try:
+        assert task._external_task_log_status.healthy is True
+
+        external_path.unlink()
+        external_path.mkdir()
+        task.process_once()
+        drive_task_monitor_until_idle(task)
+
+        assert task._external_task_log_status.healthy is False
+        mapping = _latest_tid_mapping_payload(make_queue, task.tid)
+        task_monitor = mapping["task_monitor"]
+        external = task_monitor["task_log_external"]
+        assert external["healthy"] is False
+        assert external["path"] == str(external_path)
+        assert "directory" in external["last_error"]
+    finally:
+        task.stop()
+
+
+def test_task_monitor_jsonl_then_delete_emits_lifetime_report_before_delete(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    external_path = tmp_path / "task-lifetime.jsonl"
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
+            "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
+            "WEFT_LOG_TASKS_EXTERNAL_PATH": str(external_path),
+            "WEFT_LOG_TASKS_EXTERNAL_MODE": "collated",
+            "WEFT_TASK_MONITOR_MODE": "jsonl_then_delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    payload = {
+        "event": "work_completed",
+        "status": "completed",
+        "tid": "1778084345905438733",
+    }
+    log_queue.write(json.dumps(payload))
+
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999967"),
+        config=config,
+    )
+    try:
+        task.process_once()
+        drive_task_monitor_until_idle(task)
+        store = task._monitor_store
+        assert store is not None
+        assert store.deferred_write_status().pending == 0
+    finally:
+        task.stop()
+
+    assert [
+        json.loads(message)
+        for message in log_queue.peek_generator()
+        if json.loads(message).get("tid") == payload["tid"]
+    ] == []
+    [line] = external_path.read_text(encoding="utf-8").splitlines()
+    external = json.loads(line)
+    assert external["record_type"] == "task_lifetime_report"
+    assert external["source_policy"] == TASK_MONITOR_POLICY_MONITOR_STORE_LIFECYCLE
+    assert external["completeness"] == "collated"
+    assert external["subject"]["tid"] == payload["tid"]
+    assert external["taskspec"]["tid"] == payload["tid"]
+    assert external["taskspec"]["state"]["status"] == "completed"
+    assert external["monitor"]["collation_kind"] == "user_task"
+    assert "last_message_id" in external["monitor"]
+    assert "collation" not in external
+    assert "effect" not in external
+
+
+def test_task_monitor_jsonl_then_delete_defers_external_failure_and_deletes(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    external_path = tmp_path / "external-target"
+    external_path.mkdir()
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
+            "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
+            "WEFT_LOG_TASKS_EXTERNAL_PATH": str(external_path),
+            "WEFT_LOG_TASKS_EXTERNAL_MODE": "collated",
+            "WEFT_TASK_MONITOR_MODE": "jsonl_then_delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    payload = {
+        "event": "work_completed",
+        "status": "completed",
+        "tid": "1778084345905438734",
+    }
+    log_queue.write(json.dumps(payload))
+
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999966"),
+        config=config,
+    )
+    try:
+        task.process_once()
+        drive_task_monitor_until_idle(task)
+        store = task._monitor_store
+        assert store is not None
+        pending = store.list_pending_deferred_writes(limit=10)
+        assert len(pending) == 1
+        body = pending[0].body()
+        assert body["record_type"] == "task_lifetime_report"
+        assert body["subject"]["tid"] == payload["tid"]
+        assert store.get_task(payload["tid"]) is None
+    finally:
+        task.stop()
+
+    assert [
+        json.loads(message)
+        for message in log_queue.peek_generator()
+        if json.loads(message).get("tid") == payload["tid"]
+    ] == []
+    assert task._external_task_log_status.healthy is False
+    assert task._external_task_log_status.deferred_pending == 1
+
+    external_path.rmdir()
+    flush_task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999965"),
+        config=config,
+    )
+    try:
+        flush_task.process_once()
+        drive_task_monitor_until_idle(flush_task)
+        store = flush_task._monitor_store
+        assert store is not None
+        assert store.deferred_write_status().pending == 0
+    finally:
+        flush_task.stop()
+
+    [line] = external_path.read_text(encoding="utf-8").splitlines()
+    flushed = json.loads(line)
+    assert flushed["record_type"] == "task_lifetime_report"
+    assert flushed["subject"]["tid"] == payload["tid"]
+
+
+def test_task_monitor_jsonl_then_delete_flushes_accumulated_deferred_reports(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    external_path = tmp_path / "external-target"
+    external_path.mkdir()
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
+            "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
+            "WEFT_LOG_TASKS_EXTERNAL_PATH": str(external_path),
+            "WEFT_LOG_TASKS_EXTERNAL_MODE": "collated",
+            "WEFT_TASK_MONITOR_MODE": "jsonl_then_delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    tids = ("1778084345905438750", "1778084345905438751")
+    for tid in tids:
+        log_queue.write(
+            json.dumps(
+                {
+                    "event": "work_completed",
+                    "status": "completed",
+                    "tid": tid,
+                }
+            )
+        )
+
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999962"),
+        config=config,
+    )
+    try:
+        task.process_once()
+        drive_task_monitor_until_idle(task)
+        store = task._monitor_store
+        assert store is not None
+        assert store.deferred_write_status().pending == 2
+    finally:
+        task.stop()
+
+    assert [
+        json.loads(message)
+        for message in log_queue.peek_generator()
+        if json.loads(message).get("tid") in tids
+    ] == []
+
+    external_path.rmdir()
+    flush_task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999961"),
+        config=config,
+    )
+    try:
+        flush_task.process_once()
+        drive_task_monitor_until_idle(flush_task)
+        store = flush_task._monitor_store
+        assert store is not None
+        assert store.deferred_write_status().pending == 0
+    finally:
+        flush_task.stop()
+
+    records = [
+        json.loads(line)
+        for line in external_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert sorted(record["subject"]["tid"] for record in records) == sorted(tids)
+
+
+def test_task_monitor_jsonl_then_delete_blocks_when_external_and_deferred_fail(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    external_path = tmp_path / "external-target"
+    external_path.mkdir()
+
+    def fail_deferred_write(self: MonitorStore, **_kwargs: object) -> None:
+        raise RuntimeError("deferred table unavailable")
+
+    monkeypatch.setattr(MonitorStore, "upsert_deferred_write", fail_deferred_write)
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
+            "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
+            "WEFT_LOG_TASKS_EXTERNAL_PATH": str(external_path),
+            "WEFT_LOG_TASKS_EXTERNAL_MODE": "collated",
+            "WEFT_TASK_MONITOR_MODE": "jsonl_then_delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    payload = {
+        "event": "work_completed",
+        "status": "completed",
+        "tid": "1778084345905438735",
+    }
+    log_queue.write(json.dumps(payload))
+
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999964"),
+        config=config,
+    )
+    try:
+        task.process_once()
+        drive_task_monitor_until_idle(task)
+        store = task._monitor_store
+        assert store is not None
+        record = store.get_task(payload["tid"])
+        assert record is not None
+        assert record.summary_emitted_at_ns is None
+        assert record.raw_deleted_at_ns is None
+    finally:
+        task.stop()
+
+    target_rows = [
+        json.loads(message)
+        for message in log_queue.peek_generator()
+        if json.loads(message).get("tid") == payload["tid"]
+    ]
+    assert target_rows == [payload]
+    assert task._last_processor_success is False
+    assert any("deferred table unavailable" in error for error in task._last_errors)
 
 
 def test_task_monitor_emits_service_summary_for_service_collation(
@@ -1773,7 +2203,7 @@ def test_task_monitor_terminal_disposition_deletes_task_runtime_queues(
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
             "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
             "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
@@ -1864,7 +2294,7 @@ def test_task_monitor_deletes_controls_for_already_disposed_family(
             "WEFT_TASK_MONITOR_ENABLED": "1",
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
             "WEFT_TASK_MONITOR_BATCH_SIZE": 100,
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
@@ -1956,7 +2386,7 @@ def test_task_monitor_terminal_control_cleanup_does_not_wait_for_retention(
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
             "WEFT_TASK_MONITOR_BATCH_SIZE": 100,
             "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "172800",
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
@@ -2033,7 +2463,7 @@ def test_task_monitor_control_cleanup_does_not_mark_when_queue_delete_fails(
             "WEFT_TASK_MONITOR_ENABLED": "1",
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
             "WEFT_TASK_MONITOR_BATCH_SIZE": 100,
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
@@ -2134,7 +2564,7 @@ def test_task_monitor_terminal_cleanup_repairs_control_deleted_without_dispositi
             "WEFT_TASK_MONITOR_ENABLED": "1",
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
             "WEFT_TASK_MONITOR_BATCH_SIZE": 100,
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
@@ -2206,7 +2636,7 @@ def test_task_monitor_repairs_raw_deleted_parent_with_child_refs(
             "WEFT_TASK_MONITOR_ENABLED": "1",
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
             "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
@@ -2278,7 +2708,7 @@ def test_task_monitor_delete_removes_stale_reserved_queue_without_monitor_record
             "WEFT_TASK_MONITOR_ENABLED": "1",
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
             "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
@@ -2317,7 +2747,7 @@ def test_task_monitor_reserved_cleanup_runs_when_task_log_ingest_is_batch_limite
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
             "WEFT_TASK_MONITOR_BATCH_SIZE": 1,
             "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
@@ -2377,7 +2807,7 @@ def test_task_monitor_keeps_reserved_queue_for_active_service_owner(
             "WEFT_TASK_MONITOR_ENABLED": "1",
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
             "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
@@ -2430,7 +2860,7 @@ def test_task_monitor_reserved_cleanup_marks_absent_reserved_probe_checked(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
@@ -2480,7 +2910,6 @@ def test_task_monitor_reserved_cleanup_marks_absent_reserved_probe_checked(
         assert record.reserved_cleanup_checked_at_ns is not None
         assert cleanup.reserved_families_processed == 1
         assert cleanup.reserved_queues_deleted == 0
-        assert cleanup.cleanup_jobs_by_kind == {"reserved": 1}
         assert second.policy_progress[-1].base_reached is True
         assert second.policy_progress[-1].selected == 0
     finally:
@@ -2499,7 +2928,7 @@ def test_task_monitor_reserved_cleanup_marks_deleted_reserved_probe_checked(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
@@ -2564,7 +2993,7 @@ def test_task_monitor_reserved_cleanup_keeps_failed_delete_retryable(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
@@ -2645,7 +3074,7 @@ def test_task_monitor_reserved_cleanup_reports_bounded_waypoint(
             "WEFT_TASK_MONITOR_ENABLED": "1",
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
             "WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT": 10,
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
@@ -2714,7 +3143,7 @@ def test_task_monitor_reserved_cleanup_batches_fallback_record_lookup(
             "WEFT_TASK_MONITOR_ENABLED": "1",
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
             "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "999999999",
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
@@ -2778,7 +3207,7 @@ def test_task_monitor_dead_task_cleanup_deletes_standard_control_queues(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
@@ -2835,7 +3264,7 @@ def test_task_monitor_dead_task_cleanup_retains_outbox_and_reserved_before_reten
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
@@ -2891,7 +3320,7 @@ def test_task_monitor_dead_task_cleanup_defers_outbox_only_until_retention(
             "WEFT_TASK_MONITOR_ENABLED": "1",
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
             "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "172800",
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
@@ -2955,7 +3384,7 @@ def test_task_monitor_dead_task_cleanup_skips_monitor_lookup_for_deferred_only_q
             "WEFT_TASK_MONITOR_ENABLED": "1",
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
             "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "999999999",
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
@@ -3022,7 +3451,7 @@ def test_task_monitor_dead_task_cleanup_does_not_coalesce_task_log_refs(
             "WEFT_TASK_MONITOR_ENABLED": "1",
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
             "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "999999999",
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
@@ -3109,7 +3538,7 @@ def test_task_monitor_dead_task_cleanup_skips_live_service_owner(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
@@ -3170,7 +3599,7 @@ def test_task_monitor_dead_task_cleanup_is_oldest_first_and_bounded(
             "WEFT_TASK_MONITOR_ENABLED": "1",
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
             "WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT": 1,
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
@@ -3222,7 +3651,7 @@ def test_task_monitor_terminal_disposition_does_not_delete_manager_control_queue
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
             "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
             "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
@@ -3301,7 +3730,7 @@ def test_task_monitor_skips_ambiguous_old_service_owner_collation(
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
             "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
             "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
@@ -3374,7 +3803,7 @@ def test_task_monitor_disposes_old_stale_service_owner_collation(
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
             "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
             "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
@@ -3459,7 +3888,7 @@ def test_task_monitor_stale_service_owner_cleanup_deletes_only_control_queues(
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
             "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
             "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
@@ -3560,7 +3989,7 @@ def test_task_monitor_stale_service_owner_cleanup_skips_active_owner(
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
             "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
             "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
@@ -3665,7 +4094,7 @@ def test_task_monitor_terminal_control_cleanup_is_bounded_by_family(
             "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
             "WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT": 1,
             "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
@@ -3799,7 +4228,7 @@ def test_task_monitor_runtime_cleanup_runs_control_before_reserved_work(
             "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
             "WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT": 10,
             "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
@@ -3866,9 +4295,6 @@ def test_task_monitor_runtime_cleanup_runs_control_before_reserved_work(
         assert cleanup.reserved_queues_deleted == 0
         assert cleanup.pending is True
         assert cleanup.next_slice_kind == "reserved"
-        assert cleanup.cleanup_jobs_by_kind == {
-            "terminal_control": 2,
-        }
         assert list(reserved.peek_generator()) == ["terminal-reserved"]
 
         reserved_cleanup = task._run_reserved_cleanup_slice(
@@ -3903,7 +4329,7 @@ def test_task_monitor_runtime_cleanup_dispatches_three_cleanup_kinds(
             "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
             "WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT": 10,
             "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
@@ -3969,15 +4395,10 @@ def test_task_monitor_runtime_cleanup_dispatches_three_cleanup_kinds(
     finally:
         task.stop()
 
-    assert terminal_cleanup.cleanup_jobs_by_kind == {"terminal_control": 1}
-    assert terminal_cleanup.cleanup_workers_configured == 1
-    assert terminal_cleanup.cleanup_jobs_started == 1
     assert terminal_cleanup.families_processed == 1
     assert terminal_cleanup.next_slice_kind == "reserved"
-    assert reserved_cleanup.cleanup_jobs_by_kind == {"reserved": 1}
     assert reserved_cleanup.reserved_families_processed == 1
     assert reserved_cleanup.next_slice_kind == "dead_tid"
-    assert dead_cleanup.cleanup_jobs_by_kind == {"dead_tid": 1}
     assert dead_cleanup.dead_tids_processed == 1
     assert reserved.stats().total == 0
     assert make_queue(f"T{dead_tid}.ctrl_in").stats().total == 0
@@ -3997,7 +4418,7 @@ def test_task_monitor_runtime_cleanup_skips_queue_snapshot_when_not_due(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
@@ -4025,8 +4446,6 @@ def test_task_monitor_runtime_cleanup_skips_queue_snapshot_when_not_due(
     finally:
         task.stop()
 
-    assert cleanup.cleanup_workers_configured == 1
-    assert cleanup.cleanup_jobs_started == 0
     assert cleanup.pending is False
 
 
@@ -4046,7 +4465,7 @@ def test_task_monitor_runtime_cleanup_keeps_reserved_pending_after_control_budge
             "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
             "WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT": 1,
             "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
@@ -4139,7 +4558,7 @@ def test_task_monitor_runtime_cleanup_starts_after_slow_queue_snapshot(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
@@ -4174,8 +4593,6 @@ def test_task_monitor_runtime_cleanup_starts_after_slow_queue_snapshot(
     finally:
         task.stop()
 
-    assert cleanup.cleanup_jobs_started == 1
-    assert cleanup.cleanup_jobs_completed == 1
     assert cleanup.dead_tids_processed == 1
     assert cleanup.dead_tid_control_queues_deleted == 1
     assert ctrl_in.stats().total == 0
@@ -4209,9 +4626,8 @@ def test_task_monitor_runtime_cleanup_deadline_stops_between_families(
             "WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS": "0.01",
             "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
             "WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT": 10,
-            "WEFT_TASK_MONITOR_CLEANUP_WORKERS": "1",
             "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
@@ -4291,7 +4707,7 @@ def test_task_monitor_raw_store_delete_reconciles_ingested_open_refs(
             "WEFT_TASK_MONITOR_ENABLED": "1",
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
             "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
@@ -4372,7 +4788,7 @@ def test_task_monitor_raw_store_delete_reconciles_missing_refs_without_stall(
             "WEFT_TASK_MONITOR_ENABLED": "1",
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
             "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
@@ -4464,7 +4880,7 @@ def test_task_monitor_terminal_control_cleanup_worker_does_not_block_ping(
             "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
             "WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT": 1,
             "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
@@ -4542,7 +4958,7 @@ def test_task_monitor_ignores_service_worker_sentinel_before_cleanup_result(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
@@ -4607,7 +5023,7 @@ def test_task_monitor_slow_builtin_cycle_does_not_block_ping(
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
             "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
             "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
-            "WEFT_TASK_MONITOR_PROCESSOR": "report_only",
+            "WEFT_TASK_MONITOR_MODE": "report_only",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
@@ -4697,7 +5113,7 @@ def test_task_monitor_terminal_control_cleanup_worker_error_is_retryable(
             "WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS": "0.01",
             "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
             "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
@@ -4783,7 +5199,7 @@ def test_task_monitor_terminal_control_cleanup_worker_error_is_retryable(
         task.stop()
 
 
-def test_task_monitor_collated_external_failure_blocks_table_delete(
+def test_task_monitor_collated_external_failure_blocks_processor_delete(
     broker_env,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
@@ -4799,8 +5215,9 @@ def test_task_monitor_collated_external_failure_blocks_table_delete(
             "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
             "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
             "WEFT_LOG_TASKS_EXTERNAL_PATH": str(tmp_path),
+            "WEFT_LOG_TASKS_EXTERNAL_ENABLED": "1",
             "WEFT_LOG_TASKS_EXTERNAL_MODE": "collated",
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
@@ -4856,8 +5273,9 @@ def test_task_monitor_raw_external_logs_and_deletes_without_store(
             "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
             "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
             "WEFT_LOG_TASKS_EXTERNAL_PATH": str(external_path),
+            "WEFT_LOG_TASKS_EXTERNAL_ENABLED": "1",
             "WEFT_LOG_TASKS_EXTERNAL_MODE": "raw",
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
@@ -4914,7 +5332,7 @@ def test_task_monitor_ping_uses_cached_policy_stats_without_cleanup_scan(
             "WEFT_TASK_MONITOR_ENABLED": "1",
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
             "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
-            "WEFT_TASK_MONITOR_PROCESSOR": "delete",
+            "WEFT_TASK_MONITOR_MODE": "delete",
         }
     )
     spec = make_task_monitor_taskspec("1778089999999999994")
@@ -4970,6 +5388,7 @@ def test_task_monitor_slow_custom_processor_does_not_block_ping(
             "WEFT_TASK_MONITOR_ENABLED": "1",
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
             "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
+            "WEFT_TASK_MONITOR_MODE": "custom",
             "WEFT_TASK_MONITOR_PROCESSOR": "tests.tasks.test_task_monitor:blocking_processor",
         }
     )
@@ -5047,6 +5466,7 @@ def test_task_monitor_failed_processor_does_not_advance_checkpoint(
             "WEFT_TASK_MONITOR_ENABLED": "1",
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
             "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
+            "WEFT_TASK_MONITOR_MODE": "custom",
             "WEFT_TASK_MONITOR_PROCESSOR": "tests.tasks.test_task_monitor:failing_processor",
         }
     )
@@ -5085,6 +5505,7 @@ def test_task_monitor_heartbeat_failure_records_health_but_still_cycles(
             "WEFT_TASK_MONITOR_ENABLED": "1",
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
             "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
+            "WEFT_TASK_MONITOR_MODE": "custom",
             "WEFT_TASK_MONITOR_PROCESSOR": "tests.tasks.test_task_monitor:recording_processor",
         }
     )

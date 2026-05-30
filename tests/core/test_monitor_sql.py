@@ -63,6 +63,28 @@ def test_monitor_sql_deletes_task_messages_physically() -> None:
     assert "%s" not in query
 
 
+def test_monitor_sql_builds_deferred_write_outbox_queries() -> None:
+    ddl = monitor_sql.create_deferred_writes_table("weft_monitor_deferred_writes")
+    upsert = monitor_sql.upsert_deferred_write("weft_monitor_deferred_writes")
+    pending = monitor_sql.select_pending_deferred_writes(
+        "weft_monitor_deferred_writes",
+        ("context_key", "report_id"),
+    )
+    flushed = monitor_sql.mark_deferred_writes_flushed(
+        "weft_monitor_deferred_writes",
+        2,
+    )
+
+    assert "CREATE TABLE IF NOT EXISTS weft_monitor_deferred_writes" in ddl
+    assert "PRIMARY KEY (context_key, report_id)" in ddl
+    assert "ON CONFLICT (context_key, report_id) DO UPDATE" in upsert
+    assert "body_json = excluded.body_json" not in upsert
+    assert "flushed_at_ns IS NULL" in pending
+    assert "ORDER BY created_at_ns, report_id" in pending
+    assert "report_id IN (?, ?)" in flushed
+    assert "%s" not in ddl + upsert + pending + flushed
+
+
 def test_monitor_sql_selects_legacy_deleted_task_message_refs() -> None:
     query = monitor_sql.select_deleted_task_message_refs("weft_monitor_task_messages")
 

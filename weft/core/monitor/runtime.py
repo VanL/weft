@@ -3,8 +3,9 @@
 This module contains the command-neutral pieces used by the supervised
 ``TaskMonitor``. It deliberately stays below the command and CLI layers:
 processors receive typed candidates plus a context, not manager or command
-objects. Built-in processor names are handled by ``TaskMonitor`` and are
-not resolved through the custom ``module:function`` processor hook.
+objects. Built-in modes are handled by ``TaskMonitor`` and are selected by
+mode rather than resolved through the custom ``module:function`` processor
+hook.
 
 Spec references:
 - docs/specifications/01-Core_Components.md [CC-2.3]
@@ -38,19 +39,18 @@ from weft._constants import (
     WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS_DEFAULT,
     WEFT_TASK_MONITOR_BATCH_SIZE_DEFAULT,
     WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS_DEFAULT,
-    WEFT_TASK_MONITOR_CLEANUP_WORKERS_DEFAULT,
     WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED_DEFAULT,
     WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT_DEFAULT,
     WEFT_TASK_MONITOR_ENABLED_DEFAULT,
     WEFT_TASK_MONITOR_INTERVAL_SECONDS_DEFAULT,
     WEFT_TASK_MONITOR_LOG_SINK_DEFAULT,
     WEFT_TASK_MONITOR_LOG_SINKS,
-    WEFT_TASK_MONITOR_PROCESSOR_BUILTINS,
+    WEFT_TASK_MONITOR_MODE_DEFAULT,
+    WEFT_TASK_MONITOR_MODES,
     WEFT_TASK_MONITOR_PROCESSOR_DEFAULT,
     WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS_DEFAULT,
     WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS_DEFAULT,
     WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE_DEFAULT,
-    WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED_DEFAULT,
     WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT_DEFAULT,
 )
 from weft.context import WeftContext
@@ -79,18 +79,17 @@ class TaskMonitorRuntimeConfig:
     control_queue_delete_limit: int = (
         WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT_DEFAULT
     )
-    cleanup_workers: int = WEFT_TASK_MONITOR_CLEANUP_WORKERS_DEFAULT
     task_log_retention_period_seconds: float = (
         WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS_DEFAULT
     )
     task_log_external_path: str = WEFT_LOG_TASKS_EXTERNAL_PATH_DEFAULT
     task_log_external_enabled: bool = WEFT_LOG_TASKS_EXTERNAL_ENABLED_DEFAULT
     task_log_external_mode: str = WEFT_LOG_TASKS_EXTERNAL_MODE_DEFAULT
-    processor: str = WEFT_TASK_MONITOR_PROCESSOR_DEFAULT
+    mode: str = WEFT_TASK_MONITOR_MODE_DEFAULT
+    processor: str | None = WEFT_TASK_MONITOR_PROCESSOR_DEFAULT or None
     log_sink: str = WEFT_TASK_MONITOR_LOG_SINK_DEFAULT
     restart_backoff_seconds: float = WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS_DEFAULT
     collation_store_enabled: bool = WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED_DEFAULT
-    table_delete_enabled: bool = WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED_DEFAULT
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any]) -> TaskMonitorRuntimeConfig:
@@ -173,21 +172,6 @@ class TaskMonitorRuntimeConfig:
                 "WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT must be positive"
             )
 
-        cleanup_workers = int(
-            config.get(
-                "WEFT_TASK_MONITOR_CLEANUP_WORKERS",
-                WEFT_TASK_MONITOR_CLEANUP_WORKERS_DEFAULT,
-            )
-        )
-        if (
-            cleanup_workers <= 0
-            or cleanup_workers > WEFT_TASK_MONITOR_CLEANUP_WORKERS_DEFAULT
-        ):
-            raise ValueError(
-                "WEFT_TASK_MONITOR_CLEANUP_WORKERS must be between 1 and "
-                f"{WEFT_TASK_MONITOR_CLEANUP_WORKERS_DEFAULT}"
-            )
-
         task_log_retention_period_seconds = float(
             config.get(
                 "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS",
@@ -196,6 +180,20 @@ class TaskMonitorRuntimeConfig:
         )
         if task_log_retention_period_seconds <= 0:
             raise ValueError("WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS must be positive")
+
+        mode = (
+            str(
+                config.get(
+                    "WEFT_TASK_MONITOR_MODE",
+                    WEFT_TASK_MONITOR_MODE_DEFAULT,
+                )
+            )
+            .strip()
+            .lower()
+        )
+        if mode not in WEFT_TASK_MONITOR_MODES:
+            allowed = ", ".join(sorted(WEFT_TASK_MONITOR_MODES))
+            raise ValueError(f"WEFT_TASK_MONITOR_MODE must be one of: {allowed}")
 
         task_log_external_path = str(
             config.get(
@@ -206,7 +204,7 @@ class TaskMonitorRuntimeConfig:
         task_log_external_enabled = bool(
             config.get(
                 "WEFT_LOG_TASKS_EXTERNAL_ENABLED",
-                bool(task_log_external_path),
+                mode == "jsonl_then_delete",
             )
         )
         task_log_external_mode = (
@@ -228,21 +226,36 @@ class TaskMonitorRuntimeConfig:
                 "WEFT_LOG_TASKS_EXTERNAL_ENABLED is true"
             )
 
-        processor = str(
+        processor_value = str(
             config.get(
                 "WEFT_TASK_MONITOR_PROCESSOR",
                 WEFT_TASK_MONITOR_PROCESSOR_DEFAULT,
             )
         ).strip()
-        if not processor:
-            raise ValueError("WEFT_TASK_MONITOR_PROCESSOR must be non-empty")
-        if (
-            processor not in WEFT_TASK_MONITOR_PROCESSOR_BUILTINS
-            and ":" not in processor
-        ):
+        if processor_value in WEFT_TASK_MONITOR_MODES:
             raise ValueError(
-                "WEFT_TASK_MONITOR_PROCESSOR must be a built-in processor name "
-                "or a module:function reference"
+                "WEFT_TASK_MONITOR_PROCESSOR no longer selects built-in modes; use "
+                f"WEFT_TASK_MONITOR_MODE={processor_value}"
+            )
+        if processor_value and ":" not in processor_value:
+            raise ValueError(
+                "WEFT_TASK_MONITOR_PROCESSOR must be a module:function reference"
+            )
+        if processor_value:
+            module_name, function_name = processor_value.split(":", 1)
+            if not module_name.strip() or not function_name.strip():
+                raise ValueError(
+                    "WEFT_TASK_MONITOR_PROCESSOR module:function reference is malformed"
+                )
+        processor = processor_value or None
+        if mode == "custom" and processor is None:
+            raise ValueError(
+                "WEFT_TASK_MONITOR_MODE=custom requires WEFT_TASK_MONITOR_PROCESSOR"
+            )
+        if mode != "custom" and processor is not None:
+            raise ValueError(
+                "WEFT_TASK_MONITOR_PROCESSOR is only valid with "
+                "WEFT_TASK_MONITOR_MODE=custom"
             )
 
         log_sink = str(
@@ -269,12 +282,27 @@ class TaskMonitorRuntimeConfig:
                 WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED_DEFAULT,
             )
         )
-        table_delete_enabled = bool(
-            config.get(
-                "WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED",
-                WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED_DEFAULT,
-            )
-        )
+        if mode == "jsonl_then_delete":
+            if not task_log_external_path:
+                raise ValueError(
+                    "WEFT_TASK_MONITOR_MODE=jsonl_then_delete requires "
+                    "WEFT_LOG_TASKS_EXTERNAL_PATH"
+                )
+            if not task_log_external_enabled:
+                raise ValueError(
+                    "WEFT_TASK_MONITOR_MODE=jsonl_then_delete requires "
+                    "WEFT_LOG_TASKS_EXTERNAL_ENABLED=true"
+                )
+            if task_log_external_mode != "collated":
+                raise ValueError(
+                    "WEFT_TASK_MONITOR_MODE=jsonl_then_delete requires "
+                    "WEFT_LOG_TASKS_EXTERNAL_MODE=collated"
+                )
+            if not collation_store_enabled:
+                raise ValueError(
+                    "WEFT_TASK_MONITOR_MODE=jsonl_then_delete requires "
+                    "WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED=true"
+                )
 
         return cls(
             enabled=enabled,
@@ -285,16 +313,15 @@ class TaskMonitorRuntimeConfig:
             store_write_batch_size=store_write_batch_size,
             stale_open_family_seconds=stale_open_family_seconds,
             control_queue_delete_limit=control_queue_delete_limit,
-            cleanup_workers=cleanup_workers,
             task_log_retention_period_seconds=task_log_retention_period_seconds,
             task_log_external_path=task_log_external_path,
             task_log_external_enabled=task_log_external_enabled,
             task_log_external_mode=task_log_external_mode,
+            mode=mode,
             processor=processor,
             log_sink=log_sink,
             restart_backoff_seconds=restart_backoff_seconds,
             collation_store_enabled=collation_store_enabled,
-            table_delete_enabled=table_delete_enabled,
         )
 
 
@@ -390,12 +417,14 @@ class TaskMonitorCycleSnapshot:
 def resolve_task_monitor_processor(name: str) -> TaskMonitorProcessor:
     """Resolve a custom ``module:function`` processor reference.
 
-    Built-in processors are handled directly by ``TaskMonitor`` so the
-    supervised monitor has one cleanup path.
+    Built-in modes are handled directly by ``TaskMonitor`` so the supervised
+    monitor has one cleanup path.
     """
 
-    if name in WEFT_TASK_MONITOR_PROCESSOR_BUILTINS:
-        raise ValueError("built-in task-monitor processors are handled by TaskMonitor")
+    if name in WEFT_TASK_MONITOR_MODES:
+        raise ValueError(
+            "built-in task-monitor modes are selected with WEFT_TASK_MONITOR_MODE"
+        )
 
     if ":" not in name:
         raise ValueError("task-monitor processor must be a module:function reference")

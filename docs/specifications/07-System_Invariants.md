@@ -196,7 +196,7 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
     prove both that Monitor tables and reports are derived evidence only and
     that cleanup effects are exact, policy-selected, and retryable after
     partial failure.
-  - **OBS.13.3**: With the built-in `delete` processor, retained
+  - **OBS.13.3**: With the built-in `delete` mode, retained
     `weft.log.tasks` cleanup may delete exact cleanup rows selected by explicit
     supported paths only: malformed rows are deleted, valid retained rows are
     folded into Monitor-owned tables, and then those exact raw rows are
@@ -243,6 +243,9 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
     blocks family disposition retry rather than resurrecting ingested rows. In
     raw external mode, external emit precedes raw deletion; external sink
     validation or emit failure must not prevent TaskMonitor service startup.
+    When external logging is enabled, the configured path is restart-scoped;
+    the TaskMonitor must re-probe the resolved path once per monitor cycle and
+    cache health transitions without emitting lifetime-log records.
   - **OBS.13.9**: Normal task cleanup clears standard task-local
     `T{tid}.ctrl_in` and `T{tid}.ctrl_out` runtime queues before process exit.
     Terminal disposition may later remove residual standard `T{tid}.ctrl_in`,
@@ -508,7 +511,7 @@ Current invariant visibility comes from:
 
 There is now a manager-supervised `TaskMonitor` in addition to the
 foreground `weft system task-monitor` command. In the current contract it is
-operational only. The default processor is `delete`, which may delete exact
+operational only. The default mode is `delete`, which may delete exact
 rows selected by supported cleanup paths. Retained task-log cleanup is
 Monitor-table driven: malformed `weft.log.tasks` rows are exact-deleted; valid
 rows older than `WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS` are folded into
@@ -598,7 +601,8 @@ orchestration lives in
 under `weft/core/pruning/policies/`; legacy/foreground task-log scan helpers
 live in `weft/core/monitor/task_log_scanner.py`; durable Monitor collation lives in
 `weft/core/monitor/store.py`, `weft/core/monitor/sql.py`, and
-`weft/core/monitor/collation.py`; runtime queue cleanup slice policy lives in
+`weft/core/monitor/collation.py`; reusable lifetime report JSON shape lives in
+`weft/core/monitor/lifetime_report.py`; runtime queue cleanup slice policy lives in
 `weft/core/monitor/policies/runtime_control.py`; runtime queue cleanup
 readiness lives in the Monitor store/SQL layer and TaskMonitor boundary;
 terminal control and eligible reserved queue deletion live at the TaskMonitor
@@ -606,6 +610,20 @@ runtime boundary;
 external task-log file emission lives in
 `weft/core/monitor/external_log.py`; exact raw-message deletion still goes
 through `weft/core/pruning/apply.py`.
+TaskMonitor built-in cleanup behavior is selected by `WEFT_TASK_MONITOR_MODE`,
+not by the external log path. The default external JSONL path is
+`logs/weft.log` under the Weft project root, and file output uses Python's
+standard rotating logfile handler.
+`jsonl_then_delete` must be durable-before-delete per selected subject: a
+`task_lifetime_report` must either be written to the configured external JSONL
+path or recorded in `weft_monitor_deferred_writes` before the selected exact
+delete is attempted. If both report handoff paths fail, that subject remains
+undeleted and retryable. Deferred writes are operational outbox rows only; they
+are flushed by bounded monitor work and must not become lifecycle truth, result
+authority, or a PONG-time live scan. TaskMonitor external-log diagnostics may
+be cached into the task's `weft.state.tid_mappings` runtime mapping for passive
+status reporting, but they remain diagnostics rather than service lifecycle
+truth.
 
 ## Scope Boundary
 
@@ -617,6 +635,9 @@ doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-05-29-task-monitor-config-and-reactor-cache-cleanup-plan.md`](../plans/2026-05-29-task-monitor-config-and-reactor-cache-cleanup-plan.md)
+- [`docs/plans/2026-05-29-task-monitor-general-lifetime-reporting-plan.md`](../plans/2026-05-29-task-monitor-general-lifetime-reporting-plan.md)
+- [`docs/plans/2026-05-30-task-monitor-mode-and-rotating-log-plan.md`](../plans/2026-05-30-task-monitor-mode-and-rotating-log-plan.md)
 - [`docs/plans/2026-05-29-reliability-and-doc-fixes-plan.md`](../plans/2026-05-29-reliability-and-doc-fixes-plan.md)
 - [`docs/plans/2026-05-28-stale-service-owner-runtime-cleanup-plan.md`](../plans/2026-05-28-stale-service-owner-runtime-cleanup-plan.md)
 - [`docs/plans/2026-05-27-service-collation-reporting-plan.md`](../plans/2026-05-27-service-collation-reporting-plan.md)
@@ -627,6 +648,7 @@ doc:
 - [`docs/plans/2026-05-23-monitor-cleanup-policy-convergence-plan.md`](../plans/2026-05-23-monitor-cleanup-policy-convergence-plan.md)
 - [`docs/plans/2026-05-23-monitor-cleanup-executor-plan.md`](../plans/2026-05-23-monitor-cleanup-executor-plan.md)
 - [`docs/plans/2026-05-20-service-task-shared-reactor-extraction-plan.md`](../plans/2026-05-20-service-task-shared-reactor-extraction-plan.md)
+- [`docs/plans/2026-05-30-task-monitor-external-log-health-plan.md`](../plans/2026-05-30-task-monitor-external-log-health-plan.md)
 - [`docs/plans/2026-05-20-monitor-collation-table-retirement-plan.md`](../plans/2026-05-20-monitor-collation-table-retirement-plan.md)
 - [`docs/plans/2026-05-20-monitor-reactor-worker-refactor-plan.md`](../plans/2026-05-20-monitor-reactor-worker-refactor-plan.md)
 - [`docs/plans/2026-05-20-monitor-fair-cleanup-scheduling-plan.md`](../plans/2026-05-20-monitor-fair-cleanup-scheduling-plan.md)

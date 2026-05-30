@@ -52,7 +52,6 @@ class CleanupPolicyConfig:
     task_log_scan_limit: int
     task_log_retention_period_seconds: float
     store_write_batch_size: int
-    table_delete_enabled: bool
     control_queue_delete_limit: int
     runtime_family_limit: int
     runtime_cleanup_slice_seconds: float

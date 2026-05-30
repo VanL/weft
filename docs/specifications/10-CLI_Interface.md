@@ -339,6 +339,11 @@ Current behavior:
   status, winning evidence source, and optional TID, manager TID, queue, PID,
   timestamp, and reconciliation details. Service rows reduce existing queue
   evidence; they are not a second state store.
+- Service rows may include additive diagnostics from persisted runtime evidence.
+  For the TaskMonitor service this includes cached external-log health and
+  deferred-write counts from the monitor's latest TID mapping. Project-wide
+  `weft status` must not PING the monitor or open the configured external log
+  path to populate these diagnostics.
 - JSON task snapshots may include an additive `reconciliation` object when
   lifecycle evidence and runtime liveness disagree; the public `status` remains
   one of the normal lifecycle states
@@ -651,6 +656,16 @@ Current configuration domains:
   directory (default `.weft/`), including the optional project-local autostart
   default in its `config.json`
 
+TaskMonitor cleanup behavior is configured through the same `load_config()` and
+`build_context()` path as other Weft settings. `WEFT_TASK_MONITOR_MODE` selects
+the built-in behavior (`delete`, `report_only`, `jsonl_then_delete`) or
+`custom`; `WEFT_TASK_MONITOR_PROCESSOR` is only a custom `module:function`
+reference for `mode=custom`. The external lifetime log path defaults to
+`logs/weft.log` under the Weft project root, but a path alone does not enable
+logging. Changing the configured external path requires restarting the
+TaskMonitor; availability and permission changes for the resolved path are
+checked on the monitor cadence.
+
 `WEFT_ENV_FILE` is a process bootstrap input, not a command option. When set,
 the CLI entry point reads the named UTF-8 dotenv-style file before importing
 the full Typer app or any config-reading helper. The file can fill missing
@@ -801,6 +816,7 @@ flags, and future queue or control ergonomics live in the companion doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-05-30-task-monitor-mode-and-rotating-log-plan.md`](../plans/2026-05-30-task-monitor-mode-and-rotating-log-plan.md)
 - [`docs/plans/2026-05-06-lifecycle-reconciliation-architecture-plan.md`](../plans/2026-05-06-lifecycle-reconciliation-architecture-plan.md)
 - [`docs/plans/2026-05-06-status-coherence-and-stale-pid-liveness-plan.md`](../plans/2026-05-06-status-coherence-and-stale-pid-liveness-plan.md)
 - [`docs/plans/2026-05-06-task-evidence-reconciliation-model-plan.md`](../plans/2026-05-06-task-evidence-reconciliation-model-plan.md)
@@ -825,6 +841,7 @@ flags, and future queue or control ergonomics live in the companion doc:
 - [`docs/plans/2026-04-16-pipeline-autostart-extension-plan.md`](../plans/2026-04-16-pipeline-autostart-extension-plan.md)
 - [`docs/plans/2026-05-11-manager-serve-operational-log-plan.md`](../plans/2026-05-11-manager-serve-operational-log-plan.md)
 - [`docs/plans/2026-05-13-manager-liveness-and-leadership-robustness-plan.md`](../plans/2026-05-13-manager-liveness-and-leadership-robustness-plan.md)
+- [`docs/plans/2026-05-30-task-monitor-external-log-health-plan.md`](../plans/2026-05-30-task-monitor-external-log-health-plan.md)
 
 ## Related Documents
 

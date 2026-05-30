@@ -256,6 +256,45 @@ def test_monitor_store_schema_creation_is_idempotent(tmp_path) -> None:
     assert store.status().schema_version == WEFT_MONITOR_SCHEMA_VERSION
 
 
+def test_monitor_store_deferred_writes_are_bounded_outbox_rows(tmp_path) -> None:
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    report = {
+        "schema_version": 1,
+        "record_type": "task_lifetime_report",
+        "report_id": "task-lifetime:test",
+        "emitted_at_ns": 1779000000000000001,
+    }
+
+    store.upsert_deferred_write(
+        report=report,
+        external_error="permission denied",
+        now_ns=1779000000000000001,
+    )
+    store.upsert_deferred_write(
+        report={**report, "emitted_at_ns": 1779000000000000002},
+        external_error="still denied",
+        now_ns=1779000000000000002,
+    )
+
+    pending = store.list_pending_deferred_writes(limit=10)
+    assert len(pending) == 1
+    assert pending[0].report_id == "task-lifetime:test"
+    assert pending[0].attempt_count == 2
+    assert pending[0].created_at_ns == 1779000000000000001
+    assert pending[0].last_external_error == "still denied"
+    assert pending[0].body()["emitted_at_ns"] == 1779000000000000001
+    status = store.deferred_write_status()
+    assert status.pending == 1
+    assert status.last_error == "still denied"
+
+    store.mark_deferred_writes_flushed(("task-lifetime:test",), 1779000000000000003)
+
+    assert store.list_pending_deferred_writes(limit=10) == ()
+    assert store.deferred_write_status().pending == 0
+
+
 def test_monitor_store_checkpoint_round_trips(tmp_path) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)

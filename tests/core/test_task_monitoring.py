@@ -163,11 +163,10 @@ def test_runtime_config_reads_loaded_weft_config() -> None:
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": str(HEARTBEAT_MIN_INTERVAL_SECONDS),
             "WEFT_TASK_MONITOR_BATCH_SIZE": 12,
             "WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT": 120,
-            "WEFT_TASK_MONITOR_CLEANUP_WORKERS": 1,
             "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": 172800.0,
             "WEFT_LOG_TASKS_EXTERNAL_PATH": "task-log.jsonl",
             "WEFT_LOG_TASKS_EXTERNAL_MODE": "raw",
-            "WEFT_TASK_MONITOR_PROCESSOR": "report_only",
+            "WEFT_TASK_MONITOR_MODE": "report_only",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
             "WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS": 3.5,
         }
@@ -179,12 +178,12 @@ def test_runtime_config_reads_loaded_weft_config() -> None:
     assert runtime_config.interval_seconds == HEARTBEAT_MIN_INTERVAL_SECONDS
     assert runtime_config.batch_size == 12
     assert runtime_config.task_log_scan_limit == 120
-    assert runtime_config.cleanup_workers == 1
     assert runtime_config.task_log_retention_period_seconds == 172800.0
     assert runtime_config.task_log_external_path == "task-log.jsonl"
-    assert runtime_config.task_log_external_enabled is True
+    assert runtime_config.task_log_external_enabled is False
     assert runtime_config.task_log_external_mode == "raw"
-    assert runtime_config.processor == "report_only"
+    assert runtime_config.mode == "report_only"
+    assert runtime_config.processor is None
     assert runtime_config.log_sink == "none"
     assert runtime_config.restart_backoff_seconds == 3.5
 
@@ -192,17 +191,64 @@ def test_runtime_config_reads_loaded_weft_config() -> None:
 def test_runtime_config_defaults_to_delete_builtin() -> None:
     runtime_config = TaskMonitorRuntimeConfig.from_config(load_config({}))
 
-    assert runtime_config.processor == "delete"
-    assert runtime_config.cleanup_workers == 3
+    assert runtime_config.mode == "delete"
+    assert runtime_config.processor is None
+    assert runtime_config.task_log_external_path == "logs/weft.log"
+    assert runtime_config.task_log_external_enabled is False
 
 
-@pytest.mark.parametrize("value", [0, 4])
-def test_runtime_config_rejects_invalid_cleanup_worker_cap(value: int) -> None:
-    config = load_config({})
-    config["WEFT_TASK_MONITOR_CLEANUP_WORKERS"] = value
+def test_runtime_config_accepts_custom_processor_only_in_custom_mode() -> None:
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_MODE": "custom",
+            "WEFT_TASK_MONITOR_PROCESSOR": (
+                "tests.core.test_task_monitoring:custom_processor"
+            ),
+        }
+    )
 
-    with pytest.raises(ValueError, match="WEFT_TASK_MONITOR_CLEANUP_WORKERS"):
-        TaskMonitorRuntimeConfig.from_config(config)
+    runtime_config = TaskMonitorRuntimeConfig.from_config(config)
+
+    assert runtime_config.mode == "custom"
+    assert (
+        runtime_config.processor == "tests.core.test_task_monitoring:custom_processor"
+    )
+
+
+def test_runtime_config_rejects_processor_for_builtin_mode() -> None:
+    with pytest.raises(ValueError, match="WEFT_TASK_MONITOR_MODE=custom"):
+        TaskMonitorRuntimeConfig.from_config(
+            load_config(
+                {
+                    "WEFT_TASK_MONITOR_MODE": "delete",
+                    "WEFT_TASK_MONITOR_PROCESSOR": (
+                        "tests.core.test_task_monitoring:custom_processor"
+                    ),
+                }
+            )
+        )
+
+
+def test_runtime_config_rejects_custom_mode_without_processor() -> None:
+    with pytest.raises(ValueError, match="requires WEFT_TASK_MONITOR_PROCESSOR"):
+        TaskMonitorRuntimeConfig.from_config(
+            load_config({"WEFT_TASK_MONITOR_MODE": "custom"})
+        )
+
+
+@pytest.mark.parametrize("mode_name", ["delete", "report_only", "jsonl_then_delete"])
+def test_load_config_rejects_builtin_mode_in_processor_config(mode_name: str) -> None:
+    with pytest.raises(ValueError, match="WEFT_TASK_MONITOR_MODE"):
+        load_config({"WEFT_TASK_MONITOR_PROCESSOR": mode_name})
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED", "WEFT_TASK_MONITOR_CLEANUP_WORKERS"],
+)
+def test_runtime_config_rejects_removed_task_monitor_config(name: str) -> None:
+    with pytest.raises(ValueError, match=name):
+        load_config({name: "1"})
 
 
 def test_task_monitor_operational_log_emits_config_and_cycle(
@@ -215,7 +261,7 @@ def test_task_monitor_operational_log_emits_config_and_cycle(
             MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY: True,
             "WEFT_MANAGER_SERVE_LOG_LEVEL": "info",
             "WEFT_TASK_MONITOR_ENABLED": True,
-            "WEFT_TASK_MONITOR_PROCESSOR": "report_only",
+            "WEFT_TASK_MONITOR_MODE": "report_only",
             "WEFT_TASK_MONITOR_BATCH_SIZE": 5,
         }
     )
@@ -239,8 +285,102 @@ def test_task_monitor_operational_log_emits_config_and_cycle(
     )
     assert cycle["manager_tid"] == "1778089999999999000"
     assert cycle["component"] == "task_monitor"
-    assert cycle["processor"] == "report_only"
+    assert cycle["task_monitor_mode"] == "report_only"
+    assert cycle["processor"] is None
     assert "events_scanned" in cycle
+
+
+def test_task_monitor_operational_log_warns_for_unhealthy_external_log_on_startup(
+    weft_harness,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path,
+) -> None:
+    external_path = tmp_path / "external-target"
+    external_path.mkdir()
+    config = dict(weft_harness.context.config)
+    config.update(
+        {
+            MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY: True,
+            "WEFT_MANAGER_SERVE_LOG_LEVEL": "info",
+            "WEFT_TASK_MONITOR_ENABLED": True,
+            "WEFT_TASK_MONITOR_MODE": "jsonl_then_delete",
+            "WEFT_LOG_TASKS_EXTERNAL_ENABLED": True,
+            "WEFT_LOG_TASKS_EXTERNAL_PATH": str(external_path),
+            "WEFT_LOG_TASKS_EXTERNAL_MODE": "collated",
+        }
+    )
+    monitor = TaskMonitor(
+        weft_harness.context.broker_target,
+        make_task_monitor_taskspec("1778089999999999010"),
+        config=config,
+    )
+    try:
+        assert monitor._external_task_log_status.healthy is False
+        external_path.rmdir()
+        monitor.process_once()
+        drive_task_monitor_until_idle(monitor)
+        assert monitor._external_task_log_status.healthy is True
+    finally:
+        monitor.cleanup()
+
+    health_events = [
+        event
+        for event in serve_log_events(capsys)
+        if event.get("event") == "task_monitor_external_log_health"
+    ]
+    assert [event["severity"] for event in health_events] == ["warning", "info"]
+    task_log_external = health_events[0]["task_log_external"]
+    assert isinstance(task_log_external, dict)
+    assert task_log_external["healthy"] is False
+    assert "directory" in str(task_log_external["last_error"])
+    recovered = health_events[1]["task_log_external"]
+    assert isinstance(recovered, dict)
+    assert recovered["healthy"] is True
+
+
+def test_task_monitor_operational_log_warns_when_external_log_regresses_on_cycle(
+    weft_harness,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path,
+) -> None:
+    external_path = tmp_path / "task-lifetime.jsonl"
+    config = dict(weft_harness.context.config)
+    config.update(
+        {
+            MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY: True,
+            "WEFT_MANAGER_SERVE_LOG_LEVEL": "info",
+            "WEFT_TASK_MONITOR_ENABLED": True,
+            "WEFT_TASK_MONITOR_MODE": "jsonl_then_delete",
+            "WEFT_LOG_TASKS_EXTERNAL_ENABLED": True,
+            "WEFT_LOG_TASKS_EXTERNAL_PATH": str(external_path),
+            "WEFT_LOG_TASKS_EXTERNAL_MODE": "collated",
+        }
+    )
+    monitor = TaskMonitor(
+        weft_harness.context.broker_target,
+        make_task_monitor_taskspec("1778089999999999011"),
+        config=config,
+    )
+    try:
+        assert monitor._external_task_log_status.healthy is True
+        external_path.unlink()
+        external_path.mkdir()
+
+        monitor.process_once()
+        drive_task_monitor_until_idle(monitor)
+    finally:
+        monitor.cleanup()
+
+    health = next(
+        event
+        for event in serve_log_events(capsys)
+        if event.get("event") == "task_monitor_external_log_health"
+    )
+    assert health["severity"] == "warning"
+    task_log_external = health["task_log_external"]
+    assert isinstance(task_log_external, dict)
+    assert task_log_external["healthy"] is False
+    assert "directory" in str(task_log_external["last_error"])
 
 
 def test_task_monitor_operational_log_off_is_silent(
@@ -253,7 +393,7 @@ def test_task_monitor_operational_log_off_is_silent(
             MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY: True,
             "WEFT_MANAGER_SERVE_LOG_LEVEL": "off",
             "WEFT_TASK_MONITOR_ENABLED": True,
-            "WEFT_TASK_MONITOR_PROCESSOR": "report_only",
+            "WEFT_TASK_MONITOR_MODE": "report_only",
         }
     )
     spec = make_task_monitor_taskspec("1778089999999999002")
@@ -271,37 +411,61 @@ def test_task_monitor_operational_log_off_is_silent(
     assert serve_log_events(capsys) == []
 
 
-def test_task_monitor_operational_log_reports_processor_error(
-    weft_harness,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    config = dict(weft_harness.context.config)
-    config.update(
+def test_runtime_config_accepts_jsonl_then_delete_when_reporting_is_configured() -> (
+    None
+):
+    config = load_config(
         {
-            MANAGER_SERVE_LOG_ACTIVE_CONFIG_KEY: True,
-            "WEFT_MANAGER_SERVE_LOG_LEVEL": "info",
-            "WEFT_TASK_MONITOR_ENABLED": True,
-            "WEFT_TASK_MONITOR_PROCESSOR": "jsonl_then_delete",
+            "WEFT_TASK_MONITOR_MODE": "jsonl_then_delete",
+            "WEFT_LOG_TASKS_EXTERNAL_MODE": "collated",
+            "WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED": "1",
         }
     )
-    spec = make_task_monitor_taskspec("1778089999999999003")
-    monitor = TaskMonitor(
-        weft_harness.context.broker_target,
-        spec,
-        config=config,
-    )
-    try:
-        monitor.process_once()
-        drive_task_monitor_until_idle(monitor)
-    finally:
-        monitor.cleanup()
 
-    events = serve_log_events(capsys)
-    assert any(
-        event.get("event") == "task_monitor_processor_error"
-        and event.get("processor") == "jsonl_then_delete"
-        for event in events
-    )
+    runtime_config = TaskMonitorRuntimeConfig.from_config(config)
+
+    assert runtime_config.mode == "jsonl_then_delete"
+    assert runtime_config.processor is None
+    assert runtime_config.task_log_external_path == "logs/weft.log"
+    assert runtime_config.task_log_external_enabled is True
+
+
+@pytest.mark.parametrize(
+    ("overrides", "match"),
+    [
+        (
+            {"WEFT_LOG_TASKS_EXTERNAL_ENABLED": "0"},
+            "WEFT_LOG_TASKS_EXTERNAL_ENABLED=true",
+        ),
+        (
+            {"WEFT_LOG_TASKS_EXTERNAL_PATH": ""},
+            "WEFT_LOG_TASKS_EXTERNAL_PATH",
+        ),
+        (
+            {"WEFT_LOG_TASKS_EXTERNAL_MODE": "raw"},
+            "WEFT_LOG_TASKS_EXTERNAL_MODE=collated",
+        ),
+        (
+            {"WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED": "0"},
+            "WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED=true",
+        ),
+    ],
+)
+def test_runtime_config_rejects_jsonl_then_delete_without_reporting_requirements(
+    tmp_path,
+    overrides: dict[str, str],
+    match: str,
+) -> None:
+    settings = {
+        "WEFT_TASK_MONITOR_MODE": "jsonl_then_delete",
+        "WEFT_LOG_TASKS_EXTERNAL_PATH": str(tmp_path / "task-lifetime.jsonl"),
+        "WEFT_LOG_TASKS_EXTERNAL_MODE": "collated",
+        "WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED": "1",
+    }
+    settings.update(overrides)
+
+    with pytest.raises(ValueError, match=match):
+        TaskMonitorRuntimeConfig.from_config(load_config(settings))
 
 
 def test_resolve_custom_processor() -> None:
@@ -319,7 +483,7 @@ def test_resolve_custom_processor() -> None:
 def test_builtin_processors_are_not_resolved_through_custom_hook(
     processor_name: str,
 ) -> None:
-    with pytest.raises(ValueError, match="handled by TaskMonitor"):
+    with pytest.raises(ValueError, match="WEFT_TASK_MONITOR_MODE"):
         resolve_task_monitor_processor(processor_name)
 
 

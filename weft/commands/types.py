@@ -113,6 +113,7 @@ class ServiceSnapshot:
     pid: int | None = None
     updated_at: int | None = None
     reconciliation: dict[str, Any] | None = None
+    diagnostics: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)

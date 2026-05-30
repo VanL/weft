@@ -368,37 +368,63 @@ Current rules:
   result materialization, or cleanup decisions
 - the supervised `TaskMonitor` may maintain Monitor-owned durable collation
   tables: `weft_monitor_meta`, `weft_monitor_task_collations`, and
-  `weft_monitor_task_messages`. These tables are operational read models
-  derived from retained `weft.log.tasks` rows. They are not queues, are not
-  exposed through `weft queue *`, and are not public lifecycle or result
+  `weft_monitor_task_messages`. It may also maintain
+  `weft_monitor_deferred_writes`, a Monitor-owned operational outbox for
+  external JSONL records that could not be written to the configured file path.
+  These tables are operational read models derived from retained
+  `weft.log.tasks` rows or accepted report handoffs. They are not queues, are
+  not exposed through `weft queue *`, and are not public lifecycle or result
   authority. The Monitor creates/verifies only these Monitor tables, in an
   already initialized Weft broker database, and records a cached PONG error if
   the store is unavailable.
 - task-monitor log records and processor summaries are operational output only
   in the current release. The monitor may mark broker messages as lifecycle or
-  cleanup candidates. With the default `delete` processor it may delete exact
+  cleanup candidates. With the default `delete` mode it may delete exact
   rows selected by explicit bounded cleanup policies from supported Weft-owned
   cleanup queues. Those policies may delete malformed rows only from queues
   whose schema is owned by Weft, such as `weft.log.tasks` and
-  `weft.state.tid_mappings`. With the built-in `report_only` processor it does
+  `weft.state.tid_mappings`. With the built-in `report_only` mode it does
   not delete, reserve, move, prune, reap, acknowledge, or unclaim rows. The
-  `jsonl_then_delete` processor remains fail-closed until the operational
-  logging callback lands.
+  `jsonl_then_delete` mode emits one `task_lifetime_report` JSONL record
+  for each destructive policy-selected subject before exact deletion. If the
+  configured external JSONL write fails, the Monitor writes the same report to
+  `weft_monitor_deferred_writes`; deletion may proceed only after either the
+  external write or the deferred write succeeds. If both fail, the selected
+  subject remains undeleted and retryable.
+  Lifetime report records use `record_type=task_lifetime_report`,
+  `schema_version=1`, deterministic `report_id`, `source_policy` constrained
+  to the five top-level cleanup policies, a `subject`, a top-level `taskspec`
+  field, a baseline `lifetime` object, compact `monitor` provenance, and
+  policy-specific `observations`. `taskspec` is populated whenever the policy
+  has TaskSpec-shaped evidence and is `null` for inferred or state-only
+  reports. For normal Monitor-store families, `taskspec` is derived from the
+  collation row's TaskSpec summary and `monitor` carries the small Monitor-only
+  context such as first/last/terminal message IDs and service classification.
+  For runtime-state and inferred cleanup policies, `monitor` carries the exact
+  queue/message or queue-name evidence used by the policy. Records are lifetime
+  reports, not delete audit records; they do not carry an `effect=delete`
+  field. The external JSONL stream is at-least-once and downstream consumers
+  deduplicate by `report_id`. The configured external path is resolved when
+  the TaskMonitor starts and requires a monitor restart to change; the current
+  resolved path's writability is re-probed once per monitor cycle. Probe
+  failures update cached diagnostics and may emit foreground operational
+  warnings, but they do not write lifetime records and do not replace the
+  write-or-defer-before-delete handoff rule.
 - when enabled, the canonical manager supervises one internal
   `TaskMonitor`. The supervised monitor reads task-log lifecycle evidence by
   generator/high-water cursor for observation and custom processors. Custom
   processors run from the resulting candidate snapshot through the registered
   `ServiceTask` processor worker group; the TaskMonitor reactor commits the
   processor result, checkpoint, and cached diagnostics after the typed worker
-  event returns. Built-in cleanup processors run through a separate registered
+  event returns. Built-in cleanup modes run through a separate registered
   TaskMonitor-owned built-in cycle worker group; the reactor stays available
   for task-local PING/STATUS/STOP/KILL, heartbeat registration, and schedule
   bookkeeping while the worker scans, writes Monitor-store rows, and applies
-  exact deletes. For the built-in `delete` processor with Monitor
+  exact deletes. For the built-in `delete` mode with Monitor
   collation enabled, retained `weft.log.tasks` rows are processed in FIFO order:
   malformed rows are exact-deleted; valid rows are folded into the Monitor
   table and then exact-deleted in the same bounded pass when running the
-  built-in `delete` processor. Terminal families may be summarized and
+  built-in `delete` mode. Terminal families may be summarized and
   disposed only after the pass reaches a complete FIFO high-water; open
   families continue to use `WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS` plus
   stale-open policy before summary/disposition. Built-in cleanup still
@@ -415,8 +441,14 @@ Current rules:
   raw broker row is already absent, the Monitor physically deletes those child
   rows and reconciles the parent `raw_deleted_at_ns` when no child refs remain.
   Bounded retry sweeps use the same rule for already-ingested child refs from
-  older cycles; terminal summary emission is not a prerequisite for deleting a
-  raw row that has already been folded into the Monitor store.
+  older cycles. For the `delete` mode, terminal summary emission is not a
+  prerequisite for deleting a raw row that has already been folded into the
+  Monitor store. For `jsonl_then_delete`, valid raw task-log rows are folded
+  into the Monitor store first and exact-deleted only after the owning family
+  has accepted a lifetime-report handoff. In this mode,
+  `summary_emitted_at_ns` records accepted report handoff, either external
+  JSONL write success or durable deferred write success; it is not public
+  lifecycle truth.
   If an older or partial cleanup cycle left a parent collation row marked
   `raw_deleted_at_ns` while child refs still exist in
   `weft_monitor_task_messages`, a bounded repair pass must exact-delete or
@@ -921,7 +953,7 @@ system pruning:
 - task-owned cleanup may remove spilled output when `cleanup_on_exit` is enabled
 - there is no built-in age-based output sweeper in the current contract
 - the supervised task monitor exists in the current contract. Its default
-  `delete` processor may delete exact message IDs selected by supported
+  `delete` mode may delete exact message IDs selected by supported
   Weft-owned cleanup paths. Runtime-state queues such as
   `weft.state.tid_mappings` remain policy driven. `weft.log.tasks` is now
   table driven when Monitor collation is enabled: the monitor scans visible
@@ -1055,7 +1087,7 @@ Current rules:
   `WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS`, defaulting to 172800 seconds.
   `WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT` remains the per-cycle task-log scan
   depth and defaults to 50000 rows. Eligible standard `T{tid}.reserved` queues
-  are deleted by the same supervised monitor `delete` processor path, bounded
+  are deleted by the same supervised monitor `delete` mode path, bounded
   by the control cleanup limit and protected by active runtime evidence. For
   Monitor-owned terminal non-completed families, a successful reserved cleanup
   or no-row reserved probe records `reserved_cleanup_checked_at_ns`; physical
@@ -1071,27 +1103,38 @@ Current rules:
   validation; it uses
   `weft/core/monitor/collation.py` for pure row reduction; it uses
   `weft/core/monitor/external_log.py` for optional external JSONL emission; it
-  uses the same canonical exact-delete helper after durable table ingestion for
-  collated mode, and after raw external emit for raw mode.
+  uses `weft/core/monitor/lifetime_report.py` for reusable
+  `task_lifetime_report` JSON shapes; file output uses Python's standard
+  rotating logfile handler and defaults to `logs/weft.log` under the Weft
+  project root when a mode enables it. It uses the same canonical exact-delete
+  helper after durable table ingestion for collated mode, after accepted
+  lifetime-report handoff for `jsonl_then_delete`, and after raw external emit
+  for raw mode.
   Disabling `WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED` leaves the tables in
-  place and removes them from the monitor cycle. `WEFT_TASK_MONITOR_TABLE_DELETE_ENABLED`
-  is retained as a legacy guard for the older table-backed raw-delete path; the
-  current supervised `delete` path deletes retained collated raw rows when the
-  collation store is enabled and available. If the store is unavailable,
-  well-formed task-log rows remain visible rather than falling back to the old
-  family-window deleter. If `WEFT_LOG_TASKS_EXTERNAL_PATH` is enabled in
-  `raw` mode, raw retained rows are emitted and deleted without writing Monitor
-  collation tables. Open families with a usable reporting interval may be
+  place and removes them from the monitor cycle. The supervised `delete`
+  mode deletes retained collated raw rows when the collation store is enabled
+  and available; `report_only` is the non-destructive override. If the
+  store is unavailable, well-formed task-log rows remain visible rather than
+  falling back to the old family-window deleter. If
+  `WEFT_LOG_TASKS_EXTERNAL_ENABLED=true` and
+  `WEFT_LOG_TASKS_EXTERNAL_MODE=raw`, raw retained rows are emitted and deleted
+  without writing Monitor collation tables. A configured external path by
+  itself is only a destination and does not trigger logging. Open families with
+  a usable reporting interval may be
   classified `suspected_inactive` after the configured reporting gap; open
   families without a usable interval may be classified `stale_open` only after
   `WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS`. These classifications are
-  operational Monitor-table state, not public lifecycle truth. PONG exposes cached
-  external-log status and retention settings only; it does not open files,
-  scan queues, or query Monitor tables.
+  operational Monitor-table state, not public lifecycle truth. PONG exposes
+  cached external-log status, deferred-write counts, and retention settings
+  only; it does not open files, scan queues, flush deferred writes, or query
+  Monitor tables. The persistent TaskMonitor runtime mapping in
+  `weft.state.tid_mappings` includes the same compact external-log diagnostics
+  so passive status surfaces can report external-log health without PINGing
+  the monitor or touching the configured path.
 - `weft system tidy` handles backend-native cleanup of empty queues and broker
   maintenance
 - autonomous destructive queue lifecycle is limited to the supervised
-  task-monitor `delete` processor and only for exact safe candidates
+  task-monitor `delete` mode and only for exact safe candidates
 
 ## Scope Boundary
 
@@ -1110,6 +1153,9 @@ management live in the companion doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-05-29-task-monitor-config-and-reactor-cache-cleanup-plan.md`](../plans/2026-05-29-task-monitor-config-and-reactor-cache-cleanup-plan.md)
+- [`docs/plans/2026-05-30-task-monitor-mode-and-rotating-log-plan.md`](../plans/2026-05-30-task-monitor-mode-and-rotating-log-plan.md)
+- [`docs/plans/2026-05-30-task-monitor-external-log-health-plan.md`](../plans/2026-05-30-task-monitor-external-log-health-plan.md)
 - [`docs/plans/2026-05-28-stale-service-owner-runtime-cleanup-plan.md`](../plans/2026-05-28-stale-service-owner-runtime-cleanup-plan.md)
 - [`docs/plans/2026-05-27-service-collation-reporting-plan.md`](../plans/2026-05-27-service-collation-reporting-plan.md)
 - [`docs/plans/2026-05-26-monitor-five-cleanup-policy-consolidation-plan.md`](../plans/2026-05-26-monitor-five-cleanup-policy-consolidation-plan.md)
@@ -1163,3 +1209,4 @@ management live in the companion doc:
 - [`docs/plans/2026-05-19-task-monitor-bounded-control-cleanup-plan.md`](../plans/2026-05-19-task-monitor-bounded-control-cleanup-plan.md)
 - [`docs/plans/2026-05-18-reactive-task-loop-hot-probe-plan.md`](../plans/2026-05-18-reactive-task-loop-hot-probe-plan.md)
 - [`docs/plans/2026-05-29-reliability-and-doc-fixes-plan.md`](../plans/2026-05-29-reliability-and-doc-fixes-plan.md)
+- [`docs/plans/2026-05-29-task-monitor-general-lifetime-reporting-plan.md`](../plans/2026-05-29-task-monitor-general-lifetime-reporting-plan.md)

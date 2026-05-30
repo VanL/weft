@@ -129,10 +129,13 @@ def cleanup_candidate_from_row(
     if payload is not None:
         event = payload.get("event")
         status = payload.get("status")
+        taskspec = payload.get("taskspec")
         if isinstance(event, str):
             metadata["event"] = event
         if isinstance(status, str):
             metadata["status"] = status
+        if isinstance(taskspec, Mapping):
+            metadata["taskspec"] = dict(taskspec)
     encoded = row.body.encode("utf-8")
     return CleanupCandidate(
         queue=row.queue,

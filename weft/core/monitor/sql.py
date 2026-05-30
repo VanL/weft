@@ -115,6 +115,27 @@ def create_task_messages_table(table: str) -> str:
         """
 
 
+def create_deferred_writes_table(table: str) -> str:
+    """Build the Monitor deferred external-write outbox table DDL."""
+
+    return f"""
+        CREATE TABLE IF NOT EXISTS {identifier(table)} (
+          context_key TEXT NOT NULL,
+          report_id TEXT NOT NULL,
+          record_type TEXT NOT NULL,
+          body_json TEXT NOT NULL,
+          created_at_ns BIGINT NOT NULL,
+          updated_at_ns BIGINT NOT NULL,
+          first_external_error TEXT NULL,
+          last_external_error TEXT NULL,
+          attempt_count INTEGER NOT NULL,
+          last_attempt_at_ns BIGINT NOT NULL,
+          flushed_at_ns BIGINT NULL,
+          PRIMARY KEY (context_key, report_id)
+        )
+        """
+
+
 def create_index(
     index_name: str,
     table: str,
@@ -170,6 +191,108 @@ def upsert_meta(meta_table: str) -> str:
         ON CONFLICT (key) DO UPDATE SET
           value_json = excluded.value_json,
           updated_at_ns = excluded.updated_at_ns
+        """
+
+
+def upsert_deferred_write(table: str) -> str:
+    """Build a deferred external-write upsert."""
+
+    table_name = identifier(table)
+    return f"""
+        INSERT INTO {table_name} (
+          context_key,
+          report_id,
+          record_type,
+          body_json,
+          created_at_ns,
+          updated_at_ns,
+          first_external_error,
+          last_external_error,
+          attempt_count,
+          last_attempt_at_ns,
+          flushed_at_ns
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, NULL)
+        ON CONFLICT (context_key, report_id) DO UPDATE SET
+          updated_at_ns = excluded.updated_at_ns,
+          last_external_error = excluded.last_external_error,
+          attempt_count = {table_name}.attempt_count + 1,
+          last_attempt_at_ns = excluded.last_attempt_at_ns,
+          flushed_at_ns = NULL
+        """
+
+
+def select_pending_deferred_writes(table: str, columns: Sequence[str]) -> str:
+    """Build a bounded pending deferred-write query."""
+
+    return f"""
+        SELECT {identifier_list(columns)}
+        FROM {identifier(table)}
+        WHERE context_key = ?
+          AND flushed_at_ns IS NULL
+        ORDER BY created_at_ns, report_id
+        LIMIT ?
+        """
+
+
+def mark_deferred_writes_flushed(table: str, report_count: int) -> str:
+    """Build a deferred-write flushed marker update."""
+
+    return f"""
+        UPDATE {identifier(table)}
+        SET flushed_at_ns = ?,
+            updated_at_ns = ?
+        WHERE context_key = ?
+          AND report_id IN ({placeholders(report_count)})
+        """
+
+
+def count_pending_deferred_writes(table: str) -> str:
+    """Build a pending deferred-write count query."""
+
+    return f"""
+        SELECT COUNT(*)
+        FROM {identifier(table)}
+        WHERE context_key = ?
+          AND flushed_at_ns IS NULL
+        """
+
+
+def select_latest_deferred_write_error(table: str) -> str:
+    """Build a query for the latest pending deferred-write error."""
+
+    return f"""
+        SELECT last_external_error
+        FROM {identifier(table)}
+        WHERE context_key = ?
+          AND flushed_at_ns IS NULL
+          AND last_external_error IS NOT NULL
+        ORDER BY last_attempt_at_ns DESC, report_id
+        LIMIT 1
+        """
+
+
+def select_flushed_deferred_write_ids(table: str) -> str:
+    """Build a bounded flushed deferred-write id query."""
+
+    return f"""
+        SELECT report_id
+        FROM {identifier(table)}
+        WHERE context_key = ?
+          AND flushed_at_ns IS NOT NULL
+          AND flushed_at_ns <= ?
+        ORDER BY flushed_at_ns, report_id
+        LIMIT ?
+        """
+
+
+def prune_flushed_deferred_writes(table: str, report_count: int) -> str:
+    """Build a bounded flushed deferred-write prune statement."""
+
+    return f"""
+        DELETE FROM {identifier(table)}
+        WHERE context_key = ?
+          AND report_id IN ({placeholders(report_count)})
         """
 
 

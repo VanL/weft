@@ -16,11 +16,13 @@ Spec references:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import time
 from collections import Counter
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
+from copy import copy
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -62,7 +64,6 @@ from weft._constants import (
     WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS,
     WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS_DEFAULT,
     WEFT_SERVICES_REGISTRY_QUEUE,
-    WEFT_TASK_MONITOR_PROCESSOR_BUILTINS,
     WEFT_TID_MAPPINGS_QUEUE,
 )
 from weft.context import WeftContext
@@ -79,7 +80,14 @@ from weft.core.monitor.collation import (
 from weft.core.monitor.external_log import (
     ExternalTaskLogError,
     ExternalTaskLogSink,
+    ExternalTaskLogStatus,
     disabled_external_task_log_status,
+)
+from weft.core.monitor.lifetime_report import (
+    build_candidate_lifetime_report,
+    build_collation_lifetime_report,
+    build_inferred_tid_lifetime_report,
+    build_raw_row_lifetime_report,
 )
 from weft.core.monitor.policies.dead_task import (
     dead_task_queue_cleanup_plan as _dead_task_queue_cleanup_plan,
@@ -149,7 +157,12 @@ from weft.core.monitor.store import (
 )
 from weft.core.monitor.task_log_scanner import GeneratorTaskLogScanner
 from weft.core.pruning.apply import apply_exact_prune_candidates
-from weft.core.pruning.models import CleanupPolicyStats, CleanupQueueStats
+from weft.core.pruning.models import (
+    AppliedCleanupCandidate,
+    CleanupCandidate,
+    CleanupPolicyStats,
+    CleanupQueueStats,
+)
 from weft.core.queue_window import QueueWindowRow, is_old_enough
 from weft.core.serve_log import (
     build_serve_log_record,
@@ -175,6 +188,8 @@ from weft.core.tasks.service import (
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 from weft.ext import RunnerHandle
 from weft.helpers import handle_has_live_host_process, iter_queue_entries
+
+logger = logging.getLogger(__name__)
 
 TaskMonitorCallback = Callable[[str, str, int], None]
 
@@ -205,6 +220,7 @@ class _TaskMonitorBuiltinCycleWorkerResult:
     work: _TaskMonitorBuiltinCycleWork
     result: TaskMonitorProcessorResult
     runtime_cleanup_ready: bool = False
+    diagnostics: _TaskMonitorCachedDiagnostics | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -337,6 +353,52 @@ class _DeadTaskLogDeleteResult:
             "rows_deleted": self.rows_deleted,
             "errors": list(self.errors),
         }
+
+
+@dataclass(frozen=True, slots=True)
+class _TaskMonitorCachedDiagnostics:
+    """TaskMonitor cached diagnostics committed by the reactor."""
+
+    last_candidates_seen: int
+    last_candidate_class_counts: dict[str, int]
+    last_safe_to_delete_candidates: int
+    last_prune_records_scanned: int
+    last_cleanup_queue_stats: tuple[dict[str, Any], ...]
+    last_cleanup_policy_stats: tuple[dict[str, Any], ...]
+    last_policy_progress: tuple[PolicyProgress, ...]
+    monitor_store_status: MonitorStoreStatus
+    last_collation_rows_processed: int
+    last_collation_tasks_updated: int
+    last_collation_terminal_tasks: int
+    last_collation_summaries_emitted: int
+    last_monitor_store_message_rows_deleted: int
+    last_monitor_store_message_tombstones_pruned: int
+    last_monitor_store_families_retired: int
+    last_terminal_families_disposed: int
+    last_suspect_families_classified: int
+    last_control_families_processed: int
+    last_control_families_disposed: int
+    last_control_queues_deleted: int
+    last_control_rows_estimated_deleted: int
+    last_control_nonstandard_skipped: int
+    last_control_cleanup_pending: bool
+    last_control_rows_deleted: int
+    last_control_cleanup_family_limit_hit: bool
+    last_control_cleanup_deadline_hit: bool
+    last_reserved_families_processed: int
+    last_reserved_queues_deleted: int
+    last_reserved_rows_estimated_deleted: int
+    last_reserved_skipped_active: int
+    last_reserved_skipped_not_ready: int
+    last_reserved_rows_deleted: int
+    runtime_cleanup_queue_discovery_pending: bool
+    next_runtime_cleanup_queue_discovery_due_monotonic: float
+    last_control_delete_errors: tuple[str, ...]
+    last_control_delete_warnings: tuple[str, ...]
+    last_retained_task_log_ingest: _RetainedTaskLogIngestResult
+    last_orphan_task_log_recovery: _DeadTaskLogDeleteResult
+    last_collation_store_error: str | None
+    external_task_log_status: ExternalTaskLogStatus
 
 
 def _applied_monitor_raw_message(
@@ -498,9 +560,9 @@ class TaskMonitor(ServiceTask):
     The foreground command still owns summary construction and
     log/checkpoint writes via ``scan_once()``. The persistent task path wakes
     on its own inbox, scans task-log history by generator/high-water reads,
-    and calls the configured processor. Built-in cleanup processors use the
-    bounded exact-delete path; custom processors receive non-consuming
-    task-log candidates.
+    and runs the configured built-in mode or custom processor. Built-in cleanup
+    modes use the bounded exact-delete path; custom processors receive
+    non-consuming task-log candidates.
     """
 
     # --- Section map ------------------------------------------------------
@@ -576,12 +638,6 @@ class TaskMonitor(ServiceTask):
         self._last_reserved_skipped_active = 0
         self._last_reserved_skipped_not_ready = 0
         self._last_reserved_rows_deleted = 0
-        self._last_cleanup_workers_configured = 0
-        self._last_cleanup_jobs_started = 0
-        self._last_cleanup_jobs_completed = 0
-        self._last_cleanup_jobs_pending = 0
-        self._last_cleanup_jobs_by_kind: dict[str, int] = {}
-        self._last_cleanup_jobs_pending_by_kind: dict[str, int] = {}
         self._runtime_cleanup_queue_discovery_pending = False
         self._next_runtime_cleanup_queue_discovery_due_monotonic = 0.0
         self._last_control_delete_errors: tuple[str, ...] = ()
@@ -594,6 +650,9 @@ class TaskMonitor(ServiceTask):
             mode="collated",
             path=None,
         )
+        self._deferred_task_log_pending = 0
+        self._deferred_task_log_last_error: str | None = None
+        self._deferred_task_log_last_flush_at: int | None = None
         self._heartbeat_registered = False
         self._heartbeat_error: str | None = None
         self._heartbeat_id = f"task-monitor:{taskspec.tid}"
@@ -602,6 +661,7 @@ class TaskMonitor(ServiceTask):
         self._serve_log_config_emitted = False
         self._serve_log_last_emit_ns: dict[str, int] = {}
         self._serve_log_last_state: dict[str, str] = {}
+        self._worker_lane_snapshot_only = False
         super().__init__(db=db, taskspec=taskspec, stop_event=stop_event, config=config)
         self._monitor_config = TaskMonitorRuntimeConfig.from_config(self._config)
         self._register_task_monitor_service_workers()
@@ -609,6 +669,245 @@ class TaskMonitor(ServiceTask):
         self.register_pong_extension_provider(self._task_monitor_pong_extension)
         if self._persistent_service:
             self._activate_monitor()
+
+    def cleanup(self) -> None:
+        """Release resources without cross-talk from worker-local copies."""
+
+        if not getattr(self, "_worker_lane_snapshot_only", False):
+            super().cleanup()
+            return
+
+        store = self._monitor_store
+        if store is not None:
+            try:
+                store.close()
+            except (OSError, RuntimeError, ValueError):  # pragma: no cover - defensive
+                logger.debug(
+                    "Failed to close worker-local monitor store", exc_info=True
+                )
+            self._monitor_store = None
+
+        seen_queue_ids: set[int] = set()
+        for queue in list(self._queue_cache.values()):
+            queue_id = id(queue)
+            if queue_id in seen_queue_ids:
+                continue
+            seen_queue_ids.add(queue_id)
+            try:
+                queue.close()
+            except (BrokerError, OSError, RuntimeError):  # pragma: no cover - defensive
+                logger.debug("Failed to close worker-local queue", exc_info=True)
+        self._queue_cache = {}
+
+    def _worker_local_monitor_clone(self) -> TaskMonitor:
+        """Return a worker-local monitor copy for durable cleanup effects.
+
+        The clone may open broker/store handles and mutate its own cached
+        diagnostics. The reactor commits those diagnostics after the typed
+        worker result returns.
+        """
+
+        worker = copy(self)
+        worker._monitor_store = None
+        worker._queue_cache = {}
+        worker._owned_queue_names = set()
+        worker._worker_lock = threading.Lock()
+        worker._worker_threads = set()
+        worker._worker_stopping = threading.Event()
+        worker._service_lane_work_items = {}
+        worker._service_worker_registrations = {}
+        worker._service_worker_lock = threading.Lock()
+        worker._endpoint_registration_name = None
+        worker._endpoint_registration_metadata = None
+        worker._endpoint_registration_message_id = None
+        worker._streaming_session_info = None
+        worker._streaming_session_message_id = None
+        worker._worker_lane_snapshot_only = True
+        return worker
+
+    def _capture_cached_diagnostics(self) -> _TaskMonitorCachedDiagnostics:
+        """Capture cached TaskMonitor diagnostics from this instance."""
+
+        return _TaskMonitorCachedDiagnostics(
+            last_candidates_seen=self._last_candidates_seen,
+            last_candidate_class_counts=dict(self._last_candidate_class_counts),
+            last_safe_to_delete_candidates=self._last_safe_to_delete_candidates,
+            last_prune_records_scanned=self._last_prune_records_scanned,
+            last_cleanup_queue_stats=tuple(self._last_cleanup_queue_stats),
+            last_cleanup_policy_stats=tuple(self._last_cleanup_policy_stats),
+            last_policy_progress=tuple(self._last_policy_progress),
+            monitor_store_status=self._monitor_store_status,
+            last_collation_rows_processed=self._last_collation_rows_processed,
+            last_collation_tasks_updated=self._last_collation_tasks_updated,
+            last_collation_terminal_tasks=self._last_collation_terminal_tasks,
+            last_collation_summaries_emitted=(self._last_collation_summaries_emitted),
+            last_monitor_store_message_rows_deleted=(
+                self._last_monitor_store_message_rows_deleted
+            ),
+            last_monitor_store_message_tombstones_pruned=(
+                self._last_monitor_store_message_tombstones_pruned
+            ),
+            last_monitor_store_families_retired=(
+                self._last_monitor_store_families_retired
+            ),
+            last_terminal_families_disposed=self._last_terminal_families_disposed,
+            last_suspect_families_classified=self._last_suspect_families_classified,
+            last_control_families_processed=self._last_control_families_processed,
+            last_control_families_disposed=self._last_control_families_disposed,
+            last_control_queues_deleted=self._last_control_queues_deleted,
+            last_control_rows_estimated_deleted=(
+                self._last_control_rows_estimated_deleted
+            ),
+            last_control_nonstandard_skipped=self._last_control_nonstandard_skipped,
+            last_control_cleanup_pending=self._last_control_cleanup_pending,
+            last_control_rows_deleted=self._last_control_rows_deleted,
+            last_control_cleanup_family_limit_hit=(
+                self._last_control_cleanup_family_limit_hit
+            ),
+            last_control_cleanup_deadline_hit=(self._last_control_cleanup_deadline_hit),
+            last_reserved_families_processed=self._last_reserved_families_processed,
+            last_reserved_queues_deleted=self._last_reserved_queues_deleted,
+            last_reserved_rows_estimated_deleted=(
+                self._last_reserved_rows_estimated_deleted
+            ),
+            last_reserved_skipped_active=self._last_reserved_skipped_active,
+            last_reserved_skipped_not_ready=self._last_reserved_skipped_not_ready,
+            last_reserved_rows_deleted=self._last_reserved_rows_deleted,
+            runtime_cleanup_queue_discovery_pending=(
+                self._runtime_cleanup_queue_discovery_pending
+            ),
+            next_runtime_cleanup_queue_discovery_due_monotonic=(
+                self._next_runtime_cleanup_queue_discovery_due_monotonic
+            ),
+            last_control_delete_errors=self._last_control_delete_errors,
+            last_control_delete_warnings=self._last_control_delete_warnings,
+            last_retained_task_log_ingest=self._last_retained_task_log_ingest,
+            last_orphan_task_log_recovery=self._last_orphan_task_log_recovery,
+            last_collation_store_error=self._last_collation_store_error,
+            external_task_log_status=self._external_task_log_status,
+        )
+
+    def _apply_cached_diagnostics(
+        self,
+        diagnostics: _TaskMonitorCachedDiagnostics,
+    ) -> None:
+        """Commit cached TaskMonitor diagnostics on the reactor thread."""
+
+        self._last_candidates_seen = diagnostics.last_candidates_seen
+        self._last_candidate_class_counts = dict(
+            diagnostics.last_candidate_class_counts
+        )
+        self._last_safe_to_delete_candidates = (
+            diagnostics.last_safe_to_delete_candidates
+        )
+        self._last_prune_records_scanned = diagnostics.last_prune_records_scanned
+        self._last_cleanup_queue_stats = tuple(diagnostics.last_cleanup_queue_stats)
+        self._last_cleanup_policy_stats = tuple(diagnostics.last_cleanup_policy_stats)
+        self._last_policy_progress = tuple(diagnostics.last_policy_progress)
+        self._monitor_store_status = diagnostics.monitor_store_status
+        self._last_collation_rows_processed = diagnostics.last_collation_rows_processed
+        self._last_collation_tasks_updated = diagnostics.last_collation_tasks_updated
+        self._last_collation_terminal_tasks = diagnostics.last_collation_terminal_tasks
+        self._last_collation_summaries_emitted = (
+            diagnostics.last_collation_summaries_emitted
+        )
+        self._last_monitor_store_message_rows_deleted = (
+            diagnostics.last_monitor_store_message_rows_deleted
+        )
+        self._last_monitor_store_message_tombstones_pruned = (
+            diagnostics.last_monitor_store_message_tombstones_pruned
+        )
+        self._last_monitor_store_families_retired = (
+            diagnostics.last_monitor_store_families_retired
+        )
+        self._last_terminal_families_disposed = (
+            diagnostics.last_terminal_families_disposed
+        )
+        self._last_suspect_families_classified = (
+            diagnostics.last_suspect_families_classified
+        )
+        self._last_control_families_processed = (
+            diagnostics.last_control_families_processed
+        )
+        self._last_control_families_disposed = (
+            diagnostics.last_control_families_disposed
+        )
+        self._last_control_queues_deleted = diagnostics.last_control_queues_deleted
+        self._last_control_rows_estimated_deleted = (
+            diagnostics.last_control_rows_estimated_deleted
+        )
+        self._last_control_nonstandard_skipped = (
+            diagnostics.last_control_nonstandard_skipped
+        )
+        self._last_control_cleanup_pending = diagnostics.last_control_cleanup_pending
+        self._last_control_rows_deleted = diagnostics.last_control_rows_deleted
+        self._last_control_cleanup_family_limit_hit = (
+            diagnostics.last_control_cleanup_family_limit_hit
+        )
+        self._last_control_cleanup_deadline_hit = (
+            diagnostics.last_control_cleanup_deadline_hit
+        )
+        self._last_reserved_families_processed = (
+            diagnostics.last_reserved_families_processed
+        )
+        self._last_reserved_queues_deleted = diagnostics.last_reserved_queues_deleted
+        self._last_reserved_rows_estimated_deleted = (
+            diagnostics.last_reserved_rows_estimated_deleted
+        )
+        self._last_reserved_skipped_active = diagnostics.last_reserved_skipped_active
+        self._last_reserved_skipped_not_ready = (
+            diagnostics.last_reserved_skipped_not_ready
+        )
+        self._last_reserved_rows_deleted = diagnostics.last_reserved_rows_deleted
+        self._runtime_cleanup_queue_discovery_pending = (
+            diagnostics.runtime_cleanup_queue_discovery_pending
+        )
+        self._next_runtime_cleanup_queue_discovery_due_monotonic = (
+            diagnostics.next_runtime_cleanup_queue_discovery_due_monotonic
+        )
+        self._last_control_delete_errors = diagnostics.last_control_delete_errors
+        self._last_control_delete_warnings = diagnostics.last_control_delete_warnings
+        self._last_retained_task_log_ingest = diagnostics.last_retained_task_log_ingest
+        self._last_orphan_task_log_recovery = diagnostics.last_orphan_task_log_recovery
+        self._last_collation_store_error = diagnostics.last_collation_store_error
+        previous_external_status = self._external_task_log_status
+        self._external_task_log_status = diagnostics.external_task_log_status
+        self._deferred_task_log_pending = (
+            diagnostics.external_task_log_status.deferred_pending
+        )
+        self._deferred_task_log_last_error = (
+            diagnostics.external_task_log_status.last_deferred_error
+        )
+        self._deferred_task_log_last_flush_at = (
+            diagnostics.external_task_log_status.last_deferred_flush_at
+        )
+        if previous_external_status.to_summary() != (
+            self._external_task_log_status.to_summary()
+        ):
+            self._register_tid_mapping()
+            self._emit_external_task_log_health_transition(
+                previous_external_status,
+                self._external_task_log_status,
+            )
+        if diagnostics.monitor_store_status.available:
+            if self._monitor_store is None:
+                try:
+                    store = open_monitor_store(
+                        self._monitor_context(),
+                        config=self._config,
+                    )
+                except (OSError, RuntimeError, ValueError) as exc:
+                    self._monitor_store = None
+                    self._last_collation_store_error = str(exc)
+                    self._monitor_store_status = MonitorStoreStatus(
+                        enabled=True,
+                        available=False,
+                        error=str(exc),
+                    )
+                    return
+                self._monitor_store = store
+        else:
+            self._monitor_store = None
 
     def _register_task_monitor_service_workers(self) -> None:
         """Register TaskMonitor worker groups used by the reactor."""
@@ -667,6 +966,22 @@ class TaskMonitor(ServiceTask):
             emit_serve_log_record(record)
         except Exception:  # pragma: no cover - diagnostics must not affect monitor
             return
+
+    def _emit_external_task_log_health_transition(
+        self,
+        previous: ExternalTaskLogStatus,
+        current: ExternalTaskLogStatus,
+    ) -> None:
+        """Emit foreground operational evidence for external-log health changes."""
+
+        if previous.healthy == current.healthy:
+            return
+        self._emit_task_monitor_log(
+            "task_monitor_external_log_health",
+            required_level="info",
+            severity="warning" if current.healthy is False else "info",
+            task_log_external=current.to_summary(),
+        )
 
     def _emit_task_monitor_log_rate_limited(
         self,
@@ -730,10 +1045,10 @@ class TaskMonitor(ServiceTask):
                 self._monitor_config.task_log_retention_period_seconds
             ),
             task_log_external=self._external_task_log_status.to_summary(),
+            task_monitor_mode=self._monitor_config.mode,
             processor=self._monitor_config.processor,
             log_sink=self._monitor_config.log_sink,
             collation_store_enabled=(self._monitor_config.collation_store_enabled),
-            table_delete_enabled=self._monitor_config.table_delete_enabled,
         )
 
     def _activate_monitor(self) -> None:
@@ -960,8 +1275,9 @@ class TaskMonitor(ServiceTask):
         payload.update(
             {
                 "role": "task_monitor",
-                "processor": self._monitor_config.processor,
                 "mode": "persistent",
+                "task_monitor_mode": self._monitor_config.mode,
+                "processor": self._monitor_config.processor,
                 "interval_seconds": self._monitor_config.interval_seconds,
                 "batch_size": self._monitor_config.batch_size,
                 "catchup_interval_seconds": (
@@ -977,7 +1293,6 @@ class TaskMonitor(ServiceTask):
                 "collation_store_enabled": (
                     self._monitor_config.collation_store_enabled
                 ),
-                "table_delete_enabled": self._monitor_config.table_delete_enabled,
                 "last_cycle_at": self._last_cycle_at,
                 "last_checkpoint": self._last_checkpoint,
                 "last_candidates_seen": self._last_candidates_seen,
@@ -1054,16 +1369,6 @@ class TaskMonitor(ServiceTask):
                     self._last_reserved_skipped_not_ready
                 ),
                 "last_reserved_rows_deleted": self._last_reserved_rows_deleted,
-                "last_cleanup_workers_configured": (
-                    self._last_cleanup_workers_configured
-                ),
-                "last_cleanup_jobs_started": self._last_cleanup_jobs_started,
-                "last_cleanup_jobs_completed": self._last_cleanup_jobs_completed,
-                "last_cleanup_jobs_pending": self._last_cleanup_jobs_pending,
-                "last_cleanup_jobs_by_kind": dict(self._last_cleanup_jobs_by_kind),
-                "last_cleanup_jobs_pending_by_kind": dict(
-                    self._last_cleanup_jobs_pending_by_kind
-                ),
                 "last_control_delete_errors": list(self._last_control_delete_errors),
                 "last_control_delete_warnings": (
                     list(self._last_control_delete_warnings)
@@ -1109,6 +1414,7 @@ class TaskMonitor(ServiceTask):
             "task_monitor": {
                 "enabled": self._monitor_config.enabled,
                 "mode": "persistent" if self._persistent_service else "observer",
+                "task_monitor_mode": self._monitor_config.mode,
                 "processor": self._monitor_config.processor,
                 "interval_seconds": self._monitor_config.interval_seconds,
                 "batch_size": self._monitor_config.batch_size,
@@ -1123,7 +1429,6 @@ class TaskMonitor(ServiceTask):
                 "task_log_external": self._external_task_log_status.to_summary(),
                 "log_sink": self._monitor_config.log_sink,
                 "collation_store": self._monitor_store_status.to_summary(),
-                "table_delete_enabled": self._monitor_config.table_delete_enabled,
                 "heartbeat": {
                     "registered": self._heartbeat_registered,
                     "id": self._heartbeat_id,
@@ -1219,16 +1524,6 @@ class TaskMonitor(ServiceTask):
                         self._last_reserved_skipped_not_ready
                     ),
                     "reserved_rows_deleted": self._last_reserved_rows_deleted,
-                    "cleanup_workers_configured": (
-                        self._last_cleanup_workers_configured
-                    ),
-                    "cleanup_jobs_started": self._last_cleanup_jobs_started,
-                    "cleanup_jobs_completed": self._last_cleanup_jobs_completed,
-                    "cleanup_jobs_pending": self._last_cleanup_jobs_pending,
-                    "cleanup_jobs_by_kind": dict(self._last_cleanup_jobs_by_kind),
-                    "cleanup_jobs_pending_by_kind": dict(
-                        self._last_cleanup_jobs_pending_by_kind
-                    ),
                     "control_delete_errors": list(self._last_control_delete_errors)[
                         :TASK_MONITOR_PONG_DETAIL_LIMIT
                     ],
@@ -1253,6 +1548,18 @@ class TaskMonitor(ServiceTask):
     def _monitor_context(self) -> WeftContext:
         return self._task_context()
 
+    def _build_tid_mapping_payload(self) -> dict[str, Any]:
+        """Include cached TaskMonitor diagnostics in runtime status mapping."""
+
+        payload = super()._build_tid_mapping_payload()
+        if not hasattr(self, "_monitor_config"):
+            return payload
+        payload["task_monitor"] = {
+            "task_monitor_mode": self._monitor_config.mode,
+            "task_log_external": self._external_task_log_status.to_summary(),
+        }
+        return payload
+
     def _configure_external_task_log_sink(self) -> None:
         """Configure the external task-log sink and cache startup health."""
 
@@ -1261,11 +1568,15 @@ class TaskMonitor(ServiceTask):
             self._external_task_log_status = disabled_external_task_log_status(
                 mode=self._monitor_config.task_log_external_mode,
                 path=self._monitor_config.task_log_external_path,
+            ).with_deferred(
+                pending=self._deferred_task_log_pending,
+                last_error=self._deferred_task_log_last_error,
+                last_flush_at=self._deferred_task_log_last_flush_at,
             )
             return
         path = Path(self._monitor_config.task_log_external_path)
         if not path.is_absolute():
-            path = self._monitor_context().logs_dir / path
+            path = self._monitor_context().root / path
         sink = ExternalTaskLogSink(
             path=path,
             mode=self._monitor_config.task_log_external_mode,
@@ -1273,17 +1584,224 @@ class TaskMonitor(ServiceTask):
         )
         sink.validate()
         self._external_task_log_sink = sink
-        self._external_task_log_status = sink.status()
+        if self._refresh_external_task_log_status():
+            self._register_tid_mapping()
+        if self._external_task_log_status.healthy is False:
+            self._emit_task_monitor_log(
+                "task_monitor_external_log_health",
+                required_level="info",
+                severity="warning",
+                task_log_external=self._external_task_log_status.to_summary(),
+            )
 
-    def _refresh_external_task_log_status(self) -> None:
+    def _refresh_external_task_log_status(self) -> bool:
         sink = self._external_task_log_sink
+        previous = self._external_task_log_status.to_summary()
         if sink is None:
             self._external_task_log_status = disabled_external_task_log_status(
                 mode=self._monitor_config.task_log_external_mode,
                 path=self._monitor_config.task_log_external_path,
+            ).with_deferred(
+                pending=self._deferred_task_log_pending,
+                last_error=self._deferred_task_log_last_error,
+                last_flush_at=self._deferred_task_log_last_flush_at,
             )
+            return previous != self._external_task_log_status.to_summary()
+        self._external_task_log_status = sink.status().with_deferred(
+            pending=self._deferred_task_log_pending,
+            last_error=self._deferred_task_log_last_error,
+            last_flush_at=self._deferred_task_log_last_flush_at,
+        )
+        return previous != self._external_task_log_status.to_summary()
+
+    def _probe_external_task_log_sink(self) -> None:
+        """Probe external log writability once per monitor cycle."""
+
+        sink = self._external_task_log_sink
+        if sink is None:
             return
-        self._external_task_log_status = sink.status()
+        previous = self._external_task_log_status
+        sink.probe()
+        changed = self._refresh_external_task_log_status()
+        if not changed:
+            return
+        if not getattr(self, "_worker_lane_snapshot_only", False):
+            self._register_tid_mapping()
+            current = self._external_task_log_status
+            self._emit_external_task_log_health_transition(previous, current)
+
+    def _jsonl_then_delete_enabled(self) -> bool:
+        return self._monitor_config.mode == "jsonl_then_delete"
+
+    def _custom_processor_enabled(self) -> bool:
+        return self._monitor_config.mode == "custom"
+
+    def _destructive_mode_enabled(self) -> bool:
+        return self._monitor_config.mode in {"delete", "jsonl_then_delete"}
+
+    def _refresh_deferred_write_status(
+        self,
+        store: MonitorStore,
+        *,
+        last_error: str | None = None,
+        last_flush_at: int | None = None,
+    ) -> None:
+        """Refresh cached deferred-write diagnostics from reactor-owned work."""
+
+        try:
+            status = store.deferred_write_status()
+        except (OSError, RuntimeError, ValueError) as exc:
+            self._deferred_task_log_last_error = str(exc)
+        else:
+            self._deferred_task_log_pending = status.pending
+            self._deferred_task_log_last_error = last_error or status.last_error
+        if last_flush_at is not None:
+            self._deferred_task_log_last_flush_at = last_flush_at
+        self._refresh_external_task_log_status()
+
+    def _handoff_lifetime_report(
+        self,
+        report: Mapping[str, Any],
+        *,
+        store: MonitorStore,
+        emitted_at_ns: int,
+    ) -> str:
+        """Write a lifetime report externally or defer it durably."""
+
+        sink = self._external_task_log_sink
+        if sink is None:
+            external_error = "external task-log sink is not configured"
+        else:
+            try:
+                sink.emit_lifetime_report(
+                    report,
+                    emitted_at_ns=emitted_at_ns,
+                )
+            except ExternalTaskLogError as exc:
+                external_error = str(exc)
+            else:
+                self._refresh_external_task_log_status()
+                return "external"
+
+        try:
+            store.upsert_deferred_write(
+                report=report,
+                external_error=external_error,
+                now_ns=emitted_at_ns,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise ExternalTaskLogError(
+                "external task-log write failed and deferred write failed: "
+                f"{external_error}; {exc}"
+            ) from exc
+        self._refresh_deferred_write_status(
+            store,
+            last_error=external_error,
+        )
+        return "deferred"
+
+    def _handoff_collation_runtime_report(
+        self,
+        record: MonitorTaskCollationRecord,
+        *,
+        store: MonitorStore,
+        emitted_at_ns: int,
+        source_policy: str,
+        report_kind: str,
+        close_reason: str,
+        queue_names: Sequence[str],
+    ) -> None:
+        """Hand off a runtime cleanup report backed by Monitor collation."""
+
+        if not self._jsonl_then_delete_enabled():
+            return
+        report = build_collation_lifetime_report(
+            record,
+            monitor_tid=self.tid,
+            emitted_at_ns=emitted_at_ns,
+            source_policy=source_policy,
+            report_kind=report_kind,
+            close_reason=close_reason,
+            observations={"queue_names": list(queue_names)},
+        )
+        self._handoff_lifetime_report(
+            report,
+            store=store,
+            emitted_at_ns=emitted_at_ns,
+        )
+
+    def _handoff_inferred_runtime_report(
+        self,
+        *,
+        tid: str,
+        store: MonitorStore,
+        emitted_at_ns: int,
+        source_policy: str,
+        report_kind: str,
+        close_reason: str,
+        queue_names: Sequence[str],
+    ) -> None:
+        """Hand off an inferred runtime cleanup report."""
+
+        if not self._jsonl_then_delete_enabled():
+            return
+        report = build_inferred_tid_lifetime_report(
+            tid=tid,
+            monitor_tid=self.tid,
+            emitted_at_ns=emitted_at_ns,
+            source_policy=source_policy,
+            report_kind=report_kind,
+            close_reason=close_reason,
+            queue_names=queue_names,
+        )
+        self._handoff_lifetime_report(
+            report,
+            store=store,
+            emitted_at_ns=emitted_at_ns,
+        )
+
+    def _flush_deferred_lifetime_reports(
+        self,
+        store: MonitorStore,
+        *,
+        now_ns: int,
+    ) -> int:
+        """Flush pending deferred lifetime reports in a bounded batch."""
+
+        if not self._jsonl_then_delete_enabled():
+            return 0
+        sink = self._external_task_log_sink
+        if sink is None:
+            self._refresh_deferred_write_status(
+                store,
+                last_error="external task-log sink is not configured",
+            )
+            return 0
+        flushed = 0
+        last_error: str | None = None
+        for record in store.list_pending_deferred_writes(
+            limit=self._monitor_config.batch_size,
+        ):
+            try:
+                sink.emit_json_text(record.body_json, emitted_at_ns=now_ns)
+            except ExternalTaskLogError as exc:
+                last_error = str(exc)
+                body = record.body()
+                if body:
+                    store.upsert_deferred_write(
+                        report=body,
+                        external_error=last_error,
+                        now_ns=now_ns,
+                    )
+                break
+            store.mark_deferred_writes_flushed((record.report_id,), now_ns)
+            flushed += 1
+        self._refresh_deferred_write_status(
+            store,
+            last_error=last_error,
+            last_flush_at=now_ns if flushed else None,
+        )
+        return flushed
 
     def _task_log_deletion_owner(self) -> str:
         """Return the single task-log deletion owner for the current cycle."""
@@ -1294,7 +1812,7 @@ class TaskMonitor(ServiceTask):
             return "collated_store"
         if self._monitor_config.collation_store_enabled:
             return "collated_store"
-        if self._monitor_config.processor in {"delete", "report_only"}:
+        if self._monitor_config.mode in {"delete", "report_only"}:
             return "cleanup_policy"
         return "none"
 
@@ -1345,9 +1863,9 @@ class TaskMonitor(ServiceTask):
         Spec: [MF-5], [OBS.13]
         """
 
+        destructive_processor = self._destructive_mode_enabled()
         runtime_cleanup_requested = (
-            self._monitor_config.processor == "delete"
-            and task_log_owner == "collated_store"
+            destructive_processor and task_log_owner == "collated_store"
         )
         runtime_cleanup_ready = False
         self._last_collation_rows_processed = 0
@@ -1374,30 +1892,24 @@ class TaskMonitor(ServiceTask):
         self._last_reserved_skipped_active = 0
         self._last_reserved_skipped_not_ready = 0
         self._last_reserved_rows_deleted = 0
-        self._last_cleanup_workers_configured = 0
-        self._last_cleanup_jobs_started = 0
-        self._last_cleanup_jobs_completed = 0
-        self._last_cleanup_jobs_pending = 0
-        self._last_cleanup_jobs_by_kind = {}
-        self._last_cleanup_jobs_pending_by_kind = {}
         self._runtime_cleanup_queue_discovery_pending = False
         self._next_runtime_cleanup_queue_discovery_due_monotonic = 0.0
         self._last_control_delete_errors = ()
         self._last_control_delete_warnings = ()
         self._last_retained_task_log_ingest = _RetainedTaskLogIngestResult()
         self._last_orphan_task_log_recovery = _DeadTaskLogDeleteResult()
+        self._last_collation_store_error = None
         store = self._ensure_monitor_store()
         if store is None:
             return False
 
         try:
+            if self._jsonl_then_delete_enabled():
+                self._flush_deferred_lifetime_reports(store, now_ns=now_ns)
             retained_ingest = self._ingest_retained_task_log_rows(
                 store,
                 now_ns=now_ns,
-                apply=(
-                    self._monitor_config.processor == "delete"
-                    and task_log_owner == "collated_store"
-                ),
+                apply=destructive_processor and task_log_owner == "collated_store",
             )
             self._last_retained_task_log_ingest = retained_ingest
             self._last_policy_progress = (
@@ -1411,7 +1923,7 @@ class TaskMonitor(ServiceTask):
                         store,
                         now_ns=now_ns,
                         apply_disposition=(
-                            self._monitor_config.processor == "delete"
+                            self._monitor_config.mode == "delete"
                             and task_log_owner == "collated_store"
                         ),
                     )
@@ -1496,7 +2008,6 @@ class TaskMonitor(ServiceTask):
                 schema_version=store.schema_version,
                 checkpoint=checkpoint,
             )
-            self._last_collation_store_error = None
         except (OSError, RuntimeError, ValueError) as exc:
             self._last_collation_store_error = str(exc)
             self._monitor_store_status = MonitorStoreStatus(
@@ -1599,9 +2110,41 @@ class TaskMonitor(ServiceTask):
                 valid_ingested += ingest.updates_written
                 store_update_chunks += 1
 
-        if apply and selected_rows and not store_errors:
+        rows_to_delete: tuple[QueueWindowRow, ...] = tuple(selected_rows)
+        if apply and self._jsonl_then_delete_enabled():
+            report_errors: list[str] = []
+            reportable_rows: list[QueueWindowRow] = []
+            for raw_row in selected_rows:
+                if raw_row.message_id not in malformed_message_ids:
+                    continue
+                report = build_raw_row_lifetime_report(
+                    raw_row,
+                    monitor_tid=self.tid,
+                    emitted_at_ns=now_ns,
+                    source_policy=TASK_MONITOR_POLICY_TASK_LOG_RETENTION,
+                    report_kind="malformed_task_log",
+                    close_reason="malformed_task_log_retention",
+                    completeness="raw_row",
+                    observations={"reason": "malformed_or_unrecognized_task_log"},
+                )
+                try:
+                    self._handoff_lifetime_report(
+                        report,
+                        store=store,
+                        emitted_at_ns=now_ns,
+                    )
+                except ExternalTaskLogError as exc:
+                    report_errors.append(str(exc))
+                    break
+                reportable_rows.append(raw_row)
+            if report_errors:
+                delete_errors.extend(report_errors)
+                stop_reason = "lifetime_report_error"
+            rows_to_delete = tuple(reportable_rows)
+
+        if apply and rows_to_delete and not store_errors and not delete_errors:
             delete_result = self._delete_exact_task_log_rows(
-                tuple(selected_rows),
+                rows_to_delete,
                 require_deleted=True,
             )
             exact_delete_chunks += 1
@@ -1748,6 +2291,7 @@ class TaskMonitor(ServiceTask):
                 try:
                     self._emit_monitor_store_summary(
                         ready,
+                        store=store,
                         emitted_at_ns=now_ns,
                     )
                 except (ExternalTaskLogError, OSError) as exc:
@@ -1832,6 +2376,7 @@ class TaskMonitor(ServiceTask):
         self,
         ready: MonitorSummaryReadyTask,
         *,
+        store: MonitorStore | None = None,
         emitted_at_ns: int,
     ) -> None:
         """Emit one terminal task or service summary to the monitor sink."""
@@ -1840,7 +2385,25 @@ class TaskMonitor(ServiceTask):
         task_summary = record.to_summary()
         service_summary = task_summary.get("service")
         is_service_summary = isinstance(service_summary, dict)
-        if self._monitor_config.task_log_external_enabled:
+        if self._jsonl_then_delete_enabled():
+            if store is None:
+                raise ExternalTaskLogError(
+                    "Monitor store is required for report deferral"
+                )
+            report = build_collation_lifetime_report(
+                record,
+                monitor_tid=self.tid,
+                emitted_at_ns=emitted_at_ns,
+                source_policy=TASK_MONITOR_POLICY_MONITOR_STORE_LIFECYCLE,
+                report_kind=f"monitor_store_{ready.close_reason}",
+                close_reason=ready.close_reason,
+            )
+            self._handoff_lifetime_report(
+                report,
+                store=store,
+                emitted_at_ns=emitted_at_ns,
+            )
+        elif self._monitor_config.task_log_external_enabled:
             sink = self._external_task_log_sink
             if sink is None:
                 raise ExternalTaskLogError("external task-log sink is not configured")
@@ -1876,6 +2439,7 @@ class TaskMonitor(ServiceTask):
         self,
         record: MonitorTaskCollationRecord,
         *,
+        store: MonitorStore,
         existing_queue_names: set[str] | None = None,
         now_ns: int,
     ) -> _TaskControlCleanupResult:
@@ -1901,6 +2465,15 @@ class TaskMonitor(ServiceTask):
         errors: list[str] = []
         warnings: list[str] = []
         queue_label = ",".join(cleanup_plan.queue_names)
+        self._handoff_collation_runtime_report(
+            record,
+            store=store,
+            emitted_at_ns=now_ns,
+            source_policy=TASK_MONITOR_POLICY_TASK_LOCAL_TERMINAL_RUNTIME,
+            report_kind="terminal_runtime_cleanup",
+            close_reason=record.disposition_reason or "terminal_runtime_cleanup",
+            queue_names=cleanup_plan.queue_names,
+        )
         try:
             with self._monitor_context().broker() as broker:
                 rows_deleted = int(broker.delete_from_queues(cleanup_plan.queue_names))
@@ -1937,6 +2510,7 @@ class TaskMonitor(ServiceTask):
         self,
         tid: str,
         *,
+        store: MonitorStore,
         existing_queue_names: set[str],
         active_tids: set[str],
         now_ns: int,
@@ -1964,6 +2538,15 @@ class TaskMonitor(ServiceTask):
         )
 
         if queue_names_to_delete:
+            self._handoff_inferred_runtime_report(
+                tid=tid,
+                store=store,
+                emitted_at_ns=now_ns,
+                source_policy=TASK_MONITOR_POLICY_TASK_LOCAL_DEAD_TID,
+                report_kind="dead_tid_runtime_cleanup",
+                close_reason="dead_tid_runtime_cleanup",
+                queue_names=queue_names_to_delete,
+            )
             try:
                 with self._monitor_context().broker() as broker:
                     rows_deleted = int(broker.delete_from_queues(queue_names_to_delete))
@@ -2389,7 +2972,6 @@ class TaskMonitor(ServiceTask):
         if not queue_discovery_due:
             return _TaskControlCleanupResult(
                 families_disposed=families_disposed,
-                cleanup_workers_configured=1,
                 errors=tuple(errors),
                 pending=bool(errors),
                 policy_progress=(
@@ -2428,9 +3010,6 @@ class TaskMonitor(ServiceTask):
         queues_deleted = 0
         rows_estimated_deleted = 0
         skipped_nonstandard = 0
-        cleanup_jobs_started = 0
-        cleanup_jobs_completed = 0
-        cleanup_jobs_pending = 0
         unprocessed_selected = 0
         deadline_hit = False
         control_delete_marks: list[str] = []
@@ -2439,10 +3018,8 @@ class TaskMonitor(ServiceTask):
         for record in records:
             if _monitor_monotonic() >= deadline_monotonic:
                 deadline_hit = True
-                cleanup_jobs_pending += 1
                 unprocessed_selected += 1
                 continue
-            cleanup_jobs_started += 1
             if record.tid in active_tids:
                 cleanup = _TaskControlCleanupResult(
                     warnings=(f"{record.tid}: skipped active runtime owner",),
@@ -2451,6 +3028,7 @@ class TaskMonitor(ServiceTask):
                 try:
                     cleanup = self._delete_terminal_control_queues(
                         record,
+                        store=store,
                         existing_queue_names=task_queue_names,
                         now_ns=now_ns,
                     )
@@ -2459,7 +3037,6 @@ class TaskMonitor(ServiceTask):
                         pending=True,
                         errors=(str(exc),),
                     )
-            cleanup_jobs_completed += 1
             families_processed += cleanup.families_processed
             queues_deleted += cleanup.queues_deleted
             rows_estimated_deleted += cleanup.rows_estimated_deleted
@@ -2509,14 +3086,6 @@ class TaskMonitor(ServiceTask):
         if not terminal_pending and queue_discovery_due:
             next_slice_kind = _next_runtime_cleanup_slice_kind("terminal_control")
         pending = terminal_pending or next_slice_kind is not None
-        jobs_by_kind = (
-            {"terminal_control": cleanup_jobs_completed}
-            if cleanup_jobs_completed
-            else {}
-        )
-        jobs_pending_by_kind = (
-            {"terminal_control": cleanup_jobs_pending} if cleanup_jobs_pending else {}
-        )
         return _TaskControlCleanupResult(
             families_processed=families_processed,
             families_disposed=families_disposed,
@@ -2524,12 +3093,6 @@ class TaskMonitor(ServiceTask):
             queues_deleted=queues_deleted,
             rows_estimated_deleted=rows_estimated_deleted,
             skipped_nonstandard=skipped_nonstandard,
-            cleanup_workers_configured=1,
-            cleanup_jobs_started=cleanup_jobs_started,
-            cleanup_jobs_completed=cleanup_jobs_completed,
-            cleanup_jobs_pending=cleanup_jobs_pending,
-            cleanup_jobs_by_kind=jobs_by_kind,
-            cleanup_jobs_pending_by_kind=jobs_pending_by_kind,
             pending=pending,
             errors=tuple(errors),
             warnings=tuple(warnings),
@@ -2636,9 +3199,7 @@ class TaskMonitor(ServiceTask):
 
         errors: list[str] = []
         warnings: list[str] = []
-        cleanup_jobs_started = 0
-        cleanup_jobs_completed = 0
-        cleanup_jobs_pending = 0
+        cleanup_items_pending = 0
         reserved_families_processed = 0
         reserved_queues_deleted = 0
         reserved_rows_estimated_deleted = 0
@@ -2652,23 +3213,30 @@ class TaskMonitor(ServiceTask):
             monitor_selected += 1
             if job_deadline_reached():
                 deadline_hit = True
-                cleanup_jobs_pending += 1
+                cleanup_items_pending += 1
                 monitor_unprocessed += 1
                 continue
             if record.tid in active_tids:
                 monitor_skipped_active += 1
                 continue
-            cleanup_jobs_started += 1
             queue_name = f"T{record.tid}.{QUEUE_RESERVED_SUFFIX}"
             if queue_name in reserved_queue_name_set:
                 try:
+                    self._handoff_collation_runtime_report(
+                        record,
+                        store=store,
+                        emitted_at_ns=now_ns,
+                        source_policy=TASK_MONITOR_POLICY_TASK_LOCAL_TERMINAL_RUNTIME,
+                        report_kind="reserved_runtime_cleanup",
+                        close_reason="reserved_runtime_cleanup",
+                        queue_names=(queue_name,),
+                    )
                     cleanup = self._delete_runtime_reserved_queue(queue_name)
                 except (BrokerError, OSError, RuntimeError, ValueError) as exc:
                     cleanup = _TaskControlCleanupResult(
                         pending=True,
                         errors=(str(exc),),
                     )
-                cleanup_jobs_completed += 1
                 reserved_queues_deleted += cleanup.reserved_queues_deleted
                 reserved_rows_estimated_deleted += (
                     cleanup.reserved_rows_estimated_deleted
@@ -2677,8 +3245,6 @@ class TaskMonitor(ServiceTask):
                 warnings.extend(cleanup.warnings)
                 if not cleanup.success:
                     continue
-            else:
-                cleanup_jobs_completed += 1
             reserved_checked_tids.append(record.tid)
 
         if reserved_checked_tids:
@@ -2691,17 +3257,26 @@ class TaskMonitor(ServiceTask):
         for queue_name in selection.queue_names:
             if job_deadline_reached():
                 deadline_hit = True
-                cleanup_jobs_pending += 1
+                cleanup_items_pending += 1
                 continue
-            cleanup_jobs_started += 1
             try:
+                tid = _reserved_queue_tid(queue_name)
+                if tid is not None:
+                    self._handoff_inferred_runtime_report(
+                        tid=tid,
+                        store=store,
+                        emitted_at_ns=now_ns,
+                        source_policy=(TASK_MONITOR_POLICY_TASK_LOCAL_TERMINAL_RUNTIME),
+                        report_kind="reserved_runtime_cleanup",
+                        close_reason="reserved_runtime_cleanup",
+                        queue_names=(queue_name,),
+                    )
                 cleanup = self._delete_runtime_reserved_queue(queue_name)
             except (BrokerError, OSError, RuntimeError, ValueError) as exc:
                 cleanup = _TaskControlCleanupResult(
                     pending=True,
                     errors=(str(exc),),
                 )
-            cleanup_jobs_completed += 1
             reserved_families_processed += cleanup.reserved_families_processed
             reserved_queues_deleted += cleanup.reserved_queues_deleted
             reserved_rows_estimated_deleted += cleanup.reserved_rows_estimated_deleted
@@ -2732,7 +3307,7 @@ class TaskMonitor(ServiceTask):
             monitor_family_limit_hit
             or selection.pending
             or deadline_hit
-            or cleanup_jobs_pending > 0
+            or cleanup_items_pending > 0
             or monitor_unprocessed > 0
             or bool(errors)
         )
@@ -2740,12 +3315,6 @@ class TaskMonitor(ServiceTask):
         if not reserved_pending:
             next_slice_kind = _next_runtime_cleanup_slice_kind("reserved")
         pending = reserved_pending or next_slice_kind is not None
-        jobs_by_kind = (
-            {"reserved": cleanup_jobs_completed} if cleanup_jobs_completed else {}
-        )
-        jobs_pending_by_kind = (
-            {"reserved": cleanup_jobs_pending} if cleanup_jobs_pending else {}
-        )
         return _TaskControlCleanupResult(
             reserved_families_processed=reserved_families_processed,
             reserved_queues_deleted=reserved_queues_deleted,
@@ -2753,12 +3322,6 @@ class TaskMonitor(ServiceTask):
             reserved_skipped_active=selection.skipped_active + monitor_skipped_active,
             reserved_skipped_not_ready=selection.skipped_not_ready,
             families_retired=families_retired,
-            cleanup_workers_configured=1,
-            cleanup_jobs_started=cleanup_jobs_started,
-            cleanup_jobs_completed=cleanup_jobs_completed,
-            cleanup_jobs_pending=cleanup_jobs_pending,
-            cleanup_jobs_by_kind=jobs_by_kind,
-            cleanup_jobs_pending_by_kind=jobs_pending_by_kind,
             pending=pending,
             errors=tuple(errors),
             warnings=tuple(warnings),
@@ -2850,9 +3413,8 @@ class TaskMonitor(ServiceTask):
 
         errors: list[str] = []
         warnings: list[str] = []
-        cleanup_jobs_started = 0
-        cleanup_jobs_completed = 0
-        cleanup_jobs_pending = 0
+        cleanup_items_completed = 0
+        cleanup_items_pending = 0
         dead_tids_processed = 0
         dead_tid_queues_deleted = 0
         dead_tid_rows_estimated_deleted = 0
@@ -2866,12 +3428,12 @@ class TaskMonitor(ServiceTask):
         for tid in selection.tids:
             if job_deadline_reached():
                 deadline_hit = True
-                cleanup_jobs_pending += 1
+                cleanup_items_pending += 1
                 continue
-            cleanup_jobs_started += 1
             try:
                 cleanup = self._delete_dead_task_control_queues(
                     tid,
+                    store=store,
                     existing_queue_names=task_queue_names,
                     active_tids=active_tids,
                     now_ns=now_ns,
@@ -2881,7 +3443,7 @@ class TaskMonitor(ServiceTask):
                     pending=True,
                     errors=(str(exc),),
                 )
-            cleanup_jobs_completed += 1
+            cleanup_items_completed += 1
             dead_tids_processed += cleanup.dead_tids_processed
             dead_tid_queues_deleted += cleanup.dead_tid_queues_deleted
             dead_tid_rows_estimated_deleted += cleanup.dead_tid_rows_estimated_deleted
@@ -2896,18 +3458,13 @@ class TaskMonitor(ServiceTask):
             warnings.extend(cleanup.warnings)
 
         dead_tids_pending = (
-            max(0, len(selection.tids) - cleanup_jobs_completed) + cleanup_jobs_pending
+            max(0, len(selection.tids) - cleanup_items_completed)
+            + cleanup_items_pending
         )
         if selection.pending and dead_tids_pending == 0:
             dead_tids_pending = 1
         dead_pending = (
             selection.pending or deadline_hit or dead_tids_pending > 0 or bool(errors)
-        )
-        jobs_by_kind = (
-            {"dead_tid": cleanup_jobs_completed} if cleanup_jobs_completed else {}
-        )
-        jobs_pending_by_kind = (
-            {"dead_tid": cleanup_jobs_pending} if cleanup_jobs_pending else {}
         )
         return _TaskControlCleanupResult(
             dead_tids_discovered=selection.discovered_tids,
@@ -2925,12 +3482,6 @@ class TaskMonitor(ServiceTask):
             dead_tid_inbox_queues_deleted=dead_tid_inbox_queues_deleted,
             dead_tid_outbox_queues_deleted=dead_tid_outbox_queues_deleted,
             dead_tid_reserved_queues_deleted=dead_tid_reserved_queues_deleted,
-            cleanup_workers_configured=1,
-            cleanup_jobs_started=cleanup_jobs_started,
-            cleanup_jobs_completed=cleanup_jobs_completed,
-            cleanup_jobs_pending=cleanup_jobs_pending,
-            cleanup_jobs_by_kind=jobs_by_kind,
-            cleanup_jobs_pending_by_kind=jobs_pending_by_kind,
             pending=dead_pending,
             errors=tuple(errors),
             warnings=tuple(warnings),
@@ -2988,7 +3539,7 @@ class TaskMonitor(ServiceTask):
 
         refs = store.list_deletable_task_log_messages(
             limit=self._monitor_config.batch_size + 1,
-            require_summary=False,
+            require_summary=self._jsonl_then_delete_enabled(),
         )
         if not refs:
             self._last_policy_progress = (
@@ -3292,6 +3843,7 @@ class TaskMonitor(ServiceTask):
                                     record=record,
                                     close_reason=close_reason,
                                 ),
+                                store=store,
                                 emitted_at_ns=now_ns,
                             )
                             store.mark_summary_emitted(
@@ -3457,7 +4009,7 @@ class TaskMonitor(ServiceTask):
         now_ns = time.time_ns()
         self._last_policy_progress = ()
         task_log_owner = self._task_log_deletion_owner()
-        if self._monitor_config.processor in WEFT_TASK_MONITOR_PROCESSOR_BUILTINS:
+        if not self._custom_processor_enabled():
             self._maybe_start_builtin_cycle_worker(
                 now_ns=now_ns,
                 task_log_owner=task_log_owner,
@@ -3468,7 +4020,7 @@ class TaskMonitor(ServiceTask):
         sink = self._external_task_log_sink
         if sink is not None:
             sink.reset_cycle_counts()
-            self._refresh_external_task_log_status()
+            self._probe_external_task_log_sink()
         if task_log_owner == "raw_external":
             self._last_collation_rows_processed = 0
             self._last_collation_tasks_updated = 0
@@ -3486,17 +4038,11 @@ class TaskMonitor(ServiceTask):
             self._last_control_nonstandard_skipped = 0
             self._last_control_cleanup_pending = False
             self._last_control_rows_deleted = 0
-            self._last_cleanup_workers_configured = 0
-            self._last_cleanup_jobs_started = 0
-            self._last_cleanup_jobs_completed = 0
-            self._last_cleanup_jobs_pending = 0
-            self._last_cleanup_jobs_by_kind = {}
-            self._last_cleanup_jobs_pending_by_kind = {}
             self._last_control_delete_errors = ()
             self._last_control_delete_warnings = ()
         else:
             self._run_monitor_store_cycle(now_ns=now_ns, task_log_owner=task_log_owner)
-        if self._monitor_config.processor in WEFT_TASK_MONITOR_PROCESSOR_BUILTINS:
+        if not self._custom_processor_enabled():
             candidates: tuple[TaskMonitorCandidate, ...] = ()
             last_timestamp = None
             events_scanned = 0
@@ -3595,13 +4141,28 @@ class TaskMonitor(ServiceTask):
     ) -> _TaskMonitorBuiltinCycleWorkerResult:
         """Run one bounded built-in monitor cycle with worker-local handles."""
 
+        worker = self._worker_local_monitor_clone()
+        result, runtime_cleanup_ready = worker._run_builtin_cycle_worker_local(work)
+        return _TaskMonitorBuiltinCycleWorkerResult(
+            work=work,
+            result=result,
+            runtime_cleanup_ready=runtime_cleanup_ready,
+            diagnostics=worker._capture_cached_diagnostics(),
+        )
+
+    def _run_builtin_cycle_worker_local(
+        self,
+        work: _TaskMonitorBuiltinCycleWork,
+    ) -> tuple[TaskMonitorProcessorResult, bool]:
+        """Run built-in monitor work against this worker-local monitor copy."""
+
         self._last_cycle_at = work.now_ns
         self._last_policy_progress = ()
         runtime_cleanup_ready = False
         sink = self._external_task_log_sink
         if sink is not None:
             sink.reset_cycle_counts()
-            self._refresh_external_task_log_status()
+            self._probe_external_task_log_sink()
         if work.task_log_owner == "raw_external":
             self._last_collation_rows_processed = 0
             self._last_collation_tasks_updated = 0
@@ -3619,12 +4180,6 @@ class TaskMonitor(ServiceTask):
             self._last_control_nonstandard_skipped = 0
             self._last_control_cleanup_pending = False
             self._last_control_rows_deleted = 0
-            self._last_cleanup_workers_configured = 0
-            self._last_cleanup_jobs_started = 0
-            self._last_cleanup_jobs_completed = 0
-            self._last_cleanup_jobs_pending = 0
-            self._last_cleanup_jobs_by_kind = {}
-            self._last_cleanup_jobs_pending_by_kind = {}
             self._last_control_delete_errors = ()
             self._last_control_delete_warnings = ()
         else:
@@ -3641,15 +4196,11 @@ class TaskMonitor(ServiceTask):
         self._last_cleanup_queue_stats = ()
         self._last_cleanup_policy_stats = ()
         result = self._run_builtin_monitor_processor_cycle(
-            apply=self._monitor_config.processor == "delete",
+            apply=self._destructive_mode_enabled(),
             now_ns=work.now_ns,
             task_log_owner=work.task_log_owner,
         )
-        return _TaskMonitorBuiltinCycleWorkerResult(
-            work=work,
-            result=result,
-            runtime_cleanup_ready=runtime_cleanup_ready,
-        )
+        return result, runtime_cleanup_ready
 
     def _finish_monitor_cycle(
         self,
@@ -3692,6 +4243,7 @@ class TaskMonitor(ServiceTask):
         if events_scanned == 0 and result.success:
             self._last_error = self._heartbeat_error
         cycle_fields = {
+            "task_monitor_mode": self._monitor_config.mode,
             "processor": self._monitor_config.processor,
             "enabled": self._monitor_config.enabled,
             "interval_seconds": self._monitor_config.interval_seconds,
@@ -3748,14 +4300,6 @@ class TaskMonitor(ServiceTask):
             "reserved_skipped_active": self._last_reserved_skipped_active,
             "reserved_skipped_not_ready": self._last_reserved_skipped_not_ready,
             "reserved_rows_deleted": self._last_reserved_rows_deleted,
-            "cleanup_workers_configured": self._last_cleanup_workers_configured,
-            "cleanup_jobs_started": self._last_cleanup_jobs_started,
-            "cleanup_jobs_completed": self._last_cleanup_jobs_completed,
-            "cleanup_jobs_pending": self._last_cleanup_jobs_pending,
-            "cleanup_jobs_by_kind": dict(self._last_cleanup_jobs_by_kind),
-            "cleanup_jobs_pending_by_kind": dict(
-                self._last_cleanup_jobs_pending_by_kind
-            ),
             "control_delete_errors": self._last_control_delete_errors,
             "control_delete_warnings": self._last_control_delete_warnings,
             "processed": result.processed,
@@ -3782,6 +4326,7 @@ class TaskMonitor(ServiceTask):
                 "task_monitor_processor_error",
                 required_level="info",
                 severity="error",
+                task_monitor_mode=self._monitor_config.mode,
                 processor=self._monitor_config.processor,
                 errors=result.errors,
             )
@@ -3795,19 +4340,11 @@ class TaskMonitor(ServiceTask):
         now_ns: int,
         task_log_owner: str,
     ) -> TaskMonitorProcessorResult | None:
-        if self._monitor_config.processor in {"delete", "report_only"}:
+        if not self._custom_processor_enabled():
             return self._run_builtin_monitor_processor_cycle(
-                apply=self._monitor_config.processor == "delete",
+                apply=self._destructive_mode_enabled(),
                 now_ns=now_ns,
                 task_log_owner=task_log_owner,
-            )
-        if self._monitor_config.processor == "jsonl_then_delete":
-            return TaskMonitorProcessorResult(
-                success=False,
-                errors=(
-                    "jsonl_then_delete task-monitor processor is reserved until "
-                    "the logging callback is implemented",
-                ),
             )
 
         request = TaskMonitorProcessorRequest(
@@ -3842,6 +4379,10 @@ class TaskMonitor(ServiceTask):
         """Run a custom broker-free processor callable on a worker lane."""
 
         try:
+            if self._monitor_config.processor is None:
+                raise ValueError(
+                    "WEFT_TASK_MONITOR_MODE=custom requires WEFT_TASK_MONITOR_PROCESSOR"
+                )
             processor = resolve_task_monitor_processor(self._monitor_config.processor)
             return processor(request)
         except Exception as exc:  # pragma: no cover - custom processor boundary
@@ -3963,6 +4504,9 @@ class TaskMonitor(ServiceTask):
             else:
                 worker_result = value
 
+        self._last_cycle_at = work.now_ns
+        if worker_result.diagnostics is not None:
+            self._apply_cached_diagnostics(worker_result.diagnostics)
         self._finish_monitor_cycle(
             candidates=(),
             last_timestamp=None,
@@ -4022,14 +4566,6 @@ class TaskMonitor(ServiceTask):
         self._last_reserved_skipped_active = cleanup.reserved_skipped_active
         self._last_reserved_skipped_not_ready = cleanup.reserved_skipped_not_ready
         self._last_reserved_rows_deleted = cleanup.reserved_rows_estimated_deleted
-        self._last_cleanup_workers_configured = cleanup.cleanup_workers_configured
-        self._last_cleanup_jobs_started = cleanup.cleanup_jobs_started
-        self._last_cleanup_jobs_completed = cleanup.cleanup_jobs_completed
-        self._last_cleanup_jobs_pending = cleanup.cleanup_jobs_pending
-        self._last_cleanup_jobs_by_kind = dict(cleanup.cleanup_jobs_by_kind or {})
-        self._last_cleanup_jobs_pending_by_kind = dict(
-            cleanup.cleanup_jobs_pending_by_kind or {}
-        )
         self._last_control_cleanup_pending = cleanup.pending
         self._last_control_delete_errors = cleanup.errors
         self._last_control_delete_warnings = cleanup.warnings
@@ -4095,31 +4631,30 @@ class TaskMonitor(ServiceTask):
     ) -> TaskMonitorProcessorResult:
         """Run built-in cleanup while honoring task-log deletion ownership."""
 
-        if self._monitor_config.processor == "jsonl_then_delete":
-            return TaskMonitorProcessorResult(
-                success=False,
-                errors=(
-                    "jsonl_then_delete task-monitor processor is reserved until "
-                    "the logging callback is implemented",
-                ),
-            )
         cleanup = self._run_task_monitor_cleanup_cycle(
             apply=apply,
             task_log_cleanup_enabled=task_log_owner == "cleanup_policy",
         )
         if task_log_owner == "collated_store" and apply:
             ingest = self._last_retained_task_log_ingest
+            collation_errors = (
+                (self._last_collation_store_error,)
+                if self._last_collation_store_error is not None
+                else ()
+            )
             errors = (
                 *cleanup.errors,
                 *ingest.store_write_errors,
                 *ingest.raw_delete_errors,
                 *self._last_control_delete_errors,
+                *collation_errors,
             )
             return TaskMonitorProcessorResult(
                 success=(
                     cleanup.success
                     and ingest.success
                     and not self._last_control_delete_errors
+                    and not collation_errors
                 ),
                 processed=cleanup.processed
                 + ingest.malformed_deleted
@@ -4130,7 +4665,7 @@ class TaskMonitor(ServiceTask):
                     + ingest.raw_deleted
                     + self._last_control_rows_deleted
                 ),
-                reported=cleanup.reported,
+                reported=cleanup.reported + self._last_collation_summaries_emitted,
                 errors=errors,
                 warnings=(*cleanup.warnings, *self._last_control_delete_warnings),
             )
@@ -4155,7 +4690,38 @@ class TaskMonitor(ServiceTask):
         task_log_cleanup_enabled: bool = True,
     ) -> TaskMonitorProcessorResult:
         ctx = self._monitor_context()
-        self._set_activity("cleanup_scanning", waiting_on=WEFT_GLOBAL_LOG_QUEUE)
+        pre_apply_reporter = None
+        if apply and self._jsonl_then_delete_enabled():
+            store = self._ensure_monitor_store()
+            if store is None:
+                error = self._last_collation_store_error or "Monitor store unavailable"
+
+                def failed_reporter(
+                    selected: Sequence[CleanupCandidate],
+                ) -> tuple[AppliedCleanupCandidate, ...]:
+                    return tuple(
+                        AppliedCleanupCandidate(
+                            candidate=candidate,
+                            deleted=False,
+                            error=error,
+                        )
+                        for candidate in selected
+                    )
+
+                pre_apply_reporter = failed_reporter
+            else:
+
+                def report_selected(
+                    selected: Sequence[CleanupCandidate],
+                ) -> tuple[AppliedCleanupCandidate, ...]:
+                    return self._report_cleanup_candidates_for_jsonl(
+                        selected,
+                        store=store,
+                    )
+
+                pre_apply_reporter = report_selected
+        if not getattr(self, "_worker_lane_snapshot_only", False):
+            self._set_activity("cleanup_scanning", waiting_on=WEFT_GLOBAL_LOG_QUEUE)
         cleanup = run_task_monitor_cleanup(
             ctx,
             TaskMonitorCleanupConfig(
@@ -4165,6 +4731,7 @@ class TaskMonitor(ServiceTask):
                     self._monitor_config.task_log_retention_period_seconds
                 ),
                 task_log_cleanup_enabled=task_log_cleanup_enabled,
+                pre_apply_reporter=pre_apply_reporter,
             ),
             apply=apply,
             exclude_tids=(self.tid,),
@@ -4185,6 +4752,44 @@ class TaskMonitor(ServiceTask):
             warnings=cleanup.warnings,
         )
 
+    def _report_cleanup_candidates_for_jsonl(
+        self,
+        candidates: Sequence[CleanupCandidate],
+        *,
+        store: MonitorStore,
+    ) -> tuple[AppliedCleanupCandidate, ...]:
+        """Durably hand off baseline reports before generic exact deletes."""
+
+        failures: list[AppliedCleanupCandidate] = []
+        now_ns = time.time_ns()
+        for candidate in candidates:
+            completeness = (
+                "raw_row" if candidate.queue == WEFT_GLOBAL_LOG_QUEUE else "state_only"
+            )
+            report = build_candidate_lifetime_report(
+                candidate,
+                monitor_tid=self.tid,
+                emitted_at_ns=now_ns,
+                completeness=completeness,
+            )
+            try:
+                self._handoff_lifetime_report(
+                    report,
+                    store=store,
+                    emitted_at_ns=now_ns,
+                )
+            except ExternalTaskLogError as exc:
+                failure = str(exc)
+                return tuple(
+                    AppliedCleanupCandidate(
+                        candidate=blocked,
+                        deleted=False,
+                        error=failure,
+                    )
+                    for blocked in candidates
+                )
+        return tuple(failures)
+
     def _run_raw_external_task_log_cycle(
         self,
         *,
@@ -4198,7 +4803,8 @@ class TaskMonitor(ServiceTask):
                 success=False,
                 errors=("external task-log sink is not configured",),
             )
-        self._set_activity("raw_external_logging", waiting_on=WEFT_GLOBAL_LOG_QUEUE)
+        if not getattr(self, "_worker_lane_snapshot_only", False):
+            self._set_activity("raw_external_logging", waiting_on=WEFT_GLOBAL_LOG_QUEUE)
         scanner = GeneratorTaskLogScanner()
         window = scanner.scan_window(
             self._monitor_context(),

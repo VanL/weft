@@ -341,6 +341,71 @@ def test_status_services_include_manager_spawned_task_monitor_before_child_log(
     assert monitor["pid"] == os.getpid()
 
 
+def test_status_services_report_task_monitor_external_log_diagnostics(
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = "1779000000000000103"
+    now = time.time_ns()
+    _write_task_log_entry(
+        ctx=ctx,
+        tid=tid,
+        event="task_started",
+        status="running",
+        started_at=now,
+        completed_at=None,
+        name="task-monitor",
+        metadata={
+            "internal": True,
+            "role": "task_monitor",
+            INTERNAL_RUNTIME_TASK_CLASS_KEY: INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR,
+            INTERNAL_SERVICE_KEY_METADATA_KEY: INTERNAL_SERVICE_KEY_TASK_MONITOR,
+            INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY: "ensure",
+        },
+    )
+    ctx.queue("weft.state.tid_mappings", persistent=False).write(
+        json.dumps(
+            {
+                "full": tid,
+                "short": tid[-10:],
+                "runner": "host",
+                "task_monitor": {
+                    "task_monitor_mode": "jsonl_then_delete",
+                    "task_log_external": {
+                        "enabled": True,
+                        "mode": "collated",
+                        "path": str(root / "logs" / "weft.log"),
+                        "healthy": False,
+                        "last_error": "permission denied",
+                        "deferred_pending": 3,
+                    },
+                },
+            }
+        )
+    )
+
+    exit_code, payload = cmd_status(json_output=True, spec_context=root)
+    text_exit_code, text_payload = cmd_status(json_output=False, spec_context=root)
+
+    assert exit_code == 0
+    assert payload is not None
+    services = json.loads(payload)["services"]
+    monitor = next(
+        service
+        for service in services
+        if service["key"] == INTERNAL_SERVICE_KEY_TASK_MONITOR
+    )
+    external = monitor["diagnostics"]["task_monitor"]["task_log_external"]
+    assert external["healthy"] is False
+    assert external["last_error"] == "permission denied"
+    assert external["deferred_pending"] == 3
+    assert text_exit_code == 0
+    assert text_payload is not None
+    assert "diagnostics=external-log-unhealthy" in text_payload
+    assert "deferred_writes=3" in text_payload
+
+
 def test_status_services_child_terminal_evidence_overrides_manager_spawn(
     tmp_path: Path,
 ) -> None:

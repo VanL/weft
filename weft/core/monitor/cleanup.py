@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import time
 from collections import Counter
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -56,6 +56,11 @@ from weft.core.queue_window import (
     scan_queue_window,
 )
 
+PreApplyReporter = Callable[
+    [Sequence[CleanupCandidate]],
+    tuple[AppliedCleanupCandidate, ...],
+]
+
 
 @dataclass(frozen=True, slots=True)
 class TaskMonitorCleanupConfig:
@@ -71,6 +76,7 @@ class TaskMonitorCleanupConfig:
     reserved_cleanup_enabled: bool = False
     queues: tuple[str, ...] = (WEFT_TID_MAPPINGS_QUEUE, WEFT_GLOBAL_LOG_QUEUE)
     task_log_scan_backend: TaskLogScanBackend | None = None
+    pre_apply_reporter: PreApplyReporter | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,6 +200,7 @@ def run_task_monitor_cleanup(
                         ctx,
                         selected,
                         apply=apply,
+                        pre_apply_reporter=config.pre_apply_reporter,
                     ),
                     peek_rows_including_claimed_fn=_peek_rows_including_claimed,
                     scan_queue_window_fn=scan_queue_window,
@@ -218,7 +225,14 @@ def run_task_monitor_cleanup(
                     now_ns=current_ns,
                     exclude_tids=excluded,
                 )
-                applied.extend(_apply_policy_candidates(ctx, selected, apply=apply))
+                applied.extend(
+                    _apply_policy_candidates(
+                        ctx,
+                        selected,
+                        apply=apply,
+                        pre_apply_reporter=config.pre_apply_reporter,
+                    )
+                )
         except (BrokerError, OSError, RuntimeError, ValueError) as exc:
             errors.append(f"failed to scan {queue_name}: {exc}")
             continue
@@ -298,11 +312,16 @@ def _apply_policy_candidates(
     candidates: Sequence[CleanupCandidate],
     *,
     apply: bool,
+    pre_apply_reporter: PreApplyReporter | None = None,
 ) -> tuple[AppliedCleanupCandidate, ...]:
     """Apply one ordered policy's exact-delete candidates."""
 
     if not apply or not candidates:
         return ()
+    if pre_apply_reporter is not None:
+        report_failures = pre_apply_reporter(candidates)
+        if report_failures:
+            return tuple(report_failures)
     return tuple(
         apply_exact_prune_candidates(
             ctx,

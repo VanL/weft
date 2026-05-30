@@ -1,5 +1,24 @@
 # Changelog
 
+## 2.7.2 - 2026-05-30
+
+### Added
+
+- Added TaskMonitor `jsonl_then_delete` logging for cleanup-selected subjects.
+  The monitor now emits one `task_lifetime_report` JSONL record before each
+  exact destructive cleanup effect, using a common policy-general shape with
+  top-level `taskspec`, `lifetime`, `monitor`, and `observations` fields.
+- Added a default external task-log path at `logs/weft.log` under the Weft
+  project root, backed by Python's rotating logfile handler. External write
+  failures are durably queued in the Monitor-owned deferred-writes table and
+  retried on later monitor cycles.
+
+### Changed
+
+- Changed TaskMonitor status diagnostics so external-log health, permission
+  regressions/recovery, and deferred-write backlog are cached and surfaced
+  through status/PONG without opening the log path on the status read path.
+
 ## 0.9.70 - 2026-05-28
 
 This is a cumulative feature entry since 0.9.10. The intervening releases were

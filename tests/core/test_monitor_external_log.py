@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+from logging.handlers import RotatingFileHandler
 
 import pytest
 
+import weft.core.monitor.external_log as external_log_mod
 from weft.core.monitor.external_log import ExternalTaskLogError, ExternalTaskLogSink
 
 pytestmark = [pytest.mark.shared]
@@ -36,6 +38,75 @@ def test_external_task_log_sink_writes_raw_jsonl(tmp_path) -> None:
     assert record["payload"]["event"] == "work_completed"
     assert sink.status().healthy is True
     assert sink.status().last_emitted == 1
+
+
+def test_external_task_log_sink_probe_creates_missing_parent_path(tmp_path) -> None:
+    path = tmp_path / "missing" / "nested" / "weft.log"
+    sink = ExternalTaskLogSink(
+        path=path,
+        mode="collated",
+        monitor_tid="1779100000000000006",
+    )
+
+    assert sink.probe() is True
+
+    assert path.exists()
+    assert path.is_file()
+    assert sink.status().healthy is True
+
+
+def test_external_task_log_sink_probe_tracks_permission_transitions(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    path = tmp_path / "permission.jsonl"
+    original_handler = external_log_mod._RaisingRotatingFileHandler
+    fail_open = True
+
+    def handler_factory(*args, **kwargs):
+        if fail_open:
+            raise PermissionError("permission denied")
+        return original_handler(*args, **kwargs)
+
+    monkeypatch.setattr(
+        external_log_mod,
+        "_RaisingRotatingFileHandler",
+        handler_factory,
+    )
+    sink = ExternalTaskLogSink(
+        path=path,
+        mode="collated",
+        monitor_tid="1779100000000000007",
+    )
+
+    assert sink.probe() is False
+    assert sink.status().healthy is False
+    assert "permission denied" in str(sink.status().last_error)
+
+    fail_open = False
+    assert sink.probe() is True
+    assert sink.status().healthy is True
+    assert sink.status().last_error is None
+
+    fail_open = True
+    assert sink.probe() is False
+    assert sink.status().healthy is False
+    assert "permission denied" in str(sink.status().last_error)
+
+
+def test_external_task_log_sink_uses_rotating_file_handler(tmp_path) -> None:
+    path = tmp_path / "rotating.jsonl"
+    sink = ExternalTaskLogSink(
+        path=path,
+        mode="collated",
+        monitor_tid="1779100000000000005",
+    )
+
+    handler = sink._ensure_handler()
+
+    assert isinstance(handler, RotatingFileHandler)
+    assert handler.maxBytes > 0
+    assert handler.backupCount > 0
 
 
 def test_external_task_log_sink_writes_collated_jsonl(tmp_path) -> None:

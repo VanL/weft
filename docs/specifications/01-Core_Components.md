@@ -265,6 +265,17 @@ Current task families:
   lifecycle retention output is owned by
   `weft/core/monitor/external_log.py`; `WEFT_TASK_MONITOR_LOG_SINK` remains
   monitor operational output, not the external lifecycle-retention contract.
+  The external JSONL sink is backed by Python's standard rotating logfile
+  handler and defaults to `logs/weft.log` under the Weft project root when a
+  mode enables it. The configured external path is resolved at TaskMonitor
+  startup and requires a restart to change; the resolved path is re-probed once
+  per monitor cycle and the cached health is exposed through PONG and passive
+  service-status diagnostics.
+  `jsonl_then_delete` builds reusable lifetime reports in
+  `weft/core/monitor/lifetime_report.py` and writes them through the external
+  JSONL sink or the Monitor-owned `weft_monitor_deferred_writes` outbox before
+  exact deletion. Deferred writes are retried by bounded monitor cycles and
+  are operational outbox state only.
   The store is not lifecycle truth, result authority, queue truth, or a public
   status dependency. Terminal task summaries and terminal task-local runtime
   cleanup are separate maintenance slices: summary emission records
@@ -318,16 +329,18 @@ Current task families:
   lifecycle and cleanup
   candidate snapshots, including Weft lifecycle anomalies, domain failures,
   stale runtime-state rows, and superseded task-log rows. Its default `delete`
-  processor may delete exact safe cleanup candidates only through the canonical
+  mode may delete exact safe cleanup candidates only through the canonical
   prune implementation under `weft/core/pruning/`; it must not consume,
   reserve, move, unclaim, or delete active, ambiguous, claimed, malformed,
   unknown, or non-exact lifecycle messages. `report_only` remains available as
-  a non-destructive override. Built-in cleanup processors run in the
+  a non-destructive override. Built-in cleanup modes run in the
   TaskMonitor built-in cycle worker group so the reactor remains responsive
   while exact deletes still stay in the canonical prune path. Successful completed
   lifecycle proof does not require a reserved-queue probe; reserved probing is
-  for failure-like or suspected-loss cases. `jsonl_then_delete` remains
-  fail-closed until the operational logging callback lands. Raw external
+  for failure-like or suspected-loss cases. `jsonl_then_delete` is the built-in
+  log-then-delete mode: it requires collated external logging and the Monitor
+  store, emits or durably defers a `task_lifetime_report`, and only then
+  applies the same exact delete selected by policy. Raw external
   task-log mode is a separate deletion owner: it emits retained raw rows before
   exact deletion and does not write the Monitor collation tables in that cycle.
 - `PipelineTask`: internal orchestrator for first-class linear pipelines
@@ -583,6 +596,10 @@ TaskMonitor runtime boundary.
 
 ## Related Plans
 
+- [`docs/plans/2026-05-29-task-monitor-config-and-reactor-cache-cleanup-plan.md`](../plans/2026-05-29-task-monitor-config-and-reactor-cache-cleanup-plan.md)
+- [`docs/plans/2026-05-29-task-monitor-general-lifetime-reporting-plan.md`](../plans/2026-05-29-task-monitor-general-lifetime-reporting-plan.md)
+- [`docs/plans/2026-05-30-task-monitor-mode-and-rotating-log-plan.md`](../plans/2026-05-30-task-monitor-mode-and-rotating-log-plan.md)
+- [`docs/plans/2026-05-30-task-monitor-external-log-health-plan.md`](../plans/2026-05-30-task-monitor-external-log-health-plan.md)
 - [`docs/plans/2026-05-29-reliability-and-doc-fixes-plan.md`](../plans/2026-05-29-reliability-and-doc-fixes-plan.md)
 - [`docs/plans/2026-05-26-monitor-five-cleanup-policy-consolidation-plan.md`](../plans/2026-05-26-monitor-five-cleanup-policy-consolidation-plan.md)
 - [`docs/plans/2026-05-20-monitor-collation-table-retirement-plan.md`](../plans/2026-05-20-monitor-collation-table-retirement-plan.md)

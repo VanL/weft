@@ -1973,6 +1973,7 @@ class BaseTask(MultiQueueWatcher, ABC):
             "name",
             "role",
             "hostname",
+            "task_monitor",
         }
         for key in comparable_keys:
             if current.get(key) != incoming.get(key):

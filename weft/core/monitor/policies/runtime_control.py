@@ -63,12 +63,6 @@ class TaskControlCleanupResult:
     dead_tid_reserved_queues_deleted: int = 0
     dead_tid_log_refs_selected: int = 0
     dead_tid_log_rows_deleted: int = 0
-    cleanup_workers_configured: int = 0
-    cleanup_jobs_started: int = 0
-    cleanup_jobs_completed: int = 0
-    cleanup_jobs_pending: int = 0
-    cleanup_jobs_by_kind: Mapping[str, int] | None = None
-    cleanup_jobs_pending_by_kind: Mapping[str, int] | None = None
     pending: bool = False
     errors: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
@@ -115,14 +109,6 @@ class TaskControlCleanupResult:
             "dead_tid_reserved_queues_deleted": (self.dead_tid_reserved_queues_deleted),
             "dead_tid_log_refs_selected": self.dead_tid_log_refs_selected,
             "dead_tid_log_rows_deleted": self.dead_tid_log_rows_deleted,
-            "cleanup_workers_configured": self.cleanup_workers_configured,
-            "cleanup_jobs_started": self.cleanup_jobs_started,
-            "cleanup_jobs_completed": self.cleanup_jobs_completed,
-            "cleanup_jobs_pending": self.cleanup_jobs_pending,
-            "cleanup_jobs_by_kind": dict(self.cleanup_jobs_by_kind or {}),
-            "cleanup_jobs_pending_by_kind": dict(
-                self.cleanup_jobs_pending_by_kind or {}
-            ),
             "pending": self.pending,
             "errors": list(self.errors),
             "warnings": list(self.warnings),
