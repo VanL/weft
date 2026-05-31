@@ -72,6 +72,10 @@ class _FakeProcess:
         return None
 
 
+class _SyntheticKeyboardInterrupt(BaseException):
+    """Synthetic interrupt used so pytest itself never observes Ctrl-C."""
+
+
 def test_launch_pytest_process_isolates_ctrl_c_on_current_platform(
     monkeypatch,
 ) -> None:
@@ -238,7 +242,13 @@ def test_run_pytest_command_forwards_first_interrupt_and_returns_130(
     """A first Ctrl-C should forward SIGINT and preserve the wrapper exit code."""
 
     pytest_pg = _load_pytest_pg_module()
-    process = _FakeProcess([KeyboardInterrupt()])
+    monkeypatch.setattr(
+        pytest_pg,
+        "KeyboardInterrupt",
+        _SyntheticKeyboardInterrupt,
+        raising=False,
+    )
+    process = _FakeProcess([_SyntheticKeyboardInterrupt()])
     calls: list[str] = []
 
     monkeypatch.setattr(
@@ -282,7 +292,13 @@ def test_run_pytest_command_escalates_after_interrupt_timeout(
     """If pytest ignores the interrupt, the helper should terminate then kill."""
 
     pytest_pg = _load_pytest_pg_module()
-    process = _FakeProcess([KeyboardInterrupt()])
+    monkeypatch.setattr(
+        pytest_pg,
+        "KeyboardInterrupt",
+        _SyntheticKeyboardInterrupt,
+        raising=False,
+    )
+    process = _FakeProcess([_SyntheticKeyboardInterrupt()])
     calls: list[str] = []
     outcomes = iter(("timeout", "timeout", "exited"))
 
