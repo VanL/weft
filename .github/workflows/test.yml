@@ -56,9 +56,14 @@ jobs:
         python bin/pytest-worker-count --github-env
 
     - name: Run tests with pytest
-      if: ${{ matrix.os != 'ubuntu-latest' || matrix.python-version != '3.13' }}
+      if: ${{ (matrix.os != 'ubuntu-latest' || matrix.python-version != '3.13') && !(matrix.os == 'windows-latest' && matrix.test_slice == 'remaining') }}
       run: |
         pytest -v --tb=short -m "not slow" ${{ matrix.pytest_targets }} --override-ini="addopts=-ra -q --strict-markers -n logical --dist load" ${{ matrix.pytest_diagnostic_args }}
+
+    - name: Run Windows remaining tests without xdist
+      if: ${{ matrix.os == 'windows-latest' && matrix.test_slice == 'remaining' }}
+      run: |
+        pytest -v --tb=short -m "not slow" ${{ matrix.pytest_targets }} --override-ini="addopts=-ra -q --strict-markers -n 0" ${{ matrix.pytest_diagnostic_args }}
 
     - name: Run tests with coverage
       if: ${{ matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13' }}
