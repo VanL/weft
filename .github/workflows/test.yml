@@ -30,7 +30,7 @@ jobs:
             pytest_diagnostic_args: --durations=100 --durations-min=0.5
           - test_slice: remaining
             pytest_targets: tests/architecture tests/context tests/helpers tests/shell tests/specs tests/system tests/tasks tests/taskspec tests/test_harness_registration.py
-            pytest_diagnostic_args: --durations=100 --durations-min=0.5 --timeout=300 --timeout-method=thread
+            pytest_diagnostic_args: --durations=100 --durations-min=0.5 --timeout=300 --timeout-method=thread --full-trace
 
     steps:
     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
