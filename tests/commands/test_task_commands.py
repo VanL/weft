@@ -31,7 +31,7 @@ from weft.core import (
 from weft.core.control_probe import ControlProbeResult, MatchedPong
 from weft.core.tasks import Consumer
 from weft.ext import RunnerHandle
-from weft.helpers import iter_queue_json_entries, kill_process_tree
+from weft.helpers import iter_queue_json_entries, kill_process_tree, pid_is_live
 
 pytestmark = [pytest.mark.shared]
 
@@ -500,18 +500,13 @@ def _wait_for_process_exit(
     process: BaseProcess | None = None,
     timeout: float = 5.0,
 ) -> bool:
-    psutil = pytest.importorskip("psutil")
     deadline = time.time() + timeout
     while time.time() < deadline:
         if process is not None:
             process.join(timeout=0.05)
             if not process.is_alive():
                 return True
-        try:
-            ps_process = psutil.Process(pid)
-        except psutil.Error:
-            return True
-        if not ps_process.is_running() or ps_process.status() == psutil.STATUS_ZOMBIE:
+        if not pid_is_live(pid):
             return True
         time.sleep(0.05)
     return False
