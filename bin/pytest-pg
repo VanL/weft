@@ -34,6 +34,17 @@ PYTEST_TERMINATE_GRACE_SECONDS: Final[float] = 2.0
 PYTEST_WAIT_POLL_SECONDS: Final[float] = 0.2
 """Bounded wait interval so repeated Ctrl-C can escalate promptly."""
 
+PYTEST_DIAGNOSTIC_ARGS: Final[tuple[str, ...]] = (
+    "--durations=100",
+    "--durations-min=0.5",
+    "-o",
+    "faulthandler_timeout=720",
+    "--timeout=900",
+    "--timeout-method=thread",
+    "--full-trace",
+)
+"""Keep PG-backed CI failures as diagnosable as direct pytest slices."""
+
 BACKEND_ENV_KEYS: Final[tuple[str, ...]] = (
     "BROKER_BACKEND",
     "BROKER_BACKEND_HOST",
@@ -252,6 +263,7 @@ def _build_pytest_command(
         "logical",
         "--dist",
         "load",
+        *PYTEST_DIAGNOSTIC_ARGS,
     ]
 
 

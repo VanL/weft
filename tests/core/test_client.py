@@ -7,7 +7,10 @@ from pathlib import Path
 
 import pytest
 
-from tests.helpers.weft_harness import WeftTestHarness
+from tests.helpers.weft_harness import (
+    DEFAULT_TASK_COMPLETION_TIMEOUT,
+    WeftTestHarness,
+)
 from weft.client import (
     ControlRejected,
     InvalidTID,
@@ -61,6 +64,26 @@ def _function_taskspec(
             "metadata": {},
         },
         context={"template": True, "auto_expand": False},
+    )
+
+
+def _assert_task_result_value(
+    task: Task,
+    harness: WeftTestHarness,
+    expected: object,
+) -> None:
+    result = task.result(timeout=DEFAULT_TASK_COMPLETION_TIMEOUT)
+    if result.value == expected:
+        return
+
+    pytest.fail(
+        "Task result mismatch:\n"
+        f"  tid={task.tid}\n"
+        f"  expected={expected!r}\n"
+        f"  status={result.status!r}\n"
+        f"  value={result.value!r}\n"
+        f"  error={result.error!r}\n"
+        f"{harness.dump_completion_timeout_state(task.tid)}"
     )
 
 
@@ -334,8 +357,8 @@ def test_submit_spec_and_pipeline_references_return_tasks() -> None:
         spec_task = client.submit_spec("stored-echo", payload="stored")
         pipeline_task = client.submit_pipeline("stored-pipeline", payload="pipeline")
 
-        assert spec_task.result(timeout=30.0).value == "stored"
-        assert pipeline_task.result(timeout=30.0).value == "pipeline"
+        _assert_task_result_value(spec_task, harness, "stored")
+        _assert_task_result_value(pipeline_task, harness, "pipeline")
 
 
 def test_task_snapshot_and_tasks_namespace_status_agree() -> None:

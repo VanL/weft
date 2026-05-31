@@ -221,6 +221,10 @@ def test_build_pytest_command_accepts_target_slices() -> None:
     assert "-m" in command
     assert command[command.index("-m") + 1] == "not sqlite_only"
     assert command[command.index("-n") + 1] == "logical"
+    assert "--durations=100" in command
+    assert "faulthandler_timeout=720" in command
+    assert "--timeout=900" in command
+    assert "--full-trace" in command
 
 
 def test_build_pytest_command_defaults_to_full_tests_tree() -> None:
