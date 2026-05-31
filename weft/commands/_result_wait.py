@@ -18,6 +18,7 @@ from weft._constants import (
 )
 from weft.context import WeftContext
 from weft.core.queue_wait import QueueChangeMonitor
+from weft.helpers import closing_queue_iterator
 
 from ._streaming import (
     DecodedOutboxValue,
@@ -93,17 +94,19 @@ def drain_ctrl_out_stream_messages(
     """
 
     terminal_candidates: list[tuple[dict[str, Any], int]] = []
-    for entry in ctrl_queue.peek_generator(with_timestamps=True):
-        if not isinstance(entry, tuple) or len(entry) < 2:
-            continue
-        ctrl_payload, message_id = entry[0], entry[1]
-        raw = str(ctrl_payload)
-        terminal_envelope = coerce_terminal_envelope(raw, tid=tid)
-        if terminal_envelope is not None:
-            terminal_candidates.append((terminal_envelope, int(message_id)))
-            continue
-        handle_ctrl_stream(raw)
-        ctrl_queue.delete(message_id=message_id)
+    iterator = ctrl_queue.peek_generator(with_timestamps=True)
+    with closing_queue_iterator(iterator) as rows:
+        for entry in rows:
+            if not isinstance(entry, tuple) or len(entry) < 2:
+                continue
+            ctrl_payload, message_id = entry[0], entry[1]
+            raw = str(ctrl_payload)
+            terminal_envelope = coerce_terminal_envelope(raw, tid=tid)
+            if terminal_envelope is not None:
+                terminal_candidates.append((terminal_envelope, int(message_id)))
+                continue
+            handle_ctrl_stream(raw)
+            ctrl_queue.delete(message_id=message_id)
     return terminal_candidates
 
 

@@ -22,7 +22,7 @@ from weft.core.outbox import (
 from weft.core.outbox import (
     process_outbox_message as _process_outbox_message,
 )
-from weft.helpers import iter_queue_json_entries
+from weft.helpers import closing_queue_iterator, iter_queue_json_entries
 
 __all__ = [
     "DecodedOutboxValue",
@@ -160,31 +160,33 @@ def poll_log_events(
 def collect_interactive_queue_output(outbox_queue: Queue) -> list[str]:
     """Return textual stream content from an interactive outbox queue."""
     collected: list[str] = []
-    for item in outbox_queue.peek_generator():
-        payload_raw = item[0] if isinstance(item, tuple) else item
-        try:
-            payload_obj = json.loads(payload_raw)
-        except json.JSONDecodeError:
-            collected.append(str(payload_raw))
-            continue
+    iterator = outbox_queue.peek_generator()
+    with closing_queue_iterator(iterator) as rows:
+        for item in rows:
+            payload_raw = item[0] if isinstance(item, tuple) else item
+            try:
+                payload_obj = json.loads(payload_raw)
+            except json.JSONDecodeError:
+                collected.append(str(payload_raw))
+                continue
 
-        if isinstance(payload_obj, dict) and payload_obj.get("type") == "stream":
-            data = payload_obj.get("data", "")
-            encoding = payload_obj.get("encoding", "text")
-            if encoding == "base64":
-                try:
-                    chunk_bytes = base64.b64decode(data)
-                    collected.append(chunk_bytes.decode("utf-8", errors="replace"))
-                except (
-                    binascii.Error,
-                    ValueError,
-                    UnicodeDecodeError,
-                ):  # pragma: no cover - malformed base64 envelope
+            if isinstance(payload_obj, dict) and payload_obj.get("type") == "stream":
+                data = payload_obj.get("data", "")
+                encoding = payload_obj.get("encoding", "text")
+                if encoding == "base64":
+                    try:
+                        chunk_bytes = base64.b64decode(data)
+                        collected.append(chunk_bytes.decode("utf-8", errors="replace"))
+                    except (
+                        binascii.Error,
+                        ValueError,
+                        UnicodeDecodeError,
+                    ):  # pragma: no cover - malformed base64 envelope
+                        collected.append(str(data))
+                else:
                     collected.append(str(data))
-            else:
-                collected.append(str(data))
-            continue
+                continue
 
-        collected.append(json.dumps(payload_obj, ensure_ascii=False))
+            collected.append(json.dumps(payload_obj, ensure_ascii=False))
 
     return collected

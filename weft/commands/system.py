@@ -67,6 +67,7 @@ from weft.core.service_convergence import (
 )
 from weft.ext import RunnerHandle
 from weft.helpers import (
+    closing_queue_iterator,
     format_byte_size,
     format_timestamp_ns_relative,
     handle_has_live_host_process,
@@ -375,24 +376,25 @@ def _iter_log_events(
         return []
 
     def _generator() -> Iterable[tuple[dict[str, Any], int]]:
-        for entry_raw in cast(Iterable[Any], iterator_raw):
-            if isinstance(entry_raw, tuple):
-                if len(entry_raw) != 2:
+        with closing_queue_iterator(cast(Iterable[Any], iterator_raw)) as rows:
+            for entry_raw in rows:
+                if isinstance(entry_raw, tuple):
+                    if len(entry_raw) != 2:
+                        continue
+                    body_candidate, timestamp = entry_raw
+                    if not isinstance(body_candidate, str):
+                        continue
+                    body_str = body_candidate
+                elif isinstance(entry_raw, str):
+                    body_str = entry_raw
+                    timestamp = 0
+                else:
                     continue
-                body_candidate, timestamp = entry_raw
-                if not isinstance(body_candidate, str):
+                try:
+                    payload = cast(dict[str, Any], json.loads(body_str))
+                except (TypeError, json.JSONDecodeError):
                     continue
-                body_str = body_candidate
-            elif isinstance(entry_raw, str):
-                body_str = entry_raw
-                timestamp = 0
-            else:
-                continue
-            try:
-                payload = cast(dict[str, Any], json.loads(body_str))
-            except (TypeError, json.JSONDecodeError):
-                continue
-            yield payload, int(timestamp)
+                yield payload, int(timestamp)
 
     return _generator()
 
@@ -588,19 +590,20 @@ def _iter_queue_json_messages(queue: Queue) -> Iterable[tuple[dict[str, Any], in
         iterator_raw = queue.peek_generator(with_timestamps=True)
     except TypeError:  # pragma: no cover - backend compatibility
         iterator_raw = queue.peek_generator()
-    for item in iterator_raw:
-        if isinstance(item, tuple) and len(item) == 2:
-            raw, timestamp = item
-        else:
-            raw, timestamp = item, 0
-        if not isinstance(raw, str):
-            continue
-        try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(payload, dict):
-            yield payload, int(timestamp)
+    with closing_queue_iterator(cast(Iterable[Any], iterator_raw)) as rows:
+        for item in rows:
+            if isinstance(item, tuple) and len(item) == 2:
+                raw, timestamp = item
+            else:
+                raw, timestamp = item, 0
+            if not isinstance(raw, str):
+                continue
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict):
+                yield payload, int(timestamp)
 
 
 def _service_runtime_liveness(

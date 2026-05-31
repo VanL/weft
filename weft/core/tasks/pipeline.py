@@ -37,6 +37,7 @@ from weft.core.pipelines import (
 )
 from weft.core.spawn_requests import submit_spawn_request
 from weft.core.taskspec import ReservedPolicy, TaskSpec
+from weft.helpers import closing_queue_iterator
 
 from .base import BaseTask, ControlRequest, TaskControlPolicy
 from .multiqueue_watcher import QueueMessageContext
@@ -654,18 +655,20 @@ class PipelineTask(BaseTask):
 
     def _latest_pipeline_registry_message_id(self) -> int | None:
         latest: int | None = None
-        for entry in self._queue(WEFT_PIPELINES_STATE_QUEUE).peek_generator(
+        iterator = self._queue(WEFT_PIPELINES_STATE_QUEUE).peek_generator(
             with_timestamps=True
-        ):
-            if not isinstance(entry, tuple) or len(entry) != 2:
-                continue
-            body, timestamp = entry
-            try:
-                payload = json.loads(body)
-            except (TypeError, json.JSONDecodeError):
-                continue
-            if payload.get("tid") == self.tid:
-                latest = int(timestamp)
+        )
+        with closing_queue_iterator(iterator) as rows:
+            for entry in rows:
+                if not isinstance(entry, tuple) or len(entry) != 2:
+                    continue
+                body, timestamp = entry
+                try:
+                    payload = json.loads(body)
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                if payload.get("tid") == self.tid:
+                    latest = int(timestamp)
         return latest
 
     def _delete_pipeline_registry_record(self) -> None:

@@ -81,6 +81,7 @@ from weft.core.endpoints import (
 from weft.core.taskspec import ReservedPolicy, TaskSpec
 from weft.ext import RunnerHandle
 from weft.helpers import (
+    closing_queue_iterator,
     iter_queue_json_entries,
     kill_process_tree,
     process_create_time,
@@ -1944,20 +1945,21 @@ class BaseTask(MultiQueueWatcher, ABC):
         except (BrokerError, OSError, RuntimeError):
             return None
 
-        for entry in generator:
-            if not isinstance(entry, tuple) or len(entry) != 2:
-                continue
-            body, timestamp = entry
-            if not isinstance(timestamp, int):
-                continue
-            try:
-                payload = json.loads(body)
-            except (TypeError, json.JSONDecodeError):
-                continue
-            if not isinstance(payload, dict):
-                continue
-            if payload.get("full") == full_tid:
-                latest = (payload, timestamp)
+        with closing_queue_iterator(generator) as rows:
+            for entry in rows:
+                if not isinstance(entry, tuple) or len(entry) != 2:
+                    continue
+                body, timestamp = entry
+                if not isinstance(timestamp, int):
+                    continue
+                try:
+                    payload = json.loads(body)
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                if payload.get("full") == full_tid:
+                    latest = (payload, timestamp)
         return latest
 
     @staticmethod

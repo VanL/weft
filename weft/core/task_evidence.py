@@ -36,7 +36,11 @@ from weft.core.outbox import (
 )
 from weft.core.runner_diagnostics import diagnostic_summary
 from weft.ext import RunnerHandle
-from weft.helpers import handle_has_live_host_process, iter_queue_json_entries
+from weft.helpers import (
+    closing_queue_iterator,
+    handle_has_live_host_process,
+    iter_queue_json_entries,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -500,14 +504,16 @@ def peek_terminal_ctrl_out_evidence(
     queue = ctx.queue(ctrl_out_name, persistent=False)
     candidates: list[tuple[dict[str, Any], int]] = []
     try:
-        for item in queue.peek_generator(with_timestamps=True):
-            if not isinstance(item, tuple) or len(item) != 2:
-                continue
-            body, timestamp = item
-            payload = coerce_terminal_envelope(str(body), tid=tid)
-            if payload is None:
-                continue
-            candidates.append((payload, int(timestamp)))
+        iterator = queue.peek_generator(with_timestamps=True)
+        with closing_queue_iterator(iterator) as rows:
+            for item in rows:
+                if not isinstance(item, tuple) or len(item) != 2:
+                    continue
+                body, timestamp = item
+                payload = coerce_terminal_envelope(str(body), tid=tid)
+                if payload is None:
+                    continue
+                candidates.append((payload, int(timestamp)))
     finally:
         queue.close()
 
@@ -563,26 +569,28 @@ def peek_final_outbox_evidence(
     observed_at: int | None = None
     saw_partial = False
     try:
-        for item in queue.peek_generator(with_timestamps=True):
-            if not isinstance(item, tuple) or len(item) != 2:
-                continue
-            body, timestamp = item
-            final, decoded = process_outbox_message(
-                str(body),
-                stream_buffer,
-                emit_stream=False,
-            )
-            if not final:
-                saw_partial = True
-                continue
-            if decoded is None:
-                continue
-            values.append(decoded.value)
-            timestamp_int = int(timestamp)
-            ack_targets.append(
-                QueueAckTarget(queue=outbox_name, message_id=timestamp_int)
-            )
-            observed_at = timestamp_int
+        iterator = queue.peek_generator(with_timestamps=True)
+        with closing_queue_iterator(iterator) as rows:
+            for item in rows:
+                if not isinstance(item, tuple) or len(item) != 2:
+                    continue
+                body, timestamp = item
+                final, decoded = process_outbox_message(
+                    str(body),
+                    stream_buffer,
+                    emit_stream=False,
+                )
+                if not final:
+                    saw_partial = True
+                    continue
+                if decoded is None:
+                    continue
+                values.append(decoded.value)
+                timestamp_int = int(timestamp)
+                ack_targets.append(
+                    QueueAckTarget(queue=outbox_name, message_id=timestamp_int)
+                )
+                observed_at = timestamp_int
     finally:
         queue.close()
 

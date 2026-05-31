@@ -16,6 +16,9 @@
 
 ### Fixed
 
+- Fixed queue-history scans to explicitly close SimpleBroker generator handles
+  when callers stop early, preventing process-shared broker leases from
+  lingering across manager probes, result waits, and cleanup scans.
 - Fixed cleanup progress accounting when policy-level progress records are
   folded from queue-local cleanup phases, including selected/applied counts and
   blocked reasons for consolidated Monitor policies.

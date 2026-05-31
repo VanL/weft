@@ -23,6 +23,7 @@ from weft._constants import (
     WEFT_SPAWN_REQUESTS_QUEUE,
 )
 from weft.context import WeftContext
+from weft.helpers import closing_queue_iterator
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,25 +171,27 @@ def send_keyed_ping_probe(
         ctrl_out = ctx.queue(ctrl_out_name, persistent=False)
         try:
             while True:
-                for item in ctrl_out.peek_generator(with_timestamps=True):
-                    if not isinstance(item, tuple) or len(item) != 2:
-                        continue
-                    body, timestamp = item
-                    payload = coerce_pong_response(
-                        str(body),
-                        tid=tid,
-                        request_id=probe_request_id,
-                    )
-                    if payload is None:
-                        continue
-                    return ControlProbeResult(
-                        request_id=probe_request_id,
-                        matched=MatchedPong(
-                            payload=payload,
-                            observed_at=int(timestamp),
+                iterator = ctrl_out.peek_generator(with_timestamps=True)
+                with closing_queue_iterator(iterator) as rows:
+                    for item in rows:
+                        if not isinstance(item, tuple) or len(item) != 2:
+                            continue
+                        body, timestamp = item
+                        payload = coerce_pong_response(
+                            str(body),
+                            tid=tid,
                             request_id=probe_request_id,
-                        ),
-                    )
+                        )
+                        if payload is None:
+                            continue
+                        return ControlProbeResult(
+                            request_id=probe_request_id,
+                            matched=MatchedPong(
+                                payload=payload,
+                                observed_at=int(timestamp),
+                                request_id=probe_request_id,
+                            ),
+                        )
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     return ControlProbeResult(

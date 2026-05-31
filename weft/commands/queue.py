@@ -44,7 +44,11 @@ from weft.core.endpoints import (
     resolve_endpoint,
 )
 from weft.core.queue_wait import QueueChangeMonitor
-from weft.helpers import resolve_broker_max_message_size, resolve_cli_message_content
+from weft.helpers import (
+    closing_queue_iterator,
+    resolve_broker_max_message_size,
+    resolve_cli_message_content,
+)
 
 
 @dataclass
@@ -246,13 +250,14 @@ def read_messages(
 
         if all_messages:
             iterator = queue.read_generator(with_timestamps=with_timestamps)
-            for item in iterator:
-                if with_timestamps:
-                    body, timestamp = cast(tuple[str, int], item)
-                    messages.append(QueueMessage(str(body), int(timestamp)))
-                else:
-                    text = cast(str, item)
-                    messages.append(QueueMessage(text))
+            with closing_queue_iterator(iterator) as rows:
+                for item in rows:
+                    if with_timestamps:
+                        body, timestamp = cast(tuple[str, int], item)
+                        messages.append(QueueMessage(str(body), int(timestamp)))
+                    else:
+                        text = cast(str, item)
+                        messages.append(QueueMessage(text))
         else:
             single_item = queue.read_one(with_timestamps=with_timestamps)
             if single_item is None:
@@ -300,15 +305,16 @@ def read_queue(
             after_timestamp=after,
             before_timestamp=before,
         )
-        for index, item in enumerate(iterator):
-            body, timestamp = cast(tuple[Any, Any], item)
-            entries.append(
-                QueueEntry(
-                    queue=queue_name, message=str(body), timestamp=int(timestamp)
+        with closing_queue_iterator(iterator) as rows:
+            for index, item in enumerate(rows):
+                body, timestamp = cast(tuple[Any, Any], item)
+                entries.append(
+                    QueueEntry(
+                        queue=queue_name, message=str(body), timestamp=int(timestamp)
+                    )
                 )
-            )
-            if not all_messages and index == 0:
-                break
+                if not all_messages and index == 0:
+                    break
         return entries
     finally:
         queue.close()
@@ -356,13 +362,14 @@ def peek_messages(
 
         if all_messages:
             iterator = queue.peek_generator(with_timestamps=with_timestamps)
-            for item in iterator:
-                if with_timestamps:
-                    body, timestamp = cast(tuple[str, int], item)
-                    messages.append(QueueMessage(str(body), int(timestamp)))
-                else:
-                    text = cast(str, item)
-                    messages.append(QueueMessage(text))
+            with closing_queue_iterator(iterator) as rows:
+                for item in rows:
+                    if with_timestamps:
+                        body, timestamp = cast(tuple[str, int], item)
+                        messages.append(QueueMessage(str(body), int(timestamp)))
+                    else:
+                        text = cast(str, item)
+                        messages.append(QueueMessage(text))
         else:
             single_item = queue.peek_one(with_timestamps=with_timestamps)
             if single_item is None:
@@ -410,15 +417,16 @@ def peek_queue(
             after_timestamp=after,
             before_timestamp=before,
         )
-        for index, item in enumerate(iterator):
-            body, timestamp = cast(tuple[Any, Any], item)
-            entries.append(
-                QueueEntry(
-                    queue=queue_name, message=str(body), timestamp=int(timestamp)
+        with closing_queue_iterator(iterator) as rows:
+            for index, item in enumerate(rows):
+                body, timestamp = cast(tuple[Any, Any], item)
+                entries.append(
+                    QueueEntry(
+                        queue=queue_name, message=str(body), timestamp=int(timestamp)
+                    )
                 )
-            )
-            if not all_messages and index == 0:
-                break
+                if not all_messages and index == 0:
+                    break
         return entries
     finally:
         queue.close()
@@ -463,13 +471,13 @@ def move_queue_messages(
     queue = ctx.queue(source, persistent=True)
     try:
         if message_id is not None:
-            moved = list(
-                queue.move_generator(
-                    destination,
-                    with_timestamps=True,
-                    exact_timestamp=message_id,
-                )
+            iterator = queue.move_generator(
+                destination,
+                with_timestamps=True,
+                exact_timestamp=message_id,
             )
+            with closing_queue_iterator(iterator) as rows:
+                moved = list(rows)
             return QueueMoveReceipt(
                 source=source,
                 destination=destination,
@@ -498,23 +506,24 @@ def move_queue_messages(
                 before_timestamp=before,
             )
             moved_count = 0
-            for _item in iterator:
-                moved_count += 1
-                break
+            with closing_queue_iterator(iterator) as rows:
+                for _item in rows:
+                    moved_count += 1
+                    break
             return QueueMoveReceipt(
                 source=source,
                 destination=destination,
                 moved_count=moved_count,
             )
-        moved = list(
-            _move_generator_after(
-                queue,
-                destination,
-                with_timestamps=True,
-                after_timestamp=after,
-                before_timestamp=before,
-            )
+        iterator = _move_generator_after(
+            queue,
+            destination,
+            with_timestamps=True,
+            after_timestamp=after,
+            before_timestamp=before,
         )
+        with closing_queue_iterator(iterator) as rows:
+            moved = list(rows)
         return QueueMoveReceipt(
             source=source,
             destination=destination,

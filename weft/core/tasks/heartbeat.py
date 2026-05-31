@@ -36,6 +36,7 @@ from weft._constants import (
 from weft.context import WeftContext
 from weft.core.endpoints import resolve_endpoint
 from weft.core.taskspec import ReservedPolicy, TaskSpec
+from weft.helpers import closing_queue_iterator
 
 from .multiqueue_watcher import QueueMessageContext, QueueMode
 from .service import ServiceTask
@@ -402,12 +403,16 @@ class HeartbeatTask(ServiceTask):
         queue = self._queue(WEFT_ENDPOINTS_REGISTRY_QUEUE)
         try:
             version: int | None = None
-            for item in queue.peek_generator(with_timestamps=True):
-                if not isinstance(item, tuple) or len(item) != 2:
-                    continue
-                _body, timestamp = item
-                if isinstance(timestamp, int):
-                    version = timestamp if version is None else max(version, timestamp)
+            iterator = queue.peek_generator(with_timestamps=True)
+            with closing_queue_iterator(iterator) as rows:
+                for item in rows:
+                    if not isinstance(item, tuple) or len(item) != 2:
+                        continue
+                    _body, timestamp = item
+                    if isinstance(timestamp, int):
+                        version = (
+                            timestamp if version is None else max(version, timestamp)
+                        )
         except (BrokerError, OSError, RuntimeError):
             return None
         return version

@@ -26,7 +26,7 @@ from weft.commands.types import TaskResult
 from weft.context import WeftContext, build_context
 from weft.core.pipelines import pipeline_public_queues
 from weft.core.queue_wait import QueueChangeMonitor
-from weft.helpers import iter_queue_json_entries
+from weft.helpers import closing_queue_iterator, iter_queue_json_entries
 
 from . import task_evidence
 from ._result_wait import (
@@ -350,11 +350,13 @@ def _active_streaming_queues(context: WeftContext) -> set[str]:
 
 def _iter_queue_messages(queue: Queue, *, peek: bool) -> Iterator[str]:
     if peek:
-        for peek_item in queue.peek_generator():
-            if isinstance(peek_item, tuple):
-                yield str(peek_item[0])
-            else:
-                yield str(peek_item)
+        iterator = queue.peek_generator()
+        with closing_queue_iterator(iterator) as rows:
+            for peek_item in rows:
+                if isinstance(peek_item, tuple):
+                    yield str(peek_item[0])
+                else:
+                    yield str(peek_item)
     else:
         while True:
             next_item = queue.read_one()
@@ -411,13 +413,15 @@ def _latest_visible_outbox_timestamp(queue: Queue) -> int | None:
     """Return the largest timestamp currently visible in an outbox queue."""
 
     latest_timestamp: int | None = None
-    for entry in queue.peek_generator(with_timestamps=True):
-        if not isinstance(entry, tuple) or len(entry) != 2:
-            continue
-        _payload, timestamp = entry
-        timestamp_int = int(timestamp)
-        if latest_timestamp is None or timestamp_int > latest_timestamp:
-            latest_timestamp = timestamp_int
+    iterator = queue.peek_generator(with_timestamps=True)
+    with closing_queue_iterator(iterator) as rows:
+        for entry in rows:
+            if not isinstance(entry, tuple) or len(entry) != 2:
+                continue
+            _payload, timestamp = entry
+            timestamp_int = int(timestamp)
+            if latest_timestamp is None or timestamp_int > latest_timestamp:
+                latest_timestamp = timestamp_int
     return latest_timestamp
 
 

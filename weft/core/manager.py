@@ -112,6 +112,7 @@ from weft.context import WeftContext
 from weft.ext import RunnerHandle
 from weft.helpers import (
     canonical_owner_tid,
+    closing_queue_iterator,
     detect_container_runtime,
     handle_has_live_host_process,
     is_canonical_manager_record,
@@ -1657,36 +1658,38 @@ class Manager(ServiceTask):
             return
 
         try:
-            for entry in entries:
-                if not isinstance(entry, tuple) or len(entry) != 2:
-                    continue
-                body, timestamp = entry
-                if not isinstance(timestamp, int):
-                    continue
-                try:
-                    payload = json.loads(body)
-                except (TypeError, json.JSONDecodeError):
-                    continue
-                if not isinstance(payload, dict):
-                    continue
-                if (
-                    payload.get("schema") == SERVICE_OWNER_SCHEMA
-                    and parse_service_owner_record(payload, timestamp=timestamp) is None
-                ):
-                    expired_timestamps.append(timestamp)
-                    continue
-                projected = project_manager_service_record(
-                    payload,
-                    timestamp=timestamp,
-                    service_key=service_key,
-                )
-                if projected is None:
-                    continue
-                if isinstance(timestamp, int) and self._registry_entry_is_expired(
-                    timestamp,
-                    now_ns=observed_now_ns,
-                ):
-                    expired_timestamps.append(timestamp)
+            with closing_queue_iterator(entries) as rows:
+                for entry in rows:
+                    if not isinstance(entry, tuple) or len(entry) != 2:
+                        continue
+                    body, timestamp = entry
+                    if not isinstance(timestamp, int):
+                        continue
+                    try:
+                        payload = json.loads(body)
+                    except (TypeError, json.JSONDecodeError):
+                        continue
+                    if not isinstance(payload, dict):
+                        continue
+                    if (
+                        payload.get("schema") == SERVICE_OWNER_SCHEMA
+                        and parse_service_owner_record(payload, timestamp=timestamp)
+                        is None
+                    ):
+                        expired_timestamps.append(timestamp)
+                        continue
+                    projected = project_manager_service_record(
+                        payload,
+                        timestamp=timestamp,
+                        service_key=service_key,
+                    )
+                    if projected is None:
+                        continue
+                    if isinstance(timestamp, int) and self._registry_entry_is_expired(
+                        timestamp,
+                        now_ns=observed_now_ns,
+                    ):
+                        expired_timestamps.append(timestamp)
         except (BrokerError, OSError, RuntimeError):
             logger.debug("Failed to replay manager registry for expiry", exc_info=True)
             return
@@ -1733,29 +1736,30 @@ class Manager(ServiceTask):
             return None
 
         try:
-            for entry in entries:
-                if not isinstance(entry, tuple) or len(entry) != 2:
-                    continue
-                body, timestamp = entry
-                if not isinstance(timestamp, int):
-                    continue
-                try:
-                    payload = json.loads(body)
-                except (TypeError, json.JSONDecodeError):
-                    continue
-                if not isinstance(payload, dict):
-                    continue
-                record = parse_service_owner_record(payload, timestamp=timestamp)
-                if (
-                    record is None
-                    or record.owner_tid != self.tid
-                    or record.service_type != SERVICE_TYPE_MANAGER
-                    or record.service_key != service_key
-                ):
-                    continue
-                if timestamp > latest_timestamp:
-                    latest_timestamp = timestamp
-                    latest_status = record.status
+            with closing_queue_iterator(entries) as rows:
+                for entry in rows:
+                    if not isinstance(entry, tuple) or len(entry) != 2:
+                        continue
+                    body, timestamp = entry
+                    if not isinstance(timestamp, int):
+                        continue
+                    try:
+                        payload = json.loads(body)
+                    except (TypeError, json.JSONDecodeError):
+                        continue
+                    if not isinstance(payload, dict):
+                        continue
+                    record = parse_service_owner_record(payload, timestamp=timestamp)
+                    if (
+                        record is None
+                        or record.owner_tid != self.tid
+                        or record.service_type != SERVICE_TYPE_MANAGER
+                        or record.service_key != service_key
+                    ):
+                        continue
+                    if timestamp > latest_timestamp:
+                        latest_timestamp = timestamp
+                        latest_status = record.status
         except (BrokerError, OSError, RuntimeError):
             logger.debug("Failed to replay self manager status", exc_info=True)
             return None
@@ -1779,31 +1783,32 @@ class Manager(ServiceTask):
             return None
 
         try:
-            for entry in entries:
-                if not isinstance(entry, tuple) or len(entry) != 2:
-                    continue
-                body, timestamp = entry
-                if not isinstance(timestamp, int):
-                    continue
-                if since_timestamp is not None and timestamp < since_timestamp:
-                    continue
-                try:
-                    payload = json.loads(body)
-                except (TypeError, json.JSONDecodeError):
-                    continue
-                if not isinstance(payload, dict):
-                    continue
-                record = parse_service_owner_record(payload, timestamp=timestamp)
-                if (
-                    record is None
-                    or record.owner_tid != self.tid
-                    or record.service_type != SERVICE_TYPE_MANAGER
-                    or record.service_key != service_key
-                    or record.status != status
-                ):
-                    continue
-                if latest_timestamp is None or timestamp > latest_timestamp:
-                    latest_timestamp = timestamp
+            with closing_queue_iterator(entries) as rows:
+                for entry in rows:
+                    if not isinstance(entry, tuple) or len(entry) != 2:
+                        continue
+                    body, timestamp = entry
+                    if not isinstance(timestamp, int):
+                        continue
+                    if since_timestamp is not None and timestamp < since_timestamp:
+                        continue
+                    try:
+                        payload = json.loads(body)
+                    except (TypeError, json.JSONDecodeError):
+                        continue
+                    if not isinstance(payload, dict):
+                        continue
+                    record = parse_service_owner_record(payload, timestamp=timestamp)
+                    if (
+                        record is None
+                        or record.owner_tid != self.tid
+                        or record.service_type != SERVICE_TYPE_MANAGER
+                        or record.service_key != service_key
+                        or record.status != status
+                    ):
+                        continue
+                    if latest_timestamp is None or timestamp > latest_timestamp:
+                        latest_timestamp = timestamp
         except (BrokerError, OSError, RuntimeError):
             logger.debug("Failed to replay self manager status", exc_info=True)
             return None
@@ -1821,29 +1826,30 @@ class Manager(ServiceTask):
             return
 
         try:
-            for entry in entries:
-                if not isinstance(entry, tuple) or len(entry) != 2:
-                    continue
-                body, timestamp = entry
-                if not isinstance(timestamp, int):
-                    continue
-                try:
-                    payload = json.loads(body)
-                except (TypeError, json.JSONDecodeError):
-                    continue
-                if not isinstance(payload, dict):
-                    continue
-                record = parse_service_owner_record(payload, timestamp=timestamp)
-                if (
-                    record is None
-                    or record.owner_tid != self.tid
-                    or record.service_type != SERVICE_TYPE_MANAGER
-                    or record.service_key != self._manager_service_key
-                ):
-                    continue
-                self_timestamps.append(timestamp)
-                if latest_ts is None or timestamp > latest_ts:
-                    latest_ts = timestamp
+            with closing_queue_iterator(entries) as rows:
+                for entry in rows:
+                    if not isinstance(entry, tuple) or len(entry) != 2:
+                        continue
+                    body, timestamp = entry
+                    if not isinstance(timestamp, int):
+                        continue
+                    try:
+                        payload = json.loads(body)
+                    except (TypeError, json.JSONDecodeError):
+                        continue
+                    if not isinstance(payload, dict):
+                        continue
+                    record = parse_service_owner_record(payload, timestamp=timestamp)
+                    if (
+                        record is None
+                        or record.owner_tid != self.tid
+                        or record.service_type != SERVICE_TYPE_MANAGER
+                        or record.service_key != self._manager_service_key
+                    ):
+                        continue
+                    self_timestamps.append(timestamp)
+                    if latest_ts is None or timestamp > latest_ts:
+                        latest_ts = timestamp
         except (BrokerError, OSError, RuntimeError):
             logger.debug("Failed to replay self manager registry rows", exc_info=True)
             return
@@ -2016,25 +2022,26 @@ class Manager(ServiceTask):
         except (BrokerError, OSError, RuntimeError):
             return None
 
-        for entry in generator:
-            if not isinstance(entry, tuple) or len(entry) != 2:
-                continue
-            body, timestamp = entry
-            if not isinstance(timestamp, int):
-                continue
-            try:
-                payload = json.loads(body)
-            except (TypeError, json.JSONDecodeError):
-                continue
-            if not isinstance(payload, dict):
-                continue
-            projected = project_manager_service_record(
-                payload,
-                timestamp=timestamp,
-                service_key=self._manager_service_key,
-            )
-            if projected is not None and projected.get("tid") == tid:
-                latest = (payload, timestamp)
+        with closing_queue_iterator(generator) as rows:
+            for entry in rows:
+                if not isinstance(entry, tuple) or len(entry) != 2:
+                    continue
+                body, timestamp = entry
+                if not isinstance(timestamp, int):
+                    continue
+                try:
+                    payload = json.loads(body)
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                projected = project_manager_service_record(
+                    payload,
+                    timestamp=timestamp,
+                    service_key=self._manager_service_key,
+                )
+                if projected is not None and projected.get("tid") == tid:
+                    latest = (payload, timestamp)
         return latest
 
     @staticmethod
@@ -2266,25 +2273,27 @@ class Manager(ServiceTask):
                 persistent=False,
             )
             try:
-                for item in ctrl_out.peek_generator(with_timestamps=True):
-                    if not isinstance(item, tuple) or len(item) != 2:
-                        continue
-                    body, _timestamp = item
-                    payload = coerce_pong_response(
-                        str(body),
-                        tid=probe.tid,
-                        request_id=probe.request_id,
-                    )
-                    if payload is None:
-                        continue
-                    matched_proof = self._manager_pong_payload_proof(
-                        payload,
-                        record=record,
-                        ctrl_in_name=probe.ctrl_in_name,
-                        ctrl_out_name=probe.ctrl_out_name,
-                    )
-                    matched_message_id = int(_timestamp)
-                    break
+                iterator = ctrl_out.peek_generator(with_timestamps=True)
+                with closing_queue_iterator(iterator) as rows:
+                    for item in rows:
+                        if not isinstance(item, tuple) or len(item) != 2:
+                            continue
+                        body, _timestamp = item
+                        payload = coerce_pong_response(
+                            str(body),
+                            tid=probe.tid,
+                            request_id=probe.request_id,
+                        )
+                        if payload is None:
+                            continue
+                        matched_proof = self._manager_pong_payload_proof(
+                            payload,
+                            record=record,
+                            ctrl_in_name=probe.ctrl_in_name,
+                            ctrl_out_name=probe.ctrl_out_name,
+                        )
+                        matched_message_id = int(_timestamp)
+                        break
             finally:
                 ctrl_out.close()
         except (BrokerError, OSError, RuntimeError) as exc:
@@ -3001,20 +3010,22 @@ class Manager(ServiceTask):
             config=self._config,
         )
         try:
-            for entry in ctrl_out.peek_generator(with_timestamps=True):
-                body = entry[0] if isinstance(entry, tuple) else entry
-                try:
-                    payload = json.loads(str(body))
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(payload, dict):
-                    continue
-                if (
-                    payload.get("type") == TERMINAL_ENVELOPE_TYPE
-                    and payload.get("tid") == tid
-                    and payload.get("source") == "task"
-                ):
-                    return True
+            iterator = ctrl_out.peek_generator(with_timestamps=True)
+            with closing_queue_iterator(iterator) as rows:
+                for entry in rows:
+                    body = entry[0] if isinstance(entry, tuple) else entry
+                    try:
+                        payload = json.loads(str(body))
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(payload, dict):
+                        continue
+                    if (
+                        payload.get("type") == TERMINAL_ENVELOPE_TYPE
+                        and payload.get("tid") == tid
+                        and payload.get("source") == "task"
+                    ):
+                        return True
         except (BrokerError, OSError, RuntimeError):
             logger.debug(
                 "Failed to inspect child ctrl_out for terminal proof",
@@ -3726,14 +3737,16 @@ class Manager(ServiceTask):
 
         queue = self._queue(queue_name)
         message_ids: list[int] = []
-        for entry in queue.peek_generator(with_timestamps=True):
-            if limit is not None and len(message_ids) >= limit:
-                break
-            if not isinstance(entry, tuple) or len(entry) != 2:
-                continue
-            _body, timestamp = entry
-            if isinstance(timestamp, int):
-                message_ids.append(timestamp)
+        iterator = queue.peek_generator(with_timestamps=True)
+        with closing_queue_iterator(iterator) as rows:
+            for entry in rows:
+                if limit is not None and len(message_ids) >= limit:
+                    break
+                if not isinstance(entry, tuple) or len(entry) != 2:
+                    continue
+                _body, timestamp = entry
+                if isinstance(timestamp, int):
+                    message_ids.append(timestamp)
         deleted = 0
         for message_id in message_ids:
             if queue.delete(message_id=message_id):
@@ -4664,20 +4677,22 @@ class Manager(ServiceTask):
                 persistent=False,
             )
             try:
-                for item in ctrl_out.peek_generator(with_timestamps=True):
-                    if not isinstance(item, tuple) or len(item) != 2:
-                        continue
-                    body, _message_timestamp = item
-                    payload = coerce_pong_response(
-                        str(body),
-                        tid=probe.tid,
-                        request_id=probe.request_id,
-                    )
-                    if payload is None:
-                        continue
-                    matched_message_id = int(_message_timestamp)
-                    matched = True
-                    break
+                iterator = ctrl_out.peek_generator(with_timestamps=True)
+                with closing_queue_iterator(iterator) as rows:
+                    for item in rows:
+                        if not isinstance(item, tuple) or len(item) != 2:
+                            continue
+                        body, _message_timestamp = item
+                        payload = coerce_pong_response(
+                            str(body),
+                            tid=probe.tid,
+                            request_id=probe.request_id,
+                        )
+                        if payload is None:
+                            continue
+                        matched_message_id = int(_message_timestamp)
+                        matched = True
+                        break
             finally:
                 ctrl_out.close()
         except (BrokerError, OSError, RuntimeError) as exc:

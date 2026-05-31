@@ -21,6 +21,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, cast
@@ -285,6 +286,18 @@ def iter_queue_entries(
                 close_generator()
 
     return _generator()
+
+
+@contextmanager
+def closing_queue_iterator[T](iterator: Iterable[T]) -> Iterator[Iterable[T]]:
+    """Close a broker generator when callers stop before exhausting it."""
+
+    try:
+        yield iterator
+    finally:
+        close_generator = getattr(iterator, "close", None)
+        if callable(close_generator):
+            close_generator()
 
 
 def iter_queue_json_entries(
