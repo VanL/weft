@@ -41,6 +41,7 @@ from weft.core.queue_wait import QueueChangeMonitor
 from weft.helpers import (
     iter_queue_json_entries,
     kill_process_tree,
+    pid_is_live,
     terminate_process_tree,
 )
 
@@ -1070,13 +1071,7 @@ def _host_pids_from_mapping(entry: dict[str, Any]) -> tuple[int, ...]:
 
 
 def _pid_exists(pid: int | None) -> bool:
-    if pid is None or pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        return False
-    return True
+    return pid_is_live(pid)
 
 
 def _snapshot_from_terminal_ctrl_out(

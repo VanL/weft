@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 import time
@@ -34,7 +33,7 @@ from weft.core.taskspec import (
     StateSection,
     TaskSpec,
 )
-from weft.helpers import kill_process_tree
+from weft.helpers import kill_process_tree, pid_is_live
 
 pytestmark = [pytest.mark.shared]
 
@@ -540,9 +539,7 @@ def _wait_for_process_exit(process: Any, *, timeout: float = 10.0) -> bool:
         is_alive = getattr(process, "is_alive", None)
         if callable(is_alive) and not bool(is_alive()):
             return True
-        try:
-            os.kill(pid, 0)
-        except OSError:
+        if not pid_is_live(pid):
             return True
         time.sleep(0.05)
     return False
