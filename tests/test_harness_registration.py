@@ -120,6 +120,17 @@ def test_harness_cleanup_preserve_database_avoids_force_termination(
         monkeypatch.setattr(
             harness, "_terminate_pid", lambda pid: terminated.append(pid)
         )
+        clock = {"now": 0.0}
+
+        def fake_time() -> float:
+            return clock["now"]
+
+        def fake_sleep(seconds: float) -> None:
+            del seconds
+            clock["now"] += harness._manager_timeout
+
+        monkeypatch.setattr(harness_mod.time, "time", fake_time)
+        monkeypatch.setattr(harness_mod.time, "sleep", fake_sleep)
 
         with pytest.raises(RuntimeError, match="preserve_database=True"):
             harness.cleanup(preserve_database=True)
@@ -383,6 +394,11 @@ def test_harness_cleanup_preserves_windows_tempdir_when_database_stays_locked(
             lambda root: None,
         )
         monkeypatch.setattr(harness_mod, "_is_windows", lambda: True)
+        monkeypatch.setattr(
+            harness_mod,
+            "WINDOWS_TEMP_DIR_CLEANUP_TIMEOUT_SECONDS",
+            0.0,
+        )
         harness._tempdir = cast(Any, _TempdirStub())
 
         harness.cleanup()
@@ -1104,6 +1120,12 @@ def test_wait_for_completion_timeout_includes_tid_debug_snapshot(
 
         monkeypatch.setattr(harness, "_pid_alive", lambda pid: pid == 424242)
         monkeypatch.setattr(harness, "_should_skip_pid", lambda pid: False)
+        monkeypatch.setattr(harness, "_collect_pid_mappings", lambda: None)
+        monkeypatch.setattr(
+            harness,
+            "_wait_for_registered_pids_to_exit",
+            lambda timeout=None: [],
+        )
 
         with pytest.raises(
             TimeoutError, match=rf"Timed out waiting for task {tid}"

@@ -5019,12 +5019,17 @@ def test_manager_stop_command_does_not_launch_new_children_after_stop(
 
     deadline = time.time() + (20.0 if os.name == "nt" else 10.0)
     max_children_seen = len(manager._child_processes)
-    while time.time() < deadline and not manager.should_stop:
+    while time.time() < deadline and not (manager._draining or manager.should_stop):
         manager.process_once()
         max_children_seen = max(max_children_seen, len(manager._child_processes))
         time.sleep(0.05)
 
-    assert manager.should_stop is True
+    assert manager._draining or manager.should_stop
+    for _ in range(3):
+        manager.process_once()
+        max_children_seen = max(max_children_seen, len(manager._child_processes))
+        time.sleep(0.05)
+
     assert max_children_seen == 1
 
     events = [json.loads(item) for item in drain(log_queue)]
