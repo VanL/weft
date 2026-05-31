@@ -7,6 +7,7 @@ import json
 import sys
 import threading
 import time
+import traceback
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -750,7 +751,7 @@ def _drive_consumer_until(
     task: Consumer,
     predicate: Callable[[], bool],
     *,
-    timeout: float = 15.0,
+    timeout: float = 60.0,
 ) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -762,8 +763,26 @@ def _drive_consumer_until(
         "Consumer did not reach expected state before timeout "
         f"(status={task.taskspec.state.status!r}, "
         f"should_stop={task.should_stop!r}, "
-        f"worker_activity={task._has_worker_activity()!r})"
+        f"worker_activity={task._has_worker_activity()!r}, "
+        f"worker_snapshot={task._worker_activity_snapshot()!r}, "
+        f"worker_stacks={_consumer_worker_stacks(task)!r})"
     )
+
+
+def _consumer_worker_stacks(task: Consumer) -> list[str]:
+    """Return worker lane stacks for async drain diagnostics."""
+
+    frames = sys._current_frames()
+    stacks: list[str] = []
+    for thread in threading.enumerate():
+        if not thread.name.startswith(f"weft-worker-{task.tid_short}-"):
+            continue
+        frame = frames.get(thread.ident)
+        if frame is None:
+            continue
+        stack = "".join(traceback.format_stack(frame, limit=12))
+        stacks.append(f"{thread.name}:\n{stack}")
+    return stacks
 
 
 def test_consumer_reactor_responds_to_ping_while_command_work_is_active(

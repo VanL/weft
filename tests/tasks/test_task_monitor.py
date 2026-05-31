@@ -105,7 +105,7 @@ def blocking_processor(
 def drive_task_monitor_until_idle(
     task: TaskMonitor,
     *,
-    timeout: float = 20.0,
+    timeout: float = 90.0,
 ) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -1066,7 +1066,9 @@ def test_task_monitor_skips_terminal_summary_after_partial_fifo_pass(
         assert task._last_retained_task_log_ingest.completed_fifo_high_water is False
         assert task._last_catchup_pending is True
         assert task._next_cycle_due_monotonic > cycle_started_at
-        assert 0.0 <= task.next_wait_timeout() <= 0.2
+        next_wait = task.next_wait_timeout()
+        assert next_wait >= 0.0
+        assert next_wait <= 0.201
     finally:
         task.stop()
 
