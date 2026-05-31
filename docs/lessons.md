@@ -267,6 +267,14 @@ runbook needs to become stricter.
   a terminal control envelope is already visible adds avoidable SQLite
   contention in long mixed-workload release gates.
 
+## 2026-05-31 Broker Finalizers
+
+- Do not perform broker I/O from object finalizers. `__del__` can run during
+  pytest or process teardown while SimpleBroker watcher and cleanup threads are
+  already inside backend locking, turning best-effort cleanup into opaque xdist
+  worker deaths. Broker mutations belong in explicit `stop()` / `cleanup()`
+  ownership paths.
+
 ## 2026-05-27 Terminal Proof Grace
 
 - A cleanly exited child wrapper is not proof that task-owned terminal evidence

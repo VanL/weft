@@ -15,7 +15,6 @@ Spec references:
 from __future__ import annotations
 
 import base64
-import contextlib
 import hashlib
 import json
 import logging
@@ -726,10 +725,6 @@ class BaseTask(MultiQueueWatcher, ABC):
             super().stop(join=join, timeout=timeout)
 
         if not cleanup_before_stop:
-            self.cleanup()
-
-    def __del__(self) -> None:  # pragma: no cover - best effort cleanup
-        with contextlib.suppress(Exception):
             self.cleanup()
 
     def _get_reserved_queue(self) -> Queue:
