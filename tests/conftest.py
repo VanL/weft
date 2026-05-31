@@ -407,15 +407,10 @@ def run_cli(
             debug_lines.append("No WeftTestHarness provided.")
         debug_text = "\n".join(debug_lines)
         existing_stderr = exc.stderr or ""
-        combined_stderr = (
-            f"{existing_stderr}\n{debug_text}" if existing_stderr else debug_text
-        )
-        raise subprocess.TimeoutExpired(
-            exc.cmd,
-            exc.timeout,
-            output=exc.output,
-            stderr=combined_stderr,
-        ) from exc
+        if existing_stderr:
+            exc.add_note(f"partial stderr:\n{existing_stderr}")
+        exc.add_note(debug_text)
+        raise
 
     stdout = completed.stdout.strip()
     stderr = completed.stderr.strip()

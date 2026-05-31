@@ -957,6 +957,7 @@ def test_cli_run_spec_path_reads_piped_stdin_into_function(
 def test_cli_run_spec_bundle_resolves_bundle_local_function_target(
     workdir, weft_harness
 ) -> None:
+    weft_harness.ensure_foreground_manager()
     bundle_dir = workdir / "bundle-task"
     bundle_dir.mkdir(parents=True, exist_ok=True)
     (bundle_dir / "helper_module.py").write_text(
@@ -1067,6 +1068,7 @@ def test_cli_run_spec_bundle_declared_args_shape_work_item(
     workdir,
     weft_harness,
 ) -> None:
+    weft_harness.ensure_foreground_manager()
     bundle_dir = workdir / "run-input-bundle"
     bundle_dir.mkdir(parents=True, exist_ok=True)
     (bundle_dir / "helper_module.py").write_text(
@@ -1230,6 +1232,7 @@ def test_cli_run_spec_bundle_declared_path_arg_normalizes_to_absolute_path(
     workdir,
     weft_harness,
 ) -> None:
+    weft_harness.ensure_foreground_manager()
     bundle_dir = workdir / "run-input-path-bundle"
     bundle_dir.mkdir(parents=True, exist_ok=True)
     (bundle_dir / "helper_module.py").write_text(
@@ -1403,6 +1406,7 @@ def test_cli_run_spec_bundle_parameterization_materializes_before_run_input(
     workdir,
     weft_harness,
 ) -> None:
+    weft_harness.ensure_foreground_manager()
     bundle_dir = workdir / "parameterized-bundle"
     bundle_dir.mkdir(parents=True, exist_ok=True)
     (bundle_dir / "helper_module.py").write_text(
