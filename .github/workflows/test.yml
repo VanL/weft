@@ -24,10 +24,10 @@ jobs:
         include:
           - test_slice: cli
             pytest_targets: tests/cli
-            pytest_diagnostic_args: --durations=100 --durations-min=0.5
+            pytest_diagnostic_args: --durations=100 --durations-min=0.5 --timeout=300 --timeout-method=thread --full-trace
           - test_slice: core-commands
             pytest_targets: tests/commands tests/core
-            pytest_diagnostic_args: --durations=100 --durations-min=0.5
+            pytest_diagnostic_args: --durations=100 --durations-min=0.5 --timeout=300 --timeout-method=thread --full-trace
           - test_slice: remaining
             pytest_targets: tests/architecture tests/context tests/helpers tests/shell tests/specs tests/system tests/tasks tests/taskspec tests/test_harness_registration.py
             pytest_diagnostic_args: --durations=100 --durations-min=0.5 --timeout=300 --timeout-method=thread --full-trace
@@ -188,7 +188,7 @@ jobs:
 
     - name: Run Django integration tests
       run: |
-        pytest -q -n 0 integrations/weft_django/tests --durations=50 --durations-min=1.0
+        pytest -q -n 0 integrations/weft_django/tests --durations=50 --durations-min=1.0 --timeout=300 --timeout-method=thread --full-trace
 
   test-docker-extension:
     # Release commits are covered by the root tag release gate, which keeps
@@ -221,7 +221,7 @@ jobs:
 
     - name: Run Docker extension tests
       run: |
-        pytest -q -n 0 extensions/weft_docker/tests --durations=50 --durations-min=1.0
+        pytest -q -n 0 extensions/weft_docker/tests --durations=50 --durations-min=1.0 --timeout=300 --timeout-method=thread --full-trace
 
   test-macos-sandbox-extension:
     # Release commits are covered by the root tag release gate, which keeps
@@ -250,4 +250,4 @@ jobs:
 
     - name: Run macOS sandbox extension tests
       run: |
-        pytest -q -n 0 extensions/weft_macos_sandbox/tests --durations=50 --durations-min=1.0
+        pytest -q -n 0 extensions/weft_macos_sandbox/tests --durations=50 --durations-min=1.0 --timeout=300 --timeout-method=thread --full-trace
