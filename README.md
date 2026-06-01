@@ -680,7 +680,7 @@ provider executable to exist, because the real provider CLI runs inside the
 container.
 
 `weft system dump` exports visible pending broker messages and preserves their
-message IDs on load through SimpleBroker's bulk import API. Claimed
+message IDs on load through SimpleBroker's `insert_messages()` API. Claimed
 in-flight rows are omitted and reported in the dump summary. `weft system load
 -i FILE` mutates the target context; use `--dry-run` for validation only.
 

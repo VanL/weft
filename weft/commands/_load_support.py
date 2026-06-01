@@ -358,7 +358,7 @@ def _execute_import(plan: ImportPlan, context: WeftContext) -> ImportReport:
 
             if plan.message_records:
                 writes_started = True
-                broker.import_messages(
+                broker.insert_messages(
                     (
                         message_record.queue_name,
                         message_record.body,
@@ -402,7 +402,7 @@ def _ensure_exact_timestamp_import_supported(
     if not plan.message_records:
         return
     with context.broker() as broker:
-        if callable(getattr(broker, "import_messages", None)):
+        if callable(getattr(broker, "insert_messages", None)):
             return
     raise ImportError(
         "backend cannot preserve message timestamps during import; "

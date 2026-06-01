@@ -787,7 +787,7 @@ Current behavior:
   returns exit code `3` on alias conflicts before writes begin. If exact
   timestamp import is unavailable for the active backend, load fails before
   writing rather than silently allocating new message IDs. Load uses
-  SimpleBroker's bulk `import_messages()` API so timestamp high-water handling
+  SimpleBroker's bulk `insert_messages()` API so timestamp high-water handling
   and row import occur inside the broker apply path.
 - `system task-monitor` scans `weft.log.tasks` without consuming broker
   messages and emits JSONL log records to stdout or append-only disk files

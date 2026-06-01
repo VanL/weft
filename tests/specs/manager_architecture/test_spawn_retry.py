@@ -35,7 +35,7 @@ def _build_spec(tid: str) -> TaskSpec:
     )
 
 
-def test_spawn_request_uses_reserved_message_api(monkeypatch, tmp_path) -> None:
+def test_spawn_request_uses_insert_messages_api(monkeypatch, tmp_path) -> None:
     root = prepare_project_root(tmp_path)
     context = build_context(spec_context=root)
     tid = run_module._generate_tid(context)
@@ -43,28 +43,24 @@ def test_spawn_request_uses_reserved_message_api(monkeypatch, tmp_path) -> None:
     called = {"count": 0, "message_id": None}
     original_get_connection = spawn_requests.Queue.get_connection
 
-    def _get_connection_with_reserved_write_probe(self):
+    def _get_connection_with_insert_probe(self):
         connection_cm = original_get_connection(self)
 
         @contextmanager
         def _wrapped() -> Iterator[Any]:
             with connection_cm as db:
-                original = db.write_reserved_message
+                original = db.insert_messages
 
                 class BrokerProxy:
                     def __init__(self, wrapped: Any) -> None:
                         self._wrapped = wrapped
 
-                    def write_reserved_message(
-                        self,
-                        queue: str,
-                        message: str,
-                        *,
-                        message_id: int,
-                    ) -> None:
-                        called["count"] += 1
-                        called["message_id"] = message_id
-                        return original(queue, message, message_id=message_id)
+                    def insert_messages(self, records: Any) -> None:
+                        captured_records = tuple(records)
+                        called["count"] += len(captured_records)
+                        assert len(captured_records) == 1
+                        called["message_id"] = captured_records[0][2]
+                        return original(captured_records)
 
                     def __getattr__(self, name: str) -> Any:
                         return getattr(self._wrapped, name)
@@ -76,7 +72,7 @@ def test_spawn_request_uses_reserved_message_api(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(
         spawn_requests.Queue,
         "get_connection",
-        _get_connection_with_reserved_write_probe,
+        _get_connection_with_insert_probe,
     )
 
     run_module._enqueue_taskspec(context, taskspec, None)
