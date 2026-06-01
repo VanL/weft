@@ -217,6 +217,58 @@ class _ServiceEvidence:
     reconciliation: dict[str, Any] | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _InternalServiceOwnerEvidenceIndex:
+    """Latest service-registry evidence keyed for status reconciliation."""
+
+    by_key: dict[str, tuple[_ServiceEvidence, ...]]
+    by_owner: dict[tuple[str, str], _ServiceEvidence]
+
+    @classmethod
+    def from_evidence(
+        cls,
+        evidence: Sequence[_ServiceEvidence],
+    ) -> _InternalServiceOwnerEvidenceIndex:
+        by_key_lists: dict[str, list[_ServiceEvidence]] = {}
+        by_owner: dict[tuple[str, str], _ServiceEvidence] = {}
+        for item in evidence:
+            by_key_lists.setdefault(item.key, []).append(item)
+            if item.tid is not None:
+                by_owner[(item.key, item.tid)] = item
+        return cls(
+            by_key={
+                key: tuple(sorted(items, key=_service_evidence_sort_key))
+                for key, items in by_key_lists.items()
+            },
+            by_owner=by_owner,
+        )
+
+    def live_owner_for_key(self, service_key: str) -> _ServiceEvidence | None:
+        """Return the best live owner evidence for one internal service key."""
+
+        candidates = [
+            item
+            for item in self.by_key.get(service_key, ())
+            if item.status in {"running", "launched"}
+        ]
+        if not candidates:
+            return None
+        return max(candidates, key=_service_evidence_sort_key)
+
+    def owner_evidence(
+        self,
+        service_key: str,
+        owner_tid: str,
+    ) -> _ServiceEvidence | None:
+        """Return service-registry evidence for one service owner TID."""
+
+        return self.by_owner.get((service_key, owner_tid))
+
+
+def _service_evidence_sort_key(candidate: _ServiceEvidence) -> tuple[int, int, str]:
+    return (candidate.rank, candidate.updated_at or 0, candidate.tid or "")
+
+
 def _resolve_context(
     spec_context: str | os.PathLike[str] | None = None,
 ) -> WeftContext:
@@ -661,6 +713,7 @@ def _effective_public_status(
 def _stale_liveness_reason(
     status: str,
     *,
+    tid: str,
     runner_name: str | None,
     mapping_entry: Mapping[str, Any] | None,
     runtime_description: Mapping[str, Any] | None,
@@ -668,6 +721,8 @@ def _stale_liveness_reason(
     now_ns: int,
     has_live_manager_record: bool = False,
     internal_service: bool = False,
+    internal_service_key: str | None = None,
+    service_owner_index: _InternalServiceOwnerEvidenceIndex | None = None,
 ) -> str | None:
     """Return why nonterminal liveness evidence is stale without failing it."""
 
@@ -688,7 +743,31 @@ def _stale_liveness_reason(
     if status in TERMINAL_TASK_STATUSES:
         return None
     if internal_service and status in {"spawning", "running"}:
-        return None
+        host_runtime_not_live = (
+            host_task_pid is not None
+            and not _task_process_alive(mapping_entry)
+            and not _runtime_description_is_live(runtime_description)
+        )
+        runtime_proof_missing = stale_without_runtime or host_runtime_not_live
+        if internal_service_key is None or not runtime_proof_missing:
+            return None
+        same_owner = (
+            service_owner_index.owner_evidence(internal_service_key, tid)
+            if service_owner_index is not None
+            else None
+        )
+        if same_owner is not None and same_owner.status in {"running", "launched"}:
+            return None
+        live_owner = (
+            service_owner_index.live_owner_for_key(internal_service_key)
+            if service_owner_index is not None
+            else None
+        )
+        if live_owner is not None and live_owner.tid != tid:
+            return "superseded_internal_service_record"
+        if host_runtime_not_live and not stale_without_runtime:
+            return "host_process_not_live"
+        return "internal_service_runtime_missing_after_stale_window"
     if (
         status in {"spawning", "running"}
         and (not normalized_runner or normalized_runner == "host")
@@ -710,14 +789,29 @@ def _stale_liveness_reconciliation(
     reason: str,
     lifecycle_status: str,
     public_status: str,
+    service_key: str | None = None,
+    active_service_tid: str | None = None,
 ) -> dict[str, Any]:
-    return {
-        "classification": "stale_liveness",
+    internal_service_reasons = {
+        "superseded_internal_service_record",
+        "internal_service_runtime_missing_after_stale_window",
+    }
+    payload: dict[str, Any] = {
+        "classification": (
+            reason if reason in internal_service_reasons else "stale_liveness"
+        ),
         "reason": reason,
         "lifecycle_status": lifecycle_status,
         "public_status": public_status,
-        "evidence_source": "runtime",
+        "evidence_source": (
+            "service-registry" if reason in internal_service_reasons else "runtime"
+        ),
     }
+    if service_key is not None:
+        payload["service_key"] = service_key
+    if active_service_tid is not None:
+        payload["active_service_tid"] = active_service_tid
+    return payload
 
 
 def _reconcile_lifecycle_status(
@@ -878,12 +972,23 @@ def _collect_task_snapshot_records(
     include_terminal: bool,
     tid_filters: set[str] | None,
     since_timestamp: int | None = None,
+    now_ns: int | None = None,
+    service_registry_evidence: Sequence[_ServiceEvidence] | None = None,
 ) -> list[CollectedTaskSnapshot]:
     """Reconstruct current task state from event-sourced log replay.
 
     Spec: [MF-5]
     """
-    now_ns = time.time_ns()
+    if now_ns is None:
+        now_ns = time.time_ns()
+    registry_evidence = (
+        tuple(service_registry_evidence)
+        if service_registry_evidence is not None
+        else tuple(_collect_service_registry_evidence(ctx, now_ns=now_ns))
+    )
+    service_owner_index = _InternalServiceOwnerEvidenceIndex.from_evidence(
+        registry_evidence
+    )
     records: dict[str, dict[str, Any]] = {}
     tid_mapping_entries = _latest_tid_mapping_entries(ctx)
     try:
@@ -1049,6 +1154,10 @@ def _collect_task_snapshot_records(
         runtime_description = _describe_runtime_handle(runtime_handle)
         status_reason = record.get("status_reason")
         lifecycle_status = str(record.get("status") or "created")
+        internal_service_key = _service_key_from_taskspec_payload(taskspec)
+        internal_service = (
+            internal_service_key is not None or _is_internal_service_record(record)
+        )
         local_evidence: task_evidence.TaskEvidenceSnapshot | None = None
         if lifecycle_status not in TERMINAL_TASK_STATUSES:
             local_evidence = task_evidence.task_local_terminal_evidence(
@@ -1068,18 +1177,26 @@ def _collect_task_snapshot_records(
                 last_timestamp=int(record.get("last_timestamp") or 0),
                 now_ns=now_ns,
                 has_live_manager_record=tid == selected_active_manager_tid,
-                internal_service=_is_internal_service_record(record),
+                internal_service=internal_service,
             )
             stale_liveness_reason = _stale_liveness_reason(
                 lifecycle_status,
+                tid=tid,
                 runner_name=runner,
                 mapping_entry=runtime_entry,
                 runtime_description=runtime_description,
                 last_timestamp=int(record.get("last_timestamp") or 0),
                 now_ns=now_ns,
                 has_live_manager_record=tid == selected_active_manager_tid,
-                internal_service=_is_internal_service_record(record),
+                internal_service=internal_service,
+                internal_service_key=internal_service_key,
+                service_owner_index=service_owner_index,
             )
+            if stale_liveness_reason in {
+                "superseded_internal_service_record",
+                "internal_service_runtime_missing_after_stale_window",
+            }:
+                public_status = "failed"
         reconciliation = _reconciliation_diagnostic(
             lifecycle_status=public_status,
             status_reason=status_reason if isinstance(status_reason, str) else None,
@@ -1104,10 +1221,19 @@ def _collect_task_snapshot_records(
                 reconciliation = claimed_evidence.reconciliation
                 public_status = claimed_evidence.status
             elif stale_liveness_reason is not None:
+                active_service = (
+                    service_owner_index.live_owner_for_key(internal_service_key)
+                    if internal_service_key is not None
+                    else None
+                )
                 reconciliation = _stale_liveness_reconciliation(
                     reason=stale_liveness_reason,
                     lifecycle_status=lifecycle_status,
                     public_status=public_status,
+                    service_key=internal_service_key,
+                    active_service_tid=(
+                        active_service.tid if active_service is not None else None
+                    ),
                 )
 
         if (
@@ -1527,22 +1653,8 @@ def _best_service_evidence(
         if candidate.status in {"running", "launched"}
     ]
     if live_candidates:
-        return max(
-            live_candidates,
-            key=lambda candidate: (
-                candidate.rank,
-                candidate.updated_at or 0,
-                candidate.tid or "",
-            ),
-        )
-    return max(
-        eligible,
-        key=lambda candidate: (
-            candidate.rank,
-            candidate.updated_at or 0,
-            candidate.tid or "",
-        ),
-    )
+        return max(live_candidates, key=_service_evidence_sort_key)
+    return max(eligible, key=_service_evidence_sort_key)
 
 
 def _service_snapshot_from_evidence(
@@ -1615,10 +1727,13 @@ def _collect_internal_service_snapshots(
     *,
     managers: Sequence[Mapping[str, Any]],
     task_records: Sequence[CollectedTaskSnapshot],
+    now_ns: int | None = None,
+    service_registry_evidence: Sequence[_ServiceEvidence] | None = None,
 ) -> list[ServiceSnapshot]:
     """Return queue-derived status for manager-owned internal services."""
 
-    now_ns = time.time_ns()
+    if now_ns is None:
+        now_ns = time.time_ns()
     candidates_by_key: dict[str, list[_ServiceEvidence]] = {
         key: [] for key in _known_internal_service_keys()
     }
@@ -1636,7 +1751,12 @@ def _collect_internal_service_snapshots(
     finally:
         log_queue.close()
 
-    for candidate in _collect_service_registry_evidence(ctx, now_ns=now_ns):
+    registry_evidence = (
+        tuple(service_registry_evidence)
+        if service_registry_evidence is not None
+        else tuple(_collect_service_registry_evidence(ctx, now_ns=now_ns))
+    )
+    for candidate in registry_evidence:
         candidates_by_key.setdefault(candidate.key, []).append(candidate)
 
     for candidate in _collect_internal_spawn_queue_evidence(
@@ -1940,10 +2060,16 @@ def cmd_status(
         )
         return exit_code, None
 
+    now_ns = time.time_ns()
+    service_registry_evidence = tuple(
+        _collect_service_registry_evidence(context, now_ns=now_ns)
+    )
     all_task_records = _collect_task_snapshot_records(
         context,
         include_terminal=True,
         tid_filters=tid_filters,
+        now_ns=now_ns,
+        service_registry_evidence=service_registry_evidence,
     )
     task_records = (
         all_task_records
@@ -1959,6 +2085,8 @@ def cmd_status(
         context,
         managers=managers,
         task_records=all_task_records,
+        now_ns=now_ns,
+        service_registry_evidence=service_registry_evidence,
     )
     if status_filter:
         tasks = [snap for snap in tasks if snap.status == status_filter]
@@ -2098,16 +2226,24 @@ def _public_task_snapshot(snapshot: TaskSnapshot) -> PublicTaskSnapshot:
 def system_status(context: WeftContext) -> SystemStatusSnapshot:
     """Return the top-level broker, manager, and task status view."""
 
+    now_ns = time.time_ns()
+    service_registry_evidence = tuple(
+        _collect_service_registry_evidence(context, now_ns=now_ns)
+    )
     managers = _collect_manager_records(context)
     task_records = _collect_task_snapshot_records(
         context,
         include_terminal=True,
         tid_filters=None,
+        now_ns=now_ns,
+        service_registry_evidence=service_registry_evidence,
     )
     services = _collect_internal_service_snapshots(
         context,
         managers=managers,
         task_records=task_records,
+        now_ns=now_ns,
+        service_registry_evidence=service_registry_evidence,
     )
     return SystemStatusSnapshot(
         broker=collect_broker_status(context).to_dict(),

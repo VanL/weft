@@ -1154,6 +1154,29 @@ def test_monitor_store_lists_raw_deleted_child_refs_for_repair(tmp_path) -> None
     assert store.list_raw_deleted_task_message_refs(limit=10) == ()
 
 
+def test_monitor_store_lists_missing_task_message_ids(tmp_path) -> None:
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    tid = "1779000000000000036"
+    known = _update(tid, 1779000000000008600)
+    store.record_task_log_updates(
+        WEFT_GLOBAL_LOG_QUEUE,
+        (known,),
+        checkpoint_message_id=None,
+    )
+
+    missing = store.missing_task_message_ids(
+        (
+            known.message_id - 1,
+            known.message_id,
+            known.message_id + 1,
+        )
+    )
+
+    assert missing == (known.message_id - 1, known.message_id + 1)
+
+
 def test_monitor_store_prunes_legacy_message_tombstones(tmp_path) -> None:
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)

@@ -139,6 +139,7 @@ class TaskLogScanBackend(Protocol):
         *,
         scan_limit: int,
         since_timestamp: int | None = None,
+        before_timestamp: int | None = None,
     ) -> TaskLogScanWindow:
         """Return a bounded non-consuming task-log scan window."""
 
@@ -156,6 +157,7 @@ class GeneratorTaskLogScanner:
         *,
         scan_limit: int,
         since_timestamp: int | None = None,
+        before_timestamp: int | None = None,
     ) -> TaskLogScanWindow:
         """Return a bounded decoded task-log window from FIFO queue iteration."""
 
@@ -169,6 +171,7 @@ class GeneratorTaskLogScanner:
             for body, message_id in iter_queue_entries(
                 queue,
                 since_timestamp=since_timestamp,
+                before_timestamp=before_timestamp,
             ):
                 if len(rows) >= scan_limit:
                     scan_limit_reached = True

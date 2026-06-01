@@ -460,6 +460,14 @@ Current rules:
   finds no raw broker rows records `orphan_raw_recovery_checked_at_ns` on the
   parent collation row so the same family is not selected again until new raw
   task-log evidence resets the recovery marker.
+  A separate bounded pre-checkpoint recovery pass may scan visible
+  `weft.log.tasks` rows older than the forward Monitor checkpoint. It selects
+  only rows missing from `weft_monitor_task_messages`, skips active TIDs and
+  rows younger than the retention floor, folds valid rows back into the
+  Monitor store without moving the checkpoint, and lets the ordinary
+  summary/report/delete path own any later exact deletion. Malformed or
+  unrecognized pre-checkpoint rows may be exact-deleted only through the same
+  durable-before-delete rule used by the selected monitor mode.
   Legacy child rows marked with `deleted_at_ns` from older releases are
   physically pruned in bounded Monitor-store cleanup slices. Replaying the same
   raw row after a delete failure is idempotent. A terminal family may emit a
@@ -1153,6 +1161,7 @@ management live in the companion doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-05-31-task-monitor-orphan-log-and-status-reconciliation-plan.md`](../plans/2026-05-31-task-monitor-orphan-log-and-status-reconciliation-plan.md)
 - [`docs/plans/2026-05-29-task-monitor-config-and-reactor-cache-cleanup-plan.md`](../plans/2026-05-29-task-monitor-config-and-reactor-cache-cleanup-plan.md)
 - [`docs/plans/2026-05-30-task-monitor-mode-and-rotating-log-plan.md`](../plans/2026-05-30-task-monitor-mode-and-rotating-log-plan.md)
 - [`docs/plans/2026-05-30-task-monitor-external-log-health-plan.md`](../plans/2026-05-30-task-monitor-external-log-health-plan.md)

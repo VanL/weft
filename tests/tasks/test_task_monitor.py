@@ -56,7 +56,10 @@ from weft.core.monitor.task_monitor import (
     TaskMonitor,
     make_task_monitor_taskspec,
 )
-from weft.core.service_convergence import manager_service_key
+from weft.core.service_convergence import (
+    build_service_owner_payload,
+    manager_service_key,
+)
 from weft.core.taskspec import TaskSpec
 from weft.helpers import iter_queue_entries
 
@@ -1197,6 +1200,133 @@ def test_task_monitor_retained_ingest_resumes_after_store_checkpoint(
         assert store.get_checkpoint(WEFT_GLOBAL_LOG_QUEUE) >= message_ids[4]
     finally:
         task.stop()
+
+
+def test_task_monitor_jsonl_then_delete_recovers_precheckpoint_service_rows(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    external_path = tmp_path / "task-lifetime.jsonl"
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
+            "WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT": 20,
+            "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
+            "WEFT_LOG_TASKS_EXTERNAL_PATH": str(external_path),
+            "WEFT_LOG_TASKS_EXTERNAL_MODE": "collated",
+            "WEFT_TASK_MONITOR_MODE": "jsonl_then_delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    old_tid = "1779555792870776832"
+    live_tid = "1779555792870776999"
+    old_taskspec = make_task_monitor_taskspec(old_tid).model_dump(mode="python")
+    old_taskspec["metadata"] = {
+        **dict(old_taskspec.get("metadata", {})),
+        "internal": True,
+        "role": "task_monitor",
+        INTERNAL_RUNTIME_TASK_CLASS_KEY: INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR,
+        INTERNAL_SERVICE_KEY_METADATA_KEY: INTERNAL_SERVICE_KEY_TASK_MONITOR,
+        INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY: "ensure",
+    }
+    old_taskspec["state"] = {
+        **dict(old_taskspec.get("state", {})),
+        "status": "running",
+        "started_at": int(old_tid),
+    }
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    for event, status in (
+        ("task_initialized", "created"),
+        ("task_spawning", "spawning"),
+        ("task_started", "running"),
+    ):
+        log_queue.write(
+            json.dumps(
+                {
+                    "event": event,
+                    "status": status,
+                    "tid": old_tid,
+                    "taskspec": {
+                        **old_taskspec,
+                        "state": {**old_taskspec["state"], "status": status},
+                    },
+                }
+            )
+        )
+    message_ids = [message_id for _body, message_id in iter_queue_entries(log_queue)]
+
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999870"),
+        config=config,
+    )
+    try:
+        store = task._ensure_monitor_store()
+        assert store is not None
+        store.set_checkpoint(WEFT_GLOBAL_LOG_QUEUE, max(message_ids) + 1)
+        make_queue(WEFT_SERVICES_REGISTRY_QUEUE).write(
+            json.dumps(
+                build_service_owner_payload(
+                    service_key=INTERNAL_SERVICE_KEY_TASK_MONITOR,
+                    service_type=SERVICE_TYPE_MANAGED,
+                    owner_tid=live_tid,
+                    status=SERVICE_STATUS_ACTIVE,
+                    name="task-monitor",
+                    queues={
+                        "ctrl_in": f"T{live_tid}.ctrl_in",
+                        "ctrl_out": f"T{live_tid}.ctrl_out",
+                        "inbox": f"T{live_tid}.inbox",
+                        "outbox": f"T{live_tid}.outbox",
+                    },
+                    metadata={"manager_tid": "1779555792870777000"},
+                )
+            )
+        )
+
+        task.process_once()
+        drive_task_monitor_until_idle(task)
+        recovery = task._last_pre_checkpoint_task_log_recovery
+        store = task._monitor_store
+        assert store is not None
+        assert store.deferred_write_status().pending == 0
+    finally:
+        task.stop()
+
+    assert recovery.selected == 3
+    assert recovery.valid_ingested == 3
+    assert recovery.raw_delete_errors == ()
+    assert [
+        json.loads(body)
+        for body, _message_id in iter_queue_entries(log_queue)
+        if json.loads(body).get("tid") == old_tid
+    ] == []
+    reports = [
+        json.loads(line)
+        for line in external_path.read_text(encoding="utf-8").splitlines()
+        if json.loads(line).get("subject", {}).get("tid") == old_tid
+    ]
+    assert len(reports) == 1
+    report = reports[0]
+    assert report["record_type"] == "task_lifetime_report"
+    assert report["source_policy"] == TASK_MONITOR_POLICY_MONITOR_STORE_LIFECYCLE
+    assert report["completeness"] == "collated"
+    assert report["report_kind"] == "monitor_store_stale_service_owner"
+    assert report["taskspec"]["tid"] == old_tid
+    assert report["taskspec"]["state"]["status"] == "running"
+    assert report["lifetime"]["close_reason"] == "stale_service_owner"
+    assert report["monitor"]["collation_kind"] == "internal_service"
+    assert report["monitor"]["service"]["service_key"] == (
+        INTERNAL_SERVICE_KEY_TASK_MONITOR
+    )
+    assert "collation" not in report
+    assert "effect" not in report
 
 
 def test_task_monitor_processor_delete_reconciles_already_absent_exact_rows(

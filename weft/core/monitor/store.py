@@ -1253,6 +1253,25 @@ class _MonitorTableAccess:
         )
         return tuple((str(row[0]), int(row[1])) for row in rows)
 
+    def missing_task_message_ids(
+        self,
+        message_ids: Sequence[int],
+    ) -> tuple[int, ...]:
+        """Return exact raw message IDs absent from Monitor child refs."""
+
+        ids = tuple(int(message_id) for message_id in message_ids)
+        if not ids:
+            return ()
+        rows = self._runner.run(
+            monitor_sql.select_missing_task_message_ids(
+                self._tables.task_messages,
+                len(ids),
+            ),
+            (*ids, self._context_key),
+            fetch=True,
+        )
+        return tuple(int(row[0]) for row in rows)
+
     def raw_deleted_task_log_recovery_tids(self, *, limit: int) -> tuple[str, ...]:
         """Return terminal families that may have orphan raw broker rows."""
 
@@ -1969,6 +1988,20 @@ class MonitorStore:
                 tid_tuple,
                 limit=limit,
                 require_summary=require_summary,
+            )
+
+    def missing_task_message_ids(
+        self,
+        message_ids: Sequence[int],
+    ) -> tuple[int, ...]:
+        """Return exact raw message IDs not represented by Monitor child refs."""
+
+        ids = tuple(int(message_id) for message_id in message_ids)
+        if not ids:
+            return ()
+        with self._context.broker() as broker:
+            return self._access(_runner_from_broker(broker)).missing_task_message_ids(
+                ids
             )
 
     def list_raw_deleted_task_log_recovery_tids(

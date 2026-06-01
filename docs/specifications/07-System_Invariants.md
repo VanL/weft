@@ -519,10 +519,13 @@ Monitor-table driven: malformed `weft.log.tasks` rows are exact-deleted; valid
 rows older than `WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS` are folded into
 Monitor-owned tables before exact deletion; exact raw deletion is reconciled
 by physically deleting the corresponding pending child refs from
-`weft_monitor_task_messages`; legacy orphan raw rows for terminal/disposed
-families may be exact-deleted by a bounded recovery pass that records a
-completed no-row probe on the parent family; parent raw-deleted rows that still
-have child refs are repaired by a bounded child-ref cleanup pass; and family
+`weft_monitor_task_messages`; visible raw rows older than the forward Monitor
+checkpoint and missing from `weft_monitor_task_messages` are recovered by a
+bounded pre-checkpoint pass that does not move the checkpoint; legacy orphan
+raw rows for terminal/disposed families may be exact-deleted by a bounded
+recovery pass that records a completed no-row probe on the parent family;
+parent raw-deleted rows that still have child refs are repaired by a bounded
+child-ref cleanup pass; and family
 summaries/disposition can run only after the FIFO pass reaches a completed
 high-water mark
 (`empty` or first too-young visible row). A batch-limited, scan-limited, or
@@ -637,6 +640,7 @@ doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-05-31-task-monitor-orphan-log-and-status-reconciliation-plan.md`](../plans/2026-05-31-task-monitor-orphan-log-and-status-reconciliation-plan.md)
 - [`docs/plans/2026-05-29-task-monitor-config-and-reactor-cache-cleanup-plan.md`](../plans/2026-05-29-task-monitor-config-and-reactor-cache-cleanup-plan.md)
 - [`docs/plans/2026-05-29-task-monitor-general-lifetime-reporting-plan.md`](../plans/2026-05-29-task-monitor-general-lifetime-reporting-plan.md)
 - [`docs/plans/2026-05-30-task-monitor-mode-and-rotating-log-plan.md`](../plans/2026-05-30-task-monitor-mode-and-rotating-log-plan.md)

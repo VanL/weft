@@ -356,6 +356,50 @@ class _DeadTaskLogDeleteResult:
 
 
 @dataclass(frozen=True, slots=True)
+class _PreCheckpointTaskLogRecoveryResult:
+    """Recovery result for visible raw task-log rows before the checkpoint."""
+
+    scanned: int = 0
+    missing: int = 0
+    selected: int = 0
+    valid_ingested: int = 0
+    malformed_deleted: int = 0
+    raw_deleted: int = 0
+    skipped_known: int = 0
+    skipped_active: int = 0
+    skipped_too_young: int = 0
+    store_write_errors: tuple[str, ...] = ()
+    raw_delete_errors: tuple[str, ...] = ()
+    stop_reason: str | None = None
+    scan_limit_reached: bool = False
+
+    @property
+    def success(self) -> bool:
+        """Return whether the recovery pass finished without write/delete errors."""
+
+        return not self.store_write_errors and not self.raw_delete_errors
+
+    def to_summary(self) -> dict[str, Any]:
+        """Return a JSON-safe cached PONG summary."""
+
+        return {
+            "scanned": self.scanned,
+            "missing": self.missing,
+            "selected": self.selected,
+            "valid_ingested": self.valid_ingested,
+            "malformed_deleted": self.malformed_deleted,
+            "raw_deleted": self.raw_deleted,
+            "skipped_known": self.skipped_known,
+            "skipped_active": self.skipped_active,
+            "skipped_too_young": self.skipped_too_young,
+            "store_write_errors": list(self.store_write_errors),
+            "raw_delete_errors": list(self.raw_delete_errors),
+            "stop_reason": self.stop_reason,
+            "scan_limit_reached": self.scan_limit_reached,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class _TaskMonitorCachedDiagnostics:
     """TaskMonitor cached diagnostics committed by the reactor."""
 
@@ -396,6 +440,7 @@ class _TaskMonitorCachedDiagnostics:
     last_control_delete_errors: tuple[str, ...]
     last_control_delete_warnings: tuple[str, ...]
     last_retained_task_log_ingest: _RetainedTaskLogIngestResult
+    last_pre_checkpoint_task_log_recovery: _PreCheckpointTaskLogRecoveryResult
     last_orphan_task_log_recovery: _DeadTaskLogDeleteResult
     last_collation_store_error: str | None
     external_task_log_status: ExternalTaskLogStatus
@@ -643,6 +688,9 @@ class TaskMonitor(ServiceTask):
         self._last_control_delete_errors: tuple[str, ...] = ()
         self._last_control_delete_warnings: tuple[str, ...] = ()
         self._last_retained_task_log_ingest = _RetainedTaskLogIngestResult()
+        self._last_pre_checkpoint_task_log_recovery = (
+            _PreCheckpointTaskLogRecoveryResult()
+        )
         self._last_orphan_task_log_recovery = _DeadTaskLogDeleteResult()
         self._last_collation_store_error: str | None = None
         self._external_task_log_sink: ExternalTaskLogSink | None = None
@@ -794,6 +842,9 @@ class TaskMonitor(ServiceTask):
             last_control_delete_errors=self._last_control_delete_errors,
             last_control_delete_warnings=self._last_control_delete_warnings,
             last_retained_task_log_ingest=self._last_retained_task_log_ingest,
+            last_pre_checkpoint_task_log_recovery=(
+                self._last_pre_checkpoint_task_log_recovery
+            ),
             last_orphan_task_log_recovery=self._last_orphan_task_log_recovery,
             last_collation_store_error=self._last_collation_store_error,
             external_task_log_status=self._external_task_log_status,
@@ -880,6 +931,9 @@ class TaskMonitor(ServiceTask):
         self._last_control_delete_errors = diagnostics.last_control_delete_errors
         self._last_control_delete_warnings = diagnostics.last_control_delete_warnings
         self._last_retained_task_log_ingest = diagnostics.last_retained_task_log_ingest
+        self._last_pre_checkpoint_task_log_recovery = (
+            diagnostics.last_pre_checkpoint_task_log_recovery
+        )
         self._last_orphan_task_log_recovery = diagnostics.last_orphan_task_log_recovery
         self._last_collation_store_error = diagnostics.last_collation_store_error
         previous_external_status = self._external_task_log_status
@@ -1388,6 +1442,9 @@ class TaskMonitor(ServiceTask):
                 "last_retained_task_log_ingest": (
                     self._last_retained_task_log_ingest.to_summary()
                 ),
+                "last_pre_checkpoint_task_log_recovery": (
+                    self._last_pre_checkpoint_task_log_recovery.to_summary()
+                ),
                 "last_orphan_task_log_recovery": (
                     self._last_orphan_task_log_recovery.to_summary()
                 ),
@@ -1544,6 +1601,9 @@ class TaskMonitor(ServiceTask):
                     ],
                     "retained_task_log_ingest": (
                         self._last_retained_task_log_ingest.to_summary()
+                    ),
+                    "pre_checkpoint_task_log_recovery": (
+                        self._last_pre_checkpoint_task_log_recovery.to_summary()
                     ),
                     "orphan_task_log_recovery": (
                         self._last_orphan_task_log_recovery.to_summary()
@@ -1909,6 +1969,9 @@ class TaskMonitor(ServiceTask):
         self._last_control_delete_errors = ()
         self._last_control_delete_warnings = ()
         self._last_retained_task_log_ingest = _RetainedTaskLogIngestResult()
+        self._last_pre_checkpoint_task_log_recovery = (
+            _PreCheckpointTaskLogRecoveryResult()
+        )
         self._last_orphan_task_log_recovery = _DeadTaskLogDeleteResult()
         self._last_collation_store_error = None
         store = self._ensure_monitor_store()
@@ -1930,6 +1993,19 @@ class TaskMonitor(ServiceTask):
             )
             self._last_collation_rows_processed = retained_ingest.scanned
             if retained_ingest.completed_fifo_high_water:
+                if runtime_cleanup_requested:
+                    pre_checkpoint_recovery = (
+                        self._recover_pre_checkpoint_task_log_rows(
+                            store,
+                            now_ns=now_ns,
+                        )
+                    )
+                    self._last_pre_checkpoint_task_log_recovery = (
+                        pre_checkpoint_recovery
+                    )
+                    self._last_monitor_store_message_rows_deleted += (
+                        pre_checkpoint_recovery.raw_deleted
+                    )
                 self._last_collation_summaries_emitted = (
                     self._emit_monitor_store_summaries(
                         store,
@@ -2214,6 +2290,211 @@ class TaskMonitor(ServiceTask):
             stop_reason=stop_reason,
             oldest_too_young_age_seconds=None,
             completed_fifo_high_water=completed_high_water,
+        )
+
+    def _recover_pre_checkpoint_task_log_rows(
+        self,
+        store: MonitorStore,
+        *,
+        now_ns: int,
+    ) -> _PreCheckpointTaskLogRecoveryResult:
+        """Fold visible pre-checkpoint raw task-log rows into Monitor-store.
+
+        This is a bounded recovery path for raw rows that predate the normal
+        forward checkpoint but are missing Monitor-store child refs.
+
+        Spec: [MF-5], [OBS.13], [OBS.17]
+        """
+
+        checkpoint_message_id = store.get_checkpoint(WEFT_GLOBAL_LOG_QUEUE)
+        if checkpoint_message_id is None:
+            result = _PreCheckpointTaskLogRecoveryResult()
+            self._record_pre_checkpoint_recovery_progress(result)
+            return result
+
+        scanner = GeneratorTaskLogScanner()
+        window = scanner.scan_window(
+            self._monitor_context(),
+            WEFT_GLOBAL_LOG_QUEUE,
+            scan_limit=self._monitor_config.task_log_scan_limit,
+            before_timestamp=checkpoint_message_id,
+        )
+        candidate_rows = [
+            row
+            for row in window.rows
+            if is_old_enough(
+                row.raw.message_id,
+                now_ns,
+                self._monitor_config.task_log_retention_period_seconds,
+            )
+        ]
+        skipped_too_young = len(window.rows) - len(candidate_rows)
+        try:
+            missing_ids = set(
+                store.missing_task_message_ids(
+                    tuple(row.raw.message_id for row in candidate_rows)
+                )
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            result = _PreCheckpointTaskLogRecoveryResult(
+                scanned=window.scanned,
+                skipped_too_young=skipped_too_young,
+                store_write_errors=(str(exc),),
+                stop_reason="store_read_error",
+                scan_limit_reached=window.scan_limit_reached,
+            )
+            self._record_pre_checkpoint_recovery_progress(result)
+            return result
+
+        active_tids = self._active_runtime_tids()
+        selected_rows: list[QueueWindowRow] = []
+        valid_updates: list[MonitorTaskEventUpdate] = []
+        malformed_rows: list[QueueWindowRow] = []
+        store_errors: list[str] = []
+        delete_errors: list[str] = []
+        skipped_known = 0
+        skipped_active = 0
+        selected = 0
+        stop_reason = window.stop_reason
+
+        for row in candidate_rows:
+            if row.raw.message_id not in missing_ids:
+                skipped_known += 1
+                continue
+            tid = row.tid
+            if tid is not None and tid in active_tids:
+                skipped_active += 1
+                continue
+            if selected >= self._monitor_config.batch_size:
+                stop_reason = "batch_limit"
+                break
+
+            update = (
+                None
+                if row.malformed_reason is not None
+                else update_from_task_log_row(row)
+            )
+            selected_rows.append(row.raw)
+            selected += 1
+            if update is None:
+                malformed_rows.append(row.raw)
+            else:
+                valid_updates.append(update)
+
+        valid_ingested = 0
+        if valid_updates:
+            try:
+                ingest = store.record_task_log_updates(
+                    WEFT_GLOBAL_LOG_QUEUE,
+                    tuple(valid_updates),
+                    checkpoint_message_id=None,
+                )
+            except (OSError, RuntimeError, ValueError) as exc:
+                store_errors.append(str(exc))
+                stop_reason = "store_write_error"
+            else:
+                valid_ingested = ingest.updates_written
+
+        rows_to_delete: tuple[QueueWindowRow, ...] = tuple(malformed_rows)
+        if self._jsonl_then_delete_enabled() and malformed_rows and not store_errors:
+            reportable_rows: list[QueueWindowRow] = []
+            for raw_row in malformed_rows:
+                report = build_raw_row_lifetime_report(
+                    raw_row,
+                    monitor_tid=self.tid,
+                    emitted_at_ns=now_ns,
+                    source_policy=TASK_MONITOR_POLICY_MONITOR_STORE_LIFECYCLE,
+                    report_kind="pre_checkpoint_malformed_task_log",
+                    close_reason="pre_checkpoint_malformed_task_log_retention",
+                    completeness="raw_row",
+                    observations={
+                        "reason": "pre_checkpoint_malformed_or_unrecognized_task_log"
+                    },
+                )
+                try:
+                    self._handoff_lifetime_report(
+                        report,
+                        store=store,
+                        emitted_at_ns=now_ns,
+                    )
+                except ExternalTaskLogError as exc:
+                    delete_errors.append(str(exc))
+                    stop_reason = "lifetime_report_error"
+                    break
+                reportable_rows.append(raw_row)
+            rows_to_delete = tuple(reportable_rows)
+
+        raw_deleted = 0
+        malformed_deleted = 0
+        if rows_to_delete and not store_errors and not delete_errors:
+            delete_result = self._delete_exact_task_log_rows(
+                rows_to_delete,
+                require_deleted=True,
+            )
+            delete_errors.extend(delete_result.errors)
+            raw_deleted = len(delete_result.deleted_ids)
+            malformed_deleted = raw_deleted
+            if delete_errors and stop_reason is None:
+                stop_reason = "queue_delete_error"
+
+        result = _PreCheckpointTaskLogRecoveryResult(
+            scanned=window.scanned,
+            missing=len(missing_ids),
+            selected=len(selected_rows),
+            valid_ingested=valid_ingested,
+            malformed_deleted=malformed_deleted,
+            raw_deleted=raw_deleted,
+            skipped_known=skipped_known,
+            skipped_active=skipped_active,
+            skipped_too_young=skipped_too_young,
+            store_write_errors=tuple(store_errors),
+            raw_delete_errors=tuple(delete_errors),
+            stop_reason=stop_reason,
+            scan_limit_reached=window.scan_limit_reached,
+        )
+        self._record_pre_checkpoint_recovery_progress(result)
+        return result
+
+    def _record_pre_checkpoint_recovery_progress(
+        self,
+        result: _PreCheckpointTaskLogRecoveryResult,
+    ) -> None:
+        """Record policy progress for pre-checkpoint task-log recovery."""
+
+        blocked_reason = None
+        if result.store_write_errors:
+            blocked_reason = result.store_write_errors[0]
+        elif result.raw_delete_errors:
+            blocked_reason = result.raw_delete_errors[0]
+        waypoint_reached = (
+            result.stop_reason
+            in {
+                "batch_limit",
+                TASK_MONITOR_TASK_LOG_SCAN_LIMIT_REACHED,
+            }
+            or result.scan_limit_reached
+        )
+        self._last_policy_progress = (
+            *self._last_policy_progress,
+            PolicyProgress(
+                policy=TASK_MONITOR_POLICY_MONITOR_STORE_LIFECYCLE,
+                domain="weft.log.tasks.pre_checkpoint_recovery",
+                scanned=result.scanned,
+                selected=result.selected,
+                applied=result.valid_ingested + result.raw_deleted,
+                waypoint_reached=waypoint_reached,
+                base_reached=blocked_reason is None and not waypoint_reached,
+                blocked_reason=blocked_reason,
+                reason_counts={
+                    "missing_refs": result.missing,
+                    "valid_ingested": result.valid_ingested,
+                    "malformed_deleted": result.malformed_deleted,
+                    "raw_deleted": result.raw_deleted,
+                    "skipped_known": result.skipped_known,
+                    "skipped_active": result.skipped_active,
+                    "skipped_too_young": result.skipped_too_young,
+                },
+            ),
         )
 
     def _delete_exact_task_log_rows(
@@ -4649,6 +4930,7 @@ class TaskMonitor(ServiceTask):
         )
         if task_log_owner == "collated_store" and apply:
             ingest = self._last_retained_task_log_ingest
+            pre_checkpoint = self._last_pre_checkpoint_task_log_recovery
             collation_errors = (
                 (self._last_collation_store_error,)
                 if self._last_collation_store_error is not None
@@ -4658,6 +4940,8 @@ class TaskMonitor(ServiceTask):
                 *cleanup.errors,
                 *ingest.store_write_errors,
                 *ingest.raw_delete_errors,
+                *pre_checkpoint.store_write_errors,
+                *pre_checkpoint.raw_delete_errors,
                 *self._last_control_delete_errors,
                 *collation_errors,
             )
@@ -4665,16 +4949,19 @@ class TaskMonitor(ServiceTask):
                 success=(
                     cleanup.success
                     and ingest.success
+                    and pre_checkpoint.success
                     and not self._last_control_delete_errors
                     and not collation_errors
                 ),
                 processed=cleanup.processed
                 + ingest.malformed_deleted
-                + ingest.valid_ingested,
+                + ingest.valid_ingested
+                + pre_checkpoint.selected,
                 deleted=(
                     cleanup.deleted
                     + ingest.malformed_deleted
                     + ingest.raw_deleted
+                    + pre_checkpoint.raw_deleted
                     + self._last_control_rows_deleted
                 ),
                 reported=cleanup.reported + self._last_collation_summaries_emitted,

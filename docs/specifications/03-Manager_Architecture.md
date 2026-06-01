@@ -35,6 +35,7 @@ always be rolled back from the public request queue.
 
 ## Related Plans
 
+- [TaskMonitor Orphan Log And Status Reconciliation Plan](../plans/2026-05-31-task-monitor-orphan-log-and-status-reconciliation-plan.md) - plan stale internal-service status reconciliation and bounded TaskMonitor recovery for pre-checkpoint raw task-log rows that missed Monitor-store collation.
 - [Service Task Worker API Plan](../plans/2026-05-26-service-task-worker-api-plan.md) - consolidate Manager child launch and TaskMonitor maintenance lanes onto the shared internal `ServiceTask` service-worker API.
 - [Stale Service Owner Runtime Cleanup Plan](../plans/2026-05-28-stale-service-owner-runtime-cleanup-plan.md) - plan stale manager/service Monitor disposition, task-local control cleanup, and internal probe residue cleanup without weakening active manager protection.
 - [Config Precedence and Parsing Alignment Plan](../plans/2026-04-14-config-precedence-and-parsing-alignment-plan.md) – align broker target precedence, Weft env parsing, and manager-timeout config semantics with the documented contract.
@@ -286,7 +287,11 @@ Key responsibilities implemented in `weft/core/manager.py`:
    manager `task_spawned` row with `child_tid`, `child_taskspec`, and
    `child_pid` may publish heartbeat or TaskMonitor as launched before the
    child has emitted its own lifecycle row; later child-local task-log,
-   terminal, and TID-mapping evidence wins over that manager launch hint.
+   terminal, TID-mapping, and service-registry evidence wins over that manager
+   launch hint. Status may reconcile an old internal-service child task row as
+   failed when no runtime proof remains and the service registry proves a newer
+   same-service owner, but that is public read-model reconciliation, not a
+   manager lifecycle transition or cleanup effect.
    Service-candidate PING fallback is also non-blocking reactor state: the
    manager writes one keyed PING, records the pending service probe, and peeks
    for the matching PONG on later service-convergence turns. `ping_pending`

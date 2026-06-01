@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 135 plan files in this directory.
+There are currently 136 plan files in this directory.
 
 ## Curation Policy
 
@@ -23,6 +23,7 @@ There are currently 135 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-05-31-task-monitor-orphan-log-and-status-reconciliation-plan.md`](./2026-05-31-task-monitor-orphan-log-and-status-reconciliation-plan.md) | TaskMonitor Orphan Log And Status Reconciliation Plan | `completed` | none |
 | [`2026-05-30-cleanup-progress-fifo-boundary-plan.md`](./2026-05-30-cleanup-progress-fifo-boundary-plan.md) | Cleanup Progress FIFO Boundary Plan | `completed` | none |
 | [`2026-05-30-task-monitor-external-log-health-plan.md`](./2026-05-30-task-monitor-external-log-health-plan.md) | TaskMonitor External Log Health Plan | `completed` | none |
 | [`2026-05-30-task-monitor-mode-and-rotating-log-plan.md`](./2026-05-30-task-monitor-mode-and-rotating-log-plan.md) | TaskMonitor Mode And Rotating Log Plan | `completed` | none |

@@ -345,8 +345,13 @@ Current behavior:
   `weft status` must not PING the monitor or open the configured external log
   path to populate these diagnostics.
 - JSON task snapshots may include an additive `reconciliation` object when
-  lifecycle evidence and runtime liveness disagree; the public `status` remains
-  one of the normal lifecycle states
+  lifecycle evidence and runtime liveness disagree. Ordinary stale runtime
+  evidence keeps the public lifecycle status and adds diagnostics. Stale
+  manager-owned internal service child rows with no runtime proof may be
+  reported as `failed` when service-registry evidence proves a newer same-key
+  owner, or when the runtime-less stale window has elapsed with no supporting
+  owner evidence. This is a read-model reconciliation only; status must not
+  write synthetic lifecycle events.
 - host-PID runtime descriptions must distinguish process absence from PID
   namespace visibility. When `weft status` runs inside a container and cannot
   observe a host-scoped PID, the runtime description reports unknown visibility
@@ -355,8 +360,10 @@ Current behavior:
   from shared task evidence, including `wrapper_lost`, `terminal_ctrl_out`,
   `result_without_terminal`, and `stale_liveness`; claimed result residue may surface as
   `claimed_result_without_terminal`, and superseded manager task rows may
-  surface as `superseded_manager_record`; these classifications are
-  diagnostics, not public lifecycle states
+  surface as `superseded_manager_record`; stale internal service rows may
+  surface as `superseded_internal_service_record` or
+  `internal_service_runtime_missing_after_stale_window`; these classifications
+  are diagnostics, not lifecycle-event writes
 - project-wide `weft status` does not actively PING every task by default;
   keyed PING/PONG current-state probing belongs to known-task inspection paths
   or explicit command/client options
@@ -816,6 +823,7 @@ flags, and future queue or control ergonomics live in the companion doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-05-31-task-monitor-orphan-log-and-status-reconciliation-plan.md`](../plans/2026-05-31-task-monitor-orphan-log-and-status-reconciliation-plan.md)
 - [`docs/plans/2026-05-30-task-monitor-mode-and-rotating-log-plan.md`](../plans/2026-05-30-task-monitor-mode-and-rotating-log-plan.md)
 - [`docs/plans/2026-05-06-lifecycle-reconciliation-architecture-plan.md`](../plans/2026-05-06-lifecycle-reconciliation-architecture-plan.md)
 - [`docs/plans/2026-05-06-status-coherence-and-stale-pid-liveness-plan.md`](../plans/2026-05-06-status-coherence-and-stale-pid-liveness-plan.md)

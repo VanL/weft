@@ -242,6 +242,7 @@ def iter_queue_entries(
     queue: Queue,
     *,
     since_timestamp: int | None = None,
+    before_timestamp: int | None = None,
 ) -> Iterator[tuple[str, int]]:
     """Yield queue entries with timestamps using the broker generator API.
 
@@ -255,12 +256,16 @@ def iter_queue_entries(
             raw_entries = queue_api.peek_generator(
                 with_timestamps=True,
                 after_timestamp=since_timestamp,
+                before_timestamp=before_timestamp,
             )
         except TypeError:
-            raw_entries = queue_api.peek_generator(
-                with_timestamps=True,
-                since_timestamp=since_timestamp,
-            )
+            if before_timestamp is None:
+                raw_entries = queue_api.peek_generator(
+                    with_timestamps=True,
+                    since_timestamp=since_timestamp,
+                )
+            else:
+                raw_entries = queue_api.peek_generator(with_timestamps=True)
     except (
         BrokerError,
         OSError,
@@ -278,6 +283,10 @@ def iter_queue_entries(
                 try:
                     timestamp_value = int(timestamp)
                 except (TypeError, ValueError):
+                    continue
+                if since_timestamp is not None and timestamp_value <= since_timestamp:
+                    continue
+                if before_timestamp is not None and timestamp_value >= before_timestamp:
                     continue
                 yield str(body), timestamp_value
         finally:

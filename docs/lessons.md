@@ -940,3 +940,19 @@ runbook needs to become stricter.
   [weft/core/runners/subprocess_runner.py](/Users/van/Developer/weft/weft/core/runners/subprocess_runner.py)
   and
   [tests/core/test_subprocess_runner.py](/Users/van/Developer/weft/tests/core/test_subprocess_runner.py).
+
+## 2026-05-31 Monitor Checkpoints And Status
+
+- A forward Monitor checkpoint is not a proof that every older raw broker row
+  is represented in the Monitor store. Partial rollouts and legacy cleanup can
+  leave pre-checkpoint `weft.log.tasks` rows with no
+  `weft_monitor_task_messages` ref. Recovery for that case must be a bounded
+  backfill that leaves the checkpoint forward-only, folds valid rows into the
+  existing Monitor-store report/delete path, and reports malformed rows before
+  exact deletion in `jsonl_then_delete`.
+- Internal service task-log rows are only one evidence source. Status must not
+  let `internal=true` bypass stale runtime reconciliation forever. When the
+  service registry proves a newer same-service owner, or no runtime proof
+  supports an old service child after the stale window, the public read model
+  should stop presenting that old TID as active without writing synthetic
+  lifecycle events.

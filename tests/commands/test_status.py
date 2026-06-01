@@ -629,6 +629,24 @@ def test_status_services_prefer_live_service_owner_over_stale_child_log(
     assert monitor["status"] == "running"
     assert monitor["tid"] == live_tid
     assert monitor["evidence"] == "service-registry"
+    tasks = json.loads(payload)["tasks"]
+    assert stale_tid not in {task["tid"] for task in tasks}
+
+    exit_code, payload = cmd_status(
+        json_output=True,
+        include_terminal=True,
+        spec_context=root,
+    )
+
+    assert exit_code == 0
+    assert payload is not None
+    tasks = json.loads(payload)["tasks"]
+    stale = next(task for task in tasks if task["tid"] == stale_tid)
+    assert stale["status"] == "failed"
+    assert stale["reconciliation"]["classification"] == (
+        "superseded_internal_service_record"
+    )
+    assert stale["reconciliation"]["active_service_tid"] == live_tid
 
 
 def test_cmd_status_text_output(tmp_path):
@@ -1429,8 +1447,7 @@ def test_cmd_status_reports_stale_runtime_less_running_snapshot(
     assert tasks[0]["reconciliation"]["reason"] == "runtime_missing_after_stale_window"
 
 
-def test_cmd_status_keeps_internal_service_running_without_runtime_proof(
-    monkeypatch: pytest.MonkeyPatch,
+def test_cmd_status_keeps_recent_internal_service_running_without_runtime_proof(
     tmp_path: Path,
 ) -> None:
     root = prepare_project_root(tmp_path)
@@ -1438,7 +1455,6 @@ def test_cmd_status_keeps_internal_service_running_without_runtime_proof(
     tid = "1844674407370955190"
     started = time.time_ns()
 
-    monkeypatch.setattr(status_cmd, "STATUS_RUNTIMELESS_STALE_AFTER_SECONDS", -1.0)
     _write_task_log_entry(
         ctx=ctx,
         tid=tid,
@@ -1471,6 +1487,41 @@ def test_cmd_status_keeps_internal_service_running_without_runtime_proof(
     assert snapshot.status == "running"
     assert snapshot.activity == "scanning"
     assert snapshot.waiting_on == "weft.log.tasks"
+
+
+def test_cmd_status_marks_stale_internal_service_without_owner_failed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = "1844674407370955191"
+    started = time.time_ns()
+
+    monkeypatch.setattr(status_cmd, "STATUS_RUNTIMELESS_STALE_AFTER_SECONDS", -1.0)
+    _write_task_log_entry(
+        ctx=ctx,
+        tid=tid,
+        event="task_started",
+        status="running",
+        started_at=started,
+        completed_at=None,
+        name="task-monitor",
+        metadata={
+            "internal": True,
+            "role": "task_monitor",
+            INTERNAL_SERVICE_KEY_METADATA_KEY: INTERNAL_SERVICE_KEY_TASK_MONITOR,
+        },
+    )
+
+    snapshot = task_cmd.task_status(tid, context_path=root)
+
+    assert snapshot is not None
+    assert snapshot.status == "failed"
+    assert snapshot.reconciliation is not None
+    assert snapshot.reconciliation["classification"] == (
+        "internal_service_runtime_missing_after_stale_window"
+    )
 
 
 def test_cmd_status_does_not_call_host_pid_missing_from_container_namespace(

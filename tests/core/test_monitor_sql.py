@@ -95,6 +95,21 @@ def test_monitor_sql_selects_legacy_deleted_task_message_refs() -> None:
     assert "%s" not in query
 
 
+def test_monitor_sql_selects_missing_task_message_ids() -> None:
+    query = monitor_sql.select_missing_task_message_ids(
+        "weft_monitor_task_messages",
+        2,
+    )
+
+    assert "WITH candidate(message_id) AS" in query
+    assert "VALUES (?), (?)" in query
+    assert "NOT EXISTS" in query
+    assert "m.context_key = ?" in query
+    assert "m.message_id = candidate.message_id" in query
+    assert "ORDER BY candidate.message_id" in query
+    assert "%s" not in query
+
+
 def test_monitor_sql_retirable_family_query_is_conservative() -> None:
     query = monitor_sql.select_retirable_task_collations(
         "weft_monitor_task_collations",

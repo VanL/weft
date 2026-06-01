@@ -639,6 +639,28 @@ def select_task_message_refs_for_message_ids(
         """
 
 
+def select_missing_task_message_ids(
+    messages_table: str,
+    message_id_count: int,
+) -> str:
+    """Build a query for exact raw message IDs absent from Monitor refs."""
+
+    return f"""
+        WITH candidate(message_id) AS (
+            VALUES {", ".join("(?)" for _ in range(message_id_count))}
+        )
+        SELECT candidate.message_id
+        FROM candidate
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM {identifier(messages_table)} AS m
+            WHERE m.context_key = ?
+              AND m.message_id = candidate.message_id
+        )
+        ORDER BY candidate.message_id
+        """
+
+
 def select_deleted_task_message_refs(messages_table: str) -> str:
     """Build a bounded query for legacy child message tombstones.
 
