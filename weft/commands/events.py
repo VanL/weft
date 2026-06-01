@@ -24,6 +24,7 @@ from weft.context import WeftContext
 from weft.core.queue_wait import QueueChangeMonitor
 from weft.helpers import iter_queue_entries, iter_queue_json_entries
 
+from . import task_evidence
 from ._result_wait import (
     append_public_value,
     terminal_error_message,
@@ -32,7 +33,6 @@ from ._result_wait import (
 from ._streaming import aggregate_public_outputs, process_outbox_message
 from .result import (
     _await_result_materialization,
-    _queue_names_for_tid,
     await_task_result,
 )
 from .submission import normalize_tid
@@ -307,7 +307,10 @@ def iter_task_realtime_events(
     taskspec_payload = (
         materialized.taskspec_payload if materialized is not None else None
     )
-    outbox_name, ctrl_out_name = _queue_names_for_tid(normalized_tid, taskspec_payload)
+    outbox_name, ctrl_out_name = task_evidence.queue_names_for_tid(
+        normalized_tid,
+        taskspec_payload,
+    )
 
     snapshot_emitted = False
     snapshot_event = _task_snapshot_event(context, normalized_tid)

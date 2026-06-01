@@ -975,7 +975,12 @@ class BaseTask(MultiQueueWatcher, ABC):
                 message_id=context.timestamp,
                 apply_reserved_policy=True,
             )
-            self._send_control_response("STOP", "ack")
+            response_extra = (
+                {"request_id": request.request_id}
+                if request.request_id is not None
+                else {}
+            )
+            self._send_control_response("STOP", "ack", **response_extra)
             return True
 
         if command == CONTROL_KILL:
@@ -985,7 +990,12 @@ class BaseTask(MultiQueueWatcher, ABC):
                 message_id=context.timestamp,
                 apply_reserved_policy=True,
             )
-            self._send_control_response("KILL", "ack")
+            response_extra = (
+                {"request_id": request.request_id}
+                if request.request_id is not None
+                else {}
+            )
+            self._send_control_response("KILL", "ack", **response_extra)
             return True
 
         if command == CONTROL_PAUSE:

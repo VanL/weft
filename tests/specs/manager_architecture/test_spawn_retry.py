@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
@@ -36,29 +35,36 @@ def _build_spec(tid: str) -> TaskSpec:
     )
 
 
-def test_spawn_request_uses_retry(monkeypatch, tmp_path) -> None:
+def test_spawn_request_uses_reserved_message_api(monkeypatch, tmp_path) -> None:
     root = prepare_project_root(tmp_path)
     context = build_context(spec_context=root)
-    tid = str(time.time_ns())
+    tid = run_module._generate_tid(context)
     taskspec = _build_spec(tid)
-    called = {"count": 0}
+    called = {"count": 0, "message_id": None}
     original_get_connection = spawn_requests.Queue.get_connection
 
-    def _get_connection_with_retry_probe(self):
+    def _get_connection_with_reserved_write_probe(self):
         connection_cm = original_get_connection(self)
 
         @contextmanager
         def _wrapped() -> Iterator[Any]:
             with connection_cm as db:
-                original = db._run_with_retry
+                original = db.write_reserved_message
 
                 class BrokerProxy:
                     def __init__(self, wrapped: Any) -> None:
                         self._wrapped = wrapped
 
-                    def _run_with_retry(self, fn, *args, **kwargs):
+                    def write_reserved_message(
+                        self,
+                        queue: str,
+                        message: str,
+                        *,
+                        message_id: int,
+                    ) -> None:
                         called["count"] += 1
-                        return original(fn, *args, **kwargs)
+                        called["message_id"] = message_id
+                        return original(queue, message, message_id=message_id)
 
                     def __getattr__(self, name: str) -> Any:
                         return getattr(self._wrapped, name)
@@ -68,9 +74,11 @@ def test_spawn_request_uses_retry(monkeypatch, tmp_path) -> None:
         return _wrapped()
 
     monkeypatch.setattr(
-        spawn_requests.Queue, "get_connection", _get_connection_with_retry_probe
+        spawn_requests.Queue,
+        "get_connection",
+        _get_connection_with_reserved_write_probe,
     )
 
     run_module._enqueue_taskspec(context, taskspec, None)
 
-    assert called["count"] >= 1
+    assert called == {"count": 1, "message_id": int(tid)}

@@ -303,6 +303,26 @@ def test_stage_output_edge_moves_single_payload_without_rewriting_it(
     )
 
 
+def test_stage_output_edge_fails_when_source_has_extra_payload(
+    broker_env,
+) -> None:
+    db_path, make_queue = broker_env
+    tid = str(time.time_ns())
+    edge = PipelineEdgeTask(db_path, _stage_output_edge_spec(tid))
+    source = make_queue("T1775000000000000001.outbox")
+    source.write(json.dumps({"payload": "first"}))
+    source.write(json.dumps({"payload": "second"}))
+
+    edge.process_once()
+
+    assert edge.taskspec.state.status == "failed"
+    assert make_queue("P1775000000000000000.stage-to-next").read_one() is None
+    events = _drain_json(make_queue("P1775000000000000000.events"))
+    terminal = next(event for event in events if event.get("type") == "edge_terminal")
+    assert terminal["status"] == "failed"
+    assert "single handoff" in terminal["error"]
+
+
 def test_edge_keeps_successful_handoff_when_checkpoint_emit_fails(
     broker_env,
     monkeypatch: pytest.MonkeyPatch,
@@ -634,6 +654,46 @@ def test_pipeline_task_fails_fast_when_child_stage_fails(tmp_path: Path) -> None
     assert latest["status"] == "failed"
     assert latest["failure"]["child_kind"] == "stage"
     assert latest["failure"]["child_name"] == "first"
+
+
+def test_pipeline_task_fails_fast_when_child_edge_fails(tmp_path: Path) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    _write_json(ctx.weft_dir / "tasks" / "first.json", _task_payload())
+    compiled = compile_linear_pipeline(
+        load_pipeline_spec_payload(
+            {"name": "pipe", "stages": [{"name": "first", "task": "first"}]}
+        ),
+        context=ctx,
+        task_loader=lambda name: _load_task(root, name),
+    )
+    task = PipelineTask(
+        ctx.broker_target, compiled.pipeline_taskspec, config=ctx.broker_config
+    )
+    task.process_once()
+
+    ctx.queue(compiled.runtime.queues.events, persistent=True).write(
+        json.dumps(
+            {
+                "type": "edge_terminal",
+                "pipeline_tid": compiled.pipeline_tid,
+                "edge_name": compiled.runtime.edges[-1].name,
+                "child_tid": compiled.runtime.edges[-1].tid,
+                "status": "failed",
+                "error": "single handoff contract violated",
+            }
+        )
+    )
+
+    task.wait_for_activity(timeout=0.05)
+    task.process_once()
+
+    assert task.taskspec.state.status == "failed"
+    snapshots = _drain_json(ctx.queue(compiled.runtime.queues.status, persistent=True))
+    latest = snapshots[-1]
+    assert latest["status"] == "failed"
+    assert latest["failure"]["child_kind"] == "edge"
+    assert latest["failure"]["child_name"] == compiled.runtime.edges[-1].name
 
 
 def test_pipeline_task_stop_propagates_to_waiting_children(tmp_path: Path) -> None:

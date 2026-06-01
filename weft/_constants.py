@@ -800,9 +800,6 @@ RUNTIME_PRUNE_CLASS_STALE_ENDPOINT: Final[str] = "stale_endpoint_record"
 RUNTIME_PRUNE_CLASS_SUPERSEDED_ENDPOINT: Final[str] = "superseded_endpoint_record"
 """Runtime-prune classification for older duplicate endpoint rows."""
 
-RUNTIME_PRUNE_CLASS_STALE_PIPELINE: Final[str] = "stale_pipeline_record"
-"""Runtime-prune classification reserved for proven stale pipeline rows."""
-
 RUNTIME_PRUNE_CLASS_UNSUPPORTED_PIPELINE: Final[str] = (
     "unsupported_pipeline_record_shape"
 )
@@ -929,11 +926,6 @@ RETENTION_PRUNE_CLASS_CLAIMED_OUTBOX_RESIDUE_FORCE: Final[str] = (
     "claimed_outbox_residue_force"
 )
 """Retention class for force-only claimed outbox residue cleanup."""
-
-RETENTION_PRUNE_SUPPORTED_FAMILIES: Final[frozenset[str]] = frozenset(
-    {"runtime-state", "task-local", "task-log", "retention", "all"}
-)
-"""Public `weft system prune --family` values."""
 
 RETENTION_PRUNE_SUPPORTED_CLASSES: Final[frozenset[str]] = frozenset(
     {
@@ -1335,11 +1327,6 @@ SPEC_ENTRY_FILES: Final[dict[str, str]] = {
 }
 """Bundle entry filenames keyed by canonical spec kind."""
 
-PIPELINE_SUPPORTED_STAGE_DEFAULT_KEYS: Final[frozenset[str]] = frozenset(
-    {"input", "args", "keyword_args", "env"}
-)
-"""Supported stage-level default override keys in authored pipeline specs."""
-
 PIPELINE_PLACEHOLDER_TARGET: Final[str] = "weft.core.tasks.pipeline:runtime"
 """Internal placeholder target used for first-class pipeline runtime tasks."""
 
@@ -1402,9 +1389,6 @@ AGENT_SESSION_PROTOCOL_VERSION: Final[int] = 1
 
 WINDOWS_CMD_SHIM_SUFFIXES: Final[frozenset[str]] = frozenset({".bat", ".cmd"})
 """Windows shim suffixes eligible for provider CLI command rewriting."""
-
-PROVIDER_CONTAINER_DESCRIPTOR_VERSION: Final[str] = "v2"
-"""Current internal descriptor schema version for provider container runtimes."""
 
 PROVIDER_CONTAINER_DESCRIPTOR_PACKAGE: Final[str] = "weft.core.agents.provider_cli"
 """Package containing shipped provider container runtime descriptor files."""

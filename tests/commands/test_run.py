@@ -336,6 +336,80 @@ def test_task_status_falls_back_to_monitor_store_after_raw_log_retirement(
     assert snapshot.metadata == {"kind": "status-fallback"}
 
 
+def test_task_status_reports_running_monitor_store_snapshot_after_raw_log_retirement(
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+    store = open_monitor_store(context)
+    store.ensure_schema()
+    tid = "1779226615233823720"
+    started_at = 1779226615233823000
+    observed_at = 1779226615233823999
+    store.upsert_task_event(
+        MonitorTaskEventUpdate(
+            tid=tid,
+            queue_name=WEFT_GLOBAL_LOG_QUEUE,
+            message_id=observed_at,
+            event="task_started",
+            status="running",
+            observed_at_ns=observed_at,
+            name="retired-running-log-task",
+            runner="host",
+            terminal_seen=False,
+            first_seen_at_ns=started_at,
+            last_seen_at_ns=observed_at,
+            started_at_ns=started_at,
+            taskspec_summary={
+                "tid": tid,
+                "name": "retired-running-log-task",
+                "metadata": {"kind": "status-fallback"},
+            },
+            state={"status": "running", "started_at": started_at},
+            lifecycle={"event": "task_started", "status": "running"},
+            resources={},
+            diagnostics={},
+            bookkeeping={},
+        )
+    )
+
+    snapshot = task_cmd.task_status(tid, context_path=root)
+
+    assert snapshot is not None
+    assert snapshot.tid == tid
+    assert snapshot.name == "retired-running-log-task"
+    assert snapshot.status == "running"
+    assert snapshot.event == "monitor_store"
+    assert snapshot.started_at == started_at
+    assert snapshot.metadata == {"kind": "status-fallback"}
+
+
+def test_task_status_reports_unknown_when_monitor_store_read_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    tid = "1779226615233824720"
+
+    def fail_open_monitor_store(*args: Any, **kwargs: Any) -> object:
+        del args, kwargs
+        raise RuntimeError("store temporarily unavailable")
+
+    monkeypatch.setattr(task_cmd, "open_monitor_store", fail_open_monitor_store)
+
+    snapshot = task_cmd.task_status(tid, context_path=root)
+
+    assert snapshot is not None
+    assert snapshot.tid == tid
+    assert snapshot.status == "unknown"
+    assert snapshot.event == "monitor_store_unavailable"
+    assert snapshot.reconciliation == {
+        "classification": "monitor_store_unavailable",
+        "reason": "store_read_failed",
+    }
+    assert snapshot.error == "monitor store unavailable: store temporarily unavailable"
+
+
 def _stop_active_manager(context) -> None:
     record = core_manager_runtime.select_active_manager(context)
     if record is None:

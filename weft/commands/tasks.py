@@ -541,6 +541,17 @@ def _task_snapshot_from_monitor_store_record(
     )
 
 
+def _monitor_store_schema_missing(exc: Exception) -> bool:
+    """Return whether a Monitor-store read failed because tables are absent."""
+
+    message = str(exc).lower()
+    return "weft_monitor_" in message and (
+        "no such table" in message
+        or "does not exist" in message
+        or "undefined table" in message
+    )
+
+
 def _monitor_store_task_snapshot(
     ctx: WeftContext,
     tid: str,
@@ -552,8 +563,33 @@ def _monitor_store_task_snapshot(
     try:
         store = open_monitor_store(ctx, config=ctx.config)
         record = store.get_task(tid)
-    except Exception:  # pragma: no cover - monitor fallback must not break status
-        return None
+    except (
+        Exception
+    ) as exc:  # pragma: no cover - monitor fallback must not break status
+        if _monitor_store_schema_missing(exc):
+            return None
+        return status_cmd.TaskSnapshot(
+            tid=tid,
+            tid_short=tid[-TASKSPEC_TID_SHORT_LENGTH:],
+            name=tid,
+            status="unknown",
+            event="monitor_store_unavailable",
+            activity=None,
+            waiting_on=None,
+            started_at=None,
+            completed_at=None,
+            last_timestamp=0,
+            duration_seconds=None,
+            runner=None,
+            runtime_handle=None,
+            runtime=None,
+            metadata={},
+            reconciliation={
+                "classification": "monitor_store_unavailable",
+                "reason": "store_read_failed",
+            },
+            error=f"monitor store unavailable: {exc}",
+        )
     if record is None:
         return None
     snapshot = _task_snapshot_from_monitor_store_record(record)
@@ -971,14 +1007,6 @@ def _pipeline_task_snapshot(
             runtime_handle_obj.to_dict() if runtime_handle_obj is not None else None
         )
         runtime = status_cmd._describe_runtime_handle(runtime_handle_obj)
-        status_text = status_cmd._effective_public_status(
-            status_text,
-            runner_name=runner,
-            mapping_entry=mapping_entry,
-            runtime_description=runtime,
-            last_timestamp=last_timestamp,
-            now_ns=now_ns,
-        )
 
     activity = pipeline_status.get("activity")
     waiting_on = pipeline_status.get("waiting_on")

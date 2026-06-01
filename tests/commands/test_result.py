@@ -315,6 +315,65 @@ def test_load_taskspec_payload_reads_full_log_history(tmp_path) -> None:
     assert taskspec["tid"] == target_tid
 
 
+def test_await_result_materialization_falls_back_on_malformed_io(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    taskspec_payload = {
+        "tid": tid,
+        "name": "malformed-io",
+        "spec": {"type": "function"},
+        "io": "not-a-dict",
+        "state": {"status": "running"},
+        "metadata": {},
+    }
+
+    monkeypatch.setattr(
+        result_cmd,
+        "_load_taskspec_payload",
+        lambda _context, requested_tid: (
+            taskspec_payload if requested_tid == tid else None
+        ),
+    )
+
+    materialized = result_cmd._await_result_materialization(ctx, tid, timeout=0.0)
+
+    assert materialized is not None
+    assert materialized.outbox_name == f"T{tid}.outbox"
+    assert materialized.ctrl_out_name == f"T{tid}.ctrl_out"
+
+
+def test_iter_task_realtime_events_falls_back_on_malformed_io(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    materialized = result_cmd.ResultMaterialization(
+        taskspec_payload={
+            "tid": tid,
+            "name": "malformed-io",
+            "spec": {"type": "function"},
+            "io": "not-a-dict",
+            "state": {"status": "running"},
+            "metadata": {},
+        },
+        outbox_name=f"T{tid}.outbox",
+        ctrl_out_name=f"T{tid}.ctrl_out",
+    )
+    monkeypatch.setattr(
+        events_cmd,
+        "_await_result_materialization",
+        lambda *_args, **_kwargs: materialized,
+    )
+
+    assert list(events_cmd.iter_task_realtime_events(ctx, tid, follow=False)) == []
+
+
 def test_load_taskspec_payload_closes_log_queue() -> None:
     tid = "1844674407370955199"
 

@@ -523,6 +523,47 @@ def test_deferred_kill_finalizes_before_limit_outcome(
     task.cleanup()
 
 
+@pytest.mark.parametrize(
+    ("command", "expected_status"),
+    ((CONTROL_STOP, "cancelled"), (CONTROL_KILL, "killed")),
+)
+def test_structured_active_stop_kill_defers_until_finalize(
+    broker_env,
+    unique_tid: str,
+    command: str,
+    expected_status: str,
+) -> None:
+    db_path, make_queue = broker_env
+    spec = make_command_taskspec(unique_tid, sys.executable)
+    task = Consumer(db_path, spec)
+    ctrl_in = make_queue(spec.io.control["ctrl_in"])
+    ctrl_out = make_queue(spec.io.control["ctrl_out"])
+    request_id = f"{command.lower()}-request"
+
+    task.taskspec.mark_started(pid=0)
+    task.taskspec.mark_running(pid=0)
+    task._active_work_in_flight = True
+    ctrl_in.write(json.dumps({"command": command.lower(), "request_id": request_id}))
+
+    task._poll_active_control_once()
+
+    assert task._deferred_active_control_command == command
+    assert task.taskspec.state.status == "running"
+    assert drain_queue(ctrl_out) == []
+    assert ctrl_in.read_one() is None
+
+    task._active_work_in_flight = False
+    task._finalize_deferred_active_control()
+
+    responses = [json.loads(message) for message in drain_queue(ctrl_out)]
+    response = next(item for item in responses if item.get("command") == command)
+    assert response["status"] == "ack"
+    assert response["request_id"] == request_id
+    assert task.taskspec.state.status == expected_status
+    assert task._deferred_active_control_command is None
+    task.cleanup()
+
+
 def test_runner_error_diagnostics_are_written_to_terminal_task_log(
     broker_env,
     unique_tid: str,

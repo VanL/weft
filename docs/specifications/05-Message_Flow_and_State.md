@@ -183,6 +183,10 @@ The control plane is explicit:
 - active STOP/KILL may delete the raw `ctrl_in` message as an internal
   handoff detail, but public acknowledgement remains the post-unwind
   `ctrl_out` reply plus the terminal task-log event on the main task thread
+- active STOP/KILL deferral applies to both raw command strings and structured
+  JSON control envelopes. Structured STOP/KILL envelopes that include
+  `request_id` must echo that value in the eventual post-unwind
+  acknowledgement.
 - a `KILL` acknowledgement means the task accepted the command; it is progress
   evidence only. Readers and CLI control helpers must not promote ack-only
   evidence into terminal lifecycle state. Kill success is proven by terminal
@@ -316,6 +320,12 @@ Current pipeline flow is task-shaped:
   parent
 - pipeline status is exposed without inventing a second top-level operator
   model
+- the current first-class pipeline contract is linear: each pipeline-compatible
+  stage emits exactly one handoff payload for the next edge. A stage that leaves
+  multiple visible handoff payloads is a contract violation and the edge must
+  fail clearly rather than move one payload and strand the rest. Fan-out,
+  batching, merge stages, and arbitrary multi-output handoff require a separate
+  spec.
 
 The reason for this shape is consistency. Pipelines are composition over tasks,
 not a separate workflow product.
@@ -391,6 +401,10 @@ Current rules:
   `weft_monitor_deferred_writes`; deletion may proceed only after either the
   external write or the deferred write succeeds. If both fail, the selected
   subject remains undeleted and retryable.
+  Passive `weft status` surfaces must render cached external-log failures and
+  pending deferred writes as visible warnings without PINGing the TaskMonitor,
+  opening the configured log path, querying Monitor tables, or flushing
+  deferred writes.
   Lifetime report records use `record_type=task_lifetime_report`,
   `schema_version=1`, deterministic `report_id`, `source_policy` constrained
   to the five top-level cleanup policies, a `subject`, a top-level `taskspec`
@@ -663,6 +677,11 @@ Managers consume `weft.spawn.requests` and, for canonical managers,
 and are drained before public spawn requests whenever both queues are pending.
 Both queues share the same validation, TaskSpec expansion, child launch, initial
 inbox seeding, and acknowledgement path.
+
+The spawn-request message ID is the submitted task TID. Dump/load paths that
+include spawn queues must preserve broker message timestamps on import. If an
+active backend cannot import rows at exact timestamps, load must fail before
+writes begin rather than rewriting runnable spawn requests under new IDs.
 
 Child process creation is the only blocking part of the launch path and runs in
 the manager's broker-free child-launch worker lane. The manager reactor owns all
@@ -1161,6 +1180,7 @@ management live in the companion doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-06-01-critical-review-remediation-plan.md`](../plans/2026-06-01-critical-review-remediation-plan.md)
 - [`docs/plans/2026-05-31-task-monitor-orphan-log-and-status-reconciliation-plan.md`](../plans/2026-05-31-task-monitor-orphan-log-and-status-reconciliation-plan.md)
 - [`docs/plans/2026-05-29-task-monitor-config-and-reactor-cache-cleanup-plan.md`](../plans/2026-05-29-task-monitor-config-and-reactor-cache-cleanup-plan.md)
 - [`docs/plans/2026-05-30-task-monitor-mode-and-rotating-log-plan.md`](../plans/2026-05-30-task-monitor-mode-and-rotating-log-plan.md)

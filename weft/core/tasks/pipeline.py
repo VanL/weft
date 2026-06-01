@@ -205,6 +205,7 @@ class PipelineEdgeTask(BaseTask):
 
     def _handoff_payload(self, timestamp: int) -> None:
         reserved_queue = self._get_reserved_queue()
+        self._assert_single_handoff_payload()
         if self._runtime.override_input is None:
             reserved_queue.move_one(
                 self._runtime.target_queue,
@@ -220,6 +221,18 @@ class PipelineEdgeTask(BaseTask):
         reserved_queue.delete(message_id=timestamp)
         self._ensure_reserved_empty()
         self._cleanup_reserved_if_needed()
+
+    def _assert_single_handoff_payload(self) -> None:
+        """Fail linear pipeline edges when an upstream emits more than one payload."""
+
+        source_queue = self._queue(self._runtime.source_queue)
+        if source_queue.peek_one() is None:
+            return
+        raise RuntimeError(
+            "Pipeline edge "
+            f"{self._runtime.edge_name!r} expected a single handoff payload "
+            f"from {self._runtime.source_queue!r}; additional payloads remain"
+        )
 
     def _fail_edge(self, error: str, timestamp: int) -> None:
         self.taskspec.mark_failed(error=error)

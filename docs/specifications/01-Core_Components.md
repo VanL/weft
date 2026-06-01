@@ -34,6 +34,7 @@ See also:
 
 ## Related Plans
 
+- [`docs/plans/2026-06-01-critical-review-remediation-plan.md`](../plans/2026-06-01-critical-review-remediation-plan.md)
 - [`docs/plans/2026-05-26-monitor-five-cleanup-policy-consolidation-plan.md`](../plans/2026-05-26-monitor-five-cleanup-policy-consolidation-plan.md)
 - [`docs/plans/2026-05-28-docker-container-profiles-plan.md`](../plans/2026-05-28-docker-container-profiles-plan.md)
 - [`docs/plans/2026-05-26-service-task-worker-api-plan.md`](../plans/2026-05-26-service-task-worker-api-plan.md)
@@ -298,9 +299,9 @@ Current task families:
   exactly five top-level cleanup policy identities:
   `task_log.retention`, `monitor_store.lifecycle`,
   `task_local.terminal_runtime`, `task_local.dead_tid`, and
-  `runtime_state.retention`. Policy work and result values share the internal
-  API in `weft/core/monitor/policies/api.py`; private helper phases must not
-  create additional policy identities. The persistent
+  `runtime_state.retention`. Policy run result values share the internal
+  result type in `weft/core/monitor/policies/types.py`; private helper phases
+  must not create additional policy identities. The persistent
   monitor also calls the configured task-monitor processor. The persistent
   monitor is a reactor: it owns task-local control, heartbeat registration,
   scheduling, and commits cached diagnostics from worker results. Custom
@@ -377,8 +378,9 @@ Current required control behavior:
   immediate, deferred, draining, broadcast, or local-only, and whether
   reserved-policy handling is applied by the base class, by the subclass, or is
   intentionally not applicable
-- handled STOP/KILL commands must produce a `ctrl_out` acknowledgement and must
-  not emit duplicate terminal state events when the task is already terminal
+- handled raw and structured STOP/KILL commands must produce a `ctrl_out`
+  acknowledgement, echo `request_id` when present, and must not emit duplicate
+  terminal state events when the task is already terminal
 
 Why this boundary matters:
 
@@ -596,6 +598,7 @@ TaskMonitor runtime boundary.
 
 ## Related Plans
 
+- [`docs/plans/2026-06-01-critical-review-remediation-plan.md`](../plans/2026-06-01-critical-review-remediation-plan.md)
 - [`docs/plans/2026-05-29-task-monitor-config-and-reactor-cache-cleanup-plan.md`](../plans/2026-05-29-task-monitor-config-and-reactor-cache-cleanup-plan.md)
 - [`docs/plans/2026-05-29-task-monitor-general-lifetime-reporting-plan.md`](../plans/2026-05-29-task-monitor-general-lifetime-reporting-plan.md)
 - [`docs/plans/2026-05-30-task-monitor-mode-and-rotating-log-plan.md`](../plans/2026-05-30-task-monitor-mode-and-rotating-log-plan.md)

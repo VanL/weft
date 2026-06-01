@@ -694,22 +694,6 @@ def _service_observation_is_stale(*, updated_at: int | None, now_ns: int) -> boo
     return now_ns - updated_at > stale_after_ns
 
 
-def _effective_public_status(
-    status: str,
-    *,
-    runner_name: str | None,
-    mapping_entry: Mapping[str, Any] | None,
-    runtime_description: Mapping[str, Any] | None,
-    last_timestamp: int,
-    now_ns: int,
-    has_live_manager_record: bool = False,
-    internal_service: bool = False,
-) -> str:
-    """Keep public state coherent with lifecycle and runtime liveness."""
-
-    return status
-
-
 def _stale_liveness_reason(
     status: str,
     *,
@@ -1169,16 +1153,7 @@ def _collect_task_snapshot_records(
             public_status = local_evidence.status
             stale_liveness_reason = None
         else:
-            public_status = _effective_public_status(
-                lifecycle_status,
-                runner_name=runner,
-                mapping_entry=runtime_entry,
-                runtime_description=runtime_description,
-                last_timestamp=int(record.get("last_timestamp") or 0),
-                now_ns=now_ns,
-                has_live_manager_record=tid == selected_active_manager_tid,
-                internal_service=internal_service,
-            )
+            public_status = lifecycle_status
             stale_liveness_reason = _stale_liveness_reason(
                 lifecycle_status,
                 tid=tid,
@@ -1905,9 +1880,10 @@ def _format_service_summary(snapshots: Sequence[ServiceSnapshot]) -> str:
             external = task_monitor.get("task_log_external")
             if isinstance(external, Mapping):
                 if external.get("healthy") is False:
-                    parts.append("diagnostics=external-log-unhealthy")
+                    parts.append("warning=external-log-unhealthy")
                 pending = external.get("deferred_pending")
                 if isinstance(pending, int) and pending > 0:
+                    parts.append("warning=deferred-writes-pending")
                     parts.append(f"deferred_writes={pending}")
         if snap.queue is not None:
             parts.append(f"queue={snap.queue}")

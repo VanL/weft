@@ -619,6 +619,11 @@ TaskMonitor built-in cleanup behavior is selected by `WEFT_TASK_MONITOR_MODE`,
 not by the external log path. The default external JSONL path is
 `logs/weft.log` under the Weft project root, and file output uses Python's
 standard rotating logfile handler.
+The default mode remains `delete`: queues are the live source of truth, and
+retained task-log rows are operational runtime evidence, not the audit record.
+Operators who want Weft's built-in task-lifetime audit handoff should use
+`jsonl_then_delete` and monitor the external file path plus deferred-write
+outbox.
 `jsonl_then_delete` must be durable-before-delete per selected subject: a
 `task_lifetime_report` must either be written to the configured external JSONL
 path or recorded in `weft_monitor_deferred_writes` before the selected exact
@@ -640,6 +645,7 @@ doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-06-01-critical-review-remediation-plan.md`](../plans/2026-06-01-critical-review-remediation-plan.md)
 - [`docs/plans/2026-05-31-task-monitor-orphan-log-and-status-reconciliation-plan.md`](../plans/2026-05-31-task-monitor-orphan-log-and-status-reconciliation-plan.md)
 - [`docs/plans/2026-05-29-task-monitor-config-and-reactor-cache-cleanup-plan.md`](../plans/2026-05-29-task-monitor-config-and-reactor-cache-cleanup-plan.md)
 - [`docs/plans/2026-05-29-task-monitor-general-lifetime-reporting-plan.md`](../plans/2026-05-29-task-monitor-general-lifetime-reporting-plan.md)

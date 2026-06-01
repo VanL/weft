@@ -8,9 +8,9 @@ Spec references:
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 from simplebroker import BrokerTarget, Queue
 from simplebroker.ext import BrokerError
@@ -31,6 +31,24 @@ from weft.core.taskspec import (
     bundle_root_from_taskspec_payload,
     resolve_taskspec_payload,
 )
+
+
+class _ExactSpawnWriter(Protocol):
+    """Broker APIs for exact-ID spawn submission."""
+
+    def write_reserved_message(
+        self,
+        queue: str,
+        message: str,
+        *,
+        message_id: int,
+    ) -> None:
+        """Write a message using a broker-reserved message ID."""
+        ...
+
+    def import_messages(self, records: Iterable[tuple[str, str, int]]) -> None:
+        """Import pending messages with exact IDs."""
+        ...
 
 
 def _normalize_broker_target(target: BrokerTarget | str | Path) -> BrokerTarget | str:
@@ -95,20 +113,26 @@ def _write_spawn_request_with_timestamp(
     """Write a spawn request at its preallocated TID timestamp.
 
     SimpleBroker's public ``Queue.write()`` API always generates a new
-    timestamp. Weft's spawn submission contract needs the spawn-request message
-    timestamp to match the externally returned TID, so this narrow adapter owns
-    the private SimpleBroker exact-timestamp call until SimpleBroker exposes a
-    public equivalent.
+    timestamp. Weft's spawn submission contract needs the queued message
+    timestamp to match the externally returned TID, so this path uses
+    SimpleBroker's exact-ID APIs.
     """
 
-    db_core = cast(Any, db)
-    db_core._run_with_retry(
-        lambda: db_core._do_write_transaction(
-            queue_name,
-            message,
-            timestamp,
+    if not callable(getattr(db, "write_reserved_message", None)) or not callable(
+        getattr(db, "import_messages", None)
+    ):
+        raise RuntimeError(
+            "exact-ID spawn request writes require simplebroker>=4.2.0"
         )
-    )
+
+    message_id = int(timestamp)
+    writer = cast(_ExactSpawnWriter, db)
+    try:
+        writer.write_reserved_message(queue_name, message, message_id=message_id)
+    except ValueError as exc:
+        if "less than or equal to current last_ts" not in str(exc):
+            raise
+        writer.import_messages([(queue_name, message, message_id)])
 
 
 def _prepare_spawn_metadata(

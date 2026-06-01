@@ -28,6 +28,7 @@ _PROVIDER_BINARIES = {
     "opencode": "opencode",
     "qwen": "qwen",
 }
+TOOL_PROFILE_CALLS: list[dict[str, Any]] = []
 
 
 def resolve_operator_question(*, agent, work_item, tid):  # noqa: ANN001
@@ -58,6 +59,24 @@ def provider_tool_profile(*, agent, tid):  # noqa: ANN001
         provider_options=provider_options,
         metadata={"profile": "fixture", "provider": provider_name, "tid": tid},
     )
+
+
+def reset_counting_tool_profile_calls() -> None:
+    """Clear recorded tool-profile calls for provider CLI tests."""
+
+    TOOL_PROFILE_CALLS.clear()
+
+
+def counting_provider_tool_profile(*, agent, tid):  # noqa: ANN001
+    """Record profile resolution before returning the normal fixture profile."""
+
+    TOOL_PROFILE_CALLS.append(
+        {
+            "provider": str(agent.runtime_config.get("provider", "")).strip(),
+            "tid": tid,
+        }
+    )
+    return provider_tool_profile(agent=agent, tid=tid)
 
 
 def invalid_resolver(*, agent, work_item, tid):  # noqa: ANN001
@@ -565,6 +584,8 @@ def _execute_fixture_request(
         "provider": provider_name,
         "model": model,
         "cwd": cwd or os.getcwd(),
+        "home": os.environ.get("HOME"),
+        "userprofile": os.environ.get("USERPROFILE"),
         "env_value": os.environ.get("WEFT_PROVIDER_FIXTURE_ENV"),
         "prompt": prompt,
         "options": options,

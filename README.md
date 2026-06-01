@@ -516,6 +516,9 @@ weft.state.pipelines     # Active pipeline registry (runtime state)
 ```
 
 Queues under `weft.state.*` are runtime-only and excluded from dumps by default.
+`weft.log.tasks` is runtime lifecycle evidence while retained. It is not the
+audit record; use TaskMonitor `jsonl_then_delete` when you want Weft's built-in
+task-lifetime JSONL handoff before cleanup.
 
 ### Reservation Pattern
 
@@ -616,7 +619,8 @@ weft manager status TID [--json] [--context PATH]
 weft system builtins [--json]  # shipped builtin inventory
 weft system tidy            # backend-native broker compaction
 weft system dump -o FILE
-weft system load -i FILE    # preflight import; exits 3 on alias conflicts
+weft system load --dry-run -i FILE  # preflight import; exits 3 on conflicts
+weft system load -i FILE            # import the dump
 
 # Generate and store a reusable spec
 weft spec generate --type task > my-task.json
@@ -674,6 +678,11 @@ For Docker-backed one-shot `provider_cli` agent specs, preflight validates the
 Docker lane and static descriptor requirements. It does not require the host
 provider executable to exist, because the real provider CLI runs inside the
 container.
+
+`weft system dump` exports visible pending broker messages and preserves their
+message IDs on load through SimpleBroker's bulk import API. Claimed
+in-flight rows are omitted and reported in the dump summary. `weft system load
+-i FILE` mutates the target context; use `--dry-run` for validation only.
 
 ### Task Execution
 

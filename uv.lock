@@ -641,7 +641,7 @@ wheels = [
 
 [[package]]
 name = "openai"
-version = "2.38.0"
+version = "2.39.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
@@ -653,9 +653,9 @@ dependencies = [
     { name = "tqdm" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/8f/12/cfa322c5f5dd8fa21aab9a7a8e979e7a11123800f86ca8d82eb68a83d213/openai-2.38.0.tar.gz", hash = "sha256:798694c6cf74145541fda94325b6f8f72d8e1fd0262cc137c8d728177a6a4ce3", size = 772764, upload-time = "2026-05-21T21:23:42.105Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/72/6c/3fc80e2a9a6a221bea772e8851912e4d86203ee66a73f17639a9cc9bfbb8/openai-2.39.0.tar.gz", hash = "sha256:8d915a72448314c97c719fa63e3c88efa6041e806c546064aaf1edc5e6fffc45", size = 774874, upload-time = "2026-06-01T18:58:18.522Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/0a/bf/ccff9be562e24207716d04ef9dc931c76aff0c89a7265da43e2104d7fe06/openai-2.38.0-py3-none-any.whl", hash = "sha256:ec6661c57b2dcc47414a767e6e3335c7ed3d19c9696999283a3c82e95c756a3c", size = 1344910, upload-time = "2026-05-21T21:23:39.636Z" },
+    { url = "https://files.pythonhosted.org/packages/02/5b/7c759d211cba60b61136556b589afeaa4087d07a6ddfcff9f5f0b1ef5121/openai-2.39.0-py3-none-any.whl", hash = "sha256:be9de9b3a1f264777c27d3efb266b5abd37f3d25b48f8d0ac1c4db14e5c73bfd", size = 1347460, upload-time = "2026-06-01T18:58:16.764Z" },
 ]
 
 [[package]]
@@ -678,11 +678,11 @@ wheels = [
 
 [[package]]
 name = "pip"
-version = "26.1.1"
+version = "26.1.2"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/b6/48/cb9b7a682f6fe01a4221e1728941dd4ac3cd9090a17db3779d6ff490b602/pip-26.1.1.tar.gz", hash = "sha256:d36762751d156a4ee895de8af39aa0abeeeb577f93a2eca6ab62467bbf0f8a78", size = 1840400, upload-time = "2026-05-04T19:02:21.248Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/01/91/47e7d486260f618783899587af63ccf7980fb60245c3e63dd4571c6b57ad/pip-26.1.2.tar.gz", hash = "sha256:f49cd134c61cf2fd75e0ce2676db03e4054504a5a4986d00f8299ae632dc4605", size = 1840799, upload-time = "2026-05-31T17:33:58.56Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/3a/eb/fea4d1d51c49832120f7f285d07306db3960f423a2612c6057caf3e8196f/pip-26.1.1-py3-none-any.whl", hash = "sha256:99cb1c2899893b075ff56e4ed0af55669a955b49ad7fb8d8603ecdaf4ed653fb", size = 1812777, upload-time = "2026-05-04T19:02:18.9Z" },
+    { url = "https://files.pythonhosted.org/packages/5d/95/6b5cb3461ea5673ba0995989746db58eb18b91b54dbf331e72f569540946/pip-26.1.2-py3-none-any.whl", hash = "sha256:382ff9f685ee3bc25864f820aa50505825f10f5458ffff07e30a6d96e5715cab", size = 1813144, upload-time = "2026-05-31T17:33:56.772Z" },
 ]
 
 [[package]]
@@ -1190,25 +1190,25 @@ wheels = [
 
 [[package]]
 name = "simplebroker"
-version = "4.0.1"
+version = "4.2.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/c5/52/ebb5c4039de16a2d37891c030fa023454164f9e96bd6fa5a656afb2e58c3/simplebroker-4.0.1.tar.gz", hash = "sha256:5baf29fa010f98cf2d361fef20cf3604885958875c07c859cd0e0d259a967980", size = 165596, upload-time = "2026-05-30T21:47:18.892Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/26/9a/8468f9b0474ac27b40740717f5c142dd57ae176359771d1bf3279f34e472/simplebroker-4.2.0.tar.gz", hash = "sha256:5f4200502d1c3503f0344c18d8dfa83e5ee37250400793f4df4397d52d7546ae", size = 168307, upload-time = "2026-06-01T19:25:19.008Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/4e/0f/14e454341b03e58d3c4368d6262847427693f10bd5753789f1dc755bf97c/simplebroker-4.0.1-py3-none-any.whl", hash = "sha256:0008762b69d44b92f5f44dfeb2ee4950b3a20d5bfb39c6723c453406c6ccdce4", size = 184020, upload-time = "2026-05-30T21:47:17.558Z" },
+    { url = "https://files.pythonhosted.org/packages/a2/a5/d985d338390e46150f57c7a0032ee40d59408b3276527d5551394169ac3d/simplebroker-4.2.0-py3-none-any.whl", hash = "sha256:037ba0263d9f80ec12f7a0672d11b485f3bda5eb9e49274e973fc155688b5889", size = 187090, upload-time = "2026-06-01T19:25:20.616Z" },
 ]
 
 [[package]]
 name = "simplebroker-pg"
-version = "1.6.1"
+version = "2.1.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "psycopg", extra = ["binary"] },
     { name = "psycopg-pool" },
     { name = "simplebroker" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/a1/3f/7c32956bcacc31738c77e03526731dff87e351f01e985c23524e6643b4f0/simplebroker_pg-1.6.1.tar.gz", hash = "sha256:7e3a704cf5550d1a1d9d0cdb84716893829189277b742c9b34597d01cf14b55e", size = 19668, upload-time = "2026-05-26T18:37:31.675Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/8c/ff/9fe15c027f041c058389a27cbc792258012774c46418d8073612bed1d0a1/simplebroker_pg-2.1.0.tar.gz", hash = "sha256:8b4f74aab885346ca658d32093a0519312983caf862c6adf316ac6805655b092", size = 19668, upload-time = "2026-06-01T19:25:30.28Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/85/07/cc55febcd5580f2dd35f8ac44b358743f3f441099cb32b06764f5b439b2e/simplebroker_pg-1.6.1-py3-none-any.whl", hash = "sha256:c42dd0ee3119720309652737f66a972b3ef2ed29a2c2a32ed5a275823590d6e3", size = 25719, upload-time = "2026-05-26T18:37:30.712Z" },
+    { url = "https://files.pythonhosted.org/packages/8e/71/5eb10e3758620a109a491df6dab8c29a3830f2dd991d58a35c12967420cf/simplebroker_pg-2.1.0-py3-none-any.whl", hash = "sha256:aab3c0066a80044a87355977c9218057bc596ab2bf74824d8eb5131f08ce566c", size = 25717, upload-time = "2026-06-01T19:25:29.426Z" },
 ]
 
 [[package]]
@@ -1300,7 +1300,7 @@ wheels = [
 
 [[package]]
 name = "typer"
-version = "0.26.4"
+version = "0.26.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "annotated-doc" },
@@ -1308,9 +1308,9 @@ dependencies = [
     { name = "rich" },
     { name = "shellingham" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/8e/d3/90c1ee19209cb59f6ad185883fd4ccfcf72f8f0bfd549d5a8b70474611d0/typer-0.26.4.tar.gz", hash = "sha256:25b128964de66c5ea36d5ac82adc579e5e113509b17469edf9f5a4a1864ff2a9", size = 201191, upload-time = "2026-05-30T17:05:04.213Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/eb/1a/2cf40b65b1d9c254fe5814bb0519f9b8f2ac38059df0810f9b866300c04a/typer-0.26.5.tar.gz", hash = "sha256:9b9b39e35c3afc9e1e51a06f21155246e457c0911279b09b35d8210ca74b935c", size = 201494, upload-time = "2026-06-01T14:42:49.744Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/f0/6d/5a525c69df4a90892135e5d490b00e9e46402491f3416d4395fcb0d0201e/typer-0.26.4-py3-none-any.whl", hash = "sha256:11bfd7b43557137e373c2b10f6967a555f9678a61ed72c808968b011d95534d6", size = 122436, upload-time = "2026-05-30T17:05:05.812Z" },
+    { url = "https://files.pythonhosted.org/packages/ec/d6/baac76fc04a6532883de3d8722c7f921dae94d10965e7ffba9e38e42a251/typer-0.26.5-py3-none-any.whl", hash = "sha256:4bfd901d564e41608920134aa5d4481200f4ba76d98e982d9f9d32dcb7b84da0", size = 122451, upload-time = "2026-06-01T14:42:51.021Z" },
 ]
 
 [[package]]
@@ -1402,6 +1402,8 @@ dev = [
     { name = "ruff" },
     { name = "simplebroker-pg" },
     { name = "types-psutil" },
+    { name = "weft-docker" },
+    { name = "weft-macos-sandbox" },
 ]
 django = [
     { name = "weft-django" },
@@ -1433,10 +1435,10 @@ requires-dist = [
     { name = "rich", specifier = ">=14.0.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.12" },
     { name = "setproctitle", specifier = ">=1.3.7" },
-    { name = "simplebroker", specifier = ">=4.0.1" },
-    { name = "simplebroker-pg", marker = "extra == 'all'", specifier = ">=1.6.0,<2" },
-    { name = "simplebroker-pg", marker = "extra == 'dev'", specifier = ">=1.6.0,<2" },
-    { name = "simplebroker-pg", marker = "extra == 'pg'", specifier = ">=1.6.1,<2" },
+    { name = "simplebroker", specifier = ">=4.2.0" },
+    { name = "simplebroker-pg", marker = "extra == 'all'", specifier = ">=2.1.0" },
+    { name = "simplebroker-pg", marker = "extra == 'dev'", specifier = ">=2.1.0" },
+    { name = "simplebroker-pg", marker = "extra == 'pg'", specifier = ">=2.1.0" },
     { name = "typer", specifier = ">=0.16.0" },
     { name = "types-psutil", marker = "extra == 'dev'", specifier = ">=5.9.5" },
     { name = "typing-extensions", specifier = ">=4.0.0" },
@@ -1444,8 +1446,10 @@ requires-dist = [
     { name = "weft-django", marker = "extra == 'django'", editable = "integrations/weft_django" },
     { name = "weft-django", extras = ["channels"], marker = "extra == 'django-channels'", editable = "integrations/weft_django" },
     { name = "weft-docker", marker = "extra == 'all'", editable = "extensions/weft_docker" },
+    { name = "weft-docker", marker = "extra == 'dev'", editable = "extensions/weft_docker" },
     { name = "weft-docker", marker = "extra == 'docker'", editable = "extensions/weft_docker" },
     { name = "weft-macos-sandbox", marker = "extra == 'all'", editable = "extensions/weft_macos_sandbox" },
+    { name = "weft-macos-sandbox", marker = "extra == 'dev'", editable = "extensions/weft_macos_sandbox" },
     { name = "weft-macos-sandbox", marker = "extra == 'macos-sandbox'", editable = "extensions/weft_macos_sandbox" },
 ]
 provides-extras = ["pg", "docker", "django", "django-channels", "macos-sandbox", "all", "dev"]

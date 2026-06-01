@@ -17,7 +17,7 @@ import signal
 import threading
 import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from multiprocessing.process import BaseProcess
 from pathlib import Path
@@ -352,6 +352,7 @@ class Manager(ServiceTask):
         self._unregistered_status: (
             Literal["draining", "stopped", "superseded"] | None
         ) = None
+        self._atexit_callback: Callable[[], None] | None = None
         self._registry_message_id: int | None = None
         self._draining = False
         self._drain_reason: str | None = None
@@ -429,7 +430,7 @@ class Manager(ServiceTask):
         self._reconcile_managed_services(force=True)
         self._managed_service_duplicate_scan_pending.clear()
         self._managed_internal_spawn_enqueued = False
-        atexit.register(self._atexit_unregister)
+        self._register_atexit_callback()
 
     def _service_state(self, service_key: str) -> ManagedServiceState:
         """Return Manager-local mutable state for a supervised service key."""
@@ -6235,6 +6236,7 @@ class Manager(ServiceTask):
         self._cleanup_own_internal_reserved_queue()
         self._unregister_manager()
         super().cleanup()
+        self._unregister_atexit_callback()
 
     def next_wait_timeout(self) -> float | None:
         """Return the next manager due timer for the shared task loop."""
@@ -6671,6 +6673,25 @@ class Manager(ServiceTask):
     def _atexit_unregister(self) -> None:
         try:
             self._unregister_manager()
+        except Exception:  # pragma: no cover - interpreter shutdown cleanup
+            pass
+
+    def _register_atexit_callback(self) -> None:
+        """Register best-effort manager cleanup for interpreter shutdown."""
+
+        callback = self._atexit_unregister
+        self._atexit_callback = callback
+        atexit.register(callback)
+
+    def _unregister_atexit_callback(self) -> None:
+        """Remove the explicit atexit callback after normal cleanup."""
+
+        callback = self._atexit_callback
+        if callback is None:
+            return
+        self._atexit_callback = None
+        try:
+            atexit.unregister(callback)
         except Exception:  # pragma: no cover - interpreter shutdown cleanup
             pass
 

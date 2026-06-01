@@ -13,7 +13,7 @@ import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Protocol, cast
+from typing import Any, Protocol, cast
 from uuid import uuid4
 
 from weft.ext import AgentMCPServerDescriptor, AgentToolProfileResult
@@ -81,13 +81,6 @@ class ProviderCLIProvider(Protocol):
         tool_profile: AgentToolProfileResult,
         *,
         preflight: bool = False,
-    ) -> None: ...
-
-    def ensure_runtime_requirements(
-        self,
-        executable: str,
-        *,
-        command_class: Literal["execute", "session"],
     ) -> None: ...
 
     def build_invocation(
@@ -177,14 +170,6 @@ class _BaseTextProvider:
             raise ValueError(f"{self.name} does not support spec.agent.model")
         if not isinstance(model, str) or not model.strip():
             raise ValueError("spec.agent.model must be a non-empty string")
-
-    def ensure_runtime_requirements(
-        self,
-        executable: str,
-        *,
-        command_class: Literal["execute", "session"],
-    ) -> None:
-        del executable, command_class
 
     def validate_tool_profile(
         self,
@@ -751,16 +736,15 @@ class GeminiProvider(_BaseTextProvider):
         command = [executable]
         if model:
             command.extend(["-m", model])
-        if authority_class == "bounded" or tool_profile.workspace_access == "read-only":
+        isolated_runtime = (
+            authority_class == "bounded" or tool_profile.workspace_access == "read-only"
+        )
+        if isolated_runtime:
             command.extend(["--approval-mode", "plan"])
         command.extend(["-p", prompt, "-y", "-o", "text"])
         return ProviderCLIInvocation(
             command=tuple(command),
-            env=(
-                build_gemini_session_environment(tempdir)
-                if authority_class == "bounded"
-                else None
-            ),
+            env=build_gemini_session_environment(tempdir) if isolated_runtime else None,
         )
 
     def create_session_context(
@@ -823,14 +807,6 @@ class OpencodeProvider(_BaseTextProvider):
             raise ValueError(f"{self.name} does not support provider options: {keys}")
         if pure_value is not None and not isinstance(pure_value, bool):
             raise TypeError(f"{self.name} provider option 'pure' must be a boolean")
-
-    def ensure_runtime_requirements(
-        self,
-        executable: str,
-        *,
-        command_class: Literal["execute", "session"],
-    ) -> None:
-        del executable, command_class
 
     def build_invocation(
         self,

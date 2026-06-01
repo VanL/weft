@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.9.75 - 2026-06-01
+
+### Changed
+
+- Raised the SimpleBroker floor to 4.2.0 and the Postgres backend floor to
+  simplebroker-pg 2.1.0 so Weft can rely on exact timestamp import and the
+  current backend APIs across SQLite and Postgres.
+- Changed `weft system dump`/`load` so runnable broker state preserves message
+  timestamps instead of rewriting pending spawn request IDs on import. Backends
+  that cannot preserve message IDs are rejected before mutation.
+- Tightened provider CLI one-shot execution so tool profile resolution happens
+  once per work item and Gemini read-only/general runs get the same isolated
+  runtime home protections as bounded execution.
+- Clarified the production retention guidance: `delete` remains the default
+  TaskMonitor mode, while `jsonl_then_delete` is documented as the audit-retention
+  preset.
+
+### Fixed
+
+- Fixed active structured STOP/KILL control envelopes so active consumers defer
+  terminal publication until the runner unwinds instead of publishing terminal
+  state early.
+- Fixed pipeline stage handoff behavior by enforcing the single-output contract,
+  preventing extra stage outputs from being stranded after the first downstream
+  edge checkpoint.
+- Fixed result and task evidence queue-name resolution by reusing the canonical
+  helper for malformed or partial TaskSpec `io` payloads.
+- Fixed manager cleanup by unregistering the registered `atexit` callback during
+  normal cleanup.
+- Removed stale monitor policy API scaffolding and unused constants/hooks that
+  no longer represented live product behavior.
+
 ## 0.9.73 - 2026-05-30
 
 ### Changed

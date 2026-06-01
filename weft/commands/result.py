@@ -10,13 +10,12 @@ import json
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
 
 from simplebroker import Queue
 from simplebroker.ext import BrokerError
 from weft._constants import (
     FAILURE_LIKE_TASK_STATUSES,
-    QUEUE_CTRL_OUT_SUFFIX,
     QUEUE_OUTBOX_SUFFIX,
     WEFT_COMPLETED_RESULT_GRACE_SECONDS,
     WEFT_GLOBAL_LOG_QUEUE,
@@ -99,25 +98,6 @@ def _normalize_tid(raw_tid: str) -> str:
     if not candidate.isdigit():
         raise ValueError(f"invalid task id '{raw_tid}'")
     return candidate
-
-
-def _queue_names_for_tid(
-    tid: str, taskspec_payload: dict[str, Any] | None
-) -> tuple[str, str]:
-    outbox = None
-    ctrl_out = None
-    if taskspec_payload:
-        io_section = cast(dict[str, Any], taskspec_payload.get("io") or {})
-        outputs = cast(dict[str, str], io_section.get("outputs") or {})
-        control = cast(dict[str, str], io_section.get("control") or {})
-        outbox = outputs.get("outbox")
-        ctrl_out = control.get("ctrl_out")
-    prefix = f"T{tid}."
-    if not outbox:
-        outbox = f"{prefix}{QUEUE_OUTBOX_SUFFIX}"
-    if not ctrl_out:
-        ctrl_out = f"{prefix}{QUEUE_CTRL_OUT_SUFFIX}"
-    return outbox, ctrl_out
 
 
 def _pipeline_queue_names_for_tid(tid: str) -> tuple[str, str, str]:
@@ -209,7 +189,10 @@ def _await_result_materialization(
     try:
         while True:
             taskspec_payload = _load_taskspec_payload(context, tid)
-            outbox_name, ctrl_out_name = _queue_names_for_tid(tid, taskspec_payload)
+            outbox_name, ctrl_out_name = task_evidence.queue_names_for_tid(
+                tid,
+                taskspec_payload,
+            )
             if taskspec_payload is not None:
                 return ResultMaterialization(
                     taskspec_payload=taskspec_payload,
@@ -285,7 +268,7 @@ def _await_result_materialization(
                 for event_payload, _timestamp in reversed(events):
                     event_taskspec = event_payload.get("taskspec")
                     if isinstance(event_taskspec, dict):
-                        outbox_name, ctrl_out_name = _queue_names_for_tid(
+                        outbox_name, ctrl_out_name = task_evidence.queue_names_for_tid(
                             tid,
                             event_taskspec,
                         )
@@ -513,7 +496,10 @@ def _await_single_result(
         taskspec_payload = _load_taskspec_payload(context, tid)
     is_persistent = _is_persistent_task(taskspec_payload)
     if outbox_name is None or ctrl_out_name is None:
-        outbox_name, ctrl_out_name = _queue_names_for_tid(tid, taskspec_payload)
+        outbox_name, ctrl_out_name = task_evidence.queue_names_for_tid(
+            tid,
+            taskspec_payload,
+        )
     ctrl_out_for_wait = (
         None if is_pipeline_taskspec_payload(taskspec_payload) else ctrl_out_name
     )

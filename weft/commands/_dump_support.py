@@ -52,8 +52,12 @@ def _export_aliases(output: TextIO, db: Any) -> int:
     return len(aliases)
 
 
-def _export_messages(output: TextIO, db: Any) -> tuple[int, int]:
-    """Export all messages from all queues. Returns (queue_count, message_count)."""
+def _export_messages(output: TextIO, db: Any) -> tuple[int, int, int, int]:
+    """Export pending messages from all queues.
+
+    Returns:
+        ``(queue_count, message_count, claimed_queue_count, claimed_message_count)``.
+    """
     try:
         queue_stats = list(db.list_queue_stats())
     except (
@@ -61,9 +65,11 @@ def _export_messages(output: TextIO, db: Any) -> tuple[int, int]:
         OSError,
         RuntimeError,
     ):  # pragma: no cover - queue probe best effort
-        return 0, 0
+        return 0, 0, 0, 0
 
     total_messages = 0
+    claimed_queue_count = 0
+    claimed_message_count = 0
 
     exported_queue_names: list[str] = []
     for stats in queue_stats:
@@ -71,6 +77,10 @@ def _export_messages(output: TextIO, db: Any) -> tuple[int, int]:
         message_count = int(stats.pending)
         if queue_name.startswith(WEFT_STATE_QUEUE_PREFIX):
             continue
+        claimed_count = int(getattr(stats, "claimed", 0))
+        if claimed_count > 0:
+            claimed_queue_count += 1
+            claimed_message_count += claimed_count
         # Skip empty queues
         if message_count == 0:
             continue
@@ -104,7 +114,12 @@ def _export_messages(output: TextIO, db: Any) -> tuple[int, int]:
             output.write(json.dumps(record, ensure_ascii=False) + "\n")
             total_messages += 1
 
-    return len(exported_queue_names), total_messages
+    return (
+        len(exported_queue_names),
+        total_messages,
+        claimed_queue_count,
+        claimed_message_count,
+    )
 
 
 def cmd_dump(
@@ -144,6 +159,8 @@ def cmd_dump(
     alias_count = 0
     exported_queues = 0
     exported_messages = 0
+    claimed_queues = 0
+    claimed_messages = 0
 
     try:
         with context.broker() as db:
@@ -152,7 +169,12 @@ def cmd_dump(
                 # Export in order: metadata, aliases, messages
                 _export_metadata(f, db)
                 alias_count = _export_aliases(f, db)
-                exported_queues, exported_messages = _export_messages(f, db)
+                (
+                    exported_queues,
+                    exported_messages,
+                    claimed_queues,
+                    claimed_messages,
+                ) = _export_messages(f, db)
 
     except Exception as exc:  # pragma: no cover - command error boundary
         return 1, f"weft dump: export failed: {exc}"
@@ -161,6 +183,11 @@ def cmd_dump(
     message = f"Exported {exported_messages} messages from {exported_queues} queues"
     if alias_count > 0:
         message += f" and {alias_count} aliases"
+    if claimed_messages > 0:
+        message += (
+            f"; omitted {claimed_messages} claimed messages from "
+            f"{claimed_queues} queues"
+        )
     message += f" to {output_path}"
 
     return 0, message

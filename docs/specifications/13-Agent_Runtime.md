@@ -519,9 +519,18 @@ Backend-specific notes:
 - `authority_class="bounded"` means Weft enforces the strongest
   deterministic narrowing it knows how to express for that provider. It does
   not mean Weft has taken over the provider's full inner safety policy
+- Gemini host-backed one-shot execution uses an isolated runtime home when the
+  authority class is `bounded` or the resolved workspace access is
+  `read-only`; persistent Gemini sessions use the same isolated-home boundary.
+  This prevents a read-only one-shot from inheriting the user's ambient Gemini
+  runtime directory.
 - delegated tool-profile validation is split from agent-runtime validation so
   CLI and execution surfaces can report environment-profile, runner,
   agent-runtime, and tool-profile failures separately
+- one-shot delegated execution resolves a callable `tool_profile_ref` once per
+  work item at the shared preparation boundary, and then carries the resolved
+  profile through invocation. Validation must not call a user profile callable
+  a second time for the same one-shot work item.
 - delegated startup validation remains static. It may resolve executable paths
   and project-local launch defaults, but it does not spawn provider CLIs just
   to prove health
@@ -551,6 +560,11 @@ Backend-specific notes:
 - when `authority_class="bounded"` and no explicit Claude MCP servers are
   declared, Weft supplies an empty strict MCP config rather than inheriting
   ambient local MCP state
+- Qwen bounded/read-only narrowing passes empty `--extensions=` and
+  `--allowed-mcp-server-names=` flags when extensions are disabled. Local help
+  confirms those flags exist for the provider CLI version tested here; stronger
+  claims about ambient extension/MCP disablement require provider-version
+  semantic verification.
 - delegated provider executable defaults may come from user-authored
   `.weft/agents.json` agent settings when the TaskSpec does not pin an
   executable explicitly; in the current shipped settings shape those defaults
@@ -718,6 +732,7 @@ This slice does not attempt to:
 
 ## Related Plans
 
+- [`docs/plans/2026-06-01-critical-review-remediation-plan.md`](../plans/2026-06-01-critical-review-remediation-plan.md)
 - [`docs/plans/2026-05-28-docker-container-profiles-plan.md`](../plans/2026-05-28-docker-container-profiles-plan.md)
 - [`docs/plans/2026-05-08-agent-session-and-task-startup-observability-plan.md`](../plans/2026-05-08-agent-session-and-task-startup-observability-plan.md)
 - [`docs/plans/2026-04-14-agent-runtime-package-refactor-plan.md`](../plans/2026-04-14-agent-runtime-package-refactor-plan.md)

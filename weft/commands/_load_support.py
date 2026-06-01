@@ -342,10 +342,10 @@ def _enrich_import_plan(plan: ImportPlan, context: WeftContext) -> None:
 
 
 def _execute_import(plan: ImportPlan, context: WeftContext) -> ImportReport:
-    """Apply a preflighted import plan using backend-neutral broker APIs."""
+    """Apply a preflighted import plan while preserving broker timestamps."""
 
+    _ensure_exact_timestamp_import_supported(plan, context)
     snapshot = _sqlite_snapshot_if_file_backed(context)
-    queue_cache: dict[str, Any] = {}
     writes_started = False
 
     try:
@@ -356,17 +356,18 @@ def _execute_import(plan: ImportPlan, context: WeftContext) -> ImportReport:
                 writes_started = True
                 broker.add_alias(alias_record.alias, alias_record.target)
 
-        for message_record in plan.message_records:
-            queue = queue_cache.get(message_record.queue_name)
-            if queue is None:
-                queue = context.queue(message_record.queue_name, persistent=True)
-                queue_cache[message_record.queue_name] = queue
-            writes_started = True
-            queue.write(message_record.body)
+            if plan.message_records:
+                writes_started = True
+                broker.import_messages(
+                    (
+                        message_record.queue_name,
+                        message_record.body,
+                        message_record.timestamp,
+                    )
+                    for message_record in plan.message_records
+                )
 
     except Exception as exc:  # pragma: no cover - rollback must run on any failure
-        _close_import_queues(queue_cache)
-
         if snapshot is not None:
             try:
                 snapshot.restore()
@@ -386,20 +387,27 @@ def _execute_import(plan: ImportPlan, context: WeftContext) -> ImportReport:
         raise ImportError(f"import failed: {exc}") from exc
 
     finally:
-        _close_import_queues(queue_cache)
         if snapshot is not None:
             snapshot.cleanup()
 
     return plan.report
 
 
-def _close_import_queues(queue_cache: dict[str, Any]) -> None:
-    """Close any cached queue handles used during import."""
+def _ensure_exact_timestamp_import_supported(
+    plan: ImportPlan,
+    context: WeftContext,
+) -> None:
+    """Fail before writes when the backend cannot preserve dump timestamps."""
 
-    for queue in queue_cache.values():
-        close = getattr(queue, "close", None)
-        if callable(close):
-            close()
+    if not plan.message_records:
+        return
+    with context.broker() as broker:
+        if callable(getattr(broker, "import_messages", None)):
+            return
+    raise ImportError(
+        "backend cannot preserve message timestamps during import; "
+        "refusing to load runnable broker state under new message IDs"
+    )
 
 
 def _sqlite_snapshot_if_file_backed(context: WeftContext) -> SQLiteSnapshot | None:

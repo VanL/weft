@@ -402,7 +402,8 @@ def test_status_services_report_task_monitor_external_log_diagnostics(
     assert external["deferred_pending"] == 3
     assert text_exit_code == 0
     assert text_payload is not None
-    assert "diagnostics=external-log-unhealthy" in text_payload
+    assert "warning=external-log-unhealthy" in text_payload
+    assert "warning=deferred-writes-pending" in text_payload
     assert "deferred_writes=3" in text_payload
 
 

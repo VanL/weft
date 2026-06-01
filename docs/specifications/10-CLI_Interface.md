@@ -344,6 +344,10 @@ Current behavior:
   deferred-write counts from the monitor's latest TID mapping. Project-wide
   `weft status` must not PING the monitor or open the configured external log
   path to populate these diagnostics.
+- Plain-text status renders cached TaskMonitor external-log failures and
+  pending deferred writes as visible `warning=...` fields. JSON status keeps
+  the same additive diagnostic fields and must not perform active probes to
+  populate them.
 - JSON task snapshots may include an additive `reconciliation` object when
   lifecycle evidence and runtime liveness disagree. Ordinary stale runtime
   evidence keeps the public lifecycle status and adds diagnostics. Stale
@@ -429,6 +433,11 @@ Current behavior:
   with lifecycle evidence, when a typed terminal `ctrl_out` envelope proves
   terminal state, or when one-shot outbox evidence is visible without terminal
   task-log publication
+- If raw task-log evidence has retired and the Monitor store cannot be read,
+  `weft task status TID` reports a degraded `unknown` snapshot with
+  `reconciliation.classification="monitor_store_unavailable"` instead of
+  treating the task as not found. A successful Monitor store read that returns
+  no row still means not found.
 - `weft task status TID --ping` sends a structured PING with a
   `request_id`, waits for the matching PONG, and may return a `live_pong`
   reconciliation classification plus best-effort runner-specific `runtime`
@@ -666,8 +675,11 @@ Current configuration domains:
 TaskMonitor cleanup behavior is configured through the same `load_config()` and
 `build_context()` path as other Weft settings. `WEFT_TASK_MONITOR_MODE` selects
 the built-in behavior (`delete`, `report_only`, `jsonl_then_delete`) or
-`custom`; `WEFT_TASK_MONITOR_PROCESSOR` is only a custom `module:function`
-reference for `mode=custom`. The external lifetime log path defaults to
+`custom`; `delete` is the zero-config default, while `jsonl_then_delete` is the
+recommended built-in production audit-handoff preset when operators need
+task-lifetime JSONL records before destructive cleanup. `WEFT_TASK_MONITOR_PROCESSOR`
+is only a custom `module:function` reference for `mode=custom`. The external
+lifetime log path defaults to
 `logs/weft.log` under the Weft project root, but a path alone does not enable
 logging. Changing the configured external path requires restarting the
 TaskMonitor; availability and permission changes for the resolved path are
@@ -766,8 +778,17 @@ Current behavior:
 - `system tidy` delegates maintenance/compaction to the active backend
 - `system dump` exports broker state while excluding runtime-only
   `weft.state.*` queues
-- `system load` imports a dump and returns exit code `3` on alias conflicts
-  before writes begin
+- `system dump` exports visible pending broker messages. If an included queue
+  has claimed rows, the command reports the omitted claimed-message count
+  instead of pretending the dump is a complete in-flight broker image.
+- `system load --dry-run -i FILE` validates a dump without writing. Plain
+  `system load -i FILE` imports the dump.
+- `system load` preserves included broker message timestamps during import and
+  returns exit code `3` on alias conflicts before writes begin. If exact
+  timestamp import is unavailable for the active backend, load fails before
+  writing rather than silently allocating new message IDs. Load uses
+  SimpleBroker's bulk `import_messages()` API so timestamp high-water handling
+  and row import occur inside the broker apply path.
 - `system task-monitor` scans `weft.log.tasks` without consuming broker
   messages and emits JSONL log records to stdout or append-only disk files
   under `.weft/logs/task-monitor/YYYY-MM-DD.jsonl`
@@ -823,6 +844,7 @@ flags, and future queue or control ergonomics live in the companion doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-06-01-critical-review-remediation-plan.md`](../plans/2026-06-01-critical-review-remediation-plan.md)
 - [`docs/plans/2026-05-31-task-monitor-orphan-log-and-status-reconciliation-plan.md`](../plans/2026-05-31-task-monitor-orphan-log-and-status-reconciliation-plan.md)
 - [`docs/plans/2026-05-30-task-monitor-mode-and-rotating-log-plan.md`](../plans/2026-05-30-task-monitor-mode-and-rotating-log-plan.md)
 - [`docs/plans/2026-05-06-lifecycle-reconciliation-architecture-plan.md`](../plans/2026-05-06-lifecycle-reconciliation-architecture-plan.md)

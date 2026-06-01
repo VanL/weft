@@ -98,6 +98,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         self._agent_session: AgentSession | None = None
         self._deferred_active_control_command: str | None = None
         self._deferred_active_control_timestamp: int | None = None
+        self._deferred_active_control_request_id: str | None = None
         self._activate_pipeline_waiter_if_needed()
         self._set_activity("waiting", waiting_on=self._queue_names["inbox"])
         self._emit_pipeline_started_event()
@@ -591,9 +592,14 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             return
 
         timestamp_int = int(timestamp)
-        command = raw_message.strip().upper()
+        request = self._parse_control_request(raw_message)
+        command = request.command
         if command in {CONTROL_STOP, CONTROL_KILL}:
-            self._defer_active_control(command, timestamp_int)
+            self._defer_active_control(
+                command,
+                timestamp_int,
+                request_id=request.request_id,
+            )
             self._ack_control_message(queue_name, timestamp_int)
             return
 
@@ -605,7 +611,13 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         )
         self._handle_control_message(raw_message, timestamp_int, context)
 
-    def _defer_active_control(self, command: str, timestamp: int) -> None:
+    def _defer_active_control(
+        self,
+        command: str,
+        timestamp: int,
+        *,
+        request_id: str | None = None,
+    ) -> None:
         """Defer active STOP/KILL finalization back to the main task thread.
 
         Thread-safety pattern
@@ -643,6 +655,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
 
         self._deferred_active_control_command = command
         self._deferred_active_control_timestamp = timestamp
+        self._deferred_active_control_request_id = request_id
         self.should_stop = True
         if command == CONTROL_KILL:
             self._kill_requested = True
@@ -660,13 +673,16 @@ class Consumer(BaseTask, InteractiveTaskMixin):
 
         command = self._deferred_active_control_command
         timestamp = self._deferred_active_control_timestamp
+        request_id = self._deferred_active_control_request_id
         if command is None:
             return
 
         self._deferred_active_control_command = None
         self._deferred_active_control_timestamp = None
+        self._deferred_active_control_request_id = None
         active_message_timestamp = self._active_message_timestamp
         has_active_reserved_message = active_message_timestamp is not None
+        response_extra = {"request_id": request_id} if request_id is not None else {}
 
         if command == CONTROL_STOP:
             policy = self._resolve_policy(self.taskspec.spec.reserved_policy_on_stop)
@@ -683,7 +699,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             if has_active_reserved_message and policy is not ReservedPolicy.KEEP:
                 self._ensure_reserved_empty()
                 self._cleanup_reserved_if_needed()
-            self._send_control_response("STOP", "ack")
+            self._send_control_response("STOP", "ack", **response_extra)
             return
 
         if command == CONTROL_KILL:
@@ -701,7 +717,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             if has_active_reserved_message and policy is not ReservedPolicy.KEEP:
                 self._ensure_reserved_empty()
                 self._cleanup_reserved_if_needed()
-            self._send_control_response("KILL", "ack")
+            self._send_control_response("KILL", "ack", **response_extra)
 
     def _make_task_runner(
         self,

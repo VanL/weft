@@ -94,14 +94,7 @@ class ProviderCLIBackend:
     ) -> AgentExecutionResult:
         del tools
         self.validate(agent=agent, preflight=False, bundle_root=bundle_root)
-        self.validate_tool_profile(
-            agent=agent,
-            tid=tid,
-            preflight=True,
-            bundle_root=bundle_root,
-        )
 
-        provider = resolve_provider_cli(agent)
         cwd = str(Path.cwd())
         executable = self._resolve_executable(agent, spec_context=cwd)
 
@@ -114,11 +107,12 @@ class ProviderCLIBackend:
                 cwd=cwd,
                 tempdir=Path(tempdir),
                 bundle_root=bundle_root,
+                preflight_tool_profile=True,
             )
             provider_result = self._run_provider_invocation(
-                provider=provider,
+                provider=prepared.provider,
                 invocation=prepared.invocation,
-                executable=executable,
+                executable=prepared.executable,
                 command_class="execute",
             )
         return build_provider_cli_execution_result(

@@ -9,6 +9,8 @@ import pytest
 
 from tests.fixtures.provider_cli_fixture import (
     PROVIDER_FIXTURE_NAMES,
+    TOOL_PROFILE_CALLS,
+    reset_counting_tool_profile_calls,
     write_provider_cli_wrapper,
 )
 from weft.core.agents import register_builtin_agent_runtimes
@@ -189,6 +191,59 @@ def test_provider_cli_runtime_executes_explicit_bounded_authority(
     if provider_name == "qwen":
         assert payload["options"]["extensions"] == ""
         assert payload["options"]["allowed_mcp_server_names"] == ""
+
+
+def test_provider_cli_runtime_resolves_callable_tool_profile_once_per_one_shot(
+    tmp_path,
+) -> None:
+    reset_counting_tool_profile_calls()
+    executable = str(write_provider_cli_wrapper(tmp_path, "codex"))
+
+    result = execute_agent_target(
+        make_agent_section(
+            executable=executable,
+            provider_name="codex",
+            model="fixture-model",
+            tool_profile_ref=(
+                "tests.fixtures.provider_cli_fixture:counting_provider_tool_profile"
+            ),
+        ),
+        {"task": "hello"},
+        tid="123",
+    )
+
+    payload = json.loads(result.aggregate_public_output())
+    assert payload["provider"] == "codex"
+    assert TOOL_PROFILE_CALLS == [{"provider": "codex", "tid": "123"}]
+
+
+def test_provider_cli_runtime_gemini_read_only_one_shot_uses_isolated_home(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host_home = tmp_path / "host-home"
+    (host_home / ".gemini").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(host_home))
+    executable = str(write_provider_cli_wrapper(tmp_path, "gemini"))
+
+    result = execute_agent_target(
+        make_agent_section(
+            executable=executable,
+            provider_name="gemini",
+            model="fixture-model",
+            tool_profile_ref=(
+                "tests.fixtures.runtime_profiles_fixture:structured_tool_profile"
+            ),
+        ),
+        {"task": "hello"},
+        tid="123",
+    )
+
+    payload = json.loads(result.aggregate_public_output())
+    assert payload["provider"] == "gemini"
+    assert payload["options"]["approval_mode"] == "plan"
+    assert payload["home"] != str(host_home)
+    assert payload["home"].endswith("gemini-home")
 
 
 def test_provider_cli_runtime_uses_project_agent_settings_executable(

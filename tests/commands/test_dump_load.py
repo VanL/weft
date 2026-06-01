@@ -8,9 +8,11 @@ from pathlib import Path
 import pytest
 
 from tests.helpers.test_backend import prepare_project_root
+from weft._constants import WEFT_SPAWN_REQUESTS_QUEUE
 from weft.commands.dump import cmd_dump
 from weft.commands.load import ImportReport, cmd_load
 from weft.context import WeftContext, build_context
+from weft.core.spawn_requests import submit_spawn_request
 
 pytestmark = [pytest.mark.shared]
 
@@ -40,6 +42,26 @@ def _snapshot_broker_state(
             )
 
     return aliases, queues
+
+
+def _queue_rows_with_timestamps(
+    context: WeftContext,
+    queue_name: str,
+) -> list[tuple[str, int]]:
+    queue = context.queue(queue_name, persistent=True)
+    try:
+        stats = queue.stats()
+    finally:
+        queue.close()
+    with context.broker() as broker:
+        return [
+            (str(body), int(timestamp))
+            for body, timestamp in broker.peek_many(
+                queue_name,
+                limit=int(stats.pending),
+                with_timestamps=True,
+            )
+        ]
 
 
 @pytest.fixture
@@ -262,6 +284,67 @@ def test_round_trip_consistency(sample_data_context: WeftContext) -> None:
 
     assert final_aliases == initial_aliases
     assert final_queues == initial_queues
+
+
+def test_dump_load_preserves_spawn_request_message_id(tmp_path: Path) -> None:
+    root = prepare_project_root(tmp_path / "source")
+    ctx = build_context(spec_context=root)
+    tid = submit_spawn_request(
+        ctx.broker_target,
+        taskspec={
+            "name": "spawned",
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:echo_payload",
+            },
+            "metadata": {},
+        },
+        work_payload={"args": ["hello"]},
+        config=ctx.broker_config,
+        inherited_weft_context=str(ctx.root),
+    )
+    export_path = ctx.weft_dir / "spawn-export.jsonl"
+
+    dump_code, dump_message = cmd_dump(
+        output=str(export_path),
+        context_path=str(ctx.root),
+    )
+    assert dump_code == 0, dump_message
+
+    new_root = prepare_project_root(tmp_path / "loaded")
+    new_ctx = build_context(spec_context=new_root)
+    load_code, load_message = cmd_load(
+        input_file=str(export_path),
+        context_path=str(new_ctx.root),
+    )
+    assert load_code == 0, load_message
+
+    rows = _queue_rows_with_timestamps(new_ctx, WEFT_SPAWN_REQUESTS_QUEUE)
+    assert len(rows) == 1
+    body, timestamp = rows[0]
+    assert timestamp == tid
+    payload = json.loads(body)
+    assert payload["taskspec"]["tid"] == str(tid)
+
+
+def test_dump_warns_when_claimed_messages_are_omitted(tmp_path: Path) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    queue = ctx.queue("claimed.queue", persistent=True)
+    queue.write("claimed")
+    assert queue.read_one() == "claimed"
+
+    export_path = ctx.weft_dir / "claimed-export.jsonl"
+    exit_code, message = cmd_dump(output=str(export_path), context_path=str(ctx.root))
+
+    assert exit_code == 0
+    assert "omitted 1 claimed messages from 1 queues" in (message or "")
+    message_records = [
+        json.loads(line)
+        for line in export_path.read_text(encoding="utf-8").splitlines()
+        if json.loads(line).get("type") == "message"
+    ]
+    assert message_records == []
 
 
 def test_empty_database_dump(tmp_path: Path) -> None:

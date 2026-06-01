@@ -399,6 +399,39 @@ def test_manager_context_is_cached_by_base_task(
         manager.cleanup()
 
 
+def test_manager_cleanup_unregisters_registered_atexit_callback(
+    tmp_path: Path,
+    broker_env,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, _make_queue = broker_env
+    registered: list[Callable[[], None]] = []
+    unregistered: list[Callable[[], None]] = []
+
+    def fake_register(callback: Callable[[], None]) -> None:
+        registered.append(callback)
+
+    def fake_unregister(callback: Callable[[], None]) -> None:
+        unregistered.append(callback)
+
+    monkeypatch.setattr(manager_mod.atexit, "register", fake_register)
+    monkeypatch.setattr(manager_mod.atexit, "unregister", fake_unregister)
+    spec = make_manager_spec(
+        unique_tid,
+        weft_context=str(tmp_path / "project"),
+        idle_timeout=0.0,
+    )
+    manager = Manager(db_path, spec, config=load_config())
+
+    assert len(registered) == 1
+
+    manager.cleanup()
+    manager.cleanup()
+
+    assert unregistered == registered
+
+
 def write_autostart_pipeline_fixture(
     root: Path,
     *,

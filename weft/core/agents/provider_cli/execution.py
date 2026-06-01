@@ -46,6 +46,7 @@ def prepare_provider_cli_execution(
     cwd: str,
     tempdir: Path,
     bundle_root: str | None = None,
+    preflight_tool_profile: bool = False,
 ) -> ProviderCLIPreparedExecution:
     """Prepare one-shot delegated CLI execution inputs.
 
@@ -72,7 +73,7 @@ def prepare_provider_cli_execution(
         raw_options=dict(agent.options),
         tool_profile=tool_profile,
     )
-    provider.validate_tool_profile(tool_profile, preflight=False)
+    provider.validate_tool_profile(tool_profile, preflight=preflight_tool_profile)
     provider.validate_model(agent.model)
     prompt = compose_provider_cli_prompt(
         work_item.instructions,

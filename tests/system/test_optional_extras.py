@@ -17,6 +17,19 @@ def _load_pyproject(path: Path) -> dict[str, Any]:
     return tomllib.loads(path.read_text(encoding="utf-8"))
 
 
+def _version_tuple(version: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in version.split("."))
+
+
+def _minimum_dependency_version(dependencies: list[str], package_name: str) -> str:
+    prefix = f"{package_name}>="
+    for dependency in dependencies:
+        if not dependency.startswith(prefix):
+            continue
+        return dependency[len(prefix) :].split(",", 1)[0]
+    raise AssertionError(f"{package_name} minimum not found in {dependencies!r}")
+
+
 def test_django_channels_extras_are_explicit_opt_ins() -> None:
     """Channels should be available without becoming a base Django dependency."""
 
@@ -49,3 +62,44 @@ def test_typed_package_markers_are_included_in_builds() -> None:
     assert (
         "weft_django/py.typed" in django_pyproject["tool"]["hatch"]["build"]["include"]
     )
+
+
+def test_root_extras_do_not_undercut_local_extension_versions() -> None:
+    root_pyproject = _load_pyproject(PROJECT_ROOT / "pyproject.toml")
+    docker_pyproject = _load_pyproject(
+        PROJECT_ROOT / "extensions" / "weft_docker" / "pyproject.toml"
+    )
+    macos_pyproject = _load_pyproject(
+        PROJECT_ROOT / "extensions" / "weft_macos_sandbox" / "pyproject.toml"
+    )
+
+    root_extras = root_pyproject["project"]["optional-dependencies"]
+    docker_version = _version_tuple(docker_pyproject["project"]["version"])
+    macos_version = _version_tuple(macos_pyproject["project"]["version"])
+    pg_version = _version_tuple(
+        _minimum_dependency_version(root_extras["pg"], "simplebroker-pg")
+    )
+
+    for extra in ("docker", "all", "dev"):
+        assert (
+            _version_tuple(
+                _minimum_dependency_version(root_extras[extra], "weft-docker")
+            )
+            >= docker_version
+        )
+
+    for extra in ("macos-sandbox", "all", "dev"):
+        assert (
+            _version_tuple(
+                _minimum_dependency_version(root_extras[extra], "weft-macos-sandbox")
+            )
+            >= macos_version
+        )
+
+    for extra in ("all", "dev"):
+        assert (
+            _version_tuple(
+                _minimum_dependency_version(root_extras[extra], "simplebroker-pg")
+            )
+            >= pg_version
+        )
