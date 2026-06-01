@@ -157,7 +157,8 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
 - **OBS.11a**: missing or stale liveness evidence may explain a nonterminal
   row through reconciliation metadata, but it must not synthesize terminal
   failure without task-owned terminal proof or an explicit recovery diagnostic
-  such as claimed outbox residue.
+  such as claimed outbox residue or a superseded internal service row
+  reconciliation.
 - **OBS.12**: a matched keyed PONG is an authoritative live task-local
   observation at its timestamp for explicit current-state probes. It is not a
   lifecycle mutation, and it must not use a second runner-specific inspection
