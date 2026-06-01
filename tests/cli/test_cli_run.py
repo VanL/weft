@@ -971,7 +971,6 @@ def test_cli_run_spec_bundle_resolves_bundle_local_function_target(
         encoding="utf-8",
     )
     spec_payload = {
-        "tid": "1760000000000000105",
         "name": "bundle-task",
         "version": "1.0",
         "spec": {
@@ -1027,7 +1026,6 @@ def test_cli_run_spec_bundle_passes_plain_json_object_stdin_to_function_target(
         encoding="utf-8",
     )
     spec_payload = {
-        "tid": "1760000000000000106",
         "name": "bundle-json-task",
         "version": "1.0",
         "spec": {
@@ -1608,8 +1606,10 @@ def test_cli_run_persistent_spec_no_wait_consumes_initial_piped_stdin(
 ) -> None:
     weft_harness.ensure_foreground_manager()
     spec_path = workdir / "persistent_stdin_spec.json"
+    # This test covers stdin handoff through a live manager. Let live
+    # submissions allocate a current broker timestamp instead of preserving a
+    # historical fixture TID that can be behind the manager's spawn cursor.
     spec_payload = {
-        "tid": "1760000000000000103",
         "name": "cli-persistent-stdin",
         "version": "1.0",
         "spec": {
@@ -1760,6 +1760,7 @@ def test_cli_run_persistent_agent_spec_continues_conversation(
         tid="1760000000000000202",
         name="cli-persistent-agent",
     ).model_dump(mode="json")
+    spec_payload.pop("tid", None)
     spec_payload["spec"]["persistent"] = True
     spec_payload["spec"]["agent"]["conversation_scope"] = "per_task"
     spec_payload["spec"]["weft_context"] = str(workdir)
