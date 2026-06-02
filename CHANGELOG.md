@@ -70,8 +70,8 @@
 
 ### Changed
 
-- Raised the SimpleBroker floor to 4.2.0 and the Postgres backend floor to
-  simplebroker-pg 2.1.0 so Weft can rely on exact timestamp import and the
+- Raised the SimpleBroker floor to 4.3.0 and the Postgres backend floor to
+  simplebroker-pg 2.2.0 so Weft can rely on the exact-ID insert API and the
   current backend APIs across SQLite and Postgres.
 - Changed `weft system dump`/`load` so runnable broker state preserves message
   timestamps instead of rewriting pending spawn request IDs on import. Backends
