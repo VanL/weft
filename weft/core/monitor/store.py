@@ -739,6 +739,17 @@ class _MonitorTableAccess:
             (key, _json(value), time.time_ns()),
         )
 
+    def get_checkpoint(self, queue_name: str) -> int | None:
+        """Return the durable ingest checkpoint message ID for a queue."""
+
+        value = self.read_meta(
+            f"{WEFT_MONITOR_CHECKPOINT_META_PREFIX}{queue_name}",
+        )
+        if value is None:
+            return None
+        message_id = value.get("message_id")
+        return message_id if isinstance(message_id, int) else None
+
     def upsert_deferred_write(
         self,
         *,
@@ -909,6 +920,33 @@ class _MonitorTableAccess:
         )
         return tuple(_record_from_row(row) for row in rows)
 
+    def _terminal_readiness_cutoff_ns(
+        self,
+        *,
+        now_ns: int,
+        retention_seconds: float,
+    ) -> int:
+        """Return the ``last_message_id`` bound for terminal-family gates.
+
+        Zero (or negative) retention means "ready once fully ingested":
+        the bound is the durable ingest checkpoint for
+        ``WEFT_GLOBAL_LOG_QUEUE`` so both sides of the comparison live in
+        the broker message-ID domain. Before any checkpoint exists nothing
+        has been ingested through the checkpointed scan, so the wall-clock
+        value is the only available bound (and there are no checkpointed
+        families to misjudge). Positive retention keeps the wall-clock
+        cutoff: it expresses observed staleness, not ingest progress.
+
+        Spec: [MF-5], [OBS.17]
+        """
+
+        if retention_seconds <= 0:
+            checkpoint = self.get_checkpoint(WEFT_GLOBAL_LOG_QUEUE)
+            if checkpoint is not None:
+                return int(checkpoint)
+            return int(now_ns)
+        return _retention_cutoff_ns(now_ns, retention_seconds)
+
     def list_summary_ready_tasks(
         self,
         *,
@@ -921,15 +959,32 @@ class _MonitorTableAccess:
         ),
         include_suspected: bool = True,
     ) -> tuple[MonitorSummaryReadyTask, ...]:
-        """Return retained task families ready for summary disposition."""
+        """Return retained task families ready for summary disposition.
+
+        Terminal readiness is evaluated in ONE domain: with a zero (or
+        negative) effective terminal retention window the gate means
+        "ready once fully ingested", so the cutoff is the store's own
+        ingest checkpoint for ``WEFT_GLOBAL_LOG_QUEUE`` — a broker message
+        ID compared against ``last_message_id`` (ID domain vs ID domain).
+        Broker hybrid message IDs are durably monotonic and may be pinned
+        ahead of the host wall clock, so a ``now_ns``-derived cutoff can
+        hide fully ingested terminal families indefinitely. Positive
+        retention windows and the open-family selections keep wall-clock
+        semantics (``now_ns``): they measure observed staleness, which is
+        genuinely a wall-clock concept.
+
+        Spec: [MF-5], [OBS.17]
+        """
 
         if limit <= 0:
             return ()
-        terminal_cutoff_ns = _retention_cutoff_ns(
-            now_ns,
-            retention_seconds
-            if terminal_retention_seconds is None
-            else terminal_retention_seconds,
+        terminal_cutoff_ns = self._terminal_readiness_cutoff_ns(
+            now_ns=now_ns,
+            retention_seconds=(
+                retention_seconds
+                if terminal_retention_seconds is None
+                else terminal_retention_seconds
+            ),
         )
         open_cutoff_ns = _retention_cutoff_ns(now_ns, retention_seconds)
         terminal_rows = self._runner.run(
@@ -986,11 +1041,23 @@ class _MonitorTableAccess:
         now_ns: int,
         retention_seconds: float,
     ) -> tuple[MonitorTaskCollationRecord, ...]:
-        """Return retained terminal families ready for control cleanup."""
+        """Return retained terminal families ready for control cleanup.
+
+        The terminal ``last_message_id`` bound follows the same one-domain
+        rule as ``list_summary_ready_tasks``: zero retention compares
+        against the ingest checkpoint (message-ID domain), so host clock
+        skew against the durably monotonic ID domain cannot stall control
+        cleanup right after summaries are fixed.
+
+        Spec: [MF-5], [OBS.13]
+        """
 
         if limit <= 0:
             return ()
-        cutoff_ns = _retention_cutoff_ns(now_ns, retention_seconds)
+        cutoff_ns = self._terminal_readiness_cutoff_ns(
+            now_ns=now_ns,
+            retention_seconds=retention_seconds,
+        )
         rows = self._runner.run(
             monitor_sql.select_terminal_control_cleanup_ready_tasks(
                 self._tables.task_collations,
@@ -1212,6 +1279,7 @@ class _MonitorTableAccess:
         self,
         *,
         limit: int,
+        require_summary: bool,
     ) -> tuple[MonitorRawMessageRef, ...]:
         """Return child refs left after parent raw deletion was recorded."""
 
@@ -1221,6 +1289,7 @@ class _MonitorTableAccess:
             monitor_sql.select_raw_deleted_task_message_refs(
                 self._tables.task_messages,
                 self._tables.task_collations,
+                require_summary=require_summary,
             ),
             (self._context_key, int(limit)),
             fetch=True,
@@ -1272,7 +1341,12 @@ class _MonitorTableAccess:
         )
         return tuple(int(row[0]) for row in rows)
 
-    def raw_deleted_task_log_recovery_tids(self, *, limit: int) -> tuple[str, ...]:
+    def raw_deleted_task_log_recovery_tids(
+        self,
+        *,
+        limit: int,
+        require_summary: bool,
+    ) -> tuple[str, ...]:
         """Return terminal families that may have orphan raw broker rows."""
 
         if limit <= 0:
@@ -1281,6 +1355,7 @@ class _MonitorTableAccess:
             monitor_sql.select_raw_deleted_task_log_recovery_tids(
                 self._tables.task_collations,
                 self._tables.task_messages,
+                require_summary=require_summary,
             ),
             (self._context_key, int(limit)),
             fetch=True,
@@ -1527,13 +1602,9 @@ class MonitorStore:
         """Return the durable checkpoint for a queue."""
 
         with self._context.broker() as broker:
-            value = self._access(_runner_from_broker(broker)).read_meta(
-                f"{WEFT_MONITOR_CHECKPOINT_META_PREFIX}{queue_name}",
+            return self._access(_runner_from_broker(broker)).get_checkpoint(
+                queue_name,
             )
-        if value is None:
-            return None
-        message_id = value.get("message_id")
-        return message_id if isinstance(message_id, int) else None
 
     def set_checkpoint(self, queue_name: str, message_id: int) -> None:
         """Set the durable checkpoint for a queue.
@@ -2008,22 +2079,15 @@ class MonitorStore:
         self,
         *,
         limit: int,
+        require_summary: bool = False,
     ) -> tuple[str, ...]:
-        """Return terminal families that may have orphan raw task-log rows."""
+        """Return terminal families that may have orphan raw task-log rows.
 
-        if limit <= 0:
-            return ()
-        with self._context.broker() as broker:
-            return self._access(
-                _runner_from_broker(broker)
-            ).raw_deleted_task_log_recovery_tids(limit=limit)
-
-    def list_raw_deleted_task_message_refs(
-        self,
-        *,
-        limit: int,
-    ) -> tuple[MonitorRawMessageRef, ...]:
-        """Return child refs left after parent raw deletion was recorded.
+        ``require_summary`` restricts the selection to families whose
+        ``summary_emitted_at_ns`` is set. Callers operating in
+        ``jsonl_then_delete`` mode must pass ``True`` so orphan recovery
+        never deletes a family's raw rows before its summary/JSONL export
+        (the mode's audit invariant).
 
         Spec: [MF-5], [OBS.13], [OBS.17]
         """
@@ -2033,7 +2097,37 @@ class MonitorStore:
         with self._context.broker() as broker:
             return self._access(
                 _runner_from_broker(broker)
-            ).raw_deleted_task_message_refs(limit=limit)
+            ).raw_deleted_task_log_recovery_tids(
+                limit=limit,
+                require_summary=require_summary,
+            )
+
+    def list_raw_deleted_task_message_refs(
+        self,
+        *,
+        limit: int,
+        require_summary: bool = False,
+    ) -> tuple[MonitorRawMessageRef, ...]:
+        """Return child refs left after parent raw deletion was recorded.
+
+        ``require_summary`` restricts the selection to refs of families
+        whose ``summary_emitted_at_ns`` is set. Callers operating in
+        ``jsonl_then_delete`` mode must pass ``True`` so the repair path
+        never deletes a family's raw rows before its summary/JSONL export
+        (the mode's audit invariant).
+
+        Spec: [MF-5], [OBS.13], [OBS.17]
+        """
+
+        if limit <= 0:
+            return ()
+        with self._context.broker() as broker:
+            return self._access(
+                _runner_from_broker(broker)
+            ).raw_deleted_task_message_refs(
+                limit=limit,
+                require_summary=require_summary,
+            )
 
     def delete_task_messages_after_raw_delete(
         self,

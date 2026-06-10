@@ -3892,11 +3892,18 @@ class TaskMonitor(ServiceTask):
     ) -> MonitorStoreRetirementResult:
         """Repair child refs left after parent raw deletion was recorded.
 
+        In ``jsonl_then_delete`` mode the selection is summary-gated
+        (``require_summary``): a marked family's raw rows are only
+        re-driven through exact deletion after its summary/JSONL export,
+        preserving the mode's audit invariant. Unsummarized marked
+        families are terminal, so the summary stage handles them first.
+
         Spec: [MF-5], [OBS.13], [OBS.17]
         """
 
         refs = store.list_raw_deleted_task_message_refs(
             limit=self._monitor_config.batch_size + 1,
+            require_summary=self._jsonl_then_delete_enabled(),
         )
         if not refs:
             self._last_policy_progress = (
@@ -3960,13 +3967,17 @@ class TaskMonitor(ServiceTask):
         """Delete raw task-log rows stranded by inconsistent Monitor state.
 
         This is a bounded recovery path for legacy/inconsistent store rows. It
-        is not the ordinary FIFO cleanup authority.
+        is not the ordinary FIFO cleanup authority. In ``jsonl_then_delete``
+        mode the selection is summary-gated (``require_summary``): orphaned
+        raw rows of an unsummarized marked family are never deleted before
+        the family's summary/JSONL export lands via the summary stage.
 
         Spec: [MF-5], [OBS.13], [OBS.17]
         """
 
         tids = store.list_raw_deleted_task_log_recovery_tids(
             limit=self._monitor_config.batch_size + 1,
+            require_summary=self._jsonl_then_delete_enabled(),
         )
         selected_tids = tids[: self._monitor_config.batch_size]
         more_tids = len(tids) > len(selected_tids)

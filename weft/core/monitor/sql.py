@@ -343,7 +343,17 @@ def select_summary_ready_terminal_tasks(
     collations_table: str,
     columns: Sequence[str],
 ) -> str:
-    """Build a query for retained terminal task summaries."""
+    """Build a query for retained terminal task summaries.
+
+    The ``last_message_id <= ?`` bound is supplied by the store. For the
+    zero-retention "ready once fully ingested" gate it is the store's own
+    ingest checkpoint (broker message-ID domain vs message-ID domain), not
+    a wall-clock timestamp: hybrid message IDs are durably monotonic and
+    may run ahead of the host clock, so comparing them against
+    ``time.time_ns()`` can hide terminal families indefinitely.
+
+    Spec: [MF-5], [OBS.17]
+    """
 
     return f"""
         SELECT {identifier_list(columns)}
@@ -361,7 +371,15 @@ def select_terminal_control_cleanup_ready_tasks(
     collations_table: str,
     columns: Sequence[str],
 ) -> str:
-    """Build a query for retained task-local runtime-queue cleanup."""
+    """Build a query for retained task-local runtime-queue cleanup.
+
+    The ``last_message_id <= ?`` bound follows the same domain contract as
+    ``select_summary_ready_terminal_tasks``: for the zero-retention gate the
+    store passes its ingest checkpoint (message-ID domain), never a
+    wall-clock timestamp.
+
+    Spec: [MF-5], [OBS.13]
+    """
 
     return f"""
         SELECT {identifier_list(columns)}
@@ -552,9 +570,24 @@ def select_deletable_task_log_messages_for_tids(
 def select_raw_deleted_task_message_refs(
     messages_table: str,
     collations_table: str,
+    *,
+    require_summary: bool,
 ) -> str:
-    """Build a query for child refs left after parent raw deletion."""
+    """Build a query for child refs left after parent raw deletion.
 
+    ``require_summary`` enforces the jsonl_then_delete audit invariant: no
+    raw task-log row of a family may be deleted unless that family's
+    ``summary_emitted_at_ns`` is set, so the repair path must not select
+    refs of unsummarized marked families. Unsummarized marked families are
+    terminal, so the normal summary stage picks them up first and repair
+    proceeds on a later pass.
+
+    Spec: [MF-5], [OBS.13], [OBS.17]
+    """
+
+    summary_condition = ""
+    if require_summary:
+        summary_condition = "AND c.summary_emitted_at_ns IS NOT NULL"
     return f"""
         SELECT m.queue_name, m.message_id, m.tid
         FROM {identifier(messages_table)} AS m
@@ -563,6 +596,7 @@ def select_raw_deleted_task_message_refs(
         WHERE m.context_key = ?
           AND m.deleted_at_ns IS NULL
           AND c.raw_deleted_at_ns IS NOT NULL
+          {summary_condition}
         ORDER BY m.message_id
         LIMIT ?
         """
@@ -571,11 +605,26 @@ def select_raw_deleted_task_message_refs(
 def select_raw_deleted_task_log_recovery_tids(
     collations_table: str,
     messages_table: str,
+    *,
+    require_summary: bool,
 ) -> str:
-    """Build a query for terminal families needing raw-log orphan recovery."""
+    """Build a query for terminal families needing raw-log orphan recovery.
+
+    ``require_summary`` enforces the jsonl_then_delete audit invariant on
+    the orphan path: the eligibility OR-condition below admits
+    terminal-but-unsummarized marked families, whose raw rows must not be
+    deleted before their summary/JSONL export. With the flag set, only
+    summarized families are selected; unsummarized ones reach the summary
+    stage first and recover on a later pass.
+
+    Spec: [MF-5], [OBS.13], [OBS.17]
+    """
 
     collations = identifier(collations_table)
     messages = identifier(messages_table)
+    summary_condition = ""
+    if require_summary:
+        summary_condition = "AND c.summary_emitted_at_ns IS NOT NULL"
     return f"""
         SELECT c.tid
         FROM {collations} AS c
@@ -588,6 +637,7 @@ def select_raw_deleted_task_log_recovery_tids(
             OR c.disposition_at_ns IS NOT NULL
             OR c.summary_emitted_at_ns IS NOT NULL
           )
+          {summary_condition}
           AND NOT EXISTS (
             SELECT 1
             FROM {messages} AS m

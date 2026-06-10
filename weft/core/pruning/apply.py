@@ -59,11 +59,16 @@ def apply_exact_prune_candidates[
         exact_status: Delete one ID at a time so mixed present/missing rows
             return per-candidate status. Use this when reconciliation must not
             let one stale ID block deletion of present IDs in the same queue.
-        reconcile_missing: Treat a successful batch delete call as
-            reconciliation for all requested non-report-only candidates, even
-            when the backend reports that fewer rows were physically deleted.
-            Use this only for idempotent cleanup paths where missing rows mean
-            the work is already complete.
+        reconcile_missing: Treat rows verified missing as already deleted.
+            When the batch delete reports fewer deletions than requested,
+            every batched candidate is re-verified with a per-ID exact
+            delete: ``True`` means the row was physically deleted now,
+            ``False`` means the backend verified the row is absent
+            (idempotent-complete), and an exception is reported as that
+            candidate's error. A row that is still present can therefore
+            never be reported ``deleted=True``. Use this only for
+            idempotent cleanup paths where missing rows mean the work is
+            already complete.
 
     Returns:
         Per-candidate apply results in queue-grouped processing order.
@@ -119,20 +124,40 @@ def apply_exact_prune_candidates[
                                 str(exc),
                             )
                     else:
-                        if reconcile_missing:
+                        if deleted_count == len(deletable):
                             for index, candidate in deletable:
                                 queue_results[index] = apply_result(
                                     candidate,
                                     True,
                                     None,
                                 )
-                        elif deleted_count == len(deletable):
+                        elif reconcile_missing:
+                            # The batch under-deleted, so per-candidate
+                            # status is unknown. Re-verify each candidate
+                            # with a per-ID exact delete: True deletes the
+                            # row now, False proves it is already absent.
+                            # Either way the row is verifiably gone, so a
+                            # present row can never be reported deleted.
                             for index, candidate in deletable:
-                                queue_results[index] = apply_result(
-                                    candidate,
-                                    True,
-                                    None,
-                                )
+                                try:
+                                    queue.delete(message_id=candidate.message_id)
+                                except (
+                                    BrokerError,
+                                    OSError,
+                                    RuntimeError,
+                                    ValueError,
+                                ) as exc:
+                                    queue_results[index] = apply_result(
+                                        candidate,
+                                        False,
+                                        str(exc),
+                                    )
+                                else:
+                                    queue_results[index] = apply_result(
+                                        candidate,
+                                        True,
+                                        None,
+                                    )
                         elif deleted_count == 0:
                             for index, candidate in deletable:
                                 queue_results[index] = apply_result(
