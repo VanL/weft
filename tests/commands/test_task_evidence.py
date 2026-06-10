@@ -520,10 +520,21 @@ def test_ping_pong_ignores_unmatched_and_preserves_terminal_ctrl_out(
         assert evidence.reconciliation is not None
         assert evidence.reconciliation["classification"] == "live_pong"
         assert evidence.reconciliation["request_id"] != "old-request"
+        # Single-reader contract ([MF-3]): the probe consumes its own matched
+        # PONG; bystander replies and terminal envelopes stay untouched.
         messages = ctrl_out.peek_many(limit=10)
-        assert len(messages) == 3
+        assert len(messages) == 2
+        assert any(
+            isinstance(message, str) and '"request_id": "old-request"' in message
+            for message in messages
+        )
         assert any(
             isinstance(message, str) and '"type": "terminal"' in message
+            for message in messages
+        )
+        probe_request_id = evidence.reconciliation["request_id"]
+        assert not any(
+            isinstance(message, str) and probe_request_id in message
             for message in messages
         )
     finally:
