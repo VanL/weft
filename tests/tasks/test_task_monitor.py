@@ -6583,8 +6583,7 @@ def _run_quiet_store_cycle(task: TaskMonitor, *, cycle: str) -> None:
         start_control_cleanup=False,
     )
     assert task._last_collation_store_error is None, (
-        f"{cycle}: unexpected collation store error: "
-        f"{task._last_collation_store_error}"
+        f"{cycle}: unexpected collation store error: {task._last_collation_store_error}"
     )
     ingest = task._last_retained_task_log_ingest
     assert ingest.store_write_errors == (), f"{cycle}: {ingest.store_write_errors}"

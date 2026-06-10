@@ -188,9 +188,7 @@ def test_monitor_sql_orphan_recovery_query_summary_gate() -> None:
     )
 
     assert "c.summary_emitted_at_ns IS NOT NULL" in gated
-    assert gated.count("summary_emitted_at_ns") > ungated.count(
-        "summary_emitted_at_ns"
-    )
+    assert gated.count("summary_emitted_at_ns") > ungated.count("summary_emitted_at_ns")
 
 
 def test_monitor_sql_raw_deleted_child_ref_repair_query_selects_inconsistency() -> None:

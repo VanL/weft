@@ -301,9 +301,7 @@ def test_send_keyed_ping_probe_timeout_sweeps_rows_bearing_its_request_id(
     assert result.error is None
     assert result.matched is None
     assert result.timed_out is True
-    remaining = [
-        json.loads(body) for body in _peek_ctrl_out_bodies(ctx, ctrl_out_name)
-    ]
+    remaining = [json.loads(body) for body in _peek_ctrl_out_bodies(ctx, ctrl_out_name)]
     assert [entry.get("request_id") for entry in remaining] == ["other-request"]
 
 
