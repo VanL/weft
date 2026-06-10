@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+from typing import Any
+
 import pytest
 
 from tests.helpers.test_backend import prepare_project_root
@@ -19,7 +23,6 @@ from weft._constants import (
     WEFT_MONITOR_SCHEMA_VERSION,
 )
 from weft.context import build_context
-from weft.core.monitor import store as monitor_store_mod
 from weft.core.monitor.collation import MonitorTaskEventUpdate
 from weft.core.monitor.store import (
     MonitorStoreUnavailable,
@@ -123,68 +126,37 @@ def _monitor_table_count(
     if where:
         query = f"{query} WHERE {where}"
     with ctx.broker() as broker:
-        rows = list(broker._runner.run(query, params, fetch=True))
+        with broker.sidecar() as session:
+            rows = list(session.run(query, params, fetch=True))
     return int(rows[0][0])
 
 
-class _FakeRunner:
-    def __init__(self, *, fail_begin: bool = False, fail_inside: bool = False) -> None:
-        self.fail_begin = fail_begin
-        self.fail_inside = fail_inside
-        self.calls: list[str] = []
+def test_store_sidecar_session_rolls_back_on_exception(tmp_path) -> None:
+    """A failing store write must leave no partial rows behind."""
 
-    def begin_immediate(self) -> None:
-        self.calls.append("begin")
-        if self.fail_begin:
-            raise RuntimeError("begin failed")
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
 
-    def commit(self) -> None:
-        self.calls.append("commit")
+    class _Boom(Exception):
+        pass
 
-    def rollback(self) -> None:
-        self.calls.append("rollback")
+    with pytest.raises(_Boom):
+        with store._sidecar_session(transaction=True) as session:
+            session.run(
+                "INSERT INTO weft_monitor_meta (key, value_json, updated_at_ns) "
+                "VALUES (?, ?, ?)",
+                ("rollback_probe", "{}", 1),
+            )
+            raise _Boom()
 
-    def run(
-        self,
-        sql: str,
-        params: tuple[object, ...] = (),
-        *,
-        fetch: bool = False,
-    ) -> list[tuple[object, ...]]:
-        del sql, params, fetch
-        self.calls.append("run")
-        if self.fail_inside:
-            raise RuntimeError("write failed")
-        return []
-
-
-def test_monitor_store_write_transaction_commits_after_begin() -> None:
-    runner = _FakeRunner()
-
-    with monitor_store_mod._write_transaction(runner):
-        runner.run("INSERT")
-
-    assert runner.calls == ["begin", "run", "commit"]
-
-
-def test_monitor_store_write_transaction_rolls_back_after_write_failure() -> None:
-    runner = _FakeRunner(fail_inside=True)
-
-    with pytest.raises(RuntimeError, match="write failed"):
-        with monitor_store_mod._write_transaction(runner):
-            runner.run("INSERT")
-
-    assert runner.calls == ["begin", "run", "rollback"]
-
-
-def test_monitor_store_write_transaction_does_not_rollback_begin_failure() -> None:
-    runner = _FakeRunner(fail_begin=True)
-
-    with pytest.raises(RuntimeError, match="begin failed"):
-        with monitor_store_mod._write_transaction(runner):
-            runner.run("INSERT")
-
-    assert runner.calls == ["begin"]
+    assert (
+        _monitor_table_count(
+            ctx, "weft_monitor_meta", where="key = ?", params=("rollback_probe",)
+        )
+        == 0
+    )
+    store.close()
 
 
 def test_monitor_collation_summary_classifies_user_tasks_without_service() -> None:
@@ -1128,19 +1100,18 @@ def test_monitor_store_lists_raw_deleted_child_refs_for_repair(tmp_path) -> None
         checkpoint_message_id=None,
     )
     with ctx.broker() as broker:
-        runner = broker._runner
-        runner.run(
-            "UPDATE weft_monitor_task_collations "
-            "SET raw_deleted_at_ns = ?, updated_at_ns = ? "
-            "WHERE context_key = ? AND tid = ?",
-            (
-                terminal.message_id + 1,
-                terminal.message_id + 1,
-                store.context_key,
-                tid,
-            ),
-        )
-        runner.commit()
+        with broker.sidecar(transaction=True) as session:
+            session.run(
+                "UPDATE weft_monitor_task_collations "
+                "SET raw_deleted_at_ns = ?, updated_at_ns = ? "
+                "WHERE context_key = ? AND tid = ?",
+                (
+                    terminal.message_id + 1,
+                    terminal.message_id + 1,
+                    store.context_key,
+                    tid,
+                ),
+            )
 
     refs = store.list_raw_deleted_task_message_refs(limit=10)
 
@@ -1196,18 +1167,12 @@ def test_monitor_store_prunes_legacy_message_tombstones(tmp_path) -> None:
         checkpoint_message_id=None,
     )
     with ctx.broker() as broker:
-        runner = broker._runner
-        runner.begin_immediate()
-        try:
-            runner.run(
+        with broker.sidecar(transaction=True) as session:
+            session.run(
                 "UPDATE weft_monitor_task_messages "
                 "SET deleted_at_ns = ? WHERE context_key = ? AND tid = ?",
                 (terminal.message_id + 1, store.context_key, tid),
             )
-            runner.commit()
-        except Exception:
-            runner.rollback()
-            raise
 
     result = store.prune_deleted_task_message_tombstones(
         limit=10,
@@ -1376,12 +1341,54 @@ def test_monitor_store_rejects_newer_schema_version(tmp_path) -> None:
     store = open_monitor_store(ctx)
     store.ensure_schema()
     with ctx.broker() as broker:
-        runner = broker._runner
-        runner.run(
-            "UPDATE weft_monitor_meta SET value_json = ? WHERE key = ?",
-            ('{"version": 999}', "schema_version"),
-        )
-        runner.commit()
+        with broker.sidecar(transaction=True) as session:
+            session.run(
+                "UPDATE weft_monitor_meta SET value_json = ? WHERE key = ?",
+                ('{"version": 999}', "schema_version"),
+            )
 
     with pytest.raises(MonitorStoreUnavailable):
         store.ensure_schema()
+
+
+class _NoPrivateRunnerBroker:
+    """A real broker behind a firewall that forbids private runner access.
+
+    This is the one sanctioned test double in the sidecar migration: it
+    wraps the REAL broker object and delegates everything except the
+    private ``_runner`` attribute, proving the store works through the
+    public surface alone.
+    """
+
+    def __init__(self, inner: Any) -> None:
+        object.__setattr__(self, "_inner", inner)
+
+    def __getattr__(self, name: str) -> Any:
+        if name == "_runner":
+            raise AssertionError("MonitorStore must not reach into broker._runner")
+        return getattr(object.__getattribute__(self, "_inner"), name)
+
+
+class _FirewalledContext:
+    """Delegating WeftContext wrapper that firewalls broker handles."""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    @contextmanager
+    def broker(self) -> Iterator[Any]:
+        with self._inner.broker() as broker:
+            yield _NoPrivateRunnerBroker(broker)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+def test_store_uses_only_public_broker_surface(tmp_path) -> None:
+    context = _FirewalledContext(_context(tmp_path))
+    store = open_monitor_store(context)
+    try:
+        store.ensure_schema()
+        assert store.get_checkpoint(WEFT_GLOBAL_LOG_QUEUE) is None
+    finally:
+        store.close()

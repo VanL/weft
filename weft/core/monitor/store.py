@@ -31,11 +31,12 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol, cast
+from typing import Any, Literal, cast
 
+from simplebroker.ext import SidecarSession, SidecarUnavailableError
 from weft._constants import (
     INTERNAL_AUTOSTART_ENABLED_METADATA_KEY,
     INTERNAL_AUTOSTART_SOURCE_METADATA_KEY,
@@ -76,35 +77,6 @@ class MonitorStoreError(RuntimeError):
 
 class MonitorStoreUnavailable(MonitorStoreError):
     """Raised when the Monitor store cannot be used safely."""
-
-
-class _SQLRunner(Protocol):
-    def run(
-        self,
-        sql: str,
-        params: tuple[Any, ...] = (),
-        *,
-        fetch: bool = False,
-    ) -> Iterable[tuple[Any, ...]]: ...
-
-    def begin_immediate(self) -> None: ...
-
-    def commit(self) -> None: ...
-
-    def rollback(self) -> None: ...
-
-
-@contextmanager
-def _write_transaction(runner: _SQLRunner) -> Iterator[None]:
-    """Run a Monitor store write in one explicit SQL transaction."""
-
-    runner.begin_immediate()
-    try:
-        yield
-        runner.commit()
-    except Exception:  # pragma: no cover - rollback must preserve original failure
-        runner.rollback()
-        raise
 
 
 @dataclass(frozen=True, slots=True)
@@ -655,13 +627,13 @@ class _MonitorTableAccess:
 
     def __init__(
         self,
-        runner: _SQLRunner,
+        session: SidecarSession,
         *,
         context_key: str,
         backend_name: str,
         tables: _MonitorTableNames = _monitor_tables,
     ) -> None:
-        self._runner = runner
+        self._session = session
         self._context_key = context_key
         self._backend_name = backend_name
         self._tables = tables
@@ -669,19 +641,19 @@ class _MonitorTableAccess:
     def ensure_schema(self) -> None:
         """Create Monitor-owned schema objects idempotently."""
 
-        self._runner.run(monitor_sql.create_meta_table(self._tables.meta))
-        self._runner.run(
+        self._session.run(monitor_sql.create_meta_table(self._tables.meta))
+        self._session.run(
             monitor_sql.create_task_collations_table(self._tables.task_collations)
         )
-        self._runner.run(
+        self._session.run(
             monitor_sql.create_task_messages_table(self._tables.task_messages)
         )
-        self._runner.run(
+        self._session.run(
             monitor_sql.create_deferred_writes_table(self._tables.deferred_writes)
         )
         for column, definition in _task_collation_additive_columns:
             if not self._column_exists(self._tables.task_collations, column):
-                self._runner.run(
+                self._session.run(
                     monitor_sql.add_column(
                         self._tables.task_collations,
                         column,
@@ -689,14 +661,14 @@ class _MonitorTableAccess:
                     )
                 )
         for spec in _monitor_index_specs:
-            self._runner.run(
+            self._session.run(
                 monitor_sql.create_index(spec.name, spec.table, spec.columns)
             )
 
     def _column_exists(self, table: str, column: str) -> bool:
         if self._backend_name == "postgres":
             rows = list(
-                self._runner.run(
+                self._session.run(
                     monitor_sql.postgres_column_exists(),
                     (table, column),
                     fetch=True,
@@ -704,7 +676,7 @@ class _MonitorTableAccess:
             )
             return bool(rows)
         rows = list(
-            self._runner.run(
+            self._session.run(
                 monitor_sql.sqlite_table_info(table),
                 fetch=True,
             )
@@ -715,7 +687,7 @@ class _MonitorTableAccess:
         """Read one Monitor metadata value."""
 
         rows = list(
-            self._runner.run(
+            self._session.run(
                 monitor_sql.select_meta(self._tables.meta),
                 (key,),
                 fetch=True,
@@ -734,7 +706,7 @@ class _MonitorTableAccess:
     def write_meta(self, key: str, value: Mapping[str, Any]) -> None:
         """Write one Monitor metadata value."""
 
-        self._runner.run(
+        self._session.run(
             monitor_sql.upsert_meta(self._tables.meta),
             (key, _json(value), time.time_ns()),
         )
@@ -761,7 +733,7 @@ class _MonitorTableAccess:
     ) -> None:
         """Insert or update one deferred external JSONL write."""
 
-        self._runner.run(
+        self._session.run(
             monitor_sql.upsert_deferred_write(self._tables.deferred_writes),
             (
                 self._context_key,
@@ -785,7 +757,7 @@ class _MonitorTableAccess:
 
         if limit <= 0:
             return ()
-        rows = self._runner.run(
+        rows = self._session.run(
             monitor_sql.select_pending_deferred_writes(
                 self._tables.deferred_writes,
                 _deferred_write_columns,
@@ -805,7 +777,7 @@ class _MonitorTableAccess:
         ids = tuple(str(report_id) for report_id in report_ids if report_id)
         if not ids:
             return
-        self._runner.run(
+        self._session.run(
             monitor_sql.mark_deferred_writes_flushed(
                 self._tables.deferred_writes,
                 len(ids),
@@ -817,7 +789,7 @@ class _MonitorTableAccess:
         """Return pending deferred-write count and latest pending error."""
 
         pending_rows = list(
-            self._runner.run(
+            self._session.run(
                 monitor_sql.count_pending_deferred_writes(
                     self._tables.deferred_writes,
                 ),
@@ -827,7 +799,7 @@ class _MonitorTableAccess:
         )
         pending = int(pending_rows[0][0]) if pending_rows else 0
         error_rows = list(
-            self._runner.run(
+            self._session.run(
                 monitor_sql.select_latest_deferred_write_error(
                     self._tables.deferred_writes,
                 ),
@@ -850,7 +822,7 @@ class _MonitorTableAccess:
             return 0
         selected = tuple(
             str(row[0])
-            for row in self._runner.run(
+            for row in self._session.run(
                 monitor_sql.select_flushed_deferred_write_ids(
                     self._tables.deferred_writes,
                 ),
@@ -860,7 +832,7 @@ class _MonitorTableAccess:
         )
         if not selected:
             return 0
-        self._runner.run(
+        self._session.run(
             monitor_sql.prune_flushed_deferred_writes(
                 self._tables.deferred_writes,
                 len(selected),
@@ -873,7 +845,7 @@ class _MonitorTableAccess:
         """Read one task collation record."""
 
         rows = list(
-            self._runner.run(
+            self._session.run(
                 monitor_sql.select_task(self._tables.task_collations, _task_columns),
                 (self._context_key, tid),
                 fetch=True,
@@ -892,7 +864,7 @@ class _MonitorTableAccess:
         tid_tuple = tuple(str(tid) for tid in tids if tid)
         if not tid_tuple:
             return ()
-        rows = self._runner.run(
+        rows = self._session.run(
             monitor_sql.select_tasks_by_tids(
                 self._tables.task_collations,
                 _task_columns,
@@ -910,7 +882,7 @@ class _MonitorTableAccess:
     ) -> tuple[MonitorTaskCollationRecord, ...]:
         """Return terminal task summaries that still need emission."""
 
-        rows = self._runner.run(
+        rows = self._session.run(
             monitor_sql.select_unemitted_terminal_tasks(
                 self._tables.task_collations,
                 _task_columns,
@@ -987,7 +959,7 @@ class _MonitorTableAccess:
             ),
         )
         open_cutoff_ns = _retention_cutoff_ns(now_ns, retention_seconds)
-        terminal_rows = self._runner.run(
+        terminal_rows = self._session.run(
             monitor_sql.select_summary_ready_terminal_tasks(
                 self._tables.task_collations,
                 _task_columns,
@@ -1004,7 +976,7 @@ class _MonitorTableAccess:
         ]
         remaining = max(0, int(limit) - len(ready))
         if include_suspected and remaining:
-            open_rows = self._runner.run(
+            open_rows = self._session.run(
                 monitor_sql.select_summary_ready_open_tasks(
                     self._tables.task_collations,
                     _task_columns,
@@ -1058,7 +1030,7 @@ class _MonitorTableAccess:
             now_ns=now_ns,
             retention_seconds=retention_seconds,
         )
-        rows = self._runner.run(
+        rows = self._session.run(
             monitor_sql.select_terminal_control_cleanup_ready_tasks(
                 self._tables.task_collations,
                 _task_columns,
@@ -1081,7 +1053,7 @@ class _MonitorTableAccess:
             return ()
         cutoff_ns = _retention_cutoff_ns(now_ns, retention_seconds)
         scan_limit = max(int(limit), int(limit) * 4)
-        rows = self._runner.run(
+        rows = self._session.run(
             monitor_sql.select_stale_service_owner_candidate_tasks(
                 self._tables.task_collations,
                 _task_columns,
@@ -1107,7 +1079,7 @@ class _MonitorTableAccess:
 
         if limit <= 0:
             return ()
-        rows = self._runner.run(
+        rows = self._session.run(
             monitor_sql.select_terminal_control_deleted_disposition_backfill_tasks(
                 self._tables.task_collations,
             ),
@@ -1125,7 +1097,7 @@ class _MonitorTableAccess:
 
         if limit <= 0:
             return ()
-        rows = self._runner.run(
+        rows = self._session.run(
             monitor_sql.select_reserved_cleanup_pending_tasks(
                 self._tables.task_collations,
                 _task_columns,
@@ -1144,7 +1116,7 @@ class _MonitorTableAccess:
     ) -> None:
         """Mark one terminal summary emitted."""
 
-        self._runner.run(
+        self._session.run(
             monitor_sql.mark_summary_emitted(self._tables.task_collations),
             (
                 int(emitted_at_ns),
@@ -1158,7 +1130,7 @@ class _MonitorTableAccess:
     def mark_task_control_deleted(self, tid: str, deleted_at_ns: int) -> None:
         """Mark one task family's control queues cleanup complete."""
 
-        self._runner.run(
+        self._session.run(
             monitor_sql.mark_task_control_deleted(self._tables.task_collations),
             (
                 int(deleted_at_ns),
@@ -1171,7 +1143,7 @@ class _MonitorTableAccess:
     def mark_reserved_cleanup_checked(self, tid: str, checked_at_ns: int) -> None:
         """Mark one reserved-queue cleanup probe complete."""
 
-        self._runner.run(
+        self._session.run(
             monitor_sql.mark_reserved_cleanup_checked(self._tables.task_collations),
             (
                 int(checked_at_ns),
@@ -1184,7 +1156,7 @@ class _MonitorTableAccess:
     def mark_orphan_raw_recovery_checked(self, tid: str, checked_at_ns: int) -> None:
         """Mark one raw-log orphan recovery probe complete."""
 
-        self._runner.run(
+        self._session.run(
             monitor_sql.mark_orphan_raw_recovery_checked(self._tables.task_collations),
             (
                 int(checked_at_ns),
@@ -1205,7 +1177,7 @@ class _MonitorTableAccess:
     ) -> None:
         """Mark one Monitor task family disposition complete."""
 
-        self._runner.run(
+        self._session.run(
             monitor_sql.mark_family_disposed(self._tables.task_collations),
             (
                 disposition_reason,
@@ -1226,7 +1198,7 @@ class _MonitorTableAccess:
     ) -> tuple[MonitorRawMessageRef, ...]:
         """Return exact task-log messages proven deletable."""
 
-        rows = self._runner.run(
+        rows = self._session.run(
             monitor_sql.select_deletable_task_log_messages(
                 self._tables.task_messages,
                 self._tables.task_collations,
@@ -1256,7 +1228,7 @@ class _MonitorTableAccess:
         tid_tuple = tuple(str(tid) for tid in tids if tid)
         if not tid_tuple or limit <= 0:
             return ()
-        rows = self._runner.run(
+        rows = self._session.run(
             monitor_sql.select_deletable_task_log_messages_for_tids(
                 self._tables.task_messages,
                 self._tables.task_collations,
@@ -1285,7 +1257,7 @@ class _MonitorTableAccess:
 
         if limit <= 0:
             return ()
-        rows = self._runner.run(
+        rows = self._session.run(
             monitor_sql.select_raw_deleted_task_message_refs(
                 self._tables.task_messages,
                 self._tables.task_collations,
@@ -1312,7 +1284,7 @@ class _MonitorTableAccess:
         ids = tuple(int(message_id) for message_id in message_ids)
         if not ids:
             return ()
-        rows = self._runner.run(
+        rows = self._session.run(
             monitor_sql.select_task_message_refs_for_message_ids(
                 self._tables.task_messages,
                 len(ids),
@@ -1331,7 +1303,7 @@ class _MonitorTableAccess:
         ids = tuple(int(message_id) for message_id in message_ids)
         if not ids:
             return ()
-        rows = self._runner.run(
+        rows = self._session.run(
             monitor_sql.select_missing_task_message_ids(
                 self._tables.task_messages,
                 len(ids),
@@ -1351,7 +1323,7 @@ class _MonitorTableAccess:
 
         if limit <= 0:
             return ()
-        rows = self._runner.run(
+        rows = self._session.run(
             monitor_sql.select_raw_deleted_task_log_recovery_tids(
                 self._tables.task_collations,
                 self._tables.task_messages,
@@ -1367,7 +1339,7 @@ class _MonitorTableAccess:
 
         if limit <= 0:
             return ()
-        rows = self._runner.run(
+        rows = self._session.run(
             monitor_sql.select_deleted_task_message_refs(self._tables.task_messages),
             (self._context_key, int(limit)),
             fetch=True,
@@ -1380,7 +1352,7 @@ class _MonitorTableAccess:
         ids = tuple(int(message_id) for message_id in message_ids)
         if not ids:
             return
-        self._runner.run(
+        self._session.run(
             monitor_sql.delete_task_messages(self._tables.task_messages, len(ids)),
             (self._context_key, *ids),
         )
@@ -1391,7 +1363,7 @@ class _MonitorTableAccess:
         ids = tuple(int(message_id) for message_id in message_ids)
         if not ids:
             return set()
-        rows = self._runner.run(
+        rows = self._session.run(
             monitor_sql.select_distinct_tids_for_message_ids(
                 self._tables.task_messages,
                 len(ids),
@@ -1405,7 +1377,7 @@ class _MonitorTableAccess:
         """Return whether a task still has known child raw-message refs."""
 
         rows = list(
-            self._runner.run(
+            self._session.run(
                 monitor_sql.select_remaining_task_message(self._tables.task_messages),
                 (self._context_key, tid),
                 fetch=True,
@@ -1416,7 +1388,7 @@ class _MonitorTableAccess:
     def mark_raw_deleted(self, tid: str, deleted_at_ns: int) -> None:
         """Mark all known raw task-log rows for a task deleted."""
 
-        self._runner.run(
+        self._session.run(
             monitor_sql.mark_raw_deleted(self._tables.task_collations),
             (int(deleted_at_ns), int(deleted_at_ns), self._context_key, tid),
         )
@@ -1424,7 +1396,7 @@ class _MonitorTableAccess:
     def reconcile_raw_deleted(self, deleted_at_ns: int) -> None:
         """Mark parent rows whose known child rows are all deleted."""
 
-        self._runner.run(
+        self._session.run(
             monitor_sql.reconcile_raw_deleted_tasks(
                 self._tables.task_collations,
                 self._tables.task_messages,
@@ -1442,7 +1414,7 @@ class _MonitorTableAccess:
         tid_items = tuple(str(tid) for tid in tids)
         if not tid_items:
             return
-        self._runner.run(
+        self._session.run(
             monitor_sql.reconcile_raw_deleted_tasks_for_tids(
                 self._tables.task_collations,
                 self._tables.task_messages,
@@ -1466,7 +1438,7 @@ class _MonitorTableAccess:
 
         if limit <= 0:
             return ()
-        rows = self._runner.run(
+        rows = self._session.run(
             monitor_sql.select_retirable_task_collations(
                 self._tables.task_collations,
                 self._tables.task_messages,
@@ -1487,7 +1459,7 @@ class _MonitorTableAccess:
         tid_items = tuple(str(tid) for tid in tids)
         if not tid_items:
             return
-        self._runner.run(
+        self._session.run(
             monitor_sql.delete_task_collations(
                 self._tables.task_collations,
                 len(tid_items),
@@ -1498,7 +1470,7 @@ class _MonitorTableAccess:
     def upsert_record(self, record: MonitorTaskCollationRecord) -> None:
         """Upsert one task collation record."""
 
-        self._runner.run(
+        self._session.run(
             monitor_sql.upsert_task_record(
                 self._tables.task_collations,
                 _task_columns,
@@ -1510,7 +1482,7 @@ class _MonitorTableAccess:
     def upsert_message(self, update: MonitorTaskEventUpdate) -> None:
         """Upsert one child raw-message reference."""
 
-        self._runner.run(
+        self._session.run(
             monitor_sql.upsert_task_message(self._tables.task_messages),
             (
                 self._context_key,
@@ -1549,12 +1521,31 @@ class MonitorStore:
 
         return self._config.schema_version
 
-    def _access(self, runner: _SQLRunner) -> _MonitorTableAccess:
+    def _access(self, session: SidecarSession) -> _MonitorTableAccess:
         return _MonitorTableAccess(
-            runner,
+            session,
             context_key=self._context_key,
             backend_name=self._context.backend_name,
         )
+
+    @contextmanager
+    def _sidecar_session(
+        self, *, transaction: bool = False
+    ) -> Iterator[SidecarSession]:
+        """Yield a broker sidecar session, mapping capability errors.
+
+        SidecarUnavailableError only originates from ``broker.sidecar()``
+        itself (non-SQL backends), so mapping it here cannot mask errors
+        raised by Monitor-store SQL inside the block.
+        """
+        with self._context.broker() as broker:
+            try:
+                with broker.sidecar(transaction=transaction) as session:
+                    yield session
+            except SidecarUnavailableError as exc:
+                raise MonitorStoreUnavailable(
+                    f"Monitor store requires a SQL broker backend: {exc}"
+                ) from exc
 
     def close(self) -> None:
         """Close the store.
@@ -1575,34 +1566,32 @@ class MonitorStore:
         ):
             raise MonitorStoreUnavailable("broker database does not exist")
 
-        with self._context.broker() as broker:
-            runner = _runner_from_broker(broker)
-            access = self._access(runner)
-            with _write_transaction(runner):
-                access.ensure_schema()
-                version = self._read_schema_version(access)
-                if version is None:
-                    access.write_meta(
-                        WEFT_MONITOR_SCHEMA_VERSION_KEY,
-                        {"version": self._config.schema_version},
-                    )
-                elif version > self._config.schema_version:
-                    raise MonitorStoreUnavailable(
-                        "Monitor store schema version "
-                        f"{version} is newer than supported "
-                        f"{self._config.schema_version}"
-                    )
-                elif version < self._config.schema_version:
-                    access.write_meta(
-                        WEFT_MONITOR_SCHEMA_VERSION_KEY,
-                        {"version": self._config.schema_version},
-                    )
+        with self._sidecar_session(transaction=True) as session:
+            access = self._access(session)
+            access.ensure_schema()
+            version = self._read_schema_version(access)
+            if version is None:
+                access.write_meta(
+                    WEFT_MONITOR_SCHEMA_VERSION_KEY,
+                    {"version": self._config.schema_version},
+                )
+            elif version > self._config.schema_version:
+                raise MonitorStoreUnavailable(
+                    "Monitor store schema version "
+                    f"{version} is newer than supported "
+                    f"{self._config.schema_version}"
+                )
+            elif version < self._config.schema_version:
+                access.write_meta(
+                    WEFT_MONITOR_SCHEMA_VERSION_KEY,
+                    {"version": self._config.schema_version},
+                )
 
     def get_checkpoint(self, queue_name: str) -> int | None:
         """Return the durable checkpoint for a queue."""
 
-        with self._context.broker() as broker:
-            return self._access(_runner_from_broker(broker)).get_checkpoint(
+        with self._sidecar_session() as session:
+            return self._access(session).get_checkpoint(
                 queue_name,
             )
 
@@ -1612,14 +1601,12 @@ class MonitorStore:
         Spec: [MF-5]
         """
 
-        with self._context.broker() as broker:
-            runner = _runner_from_broker(broker)
-            access = self._access(runner)
-            with _write_transaction(runner):
-                access.write_meta(
-                    f"{WEFT_MONITOR_CHECKPOINT_META_PREFIX}{queue_name}",
-                    {"message_id": int(message_id)},
-                )
+        with self._sidecar_session(transaction=True) as session:
+            access = self._access(session)
+            access.write_meta(
+                f"{WEFT_MONITOR_CHECKPOINT_META_PREFIX}{queue_name}",
+                {"message_id": int(message_id)},
+            )
 
     def upsert_task_event(self, update: MonitorTaskEventUpdate) -> None:
         """Merge one task-log event into the durable collation tables."""
@@ -1656,37 +1643,35 @@ class MonitorStore:
 
         tasks_updated: set[str] = set()
         terminal_tasks: set[str] = set()
-        with self._context.broker() as broker:
-            runner = _runner_from_broker(broker)
-            access = self._access(runner)
-            for chunk in _chunks(update_items, self._config.write_batch_size):
-                with _write_transaction(runner):
-                    updates_by_tid: dict[str, list[MonitorTaskEventUpdate]] = {}
-                    for update in chunk:
-                        updates_by_tid.setdefault(update.tid, []).append(update)
+        for chunk in _chunks(update_items, self._config.write_batch_size):
+            with self._sidecar_session(transaction=True) as session:
+                access = self._access(session)
+                updates_by_tid: dict[str, list[MonitorTaskEventUpdate]] = {}
+                for update in chunk:
+                    updates_by_tid.setdefault(update.tid, []).append(update)
 
-                    for tid, tid_updates in updates_by_tid.items():
-                        merged = access.fetch_task(tid)
-                        for update in tid_updates:
-                            merged = _merge_record(
-                                self._context_key,
-                                merged,
-                                update,
-                            )
-                            tasks_updated.add(update.tid)
-                            if update.terminal_seen:
-                                terminal_tasks.add(update.tid)
-                        if merged is not None:
-                            access.upsert_record(merged)
+                for tid, tid_updates in updates_by_tid.items():
+                    merged = access.fetch_task(tid)
+                    for update in tid_updates:
+                        merged = _merge_record(
+                            self._context_key,
+                            merged,
+                            update,
+                        )
+                        tasks_updated.add(update.tid)
+                        if update.terminal_seen:
+                            terminal_tasks.add(update.tid)
+                    if merged is not None:
+                        access.upsert_record(merged)
 
-                    for update in chunk:
-                        access.upsert_message(update)
-            if checkpoint_message_id is not None:
-                with _write_transaction(runner):
-                    access.write_meta(
-                        f"{WEFT_MONITOR_CHECKPOINT_META_PREFIX}{queue_name}",
-                        {"message_id": int(checkpoint_message_id)},
-                    )
+                for update in chunk:
+                    access.upsert_message(update)
+        if checkpoint_message_id is not None:
+            with self._sidecar_session(transaction=True) as session:
+                self._access(session).write_meta(
+                    f"{WEFT_MONITOR_CHECKPOINT_META_PREFIX}{queue_name}",
+                    {"message_id": int(checkpoint_message_id)},
+                )
 
         return MonitorStoreIngestResult(
             updates_written=len(update_items),
@@ -1700,18 +1685,11 @@ class MonitorStore:
             checkpoint_written=checkpoint_message_id is not None,
         )
 
-    def get_task(
-        self,
-        tid: str,
-        *,
-        runner: _SQLRunner | None = None,
-    ) -> MonitorTaskCollationRecord | None:
+    def get_task(self, tid: str) -> MonitorTaskCollationRecord | None:
         """Return one durable task collation record."""
 
-        if runner is not None:
-            return self._access(runner).fetch_task(tid)
-        with self._context.broker() as broker:
-            return self._access(_runner_from_broker(broker)).fetch_task(tid)
+        with self._sidecar_session() as session:
+            return self._access(session).fetch_task(tid)
 
     def get_tasks(
         self,
@@ -1723,8 +1701,8 @@ class MonitorStore:
         if not tid_tuple:
             return ()
         records: list[MonitorTaskCollationRecord] = []
-        with self._context.broker() as broker:
-            access = self._access(_runner_from_broker(broker))
+        with self._sidecar_session() as session:
+            access = self._access(session)
             for chunk in _chunks(tid_tuple, self._config.write_batch_size):
                 records.extend(access.fetch_tasks(chunk))
         return tuple(records)
@@ -1738,10 +1716,8 @@ class MonitorStore:
 
         if limit <= 0:
             return ()
-        with self._context.broker() as broker:
-            return self._access(
-                _runner_from_broker(broker)
-            ).list_unemitted_terminal_tasks(
+        with self._sidecar_session() as session:
+            return self._access(session).list_unemitted_terminal_tasks(
                 limit=limit,
             )
 
@@ -1761,8 +1737,8 @@ class MonitorStore:
 
         if limit <= 0:
             return ()
-        with self._context.broker() as broker:
-            return self._access(_runner_from_broker(broker)).list_summary_ready_tasks(
+        with self._sidecar_session() as session:
+            return self._access(session).list_summary_ready_tasks(
                 limit=limit,
                 now_ns=now_ns,
                 retention_seconds=retention_seconds,
@@ -1782,10 +1758,8 @@ class MonitorStore:
 
         if limit <= 0:
             return ()
-        with self._context.broker() as broker:
-            return self._access(
-                _runner_from_broker(broker)
-            ).list_terminal_control_cleanup_ready_tasks(
+        with self._sidecar_session() as session:
+            return self._access(session).list_terminal_control_cleanup_ready_tasks(
                 limit=limit,
                 now_ns=now_ns,
                 retention_seconds=retention_seconds,
@@ -1802,10 +1776,8 @@ class MonitorStore:
 
         if limit <= 0:
             return ()
-        with self._context.broker() as broker:
-            return self._access(
-                _runner_from_broker(broker)
-            ).list_stale_service_owner_candidates(
+        with self._sidecar_session() as session:
+            return self._access(session).list_stale_service_owner_candidates(
                 limit=limit,
                 now_ns=now_ns,
                 retention_seconds=retention_seconds,
@@ -1823,9 +1795,9 @@ class MonitorStore:
 
         if limit <= 0:
             return ()
-        with self._context.broker() as broker:
+        with self._sidecar_session() as session:
             return self._access(
-                _runner_from_broker(broker)
+                session
             ).list_terminal_control_deleted_disposition_backfill_tasks(
                 limit=limit,
             )
@@ -1842,10 +1814,10 @@ class MonitorStore:
 
         if limit <= 0:
             return ()
-        with self._context.broker() as broker:
-            return self._access(
-                _runner_from_broker(broker)
-            ).list_reserved_cleanup_pending_tasks(limit=limit)
+        with self._sidecar_session() as session:
+            return self._access(session).list_reserved_cleanup_pending_tasks(
+                limit=limit
+            )
 
     def mark_summary_emitted(
         self,
@@ -1877,17 +1849,15 @@ class MonitorStore:
         item_tuple = tuple(items)
         if not item_tuple:
             return
-        with self._context.broker() as broker:
-            runner = _runner_from_broker(broker)
-            access = self._access(runner)
-            for chunk in _chunks(item_tuple, self._config.write_batch_size):
-                with _write_transaction(runner):
-                    for tid, suspect_reason in chunk:
-                        access.mark_summary_emitted(
-                            tid,
-                            emitted_at_ns,
-                            suspect_reason=suspect_reason,
-                        )
+        for chunk in _chunks(item_tuple, self._config.write_batch_size):
+            with self._sidecar_session(transaction=True) as session:
+                access = self._access(session)
+                for tid, suspect_reason in chunk:
+                    access.mark_summary_emitted(
+                        tid,
+                        emitted_at_ns,
+                        suspect_reason=suspect_reason,
+                    )
 
     def mark_task_control_deleted(
         self,
@@ -1908,13 +1878,11 @@ class MonitorStore:
         tid_tuple = tuple(str(tid) for tid in tids)
         if not tid_tuple:
             return
-        with self._context.broker() as broker:
-            runner = _runner_from_broker(broker)
-            access = self._access(runner)
-            for chunk in _chunks(tid_tuple, self._config.write_batch_size):
-                with _write_transaction(runner):
-                    for tid in chunk:
-                        access.mark_task_control_deleted(tid, deleted_at_ns)
+        for chunk in _chunks(tid_tuple, self._config.write_batch_size):
+            with self._sidecar_session(transaction=True) as session:
+                access = self._access(session)
+                for tid in chunk:
+                    access.mark_task_control_deleted(tid, deleted_at_ns)
 
     def mark_reserved_cleanup_checked(
         self,
@@ -1929,13 +1897,11 @@ class MonitorStore:
         tid_tuple = tuple(str(tid) for tid in tids)
         if not tid_tuple:
             return
-        with self._context.broker() as broker:
-            runner = _runner_from_broker(broker)
-            access = self._access(runner)
-            for chunk in _chunks(tid_tuple, self._config.write_batch_size):
-                with _write_transaction(runner):
-                    for tid in chunk:
-                        access.mark_reserved_cleanup_checked(tid, checked_at_ns)
+        for chunk in _chunks(tid_tuple, self._config.write_batch_size):
+            with self._sidecar_session(transaction=True) as session:
+                access = self._access(session)
+                for tid in chunk:
+                    access.mark_reserved_cleanup_checked(tid, checked_at_ns)
 
     def mark_orphan_raw_recovery_checked(
         self,
@@ -1950,13 +1916,11 @@ class MonitorStore:
         tid_tuple = tuple(str(tid) for tid in tids)
         if not tid_tuple:
             return
-        with self._context.broker() as broker:
-            runner = _runner_from_broker(broker)
-            access = self._access(runner)
-            for chunk in _chunks(tid_tuple, self._config.write_batch_size):
-                with _write_transaction(runner):
-                    for tid in chunk:
-                        access.mark_orphan_raw_recovery_checked(tid, checked_at_ns)
+        for chunk in _chunks(tid_tuple, self._config.write_batch_size):
+            with self._sidecar_session(transaction=True) as session:
+                access = self._access(session)
+                for tid in chunk:
+                    access.mark_orphan_raw_recovery_checked(tid, checked_at_ns)
 
     def mark_family_disposed(
         self,
@@ -2003,24 +1967,22 @@ class MonitorStore:
         item_tuple = tuple(items)
         if not item_tuple:
             return
-        with self._context.broker() as broker:
-            runner = _runner_from_broker(broker)
-            access = self._access(runner)
-            for chunk in _chunks(item_tuple, self._config.write_batch_size):
-                with _write_transaction(runner):
-                    for (
+        for chunk in _chunks(item_tuple, self._config.write_batch_size):
+            with self._sidecar_session(transaction=True) as session:
+                access = self._access(session)
+                for (
+                    tid,
+                    disposition_reason,
+                    suspect_reason,
+                    suspect_at_ns,
+                ) in chunk:
+                    access.mark_family_disposed(
                         tid,
-                        disposition_reason,
-                        suspect_reason,
-                        suspect_at_ns,
-                    ) in chunk:
-                        access.mark_family_disposed(
-                            tid,
-                            disposed_at_ns,
-                            disposition_reason=disposition_reason,
-                            suspect_reason=suspect_reason,
-                            suspect_at_ns=suspect_at_ns,
-                        )
+                        disposed_at_ns,
+                        disposition_reason=disposition_reason,
+                        suspect_reason=suspect_reason,
+                        suspect_at_ns=suspect_at_ns,
+                    )
 
     def list_deletable_task_log_messages(
         self,
@@ -2032,10 +1994,8 @@ class MonitorStore:
 
         if limit <= 0:
             return ()
-        with self._context.broker() as broker:
-            return self._access(
-                _runner_from_broker(broker)
-            ).list_deletable_task_log_messages(
+        with self._sidecar_session() as session:
+            return self._access(session).list_deletable_task_log_messages(
                 limit=limit,
                 require_summary=require_summary,
             )
@@ -2052,10 +2012,8 @@ class MonitorStore:
         tid_tuple = tuple(str(tid) for tid in tids if tid)
         if not tid_tuple or limit <= 0:
             return ()
-        with self._context.broker() as broker:
-            return self._access(
-                _runner_from_broker(broker)
-            ).list_deletable_task_log_messages_for_tids(
+        with self._sidecar_session() as session:
+            return self._access(session).list_deletable_task_log_messages_for_tids(
                 tid_tuple,
                 limit=limit,
                 require_summary=require_summary,
@@ -2070,10 +2028,8 @@ class MonitorStore:
         ids = tuple(int(message_id) for message_id in message_ids)
         if not ids:
             return ()
-        with self._context.broker() as broker:
-            return self._access(_runner_from_broker(broker)).missing_task_message_ids(
-                ids
-            )
+        with self._sidecar_session() as session:
+            return self._access(session).missing_task_message_ids(ids)
 
     def list_raw_deleted_task_log_recovery_tids(
         self,
@@ -2094,10 +2050,8 @@ class MonitorStore:
 
         if limit <= 0:
             return ()
-        with self._context.broker() as broker:
-            return self._access(
-                _runner_from_broker(broker)
-            ).raw_deleted_task_log_recovery_tids(
+        with self._sidecar_session() as session:
+            return self._access(session).raw_deleted_task_log_recovery_tids(
                 limit=limit,
                 require_summary=require_summary,
             )
@@ -2121,10 +2075,8 @@ class MonitorStore:
 
         if limit <= 0:
             return ()
-        with self._context.broker() as broker:
-            return self._access(
-                _runner_from_broker(broker)
-            ).raw_deleted_task_message_refs(
+        with self._sidecar_session() as session:
+            return self._access(session).raw_deleted_task_message_refs(
                 limit=limit,
                 require_summary=require_summary,
             )
@@ -2146,21 +2098,19 @@ class MonitorStore:
         timestamp = time.time_ns() if deleted_at_ns is None else int(deleted_at_ns)
         deleted_rows = 0
         affected_tids: set[str] = set()
-        with self._context.broker() as broker:
-            runner = _runner_from_broker(broker)
-            access = self._access(runner)
-            for chunk in _chunks(ids, self._config.write_batch_size):
-                with _write_transaction(runner):
-                    refs = access.task_message_refs_for_message_ids(chunk)
-                    chunk_tids = {tid for tid, _message_id in refs}
-                    chunk_message_ids = tuple(message_id for _tid, message_id in refs)
-                    access.delete_task_messages(chunk_message_ids)
-                    deleted_rows += len(chunk_message_ids)
-                    affected_tids.update(chunk_tids)
-                    access.reconcile_raw_deleted_for_tids(
-                        sorted(chunk_tids),
-                        timestamp,
-                    )
+        for chunk in _chunks(ids, self._config.write_batch_size):
+            with self._sidecar_session(transaction=True) as session:
+                access = self._access(session)
+                refs = access.task_message_refs_for_message_ids(chunk)
+                chunk_tids = {tid for tid, _message_id in refs}
+                chunk_message_ids = tuple(message_id for _tid, message_id in refs)
+                access.delete_task_messages(chunk_message_ids)
+                deleted_rows += len(chunk_message_ids)
+                affected_tids.update(chunk_tids)
+                access.reconcile_raw_deleted_for_tids(
+                    sorted(chunk_tids),
+                    timestamp,
+                )
         return MonitorStoreRetirementResult(
             message_rows_deleted=deleted_rows,
             affected_tids=len(affected_tids),
@@ -2182,26 +2132,24 @@ class MonitorStore:
         timestamp = time.time_ns() if pruned_at_ns is None else int(pruned_at_ns)
         pruned_rows = 0
         affected_tids: set[str] = set()
-        with self._context.broker() as broker:
-            runner = _runner_from_broker(broker)
-            access = self._access(runner)
-            remaining = int(limit)
-            while remaining > 0:
-                chunk_limit = min(remaining, self._config.write_batch_size)
-                with _write_transaction(runner):
-                    chunk = access.deleted_task_message_refs(limit=chunk_limit)
-                    if not chunk:
-                        break
-                    chunk_tids = {tid for tid, _message_id in chunk}
-                    chunk_message_ids = tuple(message_id for _tid, message_id in chunk)
-                    access.delete_task_messages(chunk_message_ids)
-                    access.reconcile_raw_deleted_for_tids(
-                        sorted(chunk_tids),
-                        timestamp,
-                    )
-                pruned_rows += len(chunk_message_ids)
-                affected_tids.update(chunk_tids)
-                remaining -= len(chunk_message_ids)
+        remaining = int(limit)
+        while remaining > 0:
+            chunk_limit = min(remaining, self._config.write_batch_size)
+            with self._sidecar_session(transaction=True) as session:
+                access = self._access(session)
+                chunk = access.deleted_task_message_refs(limit=chunk_limit)
+                if not chunk:
+                    break
+                chunk_tids = {tid for tid, _message_id in chunk}
+                chunk_message_ids = tuple(message_id for _tid, message_id in chunk)
+                access.delete_task_messages(chunk_message_ids)
+                access.reconcile_raw_deleted_for_tids(
+                    sorted(chunk_tids),
+                    timestamp,
+                )
+            pruned_rows += len(chunk_message_ids)
+            affected_tids.update(chunk_tids)
+            remaining -= len(chunk_message_ids)
         return MonitorStoreRetirementResult(
             message_tombstones_pruned=pruned_rows,
             affected_tids=len(affected_tids),
@@ -2232,22 +2180,20 @@ class MonitorStore:
             now_ns = int(retired_at_ns if retired_at_ns is not None else time.time_ns())
             older_than_ns = now_ns - int(float(retention_seconds) * 1_000_000_000)
         retired = 0
-        with self._context.broker() as broker:
-            runner = _runner_from_broker(broker)
-            access = self._access(runner)
-            remaining = int(limit)
-            while remaining > 0:
-                chunk_limit = min(remaining, self._config.write_batch_size)
-                with _write_transaction(runner):
-                    chunk = access.list_retirable_task_collations(
-                        limit=chunk_limit,
-                        older_than_ns=older_than_ns,
-                    )
-                    if not chunk:
-                        break
-                    access.delete_task_collations(chunk)
-                    retired += len(chunk)
-                remaining -= len(chunk)
+        remaining = int(limit)
+        while remaining > 0:
+            chunk_limit = min(remaining, self._config.write_batch_size)
+            with self._sidecar_session(transaction=True) as session:
+                access = self._access(session)
+                chunk = access.list_retirable_task_collations(
+                    limit=chunk_limit,
+                    older_than_ns=older_than_ns,
+                )
+                if not chunk:
+                    break
+                access.delete_task_collations(chunk)
+                retired += len(chunk)
+            remaining -= len(chunk)
         return MonitorStoreRetirementResult(families_retired=retired)
 
     def upsert_deferred_write(
@@ -2270,17 +2216,15 @@ class MonitorStore:
             raise ValueError("deferred write record_type must be a non-empty string")
         timestamp = time.time_ns() if now_ns is None else int(now_ns)
         body_json = _json(report)
-        with self._context.broker() as broker:
-            runner = _runner_from_broker(broker)
-            access = self._access(runner)
-            with _write_transaction(runner):
-                access.upsert_deferred_write(
-                    report_id=report_id,
-                    record_type=record_type,
-                    body_json=body_json,
-                    external_error=external_error,
-                    now_ns=timestamp,
-                )
+        with self._sidecar_session(transaction=True) as session:
+            access = self._access(session)
+            access.upsert_deferred_write(
+                report_id=report_id,
+                record_type=record_type,
+                body_json=body_json,
+                external_error=external_error,
+                now_ns=timestamp,
+            )
 
     def list_pending_deferred_writes(
         self,
@@ -2291,10 +2235,8 @@ class MonitorStore:
 
         if limit <= 0:
             return ()
-        with self._context.broker() as broker:
-            return self._access(
-                _runner_from_broker(broker)
-            ).list_pending_deferred_writes(limit=limit)
+        with self._sidecar_session() as session:
+            return self._access(session).list_pending_deferred_writes(limit=limit)
 
     def mark_deferred_writes_flushed(
         self,
@@ -2306,18 +2248,16 @@ class MonitorStore:
         ids = tuple(str(report_id) for report_id in report_ids if report_id)
         if not ids:
             return
-        with self._context.broker() as broker:
-            runner = _runner_from_broker(broker)
-            access = self._access(runner)
-            for chunk in _chunks(ids, self._config.write_batch_size):
-                with _write_transaction(runner):
-                    access.mark_deferred_writes_flushed(chunk, flushed_at_ns)
+        for chunk in _chunks(ids, self._config.write_batch_size):
+            with self._sidecar_session(transaction=True) as session:
+                access = self._access(session)
+                access.mark_deferred_writes_flushed(chunk, flushed_at_ns)
 
     def deferred_write_status(self) -> MonitorDeferredWriteStatus:
         """Return deferred-write status for cached monitor diagnostics."""
 
-        with self._context.broker() as broker:
-            return self._access(_runner_from_broker(broker)).deferred_write_status()
+        with self._sidecar_session() as session:
+            return self._access(session).deferred_write_status()
 
     def prune_flushed_deferred_writes(
         self,
@@ -2329,14 +2269,12 @@ class MonitorStore:
 
         if limit <= 0:
             return 0
-        with self._context.broker() as broker:
-            runner = _runner_from_broker(broker)
-            access = self._access(runner)
-            with _write_transaction(runner):
-                return access.prune_flushed_deferred_writes(
-                    flushed_before_ns=flushed_before_ns,
-                    limit=limit,
-                )
+        with self._sidecar_session(transaction=True) as session:
+            access = self._access(session)
+            return access.prune_flushed_deferred_writes(
+                flushed_before_ns=flushed_before_ns,
+                limit=limit,
+            )
 
     def status(self) -> MonitorStoreStatus:
         """Return a store status snapshot for cached PONG fields."""
@@ -2645,13 +2583,6 @@ def _positive_float_or_none(value: Any) -> float | None:
 def _chunks[T](items: Sequence[T], size: int) -> Iterator[Sequence[T]]:
     for start in range(0, len(items), size):
         yield items[start : start + size]
-
-
-def _runner_from_broker(broker: Any) -> _SQLRunner:
-    runner = getattr(broker, "_runner", None)
-    if runner is None:
-        raise MonitorStoreUnavailable("broker does not expose a SQL runner")
-    return cast(_SQLRunner, runner)
 
 
 def _json(value: Mapping[str, Any]) -> str:
