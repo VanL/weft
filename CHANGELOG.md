@@ -19,6 +19,10 @@
 
 ### Changed
 
+- Monitor store now uses SimpleBroker's public sidecar-session API
+  (`broker.sidecar()`) instead of the private `_runner` attribute; requires
+  simplebroker>=4.5.0. Watcher imports moved to `simplebroker.ext`
+  (`StopWatching` replaces the private `_StopLoop`). No behavior change.
 - Keyed PING probes now retire their replies (single-reader contract): a
   matched PONG is deleted on match, and rows bearing the probe's request id
   are swept at timeout or abandonment, on the shared probe helper and on the
