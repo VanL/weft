@@ -164,6 +164,7 @@ def test_monitor_sql_orphan_recovery_query_excludes_checked_families() -> None:
     query = monitor_sql.select_raw_deleted_task_log_recovery_tids(
         "weft_monitor_task_collations",
         "weft_monitor_task_messages",
+        require_summary=False,
     )
 
     assert "raw_deleted_at_ns IS NOT NULL" in query
@@ -173,10 +174,30 @@ def test_monitor_sql_orphan_recovery_query_excludes_checked_families() -> None:
     assert "%s" not in query
 
 
+def test_monitor_sql_orphan_recovery_query_summary_gate() -> None:
+    """jsonl mode gates orphan recovery on the family's summary export."""
+    ungated = monitor_sql.select_raw_deleted_task_log_recovery_tids(
+        "weft_monitor_task_collations",
+        "weft_monitor_task_messages",
+        require_summary=False,
+    )
+    gated = monitor_sql.select_raw_deleted_task_log_recovery_tids(
+        "weft_monitor_task_collations",
+        "weft_monitor_task_messages",
+        require_summary=True,
+    )
+
+    assert "c.summary_emitted_at_ns IS NOT NULL" in gated
+    assert gated.count("summary_emitted_at_ns") > ungated.count(
+        "summary_emitted_at_ns"
+    )
+
+
 def test_monitor_sql_raw_deleted_child_ref_repair_query_selects_inconsistency() -> None:
     query = monitor_sql.select_raw_deleted_task_message_refs(
         "weft_monitor_task_messages",
         "weft_monitor_task_collations",
+        require_summary=False,
     )
 
     assert "FROM weft_monitor_task_messages AS m" in query
@@ -186,6 +207,17 @@ def test_monitor_sql_raw_deleted_child_ref_repair_query_selects_inconsistency() 
     assert "ORDER BY m.message_id" in query
     assert "LIMIT ?" in query
     assert "%s" not in query
+
+
+def test_monitor_sql_raw_deleted_child_ref_repair_query_summary_gate() -> None:
+    """jsonl mode gates marked-with-refs repair on the summary export."""
+    gated = monitor_sql.select_raw_deleted_task_message_refs(
+        "weft_monitor_task_messages",
+        "weft_monitor_task_collations",
+        require_summary=True,
+    )
+
+    assert "c.summary_emitted_at_ns IS NOT NULL" in gated
 
 
 def test_monitor_sql_summary_ready_queries_parameterize_cutoffs() -> None:
