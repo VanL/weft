@@ -10,10 +10,11 @@ import pytest
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import (
     SERVICE_STATUS_DRAINING,
+    TERMINAL_ENVELOPE_TYPE,
     WEFT_MANAGER_OUTBOX_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
 )
-from weft.context import build_context
+from weft.context import WeftContext, build_context
 from weft.core.control_probe import (
     coerce_pong_response,
     pong_proves_dispatch_eligible,
@@ -22,6 +23,27 @@ from weft.core.control_probe import (
 from weft.core.manager_runtime import _matched_pong_proves_manager_record
 
 pytestmark = [pytest.mark.shared]
+
+
+def _write_ctrl_out_rows(
+    ctx: WeftContext,
+    ctrl_out_name: str,
+    rows: list[str],
+) -> None:
+    queue = ctx.queue(ctrl_out_name, persistent=False)
+    try:
+        for row in rows:
+            queue.write(row)
+    finally:
+        queue.close()
+
+
+def _peek_ctrl_out_bodies(ctx: WeftContext, ctrl_out_name: str) -> list[str]:
+    queue = ctx.queue(ctrl_out_name, persistent=False)
+    try:
+        return [str(item) for item in queue.peek_generator()]
+    finally:
+        queue.close()
 
 
 def test_send_keyed_ping_probe_matches_expected_pong(tmp_path: Path) -> None:
@@ -122,6 +144,167 @@ def test_send_keyed_ping_probe_ignores_unmatched_pongs(tmp_path: Path) -> None:
     assert result.error is None
     assert result.matched is None
     assert result.timed_out is True
+
+
+def test_send_keyed_ping_probe_consumes_matched_pong(tmp_path: Path) -> None:
+    """A matched keyed PONG is retired from ctrl_out by the probe itself.
+
+    Single-reader contract: the prober that issued the request_id owns the
+    matched reply's lifecycle and deletes it by exact message id on match.
+
+    Spec: [MF-3], [MANAGER.8]
+    """
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = "1775622400000000104"
+    ctrl_in_name = f"T{tid}.ctrl_in"
+    ctrl_out_name = f"T{tid}.ctrl_out"
+    request_id = "probe-request-consumed"
+    _write_ctrl_out_rows(
+        ctx,
+        ctrl_out_name,
+        [
+            json.dumps(
+                {
+                    "command": "PING",
+                    "status": "ok",
+                    "message": "PONG",
+                    "tid": tid,
+                    "request_id": request_id,
+                    "task_status": "running",
+                }
+            )
+        ],
+    )
+
+    result = send_keyed_ping_probe(
+        ctx,
+        tid=tid,
+        ctrl_in_name=ctrl_in_name,
+        ctrl_out_name=ctrl_out_name,
+        request_id=request_id,
+        timeout=0.0,
+    )
+
+    assert result.error is None
+    assert result.timed_out is False
+    assert result.matched is not None
+    assert result.matched.request_id == request_id
+    assert _peek_ctrl_out_bodies(ctx, ctrl_out_name) == []
+
+
+def test_send_keyed_ping_probe_leaves_bystander_rows_untouched(
+    tmp_path: Path,
+) -> None:
+    """Non-matching pongs and terminal envelopes survive a probe untouched.
+
+    The single-reader contract only covers replies keyed to this probe's
+    request_id; messages owned by other ctrl_out readers (other probes'
+    replies, terminal-envelope scanners) must stay visible after the probe
+    completes, including after its timeout sweep.
+
+    Spec: [MF-3]
+    """
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = "1775622400000000105"
+    ctrl_in_name = f"T{tid}.ctrl_in"
+    ctrl_out_name = f"T{tid}.ctrl_out"
+    bystander_pong = json.dumps(
+        {
+            "command": "PING",
+            "status": "ok",
+            "message": "PONG",
+            "tid": tid,
+            "request_id": "other-request",
+            "task_status": "running",
+        }
+    )
+    terminal_envelope = json.dumps(
+        {
+            "type": TERMINAL_ENVELOPE_TYPE,
+            "source": "task",
+            "tid": tid,
+            "status": "completed",
+            "timestamp": 1,
+        }
+    )
+    _write_ctrl_out_rows(ctx, ctrl_out_name, [bystander_pong, terminal_envelope])
+
+    result = send_keyed_ping_probe(
+        ctx,
+        tid=tid,
+        ctrl_in_name=ctrl_in_name,
+        ctrl_out_name=ctrl_out_name,
+        request_id="wanted-request",
+        timeout=0.0,
+    )
+
+    assert result.error is None
+    assert result.matched is None
+    assert result.timed_out is True
+    assert _peek_ctrl_out_bodies(ctx, ctrl_out_name) == [
+        bystander_pong,
+        terminal_envelope,
+    ]
+
+
+def test_send_keyed_ping_probe_timeout_sweeps_rows_bearing_its_request_id(
+    tmp_path: Path,
+) -> None:
+    """After the probe returns, no row bearing its request_id remains.
+
+    The sweep runs once at timeout-return, so the swept row must already be
+    in ctrl_out while the probe waits. A reply keyed to this probe's
+    request_id that cannot coerce to a matched PONG (missing task_status)
+    exercises exactly that window: the probe cannot match it, times out, and
+    must still retire it. A reply keyed to another request_id survives.
+
+    Spec: [MF-3]
+    """
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = "1775622400000000106"
+    ctrl_in_name = f"T{tid}.ctrl_in"
+    ctrl_out_name = f"T{tid}.ctrl_out"
+    request_id = "swept-request"
+    own_unmatchable_reply = json.dumps(
+        {
+            "command": "PING",
+            "status": "ok",
+            "message": "PONG",
+            "tid": tid,
+            "request_id": request_id,
+        }
+    )
+    bystander_pong = json.dumps(
+        {
+            "command": "PING",
+            "status": "ok",
+            "message": "PONG",
+            "tid": tid,
+            "request_id": "other-request",
+            "task_status": "running",
+        }
+    )
+    _write_ctrl_out_rows(ctx, ctrl_out_name, [own_unmatchable_reply, bystander_pong])
+
+    result = send_keyed_ping_probe(
+        ctx,
+        tid=tid,
+        ctrl_in_name=ctrl_in_name,
+        ctrl_out_name=ctrl_out_name,
+        request_id=request_id,
+        timeout=0.0,
+    )
+
+    assert result.error is None
+    assert result.matched is None
+    assert result.timed_out is True
+    remaining = [
+        json.loads(body) for body in _peek_ctrl_out_bodies(ctx, ctrl_out_name)
+    ]
+    assert [entry.get("request_id") for entry in remaining] == ["other-request"]
 
 
 def test_coerce_pong_response_rejects_payload_without_task_status() -> None:

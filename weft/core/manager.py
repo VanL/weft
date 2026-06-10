@@ -127,7 +127,11 @@ from weft.helpers import (
 )
 from weft.runtime_liveness import runtime_liveness_from_registered_probe
 
-from .control_probe import coerce_pong_response, pong_proves_dispatch_eligible
+from .control_probe import (
+    coerce_pong_response,
+    pong_proves_dispatch_eligible,
+    reply_bears_request_id,
+)
 from .launcher import launch_task_process
 from .manager_services import (
     ManagedServiceDecision,
@@ -2174,6 +2178,7 @@ class Manager(ServiceTask):
                 pending.ctrl_in_name,
                 pending.ctrl_in_message_id,
             )
+            self._sweep_probe_reply_rows(pending.ctrl_out_name, pending.request_id)
             self._leader_probe_pending.pop(cache_key, None)
         if self._leader_probe_used_this_turn:
             return ManagerLeadershipProof(
@@ -2325,6 +2330,7 @@ class Manager(ServiceTask):
                 probe.ctrl_in_name,
                 probe.ctrl_in_message_id,
             )
+            self._sweep_probe_reply_rows(probe.ctrl_out_name, probe.request_id)
             self._complete_manager_pong_probe(probe, proof, now_ns=now_ns)
             return proof
 
@@ -2386,6 +2392,41 @@ class Manager(ServiceTask):
             )
         finally:
             queue.close()
+
+    def _sweep_probe_reply_rows(self, ctrl_out_name: str, request_id: str) -> None:
+        """Best-effort sweep of ctrl_out rows keyed to one finished probe.
+
+        Retires late or unmatched keyed replies when a pending probe is
+        abandoned or times out (single-reader contract): every row whose
+        payload bears the probe's exact ``request_id`` is deleted by exact
+        message ID; all other rows stay untouched. A reply landing after this
+        sweep is bounded by task-exit purge and terminal/dead-TID cleanup.
+
+        Spec: [MF-3], [MANAGER.8]
+        """
+
+        # Use a short-lived direct handle for manager-owned probe queues so the
+        # context cache does not retain transient control rows.
+        queue = Queue(
+            ctrl_out_name,
+            db_path=self._db_path,
+            config=self._config,
+        )
+        reply_ids: list[int] = []
+        try:
+            for body, message_id in iter_queue_entries(queue):
+                if reply_bears_request_id(body, request_id=request_id):
+                    reply_ids.append(message_id)
+        except (BrokerError, OSError, RuntimeError):
+            logger.debug(
+                "Failed to scan ctrl_out for keyed probe replies",
+                extra={"queue": ctrl_out_name, "request_id": request_id},
+                exc_info=True,
+            )
+        finally:
+            queue.close()
+        for message_id in reply_ids:
+            self._delete_exact_probe_message(ctrl_out_name, message_id)
 
     def _complete_manager_pong_probe(
         self,
@@ -4732,6 +4773,7 @@ class Manager(ServiceTask):
                 probe.ctrl_in_name,
                 probe.ctrl_in_message_id,
             )
+            self._sweep_probe_reply_rows(probe.ctrl_out_name, probe.request_id)
             self._service_probe_pending.pop(probe.key, None)
             return None
 

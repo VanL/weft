@@ -2827,6 +2827,73 @@ def test_managed_service_pong_probe_timeout_deletes_exact_ping(
     assert probe.key not in manager._service_probe_pending
 
 
+def test_managed_service_pong_probe_timeout_sweeps_own_keyed_reply(
+    manager_setup,
+) -> None:
+    """A timed-out service probe retires ctrl_out replies keyed to it.
+
+    A reply bearing the probe's request_id that cannot coerce to a matched
+    PONG (missing task_status) must still be swept at timeout so keyed
+    replies never accumulate in the target's ctrl_out.
+
+    Spec: [MF-3], [MANAGER.8]
+    """
+    manager, make_queue = manager_setup
+    service_key = INTERNAL_SERVICE_KEY_TASK_MONITOR
+    old_tid = "1777000000000000152"
+    _write_managed_service_owner(
+        make_queue,
+        service_key=service_key,
+        tid=old_tid,
+    )
+
+    candidates = manager._observed_service_candidates_by_key({service_key})[service_key]
+    pending_candidate = next(
+        candidate for candidate in candidates if candidate.tid == old_tid
+    )
+    assert pending_candidate.reason == "ping_pending"
+    probe = _service_probe_for(
+        manager,
+        tid=old_tid,
+        source="service-registry-pong",
+    )
+    make_queue(probe.ctrl_out_name).write(
+        json.dumps(
+            {
+                "command": CONTROL_PING,
+                "status": "ok",
+                "message": "PONG",
+                "request_id": probe.request_id,
+                "tid": old_tid,
+            }
+        )
+    )
+    expired_probe = probe.__class__(
+        key=probe.key,
+        service_key=probe.service_key,
+        tid=probe.tid,
+        row_timestamp=probe.row_timestamp,
+        source=probe.source,
+        ctrl_in_name=probe.ctrl_in_name,
+        ctrl_out_name=probe.ctrl_out_name,
+        request_id=probe.request_id,
+        deadline_ns=time.time_ns() - 1,
+        ctrl_in_message_id=probe.ctrl_in_message_id,
+    )
+
+    candidate = manager._advance_service_pong_probe(
+        expired_probe,
+        timestamp=probe.row_timestamp,
+        metadata={},
+        now_ns=time.time_ns(),
+    )
+
+    assert candidate is None
+    assert make_queue(probe.ctrl_in_name).stats().total == 0
+    assert list(make_queue(probe.ctrl_out_name).peek_generator()) == []
+    assert probe.key not in manager._service_probe_pending
+
+
 def test_managed_service_observation_prunes_superseded_service_history(
     manager_setup,
 ) -> None:
@@ -4158,6 +4225,122 @@ def test_manager_leadership_ping_probe_timeout_deletes_exact_ping(
     assert expired.reason == "ping_timeout"
     assert make_queue(ctrl_in_name).stats().total == 0
     assert lower_tid not in manager._leader_probe_pending
+
+
+def test_manager_leadership_probe_timeout_sweeps_own_keyed_reply(
+    manager_setup,
+) -> None:
+    """A timed-out leadership probe retires ctrl_out replies keyed to it.
+
+    A reply bearing the probe's request_id that cannot coerce to a matched
+    PONG (missing task_status) must still be swept at timeout; replies keyed
+    to other request_ids survive untouched.
+
+    Spec: [MF-3], [MANAGER.8]
+    """
+    manager, make_queue = manager_setup
+    lower_tid = str(int(manager.tid) - 1)
+    ctrl_in_name = f"T{lower_tid}.ctrl_in"
+    ctrl_out_name = f"T{lower_tid}.ctrl_out"
+    record = _manager_service_payload(
+        manager,
+        tid=lower_tid,
+        runtime_handle=_external_supervisor_runtime_handle(),
+        ctrl_in=ctrl_in_name,
+        ctrl_out=ctrl_out_name,
+    )
+
+    initial = manager._manager_pong_dispatch_proof(record, now_ns=time.time_ns())
+    assert initial.reason == "ping_pending"
+    pending = manager._leader_probe_pending[lower_tid]
+    make_queue(ctrl_out_name).write(
+        json.dumps(
+            {
+                "command": CONTROL_PING,
+                "status": "ok",
+                "message": "PONG",
+                "request_id": pending.request_id,
+                "tid": lower_tid,
+            }
+        )
+    )
+    bystander_pong = json.dumps(
+        {
+            "command": CONTROL_PING,
+            "status": "ok",
+            "message": "PONG",
+            "request_id": "bystander-request",
+            "tid": lower_tid,
+            "task_status": "running",
+        }
+    )
+    make_queue(ctrl_out_name).write(bystander_pong)
+    manager._leader_probe_pending[lower_tid] = pending.__class__(
+        tid=pending.tid,
+        row_timestamp=pending.row_timestamp,
+        ctrl_in_name=pending.ctrl_in_name,
+        ctrl_out_name=pending.ctrl_out_name,
+        request_id=pending.request_id,
+        deadline_ns=time.time_ns() - 1,
+        ctrl_in_message_id=pending.ctrl_in_message_id,
+    )
+
+    expired = manager._manager_pong_dispatch_proof(record, now_ns=time.time_ns())
+
+    assert expired.reason == "ping_timeout"
+    assert make_queue(ctrl_in_name).stats().total == 0
+    assert lower_tid not in manager._leader_probe_pending
+    assert list(make_queue(ctrl_out_name).peek_generator()) == [bystander_pong]
+
+
+def test_manager_leadership_probe_abandonment_sweeps_own_keyed_reply(
+    manager_setup,
+) -> None:
+    """An abandoned leadership probe retires ctrl_out replies keyed to it.
+
+    When the target registry row timestamp moves, the pending probe is
+    abandoned; a pong that already arrived for it must be swept so the
+    abandoned probe's keyed reply does not accumulate in ctrl_out.
+
+    Spec: [MF-3], [MANAGER.8]
+    """
+    manager, make_queue = manager_setup
+    lower_tid = str(int(manager.tid) - 1)
+    ctrl_in_name = f"T{lower_tid}.ctrl_in"
+    ctrl_out_name = f"T{lower_tid}.ctrl_out"
+    record = _manager_service_payload(
+        manager,
+        tid=lower_tid,
+        runtime_handle=_external_supervisor_runtime_handle(),
+        ctrl_in=ctrl_in_name,
+        ctrl_out=ctrl_out_name,
+    )
+    record["_timestamp"] = 111
+
+    initial = manager._manager_pong_dispatch_proof(record, now_ns=time.time_ns())
+    assert initial.reason == "ping_pending"
+    pending = manager._leader_probe_pending[lower_tid]
+    assert pending.row_timestamp == 111
+    make_queue(ctrl_out_name).write(
+        json.dumps(
+            {
+                "command": CONTROL_PING,
+                "status": "ok",
+                "message": "PONG",
+                "request_id": pending.request_id,
+                "tid": lower_tid,
+                "task_status": "running",
+            }
+        )
+    )
+
+    moved = dict(record, _timestamp=222)
+    proof = manager._manager_pong_dispatch_proof(moved, now_ns=time.time_ns())
+
+    assert proof.reason == "leadership_ping_budget_exhausted"
+    assert lower_tid not in manager._leader_probe_pending
+    assert make_queue(ctrl_in_name).stats().total == 0
+    assert list(make_queue(ctrl_out_name).peek_generator()) == []
 
 
 def test_manager_leadership_ping_probe_accepts_later_pong(
