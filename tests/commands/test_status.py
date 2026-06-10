@@ -650,6 +650,92 @@ def test_status_services_prefer_live_service_owner_over_stale_child_log(
     assert stale["reconciliation"]["active_service_tid"] == live_tid
 
 
+def test_status_tasks_treat_fresh_runtime_less_internal_service_log_as_superseded(
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    manager_tid = "1779744647005905800"
+    stale_tid = "1779555792870776832"
+    live_tid = "1779744647005905896"
+    now = time.time_ns()
+    registry = ctx.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
+    registry.write(
+        json.dumps(
+            build_service_owner_payload(
+                service_key=INTERNAL_SERVICE_KEY_HEARTBEAT,
+                service_type=SERVICE_TYPE_MANAGED,
+                owner_tid=live_tid,
+                status="active",
+                name="heartbeat-service",
+                queues={
+                    "ctrl_in": f"T{live_tid}.ctrl_in",
+                    "ctrl_out": f"T{live_tid}.ctrl_out",
+                    "inbox": f"T{live_tid}.inbox",
+                    "outbox": f"T{live_tid}.outbox",
+                },
+                runtime_handle=_runtime_handle(
+                    "host",
+                    str(os.getpid()),
+                    host_pids=[os.getpid()],
+                ),
+                metadata={"manager_tid": manager_tid},
+            )
+        )
+    )
+    registry.close()
+    heartbeat_metadata = {
+        "internal": True,
+        "role": "heartbeat_service",
+        INTERNAL_RUNTIME_TASK_CLASS_KEY: INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
+        INTERNAL_SERVICE_KEY_METADATA_KEY: INTERNAL_SERVICE_KEY_HEARTBEAT,
+        INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY: "ensure",
+    }
+    _write_task_log_entry(
+        ctx=ctx,
+        tid=stale_tid,
+        event="task_started",
+        status="running",
+        started_at=now - 1_000_000,
+        completed_at=None,
+        name="heartbeat-service",
+        metadata=heartbeat_metadata,
+    )
+    _write_task_log_entry(
+        ctx=ctx,
+        tid=stale_tid,
+        event="heartbeat_emitted",
+        status="running",
+        started_at=now - 1_000_000,
+        completed_at=None,
+        name="heartbeat-service",
+        metadata=heartbeat_metadata,
+    )
+
+    exit_code, payload = cmd_status(json_output=True, spec_context=root)
+
+    assert exit_code == 0
+    assert payload is not None
+    tasks = json.loads(payload)["tasks"]
+    assert stale_tid not in {task["tid"] for task in tasks}
+
+    exit_code, payload = cmd_status(
+        json_output=True,
+        include_terminal=True,
+        spec_context=root,
+    )
+
+    assert exit_code == 0
+    assert payload is not None
+    tasks = json.loads(payload)["tasks"]
+    stale = next(task for task in tasks if task["tid"] == stale_tid)
+    assert stale["status"] == "failed"
+    assert stale["reconciliation"]["classification"] == (
+        "superseded_internal_service_record"
+    )
+    assert stale["reconciliation"]["active_service_tid"] == live_tid
+
+
 def test_cmd_status_text_output(tmp_path):
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)

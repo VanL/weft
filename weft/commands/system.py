@@ -269,6 +269,20 @@ def _service_evidence_sort_key(candidate: _ServiceEvidence) -> tuple[int, int, s
     return (candidate.rank, candidate.updated_at or 0, candidate.tid or "")
 
 
+def _service_owner_tid_is_newer(
+    *,
+    owner_tid: str | None,
+    candidate_tid: str,
+) -> bool:
+    """Return whether service-owner evidence comes from a newer task TID."""
+
+    if not isinstance(owner_tid, str) or not owner_tid.isdigit():
+        return False
+    if not candidate_tid.isdigit():
+        return False
+    return int(owner_tid) > int(candidate_tid)
+
+
 def _resolve_context(
     spec_context: str | os.PathLike[str] | None = None,
 ) -> WeftContext:
@@ -708,7 +722,7 @@ def _stale_liveness_reason(
     internal_service_key: str | None = None,
     service_owner_index: _InternalServiceOwnerEvidenceIndex | None = None,
 ) -> str | None:
-    """Return why nonterminal liveness evidence is stale without failing it."""
+    """Return why nonterminal liveness evidence needs read-model reconciliation."""
 
     normalized_runner = (
         runner_name.strip().lower() if isinstance(runner_name, str) else ""
@@ -727,13 +741,31 @@ def _stale_liveness_reason(
     if status in TERMINAL_TASK_STATUSES:
         return None
     if internal_service and status in {"spawning", "running"}:
+        host_runtime_absent = host_task_pid is None and runtime_description is None
         host_runtime_not_live = (
             host_task_pid is not None
             and not _task_process_alive(mapping_entry)
             and not _runtime_description_is_live(runtime_description)
         )
         runtime_proof_missing = stale_without_runtime or host_runtime_not_live
-        if internal_service_key is None or not runtime_proof_missing:
+        if internal_service_key is None:
+            return None
+        live_owner = (
+            service_owner_index.live_owner_for_key(internal_service_key)
+            if service_owner_index is not None
+            else None
+        )
+        if (
+            live_owner is not None
+            and live_owner.tid != tid
+            and _service_owner_tid_is_newer(
+                owner_tid=live_owner.tid,
+                candidate_tid=tid,
+            )
+            and (host_runtime_absent or host_runtime_not_live)
+        ):
+            return "superseded_internal_service_record"
+        if not runtime_proof_missing:
             return None
         same_owner = (
             service_owner_index.owner_evidence(internal_service_key, tid)
@@ -742,11 +774,6 @@ def _stale_liveness_reason(
         )
         if same_owner is not None and same_owner.status in {"running", "launched"}:
             return None
-        live_owner = (
-            service_owner_index.live_owner_for_key(internal_service_key)
-            if service_owner_index is not None
-            else None
-        )
         if live_owner is not None and live_owner.tid != tid:
             return "superseded_internal_service_record"
         if host_runtime_not_live and not stale_without_runtime:
