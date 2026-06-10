@@ -19,6 +19,11 @@
 
 ### Changed
 
+- Monitor cleanup policies now read claimed task-log rows through SimpleBroker's
+  public `peek_one`/`peek_many` `include_claimed` surface instead of the private
+  `_retrieve` hook; requires simplebroker>=4.6.0. An architecture test now pins
+  "no private simplebroker reaches" across the `weft/` package. No behavior
+  change.
 - Monitor store now uses SimpleBroker's public sidecar-session API
   (`broker.sidecar()`) instead of the private `_runner` attribute; requires
   simplebroker>=4.5.0. Watcher imports moved to `simplebroker.ext`

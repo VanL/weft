@@ -1,6 +1,6 @@
 # Include-Claimed Peek Surface — Implementation Plan
 
-Status: draft
+Status: completed
 Source specs: none — SimpleBroker is README-governed; in weft, behavior specs are unaffected (cleanup-policy mechanics only) and storage-access mechanics are not spec-governed
 Superseded by: none
 
