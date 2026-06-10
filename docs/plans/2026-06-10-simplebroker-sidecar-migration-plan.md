@@ -9,6 +9,10 @@
 
 # Sidecar Sessions & Public Watcher Surface — Implementation Plan
 
+Status: completed
+Source specs: none — storage-access mechanics are not spec-governed; behavior specs (docs/specifications/07-System_Invariants.md [OBS.13]) are unaffected
+Superseded by: none
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development
 > (recommended) or superpowers:executing-plans to implement this plan task-by-task.
 > Steps use checkbox (`- [ ]`) syntax for tracking.
