@@ -17,6 +17,7 @@ import weft.core.tasks.base as base_task_mod
 import weft.core.tasks.service as service_task_mod
 from weft._constants import (
     CONTROL_PING,
+    CONTROL_STATUS,
     INTERNAL_RUNTIME_TASK_CLASS_KEY,
     INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR,
     INTERNAL_SERVICE_KEY_METADATA_KEY,
@@ -26,6 +27,7 @@ from weft._constants import (
     QUEUE_INTERNAL_RESERVED_SUFFIX,
     SERVICE_OWNER_SCHEMA,
     SERVICE_STATUS_ACTIVE,
+    SERVICE_STATUS_TERMINAL,
     SERVICE_TYPE_MANAGED,
     SERVICE_TYPE_MANAGER,
     STALE_SERVICE_OWNER_DISPOSITION_REASONS,
@@ -39,6 +41,7 @@ from weft._constants import (
     WEFT_MONITOR_SCHEMA_VERSION,
     WEFT_SERVICES_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
+    WEFT_STREAMING_SESSIONS_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
     load_config,
 )
@@ -7093,5 +7096,344 @@ def test_task_monitor_orphan_path_exports_summary_before_deleting_rows(
                 assert record.summary_emitted_at_ns is not None
                 assert record.orphan_raw_recovery_checked_at_ns is not None
             _assert_raw_deleted_oracle(store, log_queue, (tid,), cycle="converged")
+    finally:
+        task.stop()
+
+
+def _read_status_reply(
+    task: TaskMonitor,
+    ctrl_in: Any,
+    ctrl_out: Any,
+    *,
+    request_id: str,
+) -> dict[str, Any]:
+    """Round-trip one STATUS control request through the live monitor."""
+
+    ctrl_in.write(json.dumps({"command": CONTROL_STATUS, "request_id": request_id}))
+    task.wait_for_activity(timeout=task.next_wait_timeout())
+    task.process_once()
+    drive_task_monitor_until_idle(task)
+    responses = [json.loads(item) for item in ctrl_out.peek_generator()]
+    return next(
+        response
+        for response in responses
+        if response.get("command") == CONTROL_STATUS
+        and response.get("request_id") == request_id
+    )
+
+
+def _maintenance_service_owner_payload(
+    *,
+    service_key: str,
+    tid: str,
+    status: str,
+) -> dict[str, Any]:
+    """Mirror the CLI runtime-prune fixtures for service-owner registry rows."""
+
+    return build_service_owner_payload(
+        service_key=service_key,
+        service_type=SERVICE_TYPE_MANAGED,
+        owner_tid=tid,
+        status=status,
+        name="maintenance-prune-service",
+        queues={
+            "ctrl_in": f"T{tid}.ctrl_in",
+            "ctrl_out": f"T{tid}.ctrl_out",
+            "inbox": f"T{tid}.inbox",
+            "outbox": f"T{tid}.outbox",
+        },
+        runtime_handle={
+            "runner": "host",
+            "kind": "process",
+            "id": tid[-4:],
+            "control": {"authority": "host-pid"},
+            "observations": {"host_pids": [int(tid[-4:])]},
+        },
+        metadata={"internal_role": "maintenance-test"},
+    )
+
+
+def _write_json_row(queue: Any, payload: dict[str, Any]) -> int:
+    """Write one JSON row and return its exact broker message ID."""
+
+    queue.write(json.dumps(payload))
+    latest: int | None = None
+    for body, message_id in iter_queue_entries(queue):
+        if not body.startswith("{"):
+            continue
+        if json.loads(body) == payload:
+            latest = int(message_id)
+    assert latest is not None
+    return latest
+
+
+def _queue_json_rows(queue: Any) -> dict[int, dict[str, Any]]:
+    """Return remaining JSON rows keyed by exact broker message ID."""
+
+    return {
+        int(message_id): json.loads(body)
+        for body, message_id in iter_queue_entries(queue)
+        if body.startswith("{")
+    }
+
+
+def test_task_monitor_maintenance_vacuums_claimed_rows_on_monotonic_deadline(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D1: monitor maintenance vacuums claimed rows on its monotonic cadence.
+
+    Verifies:
+    - Claimed (read) rows are physically deleted once maintenance runs.
+    - The cadence is a monotonic next-due deadline, not a cycle counter.
+    - STATUS reports the new top-level non-policy ``maintenance`` block.
+    - No new ``policy_progress[*].policy`` identity is introduced.
+    """
+
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    current_monotonic = {"value": 1000.0}
+    monkeypatch.setattr(
+        task_monitor_mod,
+        "_monitor_monotonic",
+        lambda: current_monotonic["value"],
+    )
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_MODE": "delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    spec = make_task_monitor_taskspec("1778089999999961901")
+    probe = make_queue("maintenance-vacuum-probe")
+    for index in range(3):
+        probe.write(f"claimed-row-{index}")
+    for _ in range(3):
+        assert probe.read_one() is not None
+    assert probe.stats().total == 3
+    ctrl_in = make_queue(spec.io.control["ctrl_in"])
+    ctrl_out = make_queue(spec.io.control["ctrl_out"])
+
+    task = TaskMonitor(db_path, spec, config=config)
+    try:
+        task.process_once()
+        drive_task_monitor_until_idle(task)
+        assert probe.stats().total == 0
+
+        status = _read_status_reply(task, ctrl_in, ctrl_out, request_id="status-1")
+        maintenance = status["maintenance"]
+        assert isinstance(maintenance["last_run_at_ns"], int)
+        assert maintenance["vacuum_ok"] is True
+        assert maintenance["runtime_prune"] == {
+            "candidates": 0,
+            "deleted": 0,
+            "partial_batches": 0,
+        }
+        assert maintenance["last_error"] is None
+        first_run_at_ns = maintenance["last_run_at_ns"]
+        assert {
+            progress["policy"] for progress in status["last_policy_progress"]
+        } <= set(TASK_MONITOR_CLEANUP_POLICY_NAMES)
+
+        for index in range(2):
+            probe.write(f"second-claimed-{index}")
+        for _ in range(2):
+            assert probe.read_one() is not None
+        assert probe.stats().total == 2
+
+        current_monotonic["value"] = 1010.0
+        task._next_cycle_due_monotonic = 0.0
+        task.process_once()
+        drive_task_monitor_until_idle(task)
+        assert probe.stats().total == 2
+        status = _read_status_reply(task, ctrl_in, ctrl_out, request_id="status-2")
+        assert status["maintenance"]["last_run_at_ns"] == first_run_at_ns
+
+        current_monotonic["value"] = 1000.0 + 3600.0 + 50.0
+        task._next_cycle_due_monotonic = 0.0
+        task.process_once()
+        drive_task_monitor_until_idle(task)
+        assert probe.stats().total == 0
+        status = _read_status_reply(task, ctrl_in, ctrl_out, request_id="status-3")
+        assert status["maintenance"]["last_run_at_ns"] > first_run_at_ns
+        assert status["maintenance"]["vacuum_ok"] is True
+        assert {
+            progress["policy"] for progress in status["last_policy_progress"]
+        } <= set(TASK_MONITOR_CLEANUP_POLICY_NAMES)
+    finally:
+        task.stop()
+
+
+def test_task_monitor_maintenance_opt_out_skips_vacuum(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D1: WEFT_TASK_MONITOR_MAINTENANCE=0 disables the maintenance slice."""
+
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_MODE": "delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+            "WEFT_TASK_MONITOR_MAINTENANCE": "0",
+        }
+    )
+    spec = make_task_monitor_taskspec("1778089999999961902")
+    probe = make_queue("maintenance-disabled-probe")
+    for index in range(2):
+        probe.write(f"claimed-row-{index}")
+    for _ in range(2):
+        assert probe.read_one() is not None
+    assert probe.stats().total == 2
+    ctrl_in = make_queue(spec.io.control["ctrl_in"])
+    ctrl_out = make_queue(spec.io.control["ctrl_out"])
+
+    task = TaskMonitor(db_path, spec, config=config)
+    try:
+        task.process_once()
+        drive_task_monitor_until_idle(task)
+        assert probe.stats().total == 2
+
+        status = _read_status_reply(task, ctrl_in, ctrl_out, request_id="status-off")
+        maintenance = status["maintenance"]
+        assert maintenance["last_run_at_ns"] is None
+        assert maintenance["vacuum_ok"] is None
+        assert maintenance["runtime_prune"] == {
+            "candidates": 0,
+            "deleted": 0,
+            "partial_batches": 0,
+        }
+        assert maintenance["last_error"] is None
+    finally:
+        task.stop()
+
+
+def test_task_monitor_maintenance_prunes_superseded_runtime_state_groups(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D2: maintenance auto-prunes superseded runtime-state rows conservatively.
+
+    Verifies:
+    - Superseded service-owner registry rows are deleted; newest-per-key kept.
+    - Task-local ``T{tid}.ctrl_out`` rows are never scanned (decoy survives).
+    - A live owner's streaming row survives on fresh tid-mapping proof (decoy).
+    - ``tid-mappings`` is excluded: a superseded mapping duplicate survives.
+    - STATUS reports the prune counters in the ``maintenance`` block.
+    """
+
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        task_monitor_mod,
+        "RUNTIME_PRUNE_DEFAULT_MIN_AGE_SECONDS",
+        0.0,
+    )
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_MODE": "delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    services = make_queue(WEFT_SERVICES_REGISTRY_QUEUE)
+    service_key = "_weft.service.maintenance-prune"
+    superseded_owner = "1770000000000000100"
+    retained_owner = "1770000000000000101"
+    superseded_active_id = _write_json_row(
+        services,
+        _maintenance_service_owner_payload(
+            service_key=service_key,
+            tid=superseded_owner,
+            status=SERVICE_STATUS_ACTIVE,
+        ),
+    )
+    superseded_terminal_id = _write_json_row(
+        services,
+        _maintenance_service_owner_payload(
+            service_key=service_key,
+            tid=superseded_owner,
+            status=SERVICE_STATUS_TERMINAL,
+        ),
+    )
+    retained_active_id = _write_json_row(
+        services,
+        _maintenance_service_owner_payload(
+            service_key=service_key,
+            tid=retained_owner,
+            status=SERVICE_STATUS_ACTIVE,
+        ),
+    )
+
+    live_tid = str(time.time_ns())
+    ctrl_out_decoy = make_queue(f"T{live_tid}.ctrl_out")
+    ctrl_out_decoy.write("decoy-terminal-envelope")
+    streaming = make_queue(WEFT_STREAMING_SESSIONS_QUEUE)
+    streaming_decoy_id = _write_json_row(
+        streaming,
+        {
+            "tid": live_tid,
+            "session_id": "live-session",
+            "queue": f"T{live_tid}.outbox",
+        },
+    )
+    mappings = make_queue(WEFT_TID_MAPPINGS_QUEUE)
+    excluded_tid = "1770000000000000300"
+    excluded_old_id = _write_json_row(
+        mappings,
+        {"short": "older-row", "full": excluded_tid, "name": "old"},
+    )
+    excluded_new_id = _write_json_row(
+        mappings,
+        {"short": "newer-row", "full": excluded_tid, "name": "new"},
+    )
+    _write_json_row(
+        mappings,
+        {"short": live_tid[-10:], "full": live_tid, "name": "live-owner"},
+    )
+    spec = make_task_monitor_taskspec("1778089999999961903")
+    ctrl_in = make_queue(spec.io.control["ctrl_in"])
+    ctrl_out = make_queue(spec.io.control["ctrl_out"])
+
+    task = TaskMonitor(db_path, spec, config=config)
+    try:
+        task.process_once()
+        drive_task_monitor_until_idle(task)
+
+        remaining_service_ids = set(_queue_json_rows(services))
+        assert superseded_active_id not in remaining_service_ids
+        assert superseded_terminal_id not in remaining_service_ids
+        assert retained_active_id in remaining_service_ids
+
+        assert ctrl_out_decoy.stats().total == 1
+        assert streaming_decoy_id in _queue_json_rows(streaming)
+        remaining_mapping_ids = set(_queue_json_rows(mappings))
+        assert excluded_old_id in remaining_mapping_ids
+        assert excluded_new_id in remaining_mapping_ids
+
+        status = _read_status_reply(task, ctrl_in, ctrl_out, request_id="status-prune")
+        maintenance = status["maintenance"]
+        assert maintenance["vacuum_ok"] is True
+        assert maintenance["runtime_prune"] == {
+            "candidates": 2,
+            "deleted": 2,
+            "partial_batches": 0,
+        }
+        assert maintenance["last_error"] is None
+        assert {
+            progress["policy"] for progress in status["last_policy_progress"]
+        } <= set(TASK_MONITOR_CLEANUP_POLICY_NAMES)
     finally:
         task.stop()

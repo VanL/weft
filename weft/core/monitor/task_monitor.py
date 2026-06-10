@@ -43,11 +43,15 @@ from weft._constants import (
     QUEUE_INBOX_SUFFIX,
     QUEUE_OUTBOX_SUFFIX,
     QUEUE_RESERVED_SUFFIX,
+    RUNTIME_PRUNE_DEFAULT_KEEP_RECENT_PER_KEY,
+    RUNTIME_PRUNE_DEFAULT_MIN_AGE_SECONDS,
     TASK_MONITOR_ACTIVITY_WAIT_CAP_SECONDS,
     TASK_MONITOR_BUILTIN_CYCLE_WORKER_LANE,
     TASK_MONITOR_CONTROL_CLEANUP_WORKER_LANE,
     TASK_MONITOR_HEARTBEAT_STARTUP_TIMEOUT_SECONDS,
     TASK_MONITOR_LOG_SUBDIR,
+    TASK_MONITOR_MAINTENANCE_PARTIAL_BATCH_ERROR_PREFIX,
+    TASK_MONITOR_MAINTENANCE_RUNTIME_PRUNE_QUEUE_GROUPS,
     TASK_MONITOR_POLICY_MONITOR_STORE_LIFECYCLE,
     TASK_MONITOR_POLICY_RUNTIME_STATE_RETENTION,
     TASK_MONITOR_POLICY_TASK_LOCAL_DEAD_TID,
@@ -162,6 +166,11 @@ from weft.core.pruning.models import (
     CleanupCandidate,
     CleanupPolicyStats,
     CleanupQueueStats,
+)
+from weft.core.pruning.runtime import (
+    RuntimePruneConfig,
+    RuntimeQueueName,
+    run_runtime_prune_for_context,
 )
 from weft.core.queue_window import QueueWindowRow, is_old_enough
 from weft.core.serve_log import (
@@ -437,6 +446,13 @@ class _TaskMonitorCachedDiagnostics:
     last_reserved_rows_deleted: int
     runtime_cleanup_queue_discovery_pending: bool
     next_runtime_cleanup_queue_discovery_due_monotonic: float
+    next_maintenance_due_monotonic: float
+    last_maintenance_run_at_ns: int | None
+    last_maintenance_vacuum_ok: bool | None
+    last_maintenance_runtime_prune_candidates: int
+    last_maintenance_runtime_prune_deleted: int
+    last_maintenance_runtime_prune_partial_batches: int
+    last_maintenance_error: str | None
     last_control_delete_errors: tuple[str, ...]
     last_control_delete_warnings: tuple[str, ...]
     last_retained_task_log_ingest: _RetainedTaskLogIngestResult
@@ -685,6 +701,13 @@ class TaskMonitor(ServiceTask):
         self._last_reserved_rows_deleted = 0
         self._runtime_cleanup_queue_discovery_pending = False
         self._next_runtime_cleanup_queue_discovery_due_monotonic = 0.0
+        self._next_maintenance_due_monotonic = 0.0
+        self._last_maintenance_run_at_ns: int | None = None
+        self._last_maintenance_vacuum_ok: bool | None = None
+        self._last_maintenance_runtime_prune_candidates = 0
+        self._last_maintenance_runtime_prune_deleted = 0
+        self._last_maintenance_runtime_prune_partial_batches = 0
+        self._last_maintenance_error: str | None = None
         self._last_control_delete_errors: tuple[str, ...] = ()
         self._last_control_delete_warnings: tuple[str, ...] = ()
         self._last_retained_task_log_ingest = _RetainedTaskLogIngestResult()
@@ -839,6 +862,19 @@ class TaskMonitor(ServiceTask):
             next_runtime_cleanup_queue_discovery_due_monotonic=(
                 self._next_runtime_cleanup_queue_discovery_due_monotonic
             ),
+            next_maintenance_due_monotonic=self._next_maintenance_due_monotonic,
+            last_maintenance_run_at_ns=self._last_maintenance_run_at_ns,
+            last_maintenance_vacuum_ok=self._last_maintenance_vacuum_ok,
+            last_maintenance_runtime_prune_candidates=(
+                self._last_maintenance_runtime_prune_candidates
+            ),
+            last_maintenance_runtime_prune_deleted=(
+                self._last_maintenance_runtime_prune_deleted
+            ),
+            last_maintenance_runtime_prune_partial_batches=(
+                self._last_maintenance_runtime_prune_partial_batches
+            ),
+            last_maintenance_error=self._last_maintenance_error,
             last_control_delete_errors=self._last_control_delete_errors,
             last_control_delete_warnings=self._last_control_delete_warnings,
             last_retained_task_log_ingest=self._last_retained_task_log_ingest,
@@ -928,6 +964,21 @@ class TaskMonitor(ServiceTask):
         self._next_runtime_cleanup_queue_discovery_due_monotonic = (
             diagnostics.next_runtime_cleanup_queue_discovery_due_monotonic
         )
+        self._next_maintenance_due_monotonic = (
+            diagnostics.next_maintenance_due_monotonic
+        )
+        self._last_maintenance_run_at_ns = diagnostics.last_maintenance_run_at_ns
+        self._last_maintenance_vacuum_ok = diagnostics.last_maintenance_vacuum_ok
+        self._last_maintenance_runtime_prune_candidates = (
+            diagnostics.last_maintenance_runtime_prune_candidates
+        )
+        self._last_maintenance_runtime_prune_deleted = (
+            diagnostics.last_maintenance_runtime_prune_deleted
+        )
+        self._last_maintenance_runtime_prune_partial_batches = (
+            diagnostics.last_maintenance_runtime_prune_partial_batches
+        )
+        self._last_maintenance_error = diagnostics.last_maintenance_error
         self._last_control_delete_errors = diagnostics.last_control_delete_errors
         self._last_control_delete_warnings = diagnostics.last_control_delete_warnings
         self._last_retained_task_log_ingest = diagnostics.last_retained_task_log_ingest
@@ -1449,6 +1500,7 @@ class TaskMonitor(ServiceTask):
                     self._last_orphan_task_log_recovery.to_summary()
                 ),
                 "last_collation_store_error": self._last_collation_store_error,
+                "maintenance": self._maintenance_status_summary(),
                 "processor_in_flight": self._processor_work_in_flight is not None,
                 "builtin_cycle_in_flight": (
                     self._builtin_cycle_work_in_flight is not None
@@ -4504,6 +4556,7 @@ class TaskMonitor(ServiceTask):
             now_ns=work.now_ns,
             task_log_owner=work.task_log_owner,
         )
+        self._maybe_run_maintenance_pass(now_ns=work.now_ns)
         return result, runtime_cleanup_ready
 
     def _finish_monitor_cycle(
@@ -4924,6 +4977,119 @@ class TaskMonitor(ServiceTask):
                 "success": cleanup.success,
                 "next_interval_seconds": next_interval_seconds,
             },
+        )
+
+    def _maintenance_status_summary(self) -> dict[str, Any]:
+        """Return the top-level non-policy ``maintenance`` STATUS block.
+
+        Maintenance is not a queue-scan policy: it must never add a
+        ``policy_progress[*].policy`` identity because spec 05 fixes the
+        monitor's reporting at exactly five top-level cleanup policies
+        (docs/specifications/05-Message_Flow_and_State.md [MF-5]).
+        """
+
+        return {
+            "last_run_at_ns": self._last_maintenance_run_at_ns,
+            "vacuum_ok": self._last_maintenance_vacuum_ok,
+            "runtime_prune": {
+                "candidates": self._last_maintenance_runtime_prune_candidates,
+                "deleted": self._last_maintenance_runtime_prune_deleted,
+                "partial_batches": (
+                    self._last_maintenance_runtime_prune_partial_batches
+                ),
+            },
+            "last_error": self._last_maintenance_error,
+        }
+
+    def _maybe_run_maintenance_pass(self, *, now_ns: int) -> None:
+        """Run self-maintenance once its monotonic next-due deadline passes.
+
+        Mirrors the runtime-cleanup queue-discovery deadline pattern: a
+        wall-clock cadence, never a cycle counter, so catch-up cycles do not
+        change maintenance frequency. Runs inside the builtin cycle worker
+        lane; no new service, thread, or process is involved.
+
+        Spec: [OBS.13.10]
+        """
+
+        if not self._monitor_config.maintenance_enabled:
+            return
+        if _monitor_monotonic() < self._next_maintenance_due_monotonic:
+            return
+        self._run_maintenance_pass(now_ns=now_ns)
+        self._next_maintenance_due_monotonic = (
+            _monitor_monotonic() + self._monitor_config.maintenance_interval_seconds
+        )
+
+    def _run_maintenance_pass(self, *, now_ns: int) -> None:
+        """Run one best-effort maintenance pass: backend vacuum, then prune.
+
+        The vacuum physically deletes claimed broker rows (compaction stays
+        with the operator ``weft system tidy`` command). The runtime-state
+        prune reuses the canonical engine with the conservative CLI defaults
+        and an explicit queue-group selection that excludes ``tid-mappings``
+        (already pruned every cycle by the monitor's own policy at a
+        different min-age). Failures are cached for the STATUS
+        ``maintenance`` block and never fail the owning cycle. The
+        informational partial-batch apply outcome is counted, not treated as
+        an error.
+
+        Spec: [OBS.13.10], [OBS.16]
+        """
+
+        errors: list[str] = []
+        vacuum_ok = False
+        try:
+            with self._monitor_context().broker() as broker:
+                broker.vacuum()
+        except (BrokerError, OSError, RuntimeError, ValueError) as exc:
+            errors.append(f"vacuum: {exc}")
+        else:
+            vacuum_ok = True
+
+        candidates = 0
+        deleted = 0
+        partial_batches = 0
+        prune_config = RuntimePruneConfig(
+            apply=True,
+            queues=cast(
+                tuple[RuntimeQueueName, ...],
+                TASK_MONITOR_MAINTENANCE_RUNTIME_PRUNE_QUEUE_GROUPS,
+            ),
+            min_age_seconds=RUNTIME_PRUNE_DEFAULT_MIN_AGE_SECONDS,
+            keep_recent_per_key=RUNTIME_PRUNE_DEFAULT_KEEP_RECENT_PER_KEY,
+        )
+        try:
+            result = run_runtime_prune_for_context(
+                self._monitor_context(),
+                prune_config,
+            )
+        except (BrokerError, OSError, RuntimeError, ValueError) as exc:
+            errors.append(f"runtime_prune: {exc}")
+        else:
+            candidates = len(result.candidates)
+            deleted = result.deleted
+            partial_batch_queues: set[str] = set()
+            for candidate in result.applied_candidates:
+                if candidate.error is None:
+                    continue
+                if candidate.error.startswith(
+                    TASK_MONITOR_MAINTENANCE_PARTIAL_BATCH_ERROR_PREFIX
+                ):
+                    partial_batch_queues.add(candidate.queue)
+                    continue
+                errors.append(f"runtime_prune: {candidate.queue}: {candidate.error}")
+            partial_batches = len(partial_batch_queues)
+            errors.extend(result.errors)
+
+        self._last_maintenance_run_at_ns = now_ns
+        self._last_maintenance_vacuum_ok = vacuum_ok
+        self._last_maintenance_runtime_prune_candidates = candidates
+        self._last_maintenance_runtime_prune_deleted = deleted
+        self._last_maintenance_runtime_prune_partial_batches = partial_batches
+        unique_errors = list(dict.fromkeys(errors))
+        self._last_maintenance_error = (
+            "; ".join(unique_errors) if unique_errors else None
         )
 
     def _run_builtin_monitor_processor_cycle(

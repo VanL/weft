@@ -656,6 +656,50 @@ WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS_DEFAULT: Final[float] = 60.0
 WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED_DEFAULT: Final[bool] = True
 """Default for the supervised monitor's durable collation store."""
 
+WEFT_TASK_MONITOR_MAINTENANCE_ENABLED_DEFAULT: Final[bool] = True
+"""Self-maintenance (backend vacuum + runtime-state prune) in the monitor.
+
+Default-on by owner decision (2026-06-10): deployments should not need
+external cron jobs for routine broker hygiene. Opt out with
+WEFT_TASK_MONITOR_MAINTENANCE=0.
+"""
+
+WEFT_TASK_MONITOR_MAINTENANCE_INTERVAL_SECONDS: Final[float] = 3600.0
+"""Minimum seconds between monitor self-maintenance passes (vacuum + prune).
+
+A wall-clock deadline, not a cycle count: monitor cycles run every 2s
+during catch-up (WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS_DEFAULT), so
+cycle counting would make the cadence load-dependent. Vacuum deletes
+claimed rows; SimpleBroker's own auto-vacuum threshold is schema-global
+and unreachable in schemas dominated by retained unclaimed history, so the
+monitor invokes it explicitly. The PG backend's vacuum is advisory-locked
+and safe while writers are active.
+"""
+
+TASK_MONITOR_MAINTENANCE_RUNTIME_PRUNE_QUEUE_GROUPS: Final[tuple[str, ...]] = (
+    "managers",
+    "services",
+    "streaming",
+    "endpoints",
+    "pipelines",
+)
+"""Runtime-state queue groups pruned by the monitor maintenance slice.
+
+Explicitly excludes ``tid-mappings``: the monitor's own per-cycle
+runtime-state policy already prunes that queue at a different min-age
+(weft/core/monitor/cleanup.py), and running both would double-scan it.
+"""
+
+TASK_MONITOR_MAINTENANCE_PARTIAL_BATCH_ERROR_PREFIX: Final[str] = "batch delete removed"
+"""Prefix of the informational partial-batch outcome from exact apply.
+
+Matches the outcome string built in
+``weft/core/pruning/apply.py::apply_exact_prune_candidates`` ("batch delete
+removed N of M exact rows; per-row status unavailable"). The maintenance
+slice counts it as ``runtime_prune.partial_batches`` instead of treating it
+as a maintenance error.
+"""
+
 MANAGER_SERVE_LOG_SCHEMA: Final[str] = "weft.manager_serve_log"
 """JSONL schema name for foreground manager operational log records."""
 
@@ -1717,6 +1761,15 @@ def _parse_task_monitor_catchup_interval_seconds(value: str) -> float:
     )
 
 
+def _parse_task_monitor_maintenance_interval_seconds(value: str) -> float:
+    """Parse the task-monitor self-maintenance interval."""
+
+    return _parse_positive_float(
+        value,
+        name="WEFT_TASK_MONITOR_MAINTENANCE_INTERVAL_SECONDS",
+    )
+
+
 def _parse_task_monitor_batch_size(value: str) -> int:
     """Parse the task-monitor batch size environment variable."""
 
@@ -2115,6 +2168,16 @@ def _load_weft_env_vars() -> dict[str, Any]:
             default=WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED_DEFAULT,
             parser=_parse_bool,
         ),
+        "WEFT_TASK_MONITOR_MAINTENANCE": _load_weft_env_value(
+            "WEFT_TASK_MONITOR_MAINTENANCE",
+            default=WEFT_TASK_MONITOR_MAINTENANCE_ENABLED_DEFAULT,
+            parser=_parse_bool,
+        ),
+        "WEFT_TASK_MONITOR_MAINTENANCE_INTERVAL_SECONDS": _load_weft_env_value(
+            "WEFT_TASK_MONITOR_MAINTENANCE_INTERVAL_SECONDS",
+            default=WEFT_TASK_MONITOR_MAINTENANCE_INTERVAL_SECONDS,
+            parser=_parse_task_monitor_maintenance_interval_seconds,
+        ),
         WEFT_MANAGER_SERVE_LOG_LEVEL: _load_weft_env_value(
             WEFT_MANAGER_SERVE_LOG_LEVEL,
             default=WEFT_MANAGER_SERVE_LOG_LEVEL_DEFAULT,
@@ -2227,6 +2290,7 @@ def _normalize_weft_override_value(name: str, value: Any) -> Any:
         "WEFT_AUTOSTART_TASKS",
         "WEFT_TASK_MONITOR_ENABLED",
         "WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED",
+        "WEFT_TASK_MONITOR_MAINTENANCE",
     }:
         return _parse_bool(value) if isinstance(value, str) else bool(value)
     if name == "WEFT_TASK_MONITOR_INTERVAL_SECONDS":
@@ -2244,6 +2308,15 @@ def _normalize_weft_override_value(name: str, value: Any) -> Any:
             return _parse_task_monitor_catchup_interval_seconds(str(float(value)))
         raise TypeError(
             "WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS override must be int, "
+            "float, or str"
+        )
+    if name == "WEFT_TASK_MONITOR_MAINTENANCE_INTERVAL_SECONDS":
+        if isinstance(value, str):
+            return _parse_task_monitor_maintenance_interval_seconds(value)
+        if isinstance(value, int | float):
+            return _parse_task_monitor_maintenance_interval_seconds(str(float(value)))
+        raise TypeError(
+            "WEFT_TASK_MONITOR_MAINTENANCE_INTERVAL_SECONDS override must be int, "
             "float, or str"
         )
     if name == "WEFT_TASK_MONITOR_BATCH_SIZE":

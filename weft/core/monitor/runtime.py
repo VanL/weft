@@ -45,6 +45,8 @@ from weft._constants import (
     WEFT_TASK_MONITOR_INTERVAL_SECONDS_DEFAULT,
     WEFT_TASK_MONITOR_LOG_SINK_DEFAULT,
     WEFT_TASK_MONITOR_LOG_SINKS,
+    WEFT_TASK_MONITOR_MAINTENANCE_ENABLED_DEFAULT,
+    WEFT_TASK_MONITOR_MAINTENANCE_INTERVAL_SECONDS,
     WEFT_TASK_MONITOR_MODE_DEFAULT,
     WEFT_TASK_MONITOR_MODES,
     WEFT_TASK_MONITOR_PROCESSOR_DEFAULT,
@@ -90,6 +92,8 @@ class TaskMonitorRuntimeConfig:
     log_sink: str = WEFT_TASK_MONITOR_LOG_SINK_DEFAULT
     restart_backoff_seconds: float = WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS_DEFAULT
     collation_store_enabled: bool = WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED_DEFAULT
+    maintenance_enabled: bool = WEFT_TASK_MONITOR_MAINTENANCE_ENABLED_DEFAULT
+    maintenance_interval_seconds: float = WEFT_TASK_MONITOR_MAINTENANCE_INTERVAL_SECONDS
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any]) -> TaskMonitorRuntimeConfig:
@@ -282,6 +286,23 @@ class TaskMonitorRuntimeConfig:
                 WEFT_TASK_MONITOR_COLLATION_STORE_ENABLED_DEFAULT,
             )
         )
+
+        maintenance_enabled = bool(
+            config.get(
+                "WEFT_TASK_MONITOR_MAINTENANCE",
+                WEFT_TASK_MONITOR_MAINTENANCE_ENABLED_DEFAULT,
+            )
+        )
+        maintenance_interval_seconds = float(
+            config.get(
+                "WEFT_TASK_MONITOR_MAINTENANCE_INTERVAL_SECONDS",
+                WEFT_TASK_MONITOR_MAINTENANCE_INTERVAL_SECONDS,
+            )
+        )
+        if maintenance_interval_seconds <= 0:
+            raise ValueError(
+                "WEFT_TASK_MONITOR_MAINTENANCE_INTERVAL_SECONDS must be positive"
+            )
         if mode == "jsonl_then_delete":
             if not task_log_external_path:
                 raise ValueError(
@@ -322,6 +343,8 @@ class TaskMonitorRuntimeConfig:
             log_sink=log_sink,
             restart_backoff_seconds=restart_backoff_seconds,
             collation_store_enabled=collation_store_enabled,
+            maintenance_enabled=maintenance_enabled,
+            maintenance_interval_seconds=maintenance_interval_seconds,
         )
 
 
