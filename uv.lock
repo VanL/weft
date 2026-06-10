@@ -1375,7 +1375,7 @@ wheels = [
 
 [[package]]
 name = "weft"
-version = "0.9.75"
+version = "0.9.80"
 source = { editable = "." }
 dependencies = [
     { name = "llm" },
