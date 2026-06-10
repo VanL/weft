@@ -247,3 +247,24 @@ def test_django_integration_import_boundaries() -> None:
         )
 
     assert not violations, "\n".join(violations)
+
+
+def test_no_private_simplebroker_reaches() -> None:
+    """weft must use only public simplebroker surface.
+
+    Guards both private-module imports (simplebroker._x) and dynamic
+    attribute reaches (getattr(obj, "_retrieve") / obj._runner style) that
+    the sidecar and include_claimed migrations eliminated.
+    """
+    offenders: list[str] = []
+    for path in sorted(PACKAGE_ROOT.rglob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        for needle in (
+            "simplebroker._",
+            'getattr(broker, "_',
+            "broker._runner",
+            "broker._retrieve",
+        ):
+            if needle in text:
+                offenders.append(f"{path}: {needle}")
+    assert offenders == []

@@ -229,19 +229,15 @@ def _task_log_row_for_message_id_including_claimed(
     broker: Any,
     message_id: int,
 ) -> QueueWindowRow | None:
-    retrieve = getattr(broker, "_retrieve", None)
-    if not callable(retrieve):
-        raise RuntimeError("broker client cannot retrieve claimed task-log rows")
-    raw_rows = retrieve(
+    row = broker.peek_one(
         WEFT_GLOBAL_LOG_QUEUE,
-        operation="peek",
-        limit=1,
         exact_timestamp=message_id,
-        require_unclaimed=False,
+        with_timestamps=True,
+        include_claimed=True,
     )
-    if not raw_rows:
+    if row is None:
         return None
-    body, timestamp = raw_rows[0]
+    body, timestamp = row
     return QueueWindowRow(
         queue=WEFT_GLOBAL_LOG_QUEUE,
         body=body if isinstance(body, str) else str(body),

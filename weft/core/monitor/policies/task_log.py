@@ -369,16 +369,13 @@ def peek_rows_including_claimed(
     *,
     limit: int,
 ) -> tuple[QueueWindowRow, ...]:
-    """Peek rows without filtering claimed rows using the broker backend hook."""
+    """Peek rows without filtering claimed rows using the public peek surface."""
 
-    retrieve = getattr(broker, "_retrieve", None)
-    if not callable(retrieve):
-        raise RuntimeError("broker client cannot retrieve claimed rows")
-    raw_rows = retrieve(
+    raw_rows = broker.peek_many(
         queue_name,
-        operation="peek",
-        limit=max(1, limit),
-        require_unclaimed=False,
+        max(1, limit),
+        with_timestamps=True,
+        include_claimed=True,
     )
     return tuple(
         QueueWindowRow(
