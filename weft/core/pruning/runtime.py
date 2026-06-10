@@ -1,9 +1,10 @@
 """Canonical runtime-only state pruning engine.
 
 This module implements runtime-state candidate selection for `weft.state.*`
-operational queues. Command wrappers use this foreground maintenance path; the
-manager-supervised TaskMonitor uses a separate cleanup runner for its
-background pass.
+operational queues. Command wrappers use this foreground maintenance path, and
+the manager-supervised TaskMonitor reuses the same engine for its default-on
+background maintenance pass; the monitor keeps its own per-cycle cleanup
+runner for tid-mappings and the task log.
 
 Spec references:
 - docs/specifications/05-Message_Flow_and_State.md [MF-3.1], [MF-5]

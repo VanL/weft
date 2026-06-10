@@ -520,6 +520,15 @@ Queues under `weft.state.*` are runtime-only and excluded from dumps by default.
 audit record; use TaskMonitor `jsonl_then_delete` when you want Weft's built-in
 task-lifetime JSONL handoff before cleanup.
 
+The supervised TaskMonitor also performs default-on self-maintenance on an
+hourly monotonic deadline: it vacuums claimed broker rows and conservatively
+prunes superseded runtime-state rows (managers, services, streaming,
+endpoints, pipelines), so deployments do not need external cron jobs running
+`weft system tidy` or `weft system prune` for routine hygiene. Opt out with
+`WEFT_TASK_MONITOR_MAINTENANCE=0`; tune the cadence with
+`WEFT_TASK_MONITOR_MAINTENANCE_INTERVAL_SECONDS`. Maintenance results appear
+in the monitor's STATUS reply under the `maintenance` block.
+
 ### Reservation Pattern
 
 Weft implements inbox -> reserved -> outbox flow for reliable message processing:

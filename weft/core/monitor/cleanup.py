@@ -2,7 +2,10 @@
 
 TaskMonitor decides when cleanup runs and whether the cycle is destructive.
 Reusable pruning policies live under ``weft.core.pruning`` and task-log
-grouping lives in ``weft.core.monitor.task_log_collation``.
+grouping lives in ``weft.core.monitor.task_log_collation``. The monitor's
+separate default-on self-maintenance pass (backend vacuum plus runtime-state
+pruning of the non-tid-mapping groups) runs through
+``weft.core.pruning.runtime``, not through this module.
 
 Spec references:
 - docs/specifications/05-Message_Flow_and_State.md [MF-5]

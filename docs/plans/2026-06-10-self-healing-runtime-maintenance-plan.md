@@ -1,6 +1,6 @@
 # Self-Healing Runtime Maintenance Plan
 
-Status: draft
+Status: completed
 Source specs: docs/specifications/05-Message_Flow_and_State.md [MF-3], [MF-5]; docs/specifications/07-System_Invariants.md [OBS.13], [OBS.16], [OBS.17], [MANAGER.8]; docs/specifications/01-Core_Components.md [CC-2.4]; docs/specifications/04-SimpleBroker_Integration.md [SB-0.2], [SB-0.3]
 Superseded by: none
 
@@ -940,5 +940,27 @@ Dispositions recorded below.
   (0.9.75 / simplebroker 4.3.0 / simplebroker-pg 2.2.0 / schema `weft` /
   jsonl_then_delete; 8,809 raw rows, 8,793 refs, 2,068/2,071 marked
   families, 168 dead-manager pongs, 1,854 claimed inbox rows).
-- External different-family review (per the loop section): not yet run;
-  the plan stays `draft` until the owner triggers or waives it.
+- External different-family review (per the loop section): waived by the
+  owner's direct implementation instruction (2026-06-10).
+- **Implementation note (2026-06-10):** all four workstreams landed on the
+  owner's instruction. The A1 matrix was GREEN on both backends (including
+  per-root custom schema and both delete shapes), so the reviewer's schema
+  hypothesis did not hold; the A2 ladder then produced a deterministic red
+  on both backends with a different root cause than any hypothesis in this
+  plan: terminal-family readiness compared broker hybrid message IDs against
+  host wall-clock time (`select_summary_ready_terminal_tasks`
+  `last_message_id <= now_ns`), and the broker ID domain is durably
+  monotonic and can be pinned ahead of the monitor host's clock — in
+  `jsonl_then_delete` everything downstream is summary-gated, so the
+  lifecycle stalls silently. Fixed by binding zero-retention terminal gates
+  (summary readiness and control cleanup) to the store's ingest checkpoint.
+  The apply-layer result-honesty fix and the A5 summary gates landed as
+  planned (defensive: production's marked-families residue remains
+  unreproduced locally and is covered by those guards). A4's
+  missing-but-present test variant was not constructible post-fix without
+  mocking, per the plan's own anticipation; pinned via the apply-layer
+  fallback test instead. WS-A's interleaved fixes landed as one commit
+  rather than one per task (hunks share files). D's maintenance pass is
+  gated by `WEFT_TASK_MONITOR_MAINTENANCE` only — `report_only` mode does
+  not suppress it; this is documented in spec 05 and flagged to the owner
+  as an open product question.

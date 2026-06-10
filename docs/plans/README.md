@@ -23,7 +23,7 @@ There are currently 139 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
-| [`2026-06-10-self-healing-runtime-maintenance-plan.md`](./2026-06-10-self-healing-runtime-maintenance-plan.md) | Self-Healing Runtime Maintenance Plan | `draft` | none |
+| [`2026-06-10-self-healing-runtime-maintenance-plan.md`](./2026-06-10-self-healing-runtime-maintenance-plan.md) | Self-Healing Runtime Maintenance Plan | `completed` | none |
 | [`2026-06-09-evaluation-findings-remediation-plan.md`](./2026-06-09-evaluation-findings-remediation-plan.md) | Evaluation Findings Remediation Plan | `draft` | none |
 | [`2026-06-01-critical-review-remediation-plan.md`](./2026-06-01-critical-review-remediation-plan.md) | Critical Review Remediation Plan | `completed` | none |
 | [`2026-05-31-task-monitor-orphan-log-and-status-reconciliation-plan.md`](./2026-05-31-task-monitor-orphan-log-and-status-reconciliation-plan.md) | TaskMonitor Orphan Log And Status Reconciliation Plan | `completed` | none |

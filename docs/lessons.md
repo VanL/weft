@@ -956,3 +956,21 @@ runbook needs to become stricter.
   supports an old service child after the stale window, the public read model
   should stop presenting that old TID as active without writing synthetic
   lifecycle events.
+
+## 2026-06-10 Same-Domain Comparisons And Verified Deletion Markers
+
+- Never compare broker hybrid message IDs against host wall-clock time in
+  readiness or cleanup gates. The broker ID domain is durably monotonic and
+  can run ahead of any single host's clock after a clock regression or a
+  fast-clocked writer; a wall-clock bound over a moving ID head can stall a
+  summary-gated pipeline silently, with zero errors, for days. Zero-retention
+  "ready once ingested" gates must be bound by the ingest checkpoint
+  (ID domain against ID domain); wall-clock cutoffs are only correct for
+  observed-staleness windows over a fixed ID. See
+  docs/specifications/05-Message_Flow_and_State.md [MF-5] and
+  docs/plans/2026-06-10-self-healing-runtime-maintenance-plan.md.
+- A completion marker whose writer can be satisfied vacuously will eventually
+  lie. Deletion markers such as `raw_deleted_at_ns` must be coupled to
+  verified per-row deletion in the same pass (the exact-row apply layer
+  re-verifies per ID on batch under-deletion), and audit-mode recovery paths
+  must carry the same summary gate as the main deletion path.

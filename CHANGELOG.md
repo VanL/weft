@@ -1,5 +1,40 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Fixed a silent `jsonl_then_delete` lifecycle stall: terminal-family summary
+  readiness and control cleanup compared broker hybrid message IDs against
+  host wall-clock time, so a monitor whose clock lagged the durably monotonic
+  broker ID domain stopped summarizing, exporting, and deleting with zero
+  errors. Zero-retention terminal gates are now bound by the store's ingest
+  checkpoint (ID domain against ID domain).
+- Exact-row prune reconciliation now re-verifies each candidate per ID when a
+  batch delete under-deletes, so a still-present row can never be reported
+  deleted and Monitor families can no longer be marked raw-deleted vacuously.
+- Stale/superseded service-owner dispositions now fire in all destructive
+  monitor modes (previously `delete` only), unlocking the spec-intended
+  dead-incarnation control-queue cleanup in `jsonl_then_delete` deployments.
+
+### Changed
+
+- Keyed PING probes now retire their replies (single-reader contract): a
+  matched PONG is deleted on match, and rows bearing the probe's request id
+  are swept at timeout or abandonment, on the shared probe helper and on the
+  manager's internal leadership/service probes alike. Live managers no longer
+  accumulate unconsumed pongs in `T{tid}.ctrl_out`.
+- `jsonl_then_delete` recovery paths (marked-with-refs repair and orphan raw
+  recovery) are summary-gated: no raw task-log row is deleted before its
+  family's JSONL lifetime export.
+- New default-on TaskMonitor self-maintenance pass (hourly monotonic
+  deadline): backend vacuum physically deletes claimed rows, and conservative
+  runtime-state pruning covers the managers/services/streaming/endpoints/
+  pipelines groups with foreground defaults. Reported through a non-policy
+  `maintenance` STATUS block; opt out with `WEFT_TASK_MONITOR_MAINTENANCE=0`.
+  Deployments no longer need external `weft system tidy`/`prune` scheduling
+  for routine hygiene.
+
 ## 0.9.75 - 2026-06-01
 
 ### Changed

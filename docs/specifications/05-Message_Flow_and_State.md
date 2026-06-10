@@ -168,6 +168,13 @@ The control plane is explicit:
   terminal proof exists alongside the `work_completed` task-log event
 - readers must ignore ordinary control replies, legacy stderr stream chunks,
   malformed JSON, and other `ctrl_out` payloads when looking for terminal state
+- keyed control replies are owned and retired by the prober that issued the
+  `request_id` (single-reader rule): a matched keyed PONG is deleted by exact
+  message ID on match, and the prober sweeps rows bearing its own
+  `request_id` once at timeout or probe abandonment. Rows keyed to other
+  request ids, terminal envelopes, and legacy payloads are never touched by
+  that sweep. A reply landing after the final sweep is bounded by task-exit
+  purge and terminal/dead-TID cleanup
 - non-interactive command `stream_output` writes stdout and stderr stream frames
   to `T{tid}.outbox`; stderr frames are diagnostics for live/event consumers
   and do not become the public task result
@@ -967,8 +974,8 @@ _Implementation mapping_: `weft/core/tasks/base.py` `_spill_large_output`,
 
 ### Cleanup Boundary
 
-Current cleanup is task-owned unless an operator explicitly invokes foreground
-system pruning:
+Cleanup has three owners: task-owned exit purge, monitor-owned lifecycle and
+self-maintenance, and explicit operator commands for force and compaction:
 
 - task-owned cleanup clears standard task-local `T{tid}.ctrl_in` and
   `T{tid}.ctrl_out` runtime queues whenever the task unwinds through
@@ -978,6 +985,14 @@ system pruning:
   Residual standard control queues after a terminal task imply forced process
   death before cleanup, cleanup failure, or pre-existing stale state.
 - task-owned cleanup may remove spilled output when `cleanup_on_exit` is enabled
+- the supervised task monitor additionally owns a default-on self-maintenance
+  pass on a monotonic deadline (hourly by default): backend vacuum of claimed
+  rows plus conservative runtime-state pruning of the
+  managers/services/streaming/endpoints/pipelines groups with the foreground
+  defaults (`min_age` 3600s, newest row per key retained; tid-mappings stay
+  with the monitor's own per-cycle policy). Maintenance is gated by
+  `WEFT_TASK_MONITOR_MAINTENANCE` and its interval setting only;
+  `WEFT_TASK_MONITOR_MODE` (including `report_only`) does not suppress it
 - there is no built-in age-based output sweeper in the current contract
 - the supervised task monitor exists in the current contract. Its default
   `delete` mode may delete exact message IDs selected by supported
@@ -1046,7 +1061,24 @@ system pruning:
   scans or Monitor-store reads. The monitor must not delete active work,
   ambiguous task-local evidence, claimed outbox residue, user payload rows,
   spawn requests, manager control rows, or candidates without exact message
-  IDs. `report_only` remains available as a non-destructive override.
+  IDs. `report_only` remains available as a non-destructive override for the
+  cleanup policies; the self-maintenance pass has its own gate (below).
+  Self-maintenance reports through a separate top-level non-policy
+  `maintenance` STATUS block (`last_run_at_ns`, `vacuum_ok`, `runtime_prune`
+  counters, `last_error`); it adds no `policy_progress[*].policy` identity.
+- terminal-family readiness gates compare message IDs against the store's
+  durable ingest checkpoint, never against host wall-clock time: with zero
+  terminal retention, a terminal family is summary-ready (and control-cleanup
+  ready) once `last_message_id` is at or behind the `weft.log.tasks`
+  checkpoint. Wall-clock cutoffs remain correct only for observed-staleness
+  windows (stale-open classification). In `jsonl_then_delete`, no raw
+  task-log row of a family may be deleted before that family's
+  `summary_emitted_at_ns` is set — the main deletion path, the
+  marked-with-refs repair path, and the marked-without-refs orphan recovery
+  path all carry the summary gate. `raw_deleted_at_ns` means verified
+  deletion: the exact-row apply layer re-verifies each candidate per ID when
+  a batch under-deletes, so a still-present row is never reported deleted and
+  families cannot be marked vacuously.
 - `weft system prune --family task-log|task-local|retention` is an explicit
   operator action, not a background sweeper. Ordinary apply mode requires an
   archive artifact before deletion. Force apply mode is a human override for
@@ -1180,6 +1212,7 @@ management live in the companion doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-06-10-self-healing-runtime-maintenance-plan.md`](../plans/2026-06-10-self-healing-runtime-maintenance-plan.md)
 - [`docs/plans/2026-06-01-critical-review-remediation-plan.md`](../plans/2026-06-01-critical-review-remediation-plan.md)
 - [`docs/plans/2026-05-31-task-monitor-orphan-log-and-status-reconciliation-plan.md`](../plans/2026-05-31-task-monitor-orphan-log-and-status-reconciliation-plan.md)
 - [`docs/plans/2026-05-29-task-monitor-config-and-reactor-cache-cleanup-plan.md`](../plans/2026-05-29-task-monitor-config-and-reactor-cache-cleanup-plan.md)

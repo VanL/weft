@@ -261,7 +261,12 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
     the reactor after the previous worker result is applied. Terminal
     stale-queue cleanup, eligible reserved cleanup, and eligible dead-TID
     cleanup must not be mixed inside one worker result, and the runtime-cleanup
-    worker must not start nested cleanup executor threads.
+    worker must not start nested cleanup executor threads. The monitor also
+    owns a default-on self-maintenance pass (backend vacuum plus conservative
+    runtime-state pruning of the non-tid-mapping groups) on a monotonic
+    deadline, gated by `WEFT_TASK_MONITOR_MAINTENANCE` /
+    `WEFT_TASK_MONITOR_MAINTENANCE_INTERVAL_SECONDS` and reported through the
+    non-policy `maintenance` STATUS block.
   - **OBS.13.11**: TaskMonitor PONG cleanup diagnostics are cached from the
     last cleanup cycle. They may report queue-level stats, policy-level stats
     including zero-selected policy rows, cached Monitor-store availability,
@@ -383,7 +388,10 @@ _Implementation mapping_: `weft/core/manager.py`,
   vote, or substitute for lowest-TID ownership reduction. Startup must not
   convert a fresh namespace-ambiguous canonical incumbent into permission to
   launch another manager unless public spawn backlog remains pending past the
-  bounded namespace-ambiguity grace window.
+  bounded namespace-ambiguity grace window. Pong-proof probes retire their
+  replies: a matched keyed PONG is deleted on match, and the prober sweeps
+  rows bearing its own request id when a pending probe times out or is
+  abandoned.
 - **MANAGER.8a**: a lower-TID live canonical manager may proactively publish a
   `superseded` manager service-owner row for a higher-TID manager when it
   observes a newly published canonical `active` row for that higher TID after
@@ -645,6 +653,7 @@ doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-06-10-self-healing-runtime-maintenance-plan.md`](../plans/2026-06-10-self-healing-runtime-maintenance-plan.md)
 - [`docs/plans/2026-06-01-critical-review-remediation-plan.md`](../plans/2026-06-01-critical-review-remediation-plan.md)
 - [`docs/plans/2026-05-31-task-monitor-orphan-log-and-status-reconciliation-plan.md`](../plans/2026-05-31-task-monitor-orphan-log-and-status-reconciliation-plan.md)
 - [`docs/plans/2026-05-29-task-monitor-config-and-reactor-cache-cleanup-plan.md`](../plans/2026-05-29-task-monitor-config-and-reactor-cache-cleanup-plan.md)
