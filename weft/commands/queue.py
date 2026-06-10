@@ -22,8 +22,7 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 from simplebroker import commands as sb_commands
-from simplebroker._timestamp import TimestampGenerator
-from simplebroker.ext import TimestampError
+from simplebroker.ext import TimestampError, TimestampGenerator
 from weft.commands.types import (
     EndpointResolution,
     QueueAliasRecord,
