@@ -24,11 +24,11 @@ from pathlib import Path
 from typing import Any, cast
 
 from simplebroker import BrokerTarget, Queue, create_activity_waiter_for_queues
-from simplebroker.ext import BrokerError
-from simplebroker.watcher import (
+from simplebroker.ext import (
     BaseWatcher,
+    BrokerError,
     PollingStrategy,
-    _StopLoop,
+    StopWatching,
     default_error_handler,
 )
 from weft._constants import (
@@ -520,7 +520,7 @@ class MultiQueueWatcher(BaseWatcher):
 
                 self._process_messages()
                 break
-            except _StopLoop:
+            except StopWatching:
                 break
             except KeyboardInterrupt:
                 raise
