@@ -28,6 +28,7 @@ from weft._constants import (
     SERVICE_STATUS_ACTIVE,
     SERVICE_TYPE_MANAGED,
     SERVICE_TYPE_MANAGER,
+    STALE_SERVICE_OWNER_DISPOSITION_REASONS,
     TASK_MONITOR_ACTIVITY_WAIT_CAP_SECONDS,
     TASK_MONITOR_CLEANUP_POLICY_NAMES,
     TASK_MONITOR_POLICY_MONITOR_STORE_LIFECYCLE,
@@ -1312,8 +1313,13 @@ def test_task_monitor_jsonl_then_delete_recovers_precheckpoint_service_rows(
         for line in external_path.read_text(encoding="utf-8").splitlines()
         if json.loads(line).get("subject", {}).get("tid") == old_tid
     ]
-    assert len(reports) == 1
-    report = reports[0]
+    summary_reports = [
+        report
+        for report in reports
+        if report["report_kind"] == "monitor_store_stale_service_owner"
+    ]
+    assert len(summary_reports) == 1
+    report = summary_reports[0]
     assert report["record_type"] == "task_lifetime_report"
     assert report["source_policy"] == TASK_MONITOR_POLICY_MONITOR_STORE_LIFECYCLE
     assert report["completeness"] == "collated"
@@ -4006,6 +4012,146 @@ def test_task_monitor_disposes_old_stale_service_owner_collation(
         assert record.suspect_reason == "stale_service_owner"
     finally:
         task.stop()
+
+
+def test_task_monitor_jsonl_then_delete_disposes_stale_service_owner(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """Stale service-owner disposition must fire in jsonl_then_delete mode.
+
+    Unlike test_task_monitor_disposes_old_stale_service_owner_collation,
+    this drives the real cycle entry point (``process_once``) instead of
+    calling ``_emit_monitor_store_summaries(apply_disposition=True)``
+    directly, so the ``_run_monitor_store_cycle`` disposition gate is
+    actually exercised.
+
+    Verifies:
+    - The superseded manager collation gains a stale service-owner
+      disposition through the full builtin cycle. The live row is retired
+      once converged, so the disposition value is asserted from the durable
+      external JSONL audit reports (the runtime cleanup report copies
+      ``record.disposition_reason`` into its close reason, and the cleanup
+      plan only fires for stale service-owner dispositions).
+    - The stale owner's standard control queues are deleted.
+    - The disposed family is retired from the Monitor store.
+
+    Spec: [MF-5]
+    """
+
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    external_path = tmp_path / "task-lifetime.jsonl"
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
+            "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
+            "WEFT_LOG_TASKS_EXTERNAL_PATH": str(external_path),
+            "WEFT_LOG_TASKS_EXTERNAL_MODE": "collated",
+            "WEFT_TASK_MONITOR_MODE": "jsonl_then_delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    tid = "1778084345905438748"
+    active_tid = "1778084345905438756"
+    taskspec = {
+        "tid": tid,
+        "version": "1.0",
+        "name": "manager",
+        "io": {
+            "control": {
+                "ctrl_in": f"T{tid}.ctrl_in",
+                "ctrl_out": f"T{tid}.ctrl_out",
+            },
+        },
+        "state": {"status": "running"},
+        "metadata": {"role": "manager"},
+    }
+    ctrl_in = make_queue(f"T{tid}.ctrl_in")
+    ctrl_out = make_queue(f"T{tid}.ctrl_out")
+    ctrl_in.write("stale-ping")
+    ctrl_out.write("stale-pong")
+
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999940"),
+        config=config,
+    )
+    try:
+        store = task._ensure_monitor_store()
+        assert store is not None
+        make_queue(WEFT_SERVICES_REGISTRY_QUEUE).write(
+            json.dumps(
+                {
+                    "schema": SERVICE_OWNER_SCHEMA,
+                    "service_key": manager_service_key(task._monitor_context()),
+                    "service_type": SERVICE_TYPE_MANAGER,
+                    "owner_tid": active_tid,
+                    "status": SERVICE_STATUS_ACTIVE,
+                }
+            )
+        )
+        update = update_from_task_log_payload(
+            {
+                "event": "work_started",
+                "status": "running",
+                "tid": tid,
+                "taskspec": taskspec,
+            },
+            message_id=int(tid),
+        )
+        assert update is not None
+        store.record_task_log_updates(
+            WEFT_GLOBAL_LOG_QUEUE,
+            (update,),
+            checkpoint_message_id=None,
+        )
+
+        def stale_owner_converged() -> bool:
+            return (
+                ctrl_in.stats().total == 0
+                and ctrl_out.stats().total == 0
+                and store.get_task(tid) is None
+            )
+
+        drive_task_monitor_until(task, stale_owner_converged)
+    finally:
+        task.stop()
+
+    assert ctrl_in.stats().total == 0
+    assert ctrl_out.stats().total == 0
+    reports = [
+        json.loads(line)
+        for line in external_path.read_text(encoding="utf-8").splitlines()
+        if json.loads(line).get("subject", {}).get("tid") == tid
+    ]
+    summary_reports = [
+        report
+        for report in reports
+        if report["report_kind"] == "monitor_store_stale_service_owner"
+    ]
+    assert len(summary_reports) == 1
+    assert summary_reports[0]["lifetime"]["close_reason"] == "stale_service_owner"
+    cleanup_reports = [
+        report
+        for report in reports
+        if report["report_kind"] == "terminal_runtime_cleanup"
+    ]
+    assert len(cleanup_reports) == 1
+    cleanup_report = cleanup_reports[0]
+    assert (
+        cleanup_report["lifetime"]["close_reason"]
+        in STALE_SERVICE_OWNER_DISPOSITION_REASONS
+    )
+    assert cleanup_report["observations"]["queue_names"] == [
+        f"T{tid}.ctrl_in",
+        f"T{tid}.ctrl_out",
+    ]
 
 
 def test_task_monitor_stale_service_owner_cleanup_deletes_only_control_queues(

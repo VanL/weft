@@ -2011,7 +2011,7 @@ class TaskMonitor(ServiceTask):
                         store,
                         now_ns=now_ns,
                         apply_disposition=(
-                            self._monitor_config.mode == "delete"
+                            self._destructive_mode_enabled()
                             and task_log_owner == "collated_store"
                         ),
                     )
