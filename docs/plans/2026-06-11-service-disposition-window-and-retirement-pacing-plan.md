@@ -1,6 +1,6 @@
 # Service Disposition Window And Retirement Pacing Plan
 
-Status: draft
+Status: completed
 Source specs: docs/specifications/05-Message_Flow_and_State.md [MF-5]; docs/specifications/07-System_Invariants.md [OBS.13], [OBS.17]; the PolicyProgress catch-up contract in weft/core/monitor/progress.py (code-owned, mirrored in spec 05's policy-progress paragraph); Task C cites no spec (test-tooling hygiene)
 Superseded by: none
 
