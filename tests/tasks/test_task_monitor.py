@@ -20,6 +20,7 @@ from weft._constants import (
     CONTROL_STATUS,
     INTERNAL_RUNTIME_TASK_CLASS_KEY,
     INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR,
+    INTERNAL_SERVICE_KEY_HEARTBEAT,
     INTERNAL_SERVICE_KEY_METADATA_KEY,
     INTERNAL_SERVICE_KEY_TASK_MONITOR,
     INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY,
@@ -59,6 +60,10 @@ from weft.core.monitor.store import (
 from weft.core.monitor.task_monitor import (
     TaskMonitor,
     make_task_monitor_taskspec,
+)
+from weft.core.pruning.runtime import (
+    RuntimePruneConfig,
+    run_runtime_prune_for_context,
 )
 from weft.core.service_convergence import (
     build_service_owner_payload,
@@ -4155,6 +4160,370 @@ def test_task_monitor_jsonl_then_delete_disposes_stale_service_owner(
         f"T{tid}.ctrl_in",
         f"T{tid}.ctrl_out",
     ]
+
+
+def test_stale_service_owner_disposes_after_maintenance_prune(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """Disposition still fires after maintenance pruned the old-owner row.
+
+    Production interleaving: the monitor's runtime-state maintenance prunes
+    the service registry to newest-per-key many times before a dead
+    service's disposition window opens, so by the time the stale
+    service-owner classifier looks for proof the superseded old-owner
+    registry row is already gone and only the live different-owner row
+    remains. Pin that sequence with a real ``run_runtime_prune_for_context``
+    apply pass over the services group (the same entry point the monitor's
+    maintenance slice calls) instead of a pre-pruned fixture, then drive
+    the full builtin cycle exactly like
+    ``test_task_monitor_jsonl_then_delete_disposes_stale_service_owner``.
+
+    Verifies:
+    - The services-group prune deletes exactly the superseded old-owner
+      registry row and keeps the live different-owner row.
+    - The stale family still gains a stale service-owner disposition
+      proved by the surviving live row alone, asserted from the durable
+      external JSONL audit reports.
+    - The stale owner's standard control queues are deleted.
+    - The disposed family is retired from the Monitor store.
+
+    Spec: [MF-5]
+    """
+
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    external_path = tmp_path / "task-lifetime.jsonl"
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
+            "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
+            "WEFT_LOG_TASKS_EXTERNAL_PATH": str(external_path),
+            "WEFT_LOG_TASKS_EXTERNAL_MODE": "collated",
+            "WEFT_TASK_MONITOR_MODE": "jsonl_then_delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    tid = "1778084345905438901"
+    active_tid = "1778084345905438909"
+    taskspec = {
+        "tid": tid,
+        "version": "1.0",
+        "name": "manager",
+        "io": {
+            "control": {
+                "ctrl_in": f"T{tid}.ctrl_in",
+                "ctrl_out": f"T{tid}.ctrl_out",
+            },
+        },
+        "state": {"status": "running"},
+        "metadata": {"role": "manager"},
+    }
+    ctrl_in = make_queue(f"T{tid}.ctrl_in")
+    ctrl_out = make_queue(f"T{tid}.ctrl_out")
+    ctrl_in.write("stale-ping")
+    ctrl_out.write("stale-pong")
+
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999941"),
+        config=config,
+    )
+    try:
+        store = task._ensure_monitor_store()
+        assert store is not None
+        services = make_queue(WEFT_SERVICES_REGISTRY_QUEUE)
+        service_key = manager_service_key(task._monitor_context())
+        superseded_owner_id = _write_json_row(
+            services,
+            _maintenance_service_owner_payload(
+                service_key=service_key,
+                tid=tid,
+                status=SERVICE_STATUS_TERMINAL,
+            ),
+        )
+        live_owner_id = _write_json_row(
+            services,
+            _maintenance_service_owner_payload(
+                service_key=service_key,
+                tid=active_tid,
+                status=SERVICE_STATUS_ACTIVE,
+            ),
+        )
+        update = update_from_task_log_payload(
+            {
+                "event": "work_started",
+                "status": "running",
+                "tid": tid,
+                "taskspec": taskspec,
+            },
+            message_id=int(tid),
+        )
+        assert update is not None
+        store.record_task_log_updates(
+            WEFT_GLOBAL_LOG_QUEUE,
+            (update,),
+            checkpoint_message_id=None,
+        )
+
+        prune_result = run_runtime_prune_for_context(
+            task._monitor_context(),
+            RuntimePruneConfig(
+                apply=True,
+                queues=("services",),
+                # RUNTIME_PRUNE_DEFAULT_MIN_AGE_SECONDS binds into the
+                # dataclass default at class-definition time, so the 3600s
+                # floor must be overridden explicitly here for the freshly
+                # seeded registry rows to be prune candidates at all.
+                min_age_seconds=0.0,
+            ),
+        )
+        assert prune_result.exit_code == 0
+        assert prune_result.deleted == 1
+        remaining_service_ids = set(_queue_json_rows(services))
+        assert superseded_owner_id not in remaining_service_ids
+        assert live_owner_id in remaining_service_ids
+
+        def stale_owner_converged() -> bool:
+            return (
+                ctrl_in.stats().total == 0
+                and ctrl_out.stats().total == 0
+                and store.get_task(tid) is None
+            )
+
+        drive_task_monitor_until(task, stale_owner_converged)
+    finally:
+        task.stop()
+
+    assert ctrl_in.stats().total == 0
+    assert ctrl_out.stats().total == 0
+    reports = [
+        json.loads(line)
+        for line in external_path.read_text(encoding="utf-8").splitlines()
+        if json.loads(line).get("subject", {}).get("tid") == tid
+    ]
+    summary_reports = [
+        report
+        for report in reports
+        if report["report_kind"] == "monitor_store_stale_service_owner"
+    ]
+    assert len(summary_reports) == 1
+    assert summary_reports[0]["lifetime"]["close_reason"] == "stale_service_owner"
+    cleanup_reports = [
+        report
+        for report in reports
+        if report["report_kind"] == "terminal_runtime_cleanup"
+    ]
+    assert len(cleanup_reports) == 1
+    cleanup_report = cleanup_reports[0]
+    assert (
+        cleanup_report["lifetime"]["close_reason"]
+        in STALE_SERVICE_OWNER_DISPOSITION_REASONS
+    )
+    assert cleanup_report["observations"]["queue_names"] == [
+        f"T{tid}.ctrl_in",
+        f"T{tid}.ctrl_out",
+    ]
+
+
+def test_stale_service_owner_disposes_only_after_retention_window(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """The retention window gates stale service-owner disposition timing.
+
+    The sibling disposition tests disable the candidate window with
+    ``WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS: "0.000001"``; production
+    runs the 48h default, so a freshly dead service is intentionally NOT
+    disposable until the window passes
+    (``list_stale_service_owner_candidates`` bounds ``last_message_id``
+    by ``now - retention``). Pin that timeline under a real 3600s window
+    with two stale service families whose fabricated message ids are
+    backdated relative to the wall clock: a manager-role family ~600s old
+    (inside the window) and a heartbeat-role family ~7200s old (outside
+    it), each with a live different-owner registry row for its service
+    key, driven through ONE real builtin-cycle drive.
+
+    Verifies:
+    - The outside-window family is disposed (JSONL summary + runtime
+      cleanup reports), its control queues are deleted, and its family is
+      retired from the Monitor store.
+    - The inside-window family stays open: no disposition mark, no
+      summary, no JSONL reports, and its control queues survive intact.
+
+    Spec: [MF-5]
+    """
+
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    external_path = tmp_path / "task-lifetime.jsonl"
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
+            "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "3600",
+            "WEFT_LOG_TASKS_EXTERNAL_PATH": str(external_path),
+            "WEFT_LOG_TASKS_EXTERNAL_MODE": "collated",
+            "WEFT_TASK_MONITOR_MODE": "jsonl_then_delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    now_ns = time.time_ns()
+    inside_tid = str(now_ns - 600 * 10**9)
+    outside_tid = str(now_ns - 7200 * 10**9)
+    live_manager_tid = str(now_ns - 1)
+    live_heartbeat_tid = str(now_ns - 2)
+    inside_taskspec = {
+        "tid": inside_tid,
+        "version": "1.0",
+        "name": "manager",
+        "io": {
+            "control": {
+                "ctrl_in": f"T{inside_tid}.ctrl_in",
+                "ctrl_out": f"T{inside_tid}.ctrl_out",
+            },
+        },
+        "state": {"status": "running"},
+        "metadata": {"role": "manager"},
+    }
+    outside_taskspec = {
+        "tid": outside_tid,
+        "version": "1.0",
+        "name": "heartbeat",
+        "io": {
+            "control": {
+                "ctrl_in": f"T{outside_tid}.ctrl_in",
+                "ctrl_out": f"T{outside_tid}.ctrl_out",
+            },
+        },
+        "state": {"status": "running"},
+        "metadata": {"role": "heartbeat_service"},
+    }
+    inside_ctrl_in = make_queue(f"T{inside_tid}.ctrl_in")
+    inside_ctrl_out = make_queue(f"T{inside_tid}.ctrl_out")
+    inside_ctrl_in.write("stale-ping")
+    inside_ctrl_out.write("stale-pong")
+    outside_ctrl_in = make_queue(f"T{outside_tid}.ctrl_in")
+    outside_ctrl_out = make_queue(f"T{outside_tid}.ctrl_out")
+    outside_ctrl_in.write("stale-ping")
+    outside_ctrl_out.write("stale-pong")
+
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999942"),
+        config=config,
+    )
+    try:
+        store = task._ensure_monitor_store()
+        assert store is not None
+        services = make_queue(WEFT_SERVICES_REGISTRY_QUEUE)
+        services.write(
+            json.dumps(
+                {
+                    "schema": SERVICE_OWNER_SCHEMA,
+                    "service_key": manager_service_key(task._monitor_context()),
+                    "service_type": SERVICE_TYPE_MANAGER,
+                    "owner_tid": live_manager_tid,
+                    "status": SERVICE_STATUS_ACTIVE,
+                }
+            )
+        )
+        services.write(
+            json.dumps(
+                {
+                    "schema": SERVICE_OWNER_SCHEMA,
+                    "service_key": INTERNAL_SERVICE_KEY_HEARTBEAT,
+                    "service_type": SERVICE_TYPE_MANAGED,
+                    "owner_tid": live_heartbeat_tid,
+                    "status": SERVICE_STATUS_ACTIVE,
+                }
+            )
+        )
+        updates = []
+        for family_tid, family_taskspec in (
+            (inside_tid, inside_taskspec),
+            (outside_tid, outside_taskspec),
+        ):
+            update = update_from_task_log_payload(
+                {
+                    "event": "work_started",
+                    "status": "running",
+                    "tid": family_tid,
+                    "taskspec": family_taskspec,
+                },
+                message_id=int(family_tid),
+            )
+            assert update is not None
+            updates.append(update)
+        store.record_task_log_updates(
+            WEFT_GLOBAL_LOG_QUEUE,
+            tuple(updates),
+            checkpoint_message_id=None,
+        )
+
+        def outside_family_converged() -> bool:
+            return (
+                outside_ctrl_in.stats().total == 0
+                and outside_ctrl_out.stats().total == 0
+                and store.get_task(outside_tid) is None
+            )
+
+        drive_task_monitor_until(task, outside_family_converged)
+
+        inside_record = store.get_task(inside_tid)
+        assert inside_record is not None
+        assert inside_record.disposition_at_ns is None
+        assert inside_record.summary_emitted_at_ns is None
+    finally:
+        task.stop()
+
+    assert outside_ctrl_in.stats().total == 0
+    assert outside_ctrl_out.stats().total == 0
+    assert inside_ctrl_in.stats().total == 1
+    assert inside_ctrl_out.stats().total == 1
+    lines = external_path.read_text(encoding="utf-8").splitlines()
+    outside_reports = [
+        json.loads(line)
+        for line in lines
+        if json.loads(line).get("subject", {}).get("tid") == outside_tid
+    ]
+    summary_reports = [
+        report
+        for report in outside_reports
+        if report["report_kind"] == "monitor_store_stale_service_owner"
+    ]
+    assert len(summary_reports) == 1
+    assert summary_reports[0]["lifetime"]["close_reason"] == "stale_service_owner"
+    cleanup_reports = [
+        report
+        for report in outside_reports
+        if report["report_kind"] == "terminal_runtime_cleanup"
+    ]
+    assert len(cleanup_reports) == 1
+    cleanup_report = cleanup_reports[0]
+    assert (
+        cleanup_report["lifetime"]["close_reason"]
+        in STALE_SERVICE_OWNER_DISPOSITION_REASONS
+    )
+    assert cleanup_report["observations"]["queue_names"] == [
+        f"T{outside_tid}.ctrl_in",
+        f"T{outside_tid}.ctrl_out",
+    ]
+    inside_reports = [
+        json.loads(line)
+        for line in lines
+        if json.loads(line).get("subject", {}).get("tid") == inside_tid
+    ]
+    assert inside_reports == []
 
 
 def test_task_monitor_stale_service_owner_cleanup_deletes_only_control_queues(
