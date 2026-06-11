@@ -6371,6 +6371,52 @@ def _seed_terminal_family_backlog(
             )
 
 
+def _seed_backdated_terminal_family_backlog(
+    log_queue: Any,
+    tids: tuple[str, ...],
+    *,
+    terminal_event: str,
+    terminal_status: str,
+    completed_at_ns: int,
+    started_at_ns: int,
+) -> None:
+    """Seed two-row terminal families with backdated completion timestamps.
+
+    Same two-row shape and start-rows-then-terminal-rows write order as
+    ``_seed_terminal_family_backlog`` (families span FIFO scan windows like
+    production), but each row nests ``started_at``/``completed_at`` under
+    ``taskspec.state`` the way production ``_report_state_change`` payloads
+    carry them. Collation's state summary reads ``payload["taskspec"]["state"]``
+    plus top-level scalar keys (``update_from_task_log_payload``) — a bare
+    top-level ``"state"`` key would be ignored — so this nesting is what makes
+    ``completed_at_ns`` land on the collation record and backdates the
+    retention-cutoff COALESCE without touching broker message ids (real queue
+    writes always get current ids).
+    """
+
+    for sequence, event, status, state in (
+        (1, "task_activity", "running", {"started_at": started_at_ns}),
+        (
+            2,
+            terminal_event,
+            terminal_status,
+            {"started_at": started_at_ns, "completed_at": completed_at_ns},
+        ),
+    ):
+        for tid in tids:
+            log_queue.write(
+                json.dumps(
+                    {
+                        "event": event,
+                        "status": status,
+                        "tid": tid,
+                        "sequence": sequence,
+                        "taskspec": {"state": state},
+                    }
+                )
+            )
+
+
 def _seeded_rows_remaining(log_queue: Any, tids: tuple[str, ...]) -> bool:
     """Return whether any seeded family still has live raw broker rows.
 
@@ -6854,6 +6900,194 @@ def test_task_monitor_jsonl_lifecycle_with_interleaved_writer_load(
         assert store.deferred_write_status().pending == 0
         report_tids = _external_report_tids(external_path)
         assert sorted(report_tids) == sorted(all_tids)
+    finally:
+        task.stop()
+
+
+def test_retirement_backlog_identifies_binding_stage(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """Characterize which retirable-predicate arm binds a terminal backlog.
+
+    A degraded production install retired only ~2 families per cycle while
+    a backlog of fully-processable terminal families waited. This test
+    seeds 120 two-row terminal families in the production shape (60
+    completed via ``work_completed`` and 60 failed via ``work_failed`` —
+    only non-completed terminal families set ``reserved_probe_needed``, so
+    the failed half is the only way to exhibit the reserved gate), with
+    completion timestamps backdated three days past the 48h retention
+    default, under production batch/scan limits and the production 1.0s
+    runtime-cleanup slice deadline. It then drives 3 real monitor cycles
+    and, if any seeded family is still unretired, fails with a
+    per-predicate-arm breakdown naming the binding stage of
+    ``select_retirable_task_collations``.
+
+    Verifies:
+    - ingest is not the limiter (the durable checkpoint passes every
+      seeded row in cycle 1 under production batch/scan limits)
+    - either all 120 families retire within 3 cycles and the JSONL sink
+      saw every subject tid exactly once (a real scale pin), or the
+      failure message reports per-cycle retired counts plus per-arm
+      counts and sample family evidence for every unsatisfied arm,
+      including the live-refs arm via ``store.has_task_messages``
+
+    Spec: [MF-5]
+    """
+
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    # The module autouse fixture widens the slice deadline to 30.0s; restore
+    # the production 1.0s so the slice deadline can actually bind.
+    monkeypatch.setattr(
+        task_monitor_mod, "TASK_MONITOR_RUNTIME_CLEANUP_SLICE_SECONDS", 1.0
+    )
+    external_path = tmp_path / "task-lifetime.jsonl"
+    config = _jsonl_lifecycle_config(external_path, batch_size=5000, scan_limit=50000)
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    base_tid = time.time_ns()
+    tids = tuple(str(base_tid + offset) for offset in range(120))
+    retention_ns = 172_800 * 10**9
+    completed_at_ns = time.time_ns() - 3 * 86_400 * 10**9
+    started_at_ns = completed_at_ns - 60 * 10**9
+    _seed_backdated_terminal_family_backlog(
+        log_queue,
+        tids[:60],
+        terminal_event="work_completed",
+        terminal_status="completed",
+        completed_at_ns=completed_at_ns,
+        started_at_ns=started_at_ns,
+    )
+    _seed_backdated_terminal_family_backlog(
+        log_queue,
+        tids[60:],
+        terminal_event="work_failed",
+        terminal_status="failed",
+        completed_at_ns=completed_at_ns,
+        started_at_ns=started_at_ns,
+    )
+    seeded_rows = _broker_rows_by_tid(log_queue)
+    max_seeded_message_id = max(
+        message_id for tid in tids for message_id in seeded_rows[tid]
+    )
+
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec(str(base_tid + 1000)),
+        config=config,
+    )
+    try:
+        store = task._ensure_monitor_store()
+        assert store is not None
+        per_cycle_remaining: list[int] = []
+        family_limit_hits: list[bool] = []
+        deadline_hits: list[bool] = []
+        for cycle in range(3):
+            task.process_once()
+            drive_task_monitor_until_idle(task)
+            task._next_cycle_due_monotonic = 0.0
+            per_cycle_remaining.append(
+                sum(1 for tid in tids if store.get_task(tid) is not None)
+            )
+            family_limit_hits.append(task._last_control_cleanup_family_limit_hit)
+            deadline_hits.append(task._last_control_cleanup_deadline_hit)
+            if cycle == 0:
+                checkpoint = store.get_checkpoint(WEFT_GLOBAL_LOG_QUEUE)
+                assert (
+                    checkpoint is not None and checkpoint >= max_seeded_message_id
+                ), (
+                    "ingest did not pass the seeded backlog in cycle 1 "
+                    f"(checkpoint {checkpoint} < {max_seeded_message_id}); "
+                    "with production batch/scan limits ingest must not be "
+                    "the binding stage"
+                )
+
+        previous = len(tids)
+        per_cycle_retired: list[int] = []
+        for remaining in per_cycle_remaining:
+            per_cycle_retired.append(previous - remaining)
+            previous = remaining
+
+        cutoff_ns = time.time_ns() - retention_ns
+        unretired: list[str] = []
+        arm_counts: dict[str, int] = {}
+        arm_samples: dict[str, list[tuple[str, dict[str, Any]]]] = {}
+        for tid in tids:
+            record = store.get_task(tid)
+            if record is None:
+                continue
+            unretired.append(tid)
+            has_live_refs = store.has_task_messages(tid)
+            coalesced = record.completed_at_ns
+            if coalesced is None:
+                coalesced = record.last_seen_at_ns
+            if coalesced is None:
+                coalesced = record.last_message_id
+            arms: list[str] = []
+            if coalesced > cutoff_ns:
+                arms.append("retention_window")
+            if record.raw_deleted_at_ns is None:
+                arms.append("raw_not_deleted")
+            if record.summary_emitted_at_ns is None:
+                arms.append("summary_missing")
+            if record.disposition_at_ns is None:
+                arms.append("disposition_missing")
+            if record.task_control_deleted_at_ns is None:
+                arms.append("control_not_deleted")
+            if (
+                record.reserved_probe_needed
+                and record.reserved_cleanup_checked_at_ns is None
+            ):
+                arms.append("reserved_probe_pending")
+            if has_live_refs:
+                arms.append("live_refs_present")
+            if not arms:
+                # Every predicate arm is satisfied: the family is fully
+                # retirable and is only waiting for the next retirement
+                # pass — a scheduling limiter, not a predicate arm.
+                arms.append("all_arms_satisfied")
+            evidence = {
+                "completed_at_ns": record.completed_at_ns,
+                "last_seen_at_ns": record.last_seen_at_ns,
+                "last_message_id": record.last_message_id,
+                "raw_deleted_at_ns": record.raw_deleted_at_ns,
+                "summary_emitted_at_ns": record.summary_emitted_at_ns,
+                "disposition_at_ns": record.disposition_at_ns,
+                "task_control_deleted_at_ns": record.task_control_deleted_at_ns,
+                "reserved_probe_needed": record.reserved_probe_needed,
+                "reserved_cleanup_checked_at_ns": (
+                    record.reserved_cleanup_checked_at_ns
+                ),
+                "has_live_refs": has_live_refs,
+            }
+            for arm in arms:
+                arm_counts[arm] = arm_counts.get(arm, 0) + 1
+                samples = arm_samples.setdefault(arm, [])
+                if len(samples) < 3:
+                    samples.append((tid, evidence))
+
+        assert not unretired, (
+            "retirement did not converge in 3 cycles; per-cycle retired counts "
+            f"{per_cycle_retired!r}; binding-arm breakdown {dict(arm_counts)!r}; "
+            f"sample families per arm {arm_samples!r}; "
+            f"per-cycle remaining {per_cycle_remaining!r}; "
+            f"per-cycle family_limit_hit {family_limit_hits!r}; "
+            f"per-cycle deadline_hit {deadline_hits!r}"
+        )
+        # Green path: pin the scale, not just the absence of leftovers —
+        # every subject family must have been exported to the JSONL sink
+        # exactly once before retirement.
+        seeded = set(tids)
+        report_tids = [
+            tid for tid in _external_report_tids(external_path) if tid in seeded
+        ]
+        assert sorted(report_tids) == sorted(tids), (
+            "all 120 families retired but the JSONL sink did not see every "
+            f"subject tid exactly once; got {report_tids!r}"
+        )
     finally:
         task.stop()
 
