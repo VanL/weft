@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.9.81 - 2026-06-11
+
+### Changed
+
+- `weft system dump` now writes SimpleBroker `simplebroker-dump` v1 NDJSON
+  directly through SimpleBroker's public dump primitive while preserving Weft's
+  runtime-state exclusion and claimed-row omission summary.
+- `weft system load` now accepts the SimpleBroker dump format, preserves broker
+  message IDs through SimpleBroker's load path, skips runtime-only
+  `weft.state.*` records, and treats same-target existing aliases as no-ops.
+  Legacy Weft `meta`/`timestamp` dumps are intentionally rejected.
+- Raised the SimpleBroker floor to 4.7.0 so dump/load can rely on the public
+  versioned dump/load helpers.
+
+### Fixed
+
+- Added regression coverage for SQLite rollback when exact message-ID import
+  fails, so duplicate IDs cannot be silently rewritten during restore.
+- Added release-load coverage for TaskMonitor stale-owner disposition pruning,
+  retirement pacing, and backlog-scale convergence without weakening the
+  cleanup policy contracts.
+
 ## 0.9.80 - 2026-06-10
 
 ### Fixed

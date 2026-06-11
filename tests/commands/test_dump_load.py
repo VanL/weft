@@ -122,10 +122,11 @@ def test_dump_export_format(sample_data_context: WeftContext) -> None:
     lines = export_path.read_text(encoding="utf-8").strip().split("\n")
     assert len(lines) >= 6
 
-    meta_record = json.loads(lines[0])
-    assert meta_record["type"] == "meta"
-    assert "schema_version" in meta_record
-    assert "magic" in meta_record
+    header_record = json.loads(lines[0])
+    assert header_record["type"] == "header"
+    assert header_record["format"] == "simplebroker-dump"
+    assert header_record["version"] == 1
+    assert "last_ts" in header_record
 
     alias_lines = [line for line in lines if json.loads(line).get("type") == "alias"]
     assert len(alias_lines) == 2
@@ -136,7 +137,7 @@ def test_dump_export_format(sample_data_context: WeftContext) -> None:
     assert len(message_lines) == 3
 
     record_types = [json.loads(line)["type"] for line in lines]
-    assert record_types[0] == "meta"
+    assert record_types[0] == "header"
 
     first_alias_idx = record_types.index("alias") if "alias" in record_types else -1
     first_message_idx = (
@@ -154,8 +155,7 @@ def test_cmd_load_dry_run(sample_data_context: WeftContext) -> None:
     export_path = ctx.weft_dir / "test_export.jsonl"
 
     cmd_dump(output=str(export_path), context_path=str(ctx.root))
-    meta_record = json.loads(export_path.read_text(encoding="utf-8").splitlines()[0])
-    schema_version = meta_record["schema_version"]
+    header_record = json.loads(export_path.read_text(encoding="utf-8").splitlines()[0])
 
     exit_code, message = cmd_load(
         input_file=str(export_path), dry_run=True, context_path=str(ctx.root)
@@ -164,7 +164,7 @@ def test_cmd_load_dry_run(sample_data_context: WeftContext) -> None:
     assert exit_code == 0
     assert "Import Preview:" in message
     assert "Total messages: 3" in message
-    assert f"schema v{schema_version}" in message
+    assert f"{header_record['format']} v{header_record['version']}" in message
 
 
 def test_cmd_load_actual_import(tmp_path: Path) -> None:
@@ -175,12 +175,18 @@ def test_cmd_load_actual_import(tmp_path: Path) -> None:
 
     export_path = tmp_path / "test_import.jsonl"
     test_data = [
-        {"type": "meta", "schema_version": 4, "magic": "simplebroker-v1"},
+        {
+            "type": "header",
+            "format": "simplebroker-dump",
+            "version": 1,
+            "backend": "test",
+            "last_ts": 0,
+        },
         {"type": "alias", "alias": "test-alias", "target": "test.queue"},
         {
             "type": "message",
             "queue": "test.queue",
-            "timestamp": 1000,
+            "id": 1000,
             "body": "test message",
         },
     ]
@@ -226,6 +232,31 @@ def test_load_invalid_context(tmp_path: Path) -> None:
     assert "failed to resolve context" in message
 
 
+def test_cmd_load_rejects_legacy_weft_dump_format(tmp_path: Path) -> None:
+    """Old Weft meta/timestamp dumps are intentionally not accepted."""
+
+    root = prepare_project_root(tmp_path)
+    export_path = tmp_path / "legacy.jsonl"
+    legacy_data = [
+        {"type": "meta", "schema_version": 4, "magic": "simplebroker-v1"},
+        {
+            "type": "message",
+            "queue": "legacy.queue",
+            "timestamp": 1000,
+            "body": "legacy message",
+        },
+    ]
+    export_path.write_text(
+        "".join(json.dumps(record) + "\n" for record in legacy_data),
+        encoding="utf-8",
+    )
+
+    exit_code, message = cmd_load(input_file=str(export_path), context_path=str(root))
+
+    assert exit_code == 1
+    assert "first record must be the dump header" in (message or "")
+
+
 def test_dump_invalid_context(tmp_path: Path) -> None:
     """Test dump with invalid context."""
 
@@ -242,25 +273,26 @@ def test_import_report_formatting() -> None:
 
     report = ImportReport()
     report.aliases_to_create = {"alias1": "target1", "alias2": "target2"}
-    report.aliases_to_update = {"alias3": ("old_target", "new_target")}
     report.queues_to_create = ["queue1", "queue2"]
     report.message_counts_by_queue = {"queue1": 5, "queue2": 3}
     report.total_messages = 8
-    report.timestamp_range = (1000, 2000)
-    report.metadata = {"schema_version": 4, "magic": "simplebroker-v1"}
+    report.message_id_range = (1000, 2000)
+    report.metadata = {
+        "format": "simplebroker-dump",
+        "version": 1,
+        "backend": "test",
+    }
 
     preview = report.format_preview()
     assert "Import Preview:" in preview
     assert "Aliases to create: 2" in preview
-    assert "Aliases to update: 1" in preview
     assert "Queues to create: 2" in preview
     assert "Total messages: 8" in preview
-    assert "schema v4" in preview
+    assert "simplebroker-dump v1" in preview
 
     completion = report.format_completion()
     assert "✓" in completion
     assert "Created 2 aliases" in completion
-    assert "Updated 1 aliases" in completion
     assert "Created 2 queues" in completion
     assert "Imported 8 messages" in completion
     assert "Import completed successfully" in completion
@@ -362,8 +394,9 @@ def test_empty_database_dump(tmp_path: Path) -> None:
 
     lines = export_path.read_text(encoding="utf-8").strip().split("\n")
     assert len(lines) >= 1
-    meta_record = json.loads(lines[0])
-    assert meta_record["type"] == "meta"
+    header_record = json.loads(lines[0])
+    assert header_record["type"] == "header"
+    assert header_record["format"] == "simplebroker-dump"
 
 
 def test_cmd_load_dry_run_reports_alias_conflicts_without_writes(
@@ -382,12 +415,18 @@ def test_cmd_load_dry_run_reports_alias_conflicts_without_writes(
 
     export_path = tmp_path / "conflict_dry_run.jsonl"
     test_data = [
-        {"type": "meta", "schema_version": 4, "magic": "simplebroker-v1"},
+        {
+            "type": "header",
+            "format": "simplebroker-dump",
+            "version": 1,
+            "backend": "test",
+            "last_ts": 0,
+        },
         {"type": "alias", "alias": "existing_alias", "target": "new_target"},
         {
             "type": "message",
             "queue": "new.queue",
-            "timestamp": 1000,
+            "id": 1000,
             "body": "new message",
         },
     ]
@@ -423,12 +462,18 @@ def test_cmd_load_rejects_alias_conflicts_before_any_writes(tmp_path: Path) -> N
 
     export_path = tmp_path / "conflict_apply.jsonl"
     test_data = [
-        {"type": "meta", "schema_version": 4, "magic": "simplebroker-v1"},
+        {
+            "type": "header",
+            "format": "simplebroker-dump",
+            "version": 1,
+            "backend": "test",
+            "last_ts": 0,
+        },
         {"type": "alias", "alias": "existing_alias", "target": "new_target"},
         {
             "type": "message",
             "queue": "new.queue",
-            "timestamp": 1000,
+            "id": 1000,
             "body": "new message",
         },
     ]
@@ -448,6 +493,47 @@ def test_cmd_load_rejects_alias_conflicts_before_any_writes(tmp_path: Path) -> N
     assert "existing_alias" in (message or "")
     assert after_aliases == before_aliases
     assert after_queues == before_queues
+
+
+def test_cmd_load_treats_same_target_existing_alias_as_noop(tmp_path: Path) -> None:
+    """Existing aliases with the same target should not be reapplied."""
+
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    with ctx.broker() as broker:
+        broker.add_alias("existing_alias", "same_target")
+
+    export_path = tmp_path / "same_target_alias.jsonl"
+    test_data = [
+        {
+            "type": "header",
+            "format": "simplebroker-dump",
+            "version": 1,
+            "backend": "test",
+            "last_ts": 0,
+        },
+        {"type": "alias", "alias": "existing_alias", "target": "same_target"},
+        {
+            "type": "message",
+            "queue": "new.queue",
+            "id": 1000,
+            "body": "new message",
+        },
+    ]
+    export_path.write_text(
+        "".join(json.dumps(record) + "\n" for record in test_data),
+        encoding="utf-8",
+    )
+
+    exit_code, message = cmd_load(
+        input_file=str(export_path), context_path=str(ctx.root)
+    )
+
+    assert exit_code == 0, message
+    assert "Created 1 aliases" not in (message or "")
+    aliases, queues = _snapshot_broker_state(ctx)
+    assert aliases["existing_alias"] == "same_target"
+    assert queues["new.queue"] == ["new message"]
 
 
 def test_export_large_message_data(tmp_path: Path) -> None:

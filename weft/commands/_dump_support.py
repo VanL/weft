@@ -1,7 +1,7 @@
-"""Export Weft database state to JSONL format for git-friendly version control.
+"""Export Weft broker state in SimpleBroker dump format.
 
 Spec references:
-- docs/specifications/10-CLI_Interface.md (system dump)
+- docs/specifications/10-CLI_Interface.md [CLI-6]
 """
 
 from __future__ import annotations
@@ -10,54 +10,15 @@ import json
 from pathlib import Path
 from typing import Any, TextIO
 
+from simplebroker import dump_lines
 from simplebroker.ext import BrokerError
 from weft._constants import WEFT_STATE_QUEUE_PREFIX
 from weft.context import build_context
 
 
-def _export_metadata(output: TextIO, db: Any) -> None:
-    """Export metadata from simplebroker meta table."""
-    try:
-        meta_dict = db.get_meta()
-        if not meta_dict:
-            return
+def _claimed_summary(db: Any) -> tuple[int, int]:
+    """Return claimed-message counts for included queues."""
 
-        # Create single record with all meta data
-        record = {"type": "meta", **meta_dict}
-        output.write(json.dumps(record, ensure_ascii=False) + "\n")
-    except (
-        BrokerError,
-        OSError,
-        RuntimeError,
-    ):  # pragma: no cover - metadata probe best effort
-        return
-
-
-def _export_aliases(output: TextIO, db: Any) -> int:
-    """Export all aliases from the database."""
-    try:
-        aliases = list(db.list_aliases())
-    except (
-        BrokerError,
-        OSError,
-        RuntimeError,
-    ):  # pragma: no cover - alias probe best effort
-        # If aliases table doesn't exist or other error, return 0
-        return 0
-
-    for alias, target in aliases:
-        record = {"type": "alias", "alias": alias, "target": target}
-        output.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-    return len(aliases)
-
-
-def _export_messages(output: TextIO, db: Any) -> tuple[int, int, int, int]:
-    """Export pending messages from all queues.
-
-    Returns:
-        ``(queue_count, message_count, claimed_queue_count, claimed_message_count)``.
-    """
     try:
         queue_stats = list(db.list_queue_stats())
     except (
@@ -65,61 +26,42 @@ def _export_messages(output: TextIO, db: Any) -> tuple[int, int, int, int]:
         OSError,
         RuntimeError,
     ):  # pragma: no cover - queue probe best effort
-        return 0, 0, 0, 0
+        return 0, 0
 
-    total_messages = 0
     claimed_queue_count = 0
     claimed_message_count = 0
 
-    exported_queue_names: list[str] = []
     for stats in queue_stats:
         queue_name = str(stats.queue)
-        message_count = int(stats.pending)
         if queue_name.startswith(WEFT_STATE_QUEUE_PREFIX):
             continue
         claimed_count = int(getattr(stats, "claimed", 0))
         if claimed_count > 0:
             claimed_queue_count += 1
             claimed_message_count += claimed_count
-        # Skip empty queues
-        if message_count == 0:
-            continue
+    return claimed_queue_count, claimed_message_count
 
-        exported_queue_names.append(queue_name)
 
-        try:
-            # Get all messages with timestamps
-            messages = list(
-                db.peek_many(
-                    queue_name,
-                    limit=message_count,
-                    with_timestamps=True,
-                )
-            )
-        except (
-            BrokerError,
-            OSError,
-            RuntimeError,
-        ):  # pragma: no cover - queue export best effort
-            # Skip queues we can't read
-            continue
+def _write_dump(output: TextIO, db: Any) -> tuple[int, int, int]:
+    """Write SimpleBroker dump lines and return alias/message/queue counts."""
 
-        for body, timestamp in messages:
-            record = {
-                "type": "message",
-                "queue": queue_name,
-                "timestamp": timestamp,
-                "body": body,
-            }
-            output.write(json.dumps(record, ensure_ascii=False) + "\n")
-            total_messages += 1
+    alias_count = 0
+    message_count = 0
+    message_queues: set[str] = set()
 
-    return (
-        len(exported_queue_names),
-        total_messages,
-        claimed_queue_count,
-        claimed_message_count,
-    )
+    for line in dump_lines(db, exclude=[f"{WEFT_STATE_QUEUE_PREFIX}*"]):
+        output.write(line + "\n")
+        record = json.loads(line)
+        record_type = record.get("type")
+        if record_type == "alias":
+            alias_count += 1
+        elif record_type == "message":
+            message_count += 1
+            queue_name = record.get("queue")
+            if isinstance(queue_name, str):
+                message_queues.add(queue_name)
+
+    return alias_count, message_count, len(message_queues)
 
 
 def cmd_dump(
@@ -164,17 +106,13 @@ def cmd_dump(
 
     try:
         with context.broker() as db:
-            # Open output file
             with open(output_path, "w", encoding="utf-8") as f:
-                # Export in order: metadata, aliases, messages
-                _export_metadata(f, db)
-                alias_count = _export_aliases(f, db)
                 (
-                    exported_queues,
+                    alias_count,
                     exported_messages,
-                    claimed_queues,
-                    claimed_messages,
-                ) = _export_messages(f, db)
+                    exported_queues,
+                ) = _write_dump(f, db)
+            claimed_queues, claimed_messages = _claimed_summary(db)
 
     except Exception as exc:  # pragma: no cover - command error boundary
         return 1, f"weft dump: export failed: {exc}"

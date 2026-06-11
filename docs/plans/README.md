@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 142 plan files in this directory.
+There are currently 143 plan files in this directory.
 
 ## Curation Policy
 
@@ -23,6 +23,7 @@ There are currently 142 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-06-11-simplebroker-dump-load-adoption-plan.md`](./2026-06-11-simplebroker-dump-load-adoption-plan.md) | SimpleBroker Dump Load Adoption Plan | `completed` | none |
 | [`2026-06-11-service-disposition-window-and-retirement-pacing-plan.md`](./2026-06-11-service-disposition-window-and-retirement-pacing-plan.md) | Service Disposition Window And Retirement Pacing Plan | `completed` | none |
 | [`2026-06-10-self-healing-runtime-maintenance-plan.md`](./2026-06-10-self-healing-runtime-maintenance-plan.md) | Self-Healing Runtime Maintenance Plan | `completed` | none |
 | [`2026-06-10-include-claimed-peek-migration-plan.md`](./2026-06-10-include-claimed-peek-migration-plan.md) | Include-Claimed Peek Surface — Implementation Plan | `completed` | none |

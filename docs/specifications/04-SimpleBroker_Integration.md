@@ -372,9 +372,10 @@ Current implications:
 - Queue payload size is bounded by the active broker's message limit.
 - Weft's large-output handling is a task-runtime feature, not a generic queue
   passthrough feature.
-- Weft dump/load import preserves included broker message timestamps through
-  SimpleBroker's public `insert_messages()` API. Those timestamps are task IDs
-  for spawn requests, so an import path that cannot perform exact-timestamp
+- Weft dump/load uses SimpleBroker `simplebroker-dump` v1 NDJSON and preserves
+  included broker message IDs through SimpleBroker's public import path. In
+  the dump file, message records carry that value as `id`. Those IDs are task
+  IDs for spawn requests, so an import path that cannot perform exact-ID
   import must fail before writes begin rather than silently allocate new
   message IDs.
 - Spawn-request submission writes generated and caller-supplied TIDs through
@@ -394,6 +395,7 @@ connection-pooling designs are tracked in the companion doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-06-11-simplebroker-dump-load-adoption-plan.md`](../plans/2026-06-11-simplebroker-dump-load-adoption-plan.md)
 - [`docs/plans/2026-06-01-critical-review-remediation-plan.md`](../plans/2026-06-01-critical-review-remediation-plan.md)
 - [`docs/plans/2026-05-25-monitor-dead-task-catchup-convergence-plan.md`](../plans/2026-05-25-monitor-dead-task-catchup-convergence-plan.md)
 - [`docs/plans/2026-05-20-monitor-collation-table-retirement-plan.md`](../plans/2026-05-20-monitor-collation-table-retirement-plan.md)

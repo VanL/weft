@@ -52,12 +52,18 @@ def test_cmd_load_rolls_back_sqlite_snapshot_on_apply_failure(
 
     export_path = tmp_path / "rollback.jsonl"
     test_data = [
-        {"type": "meta", "schema_version": 4, "magic": "simplebroker-v1"},
+        {
+            "type": "header",
+            "format": "simplebroker-dump",
+            "version": 1,
+            "backend": "test",
+            "last_ts": 0,
+        },
         {"type": "alias", "alias": "restored_alias", "target": "restored.queue"},
         {
             "type": "message",
             "queue": "restored.queue",
-            "timestamp": 1000,
+            "id": 1000,
             "body": "x" * 256,
         },
     ]
@@ -74,5 +80,49 @@ def test_cmd_load_rolls_back_sqlite_snapshot_on_apply_failure(
 
     assert exit_code == 1
     assert "import failed" in (message or "").lower()
+    assert after_aliases == before_aliases
+    assert after_queues == before_queues
+
+
+def test_cmd_load_rolls_back_sqlite_snapshot_on_duplicate_message_id(
+    tmp_path: Path,
+) -> None:
+    """Duplicate exact IDs should fail without rewriting imported messages."""
+
+    ctx = build_context(spec_context=tmp_path)
+    with ctx.broker() as broker:
+        broker.insert_messages([("existing.queue", "keep", 1000)])
+    before_aliases, before_queues = _snapshot_broker_state(ctx)
+
+    export_path = tmp_path / "duplicate-id.jsonl"
+    test_data = [
+        {
+            "type": "header",
+            "format": "simplebroker-dump",
+            "version": 1,
+            "backend": "test",
+            "last_ts": 0,
+        },
+        {
+            "type": "message",
+            "queue": "new.queue",
+            "id": 1000,
+            "body": "duplicate",
+        },
+    ]
+    export_path.write_text(
+        "".join(json.dumps(record) + "\n" for record in test_data),
+        encoding="utf-8",
+    )
+
+    exit_code, message = cmd_load(
+        input_file=str(export_path), context_path=str(ctx.root)
+    )
+
+    after_aliases, after_queues = _snapshot_broker_state(ctx)
+
+    assert exit_code == 1
+    assert "import failed" in (message or "").lower()
+    assert "exact message ID import failed" in (message or "")
     assert after_aliases == before_aliases
     assert after_queues == before_queues

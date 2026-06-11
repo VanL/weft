@@ -1,4 +1,4 @@
-"""Import Weft broker state from JSONL format.
+"""Import Weft broker state from SimpleBroker dump format.
 
 Spec references:
 - docs/specifications/04-SimpleBroker_Integration.md [SB-0.4]
@@ -14,10 +14,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TextIO
 
-from simplebroker.ext import BrokerError
+from simplebroker import load_lines
+from simplebroker.ext import BrokerError, IntegrityError
 from weft._constants import (
+    SIMPLEBROKER_DUMP_FORMAT,
+    SIMPLEBROKER_DUMP_VERSION,
     SQLITE_SNAPSHOT_SUFFIXES,
-    SUPPORTED_IMPORT_SCHEMA_VERSIONS,
     WEFT_STATE_QUEUE_PREFIX,
 )
 from weft.context import WeftContext, build_context
@@ -36,7 +38,7 @@ class MessageImportRecord:
     """Queue message entry parsed from a dump file."""
 
     queue_name: str
-    timestamp: int
+    message_id: int
     body: str
 
 
@@ -45,12 +47,11 @@ class ImportReport:
     """Summary of what would be imported or was imported."""
 
     aliases_to_create: dict[str, str] = field(default_factory=dict)
-    aliases_to_update: dict[str, tuple[str, str]] = field(default_factory=dict)
     alias_conflicts: set[str] = field(default_factory=set)
     queues_to_create: list[str] = field(default_factory=list)
     message_counts_by_queue: dict[str, int] = field(default_factory=dict)
     total_messages: int = 0
-    timestamp_range: tuple[int | None, int | None] = field(
+    message_id_range: tuple[int | None, int | None] = field(
         default_factory=lambda: (None, None)
     )
     validation_warnings: list[str] = field(default_factory=list)
@@ -61,13 +62,13 @@ class ImportReport:
         lines = ["Import Preview:"]
 
         if self.metadata:
-            schema_version = self.metadata.get("schema_version", "unknown")
-            export_timestamp = self.metadata.get("export_timestamp", "unknown")
-            source_context = self.metadata.get("context_path", "unknown")
+            dump_format = self.metadata.get("format", "unknown")
+            dump_version = self.metadata.get("version", "unknown")
+            source_backend = self.metadata.get("backend", "unknown")
             lines.extend(
                 [
-                    f"  Source: {source_context} (schema v{schema_version})",
-                    f"  Exported: {export_timestamp}",
+                    f"  Source: {dump_format} v{dump_version}",
+                    f"  Backend: {source_backend}",
                     "",
                 ]
             )
@@ -78,13 +79,6 @@ class ImportReport:
                 lines.append(f"    - {alias} -> {target}")
             if len(self.aliases_to_create) > 5:
                 lines.append(f"    ... and {len(self.aliases_to_create) - 5} more")
-
-        if self.aliases_to_update:
-            lines.append(f"  Aliases to update: {len(self.aliases_to_update)}")
-            for alias, (old, new) in list(self.aliases_to_update.items())[:3]:
-                lines.append(f"    - {alias}: {old} -> {new}")
-            if len(self.aliases_to_update) > 3:
-                lines.append(f"    ... and {len(self.aliases_to_update) - 3} more")
 
         if self.queues_to_create:
             lines.append(f"  Queues to create: {len(self.queues_to_create)}")
@@ -101,9 +95,12 @@ class ImportReport:
             ]
         )
 
-        if self.timestamp_range[0] is not None and self.timestamp_range[1] is not None:
+        if (
+            self.message_id_range[0] is not None
+            and self.message_id_range[1] is not None
+        ):
             lines.append(
-                f"  Timestamp range: {self.timestamp_range[0]} to {self.timestamp_range[1]}"
+                f"  Message ID range: {self.message_id_range[0]} to {self.message_id_range[1]}"
             )
 
         if self.validation_warnings:
@@ -125,8 +122,6 @@ class ImportReport:
         parts = []
         if self.aliases_to_create:
             parts.append(f"Created {len(self.aliases_to_create)} aliases")
-        if self.aliases_to_update:
-            parts.append(f"Updated {len(self.aliases_to_update)} aliases")
         if self.queues_to_create:
             parts.append(f"Created {len(self.queues_to_create)} queues")
         parts.append(f"Imported {self.total_messages:,} messages")
@@ -141,6 +136,8 @@ class ImportPlan:
     report: ImportReport = field(default_factory=ImportReport)
     alias_records: list[AliasImportRecord] = field(default_factory=list)
     message_records: list[MessageImportRecord] = field(default_factory=list)
+    header_line: str | None = None
+    apply_lines: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -166,16 +163,22 @@ class SQLiteSnapshot:
         shutil.rmtree(self.snapshot_dir, ignore_errors=True)
 
 
-def _validate_compatibility(metadata: dict[str, Any]) -> list[str]:
-    """Validate that the import is compatible with the current schema."""
+def _dump_error(line_number: int, problem: str) -> ValueError:
+    """Return a line-numbered dump parse error."""
 
-    warnings = []
-    schema_version = metadata.get("schema_version")
-    if not schema_version:
-        warnings.append("No schema version found in export")
-    elif schema_version not in SUPPORTED_IMPORT_SCHEMA_VERSIONS:
-        warnings.append(f"Schema version {schema_version} may not be fully compatible")
-    return warnings
+    return ValueError(f"invalid dump input at line {line_number}: {problem}")
+
+
+def _dump_line(record: dict[str, Any]) -> str:
+    """Serialize one normalized SimpleBroker dump record."""
+
+    return json.dumps(record, ensure_ascii=False, sort_keys=True)
+
+
+def _is_runtime_name(name: str) -> bool:
+    """Return whether a dump name targets Weft runtime-only state."""
+
+    return name.startswith(WEFT_STATE_QUEUE_PREFIX)
 
 
 def _build_import_plan(input_file: TextIO, context: WeftContext) -> ImportPlan:
@@ -191,6 +194,7 @@ def _parse_import_file(input_file: TextIO) -> ImportPlan:
 
     plan = ImportPlan()
     skipped_runtime: set[str] = set()
+    header_seen = False
 
     for line_num, raw_line in enumerate(input_file, 1):
         line = raw_line.strip()
@@ -199,86 +203,138 @@ def _parse_import_file(input_file: TextIO) -> ImportPlan:
 
         try:
             record = json.loads(line)
-        except json.JSONDecodeError:
-            plan.report.validation_warnings.append(f"Line {line_num}: Invalid JSON")
-            continue
+        except json.JSONDecodeError as exc:
+            raise _dump_error(line_num, f"malformed JSON ({exc.msg})") from exc
+
+        if not isinstance(record, dict):
+            raise _dump_error(line_num, "record must be a JSON object")
 
         record_type = record.get("type")
 
-        if record_type == "meta":
+        if not header_seen:
+            if record_type != "header":
+                raise _dump_error(line_num, "first record must be the dump header")
+            if record.get("format") != SIMPLEBROKER_DUMP_FORMAT:
+                raise _dump_error(line_num, "unrecognized dump format")
+            if record.get("version") != SIMPLEBROKER_DUMP_VERSION:
+                raise _dump_error(
+                    line_num,
+                    f"unsupported dump version {record.get('version')!r} "
+                    f"(supported: {SIMPLEBROKER_DUMP_VERSION})",
+                )
+            header_seen = True
             plan.report.metadata.update(
                 {key: value for key, value in record.items() if key != "type"}
             )
+            plan.header_line = _dump_line(record)
             continue
 
         if record_type == "alias":
             alias = record.get("alias")
             target = record.get("target")
-            if not alias or not target:
-                plan.report.validation_warnings.append(
-                    f"Line {line_num}: Invalid alias record"
+            if not isinstance(alias, str) or not isinstance(target, str):
+                raise _dump_error(
+                    line_num,
+                    "alias record requires string 'alias' and 'target' fields",
                 )
+
+            runtime_names = tuple(
+                name for name in (alias, target) if _is_runtime_name(name)
+            )
+            if runtime_names:
+                warning_key = " / ".join(runtime_names)
+                if warning_key not in skipped_runtime:
+                    plan.report.validation_warnings.append(
+                        f"Skipping runtime alias {alias} -> {target}"
+                    )
+                    skipped_runtime.add(warning_key)
                 continue
 
-            plan.alias_records.append(AliasImportRecord(alias=alias, target=target))
+            alias_record = AliasImportRecord(alias=alias, target=target)
+            plan.alias_records.append(alias_record)
             continue
 
-        if record_type != "message":
-            plan.report.validation_warnings.append(
-                f"Line {line_num}: Unsupported record type"
-            )
-            continue
-
-        queue_name = record.get("queue")
-        timestamp = record.get("timestamp")
-        body = record.get("body")
-
-        if queue_name and queue_name.startswith(WEFT_STATE_QUEUE_PREFIX):
-            if queue_name not in skipped_runtime:
-                plan.report.validation_warnings.append(
-                    f"Skipping runtime queue {queue_name}"
+        if record_type == "message":
+            queue_name = record.get("queue")
+            body = record.get("body")
+            message_id = record.get("id")
+            if not isinstance(queue_name, str) or not isinstance(body, str):
+                raise _dump_error(
+                    line_num,
+                    "message record requires string 'queue' and 'body' fields",
                 )
-                skipped_runtime.add(queue_name)
-            continue
+            if (
+                isinstance(message_id, bool)
+                or not isinstance(message_id, int)
+                or message_id < 0
+            ):
+                raise _dump_error(
+                    line_num,
+                    "message record requires a non-negative integer 'id' field",
+                )
 
-        if not queue_name:
-            plan.report.validation_warnings.append(
-                f"Line {line_num}: Missing queue name"
+            if _is_runtime_name(queue_name):
+                if queue_name not in skipped_runtime:
+                    plan.report.validation_warnings.append(
+                        f"Skipping runtime queue {queue_name}"
+                    )
+                    skipped_runtime.add(queue_name)
+                continue
+
+            plan.message_records.append(
+                MessageImportRecord(
+                    queue_name=queue_name,
+                    message_id=message_id,
+                    body=body,
+                )
+            )
+            plan.report.message_counts_by_queue[queue_name] = (
+                plan.report.message_counts_by_queue.get(queue_name, 0) + 1
+            )
+            plan.report.total_messages += 1
+            plan.report.message_id_range = _update_message_id_range(
+                plan.report.message_id_range,
+                message_id,
             )
             continue
 
-        if not isinstance(timestamp, int) or timestamp < 0:
-            plan.report.validation_warnings.append(
-                f"Line {line_num}: Invalid timestamp"
-            )
-            continue
+        if record_type == "header":
+            raise _dump_error(line_num, "duplicate header")
 
-        if body is None:
-            plan.report.validation_warnings.append(
-                f"Line {line_num}: Missing message body"
-            )
-            continue
+        raise _dump_error(line_num, f"unknown record type {record_type!r}")
 
-        plan.message_records.append(
-            MessageImportRecord(
-                queue_name=queue_name,
-                timestamp=timestamp,
-                body=str(body),
-            )
+    if not header_seen:
+        raise ValueError(
+            "invalid dump input: missing header (is this a simplebroker dump?)"
         )
-        plan.report.message_counts_by_queue[queue_name] = (
-            plan.report.message_counts_by_queue.get(queue_name, 0) + 1
-        )
-        plan.report.total_messages += 1
-        plan.report.timestamp_range = _update_timestamp_range(
-            plan.report.timestamp_range,
-            timestamp,
-        )
 
-    plan.report.validation_warnings.extend(
-        _validate_compatibility(plan.report.metadata)
-    )
     return plan
+
+
+def _build_apply_lines(plan: ImportPlan) -> list[str]:
+    """Build the normalized dump stream that should be applied."""
+
+    if plan.header_line is None:
+        raise ValueError("import plan is missing dump header")
+
+    lines = [plan.header_line]
+    lines.extend(
+        _dump_line({"type": "alias", "alias": record.alias, "target": record.target})
+        for record in plan.alias_records
+        if record.alias in plan.report.aliases_to_create
+    )
+    lines.extend(
+        _dump_line(
+            {
+                "type": "message",
+                "queue": record.queue_name,
+                "body": record.body,
+                "id": record.message_id,
+            }
+        )
+        for record in plan.message_records
+    )
+    return lines
 
 
 def _enrich_import_plan(plan: ImportPlan, context: WeftContext) -> None:
@@ -303,26 +359,6 @@ def _enrich_import_plan(plan: ImportPlan, context: WeftContext) -> None:
         ):  # pragma: no cover - broker probe best effort
             existing_queues = set()
 
-        try:
-            destination_meta = broker.get_meta()
-        except (
-            BrokerError,
-            OSError,
-            RuntimeError,
-        ):  # pragma: no cover - broker probe best effort
-            destination_meta = {}
-
-    source_schema = plan.report.metadata.get("schema_version")
-    destination_schema = destination_meta.get("schema_version")
-    if (
-        isinstance(source_schema, int)
-        and isinstance(destination_schema, int)
-        and source_schema != destination_schema
-    ):
-        plan.report.validation_warnings.append(
-            "Destination schema version differs from the export schema version"
-        )
-
     seen_create_queues: set[str] = set()
     for alias_record in plan.alias_records:
         existing_target = existing_aliases.get(alias_record.alias)
@@ -340,51 +376,42 @@ def _enrich_import_plan(plan: ImportPlan, context: WeftContext) -> None:
         seen_create_queues.add(message_record.queue_name)
         plan.report.queues_to_create.append(message_record.queue_name)
 
+    plan.apply_lines = _build_apply_lines(plan)
+
 
 def _execute_import(plan: ImportPlan, context: WeftContext) -> ImportReport:
-    """Apply a preflighted import plan while preserving broker timestamps."""
+    """Apply a preflighted import plan while preserving broker message IDs."""
 
-    _ensure_exact_timestamp_import_supported(plan, context)
+    _ensure_exact_message_id_import_supported(plan, context)
     snapshot = _sqlite_snapshot_if_file_backed(context)
     writes_started = False
 
     try:
         with context.broker() as broker:
-            for alias_record in plan.alias_records:
-                if alias_record.alias not in plan.report.aliases_to_create:
-                    continue
-                writes_started = True
-                broker.add_alias(alias_record.alias, alias_record.target)
-
-            if plan.message_records:
-                writes_started = True
-                broker.insert_messages(
-                    (
-                        message_record.queue_name,
-                        message_record.body,
-                        message_record.timestamp,
-                    )
-                    for message_record in plan.message_records
-                )
+            writes_started = bool(plan.apply_lines[1:])
+            load_lines(broker, plan.apply_lines)
 
     except Exception as exc:  # pragma: no cover - rollback must run on any failure
+        failure_detail = _format_apply_failure(exc)
         if snapshot is not None:
             try:
                 snapshot.restore()
             except Exception as restore_exc:  # pragma: no cover - rollback failure
                 raise ImportError(
-                    f"import failed and file-backed rollback failed: {exc}; restore failed: {restore_exc}"
+                    "import failed and file-backed rollback failed: "
+                    f"{failure_detail}; restore failed: {restore_exc}"
                 ) from exc
             raise ImportError(
-                f"import failed and restored file-backed snapshot: {exc}"
+                f"import failed and restored file-backed snapshot: {failure_detail}"
             ) from exc
 
         if writes_started:
             raise ImportError(
-                f"import failed after writes began; partial import may have occurred: {exc}"
+                "import failed after writes began; partial import may have occurred: "
+                f"{failure_detail}"
             ) from exc
 
-        raise ImportError(f"import failed: {exc}") from exc
+        raise ImportError(f"import failed: {failure_detail}") from exc
 
     finally:
         if snapshot is not None:
@@ -393,11 +420,19 @@ def _execute_import(plan: ImportPlan, context: WeftContext) -> ImportReport:
     return plan.report
 
 
-def _ensure_exact_timestamp_import_supported(
+def _format_apply_failure(exc: Exception) -> str:
+    """Return a user-facing apply failure detail."""
+
+    if isinstance(exc, IntegrityError):
+        return f"exact message ID import failed: {exc}"
+    return str(exc)
+
+
+def _ensure_exact_message_id_import_supported(
     plan: ImportPlan,
     context: WeftContext,
 ) -> None:
-    """Fail before writes when the backend cannot preserve dump timestamps."""
+    """Fail before writes when the backend cannot preserve dump message IDs."""
 
     if not plan.message_records:
         return
@@ -405,7 +440,7 @@ def _ensure_exact_timestamp_import_supported(
         if callable(getattr(broker, "insert_messages", None)):
             return
     raise ImportError(
-        "backend cannot preserve message timestamps during import; "
+        "backend cannot preserve message IDs during import; "
         "refusing to load runnable broker state under new message IDs"
     )
 
@@ -438,16 +473,16 @@ def _sqlite_artifact_paths(database_path: Path) -> tuple[Path, ...]:
     )
 
 
-def _update_timestamp_range(
-    timestamp_range: tuple[int | None, int | None],
-    timestamp: int,
+def _update_message_id_range(
+    message_id_range: tuple[int | None, int | None],
+    message_id: int,
 ) -> tuple[int | None, int | None]:
-    """Expand a timestamp range to include the supplied value."""
+    """Expand a message ID range to include the supplied value."""
 
-    start, end = timestamp_range
+    start, end = message_id_range
     if start is None or end is None:
-        return (timestamp, timestamp)
-    return (min(start, timestamp), max(end, timestamp))
+        return (message_id, message_id)
+    return (min(start, message_id), max(end, message_id))
 
 
 def _format_alias_conflicts(conflicts: set[str]) -> tuple[int, str]:

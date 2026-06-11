@@ -778,16 +778,18 @@ Current behavior:
 - `system tidy` delegates maintenance/compaction to the active backend
 - `system dump` exports broker state while excluding runtime-only
   `weft.state.*` queues
+- `system dump` writes SimpleBroker `simplebroker-dump` v1 NDJSON. Message
+  records carry the preserved broker message ID in the `id` field.
 - `system dump` exports visible pending broker messages. If an included queue
   has claimed rows, the command reports the omitted claimed-message count
   instead of pretending the dump is a complete in-flight broker image.
 - `system load --dry-run -i FILE` validates a dump without writing. Plain
   `system load -i FILE` imports the dump.
-- `system load` preserves included broker message timestamps during import and
+- `system load` preserves included broker message IDs during import and
   returns exit code `3` on alias conflicts before writes begin. If exact
-  timestamp import is unavailable for the active backend, load fails before
+  message-ID import is unavailable for the active backend, load fails before
   writing rather than silently allocating new message IDs. Load uses
-  SimpleBroker's bulk `insert_messages()` API so timestamp high-water handling
+  SimpleBroker's bulk `insert_messages()` API so message-ID high-water handling
   and row import occur inside the broker apply path.
 - `system task-monitor` scans `weft.log.tasks` without consuming broker
   messages and emits JSONL log records to stdout or append-only disk files
@@ -844,6 +846,7 @@ flags, and future queue or control ergonomics live in the companion doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-06-11-simplebroker-dump-load-adoption-plan.md`](../plans/2026-06-11-simplebroker-dump-load-adoption-plan.md)
 - [`docs/plans/2026-06-01-critical-review-remediation-plan.md`](../plans/2026-06-01-critical-review-remediation-plan.md)
 - [`docs/plans/2026-05-31-task-monitor-orphan-log-and-status-reconciliation-plan.md`](../plans/2026-05-31-task-monitor-orphan-log-and-status-reconciliation-plan.md)
 - [`docs/plans/2026-05-30-task-monitor-mode-and-rotating-log-plan.md`](../plans/2026-05-30-task-monitor-mode-and-rotating-log-plan.md)

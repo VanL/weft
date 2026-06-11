@@ -686,9 +686,11 @@ Both queues share the same validation, TaskSpec expansion, child launch, initial
 inbox seeding, and acknowledgement path.
 
 The spawn-request message ID is the submitted task TID. Dump/load paths that
-include spawn queues must preserve broker message timestamps on import. If an
-active backend cannot import rows at exact timestamps, load must fail before
-writes begin rather than rewriting runnable spawn requests under new IDs.
+include spawn queues must preserve broker message IDs on import; in
+SimpleBroker `simplebroker-dump` v1 files, message records carry that value as
+`id`. If an active backend cannot import rows at exact IDs, load must fail
+before writes begin rather than rewriting runnable spawn requests under new
+IDs.
 
 Child process creation is the only blocking part of the launch path and runs in
 the manager's broker-free child-launch worker lane. The manager reactor owns all
@@ -1212,6 +1214,7 @@ management live in the companion doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-06-11-simplebroker-dump-load-adoption-plan.md`](../plans/2026-06-11-simplebroker-dump-load-adoption-plan.md)
 - [`docs/plans/2026-06-10-self-healing-runtime-maintenance-plan.md`](../plans/2026-06-10-self-healing-runtime-maintenance-plan.md)
 - [`docs/plans/2026-06-01-critical-review-remediation-plan.md`](../plans/2026-06-01-critical-review-remediation-plan.md)
 - [`docs/plans/2026-05-31-task-monitor-orphan-log-and-status-reconciliation-plan.md`](../plans/2026-05-31-task-monitor-orphan-log-and-status-reconciliation-plan.md)

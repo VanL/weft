@@ -1347,8 +1347,11 @@ POSTGRES_BACKEND_INSTALL_HINT: Final[str] = (
 SQLITE_SNAPSHOT_SUFFIXES: Final[tuple[str, ...]] = ("", "-wal", "-shm")
 """SQLite database sidecar suffixes that travel with snapshot imports."""
 
-SUPPORTED_IMPORT_SCHEMA_VERSIONS: Final[frozenset[int]] = frozenset({4, 5})
-"""Dump schema versions accepted by the current import surface."""
+SIMPLEBROKER_DUMP_FORMAT: Final[str] = "simplebroker-dump"
+"""SimpleBroker dump format identifier accepted by Weft system load."""
+
+SIMPLEBROKER_DUMP_VERSION: Final[int] = 1
+"""SimpleBroker dump format version accepted by Weft system load."""
 
 SPEC_TYPE_TASK: Final[str] = "task"
 """Canonical spec kind name for stored TaskSpecs."""
