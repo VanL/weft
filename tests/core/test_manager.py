@@ -5436,7 +5436,7 @@ def test_manager_leadership_yields_when_only_public_backlog_is_pending(
     assert yield_event["leader_tid"] == lower_leader_tid
 
 
-def test_manager_leadership_waits_when_reserved_public_work_exists(
+def test_manager_leadership_requeues_reserved_public_work_before_yield(
     broker_env,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -5465,7 +5465,11 @@ def test_manager_leadership_waits_when_reserved_public_work_exists(
     )
     lower_leader_tid = str(int(manager.tid) - 1)
 
-    monkeypatch.setattr(manager, "_leader_tid", lambda: lower_leader_tid)
+    monkeypatch.setattr(
+        manager,
+        "_read_active_manager_records",
+        lambda: {lower_leader_tid: {"tid": lower_leader_tid}},
+    )
 
     try:
         yielded = manager._maybe_yield_leadership(force=True)
@@ -5474,9 +5478,10 @@ def test_manager_leadership_waits_when_reserved_public_work_exists(
         manager.cleanup()
 
     assert moved == (json.dumps(payload), message_id)
-    assert yielded is False
-    assert manager.should_stop is False
-    assert reserved_queue.peek_one(exact_timestamp=message_id) is not None
+    assert yielded is True
+    assert manager.should_stop is True
+    assert reserved_queue.peek_one(exact_timestamp=message_id) is None
+    assert spawn_queue.peek_one(exact_timestamp=message_id) is not None
 
 
 def test_manager_leadership_waits_while_child_launch_is_in_flight(

@@ -2953,6 +2953,15 @@ class Manager(ServiceTask):
         if leader_tid is None or leader_tid == self.tid:
             return False
 
+        if (
+            not self._has_active_child_launches()
+            and not self._user_work_children()
+            and not self._requeue_public_reserved_spawn_requests_before_yield(
+                leader_tid=leader_tid
+            )
+        ):
+            return False
+
         actionable_work = (
             self._has_actionable_leadership_work()
             if force
@@ -2978,6 +2987,79 @@ class Manager(ServiceTask):
             )
             self._unregister_manager()
             self.should_stop = True
+        return True
+
+    def _reserved_queue_has_any_message(self, queue_name: str) -> bool:
+        """Return whether a reserved queue has any row, including claimed rows."""
+
+        try:
+            return self._queue(queue_name).peek_one(include_claimed=True) is not None
+        except (BrokerError, OSError, RuntimeError):
+            logger.debug(
+                "Failed to inspect reserved queue %s before leadership yield",
+                queue_name,
+                exc_info=True,
+            )
+            return True
+
+    def _requeue_public_reserved_spawn_requests_before_yield(
+        self,
+        *,
+        leader_tid: str,
+    ) -> bool:
+        """Return public reserved spawn requests before a no-child leadership yield.
+
+        A manager that loses leadership may have already moved public spawn
+        requests into its reserved queue. If no child launch is active, those
+        rows are not in progress. Requeue them before yielding so the elected
+        leader can dispatch them.
+
+        Spec: [MA-1.4], [MF-6]
+        """
+
+        reserved_queue = self._queue_names["reserved"]
+        source_queue = self._queue_names["inbox"]
+        moved_count = 0
+        reserved = self._queue(reserved_queue)
+        while True:
+            try:
+                batch = reserved.move_many(
+                    source_queue,
+                    limit=64,
+                    require_unclaimed=False,
+                    with_timestamps=False,
+                )
+            except (BrokerError, OSError, RuntimeError):
+                logger.debug(
+                    "Failed to requeue public reserved spawn messages before "
+                    "leadership yield",
+                    exc_info=True,
+                )
+                self._emit_serve_log(
+                    "manager_leadership_reserved_requeue_failed",
+                    component="manager",
+                    required_level="debug",
+                    severity="warning",
+                    leader_tid=leader_tid,
+                    reserved_queue=reserved_queue,
+                    source_queue=source_queue,
+                )
+                return not self._reserved_queue_has_any_message(reserved_queue)
+            if not batch:
+                break
+            moved_count += len(batch)
+
+        if moved_count:
+            self._invalidate_leadership_work_cache()
+            self._emit_serve_log(
+                "manager_leadership_reserved_requeued",
+                component="manager",
+                required_level="debug",
+                leader_tid=leader_tid,
+                reserved_queue=reserved_queue,
+                source_queue=source_queue,
+                moved_count=moved_count,
+            )
         return True
 
     # ------------------------------------------------------------------
