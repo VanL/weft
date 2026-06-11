@@ -6229,6 +6229,8 @@ def _jsonl_lifecycle_config(
 def _broker_rows_by_tid(log_queue: Any) -> dict[str, set[int]]:
     """Return live ``weft.log.tasks`` row IDs grouped by payload tid."""
 
+    # Exact top-level tid match — do not weaken to body-substring matching;
+    # service-event bodies embed child tids (docs/lessons.md, 2026-06-11).
     rows: dict[str, set[int]] = {}
     for body, message_id in iter_queue_entries(log_queue):
         try:
