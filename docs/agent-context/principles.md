@@ -39,6 +39,10 @@ Example:
 - Follow explicit user corrections immediately.
 - State critical assumptions before broad or irreversible changes.
 - Report blockers with precise causes and the next missing input.
+- Returning mid-task with falsified premises, newly discovered issues, or
+  reasonable uncertainty is a success path, not a failure. Bring the
+  evidence and a corrected scope, then wait for direction
+  (see `docs/lessons.md`, 2026-06-11).
 - If something seems clear to a human but confusing to an agent, say so and
   propose a specific change that would make it easier to use correctly.
 

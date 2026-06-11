@@ -974,3 +974,25 @@ runbook needs to become stricter.
   verified per-row deletion in the same pass (the exact-row apply layer
   re-verifies per ID on batch under-deletion), and audit-mode recovery paths
   must carry the same summary gate as the main deletion path.
+
+## 2026-06-11 Return With Falsified Premises
+
+- While writing a plan to scale monitor cleanup budgets, successive
+  code-grounding checks falsified the diagnosis the plan was scoped on
+  (the deferral was a routing bucket, not a budget; the "stalled backlog"
+  was service-family event streams plus a false-positive body-substring
+  oracle) and surfaced a different real question entirely. The author
+  stopped and returned with the evidence and a corrected scope instead of
+  delivering the agreed-but-wrong plan.
+- Durable rule, owner-endorsed: returning mid-task with falsified premises,
+  new issues, or reasonable uncertainty is the correct outcome, not a
+  failure. Bring what was attempted, each falsification with evidence, the
+  corrected picture, and a proposed corrected scope — then wait for
+  direction. The fresh-eyes clause in
+  `docs/agent-context/runbooks/writing-plans.md` ("stop and report instead
+  of quietly rewriting") is a success path; treat plan-writing as an
+  experiment that may invalidate its own premise.
+- Corollary for diagnostics: never match TIDs by body substring over
+  `weft.log.tasks` — service event bodies embed other tasks' TIDs and
+  produce false positives. Join through the Monitor store refs
+  (`weft_monitor_task_messages`) or parse the JSON `tid` field exactly.
