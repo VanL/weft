@@ -92,3 +92,6 @@ agent_history/
 .code/
 # This is in context for agents but we don't want it to check it in here
 simplebroker/
+
+# Codex CLI session metadata
+.context/
