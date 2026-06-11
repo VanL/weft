@@ -6998,9 +6998,7 @@ def test_retirement_backlog_identifies_binding_stage(
             deadline_hits.append(task._last_control_cleanup_deadline_hit)
             if cycle == 0:
                 checkpoint = store.get_checkpoint(WEFT_GLOBAL_LOG_QUEUE)
-                assert (
-                    checkpoint is not None and checkpoint >= max_seeded_message_id
-                ), (
+                assert checkpoint is not None and checkpoint >= max_seeded_message_id, (
                     "ingest did not pass the seeded backlog in cycle 1 "
                     f"(checkpoint {checkpoint} < {max_seeded_message_id}); "
                     "with production batch/scan limits ingest must not be "
