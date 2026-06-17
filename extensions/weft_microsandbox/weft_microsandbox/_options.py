@@ -27,6 +27,7 @@ WorkspaceMode = Literal[
     "mount-read-write",
 ]
 
+
 @dataclass(frozen=True, slots=True)
 class MicrosandboxMount:
     """Host path mounted into the guest."""
@@ -161,9 +162,7 @@ def parse_options(
     cwd = _optional_text(options.get("cwd"), name="spec.runner.options.cwd") or "/"
     if workspace_mode != "none":
         if not working_dir:
-            raise ValueError(
-                "Microsandbox workspace modes require spec.working_dir"
-            )
+            raise ValueError("Microsandbox workspace modes require spec.working_dir")
         if cwd == "/":
             raise ValueError(
                 "Microsandbox workspace modes require spec.runner.options.cwd"

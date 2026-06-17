@@ -47,6 +47,7 @@ from .sessions import AgentSession
 
 logger = logging.getLogger(__name__)
 
+
 @dataclass(frozen=True, slots=True)
 class _ConsumerWorkerEvent:
     kind: Literal["worker_started", "runtime_handle", "stream_chunk"]

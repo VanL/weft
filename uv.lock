@@ -1405,7 +1405,7 @@ all = [
     { name = "weft-django" },
     { name = "weft-docker" },
     { name = "weft-macos-sandbox" },
-    { name = "weft-microsandbox" },
+    { name = "weft-microsandbox", marker = "sys_platform != 'win32'" },
 ]
 dev = [
     { name = "mypy" },
@@ -1418,7 +1418,7 @@ dev = [
     { name = "types-psutil" },
     { name = "weft-docker" },
     { name = "weft-macos-sandbox" },
-    { name = "weft-microsandbox" },
+    { name = "weft-microsandbox", marker = "sys_platform != 'win32'" },
 ]
 django = [
     { name = "weft-django" },
@@ -1433,7 +1433,7 @@ macos-sandbox = [
     { name = "weft-macos-sandbox" },
 ]
 microsandbox = [
-    { name = "weft-microsandbox" },
+    { name = "weft-microsandbox", marker = "sys_platform != 'win32'" },
 ]
 pg = [
     { name = "simplebroker-pg" },
@@ -1469,9 +1469,9 @@ requires-dist = [
     { name = "weft-macos-sandbox", marker = "extra == 'all'", editable = "extensions/weft_macos_sandbox" },
     { name = "weft-macos-sandbox", marker = "extra == 'dev'", editable = "extensions/weft_macos_sandbox" },
     { name = "weft-macos-sandbox", marker = "extra == 'macos-sandbox'", editable = "extensions/weft_macos_sandbox" },
-    { name = "weft-microsandbox", marker = "extra == 'all'", editable = "extensions/weft_microsandbox" },
-    { name = "weft-microsandbox", marker = "extra == 'dev'", editable = "extensions/weft_microsandbox" },
-    { name = "weft-microsandbox", marker = "extra == 'microsandbox'", editable = "extensions/weft_microsandbox" },
+    { name = "weft-microsandbox", marker = "sys_platform != 'win32' and extra == 'all'", editable = "extensions/weft_microsandbox" },
+    { name = "weft-microsandbox", marker = "sys_platform != 'win32' and extra == 'dev'", editable = "extensions/weft_microsandbox" },
+    { name = "weft-microsandbox", marker = "sys_platform != 'win32' and extra == 'microsandbox'", editable = "extensions/weft_microsandbox" },
 ]
 provides-extras = ["pg", "docker", "django", "django-channels", "macos-sandbox", "microsandbox", "all", "dev"]
 

@@ -230,7 +230,9 @@ class MicrosandboxRunner:
         guest_dirs: tuple[str, ...] = (),
         extra_env: Mapping[str, str] | None = None,
     ) -> RunnerOutcome:
-        sandbox_name = _sandbox_name(self._tid, prefix=self._options.sandbox_name_prefix)
+        sandbox_name = _sandbox_name(
+            self._tid, prefix=self._options.sandbox_name_prefix
+        )
         started_at = time.monotonic()
         runtime_handle: RunnerHandle | None = None
 
@@ -469,11 +471,16 @@ def _runtime_handle(
 
 def _sandbox_name(tid: str | None, *, prefix: str | None) -> str:
     safe_prefix = prefix or "weft"
-    safe_prefix = "".join(
-        char if char.isalnum() or char in {"-", "_"} else "-"
-        for char in safe_prefix
-    ).strip("-_") or "weft"
-    suffix = tid[-8:] if isinstance(tid, str) and len(tid) >= 8 else uuid.uuid4().hex[:8]
+    safe_prefix = (
+        "".join(
+            char if char.isalnum() or char in {"-", "_"} else "-"
+            for char in safe_prefix
+        ).strip("-_")
+        or "weft"
+    )
+    suffix = (
+        tid[-8:] if isinstance(tid, str) and len(tid) >= 8 else uuid.uuid4().hex[:8]
+    )
     return f"{safe_prefix}-{suffix}-{uuid.uuid4().hex[:8]}"[:120]
 
 

@@ -18,7 +18,9 @@ pytestmark = [pytest.mark.shared, pytest.mark.slow]
 
 def _runtime_or_skip() -> MicrosandboxRuntime:
     if os.environ.get("WEFT_MICROSANDBOX_TEST_ENABLE") != "1":
-        pytest.skip("set WEFT_MICROSANDBOX_TEST_ENABLE=1 to run real Microsandbox tests")
+        pytest.skip(
+            "set WEFT_MICROSANDBOX_TEST_ENABLE=1 to run real Microsandbox tests"
+        )
     runtime = MicrosandboxRuntime()
     try:
         runtime.check_preflight()

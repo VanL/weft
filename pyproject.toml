@@ -55,20 +55,20 @@ macos-sandbox = [
     "weft-macos-sandbox>=0.5.4",
 ]
 microsandbox = [
-    "weft-microsandbox>=0.5.0",
+    "weft-microsandbox>=0.5.0; platform_system != 'Windows'",
 ]
 all = [
     "simplebroker-pg>=2.2.1",
     "weft-docker>=0.9.70",
     "weft-django>=0.9.30",
     "weft-macos-sandbox>=0.5.4",
-    "weft-microsandbox>=0.5.0",
+    "weft-microsandbox>=0.5.0; platform_system != 'Windows'",
 ]
 dev = [
     "simplebroker-pg>=2.2.1",
     "weft-docker>=0.9.70",
     "weft-macos-sandbox>=0.5.4",
-    "weft-microsandbox>=0.5.0",
+    "weft-microsandbox>=0.5.0; platform_system != 'Windows'",
     "pytest>=7.0",
     "pytest-cov>=4.0",
     "pytest-xdist>=3.0",
