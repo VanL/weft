@@ -29,6 +29,7 @@ from weft._constants import (
     DEFAULT_CLEANUP_ON_EXIT,
     DEFAULT_OUTPUT_SIZE_LIMIT_MB,
     TERMINAL_TASK_STATUSES,
+    VALID_RUNNER_OUTCOME_STATUSES,
     WORK_ENVELOPE_START,
 )
 from weft.core.agents.runtime import AgentExecutionResult
@@ -45,7 +46,6 @@ from .runner import RunnerOutcome, TaskRunner
 from .sessions import AgentSession
 
 logger = logging.getLogger(__name__)
-
 
 @dataclass(frozen=True, slots=True)
 class _ConsumerWorkerEvent:
@@ -976,6 +976,33 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         """
         if outcome.status != "ok" and self._uses_agent_session():
             self._shutdown_agent_session()
+
+        if outcome.status not in VALID_RUNNER_OUTCOME_STATUSES:
+            self._finalize_deferred_active_control()
+            if self.taskspec.state.status == "cancelled":
+                self._raise_already_terminal(
+                    RuntimeError(
+                        self.taskspec.state.error or "Target execution cancelled"
+                    )
+                )
+            if self.taskspec.state.status == "killed":
+                self._raise_already_terminal(
+                    RuntimeError(self.taskspec.state.error or "Target execution killed")
+                )
+            error_exc = RuntimeError(
+                f"unsupported runner outcome status {outcome.status!r}"
+            )
+            self.taskspec.mark_failed(error=str(error_exc))
+            self._finalize_terminal_outcome(
+                title_state="failed",
+                title_detail=None,
+                event="work_failed",
+                pipeline_status="failed",
+                timestamp=timestamp,
+                metrics_payload=metrics_payload,
+                exc=error_exc,
+                runner_diagnostics=outcome.diagnostics,
+            )
 
         if outcome.status == "timeout":
             self._finalize_deferred_active_control()

@@ -108,6 +108,35 @@ jobs:
         run: |
           pytest -q -n 0 extensions/weft_macos_sandbox/tests --durations=50 --durations-min=1.0 -o faulthandler_timeout=720 --timeout=900 --timeout-method=thread --full-trace
 
+  test-microsandbox-extension:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+
+      - name: Install dependencies
+        run: |
+          uv pip install --system -e ".[dev,microsandbox]"
+
+      - name: Run Microsandbox extension tests
+        run: |
+          pytest -q -n 0 extensions/weft_microsandbox/tests --durations=50 --durations-min=1.0 -o faulthandler_timeout=720 --timeout=900 --timeout-method=thread --full-trace
+
   test-sqlite:
     name: test-sqlite (${{ matrix.test_slice }})
     runs-on: ubuntu-latest
@@ -146,7 +175,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          uv pip install --system -e ".[dev,docker,macos-sandbox]"
+          uv pip install --system -e ".[dev,docker,macos-sandbox,microsandbox]"
 
       - name: Set pytest worker count
         run: |
@@ -200,7 +229,7 @@ jobs:
         env:
           PYTEST_ADDOPTS: ${{ matrix.pytest_diagnostic_args }}
         run: |
-          uv run --extra dev --extra docker --extra macos-sandbox bin/pytest-pg --all ${{ matrix.pytest_targets }}
+          uv run --extra dev --extra docker --extra macos-sandbox --extra microsandbox bin/pytest-pg --all ${{ matrix.pytest_targets }}
 
   verify-tag-current:
     runs-on: ubuntu-latest
@@ -209,6 +238,7 @@ jobs:
       - test-django-integration
       - test-docker-extension
       - test-macos-sandbox-extension
+      - test-microsandbox-extension
       - test-sqlite
       - test-postgres
 

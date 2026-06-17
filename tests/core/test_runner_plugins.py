@@ -104,3 +104,18 @@ def test_require_runner_plugin_missing_docker_has_install_hint() -> None:
             require_runner_plugin("docker")
     finally:
         monkeypatch.undo()
+
+
+def test_require_runner_plugin_missing_microsandbox_has_install_hint() -> None:
+    fake_entry_points = _FakeEntryPoints([])
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        "weft._runner_plugins.metadata.entry_points",
+        lambda: fake_entry_points,
+    )
+    try:
+        with pytest.raises(RuntimeError, match=r"Install weft\[microsandbox\]"):
+            require_runner_plugin("microsandbox")
+    finally:
+        monkeypatch.undo()

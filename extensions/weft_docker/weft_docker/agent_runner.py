@@ -255,8 +255,8 @@ class DockerProviderCLIRunner:
                         if status in {"created", "running", "restarting"}:
                             if cancel_requested is not None and cancel_requested():
                                 container.kill()
-                                terminal_status = "killed"
-                                terminal_error = "Target execution was killed"
+                                terminal_status = "cancelled"
+                                terminal_error = "Target execution cancelled"
                                 break
                             if (
                                 self._timeout is not None

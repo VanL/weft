@@ -49,7 +49,7 @@ jobs:
 
     - name: Install dependencies
       run: |
-        uv pip install --system -e ".[dev,docker,django,macos-sandbox]"
+        uv pip install --system -e ".[dev,docker,django,macos-sandbox,microsandbox]"
 
     - name: Set pytest worker count
       run: |
@@ -147,19 +147,19 @@ jobs:
 
     - name: Install dependencies
       run: |
-        uv pip install --system -e ".[dev,docker,django,macos-sandbox]"
+        uv pip install --system -e ".[dev,docker,django,macos-sandbox,microsandbox]"
 
     - name: Run linting with ruff
       run: |
-        ruff check weft tests integrations/weft_django extensions/weft_docker extensions/weft_macos_sandbox
+        ruff check weft tests integrations/weft_django extensions/weft_docker extensions/weft_macos_sandbox extensions/weft_microsandbox
 
     - name: Check formatting with ruff
       run: |
-        ruff format --check weft tests integrations/weft_django extensions/weft_docker extensions/weft_macos_sandbox
+        ruff format --check weft tests integrations/weft_django extensions/weft_docker extensions/weft_macos_sandbox extensions/weft_microsandbox
 
     - name: Type check with mypy
       run: |
-        mypy weft bin integrations/weft_django/weft_django extensions/weft_docker/weft_docker extensions/weft_macos_sandbox/weft_macos_sandbox --config-file pyproject.toml
+        mypy weft bin integrations/weft_django/weft_django extensions/weft_docker/weft_docker extensions/weft_macos_sandbox/weft_macos_sandbox extensions/weft_microsandbox/weft_microsandbox --config-file pyproject.toml
 
   test-django-integration:
     # Release commits are covered by the root tag release gate, which keeps
@@ -251,3 +251,32 @@ jobs:
     - name: Run macOS sandbox extension tests
       run: |
         pytest -q -n 0 extensions/weft_macos_sandbox/tests --durations=50 --durations-min=1.0 -o faulthandler_timeout=720 --timeout=900 --timeout-method=thread --full-trace
+
+  test-microsandbox-extension:
+    # Release commits are covered by the root tag release gate, which keeps
+    # bundled extension proof on the publishing path without rerunning it here.
+    if: ${{ github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'Release ') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+    - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+    - name: Set up Python
+      uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+      with:
+        python-version: "3.13"
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+      with:
+        version: ${{ env.UV_VERSION }}
+        enable-cache: true
+        cache-dependency-glob: "pyproject.toml"
+
+    - name: Install dependencies
+      run: |
+        uv pip install --system -e ".[dev,django,microsandbox]"
+
+    - name: Run Microsandbox extension tests
+      run: |
+        pytest -q -n 0 extensions/weft_microsandbox/tests --durations=50 --durations-min=1.0 -o faulthandler_timeout=720 --timeout=900 --timeout-method=thread --full-trace

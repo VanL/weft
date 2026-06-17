@@ -482,7 +482,9 @@ environment-profile materialization in `weft/core/environment_profiles.py`;
 task runner validation in `weft/core/agents/validation.py` and
 `weft/core/runner_validation.py`; plugin loading in `weft/_runner_plugins.py`;
 runner plugin interface in `weft/ext.py`; built-in host runner in
-`weft/core/runners/`.
+`weft/core/runners/`; optional first-party runner extensions in
+`extensions/weft_docker`, `extensions/weft_macos_sandbox`, and
+`extensions/weft_microsandbox`.
 
 Why this boundary exists:
 
@@ -502,8 +504,20 @@ Current rules:
   construction, but core still sees ordinary runner options, env, and working
   directory values. The first-party Docker extension owns
   `spec.runner.options.container_profile` for command tasks; core does not
-  interpret Docker profile files.
+  interpret Docker profile files. The first-party Microsandbox extension owns
+  `spec.runner.options.mode`, `image`, `executable`, `network`,
+  `workspace_mode`, `mounts`, `cwd`, and `sandbox_name_prefix`; core does not
+  interpret Microsandbox images or guest executable paths.
 - core owns lifecycle, queues, and control semantics
+
+Current first-party optional runner names:
+
+- `docker`: command tasks and Docker-backed one-shot `provider_cli` agent tasks
+  for providers with shipped image recipes.
+- `macos-sandbox`: macOS `sandbox-exec` command tasks only.
+- `microsandbox`: disposable Microsandbox command tasks and one-shot
+  `provider_cli` agent tasks. It rejects function, interactive, persistent,
+  and long-lived agent-session execution in the first shipped slice.
 
 ### 3.2 Runtime Handles and Control [CC-3.2]
 
@@ -547,6 +561,10 @@ Why this matters:
 - some runtimes are not reducible to one host process
 - CLI status and control need a cross-runner abstraction that still carries
   concrete identity when available
+- Microsandbox uses `RunnerHandle.kind == "sandboxed-process"` and
+  `RunnerHandle.id` as the sandbox identity. Any host PID observations are
+  best-effort evidence only; task lifecycle truth remains in queues and state
+  logs.
 
 ### 3.3 Validation and Preflight [CC-3.3]
 
@@ -598,6 +616,7 @@ TaskMonitor runtime boundary.
 
 ## Related Plans
 
+- [`docs/plans/2026-06-17-microsandbox-runner-plan.md`](../plans/2026-06-17-microsandbox-runner-plan.md)
 - [`docs/plans/2026-06-01-critical-review-remediation-plan.md`](../plans/2026-06-01-critical-review-remediation-plan.md)
 - [`docs/plans/2026-05-29-task-monitor-config-and-reactor-cache-cleanup-plan.md`](../plans/2026-05-29-task-monitor-config-and-reactor-cache-cleanup-plan.md)
 - [`docs/plans/2026-05-29-task-monitor-general-lifetime-reporting-plan.md`](../plans/2026-05-29-task-monitor-general-lifetime-reporting-plan.md)

@@ -375,6 +375,10 @@ different owners and run at different points:
 - runner-specific features such as Docker
   `spec.runner.options.work_item_mounts`: runner-owned late binding from the
   raw work item into ordinary runner inputs
+- runner-specific features such as Microsandbox `mode`, `image`,
+  `executable`, `network`, `workspace_mode`, `mounts`, `cwd`, and
+  `sandbox_name_prefix`: runner-owned inputs that remain ordinary
+  JSON-serializable `runner.options`
 
 Boundary rule:
 
@@ -421,7 +425,8 @@ at creation time or from `update_metadata` control messages over `ctrl_in`.
   - `agent`
 - `spec.runner` declares which execution backend should run that task:
   - built-in `host`
-  - installed external runners such as `docker` or `macos-sandbox`
+  - installed external runners such as `docker`, `macos-sandbox`, or
+    `microsandbox`
     - current platform note: the first-party `docker` runner is supported on
       Linux and macOS, but not Windows
 
@@ -452,6 +457,14 @@ inside Docker, or in another supported backend.
     from the Docker extension. That profile materializes ordinary Docker
     runner options and env at the plugin boundary; it is not core TaskSpec
     schema and is rejected for Docker-backed agent tasks.
+  - first-party Microsandbox tasks may set these runner-owned options:
+    `mode` (`"tool"` or `"agent"`, derived from `spec.type` when omitted),
+    `image` (required), `executable` (required in agent mode and interpreted
+    inside the guest image), `network` (`"none"` by default or `"allow"`),
+    `workspace_mode` (`"none"` by default, `"copy"`, `"mount-read-only"`,
+    or `"mount-read-write"`), `mounts`, `cwd`, and `sandbox_name_prefix`.
+    The Microsandbox runner rejects unknown option keys, unsupported task
+    types, interactive tasks, persistent tasks, and persistent agent sessions.
 
 Validation is layered:
 
@@ -486,7 +499,19 @@ runner, descriptor, and Docker availability, but it does not require the host
 provider executable to exist because the real provider runtime lives inside the
 container.
 
-_Implementation mapping_: `weft/core/taskspec/model.py` (`RunnerSection`, `resolve_taskspec_payload()`), `weft/core/environment_profiles.py` (`RunnerEnvironmentProfileResult`, `materialize_runner_environment()`, `materialize_runner_environment_from_taskspec()`), `weft/core/runner_validation.py` (`validate_taskspec_runner()`, `validate_taskspec_runner_environment()`, `validate_runner_capabilities()`, `runner_name_from_taskspec()`), `weft/ext.py` (`RunnerPlugin`, `RunnerHandle`, `RunnerEnvironmentProfile`), `weft/_runner_plugins.py` (`get_runner_plugin()`, `require_runner_plugin()`), `weft/core/tasks/runner.py` (`TaskRunner`, `_build_runner_validation_payload()`).
+The Microsandbox runner is a separate optional runner surface for disposable
+probably-hostile processes. In tool mode it runs command tasks, including
+stdio MCP servers, inside a fresh Microsandbox sandbox. In agent mode it runs
+one-shot `provider_cli` agent calls inside a fresh sandbox. It does not use
+Docker provider image recipes and does not infer provider executables from the
+host. Callers must supply `spec.runner.options.image` and, for agent mode,
+`spec.runner.options.executable` as a guest-local command. Its secure defaults
+are intentionally narrower than Docker's compatibility defaults:
+`network="none"`, `workspace_mode="none"`, no ambient host environment
+forwarding, and no persistent session support. Explicit `spec.env` values are
+passed into the guest.
+
+_Implementation mapping_: `weft/core/taskspec/model.py` (`RunnerSection`, `resolve_taskspec_payload()`), `weft/core/environment_profiles.py` (`RunnerEnvironmentProfileResult`, `materialize_runner_environment()`, `materialize_runner_environment_from_taskspec()`), `weft/core/runner_validation.py` (`validate_taskspec_runner()`, `validate_taskspec_runner_environment()`, `validate_runner_capabilities()`, `runner_name_from_taskspec()`), `weft/ext.py` (`RunnerPlugin`, `RunnerHandle`, `RunnerEnvironmentProfile`), `weft/_runner_plugins.py` (`get_runner_plugin()`, `require_runner_plugin()`), `weft/core/tasks/runner.py` (`TaskRunner`, `_build_runner_validation_payload()`), `extensions/weft_microsandbox/weft_microsandbox/_options.py` (`parse_options_from_payload()`, `parse_options()`), `extensions/weft_microsandbox/weft_microsandbox/plugin.py` (`MicrosandboxRunnerPlugin`).
 
 ### Autostart Manifests [TS-1.2]
 
@@ -566,6 +591,7 @@ _Implementation mapping_: `weft/core/tasks/base.py` (`BaseTask._apply_reserved_p
 
 ## Related Plans
 
+- [`docs/plans/2026-06-17-microsandbox-runner-plan.md`](../plans/2026-06-17-microsandbox-runner-plan.md)
 - [`docs/plans/2026-05-28-docker-container-profiles-plan.md`](../plans/2026-05-28-docker-container-profiles-plan.md)
 - [`docs/plans/2026-04-06-piped-input-support-plan.md`](../plans/2026-04-06-piped-input-support-plan.md)
 - [`docs/plans/2026-04-13-pipeline-spec-expansion-plan.md`](../plans/2026-04-13-pipeline-spec-expansion-plan.md)

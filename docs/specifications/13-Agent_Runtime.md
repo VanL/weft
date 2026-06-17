@@ -534,11 +534,11 @@ Backend-specific notes:
 - delegated startup validation remains static. It may resolve executable paths
   and project-local launch defaults, but it does not spawn provider CLIs just
   to prove health
-- for the Docker-backed one-shot lane specifically, ahead-of-time validation
-  also skips host provider-executable checks. The important static checks there
-  are Docker availability plus the provider's image-recipe and runtime-
-  descriptor contract; the actual provider behavior is proven only on real
-  container start
+- for the Docker-backed and Microsandbox-backed one-shot lanes specifically,
+  ahead-of-time validation also skips host provider-executable checks. The
+  important static checks are runner availability plus the runner-owned
+  image/executable contract; the actual provider behavior is proven only on
+  real container or sandbox start
 - ordinary `weft run` submission does not add a separate speculative "does this
   provider CLI run here" gate either; the real delegated startup is attempted
   on the normal execution path, and failures surface from that real start
@@ -591,6 +591,13 @@ Backend-specific notes:
   created by the Docker runner, but the outer task lifecycle still stays on the
   existing `TaskSpec -> Manager -> Consumer -> TaskRunner -> runner plugin ->
   queues/state log` spine
+- Microsandbox-backed one-shot provider execution runs inside a fresh
+  Microsandbox sandbox created by the Microsandbox runner, but the outer task
+  lifecycle still stays on the existing `TaskSpec -> Manager -> Consumer ->
+  TaskRunner -> runner plugin -> queues/state log` spine. The runner requires
+  an explicit `spec.runner.options.image` and guest-local
+  `spec.runner.options.executable`; it does not use Docker provider image
+  recipes or host executable resolution.
 - Docker-backed command and provider lanes publish their runtime handle only
   after the container has left Docker's transient `created` state. If Docker
   cannot make the runtime observable within the configured startup budget, the
@@ -607,6 +614,13 @@ Backend-specific notes:
 - Docker container profiles are a Docker command-runner feature. Docker-backed
   agent tasks reject `spec.runner.options.container_profile` and continue to
   use provider image recipes and provider container runtime descriptors.
+- Microsandbox-backed agent tasks accept only one-shot `provider_cli` with
+  `spec.persistent=false` and
+  `spec.agent.conversation_scope="per_message"`. They reject persistent agent
+  sessions and default to `network="none"` and `workspace_mode="none"`.
+  Credentials or provider env needed inside the guest must be explicit in
+  `spec.env`; ambient host environment forwarding is not part of the first
+  shipped Microsandbox lane.
 - in both lanes, timeout, cancellation, reserved-queue policy, and outbox
   writes stay on the existing durable spine
 
@@ -664,6 +678,41 @@ Keychain. Tasks that want Docker-backed Claude should therefore use explicit
 portable auth such as `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_AUTH_TOKEN`,
 `ANTHROPIC_API_KEY`, or a Linux `~/.claude/.credentials.json`.
 
+Example TaskSpec shape for the Microsandbox-backed one-shot lane:
+
+```jsonc
+{
+  "spec": {
+    "type": "agent",
+    "persistent": false,
+    "agent": {
+      "runtime": "provider_cli",
+      "conversation_scope": "per_message",
+      "runtime_config": {
+        "provider": "codex"
+      }
+    },
+    "env": {
+      "OPENAI_API_KEY": "..."
+    },
+    "runner": {
+      "name": "microsandbox",
+      "options": {
+        "mode": "agent",
+        "image": "ghcr.io/acme/codex-provider:latest",
+        "executable": "codex",
+        "network": "allow",
+        "workspace_mode": "none"
+      }
+    }
+  }
+}
+```
+
+The `executable` value is resolved inside the guest image, not on the host.
+Microsandbox agent mode returns through the same provider CLI parser and public
+agent result contract as host and Docker one-shot provider CLI execution.
+
 _Implementation mapping:_ Resolver and tool-profile loading:
 `weft/core/agents/resolution.py`. Agent-runtime and delegated tool-profile
 load and preflight validation: `weft/core/agents/validation.py`. Provider
@@ -683,8 +732,10 @@ Docker-backed one-shot runner and image helpers:
 `extensions/weft_docker/weft_docker/plugin.py`,
 `extensions/weft_docker/weft_docker/agent_runner.py`,
 `extensions/weft_docker/weft_docker/agent_images.py`,
-`extensions/weft_docker/weft_docker/images.py`. Explicit cache-warming builtin:
-`weft/builtins/agent_images.py`. Backend registration:
+`extensions/weft_docker/weft_docker/images.py`. Microsandbox-backed one-shot
+runner: `extensions/weft_microsandbox/weft_microsandbox/plugin.py`.
+Explicit cache-warming builtin: `weft/builtins/agent_images.py`.
+Backend registration:
 `weft/core/agents/backends/__init__.py`.
 
 ## Non-Goals [AR-8]
@@ -729,9 +780,12 @@ This slice does not attempt to:
 - Persistent runtime subprocess orchestration: `weft/core/tasks/runner.py`
 - Private session protocol: `weft/core/tasks/agent_session_protocol.py`
 - CLI result aggregation: `weft/cli/run.py`, `weft/commands/result.py`
+- Microsandbox-backed one-shot provider execution:
+  `extensions/weft_microsandbox/weft_microsandbox/plugin.py`
 
 ## Related Plans
 
+- [`docs/plans/2026-06-17-microsandbox-runner-plan.md`](../plans/2026-06-17-microsandbox-runner-plan.md)
 - [`docs/plans/2026-06-01-critical-review-remediation-plan.md`](../plans/2026-06-01-critical-review-remediation-plan.md)
 - [`docs/plans/2026-05-28-docker-container-profiles-plan.md`](../plans/2026-05-28-docker-container-profiles-plan.md)
 - [`docs/plans/2026-05-08-agent-session-and-task-startup-observability-plan.md`](../plans/2026-05-08-agent-session-and-task-startup-observability-plan.md)

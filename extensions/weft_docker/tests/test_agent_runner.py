@@ -251,3 +251,128 @@ def test_agent_runner_uses_cached_image_tag_returned_by_ensure_agent_image(
     kwargs = cast(dict[str, object], created["kwargs"])
     labels = cast(dict[str, str], kwargs["labels"])
     assert labels["weft.agent.image.cache_key"] == "cached-key"
+
+
+def test_agent_runner_reports_cancel_requested_as_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    killed: list[bool] = []
+
+    class FakeContainer:
+        def __init__(self) -> None:
+            self.name = "weft-agent-cancel"
+            self.id = "container-id"
+            state: dict[str, object] = {
+                "Status": "running",
+                "ExitCode": None,
+                "OOMKilled": False,
+            }
+            self.attrs: dict[str, object] = {"State": state}
+
+        def start(self) -> None:
+            return None
+
+        def reload(self) -> None:
+            return None
+
+        def kill(self) -> None:
+            killed.append(True)
+            state = cast(dict[str, object], self.attrs["State"])
+            state["Status"] = "exited"
+            state["ExitCode"] = 137
+
+        def logs(self, *, stdout: bool = False, stderr: bool = False) -> bytes:
+            del stdout, stderr
+            return b""
+
+        def remove(self, force: bool = False) -> None:
+            del force
+            return None
+
+    class FakeContainers:
+        def create(
+            self, image: str, command: list[str], **kwargs: object
+        ) -> FakeContainer:
+            del image, command, kwargs
+            return FakeContainer()
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.containers = FakeContainers()
+
+    @contextmanager
+    def fake_docker_client() -> Iterator[FakeClient]:
+        yield FakeClient()
+
+    class FakeMount:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
+    class FakeUlimit:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(
+        "weft_docker.agent_runner.resolve_provider_container_runtime",
+        lambda provider_name, task_env, working_dir, explicit_mounts: SimpleNamespace(
+            env={}, mounts=()
+        ),
+    )
+    monkeypatch.setattr(
+        "weft_docker.agent_runner.ensure_agent_image",
+        lambda provider_name: SimpleNamespace(
+            image="weft-agent-codex:cached123",
+            cache_key="cached-key",
+            recipe=SimpleNamespace(default_executable="codex"),
+        ),
+    )
+    monkeypatch.setattr(
+        "weft_docker.agent_runner.prepare_provider_container_runtime",
+        lambda provider_name, runtime_requirements, temp_root: SimpleNamespace(
+            mounts=(), env={}
+        ),
+    )
+    monkeypatch.setattr(
+        "weft_docker.agent_runner.prepare_provider_cli_execution",
+        lambda **kwargs: SimpleNamespace(
+            invocation=SimpleNamespace(
+                stdin_text=None,
+                cwd="/tmp",
+                env={},
+                command=("codex", "exec", "prompt"),
+            ),
+            provider=SimpleNamespace(),
+        ),
+    )
+    monkeypatch.setattr(
+        "weft_docker.agent_runner.load_docker_sdk",
+        lambda: SimpleNamespace(
+            types=SimpleNamespace(Mount=FakeMount, Ulimit=FakeUlimit)
+        ),
+    )
+    monkeypatch.setattr("weft_docker.agent_runner.docker_client", fake_docker_client)
+
+    runner = DockerProviderCLIRunner(
+        tid="1234567890",
+        agent={
+            "runtime": "provider_cli",
+            "authority_class": "general",
+            "conversation_scope": "per_message",
+            "runtime_config": {"provider": "codex"},
+        },
+        env={},
+        working_dir=None,
+        timeout=5.0,
+        limits=None,
+        monitor_interval=0.01,
+        runner_options={"container_workdir": "/tmp", "mount_workdir": False},
+    )
+
+    outcome = runner.run_with_hooks(
+        {"task": "slow"},
+        cancel_requested=lambda: True,
+    )
+
+    assert killed == [True]
+    assert outcome.status == "cancelled"
+    assert outcome.error == "Target execution cancelled"

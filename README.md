@@ -50,6 +50,9 @@ uv add 'weft[docker]'
 # Install macOS sandbox runner support
 uv add 'weft[macos-sandbox]'
 
+# Install Microsandbox runner support
+uv add 'weft[microsandbox]'
+
 # Install Django integration support
 uv add 'weft[django]'
 
@@ -66,17 +69,21 @@ variables; the extra only makes the Postgres backend available.
 
 Runner extras work the same way: `weft[docker]` adds the Docker runner plugin
 plus the Docker SDK dependency, `weft[macos-sandbox]` adds the macOS sandbox
-runner plugin, and `weft[django]` adds the first-party Django integration
-package. `weft[django-channels]` adds that Django integration plus the optional
+runner plugin, and `weft[microsandbox]` adds the Microsandbox runner plugin.
+`weft[django]` adds the first-party Django integration package.
+`weft[django-channels]` adds that Django integration plus the optional
 Channels/WebSocket realtime transport. The first-party Docker runner is
-currently supported on Linux and macOS only. `weft[all]` installs the current
-first-party optional backends, runner plugins, and framework integrations
-together; it does not pull nested framework transport extras such as Channels.
-Runner selection still happens per TaskSpec through `spec.runner`. The current
-Docker runner owns normal command tasks and the Docker-backed one-shot
-`provider_cli` agent lane for providers with explicit image recipes. The
-current shipped image-recipe set is `claude_code`, `codex`, `gemini`,
-`opencode`, and `qwen`.
+currently supported on Linux and macOS only. The Microsandbox runner requires a
+supported Microsandbox runtime: Linux x86_64/aarch64 or macOS Apple Silicon.
+`weft[all]` installs the current first-party optional backends, runner plugins,
+and framework integrations together; it does not pull nested framework
+transport extras such as Channels. Runner selection still happens per TaskSpec
+through `spec.runner`. The current Docker runner owns normal command tasks and
+the Docker-backed one-shot `provider_cli` agent lane for providers with
+explicit image recipes. The current shipped image-recipe set is `claude_code`,
+`codex`, `gemini`, `opencode`, and `qwen`. The Microsandbox runner owns
+disposable command tasks and one-shot `provider_cli` agent calls with explicit
+guest images and guest executables.
 
 ## Quick Start
 
@@ -363,6 +370,73 @@ input-mount abstraction.
 `prepare-agent-images` is optional. It can warm the local image cache ahead of
 time, but ordinary `weft run` still takes the normal path and builds on cache
 miss when needed.
+
+## Microsandbox Runner
+
+The optional `microsandbox` runner runs each work item in a disposable
+Microsandbox sandbox. It is meant for probably-hostile tools, MCP servers, and
+skills where the host runner is too permissive and Docker is not a hard enough
+boundary for the threat model. It is a process and filesystem boundary, not a
+semantic defense against prompt injection or malicious output.
+
+Tool mode runs command tasks:
+
+```jsonc
+{
+  "spec": {
+    "type": "command",
+    "process_target": "python",
+    "args": ["-c", "print('hello')"],
+    "runner": {
+      "name": "microsandbox",
+      "options": {
+        "image": "python:3.12-alpine",
+        "mode": "tool",
+        "network": "none",
+        "workspace_mode": "none"
+      }
+    }
+  }
+}
+```
+
+Agent mode runs one-shot `provider_cli` tasks only. The image and executable
+are explicit guest inputs; Weft does not resolve the executable on the host and
+does not reuse Docker provider image recipes.
+
+```jsonc
+{
+  "spec": {
+    "type": "agent",
+    "persistent": false,
+    "agent": {
+      "runtime": "provider_cli",
+      "conversation_scope": "per_message",
+      "runtime_config": {
+        "provider": "codex"
+      }
+    },
+    "env": {
+      "OPENAI_API_KEY": "..."
+    },
+    "runner": {
+      "name": "microsandbox",
+      "options": {
+        "image": "ghcr.io/acme/codex-provider:latest",
+        "mode": "agent",
+        "executable": "codex",
+        "network": "allow",
+        "workspace_mode": "none"
+      }
+    }
+  }
+}
+```
+
+Secure defaults are intentionally narrow: `network` defaults to `none`,
+`workspace_mode` defaults to `none`, host environment variables are not
+forwarded unless they are explicit in `spec.env`, and persistent or interactive
+tasks are rejected.
 
 For the current builtin catalog and contract, see
 [Builtin TaskSpecs](docs/specifications/10B-Builtin_TaskSpecs.md).
@@ -900,7 +974,7 @@ uv sync --all-extras
 # Static checks
 ./.venv/bin/ruff check weft tests
 ./.venv/bin/ruff format weft tests
-./.venv/bin/mypy weft extensions/weft_docker extensions/weft_macos_sandbox
+./.venv/bin/mypy weft extensions/weft_docker extensions/weft_macos_sandbox extensions/weft_microsandbox
 
 # Build
 uv build
@@ -913,10 +987,11 @@ Weft uses a tag-driven release flow in GitHub Actions:
 - [`.github/workflows/release-gate.yml`](./.github/workflows/release-gate.yml)
   runs on pushed `v*` tags, executes the full SQLite suite plus the
   PG-compatible suite via [`bin/pytest-pg`](./bin/pytest-pg), runs the
-  Docker extension test suite on Ubuntu and the macOS sandbox extension test
-  suite on macOS, and only invokes the publish workflow if every job passes.
-  If the tag is moved while a gate is running, the older run is canceled and
-  the gate refuses to publish from the stale tag state.
+  Docker extension test suite on Ubuntu, the macOS sandbox extension test
+  suite on macOS, and the Microsandbox extension test suite on Ubuntu, and
+  only invokes the publish workflow if every job passes. If the tag is moved
+  while a gate is running, the older run is canceled and the gate refuses to
+  publish from the stale tag state.
 - [`.github/workflows/release-gate-docker.yml`](./.github/workflows/release-gate-docker.yml)
   runs on pushed `weft_docker/v*` tags, executes the Docker extension package
   tests on Ubuntu, and publishes the `weft-docker` package to PyPI if the tag
@@ -928,6 +1003,10 @@ Weft uses a tag-driven release flow in GitHub Actions:
 - [`.github/workflows/release-gate-macos-sandbox.yml`](./.github/workflows/release-gate-macos-sandbox.yml)
   runs on pushed `weft_macos_sandbox/v*` tags, executes the macOS sandbox
   extension package tests on macOS, and publishes the `weft-macos-sandbox`
+  package to PyPI if the tag still points at the tested commit.
+- [`.github/workflows/release-gate-microsandbox.yml`](./.github/workflows/release-gate-microsandbox.yml)
+  runs on pushed `weft_microsandbox/v*` tags, executes the Microsandbox
+  extension package tests on Ubuntu, and publishes the `weft-microsandbox`
   package to PyPI if the tag still points at the tested commit.
 - [`.github/workflows/release.yml`](./.github/workflows/release.yml) is a
   reusable workflow that can only be called from a release gate; it handles
@@ -963,6 +1042,7 @@ packages:
 - `extensions/weft_docker/pyproject.toml`
 - `integrations/weft_django/pyproject.toml`
 - `extensions/weft_macos_sandbox/pyproject.toml`
+- `extensions/weft_microsandbox/pyproject.toml`
 
 If any package version is still unpublished on PyPI, the helper pushes the
 matching namespaced tag from the tested commit:
@@ -970,6 +1050,7 @@ matching namespaced tag from the tested commit:
 - `weft_docker/vX.Y.Z`
 - `weft_django/vX.Y.Z`
 - `weft_macos_sandbox/vX.Y.Z`
+- `weft_microsandbox/vX.Y.Z`
 
 Those namespaced tags can also be pushed manually when you want to release just
 one first-party package.
@@ -987,6 +1068,7 @@ Before it tags and pushes, the helper runs:
 3. The Django integration tests
 4. The Docker extension tests when Docker is available locally
 5. The macOS sandbox extension tests when running on macOS
+6. The Microsandbox extension tests
 
 After the helper pushes `v0.1.1`, the release gate workflow will:
 
@@ -995,15 +1077,16 @@ After the helper pushes `v0.1.1`, the release gate workflow will:
 3. Run the Django integration tests on Ubuntu
 4. Run the Docker extension tests on Ubuntu
 5. Run the macOS sandbox extension tests on macOS
-6. Confirm the tag still points at the tested commit
-7. Invoke the package release workflow only if all suites pass
-8. Build distributions with `uv build`
-9. Publish to PyPI with `uv publish --trusted-publishing always dist/*`
-10. Sign artifacts, create the GitHub Release, and upload the release files once PyPI succeeds
+6. Run the Microsandbox extension tests on Ubuntu
+7. Confirm the tag still points at the tested commit
+8. Invoke the package release workflow only if all suites pass
+9. Build distributions with `uv build`
+10. Publish to PyPI with `uv publish --trusted-publishing always dist/*`
+11. Sign artifacts, create the GitHub Release, and upload the release files once PyPI succeeds
 
 If the helper also pushes a namespaced package tag such as `weft_docker/vX.Y.Z`,
-`weft_django/vX.Y.Z`, or `weft_macos_sandbox/vX.Y.Z`, the package-specific
-release gates will:
+`weft_django/vX.Y.Z`, `weft_macos_sandbox/vX.Y.Z`, or
+`weft_microsandbox/vX.Y.Z`, the package-specific release gates will:
 
 1. Run the matching package test suite
 2. Verify the namespaced tag still points at the tested commit
@@ -1013,8 +1096,8 @@ release gates will:
 Prerequisite:
 
 - Configure the PyPI Trusted Publisher for `weft`, `weft-docker`,
-  `weft-django`, and `weft-macos-sandbox`, each with the corresponding
-  GitHub Actions workflow.
+  `weft-django`, `weft-macos-sandbox`, and `weft-microsandbox`, each with the
+  corresponding GitHub Actions workflow.
 
 ## Supervised Manager
 

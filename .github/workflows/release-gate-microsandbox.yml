@@ -1,0 +1,63 @@
+name: Release Gate (weft-microsandbox)
+
+on:
+  push:
+    tags:
+      - "weft_microsandbox/v*"
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: release-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_VERSION: "0.11.11"
+
+jobs:
+  test-microsandbox-extension:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+
+      - name: Install dependencies
+        run: |
+          uv pip install --system -e ".[dev,microsandbox]"
+
+      - name: Run Microsandbox extension tests
+        run: |
+          pytest -q -n 0 extensions/weft_microsandbox/tests --durations=50 --durations-min=1.0 -o faulthandler_timeout=720 --timeout=900 --timeout-method=thread --full-trace
+
+  publish-release:
+    needs:
+      - test-microsandbox-extension
+    uses: ./.github/workflows/release.yml
+    with:
+      package_name: weft-microsandbox
+      package_dir: extensions/weft_microsandbox
+      tag_name: ${{ github.ref_name }}
+      release_ref: ${{ github.sha }}
+      expected_tag_commit: ${{ github.sha }}
+      create_github_release: false
+    permissions:
+      actions: read
+      contents: write
+      id-token: write

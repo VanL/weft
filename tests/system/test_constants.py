@@ -101,6 +101,7 @@ _RUNTIME_OBJECT_ALLOWLIST = {
     "extensions/weft_docker/weft_docker/agent_runner.py": {"_WORK_ITEM_MISSING"},
     "extensions/weft_docker/weft_docker/plugin.py": {"_PLUGIN"},
     "extensions/weft_macos_sandbox/weft_macos_sandbox/plugin.py": {"_PLUGIN"},
+    "extensions/weft_microsandbox/weft_microsandbox/plugin.py": {"_PLUGIN"},
     "weft/core/agents/provider_cli/registry.py": {"_PROVIDERS"},
     "weft/core/agents/provider_cli/windows_shims.py": {"_TOKEN_RE"},
     "weft/core/agents/runtime.py": {"_RUNTIME_REGISTRY"},

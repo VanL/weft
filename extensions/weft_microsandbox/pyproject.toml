@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "weft-microsandbox"
+version = "0.5.0"
+description = "Microsandbox runner plugin for Weft"
+readme = "README.md"
+requires-python = ">=3.12"
+license = {text = "MIT"}
+authors = [
+    {name = "Van Lindberg", email = "van@modelmonster.ai"},
+]
+dependencies = [
+    "microsandbox>=0.5.7",
+    "weft>=0.9.81",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+]
+
+[project.entry-points."weft.runners"]
+microsandbox = "weft_microsandbox.plugin:get_runner_plugin"
+
+[tool.hatch.build]
+include = [
+    "weft_microsandbox/**/*.py",
+    "README.md",
+]

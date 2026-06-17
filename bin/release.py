@@ -34,6 +34,12 @@ MACOS_SANDBOX_EXTENSION_DIR: Final[Path] = (
 MACOS_SANDBOX_EXTENSION_PYPROJECT_PATH: Final[Path] = (
     MACOS_SANDBOX_EXTENSION_DIR / "pyproject.toml"
 )
+MICROSANDBOX_EXTENSION_DIR: Final[Path] = (
+    PROJECT_ROOT / "extensions" / "weft_microsandbox"
+)
+MICROSANDBOX_EXTENSION_PYPROJECT_PATH: Final[Path] = (
+    MICROSANDBOX_EXTENSION_DIR / "pyproject.toml"
+)
 UV_LOCK_PATH: Final[Path] = PROJECT_ROOT / "uv.lock"
 PYTEST_WORKER_COUNT_HELPER: Final[Path] = PROJECT_ROOT / "bin" / "pytest-worker-count"
 ROOT_RELEASE_GATE_WORKFLOW: Final[str] = ".github/workflows/release-gate.yml"
@@ -41,6 +47,9 @@ DOCKER_RELEASE_GATE_WORKFLOW: Final[str] = ".github/workflows/release-gate-docke
 DJANGO_RELEASE_GATE_WORKFLOW: Final[str] = ".github/workflows/release-gate-django.yml"
 MACOS_SANDBOX_RELEASE_GATE_WORKFLOW: Final[str] = (
     ".github/workflows/release-gate-macos-sandbox.yml"
+)
+MICROSANDBOX_RELEASE_GATE_WORKFLOW: Final[str] = (
+    ".github/workflows/release-gate-microsandbox.yml"
 )
 RELEASE_GATE_WORKFLOW: Final[str] = ROOT_RELEASE_GATE_WORKFLOW
 GITHUB_API_BASE: Final[str] = "https://api.github.com"
@@ -67,6 +76,8 @@ BASE_PRECHECK_COMMANDS: Final[tuple[tuple[str, ...], ...]] = (
         "django",
         "--extra",
         "macos-sandbox",
+        "--extra",
+        "microsandbox",
         "pytest",
         "-v",
         "--tb=short",
@@ -85,6 +96,8 @@ BASE_PRECHECK_COMMANDS: Final[tuple[tuple[str, ...], ...]] = (
         "django",
         "--extra",
         "macos-sandbox",
+        "--extra",
+        "microsandbox",
         "bin/pytest-pg",
         "--all",
     ),
@@ -99,6 +112,8 @@ BASE_PRECHECK_COMMANDS: Final[tuple[tuple[str, ...], ...]] = (
         "django",
         "--extra",
         "macos-sandbox",
+        "--extra",
+        "microsandbox",
         "ruff",
         "check",
         "weft",
@@ -106,6 +121,7 @@ BASE_PRECHECK_COMMANDS: Final[tuple[tuple[str, ...], ...]] = (
         "integrations/weft_django",
         "extensions/weft_docker",
         "extensions/weft_macos_sandbox",
+        "extensions/weft_microsandbox",
     ),
     (
         "uv",
@@ -118,6 +134,8 @@ BASE_PRECHECK_COMMANDS: Final[tuple[tuple[str, ...], ...]] = (
         "django",
         "--extra",
         "macos-sandbox",
+        "--extra",
+        "microsandbox",
         "ruff",
         "format",
         "--check",
@@ -126,6 +144,7 @@ BASE_PRECHECK_COMMANDS: Final[tuple[tuple[str, ...], ...]] = (
         "integrations/weft_django",
         "extensions/weft_docker",
         "extensions/weft_macos_sandbox",
+        "extensions/weft_microsandbox",
     ),
     (
         "uv",
@@ -138,11 +157,14 @@ BASE_PRECHECK_COMMANDS: Final[tuple[tuple[str, ...], ...]] = (
         "django",
         "--extra",
         "macos-sandbox",
+        "--extra",
+        "microsandbox",
         "mypy",
         "weft",
         "integrations/weft_django/weft_django",
         "extensions/weft_docker/weft_docker",
         "extensions/weft_macos_sandbox/weft_macos_sandbox",
+        "extensions/weft_microsandbox/weft_microsandbox",
         "--config-file",
         "pyproject.toml",
     ),
@@ -158,6 +180,8 @@ DJANGO_INTEGRATION_TEST_COMMAND: Final[tuple[str, ...]] = (
     "django",
     "--extra",
     "macos-sandbox",
+    "--extra",
+    "microsandbox",
     "pytest",
     "-q",
     "-n",
@@ -175,6 +199,8 @@ DOCKER_EXTENSION_TEST_COMMAND: Final[tuple[str, ...]] = (
     "django",
     "--extra",
     "macos-sandbox",
+    "--extra",
+    "microsandbox",
     "pytest",
     "-q",
     "-n",
@@ -192,11 +218,32 @@ MACOS_SANDBOX_EXTENSION_TEST_COMMAND: Final[tuple[str, ...]] = (
     "django",
     "--extra",
     "macos-sandbox",
+    "--extra",
+    "microsandbox",
     "pytest",
     "-q",
     "-n",
     "0",
     "extensions/weft_macos_sandbox/tests",
+)
+MICROSANDBOX_EXTENSION_TEST_COMMAND: Final[tuple[str, ...]] = (
+    "uv",
+    "run",
+    "--extra",
+    "dev",
+    "--extra",
+    "docker",
+    "--extra",
+    "django",
+    "--extra",
+    "macos-sandbox",
+    "--extra",
+    "microsandbox",
+    "pytest",
+    "-q",
+    "-n",
+    "0",
+    "extensions/weft_microsandbox/tests",
 )
 PRECHECK_ENV_OVERRIDES: Final[dict[str, str]] = {
     "PYTEST_ADDOPTS": "-x --maxfail=1",
@@ -305,10 +352,20 @@ MACOS_SANDBOX_RELEASE_TARGET: Final[ReleaseTarget] = ReleaseTarget(
     tag_namespace="weft_macos_sandbox",
     release_gate_workflow=MACOS_SANDBOX_RELEASE_GATE_WORKFLOW,
 )
+MICROSANDBOX_RELEASE_TARGET: Final[ReleaseTarget] = ReleaseTarget(
+    key="microsandbox",
+    package_name="weft-microsandbox",
+    display_name="weft-microsandbox",
+    package_dir=MICROSANDBOX_EXTENSION_DIR,
+    pyproject_path=MICROSANDBOX_EXTENSION_PYPROJECT_PATH,
+    tag_namespace="weft_microsandbox",
+    release_gate_workflow=MICROSANDBOX_RELEASE_GATE_WORKFLOW,
+)
 FIRST_PARTY_EXTENSION_TARGETS: Final[tuple[ReleaseTarget, ...]] = (
     DOCKER_RELEASE_TARGET,
     DJANGO_RELEASE_TARGET,
     MACOS_SANDBOX_RELEASE_TARGET,
+    MICROSANDBOX_RELEASE_TARGET,
 )
 
 
@@ -490,6 +547,7 @@ def build_precheck_commands(
 
     commands = list(BASE_PRECHECK_COMMANDS)
     commands.insert(2, DJANGO_INTEGRATION_TEST_COMMAND)
+    commands.insert(3, MICROSANDBOX_EXTENSION_TEST_COMMAND)
 
     if include_docker_extension_tests is None:
         include_docker_extension_tests = _docker_available_for_tests()
@@ -497,9 +555,9 @@ def build_precheck_commands(
         include_macos_sandbox_extension_tests = _host_supports_macos_sandbox_tests()
 
     if include_docker_extension_tests:
-        commands.insert(3, DOCKER_EXTENSION_TEST_COMMAND)
+        commands.insert(4, DOCKER_EXTENSION_TEST_COMMAND)
     if include_macos_sandbox_extension_tests:
-        insert_at = 4 if include_docker_extension_tests else 3
+        insert_at = 5 if include_docker_extension_tests else 4
         commands.insert(insert_at, MACOS_SANDBOX_EXTENSION_TEST_COMMAND)
 
     return tuple(commands)
@@ -514,6 +572,7 @@ def build_postupdate_steps() -> tuple[CommandStep, ...]:
         CommandStep(("uv", "build"), cwd=DJANGO_INTEGRATION_DIR),
         CommandStep(("uv", "build"), cwd=DOCKER_EXTENSION_DIR),
         CommandStep(("uv", "build"), cwd=MACOS_SANDBOX_EXTENSION_DIR),
+        CommandStep(("uv", "build"), cwd=MICROSANDBOX_EXTENSION_DIR),
     )
 
 

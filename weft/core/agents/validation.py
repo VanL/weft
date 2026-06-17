@@ -42,7 +42,7 @@ def validate_taskspec_agent_runtime(
     runtime = get_agent_runtime(agent.runtime)
     validate = getattr(runtime, "validate", None)
     if callable(validate):
-        effective_preflight = preflight and not _is_docker_one_shot_provider_cli(
+        effective_preflight = preflight and not _is_runner_one_shot_provider_cli(
             taskspec_payload
         )
         validate(
@@ -77,7 +77,7 @@ def validate_taskspec_agent_tool_profile(
     runtime = get_agent_runtime(agent.runtime)
     validate = getattr(runtime, "validate_tool_profile", None)
     if callable(validate):
-        effective_preflight = preflight and not _is_docker_one_shot_provider_cli(
+        effective_preflight = preflight and not _is_runner_one_shot_provider_cli(
             taskspec_payload
         )
         validate(
@@ -113,7 +113,7 @@ def _tid_from_payload(taskspec_payload: Mapping[str, Any]) -> str | None:
     return None
 
 
-def _is_docker_one_shot_provider_cli(taskspec_payload: Mapping[str, Any]) -> bool:
+def _is_runner_one_shot_provider_cli(taskspec_payload: Mapping[str, Any]) -> bool:
     spec = taskspec_payload.get("spec")
     if not isinstance(spec, Mapping):
         return False
@@ -125,7 +125,10 @@ def _is_docker_one_shot_provider_cli(taskspec_payload: Mapping[str, Any]) -> boo
     if not isinstance(runner, Mapping):
         return False
     runner_name = runner.get("name")
-    if not isinstance(runner_name, str) or runner_name.strip() != "docker":
+    if not isinstance(runner_name, str) or runner_name.strip() not in {
+        "docker",
+        "microsandbox",
+    }:
         return False
     agent = spec.get("agent")
     if not isinstance(agent, Mapping):

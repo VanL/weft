@@ -12,7 +12,9 @@ failures that are visible through state, control, and reserved-queue behavior.
 _Implementation mapping_: `weft/core/resource_monitor.py`,
 `weft/core/runners/host.py`, `weft/core/runners/subprocess_runner.py`,
 `weft/core/tasks/runner.py`, `weft/core/tasks/base.py`,
-`weft/core/tasks/consumer.py`, `weft/ext.py`, `weft/_runner_plugins.py`.
+`weft/core/tasks/consumer.py`, `weft/ext.py`, `weft/_runner_plugins.py`,
+`extensions/weft_microsandbox/weft_microsandbox/_options.py`,
+`extensions/weft_microsandbox/weft_microsandbox/_runtime.py`.
 
 See also:
 
@@ -43,7 +45,9 @@ Current behavior:
   response (terminate on a confirmed violation, no throttling), not an
   instantaneous ceiling. Host (psutil) detection is bounded by the sample window,
   so a fast allocator can transiently exceed `memory_mb` between samples before
-  termination; Docker-backed runners map the limit to a native runtime quota.
+  termination; Docker-backed runners map the limit to a native runtime quota;
+  the Microsandbox runner passes `memory_mb` through to the Microsandbox SDK
+  when used.
 - violations terminate the task and surface a limit failure
 
 _Implementation mapping_: `weft/core/resource_monitor.py`
@@ -60,6 +64,8 @@ Current behavior:
 - the host path treats sustained over-limit CPU as a hard violation
 - Docker-backed runners map CPU limits into native runtime quotas instead of
   relying on the psutil window
+- the Microsandbox runner converts `cpu_percent` into an SDK CPU allocation
+  for the sandbox instead of relying on a host psutil process tree
 - the response is termination, not throttling
 
 _Implementation mapping_: `weft/core/resource_monitor.py`
@@ -74,6 +80,7 @@ Current behavior:
 - open-file counts are sampled when the backend can provide them
 - psutil-backed runtimes enforce configured fd limits as hard limits
 - Docker-backed runners map fd limits into native runtime ulimits
+- the Microsandbox runner maps `max_fds` into an SDK `nofile` rlimit
 
 _Implementation mapping_: `weft/core/resource_monitor.py`
 `PsutilResourceMonitor._open_file_count`; `weft/core/taskspec/model.py`
@@ -87,6 +94,10 @@ Current behavior:
 - psutil-backed runtimes enforce configured connection limits as hard limits
 - Docker-backed runners currently support only `max_connections=0`, which maps
   to network isolation; other values are rejected
+- the Microsandbox runner follows the same first-slice policy:
+  `max_connections=0` maps to `runner.options.network="none"`, explicit
+  `network="allow"` conflicts with `max_connections=0`, and non-zero
+  `max_connections` values are rejected
 
 _Implementation mapping_: `weft/core/resource_monitor.py`
 `PsutilResourceMonitor._connection_count`; `weft/core/taskspec/model.py`
@@ -139,6 +150,9 @@ Current behavior:
 
 - one-shot command and function targets use `spec.timeout` to bound their
   concrete execution work
+- one-shot Microsandbox command and agent targets pass `spec.timeout` to the
+  Microsandbox SDK execution call and still report timeout through the normal
+  task lifecycle
 - persistent agent sessions use `spec.timeout` for each session `execute` call
   after the private session worker is ready
 - persistent agent session startup uses a separate internal readiness timeout
@@ -203,6 +217,13 @@ backend-specific controls in some runner plugins. The contract does not promise
 a universal cgroup or container sandbox, and it does not require every runner
 to expose the same native controls.
 
+The Microsandbox runner is a stronger optional process/filesystem boundary for
+disposable workloads, but it is still a runner-specific backend. Its default
+network policy is `none`, its default workspace policy is `none`, and
+unsupported limit or workspace requests fail validation instead of silently
+widening access. This is an isolation boundary only; it is not semantic
+protection against prompt injection or malicious output.
+
 ### Environment Variables
 
 Current runners merge environment data needed for execution, but there is no
@@ -233,6 +254,7 @@ controls stay here only when they are already shipped and observable:
 
 ## Related Plans
 
+- [`docs/plans/2026-06-17-microsandbox-runner-plan.md`](../plans/2026-06-17-microsandbox-runner-plan.md)
 - [`docs/plans/2026-05-29-reliability-and-doc-fixes-plan.md`](../plans/2026-05-29-reliability-and-doc-fixes-plan.md)
 - [`docs/plans/2026-05-08-agent-session-and-task-startup-observability-plan.md`](../plans/2026-05-08-agent-session-and-task-startup-observability-plan.md)
 - [`docs/plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md`](../plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md)

@@ -356,9 +356,10 @@ def test_collect_extension_release_plans_skips_already_published_packages(
         allow_retag=False,
     )
 
-    assert len(plans) == 2
+    assert len(plans) == 3
     assert plans[0].state.target is release.DJANGO_RELEASE_TARGET
     assert plans[1].state.target is release.MACOS_SANDBOX_RELEASE_TARGET
+    assert plans[2].state.target is release.MICROSANDBOX_RELEASE_TARGET
     assert len(skipped) == 1
     assert skipped[0].target is release.DOCKER_RELEASE_TARGET
 
@@ -584,11 +585,12 @@ def test_build_precheck_commands_cover_release_gate_and_quality_gates() -> None:
     sqlite_command = commands[0]
     postgres_command = commands[1]
     django_command = commands[2]
-    ruff_check_command = commands[3]
-    ruff_format_command = commands[4]
-    mypy_command = commands[5]
+    microsandbox_command = commands[3]
+    ruff_check_command = commands[4]
+    ruff_format_command = commands[5]
+    mypy_command = commands[6]
 
-    assert sqlite_command[:13] == (
+    assert sqlite_command[:15] == (
         "uv",
         "run",
         "--extra",
@@ -599,6 +601,8 @@ def test_build_precheck_commands_cover_release_gate_and_quality_gates() -> None:
         "django",
         "--extra",
         "macos-sandbox",
+        "--extra",
+        "microsandbox",
         "pytest",
         "-v",
         "--tb=short",
@@ -620,10 +624,13 @@ def test_build_precheck_commands_cover_release_gate_and_quality_gates() -> None:
         "django",
         "--extra",
         "macos-sandbox",
+        "--extra",
+        "microsandbox",
         "bin/pytest-pg",
         "--all",
     )
     assert django_command == release.DJANGO_INTEGRATION_TEST_COMMAND
+    assert microsandbox_command == release.MICROSANDBOX_EXTENSION_TEST_COMMAND
     assert ruff_check_command == (
         "uv",
         "run",
@@ -635,6 +642,8 @@ def test_build_precheck_commands_cover_release_gate_and_quality_gates() -> None:
         "django",
         "--extra",
         "macos-sandbox",
+        "--extra",
+        "microsandbox",
         "ruff",
         "check",
         "weft",
@@ -642,6 +651,7 @@ def test_build_precheck_commands_cover_release_gate_and_quality_gates() -> None:
         "integrations/weft_django",
         "extensions/weft_docker",
         "extensions/weft_macos_sandbox",
+        "extensions/weft_microsandbox",
     )
     assert ruff_format_command == (
         "uv",
@@ -654,6 +664,8 @@ def test_build_precheck_commands_cover_release_gate_and_quality_gates() -> None:
         "django",
         "--extra",
         "macos-sandbox",
+        "--extra",
+        "microsandbox",
         "ruff",
         "format",
         "--check",
@@ -662,6 +674,7 @@ def test_build_precheck_commands_cover_release_gate_and_quality_gates() -> None:
         "integrations/weft_django",
         "extensions/weft_docker",
         "extensions/weft_macos_sandbox",
+        "extensions/weft_microsandbox",
     )
     assert mypy_command == (
         "uv",
@@ -674,11 +687,14 @@ def test_build_precheck_commands_cover_release_gate_and_quality_gates() -> None:
         "django",
         "--extra",
         "macos-sandbox",
+        "--extra",
+        "microsandbox",
         "mypy",
         "weft",
         "integrations/weft_django/weft_django",
         "extensions/weft_docker/weft_docker",
         "extensions/weft_macos_sandbox/weft_macos_sandbox",
+        "extensions/weft_microsandbox/weft_microsandbox",
         "--config-file",
         "pyproject.toml",
     )
@@ -730,6 +746,10 @@ def test_build_postupdate_steps_build_all_publishable_packages() -> None:
         ("uv", "build"),
         cwd=release.MACOS_SANDBOX_EXTENSION_DIR,
     )
+    assert steps[5] == release.CommandStep(
+        ("uv", "build"),
+        cwd=release.MICROSANDBOX_EXTENSION_DIR,
+    )
 
 
 def test_build_precheck_commands_include_extension_tests_when_supported() -> None:
@@ -742,8 +762,9 @@ def test_build_precheck_commands_include_extension_tests_when_supported() -> Non
     )
 
     assert commands[2] == release.DJANGO_INTEGRATION_TEST_COMMAND
-    assert commands[3] == release.DOCKER_EXTENSION_TEST_COMMAND
-    assert commands[4] == release.MACOS_SANDBOX_EXTENSION_TEST_COMMAND
+    assert commands[3] == release.MICROSANDBOX_EXTENSION_TEST_COMMAND
+    assert commands[4] == release.DOCKER_EXTENSION_TEST_COMMAND
+    assert commands[5] == release.MACOS_SANDBOX_EXTENSION_TEST_COMMAND
 
 
 def test_build_precheck_commands_skip_extension_tests_when_unavailable() -> None:
@@ -756,6 +777,7 @@ def test_build_precheck_commands_skip_extension_tests_when_unavailable() -> None
     )
 
     assert release.DJANGO_INTEGRATION_TEST_COMMAND in commands
+    assert release.MICROSANDBOX_EXTENSION_TEST_COMMAND in commands
     assert release.DOCKER_EXTENSION_TEST_COMMAND not in commands
     assert release.MACOS_SANDBOX_EXTENSION_TEST_COMMAND not in commands
 

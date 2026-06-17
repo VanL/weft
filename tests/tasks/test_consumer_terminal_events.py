@@ -63,3 +63,27 @@ def test_consumer_terminal_outcome_emits_one_state_event(
 
     events = _terminal_events(db_path, taskspec.tid)
     assert events.count(expected_event) == 1
+
+
+def test_consumer_unknown_runner_outcome_status_fails_task(broker_env) -> None:
+    db_path, _ = broker_env
+    taskspec = fixtures.create_minimal_taskspec()
+    task = Consumer(db_path, taskspec)
+    task.taskspec.mark_running()
+    outcome = RunnerOutcome(
+        status="nonsense",
+        value=None,
+        error=None,
+        stdout=None,
+        stderr=None,
+        returncode=None,
+        duration=0.01,
+    )
+
+    with pytest.raises(RuntimeError, match="unsupported runner outcome status"):
+        task._ensure_outcome_ok(outcome, timestamp=None, metrics_payload=None)
+
+    assert task.taskspec.state.status == "failed"
+    assert "nonsense" in (task.taskspec.state.error or "")
+    events = _terminal_events(db_path, taskspec.tid)
+    assert events.count("work_failed") == 1

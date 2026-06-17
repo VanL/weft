@@ -70,6 +70,25 @@ def test_validate_agent_runtime_preflight_docker_one_shot_skips_host_executable_
     validate_taskspec_agent_runtime(payload, load_runtime=True, preflight=True)
 
 
+def test_validate_agent_runtime_preflight_microsandbox_one_shot_skips_host_executable_check(
+    tmp_path,
+) -> None:
+    taskspec = create_valid_provider_cli_agent_taskspec(
+        provider="codex",
+        executable=str(Path("/nonexistent/provider-cli")),
+    )
+    payload = taskspec.model_dump(mode="python")
+    payload["spec"]["runner"] = {
+        "name": "microsandbox",
+        "options": {
+            "image": "agent:latest",
+            "executable": "codex",
+        },
+    }
+
+    validate_taskspec_agent_runtime(payload, load_runtime=True, preflight=True)
+
+
 @pytest.mark.parametrize("provider_name", PROVIDER_FIXTURE_NAMES)
 def test_validate_agent_runtime_preflight_accepts_real_fixture_executable(
     tmp_path,
