@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.9.82 - 2026-06-17
+
+### Added
+
+- Added the optional `weft-microsandbox` first-party runner package and the
+  root `weft[microsandbox]` extra. The runner executes disposable command tasks
+  and one-shot `provider_cli` agent tasks inside fresh Microsandbox sandboxes,
+  with explicit guest images/executables and narrow defaults for network,
+  workspace access, environment forwarding, interactivity, and persistence.
+- Documented the Microsandbox runner in the README and specs, including the
+  TaskSpec runner option contract, resource-limit mapping, agent-runtime lane,
+  implementation ownership, and release-gate coverage.
+- Added root and package-specific CI/release gates for the Microsandbox
+  extension so root Weft releases exercise the extension and
+  `weft_microsandbox/v*` tags can publish the package independently.
+
+### Fixed
+
+- Fixed the Microsandbox release workflow wiring so the already-published
+  `weft-microsandbox` package is recognized correctly by the root release
+  helper and the extension release gate.
+
 ## 0.9.81 - 2026-06-11
 
 ### Changed
