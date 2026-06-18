@@ -26,15 +26,15 @@ wheels = [
 
 [[package]]
 name = "anyio"
-version = "4.13.0"
+version = "4.14.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "idna" },
     { name = "typing-extensions", marker = "python_full_version < '3.13'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/19/14/2c5dd9f512b66549ae92767a9c7b330ae88e1932ca57876909410251fe13/anyio-4.13.0.tar.gz", hash = "sha256:334b70e641fd2221c1505b3890c69882fe4a2df910cba14d97019b90b24439dc", size = 231622, upload-time = "2026-03-24T12:59:09.671Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/1c/b5/001890774a9552aff22502b8da382593109ce0c95314abaebbb116567545/anyio-4.14.0.tar.gz", hash = "sha256:b47c1f9ccf73e67021df785332508f99379c68fa7d0684e8e3492cb1d4b23f89", size = 253586, upload-time = "2026-06-15T22:00:49.021Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/da/42/e921fccf5015463e32a3cf6ee7f980a6ed0f395ceeaa45060b61d86486c2/anyio-4.13.0-py3-none-any.whl", hash = "sha256:08b310f9e24a9594186fd75b4f73f4a4152069e3853f1ed8bfbf58369f4ad708", size = 114353, upload-time = "2026-03-24T12:59:08.246Z" },
+    { url = "https://files.pythonhosted.org/packages/ba/16/9826f089383c593cdfc4a6e5aca94d9e91ae1692c57af82c3b2aa5e810f7/anyio-4.14.0-py3-none-any.whl", hash = "sha256:dd9b7a2a9799ed6552fde617b2c5df02b7fdd7d88392fc48101e51bae46164d9", size = 123506, upload-time = "2026-06-15T22:00:47.595Z" },
 ]
 
 [[package]]
@@ -88,11 +88,11 @@ wheels = [
 
 [[package]]
 name = "certifi"
-version = "2026.5.20"
+version = "2026.6.17"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/f3/ce/ee2ecad540810a79593028e88299baeae54d346cc7a0d94b6199988b89b1/certifi-2026.5.20.tar.gz", hash = "sha256:69dea482ab64caa7b9f6aba1c6bf48bb6a5448d1c0f1b17ab42ad8c763a5344d", size = 135422, upload-time = "2026-05-20T11:46:50.073Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/c9/c7/424b75da314c1045981bd9777432fad05a9e0c69daa4ed7e308bbaffe405/certifi-2026.6.17.tar.gz", hash = "sha256:024c88eeec92ca068db80f02b8b07c9cef7b9fe261d1d535abfd5abd6f6af432", size = 134594, upload-time = "2026-06-17T10:31:07.894Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/59/8c/57e832b7af6d7c5abe66eb3fbe3a3a32f4d11ea23a1aa7131371035be991/certifi-2026.5.20-py3-none-any.whl", hash = "sha256:3c52e209ba0a4ad7aebe60436a4ab349c39e1e602e8c134221e546902ad25897", size = 134134, upload-time = "2026-05-20T11:46:48.578Z" },
+    { url = "https://files.pythonhosted.org/packages/ef/2f/c5464532e965badff2f4c4c1a3a83f5697f0d7c407ed0cda44aaa99bb451/certifi-2026.6.17-py3-none-any.whl", hash = "sha256:2227dcbaafe0d2f59279d1762ddddc37783ed4354594f194ffc31d20f41fc3db", size = 133289, upload-time = "2026-06-17T10:31:06.348Z" },
 ]
 
 [[package]]
@@ -651,7 +651,7 @@ wheels = [
 
 [[package]]
 name = "openai"
-version = "2.41.1"
+version = "2.43.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
@@ -663,9 +663,9 @@ dependencies = [
     { name = "tqdm" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/40/36/4c926a91554483977608951360c18c2e911592785eb87a6437813f6123f7/openai-2.41.1.tar.gz", hash = "sha256:23d617a0432457ad844973bee8f540be9da90894f7c5686852d2d365da058f57", size = 783584, upload-time = "2026-06-10T16:10:37.667Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/f3/fa/88d0c58a0c58df7e6758e66b99c5d028d5e0bb49f8812d7203940cd9dbf1/openai-2.43.0.tar.gz", hash = "sha256:e74d238200a26868977002190fb6631613480a93dfe0c9c982e77021ed60a017", size = 785369, upload-time = "2026-06-17T17:06:56.06Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/20/74/925d7b3892927e9804aaf58d374a45dc28e4420ff90e992272b77286343e/openai-2.41.1-py3-none-any.whl", hash = "sha256:a939565f350cb7443cb843b801b88c716ac8024b492fb94ca269d5f6b1bbefd6", size = 1353380, upload-time = "2026-06-10T16:10:35.756Z" },
+    { url = "https://files.pythonhosted.org/packages/a3/d2/ba767f4bbb30776c03d40906a2d3afad716a165ffa1771fc23b8992f7920/openai-2.43.0-py3-none-any.whl", hash = "sha256:65a670b54fadf2268c9e1330133373c963eb779ee969e5cbad419ec2c21dce97", size = 1355077, upload-time = "2026-06-17T17:06:53.614Z" },
 ]
 
 [[package]]
@@ -933,7 +933,7 @@ wheels = [
 
 [[package]]
 name = "pytest"
-version = "9.0.3"
+version = "9.1.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "colorama", marker = "sys_platform == 'win32'" },
@@ -942,9 +942,9 @@ dependencies = [
     { name = "pluggy" },
     { name = "pygments" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/7d/0d/549bd94f1a0a402dc8cf64563a117c0f3765662e2e668477624baeec44d5/pytest-9.0.3.tar.gz", hash = "sha256:b86ada508af81d19edeb213c681b1d48246c1a91d304c6c81a427674c17eb91c", size = 1572165, upload-time = "2026-04-07T17:16:18.027Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/84/0e/b5858858d74958632c49b72cb25a3976ff9f632397626715be71c89d3971/pytest-9.1.0.tar.gz", hash = "sha256:41dd9148c08072446394cefd3d79701701335a9f4cae69ba92e39f6c7f5c061c", size = 1634181, upload-time = "2026-06-13T18:52:45.983Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/d4/24/a372aaf5c9b7208e7112038812994107bc65a84cd00e0354a88c2c77a617/pytest-9.0.3-py3-none-any.whl", hash = "sha256:2c5efc453d45394fdd706ade797c0a81091eccd1d6e4bccfcd476e2b8e0ab5d9", size = 375249, upload-time = "2026-04-07T17:16:16.13Z" },
+    { url = "https://files.pythonhosted.org/packages/8b/5a/ba30a81239b909821b3153e303e7def45178bf353da4f72380e6c5e8793b/pytest-9.1.0-py3-none-any.whl", hash = "sha256:8ebb0e7888bdf2bdfc602ec51f8f62d50200af37356c74e503c79a94f5c81f32", size = 386453, upload-time = "2026-06-13T18:52:44.045Z" },
 ]
 
 [[package]]
@@ -1203,25 +1203,25 @@ wheels = [
 
 [[package]]
 name = "simplebroker"
-version = "4.7.1"
+version = "4.8.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/0f/75/4146baa59bd067758b86a656eda31169d7f7cc7490fc38c617800a3809b3/simplebroker-4.7.1.tar.gz", hash = "sha256:0383fe3ba45c93865082777e5aec14e0dc00675b127c99df68561131d40870a4", size = 180050, upload-time = "2026-06-11T23:37:58.682Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/61/f1/74ec355f12d31ba269cb929921a83c5a953187655ebcf61da5f7efda42d9/simplebroker-4.8.0.tar.gz", hash = "sha256:f3baf1588736da02adc737eac5a06217065a6a4c98a71231ad89abbff9d7174d", size = 180878, upload-time = "2026-06-18T03:16:13.964Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ba/4b/6b35967641640600c9a1cb2ecf143bb8ecc0af43ae0c5eb712484649fb0a/simplebroker-4.7.1-py3-none-any.whl", hash = "sha256:0f9675218e5f855a8a04c372f2d396a3a20643f7ea290bc2c1cd66123c87b048", size = 199599, upload-time = "2026-06-11T23:37:57.385Z" },
+    { url = "https://files.pythonhosted.org/packages/33/db/50b2fd56f9a6a7435b484a209a0fa97e7d6c456ec36f348acead5a556678/simplebroker-4.8.0-py3-none-any.whl", hash = "sha256:970fe7539c6ac2c93df8c2202985fe8abdd92eb2acf9644db5c62663069f83ba", size = 200479, upload-time = "2026-06-18T03:16:11.985Z" },
 ]
 
 [[package]]
 name = "simplebroker-pg"
-version = "2.2.1"
+version = "2.3.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "psycopg", extra = ["binary"] },
     { name = "psycopg-pool" },
     { name = "simplebroker" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/1e/b2/463818aec35ffc6966aa79dac8dfcbf3ad4d901b25e06af48f45ec5efcbc/simplebroker_pg-2.2.1.tar.gz", hash = "sha256:8b714158e3b40c2dd1e062b30eac0ef88132d30ea99f91c348e435bba967e465", size = 19667, upload-time = "2026-06-10T19:31:34.337Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/96/60/8887a4bdab41fb0983724719e2fc3455f9e7fe236aafaf5feba62ea5eac3/simplebroker_pg-2.3.0.tar.gz", hash = "sha256:01886524f9ac9b0ae2a17b243e1812687d16ee0b37680c3093ed09c8a65225cc", size = 19798, upload-time = "2026-06-18T03:16:17.273Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/43/b2/ec697d52f4d20f5eea476750dcb26b83b2c7812f7c2e43a8ca722e7922cc/simplebroker_pg-2.2.1-py3-none-any.whl", hash = "sha256:cb156728ee5f81f6869a3c3d86af5a20f2e214f319c76ab2600b4c11be03151b", size = 25719, upload-time = "2026-06-10T19:31:33.327Z" },
+    { url = "https://files.pythonhosted.org/packages/9f/1e/fc27357f513e073e5f8c546588a4eb65aed71c88c26216610171d9d91aba/simplebroker_pg-2.3.0-py3-none-any.whl", hash = "sha256:5fe71eef3091a16120c11cfbaf50feb8b16e0f68f7f898d319a42f82a536bd36", size = 25857, upload-time = "2026-06-18T03:16:16.131Z" },
 ]
 
 [[package]]
@@ -1301,14 +1301,14 @@ wheels = [
 
 [[package]]
 name = "tqdm"
-version = "4.68.2"
+version = "4.68.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "colorama", marker = "sys_platform == 'win32'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/85/05/0d5260f1f1ca784f4a4a0def9cbe6affe587f5b4025328d446c3d67765f4/tqdm-4.68.2.tar.gz", hash = "sha256:89c230e8dbc67c7615c142487111222f878c77427ea09549960f62389e258add", size = 171923, upload-time = "2026-06-09T13:26:42.539Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/87/d7/0535a28b1f5f24f6612fb3ff1e89fb1a8d160fee0f976e0aa6803862134b/tqdm-4.68.3.tar.gz", hash = "sha256:00dfa48452b6b6cfae3dd9885636c23d3422d1ec97c66d96818cbd5e0821d482", size = 170596, upload-time = "2026-06-17T07:36:52.105Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/eb/75/1a0392bcc21c44dcdf87b3cf2d137e7829be2c083a1e38d44efca3d57a16/tqdm-4.68.2-py3-none-any.whl", hash = "sha256:d4240441fb5353290b87d6a85968c9decc131a99b8c7faa28269d829de669ede", size = 78578, upload-time = "2026-06-09T13:26:40.731Z" },
+    { url = "https://files.pythonhosted.org/packages/d8/8e/bb97bb0c71802080bfc8952937d174e49cfc50de5c951dd47b2496f0dcdb/tqdm-4.68.3-py3-none-any.whl", hash = "sha256:39832cc2def2789a6f29df83f172db7416cea70052c0907a57801c5f2fdccb03", size = 78337, upload-time = "2026-06-17T07:36:50.132Z" },
 ]
 
 [[package]]
@@ -1453,9 +1453,9 @@ requires-dist = [
     { name = "rich", specifier = ">=14.0.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.12" },
     { name = "setproctitle", specifier = ">=1.3.7" },
-    { name = "simplebroker", specifier = ">=4.7.1" },
-    { name = "simplebroker-pg", marker = "extra == 'all'", specifier = ">=2.2.1" },
-    { name = "simplebroker-pg", marker = "extra == 'dev'", specifier = ">=2.2.1" },
+    { name = "simplebroker", specifier = ">=4.8.0" },
+    { name = "simplebroker-pg", marker = "extra == 'all'", specifier = ">=2.3.0" },
+    { name = "simplebroker-pg", marker = "extra == 'dev'", specifier = ">=2.3.0" },
     { name = "simplebroker-pg", marker = "extra == 'pg'", specifier = ">=2.2.1" },
     { name = "typer", specifier = ">=0.16.0" },
     { name = "types-psutil", marker = "extra == 'dev'", specifier = ">=5.9.5" },
