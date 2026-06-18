@@ -620,7 +620,9 @@ Backend-specific notes:
   sessions and default to `network="none"` and `workspace_mode="none"`.
   Credentials or provider env needed inside the guest must be explicit in
   `spec.env`; ambient host environment forwarding is not part of the first
-  shipped Microsandbox lane.
+  shipped Microsandbox lane. Generated provider input files, such as bounded
+  Claude MCP config files, are staged into the guest before provider execution;
+  provider output files are copied back before result parsing.
 - in both lanes, timeout, cancellation, reserved-queue policy, and outbox
   writes stay on the existing durable spine
 

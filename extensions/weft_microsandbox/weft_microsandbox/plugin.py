@@ -37,6 +37,7 @@ from weft.ext import (
 from ._options import MicrosandboxOptions, parse_options, parse_options_from_payload
 from ._runtime import (
     FileCopyBack,
+    FileCopyIntoGuest,
     MicrosandboxRunResult,
     MicrosandboxRunSpec,
     MicrosandboxRuntime,
@@ -97,10 +98,10 @@ class MicrosandboxRunner:
         on_stdout_chunk: Callable[[str, bool], None] | None = None,
         on_stderr_chunk: Callable[[str, bool], None] | None = None,
     ) -> RunnerOutcome:
-        del cancel_requested
         if self._options.mode == "agent":
             return self._run_agent(
                 work_item,
+                cancel_requested=cancel_requested,
                 on_worker_started=on_worker_started,
                 on_runtime_handle_started=on_runtime_handle_started,
                 on_stdout_chunk=on_stdout_chunk,
@@ -108,6 +109,7 @@ class MicrosandboxRunner:
             )
         return self._run_tool(
             work_item,
+            cancel_requested=cancel_requested,
             on_worker_started=on_worker_started,
             on_runtime_handle_started=on_runtime_handle_started,
             on_stdout_chunk=on_stdout_chunk,
@@ -124,6 +126,7 @@ class MicrosandboxRunner:
         self,
         work_item: Any,
         *,
+        cancel_requested: Callable[[], bool] | None,
         on_worker_started: Callable[[int | None], None] | None,
         on_runtime_handle_started: Callable[[RunnerHandle], None] | None,
         on_stdout_chunk: Callable[[str, bool], None] | None,
@@ -140,6 +143,7 @@ class MicrosandboxRunner:
             command=tuple(command),
             stdin_text=stdin_data,
             value_builder=lambda result: result.stdout,
+            cancel_requested=cancel_requested,
             on_worker_started=on_worker_started,
             on_runtime_handle_started=on_runtime_handle_started,
             on_stdout_chunk=on_stdout_chunk,
@@ -150,6 +154,7 @@ class MicrosandboxRunner:
         self,
         work_item: Any,
         *,
+        cancel_requested: Callable[[], bool] | None,
         on_worker_started: Callable[[int | None], None] | None,
         on_runtime_handle_started: Callable[[RunnerHandle], None] | None,
         on_stdout_chunk: Callable[[str, bool], None] | None,
@@ -161,6 +166,8 @@ class MicrosandboxRunner:
             raise ValueError("Microsandbox agent mode requires a guest executable")
         agent = AgentSection.model_validate(self._agent_payload)
         normalized_work_item = normalize_agent_work_item(agent, work_item)
+        # Keep the provider tempdir under /tmp so host and guest paths match when
+        # provider CLIs receive absolute paths such as Claude's --mcp-config.
         with tempfile.TemporaryDirectory(
             prefix="weft-microsandbox-provider-cli-",
             dir="/tmp",
@@ -177,6 +184,12 @@ class MicrosandboxRunner:
             )
             copy_back: tuple[FileCopyBack, ...] = ()
             guest_dirs: tuple[str, ...] = (str(temp_path),)
+            copy_into_guest = (
+                FileCopyIntoGuest(
+                    host_path=str(temp_path),
+                    guest_path=str(temp_path),
+                ),
+            )
             if prepared.invocation.output_path is not None:
                 copy_back = (
                     FileCopyBack(
@@ -207,9 +220,11 @@ class MicrosandboxRunner:
                 command=tuple(prepared.invocation.command),
                 stdin_text=prepared.invocation.stdin_text,
                 extra_env=prepared.invocation.env,
+                copy_into_guest=copy_into_guest,
                 copy_back=copy_back,
                 guest_dirs=guest_dirs,
                 value_builder=_build_agent_result,
+                cancel_requested=cancel_requested,
                 on_worker_started=on_worker_started,
                 on_runtime_handle_started=on_runtime_handle_started,
                 on_stdout_chunk=on_stdout_chunk,
@@ -222,11 +237,13 @@ class MicrosandboxRunner:
         command: tuple[str, ...],
         stdin_text: str | None,
         value_builder: Callable[[MicrosandboxRunResult], Any],
+        cancel_requested: Callable[[], bool] | None,
         on_worker_started: Callable[[int | None], None] | None,
         on_runtime_handle_started: Callable[[RunnerHandle], None] | None,
         on_stdout_chunk: Callable[[str, bool], None] | None,
         on_stderr_chunk: Callable[[str, bool], None] | None,
         copy_back: tuple[FileCopyBack, ...] = (),
+        copy_into_guest: tuple[FileCopyIntoGuest, ...] = (),
         guest_dirs: tuple[str, ...] = (),
         extra_env: Mapping[str, str] | None = None,
     ) -> RunnerOutcome:
@@ -268,10 +285,12 @@ class MicrosandboxRunner:
                     cpus=self._options.cpus,
                     max_fds=self._options.max_fds,
                     guest_dirs=guest_dirs,
+                    copy_into_guest=copy_into_guest,
                     copy_back=copy_back,
                     labels={"weft.runner": "microsandbox"},
                 ),
                 on_started=_on_started,
+                cancel_requested=cancel_requested,
             )
         except MicrosandboxRuntimeError as exc:
             return RunnerOutcome(
@@ -295,6 +314,17 @@ class MicrosandboxRunner:
                 host_pid=None,
             )
 
+        if result.cancelled:
+            return RunnerOutcome(
+                status="cancelled",
+                value=None,
+                error=result.stderr or "Target execution cancelled",
+                stdout=result.stdout or None,
+                stderr=result.stderr or None,
+                returncode=result.exit_code,
+                duration=result.duration,
+                runtime_handle=runtime_handle,
+            )
         if result.timed_out:
             return RunnerOutcome(
                 status="timeout",

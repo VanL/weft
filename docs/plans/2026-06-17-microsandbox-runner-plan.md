@@ -415,9 +415,14 @@ import the third-party SDK directly.
 
 Tests:
 
-- Fake only the Microsandbox SDK boundary.
-- Verify command, env, network, timeout, and workspace values are passed through
-  unchanged.
+- Do not hand-write a fake Microsandbox SDK that mirrors the adapter's own
+  calls. That is circular and will not catch SDK drift.
+- Use the installed `microsandbox` package for adapter contract tests. Verify
+  the real `Sandbox`, `Network`, `Volume`, and `Rlimit` API surface that the
+  adapter depends on.
+- Keep virtualization-dependent execution tests opt-in, but make them real:
+  they should boot Microsandbox and exercise the adapter against the actual SDK
+  and runtime.
 - Verify SDK errors become a typed extension-local error, not raw arbitrary SDK
   exceptions leaking out.
 - Record the supported platform assumptions in test names or fixtures so future
@@ -615,11 +620,12 @@ Behavior:
 
 Testing:
 
-- Use the fake `_runtime.py` adapter to avoid requiring actual virtualization.
+- Unit tests may use a small recording runtime only to prove command
+  construction and outcome mapping. Do not count those as integration coverage.
 - Do not mock `TaskRunner`, queues, or TaskSpec validation in the main behavior
   tests. Run through the real runner backend when practical.
-- Include at least one full lifecycle test using the real Weft harness or a real
-  `TaskRunner` call with the fake adapter, so stdout/outcome/control hooks prove
+- Include at least one opt-in full lifecycle test using a real `TaskRunner` call
+  and the real Microsandbox runtime, so stdout/outcome/control hooks prove
   integration rather than just unit method calls.
 - Verify stderr is preserved on failure.
 - Verify the handle uses `runner="microsandbox"`, `kind="sandboxed-process"`,
@@ -688,16 +694,18 @@ Testing:
 - validation rejects missing guest executable
 - provider CLI command construction includes the prompt/work item in the same
   way Docker agent mode does
-- successful fake guest stdout becomes the normal agent result
-- malformed fake guest stdout fails the task
+- recorded guest stdout from the runner seam becomes the normal agent result
+- malformed recorded guest stdout fails the task
 - non-zero guest exit fails the task and preserves stderr
 
 Avoid over-mocking:
 
-- Mock only the Microsandbox adapter.
+- Do not fake the Microsandbox SDK in adapter contract tests.
 - Use the real provider CLI preparation/parser helpers.
 - If provider parsing requires a specific provider fixture, reuse an existing
   Docker/provider test fixture instead of inventing a weaker fake parser.
+- Include a bounded Claude/provider CLI case that proves generated input files
+  such as `claude-mcp.json` are staged into the guest before execution.
 
 Gate:
 
@@ -960,7 +968,9 @@ Check these invariants manually in review:
 - Runtime handle metadata never becomes lifecycle truth.
 - Agent mode uses existing provider CLI preparation and parsing.
 - Persistent sessions are rejected.
-- Tests fake only the external SDK boundary, not Weft queues and task lifecycle.
+- Tests use the installed SDK for adapter contract coverage and fake only narrow
+  pure unit seams; Weft queues, `TaskRunner`, and at least one opt-in
+  Microsandbox execution lifecycle stay real.
 
 ## Failure Modes To Handle
 
@@ -1025,8 +1035,8 @@ were the main issues found and fixed:
 5. Outcome status validation was a latent core risk. The plan now includes a
    small core hardening task before relying on a new plugin.
 6. The test strategy initially leaned too much on adapter fakes. The plan now
-   requires at least one real Weft lifecycle path with only the Microsandbox SDK
-   boundary faked, plus optional real virtualization smoke tests.
+   requires installed-SDK adapter contract tests, at least one real Weft
+   lifecycle path, and optional real virtualization smoke tests.
 7. Secure defaults conflicted with Docker conformity. The plan now calls this
    out as an intentional difference because the stated use case is malicious
    workloads.

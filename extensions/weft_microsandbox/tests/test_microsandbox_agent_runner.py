@@ -8,7 +8,10 @@ from pathlib import Path
 import pytest
 
 from weft.core.agents.runtime import AgentExecutionResult
-from weft_microsandbox._runtime import MicrosandboxRunResult, MicrosandboxRunSpec
+from weft_microsandbox._runtime import (
+    MicrosandboxRunResult,
+    MicrosandboxRunSpec,
+)
 from weft_microsandbox.plugin import MicrosandboxRunner
 
 pytestmark = [pytest.mark.shared]
@@ -22,7 +25,9 @@ class StdoutAgentRuntime:
         spec: MicrosandboxRunSpec,
         *,
         on_started: Callable[[object], None] | None = None,
+        cancel_requested: Callable[[], bool] | None = None,
     ) -> MicrosandboxRunResult:
+        del cancel_requested
         StdoutAgentRuntime.last_spec = spec
         if on_started is not None:
             from weft_microsandbox._runtime import MicrosandboxStarted
@@ -45,8 +50,9 @@ class EmptyRuntime:
         spec: MicrosandboxRunSpec,
         *,
         on_started: Callable[[object], None] | None = None,
+        cancel_requested: Callable[[], bool] | None = None,
     ) -> MicrosandboxRunResult:
-        del spec, on_started
+        del spec, on_started, cancel_requested
         return MicrosandboxRunResult(
             sandbox_id="agent-sandbox",
             sandbox_name="agent-sandbox",
@@ -104,8 +110,9 @@ def test_agent_runner_copies_provider_output_file_before_parse() -> None:
             spec: MicrosandboxRunSpec,
             *,
             on_started: Callable[[object], None] | None = None,
+            cancel_requested: Callable[[], bool] | None = None,
         ) -> MicrosandboxRunResult:
-            del on_started
+            del on_started, cancel_requested
             assert spec.copy_back
             Path(spec.copy_back[0].host_path).write_text(
                 "copied codex answer\n",
@@ -144,6 +151,61 @@ def test_agent_runner_copies_provider_output_file_before_parse() -> None:
     assert outcome.status == "ok"
     assert isinstance(outcome.value, AgentExecutionResult)
     assert outcome.value.outputs == ("copied codex answer",)
+
+
+def test_bounded_claude_agent_copies_generated_mcp_config_into_guest() -> None:
+    class BoundedRuntime:
+        def run(
+            self,
+            spec: MicrosandboxRunSpec,
+            *,
+            on_started: Callable[[object], None] | None = None,
+            cancel_requested: Callable[[], bool] | None = None,
+        ) -> MicrosandboxRunResult:
+            del on_started, cancel_requested
+            assert "--mcp-config" in spec.command
+            config_path = Path(spec.command[spec.command.index("--mcp-config") + 1])
+            assert config_path.name == "claude-mcp.json"
+            assert config_path.exists()
+            assert spec.copy_into_guest
+            copied_root = Path(spec.copy_into_guest[0].host_path)
+            assert config_path.is_relative_to(copied_root)
+            assert (
+                spec.copy_into_guest[0].guest_path == spec.copy_into_guest[0].host_path
+            )
+            return MicrosandboxRunResult(
+                sandbox_id="agent-sandbox",
+                sandbox_name="agent-sandbox",
+                exit_code=0,
+                stdout="bounded answer\n",
+                stderr="",
+                timed_out=False,
+                duration=0.01,
+            )
+
+    runner = MicrosandboxRunner(
+        target_type="agent",
+        tid="1234567890123456789",
+        process_target=None,
+        agent={**_agent("claude_code"), "authority_class": "bounded"},
+        args=[],
+        env={},
+        working_dir=None,
+        timeout=5.0,
+        limits=None,
+        runner_options={
+            "image": "agent:latest",
+            "executable": "claude",
+            "cwd": "/workspace",
+        },
+        runtime=BoundedRuntime(),
+    )
+
+    outcome = runner.run("question")
+
+    assert outcome.status == "ok"
+    assert isinstance(outcome.value, AgentExecutionResult)
+    assert outcome.value.outputs == ("bounded answer",)
 
 
 def test_agent_runner_passes_explicit_and_provider_env_to_guest() -> None:

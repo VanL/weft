@@ -1339,20 +1339,6 @@ VALID_RUNNER_OUTCOME_STATUSES: Final[frozenset[str]] = frozenset(
 )
 """Runner outcome statuses accepted by the core consumer boundary."""
 
-MICROSANDBOX_RUNNER_OPTION_KEYS: Final[frozenset[str]] = frozenset(
-    {
-        "mode",
-        "image",
-        "executable",
-        "network",
-        "workspace_mode",
-        "mounts",
-        "cwd",
-        "sandbox_name_prefix",
-    }
-)
-"""Runner option keys accepted by the first-party Microsandbox extension."""
-
 POSTGRES_BACKEND_UNAVAILABLE: Final[str] = (
     "Requested backend 'postgres' is not available. Install simplebroker-pg."
 )

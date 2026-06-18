@@ -18,9 +18,8 @@
 
 ### Fixed
 
-- Fixed the Microsandbox release workflow wiring so the already-published
-  `weft-microsandbox` package is recognized correctly by the root release
-  helper and the extension release gate.
+- Fixed the Microsandbox release workflow wiring and paired the root
+  `weft[microsandbox]` extra with `weft-microsandbox 0.5.1`.
 
 ## 0.9.81 - 2026-06-11
 

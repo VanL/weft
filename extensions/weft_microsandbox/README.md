@@ -93,5 +93,12 @@ resolved on the host.
   `spec.env`.
 - persistent and interactive tasks are rejected.
 
+## Current Limitations
+
+Memory, CPU, and file-descriptor limits are passed to the Microsandbox SDK, but
+the runner does not yet map SDK OOM or metrics evidence to
+`RunnerOutcome(status="limit")`. A guest killed by the runtime for memory
+pressure may currently surface as a generic execution error.
+
 This runner is a process, VM, and filesystem boundary. It is not a semantic
 defense against prompt injection or malicious output.

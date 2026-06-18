@@ -8,10 +8,12 @@ Spec references:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import platform
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from ._options import MicrosandboxMount, MicrosandboxNetwork, WorkspaceMode
@@ -39,6 +41,14 @@ class FileCopyBack:
 
 
 @dataclass(frozen=True, slots=True)
+class FileCopyIntoGuest:
+    """Host path copied into the guest before command execution."""
+
+    host_path: str
+    guest_path: str
+
+
+@dataclass(frozen=True, slots=True)
 class MicrosandboxRunSpec:
     """Normalized sandbox execution request."""
 
@@ -56,6 +66,7 @@ class MicrosandboxRunSpec:
     cpus: float | None = None
     max_fds: int | None = None
     guest_dirs: tuple[str, ...] = ()
+    copy_into_guest: tuple[FileCopyIntoGuest, ...] = ()
     copy_back: tuple[FileCopyBack, ...] = ()
     labels: Mapping[str, str] | None = None
 
@@ -80,6 +91,7 @@ class MicrosandboxRunResult:
     stderr: str
     timed_out: bool
     duration: float
+    cancelled: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,8 +111,15 @@ class MicrosandboxRuntime:
         spec: MicrosandboxRunSpec,
         *,
         on_started: Callable[[MicrosandboxStarted], None] | None = None,
+        cancel_requested: Callable[[], bool] | None = None,
     ) -> MicrosandboxRunResult:
-        return asyncio.run(self._run_async(spec, on_started=on_started))
+        return asyncio.run(
+            self._run_async(
+                spec,
+                on_started=on_started,
+                cancel_requested=cancel_requested,
+            )
+        )
 
     def stop(self, sandbox_id: str, *, timeout: float = 2.0) -> bool:
         return asyncio.run(self._stop_async(sandbox_id, timeout=timeout))
@@ -126,6 +145,7 @@ class MicrosandboxRuntime:
         spec: MicrosandboxRunSpec,
         *,
         on_started: Callable[[MicrosandboxStarted], None] | None,
+        cancel_requested: Callable[[], bool] | None,
     ) -> MicrosandboxRunResult:
         if not spec.command:
             raise MicrosandboxRuntimeError("Microsandbox command must be non-empty")
@@ -142,7 +162,7 @@ class MicrosandboxRuntime:
                 labels=dict(spec.labels or {}),
                 **_resource_create_kwargs(spec),
             )
-            sandbox_name = await sandbox.name()
+            sandbox_name = await _sandbox_name(sandbox, fallback=spec.name)
             if on_started is not None:
                 on_started(
                     MicrosandboxStarted(
@@ -151,15 +171,24 @@ class MicrosandboxRuntime:
                     )
                 )
             await _prepare_guest_filesystem(sandbox, spec)
-            output = await sandbox.exec(
-                spec.command[0],
-                list(spec.command[1:]),
-                cwd=spec.cwd,
-                env=dict(spec.env),
-                timeout=spec.timeout_seconds,
-                stdin=spec.stdin_text,
-                rlimits=_rlimits(sdk, spec),
+            await _copy_into_guest(sandbox, spec.copy_into_guest)
+            output = await _exec_with_cancel(
+                sdk,
+                sandbox,
+                spec,
+                cancel_requested=cancel_requested,
             )
+            if output is None:
+                return MicrosandboxRunResult(
+                    sandbox_id=sandbox_name,
+                    sandbox_name=sandbox_name,
+                    exit_code=None,
+                    stdout="",
+                    stderr="Target execution cancelled",
+                    timed_out=False,
+                    duration=time.monotonic() - started,
+                    cancelled=True,
+                )
             await _copy_back_files(sandbox, spec.copy_back)
             return MicrosandboxRunResult(
                 sandbox_id=sandbox_name,
@@ -288,10 +317,7 @@ async def _prepare_guest_filesystem(
     spec: MicrosandboxRunSpec,
 ) -> None:
     for path in spec.guest_dirs:
-        try:
-            await sandbox.fs.mkdir(path)
-        except Exception:
-            pass
+        await _mkdir_guest(sandbox, path)
     if spec.workspace.mode == "copy":
         if spec.workspace.source is None or spec.workspace.target is None:
             raise MicrosandboxRuntimeError("workspace copy requires source and target")
@@ -307,6 +333,38 @@ async def _copy_back_files(
             await sandbox.fs.copy_to_host(item.guest_path, item.host_path)
         except Exception:
             pass
+
+
+async def _copy_into_guest(
+    sandbox: Any,
+    copy_into_guest: Sequence[FileCopyIntoGuest],
+) -> None:
+    for item in copy_into_guest:
+        host_path = Path(item.host_path)
+        if not host_path.is_dir():
+            await _mkdir_guest(sandbox, str(PurePosixPath(item.guest_path).parent))
+            await sandbox.fs.copy_from_host(item.host_path, item.guest_path)
+            continue
+        await _mkdir_guest(sandbox, item.guest_path)
+        for child in host_path.rglob("*"):
+            guest_path = str(
+                PurePosixPath(item.guest_path)
+                / PurePosixPath(*child.relative_to(host_path).parts)
+            )
+            if child.is_dir():
+                await _mkdir_guest(sandbox, guest_path)
+            else:
+                await _mkdir_guest(sandbox, str(PurePosixPath(guest_path).parent))
+                await sandbox.fs.copy_from_host(str(child), guest_path)
+
+
+async def _mkdir_guest(sandbox: Any, path: str) -> None:
+    if path in {"", "."}:
+        return
+    try:
+        await sandbox.fs.mkdir(path)
+    except Exception:
+        pass
 
 
 def _resource_create_kwargs(spec: MicrosandboxRunSpec) -> dict[str, Any]:
@@ -325,14 +383,62 @@ def _rlimits(sdk: Any, spec: MicrosandboxRunSpec) -> list[Any] | None:
     return rlimits or None
 
 
+async def _exec_with_cancel(
+    sdk: Any,
+    sandbox: Any,
+    spec: MicrosandboxRunSpec,
+    *,
+    cancel_requested: Callable[[], bool] | None,
+) -> Any | None:
+    exec_task = asyncio.create_task(
+        sandbox.exec(
+            spec.command[0],
+            list(spec.command[1:]),
+            cwd=spec.cwd,
+            env=dict(spec.env),
+            timeout=spec.timeout_seconds,
+            stdin=spec.stdin_text,
+            rlimits=_rlimits(sdk, spec),
+        )
+    )
+    while True:
+        done, _pending = await asyncio.wait({exec_task}, timeout=0.05)
+        if done:
+            try:
+                return exec_task.result()
+            except asyncio.CancelledError:
+                if cancel_requested is not None and cancel_requested():
+                    return None
+                raise
+        if cancel_requested is None or not cancel_requested():
+            continue
+        try:
+            await sandbox.kill()
+        except Exception:
+            pass
+        try:
+            await asyncio.wait_for(exec_task, timeout=2.0)
+            return None
+        except asyncio.CancelledError:
+            return None
+        except Exception:
+            exec_task.cancel()
+            return None
+
+
 async def _sandbox_name(sandbox: Any | None, *, fallback: str) -> str:
     if sandbox is None:
         return fallback
     try:
-        value = await sandbox.name()
+        value = getattr(sandbox, "name", None)
+        if callable(value):
+            value = value()
+        if inspect.isawaitable(value):
+            value = await value
     except Exception:
         return fallback
-    return str(value)
+    text = str(value).strip()
+    return text or fallback
 
 
 async def _cleanup_sandbox(sdk: Any, sandbox: Any, name: str) -> None:
@@ -347,11 +453,16 @@ async def _cleanup_sandbox(sdk: Any, sandbox: Any, name: str) -> None:
 
 
 def _is_timeout_error(exc: BaseException) -> bool:
-    return exc.__class__.__name__ == "ExecTimeoutError"
+    try:
+        timeout_error = _load_sdk().ExecTimeoutError
+    except Exception:  # pragma: no cover - import already checked on real path
+        return exc.__class__.__name__ == "ExecTimeoutError"
+    return isinstance(exc, timeout_error)
 
 
 __all__ = [
     "FileCopyBack",
+    "FileCopyIntoGuest",
     "MicrosandboxDescription",
     "MicrosandboxRunResult",
     "MicrosandboxRunSpec",

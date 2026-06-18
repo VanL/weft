@@ -6,8 +6,9 @@ failure over complex partial mitigation.
 
 _Implementation snapshot_: resource limits are enforced at the runner
 boundary. The default host-path monitor is psutil-based, but runner plugins
-may also map limits into native runtime controls. Limit violations become task
-failures that are visible through state, control, and reserved-queue behavior.
+may also map limits into native runtime controls. Limit violations that Weft can
+classify become task failures visible through state, control, and
+reserved-queue behavior.
 
 _Implementation mapping_: `weft/core/resource_monitor.py`,
 `weft/core/runners/host.py`, `weft/core/runners/subprocess_runner.py`,
@@ -48,7 +49,11 @@ Current behavior:
   termination; Docker-backed runners map the limit to a native runtime quota;
   the Microsandbox runner passes `memory_mb` through to the Microsandbox SDK
   when used.
-- violations terminate the task and surface a limit failure
+- host and Docker memory violations surface as limit failures. Microsandbox
+  native memory enforcement currently lacks a reliable OOM classification path
+  in the runner, so guest memory-pressure termination can surface as an ordinary
+  runner error until SDK metrics or a native OOM signal are wired into outcome
+  mapping.
 
 _Implementation mapping_: `weft/core/resource_monitor.py`
 `ResourceMonitor`, `PsutilResourceMonitor.check_limits`;

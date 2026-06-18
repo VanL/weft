@@ -996,3 +996,14 @@ runbook needs to become stricter.
   `weft.log.tasks` — service event bodies embed other tasks' TIDs and
   produce false positives. Join through the Monitor store refs
   (`weft_monitor_task_messages`) or parse the JSON `tid` field exactly.
+
+## 2026-06-17 Optional Runner SDK Boundaries
+
+- Adapter tests for optional runner SDKs must use the installed SDK surface for
+  contract checks. A hand-written fake that mirrors the adapter's assumptions
+  proves only that the adapter is self-consistent, and can miss real SDK drift
+  such as attribute-vs-method differences.
+- Runner tests for guest execution must preserve the host/guest filesystem
+  distinction when the behavior depends on staged files. A test runtime that
+  treats host temp paths as already present in the guest will miss bounded-agent
+  failures such as generated MCP config files not being copied before exec.

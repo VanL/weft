@@ -438,6 +438,11 @@ Secure defaults are intentionally narrow: `network` defaults to `none`,
 forwarded unless they are explicit in `spec.env`, and persistent or interactive
 tasks are rejected.
 
+Memory, CPU, and file-descriptor limits are passed through to the Microsandbox
+SDK. The runner does not yet map SDK OOM or metrics evidence to
+`RunnerOutcome(status="limit")`, so memory-pressure termination may currently
+surface as a generic execution error.
+
 For the current builtin catalog and contract, see
 [Builtin TaskSpecs](docs/specifications/10B-Builtin_TaskSpecs.md).
 

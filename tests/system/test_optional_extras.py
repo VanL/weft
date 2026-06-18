@@ -26,8 +26,16 @@ def _minimum_dependency_version(dependencies: list[str], package_name: str) -> s
     for dependency in dependencies:
         if not dependency.startswith(prefix):
             continue
-        return dependency[len(prefix) :].split(",", 1)[0]
+        return dependency[len(prefix) :].split(";", 1)[0].split(",", 1)[0].strip()
     raise AssertionError(f"{package_name} minimum not found in {dependencies!r}")
+
+
+def _dependency_entry(dependencies: list[str], package_name: str) -> str:
+    prefix = f"{package_name}>="
+    for dependency in dependencies:
+        if dependency.startswith(prefix):
+            return dependency
+    raise AssertionError(f"{package_name} dependency not found in {dependencies!r}")
 
 
 def test_django_channels_extras_are_explicit_opt_ins() -> None:
@@ -72,10 +80,14 @@ def test_root_extras_do_not_undercut_local_extension_versions() -> None:
     macos_pyproject = _load_pyproject(
         PROJECT_ROOT / "extensions" / "weft_macos_sandbox" / "pyproject.toml"
     )
+    microsandbox_pyproject = _load_pyproject(
+        PROJECT_ROOT / "extensions" / "weft_microsandbox" / "pyproject.toml"
+    )
 
     root_extras = root_pyproject["project"]["optional-dependencies"]
     docker_version = _version_tuple(docker_pyproject["project"]["version"])
     macos_version = _version_tuple(macos_pyproject["project"]["version"])
+    microsandbox_version = _version_tuple(microsandbox_pyproject["project"]["version"])
     pg_version = _version_tuple(
         _minimum_dependency_version(root_extras["pg"], "simplebroker-pg")
     )
@@ -96,6 +108,14 @@ def test_root_extras_do_not_undercut_local_extension_versions() -> None:
             >= macos_version
         )
 
+    for extra in ("microsandbox", "all", "dev"):
+        assert (
+            _version_tuple(
+                _minimum_dependency_version(root_extras[extra], "weft-microsandbox")
+            )
+            >= microsandbox_version
+        )
+
     for extra in ("all", "dev"):
         assert (
             _version_tuple(
@@ -103,3 +123,18 @@ def test_root_extras_do_not_undercut_local_extension_versions() -> None:
             )
             >= pg_version
         )
+
+
+def test_microsandbox_sdk_dependency_is_minor_bounded() -> None:
+    """The SDK adapter depends on a tight 0.5.x Microsandbox API surface."""
+
+    microsandbox_pyproject = _load_pyproject(
+        PROJECT_ROOT / "extensions" / "weft_microsandbox" / "pyproject.toml"
+    )
+
+    dependency = _dependency_entry(
+        microsandbox_pyproject["project"]["dependencies"],
+        "microsandbox",
+    )
+
+    assert dependency == "microsandbox>=0.5.7,<0.6"

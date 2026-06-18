@@ -1533,7 +1533,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "weft-microsandbox"
-version = "0.5.0"
+version = "0.5.1"
 source = { editable = "extensions/weft_microsandbox" }
 dependencies = [
     { name = "microsandbox" },
@@ -1542,8 +1542,8 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "microsandbox", specifier = ">=0.5.7" },
+    { name = "microsandbox", specifier = ">=0.5.7,<0.6" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
-    { name = "weft", specifier = ">=0.9.81" },
+    { name = "weft", specifier = ">=0.9.82" },
 ]
 provides-extras = ["dev"]

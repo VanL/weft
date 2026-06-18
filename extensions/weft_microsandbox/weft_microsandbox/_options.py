@@ -14,7 +14,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from weft._constants import MICROSANDBOX_RUNNER_OPTION_KEYS
 from weft.core.agents.provider_cli.execution import runtime_config_str
 from weft.core.taskspec import AgentSection
 
@@ -26,6 +25,18 @@ WorkspaceMode = Literal[
     "mount-read-only",
     "mount-read-write",
 ]
+_microsandbox_runner_option_keys: frozenset[str] = frozenset(
+    {
+        "mode",
+        "image",
+        "executable",
+        "network",
+        "workspace_mode",
+        "mounts",
+        "cwd",
+        "sandbox_name_prefix",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,7 +122,7 @@ def parse_options(
     """Normalize Microsandbox runner options."""
 
     options = dict(runner_options or {})
-    extra_keys = sorted(set(options) - MICROSANDBOX_RUNNER_OPTION_KEYS)
+    extra_keys = sorted(set(options) - _microsandbox_runner_option_keys)
     if extra_keys:
         raise ValueError(
             "Microsandbox runner option(s) are unsupported: "
