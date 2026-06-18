@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Callable
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +46,40 @@ DOCKER_IMAGE_PULL_TIMEOUT = 120.0
 RUNNER_NAMES = ("host", "docker", "macos-sandbox")
 CONSUMER_LIFECYCLE_TIMEOUT_SECONDS = 10.0
 SLOW_CONSUMER_LIFECYCLE_TIMEOUT_SECONDS = 30.0
+
+
+@contextmanager
+def _docker_external_resource_lock():
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - Windows skips real Docker tests
+        yield
+        return
+
+    lock_path = Path(tempfile.gettempdir()) / "weft-docker-runner-tests.lock"
+    with lock_path.open("w", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _node_uses_real_docker(node: pytest.Item) -> bool:
+    callspec = getattr(node, "callspec", None)
+    if callspec is not None and callspec.params.get("runner_name") == "docker":
+        return True
+    return str(node.name).startswith("test_docker_")
+
+
+@pytest.fixture(autouse=True)
+def _serialize_real_docker_tests(request: pytest.FixtureRequest):
+    if not _node_uses_real_docker(request.node):
+        yield
+        return
+
+    with _docker_external_resource_lock():
+        yield
 
 
 @pytest.fixture

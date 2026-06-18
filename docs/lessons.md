@@ -1007,3 +1007,9 @@ runbook needs to become stricter.
   distinction when the behavior depends on staged files. A test runtime that
   treats host temp paths as already present in the guest will miss bounded-agent
   failures such as generated MCP config files not being copied before exec.
+- Real Docker runner tests share one daemon, even when every Weft broker
+  context is isolated. Under release-load xdist, container create/start calls
+  can saturate that daemon and leave otherwise valid tests timing out against
+  containers stuck in `Created`. Serialize tests that execute real Docker
+  containers with a narrow cross-process lock; do not hide Docker lifecycle
+  coverage behind mocks or broader suite serialization.
