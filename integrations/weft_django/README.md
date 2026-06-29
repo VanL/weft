@@ -74,6 +74,12 @@ The handle exposes:
 available yet. `wait()` and `result()` both return the structured Weft
 `TaskResult`.
 
+Module-level `status(tid)` and `terminal_snapshot(tid)` use Weft's compact
+known-TID terminal snapshot path. They are read-only and can report terminal
+Monitor-store fallback after raw task-log rows retire. Use `snapshot(tid)` when
+callers need diagnostic fields such as task metadata, runtime details, or
+timestamps.
+
 `enqueue_on_commit(...)` and the native `*_on_commit(...)` helpers return
 `WeftDeferredSubmission`. The deferred handle has a stable `name` immediately
 and gains `tid` plus task methods after the outer transaction commits. Calling

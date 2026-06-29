@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.9.84 - 2026-06-29
+
+### Added
+
+- Added focused Hypothesis property tests for pure Weft invariants, including
+  TaskSpec payload resolution, immutable resolved sections, lifecycle status
+  sequences, queue-name classifiers, task-evidence queue fallbacks, and small
+  configuration parsers. Property tests are now a documented dev-only test
+  style with their own pytest marker.
+- Added a TaskMonitor cleanup subphase that trims old manager-authored
+  `task_spawned` rows after Monitor-store collation while preserving the newest
+  launch hints for each manager TID.
+
+### Changed
+
+- Known-TID terminal snapshots now use the shared status reconstruction path as
+  a fallback, so terminal Monitor-store records remain visible after raw
+  task-log retirement. `weft_django.status(tid)` inherits the same compact
+  non-consuming terminal status behavior.
+- Documented property-test boundaries and the manager launch-event retention
+  policy in the specs, plans, and agent testing runbook.
+
+### Fixed
+
+- Kept manager `task_spawned` compaction row-level only: it deletes exact old
+  launch-event rows and their Monitor child refs without marking the live
+  manager family raw-deleted or removing child-owned lifecycle evidence.
+
 ## 0.9.82 - 2026-06-17
 
 ### Added

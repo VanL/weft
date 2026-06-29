@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 144 plan files in this directory.
+There are currently 147 plan files in this directory.
 
 ## Curation Policy
 
@@ -23,6 +23,9 @@ There are currently 144 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-06-29-manager-task-spawned-retention-policy-plan.md`](./2026-06-29-manager-task-spawned-retention-policy-plan.md) | Manager Task-Spawned Retention Policy Plan | `completed` | none |
+| [`2026-06-20-weft-django-terminal-status-monitor-store-plan.md`](./2026-06-20-weft-django-terminal-status-monitor-store-plan.md) | Weft Django Terminal Status Monitor Store Plan | `completed` | none |
+| [`2026-06-18-hypothesis-property-testing-plan.md`](./2026-06-18-hypothesis-property-testing-plan.md) | Hypothesis Property-Based Testing Plan | `completed` | none |
 | [`2026-06-17-microsandbox-runner-plan.md`](./2026-06-17-microsandbox-runner-plan.md) | Microsandbox Runner Implementation Plan | `completed` | none |
 | [`2026-06-11-simplebroker-dump-load-adoption-plan.md`](./2026-06-11-simplebroker-dump-load-adoption-plan.md) | SimpleBroker Dump Load Adoption Plan | `completed` | none |
 | [`2026-06-11-service-disposition-window-and-retirement-pacing-plan.md`](./2026-06-11-service-disposition-window-and-retirement-pacing-plan.md) | Service Disposition Window And Retirement Pacing Plan | `completed` | none |

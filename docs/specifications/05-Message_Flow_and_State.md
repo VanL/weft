@@ -461,6 +461,13 @@ Current rules:
   references: after exact broker deletion succeeds, or after retry observes the
   raw broker row is already absent, the Monitor physically deletes those child
   rows and reconciles the parent `raw_deleted_at_ns` when no child refs remain.
+  A private manager launch-event compaction subphase may also delete exact old
+  manager-authored `task_spawned` raw rows and their Monitor child refs after
+  preserving the newest launch hints per manager TID. That subphase reports
+  under `task_log.retention`, uses exact message IDs from
+  `weft_monitor_task_messages`, and intentionally does not reconcile the
+  manager parent `raw_deleted_at_ns` because the manager service family may
+  still be open.
   Bounded retry sweeps use the same rule for already-ingested child refs from
   older cycles. For the `delete` mode, terminal summary emission is not a
   prerequisite for deleting a raw row that has already been folded into the
@@ -600,7 +607,10 @@ Current rules:
   inventing their own priority rules
 - shared task evidence priority is: terminal task-log lifecycle proof, typed
   terminal `ctrl_out`, readable final one-shot outbox, live runtime evidence,
-  then stale observer fallback
+  terminal Monitor-store fallback for known full TIDs after raw task-log
+  retirement, then stale observer fallback. Monitor-store fallback counts only
+  for terminal rows; nonterminal Monitor-store rows remain diagnostic history,
+  not live task proof
 - a matched keyed PONG is authoritative live task-local evidence at its
   timestamp for explicit known-TID current-state probes; reconciliation compares
   task-log lifecycle events, typed terminal `ctrl_out` envelopes, and matched
@@ -710,6 +720,11 @@ Child-local terminal evidence and TID-mapping/runtime evidence override the
 manager launch hint when they are present. An empty `weft.spawn.internal` queue
 means only that no unclaimed internal spawn request is waiting there; it is not
 evidence that the internal service is absent.
+While retained, manager `task_spawned` rows are durable launch hints, not child
+lifecycle truth. The TaskMonitor may compact high-volume historical manager
+launch hints by deleting exact older `task_spawned` rows after preserving the
+newest launch hints per manager TID and leaving child task-log rows and TID
+mappings under their normal owners.
 
 Current submission-reconciliation rules:
 
@@ -1214,6 +1229,8 @@ management live in the companion doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-06-29-manager-task-spawned-retention-policy-plan.md`](../plans/2026-06-29-manager-task-spawned-retention-policy-plan.md)
+- [`docs/plans/2026-06-20-weft-django-terminal-status-monitor-store-plan.md`](../plans/2026-06-20-weft-django-terminal-status-monitor-store-plan.md)
 - [`docs/plans/2026-06-11-simplebroker-dump-load-adoption-plan.md`](../plans/2026-06-11-simplebroker-dump-load-adoption-plan.md)
 - [`docs/plans/2026-06-10-self-healing-runtime-maintenance-plan.md`](../plans/2026-06-10-self-healing-runtime-maintenance-plan.md)
 - [`docs/plans/2026-06-01-critical-review-remediation-plan.md`](../plans/2026-06-01-critical-review-remediation-plan.md)

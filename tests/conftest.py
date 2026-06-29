@@ -95,6 +95,7 @@ _SHARED_MODULES = frozenset(
         "tests/core/test_state_machines.py",
         "tests/core/test_task_monitor_cleanup.py",
         "tests/core/test_task_log_scanner.py",
+        "tests/core/test_task_evidence_properties.py",
         "tests/core/test_task_monitoring.py",
         "tests/core/test_targets.py",
         "tests/core/test_tool_profiles.py",

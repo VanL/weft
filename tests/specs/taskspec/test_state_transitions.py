@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 from tests.taskspec import fixtures
 from weft.core.task_lifecycle import (
     TaskLifecycleStatus,
     TaskStatusTarget,
     task_lifecycle_machine,
+    task_lifecycle_statuses,
+    terminal_task_lifecycle_statuses,
+    valid_task_status_targets,
     validate_task_status_transition,
 )
 
@@ -76,6 +81,22 @@ def test_lifecycle_machine_covers_allowed_state_transitions() -> None:
     task_lifecycle_machine.assert_actions_covered(seen_actions)
 
 
+def test_lifecycle_machine_pair_matrix_matches_transition_table() -> None:
+    for current in sorted(task_lifecycle_statuses):
+        valid_targets = valid_task_status_targets(current)
+        for target in sorted(task_lifecycle_statuses):
+            if target in valid_targets:
+                decision = validate_task_status_transition(current, target)
+                assert decision.source == current
+                assert decision.target == target
+            else:
+                with pytest.raises(ValueError, match="No transition matched"):
+                    task_lifecycle_machine.decide(current, TaskStatusTarget(target))
+
+    for current in sorted(terminal_task_lifecycle_statuses):
+        assert valid_task_status_targets(current) == frozenset()
+
+
 @pytest.mark.parametrize(
     ("current", "target"),
     (
@@ -123,3 +144,45 @@ def test_unknown_current_status_fails_explicitly() -> None:
 
     with pytest.raises(ValueError, match="Unknown current status"):
         taskspec.set_status("running")
+
+
+_STATUS_OPERATIONS = {
+    "started": lambda taskspec: taskspec.mark_started(),
+    "running": lambda taskspec: taskspec.mark_running(),
+    "completed": lambda taskspec: taskspec.mark_completed(),
+    "failed": lambda taskspec: taskspec.mark_failed(error="generated"),
+    "timeout": lambda taskspec: taskspec.mark_timeout(error="generated"),
+    "cancelled": lambda taskspec: taskspec.mark_cancelled(reason="generated"),
+    "killed": lambda taskspec: taskspec.mark_killed(reason="generated"),
+}
+
+
+@pytest.mark.property
+@given(
+    operations=st.lists(
+        st.sampled_from(tuple(_STATUS_OPERATIONS)),
+        min_size=1,
+        max_size=12,
+    )
+)
+def test_generated_status_operation_sequences_never_leave_terminal_state(
+    operations: list[str],
+) -> None:
+    taskspec = fixtures.create_minimal_taskspec()
+
+    terminal_status: str | None = None
+    for operation in operations:
+        try:
+            _STATUS_OPERATIONS[operation](taskspec)
+        except ValueError:
+            pass
+
+        if terminal_status is not None:
+            assert taskspec.state.status == terminal_status
+        elif taskspec.state.status in terminal_task_lifecycle_statuses:
+            terminal_status = taskspec.state.status
+
+        if taskspec.state.status in {"spawning", "running"}:
+            assert taskspec.state.started_at is not None
+        if taskspec.state.status in terminal_task_lifecycle_statuses:
+            assert taskspec.state.completed_at is not None

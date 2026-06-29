@@ -43,13 +43,14 @@ def _update(
     *,
     event: str = "work_started",
     status: str = "running",
+    name: str = "sample",
     terminal: bool = False,
     reporting_interval: float | str | None = None,
     role: str | None = None,
     metadata: dict[str, object] | None = None,
 ) -> MonitorTaskEventUpdate:
     terminal_status = status if terminal else None
-    taskspec_summary: dict[str, object] = {"tid": tid, "name": "sample"}
+    taskspec_summary: dict[str, object] = {"tid": tid, "name": name}
     if reporting_interval is not None:
         taskspec_summary["spec"] = {"reporting_interval": reporting_interval}
     metadata_summary = dict(metadata or {})
@@ -64,7 +65,7 @@ def _update(
         event=event,
         status=status,
         observed_at_ns=message_id,
-        name="sample",
+        name=name,
         runner="host",
         role=role,
         terminal_seen=terminal,
@@ -129,6 +130,23 @@ def _monitor_table_count(
         with broker.sidecar() as session:
             rows = list(session.run(query, params, fetch=True))
     return int(rows[0][0])
+
+
+def _monitor_message_ids(
+    ctx,
+    *,
+    context_key: str,
+    tid: str,
+) -> tuple[int, ...]:
+    with ctx.broker() as broker:
+        with broker.sidecar() as session:
+            rows = session.run(
+                "SELECT message_id FROM weft_monitor_task_messages "
+                "WHERE context_key = ? AND tid = ? ORDER BY message_id",
+                (context_key, tid),
+                fetch=True,
+            )
+    return tuple(int(row[0]) for row in rows)
 
 
 def test_store_sidecar_session_rolls_back_on_exception(tmp_path) -> None:
@@ -918,6 +936,124 @@ def test_monitor_store_deletes_task_messages_and_reconciles_parent(tmp_path) -> 
         )
         == 0
     )
+
+
+def test_monitor_store_lists_manager_task_spawned_retention_refs(tmp_path) -> None:
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    manager_tid = "1779000000000100000"
+    other_manager_tid = "1779000000000100001"
+    worker_tid = "1779000000000100002"
+    child_tid = "1779000000000100003"
+    base = 1779000000000200000
+
+    updates = [
+        _update(
+            manager_tid,
+            base - 10,
+            event="task_started",
+            name="manager",
+            role="manager",
+        ),
+        *(
+            _update(
+                manager_tid,
+                base + index,
+                event="task_spawned",
+                name="manager",
+                role="manager",
+            )
+            for index in range(5)
+        ),
+        *(
+            _update(
+                other_manager_tid,
+                base + 10 + index,
+                event="task_spawned",
+                name="manager",
+                role="manager",
+            )
+            for index in range(4)
+        ),
+        _update(worker_tid, base + 20, event="task_spawned", name="worker"),
+        _update(child_tid, base + 21, event="work_started", name="child"),
+    ]
+    store.record_task_log_updates(
+        WEFT_GLOBAL_LOG_QUEUE,
+        tuple(updates),
+        checkpoint_message_id=None,
+    )
+
+    refs = store.list_manager_task_spawned_retention_refs(
+        keep_recent=2,
+        limit=10,
+    )
+
+    assert [(ref.tid, ref.message_id) for ref in refs] == [
+        (manager_tid, base),
+        (manager_tid, base + 1),
+        (manager_tid, base + 2),
+        (other_manager_tid, base + 10),
+        (other_manager_tid, base + 11),
+    ]
+
+
+def test_monitor_store_event_trim_deletes_child_refs_without_closing_manager(
+    tmp_path,
+) -> None:
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    manager_tid = "1779000000000110000"
+    base = 1779000000000300000
+    lifecycle = _update(
+        manager_tid,
+        base - 1,
+        event="task_started",
+        name="manager",
+        role="manager",
+    )
+    spawned = tuple(
+        _update(
+            manager_tid,
+            base + index,
+            event="task_spawned",
+            name="manager",
+            role="manager",
+        )
+        for index in range(5)
+    )
+    store.record_task_log_updates(
+        WEFT_GLOBAL_LOG_QUEUE,
+        (lifecycle, *spawned),
+        checkpoint_message_id=None,
+    )
+
+    selected = store.list_manager_task_spawned_retention_refs(
+        keep_recent=2,
+        limit=10,
+    )
+    result = store.delete_task_messages_after_event_trim(
+        tuple(ref.message_id for ref in selected),
+        deleted_at_ns=base + 100,
+    )
+    second = store.delete_task_messages_after_event_trim(
+        tuple(ref.message_id for ref in selected),
+        deleted_at_ns=base + 101,
+    )
+
+    assert result.message_rows_deleted == 3
+    assert result.affected_tids == 1
+    assert second.message_rows_deleted == 0
+    assert _monitor_message_ids(
+        ctx,
+        context_key=store.context_key,
+        tid=manager_tid,
+    ) == (lifecycle.message_id, spawned[-2].message_id, spawned[-1].message_id)
+    record = store.get_task(manager_tid)
+    assert record is not None
+    assert record.raw_deleted_at_ns is None
 
 
 def test_monitor_store_deletes_messages_and_reconciles_only_affected_tids(

@@ -52,6 +52,7 @@ from weft._constants import (
     TASK_MONITOR_LOG_SUBDIR,
     TASK_MONITOR_MAINTENANCE_PARTIAL_BATCH_ERROR_PREFIX,
     TASK_MONITOR_MAINTENANCE_RUNTIME_PRUNE_QUEUE_GROUPS,
+    TASK_MONITOR_MANAGER_TASK_SPAWNED_KEEP_RECENT_DEFAULT,
     TASK_MONITOR_POLICY_MONITOR_STORE_LIFECYCLE,
     TASK_MONITOR_POLICY_RUNTIME_STATE_RETENTION,
     TASK_MONITOR_POLICY_TASK_LOCAL_DEAD_TID,
@@ -2044,6 +2045,13 @@ class TaskMonitor(ServiceTask):
                 _retained_task_log_ingest_progress(retained_ingest),
             )
             self._last_collation_rows_processed = retained_ingest.scanned
+            if runtime_cleanup_requested:
+                self._apply_monitor_store_retirement_result(
+                    self._trim_manager_task_spawned_task_log_rows(
+                        store,
+                        now_ns=now_ns,
+                    )
+                )
             if retained_ingest.completed_fifo_high_water:
                 if runtime_cleanup_requested:
                     pre_checkpoint_recovery = (
@@ -3871,6 +3879,203 @@ class TaskMonitor(ServiceTask):
             ),
             family_limit_hit=selection.pending,
             deadline_hit=deadline_hit,
+        )
+
+    def _trim_manager_task_spawned_task_log_rows(
+        self,
+        store: MonitorStore,
+        *,
+        now_ns: int,
+    ) -> MonitorStoreRetirementResult:
+        """Trim old manager-authored task_spawned rows from retained logs.
+
+        This is row-level compaction for open manager families. It must not mark
+        the manager collation ``raw_deleted_at_ns``.
+
+        Spec: [MF-5], [MF-6], [OBS.13]
+        """
+
+        refs = store.list_manager_task_spawned_retention_refs(
+            limit=self._monitor_config.batch_size + 1,
+            keep_recent=TASK_MONITOR_MANAGER_TASK_SPAWNED_KEEP_RECENT_DEFAULT,
+        )
+        if not refs:
+            self._last_policy_progress = (
+                *self._last_policy_progress,
+                PolicyProgress(
+                    policy=TASK_MONITOR_POLICY_TASK_LOG_RETENTION,
+                    domain=WEFT_GLOBAL_LOG_QUEUE,
+                    scanned=0,
+                    selected=0,
+                    base_reached=True,
+                ),
+            )
+            return MonitorStoreRetirementResult()
+
+        selected_refs = refs[: self._monitor_config.batch_size]
+        more_refs = len(refs) > len(selected_refs)
+        selected_for_delete = selected_refs
+        already_missing = 0
+        reported = 0
+        report_errors: list[str] = []
+
+        if self._jsonl_then_delete_enabled():
+            rows_by_message_id = self._task_log_rows_for_message_refs_including_claimed(
+                selected_refs
+            )
+            reportable_refs: list[MonitorRawMessageRef] = []
+            for ref in selected_refs:
+                raw_row = rows_by_message_id.get(ref.message_id)
+                if raw_row is None:
+                    already_missing += 1
+                    reportable_refs.append(ref)
+                    continue
+                report = self._manager_task_spawned_lifetime_report(
+                    raw_row,
+                    ref,
+                    emitted_at_ns=now_ns,
+                )
+                try:
+                    self._handoff_lifetime_report(
+                        report,
+                        store=store,
+                        emitted_at_ns=now_ns,
+                    )
+                except ExternalTaskLogError as exc:
+                    report_errors.append(str(exc))
+                    break
+                reported += 1
+                reportable_refs.append(ref)
+            selected_for_delete = tuple(reportable_refs)
+
+        applied: tuple[_AppliedMonitorRawMessage, ...] = ()
+        if selected_for_delete and not report_errors:
+            applied = tuple(
+                apply_exact_prune_candidates(
+                    self._monitor_context(),
+                    selected_for_delete,
+                    apply_result=_applied_monitor_raw_message,
+                    reconcile_missing=True,
+                )
+            )
+        delete_errors = tuple(
+            result.error for result in applied if result.error is not None
+        )
+        reconciled_ids = tuple(
+            result.candidate.message_id
+            for result in applied
+            if result.deleted
+            or (result.error is None and not result.candidate.report_only)
+        )
+
+        retirement = MonitorStoreRetirementResult()
+        store_errors: list[str] = []
+        if reconciled_ids:
+            try:
+                retirement = store.delete_task_messages_after_event_trim(
+                    reconciled_ids,
+                    deleted_at_ns=now_ns,
+                )
+            except (OSError, RuntimeError, ValueError) as exc:
+                store_errors.append(str(exc))
+
+        blocked_reason = None
+        if report_errors:
+            blocked_reason = report_errors[0]
+        elif delete_errors:
+            blocked_reason = delete_errors[0]
+        elif store_errors:
+            blocked_reason = store_errors[0]
+        if blocked_reason is not None:
+            self._last_collation_store_error = blocked_reason
+
+        raw_deleted = len(reconciled_ids)
+        self._last_policy_progress = (
+            *self._last_policy_progress,
+            PolicyProgress(
+                policy=TASK_MONITOR_POLICY_TASK_LOG_RETENTION,
+                domain=WEFT_GLOBAL_LOG_QUEUE,
+                scanned=len(refs),
+                selected=len(selected_refs),
+                applied=retirement.message_rows_deleted,
+                waypoint_reached=more_refs or blocked_reason is not None,
+                base_reached=False,
+                blocked_reason=blocked_reason,
+                reason_counts={
+                    "manager_task_spawned_retained_event": len(selected_refs),
+                    "manager_task_spawned_already_missing": already_missing,
+                    "manager_task_spawned_reported": reported,
+                    "manager_task_spawned_raw_deleted": raw_deleted,
+                    "manager_task_spawned_refs_deleted": (
+                        retirement.message_rows_deleted
+                    ),
+                },
+            ),
+        )
+        return retirement
+
+    def _task_log_rows_for_message_refs_including_claimed(
+        self,
+        refs: Sequence[MonitorRawMessageRef],
+    ) -> dict[int, QueueWindowRow]:
+        """Fetch exact task-log raw rows for selected refs, including claimed rows."""
+
+        rows: dict[int, QueueWindowRow] = {}
+        with self._monitor_context().broker() as broker:
+            for ref in refs:
+                row = broker.peek_one(
+                    ref.queue,
+                    exact_timestamp=ref.message_id,
+                    with_timestamps=True,
+                    include_claimed=True,
+                )
+                if row is None:
+                    continue
+                body, timestamp = row
+                rows[int(timestamp)] = QueueWindowRow(
+                    queue=ref.queue,
+                    body=body if isinstance(body, str) else str(body),
+                    message_id=int(timestamp),
+                )
+        return rows
+
+    def _manager_task_spawned_lifetime_report(
+        self,
+        row: QueueWindowRow,
+        ref: MonitorRawMessageRef,
+        *,
+        emitted_at_ns: int,
+    ) -> dict[str, Any]:
+        """Build a compact JSONL handoff for one retained manager launch event."""
+
+        observations: dict[str, Any] = {
+            "event": "task_spawned",
+            "manager_tid": ref.tid,
+            "retained_newest_per_manager_tid": (
+                TASK_MONITOR_MANAGER_TASK_SPAWNED_KEEP_RECENT_DEFAULT
+            ),
+        }
+        try:
+            payload = json.loads(row.body)
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, Mapping):
+            event = payload.get("event")
+            if isinstance(event, str) and event:
+                observations["event"] = event
+            child_tid = payload.get("child_tid")
+            if isinstance(child_tid, str) and child_tid:
+                observations["child_tid"] = child_tid
+        return build_raw_row_lifetime_report(
+            row,
+            monitor_tid=self.tid,
+            emitted_at_ns=emitted_at_ns,
+            source_policy=TASK_MONITOR_POLICY_TASK_LOG_RETENTION,
+            report_kind="manager_task_spawned_retained_event",
+            close_reason="manager_task_spawned_retention",
+            tid=ref.tid,
+            completeness="raw_row",
+            observations=observations,
         )
 
     def _delete_monitor_store_task_log_rows(

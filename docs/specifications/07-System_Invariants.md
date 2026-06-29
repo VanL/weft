@@ -205,8 +205,10 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
     table for exact raw-message deletion and retry, not a shadow queue ledger.
     After exact raw broker deletion succeeds, or retry observes the raw row is
     already absent, the Monitor deletes the child refs and reconciles the
-    parent family. Raw deletion is gated by successful Monitor collation, not
-    by terminal summary emission.
+    parent family. The manager `task_spawned` event-trim helper is the narrow
+    exception: it may delete selected launch-event child refs while leaving the
+    open manager parent family without `raw_deleted_at_ns`. Raw deletion is
+    gated by successful Monitor collation, not by terminal summary emission.
   - **OBS.13.4**: Family disposition and parent retirement are explicit,
     retryable table state. Parents may be physically retired only after raw
     deletion, summary emission, disposition, task-local control cleanup, any
@@ -282,7 +284,9 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
     `runtime_state.retention`. Each policy run must remain bounded, report
     base/waypoint/blocked status, and avoid spinning when only future-eligible
     or blocked work remains. Private cleanup phases belong in reason counts or
-    cached details, not new policy identities.
+    cached details, not new policy identities. Manager `task_spawned` row
+    trimming is reported through `task_log.retention` reason counts and does
+    not add a sixth policy identity.
 - **OBS.14**: claimed outbox residue is recovery evidence, not decoded result
   evidence. Status/result readers may surface
   `claimed_result_without_terminal`, but they must not delete, unclaim, or
@@ -654,6 +658,8 @@ doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-06-29-manager-task-spawned-retention-policy-plan.md`](../plans/2026-06-29-manager-task-spawned-retention-policy-plan.md)
+- [`docs/plans/2026-06-18-hypothesis-property-testing-plan.md`](../plans/2026-06-18-hypothesis-property-testing-plan.md)
 - [`docs/plans/2026-06-10-self-healing-runtime-maintenance-plan.md`](../plans/2026-06-10-self-healing-runtime-maintenance-plan.md)
 - [`docs/plans/2026-06-01-critical-review-remediation-plan.md`](../plans/2026-06-01-critical-review-remediation-plan.md)
 - [`docs/plans/2026-05-31-task-monitor-orphan-log-and-status-reconciliation-plan.md`](../plans/2026-05-31-task-monitor-orphan-log-and-status-reconciliation-plan.md)

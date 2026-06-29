@@ -188,6 +188,112 @@ def _latest_tid_mapping_payload(
     return latest[1]
 
 
+def _task_log_message_ids(queue: Any) -> set[int]:
+    return {int(message_id) for _body, message_id in iter_queue_entries(queue)}
+
+
+def _task_monitor_manager_taskspec(tid: str) -> dict[str, Any]:
+    return {
+        "tid": tid,
+        "version": "1.0",
+        "name": "manager",
+        "io": {},
+        "spec": {"runner": {"name": "host"}},
+        "state": {"status": "running"},
+        "metadata": {"role": "manager"},
+    }
+
+
+def _task_monitor_child_taskspec(tid: str) -> dict[str, Any]:
+    return {
+        "tid": tid,
+        "version": "1.0",
+        "name": "child",
+        "io": {},
+        "spec": {"runner": {"name": "host"}},
+        "state": {"status": "created"},
+        "metadata": {},
+    }
+
+
+def _write_task_log_payload(queue: Any, payload: dict[str, Any]) -> int:
+    body = json.dumps(payload, sort_keys=True)
+    queue.write(body)
+    return max(
+        int(message_id)
+        for row_body, message_id in iter_queue_entries(queue)
+        if row_body == body
+    )
+
+
+def _seed_manager_task_spawned_retention_fixture(
+    store: MonitorStore,
+    log_queue: Any,
+    *,
+    manager_tid: str,
+    child_prefix: str,
+    spawned_count: int = 5,
+) -> dict[str, Any]:
+    manager_taskspec = _task_monitor_manager_taskspec(manager_tid)
+    updates = []
+    lifecycle_payload = {
+        "event": "task_started",
+        "status": "running",
+        "tid": manager_tid,
+        "taskspec": manager_taskspec,
+    }
+    lifecycle_id = _write_task_log_payload(log_queue, lifecycle_payload)
+    lifecycle_update = update_from_task_log_payload(
+        lifecycle_payload,
+        message_id=lifecycle_id,
+    )
+    assert lifecycle_update is not None
+    updates.append(lifecycle_update)
+
+    spawned_ids: list[int] = []
+    child_tids: list[str] = []
+    for index in range(spawned_count):
+        child_tid = f"{child_prefix}{index:02d}"
+        child_tids.append(child_tid)
+        payload = {
+            "event": "task_spawned",
+            "status": "running",
+            "tid": manager_tid,
+            "taskspec": manager_taskspec,
+            "child_tid": child_tid,
+            "child_pid": 1000 + index,
+            "child_taskspec": _task_monitor_child_taskspec(child_tid),
+        }
+        message_id = _write_task_log_payload(log_queue, payload)
+        spawned_ids.append(message_id)
+        update = update_from_task_log_payload(payload, message_id=message_id)
+        assert update is not None
+        updates.append(update)
+
+    child_payload = {
+        "event": "work_started",
+        "status": "running",
+        "tid": child_tids[0],
+        "taskspec": _task_monitor_child_taskspec(child_tids[0]),
+    }
+    child_row_id = _write_task_log_payload(log_queue, child_payload)
+    child_update = update_from_task_log_payload(child_payload, message_id=child_row_id)
+    assert child_update is not None
+    updates.append(child_update)
+
+    store.record_task_log_updates(
+        WEFT_GLOBAL_LOG_QUEUE,
+        tuple(updates),
+        checkpoint_message_id=None,
+    )
+    return {
+        "lifecycle_id": lifecycle_id,
+        "spawned_ids": tuple(spawned_ids),
+        "child_row_id": child_row_id,
+        "child_tids": tuple(child_tids),
+    }
+
+
 def drive_task_monitor_until(
     task: TaskMonitor,
     predicate: Callable[[], bool],
@@ -5515,6 +5621,319 @@ def test_task_monitor_raw_store_delete_reconciles_missing_refs_without_stall(
         assert task._last_collation_store_error is None
     finally:
         task.stop()
+
+
+def test_task_monitor_trims_manager_task_spawned_rows_without_closing_manager_family(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        task_monitor_mod,
+        "TASK_MONITOR_MANAGER_TASK_SPAWNED_KEEP_RECENT_DEFAULT",
+        2,
+    )
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
+            "WEFT_TASK_MONITOR_MODE": "delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    manager_tid = "1778084345905438800"
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    manager_ctrl_in = make_queue(f"T{manager_tid}.ctrl_in")
+    manager_ctrl_in.write("control-row")
+
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999961800"),
+        config=config,
+    )
+    try:
+        store = task._ensure_monitor_store()
+        assert store is not None
+        seeded = _seed_manager_task_spawned_retention_fixture(
+            store,
+            log_queue,
+            manager_tid=manager_tid,
+            child_prefix="17780843459054388",
+        )
+
+        retired = task._trim_manager_task_spawned_task_log_rows(
+            store,
+            now_ns=time.time_ns(),
+        )
+
+        spawned_ids = seeded["spawned_ids"]
+        old_spawned_ids = set(spawned_ids[:-2])
+        newest_spawned_ids = set(spawned_ids[-2:])
+        remaining_raw_ids = _task_log_message_ids(log_queue)
+        assert retired.message_rows_deleted == 3
+        assert old_spawned_ids.isdisjoint(remaining_raw_ids)
+        assert newest_spawned_ids <= remaining_raw_ids
+        assert seeded["lifecycle_id"] in remaining_raw_ids
+        assert seeded["child_row_id"] in remaining_raw_ids
+        assert set(store.missing_task_message_ids(tuple(old_spawned_ids))) == (
+            old_spawned_ids
+        )
+        assert store.missing_task_message_ids(tuple(newest_spawned_ids)) == ()
+        assert store.missing_task_message_ids((seeded["lifecycle_id"],)) == ()
+        assert store.missing_task_message_ids((seeded["child_row_id"],)) == ()
+        record = store.get_task(manager_tid)
+        assert record is not None
+        assert record.raw_deleted_at_ns is None
+        assert record.disposition_at_ns is None
+        assert list(manager_ctrl_in.peek_generator()) == ["control-row"]
+        progress = task._last_policy_progress[-1]
+        assert progress.policy == TASK_MONITOR_POLICY_TASK_LOG_RETENTION
+        assert progress.reason_counts["manager_task_spawned_refs_deleted"] == 3
+        assert {progress.policy} <= set(TASK_MONITOR_CLEANUP_POLICY_NAMES)
+    finally:
+        task.stop()
+
+
+def test_task_monitor_jsonl_then_delete_reports_manager_task_spawned_before_trim(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        task_monitor_mod,
+        "TASK_MONITOR_MANAGER_TASK_SPAWNED_KEEP_RECENT_DEFAULT",
+        2,
+    )
+    external_path = tmp_path / "manager-task-spawned.jsonl"
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
+            "WEFT_LOG_TASKS_EXTERNAL_PATH": str(external_path),
+            "WEFT_LOG_TASKS_EXTERNAL_MODE": "collated",
+            "WEFT_TASK_MONITOR_MODE": "jsonl_then_delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    manager_tid = "1778084345905438810"
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999961810"),
+        config=config,
+    )
+    try:
+        store = task._ensure_monitor_store()
+        assert store is not None
+        seeded = _seed_manager_task_spawned_retention_fixture(
+            store,
+            log_queue,
+            manager_tid=manager_tid,
+            child_prefix="17780843459054389",
+        )
+
+        task._run_monitor_store_cycle(
+            now_ns=time.time_ns(),
+            task_log_owner="collated_store",
+            start_control_cleanup=False,
+        )
+
+        spawned_ids = seeded["spawned_ids"]
+        old_spawned_ids = set(spawned_ids[:-2])
+        newest_spawned_ids = set(spawned_ids[-2:])
+        remaining_raw_ids = _task_log_message_ids(log_queue)
+        assert old_spawned_ids.isdisjoint(remaining_raw_ids)
+        assert newest_spawned_ids <= remaining_raw_ids
+        assert seeded["lifecycle_id"] in remaining_raw_ids
+        assert seeded["child_row_id"] in remaining_raw_ids
+        record = store.get_task(manager_tid)
+        assert record is not None
+        assert record.raw_deleted_at_ns is None
+    finally:
+        task.stop()
+
+    records = [
+        json.loads(line)
+        for line in external_path.read_text(encoding="utf-8").splitlines()
+    ]
+    manager_reports = [
+        record
+        for record in records
+        if record["report_kind"] == "manager_task_spawned_retained_event"
+    ]
+    assert len(manager_reports) == 3
+    for report in manager_reports:
+        assert report["record_type"] == "task_lifetime_report"
+        assert report["source_policy"] == TASK_MONITOR_POLICY_TASK_LOG_RETENTION
+        assert report["completeness"] == "raw_row"
+        assert report["lifetime"]["close_reason"] == ("manager_task_spawned_retention")
+        assert report["subject"]["tid"] == manager_tid
+        assert report["observations"]["event"] == "task_spawned"
+        assert report["observations"]["manager_tid"] == manager_tid
+        assert "child_tid" in report["observations"]
+        assert "payload_size_bytes" in report["observations"]
+        assert "child_taskspec" not in report["observations"]
+
+
+def test_task_monitor_jsonl_then_delete_blocks_manager_task_spawned_trim(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        task_monitor_mod,
+        "TASK_MONITOR_MANAGER_TASK_SPAWNED_KEEP_RECENT_DEFAULT",
+        2,
+    )
+    external_path = tmp_path / "external-target"
+    external_path.mkdir()
+
+    def fail_deferred_write(self: MonitorStore, **_kwargs: object) -> None:
+        raise RuntimeError("deferred table unavailable")
+
+    monkeypatch.setattr(MonitorStore, "upsert_deferred_write", fail_deferred_write)
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
+            "WEFT_LOG_TASKS_EXTERNAL_PATH": str(external_path),
+            "WEFT_LOG_TASKS_EXTERNAL_MODE": "collated",
+            "WEFT_TASK_MONITOR_MODE": "jsonl_then_delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    manager_tid = "1778084345905438820"
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999961820"),
+        config=config,
+    )
+    try:
+        store = task._ensure_monitor_store()
+        assert store is not None
+        seeded = _seed_manager_task_spawned_retention_fixture(
+            store,
+            log_queue,
+            manager_tid=manager_tid,
+            child_prefix="17780843459054390",
+        )
+
+        retired = task._trim_manager_task_spawned_task_log_rows(
+            store,
+            now_ns=time.time_ns(),
+        )
+
+        spawned_ids = seeded["spawned_ids"]
+        old_spawned_ids = set(spawned_ids[:-2])
+        remaining_raw_ids = _task_log_message_ids(log_queue)
+        assert retired.message_rows_deleted == 0
+        assert old_spawned_ids <= remaining_raw_ids
+        assert store.missing_task_message_ids(tuple(old_spawned_ids)) == ()
+        progress = task._last_policy_progress[-1]
+        assert progress.policy == TASK_MONITOR_POLICY_TASK_LOG_RETENTION
+        assert progress.blocked_reason is not None
+        assert "deferred table unavailable" in progress.blocked_reason
+        record = store.get_task(manager_tid)
+        assert record is not None
+        assert record.raw_deleted_at_ns is None
+    finally:
+        task.stop()
+
+
+def test_task_monitor_jsonl_then_delete_reconciles_missing_manager_spawned_ref(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        task_monitor_mod,
+        "TASK_MONITOR_MANAGER_TASK_SPAWNED_KEEP_RECENT_DEFAULT",
+        2,
+    )
+    external_path = tmp_path / "manager-task-spawned-missing.jsonl"
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
+            "WEFT_LOG_TASKS_EXTERNAL_PATH": str(external_path),
+            "WEFT_LOG_TASKS_EXTERNAL_MODE": "collated",
+            "WEFT_TASK_MONITOR_MODE": "jsonl_then_delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    manager_tid = "1778084345905438830"
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999961830"),
+        config=config,
+    )
+    try:
+        store = task._ensure_monitor_store()
+        assert store is not None
+        seeded = _seed_manager_task_spawned_retention_fixture(
+            store,
+            log_queue,
+            manager_tid=manager_tid,
+            child_prefix="17780843459054391",
+        )
+        spawned_ids = seeded["spawned_ids"]
+        assert log_queue.delete(message_id=spawned_ids[0]) is True
+
+        retired = task._trim_manager_task_spawned_task_log_rows(
+            store,
+            now_ns=time.time_ns(),
+        )
+
+        old_spawned_ids = set(spawned_ids[:-2])
+        remaining_raw_ids = _task_log_message_ids(log_queue)
+        assert retired.message_rows_deleted == 3
+        assert old_spawned_ids.isdisjoint(remaining_raw_ids)
+        assert set(store.missing_task_message_ids(tuple(old_spawned_ids))) == (
+            old_spawned_ids
+        )
+        progress = task._last_policy_progress[-1]
+        assert progress.reason_counts["manager_task_spawned_already_missing"] == 1
+        assert progress.reason_counts["manager_task_spawned_reported"] == 2
+        record = store.get_task(manager_tid)
+        assert record is not None
+        assert record.raw_deleted_at_ns is None
+    finally:
+        task.stop()
+
+    records = [
+        json.loads(line)
+        for line in external_path.read_text(encoding="utf-8").splitlines()
+    ]
+    manager_reports = [
+        record
+        for record in records
+        if record["report_kind"] == "manager_task_spawned_retained_event"
+    ]
+    assert len(manager_reports) == 2
 
 
 def test_task_monitor_terminal_control_cleanup_worker_does_not_block_ping(

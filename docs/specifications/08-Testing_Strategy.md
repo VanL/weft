@@ -17,6 +17,9 @@ harnesses:
   provide broker-backed fixtures for queue and task tests.
 - `shared` vs `sqlite_only` keeps backend-neutral coverage separate from
   SQLite-specific coverage.
+- Hypothesis is a dev-only dependency used for focused property-based
+  invariant sweeps. Property tests use the `property` marker and remain in the
+  normal domain modules they exercise.
 - `tests/specs/test_test_audit_policy.py` enforces the classification tables,
   and `tests/test_harness_registration.py` guards harness-registration plumbing.
 - The Postgres-backed check is `bin/pytest-pg --all` for backend-sensitive
@@ -34,6 +37,8 @@ Current classification rule:
 - test modules should declare backend scope explicitly through `shared` or
   `sqlite_only`, either directly or through the central classification tables in
   `tests/conftest.py`
+- property-based modules should also declare `property`; this marker is a test
+  style marker, not a backend-scope marker
 - broker-heavy tests run under normal xdist scheduling; parallel contention is
   part of the test signal, and isolation bugs should be fixed in the harness or
   implementation instead of hidden through broad serialization
@@ -66,7 +71,9 @@ Coverage policy:
   provider CLI adapters, target execution helpers, and related validation
   surfaces. Pure reducer helpers such as `weft/core/state_machines.py` are
   covered here with table tests that assert structural reachability,
-  transition-ID coverage, state coverage, and action coverage.
+  transition-ID coverage, state coverage, and action coverage. Focused
+  property tests also cover pure queue-name classification and read-only task
+  evidence queue fallback helpers.
 - `tests/specs/` covers spec-level invariants and cross-surface contracts. This
   tree already includes focused subdirectories such as
   `manager_architecture/`, `message_flow/`, `quick_reference/`,
@@ -74,12 +81,15 @@ Coverage policy:
   `test_command_queue_seam.py`, `test_plan_metadata.py`, and
   `test_test_audit_policy.py`.
 - `tests/system/` holds repository-level checks for constants, helper behavior,
-  backend test plumbing, and release-script invariants.
+  backend test plumbing, and release-script invariants. It also contains pure
+  property tests for finite configuration-parser boundaries.
 - `tests/tasks/` covers execution, reservation flow, control messages, process
   titles, observability, interactive behavior, pipeline runtime, and
   task-endpoint behavior.
 - `tests/taskspec/` covers TaskSpec validation, immutability, defaults, and
-  state transitions.
+  state transitions. Property tests supplement the examples for generated
+  TaskSpec payload resolution, immutable `spec`/`io` sections, resource-limit
+  validation, metric peaks, and timestamp coherence.
 - `tests/helpers/` and `tests/fixtures/` provide shared harness, backend, and
   scenario setup for the above suites. They are support code, not their own
   test contract.
@@ -96,11 +106,16 @@ Coverage policy:
   part of the canonical pytest contract.
 - There is no dedicated `tests/property/` tree yet. Property-style checks remain
   embedded in normal pytest modules where they are needed.
+- Property tests are not the proof mechanism for live Manager, Consumer,
+  SimpleBroker reservation, process execution, or wall-clock lifecycle
+  behavior. Those paths remain covered by deterministic table tests and real
+  harness-backed examples.
 - Deferred test surfaces stay in the companion planned doc instead of being
   mixed into this canonical file.
 
 ## Related Plans
 
+- [`docs/plans/2026-06-18-hypothesis-property-testing-plan.md`](../plans/2026-06-18-hypothesis-property-testing-plan.md)
 - [`docs/plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md`](../plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md)
 
 ## Related Documents

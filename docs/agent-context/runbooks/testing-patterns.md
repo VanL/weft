@@ -84,6 +84,35 @@ Use the narrowest real harness that still proves the behavior:
    tests should avoid assuming a terminal log event means the result is already
    readable.
 
+## Property-Based Tests
+
+Use Hypothesis for pure invariant sweeps where generated examples shrink to a
+useful counterexample. Good targets are TaskSpec validation/defaulting,
+immutable model sections, pure lifecycle status-operation sequences,
+queue-name classifiers, read-only evidence helpers, and small configuration
+parsers.
+
+Keep property tests inside the normal domain module or nearby test file, not in
+a separate `tests/property/` tree. Mark property modules or tests with
+`pytest.mark.property`, and still declare backend scope with `shared` or
+`sqlite_only`.
+
+Do not use generated live Manager, Consumer, broker, process, filesystem, or
+wall-clock lifecycle tests in the default suite. Pytest function-scoped
+fixtures are set up once for the whole Hypothesis test, not once per generated
+example, so live harness state can leak between examples. Use real
+harness-backed example tests for durable queue/process behavior instead.
+
+Keep strategies focused and small. Prefer local strategies until duplication is
+real; use `tests/helpers/hypothesis_strategies.py` only for shared TID, queue,
+and small JSON-value generation. Avoid broad `st.data()` tests and heavy
+filters. Do not suppress Hypothesis health checks broadly; fix the strategy or
+document a narrow suppression.
+
+Do not mock SimpleBroker, Manager, Consumer, or TaskSpec to make a property
+test easier. If a property cannot call the production helper directly, it is
+probably not a good property-test target.
+
 ## Common Failure Patterns
 
 ### Pattern 1: Broker-Heavy Tests Flake Under xdist

@@ -546,6 +546,9 @@ TASK_MONITOR_CLEANUP_POLICY_NAMES: Final[tuple[str, ...]] = (
 )
 """The complete set of TaskMonitor top-level cleanup policy names."""
 
+TASK_MONITOR_MANAGER_TASK_SPAWNED_KEEP_RECENT_DEFAULT: Final[int] = 1000
+"""Newest manager-authored task_spawned refs retained per manager TID."""
+
 TASK_MONITOR_TASK_LOG_SCAN_LIMIT_REACHED: Final[str] = "task_log_scan_limit_reached"
 """TaskMonitor task-log cleanup stop reason for scan limit exhaustion."""
 

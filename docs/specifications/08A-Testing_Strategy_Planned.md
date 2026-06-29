@@ -45,20 +45,27 @@ Constraint:
 - keep these as opt-in measurement or gated regression suites; do not make them
   the default pytest contract unless the canonical spec is updated
 
-## 3. Property-Based Invariant Sweeps [TS-A3]
+## 3. Future Property-Based Invariant Sweeps [TS-A3]
 
-Property-style checks remain useful for invariants that are already covered
-deterministically elsewhere. Future additions would focus on:
+The current canonical suite already includes focused Hypothesis checks for pure
+TaskSpec, lifecycle, queue-identity, task-evidence, and configuration-parser
+invariants. Future property-style additions should stay limited to new pure
+contracts or demonstrably valuable edge cases that are awkward to enumerate by
+hand.
 
-- forward-only state transitions
+Possible future additions:
+
 - delivery and reservation invariants
-- resource-limit enforcement
 - queue-history and reservation edge cases that are awkward to enumerate by hand
+- additional monitor policy reducers if they stay pure and cheap
 
 Constraint:
 
 - treat these as supplemental confidence checks, not the primary proof of
   behavior
+- do not put live Manager, Consumer, broker reservation loops, process
+  execution, or wall-clock lifecycle races under Hypothesis in the default
+  suite unless the canonical testing spec is updated with a concrete rationale
 
 ## 4. Test-Hook and CI Follow-Up [TS-A4]
 
@@ -81,6 +88,10 @@ Constraint:
 Current suite shape, harness selection, backend classification, and dev-only
 benchmark status are owned by [08-Testing_Strategy.md](08-Testing_Strategy.md).
 They are not repeated here.
+
+## Related Plans
+
+- [`docs/plans/2026-06-18-hypothesis-property-testing-plan.md`](../plans/2026-06-18-hypothesis-property-testing-plan.md)
 
 ## Backlink
 

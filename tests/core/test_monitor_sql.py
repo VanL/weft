@@ -218,6 +218,26 @@ def test_monitor_sql_raw_deleted_child_ref_repair_query_summary_gate() -> None:
     assert "c.summary_emitted_at_ns IS NOT NULL" in gated
 
 
+def test_monitor_sql_manager_task_spawned_retention_query_keeps_newest_refs() -> None:
+    query = monitor_sql.select_manager_task_spawned_retention_refs(
+        "weft_monitor_task_messages",
+        "weft_monitor_task_collations",
+    )
+
+    assert "ROW_NUMBER() OVER" in query
+    assert "PARTITION BY m.context_key, m.tid" in query
+    assert "ORDER BY m.message_id DESC" in query
+    assert "m.queue_name = ?" in query
+    assert "m.event = 'task_spawned'" in query
+    assert "m.deleted_at_ns IS NULL" in query
+    assert "c.raw_deleted_at_ns IS NULL" in query
+    assert "(c.role = 'manager' OR c.name = 'manager')" in query
+    assert "WHERE newest_rank > ?" in query
+    assert "ORDER BY message_id" in query
+    assert "LIMIT ?" in query
+    assert "%s" not in query
+
+
 def test_monitor_sql_summary_ready_queries_parameterize_cutoffs() -> None:
     terminal = monitor_sql.select_summary_ready_terminal_tasks(
         "weft_monitor_task_collations",

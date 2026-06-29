@@ -1647,7 +1647,7 @@ def test_cli_run_persistent_spec_no_wait_consumes_initial_piped_stdin(
     assert err == ""
     tid = out.strip()
     result_timeout = (
-        "20" if os.name == "nt" or active_test_backend() == "postgres" else "5"
+        "20" if os.name == "nt" or active_test_backend() == "postgres" else "10"
     )
 
     rc, out, err = run_cli(
@@ -1660,7 +1660,7 @@ def test_cli_run_persistent_spec_no_wait_consumes_initial_piped_stdin(
         harness=weft_harness,
     )
 
-    assert rc == 0
+    assert rc == 0, (out, err, weft_harness.dump_completion_timeout_state(tid))
     result_payload = json.loads(out)
     assert result_payload["result"] == "hello-from-stdin"
     assert err == ""

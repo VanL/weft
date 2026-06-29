@@ -1247,6 +1247,40 @@ class _MonitorTableAccess:
             for row in rows
         )
 
+    def list_manager_task_spawned_retention_refs(
+        self,
+        *,
+        limit: int,
+        keep_recent: int,
+    ) -> tuple[MonitorRawMessageRef, ...]:
+        """Return old excess manager-authored task_spawned refs."""
+
+        if limit <= 0:
+            return ()
+        if keep_recent <= 0:
+            raise ValueError("keep_recent must be positive")
+        rows = self._session.run(
+            monitor_sql.select_manager_task_spawned_retention_refs(
+                self._tables.task_messages,
+                self._tables.task_collations,
+            ),
+            (
+                self._context_key,
+                WEFT_GLOBAL_LOG_QUEUE,
+                int(keep_recent),
+                int(limit),
+            ),
+            fetch=True,
+        )
+        return tuple(
+            MonitorRawMessageRef(
+                queue=str(row[0]),
+                message_id=int(row[1]),
+                tid=str(row[2]),
+            )
+            for row in rows
+        )
+
     def raw_deleted_task_message_refs(
         self,
         *,
@@ -2019,6 +2053,24 @@ class MonitorStore:
                 require_summary=require_summary,
             )
 
+    def list_manager_task_spawned_retention_refs(
+        self,
+        *,
+        limit: int,
+        keep_recent: int,
+    ) -> tuple[MonitorRawMessageRef, ...]:
+        """Return old excess manager task_spawned refs for row-level trimming."""
+
+        if limit <= 0:
+            return ()
+        if keep_recent <= 0:
+            raise ValueError("keep_recent must be positive")
+        with self._sidecar_session() as session:
+            return self._access(session).list_manager_task_spawned_retention_refs(
+                limit=limit,
+                keep_recent=keep_recent,
+            )
+
     def missing_task_message_ids(
         self,
         message_ids: Sequence[int],
@@ -2111,6 +2163,39 @@ class MonitorStore:
                     sorted(chunk_tids),
                     timestamp,
                 )
+        return MonitorStoreRetirementResult(
+            message_rows_deleted=deleted_rows,
+            affected_tids=len(affected_tids),
+        )
+
+    def delete_task_messages_after_event_trim(
+        self,
+        message_ids: Sequence[int],
+        *,
+        deleted_at_ns: int | None = None,
+    ) -> MonitorStoreRetirementResult:
+        """Physically delete child refs after row-level event trimming.
+
+        This helper intentionally does not reconcile parent ``raw_deleted_at_ns``;
+        the parent service family may still be open.
+
+        Spec: [MF-5], [OBS.13]
+        """
+
+        ids = tuple(int(message_id) for message_id in message_ids)
+        if not ids:
+            return MonitorStoreRetirementResult()
+        deleted_rows = 0
+        affected_tids: set[str] = set()
+        for chunk in _chunks(ids, self._config.write_batch_size):
+            with self._sidecar_session(transaction=True) as session:
+                access = self._access(session)
+                refs = access.task_message_refs_for_message_ids(chunk)
+                chunk_tids = {tid for tid, _message_id in refs}
+                chunk_message_ids = tuple(message_id for _tid, message_id in refs)
+                access.delete_task_messages(chunk_message_ids)
+                deleted_rows += len(chunk_message_ids)
+                affected_tids.update(chunk_tids)
         return MonitorStoreRetirementResult(
             message_rows_deleted=deleted_rows,
             affected_tids=len(affected_tids),

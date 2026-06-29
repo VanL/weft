@@ -7,10 +7,12 @@ from pathlib import Path
 
 import pytest
 
+from tests.helpers.test_backend import prepare_project_root
 from tests.helpers.weft_harness import (
     DEFAULT_TASK_COMPLETION_TIMEOUT,
     WeftTestHarness,
 )
+from weft._constants import WEFT_GLOBAL_LOG_QUEUE
 from weft.client import (
     ControlRejected,
     InvalidTID,
@@ -34,6 +36,9 @@ from weft.client._namespaces import (
     SystemNamespace,
     TasksNamespace,
 )
+from weft.context import build_context
+from weft.core.monitor.collation import MonitorTaskEventUpdate
+from weft.core.monitor.store import open_monitor_store
 from weft.core.taskspec import TaskSpec
 
 pytestmark = [pytest.mark.shared]
@@ -288,6 +293,54 @@ def test_task_terminal_snapshot_is_non_consuming() -> None:
 
         assert snapshot.status == "completed"
         assert task.result(timeout=30.0).value == "hello!"
+
+
+def test_task_terminal_snapshot_uses_monitor_store_terminal_fallback(
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+    store = open_monitor_store(context)
+    store.ensure_schema()
+    tid = "1779226615233825720"
+    store.upsert_task_event(
+        MonitorTaskEventUpdate(
+            tid=tid,
+            queue_name=WEFT_GLOBAL_LOG_QUEUE,
+            message_id=int(tid) + 101,
+            event="work_completed",
+            status="completed",
+            observed_at_ns=int(tid) + 101,
+            name="client-retired-task",
+            runner="host",
+            terminal_seen=True,
+            terminal_event="work_completed",
+            terminal_status="completed",
+            first_seen_at_ns=int(tid) - 10,
+            last_seen_at_ns=int(tid) + 101,
+            started_at_ns=int(tid) - 10,
+            completed_at_ns=int(tid) + 101,
+            taskspec_summary={
+                "tid": tid,
+                "name": "client-retired-task",
+                "metadata": {"kind": "client-terminal-fallback"},
+            },
+            state={"status": "completed"},
+            lifecycle={"event": "work_completed", "status": "completed"},
+            resources={},
+            diagnostics={},
+            bookkeeping={},
+        )
+    )
+    client = WeftClient(path=root)
+
+    handle_snapshot = client.task(tid).terminal_snapshot()
+    namespace_snapshot = client.tasks.terminal_snapshot(tid)
+
+    assert handle_snapshot.status == "completed"
+    assert handle_snapshot.source == "monitor_store"
+    assert handle_snapshot.metadata["classification"] == "terminal_monitor_store"
+    assert namespace_snapshot == handle_snapshot
 
 
 def test_prepare_snapshots_payload_before_submission() -> None:

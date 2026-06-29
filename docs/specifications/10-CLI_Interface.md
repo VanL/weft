@@ -438,6 +438,10 @@ Current behavior:
   `reconciliation.classification="monitor_store_unavailable"` instead of
   treating the task as not found. A successful Monitor store read that returns
   no row still means not found.
+- Compact known-TID terminal snapshot helpers use the same terminal
+  Monitor-store fallback after raw task-log retirement. This fallback is
+  read-only and has no acknowledgement target. Nonterminal Monitor-store rows
+  are not returned as live/running terminal snapshots.
 - `weft task status TID --ping` sends a structured PING with a
   `request_id`, waits for the matching PONG, and may return a `live_pong`
   reconciliation classification plus best-effort runner-specific `runtime`
@@ -846,6 +850,7 @@ flags, and future queue or control ergonomics live in the companion doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-06-20-weft-django-terminal-status-monitor-store-plan.md`](../plans/2026-06-20-weft-django-terminal-status-monitor-store-plan.md)
 - [`docs/plans/2026-06-11-simplebroker-dump-load-adoption-plan.md`](../plans/2026-06-11-simplebroker-dump-load-adoption-plan.md)
 - [`docs/plans/2026-06-01-critical-review-remediation-plan.md`](../plans/2026-06-01-critical-review-remediation-plan.md)
 - [`docs/plans/2026-05-31-task-monitor-orphan-log-and-status-reconciliation-plan.md`](../plans/2026-05-31-task-monitor-orphan-log-and-status-reconciliation-plan.md)

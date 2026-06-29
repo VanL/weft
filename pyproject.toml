@@ -69,6 +69,7 @@ dev = [
     "weft-docker>=0.9.70",
     "weft-macos-sandbox>=0.5.4",
     "weft-microsandbox>=0.5.1; platform_system != 'Windows'",
+    "hypothesis>=6",
     "pytest>=7.0",
     "pytest-cov>=4.0",
     "pytest-xdist>=3.0",
@@ -117,6 +118,7 @@ markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "shared: backend-agnostic tests that should pass across supported backends",
     "sqlite_only: tests that intentionally validate SQLite/file-backed behavior",
+    "property: property-based invariant tests using Hypothesis",
 ]
 
 [tool.mypy]

@@ -415,6 +415,17 @@ def task_terminal_snapshot(
                 continue
             return snapshot
 
+        status_snapshot = task_status(
+            full_tid,
+            include_terminal=True,
+            context_path=ctx.root,
+        )
+        terminal_status_snapshot = _terminal_snapshot_from_status_snapshot(
+            status_snapshot
+        )
+        if terminal_status_snapshot is not None:
+            return terminal_status_snapshot
+
         if deadline is None or time.monotonic() >= deadline:
             return TaskTerminalSnapshot(
                 tid=full_tid,
@@ -520,6 +531,7 @@ def _task_snapshot_from_monitor_store_record(
     else:
         duration = None
     error = record.state.get("error")
+    status_is_terminal = status in status_cmd.TERMINAL_TASK_STATUSES
     return status_cmd.TaskSnapshot(
         tid=record.tid,
         tid_short=record.tid[-TASKSPEC_TID_SHORT_LENGTH:],
@@ -538,6 +550,14 @@ def _task_snapshot_from_monitor_store_record(
         metadata=dict(metadata),
         return_code=record.return_code,
         error=error if isinstance(error, str) else None,
+        reconciliation=(
+            {
+                "classification": "terminal_monitor_store",
+                "reason": "raw_task_log_retired",
+            }
+            if status_is_terminal
+            else None
+        ),
     )
 
 
@@ -596,6 +616,60 @@ def _monitor_store_task_snapshot(
     if not include_terminal and snapshot.status in status_cmd.TERMINAL_TASK_STATUSES:
         return None
     return snapshot
+
+
+def _terminal_snapshot_from_status_snapshot(
+    snapshot: status_cmd.TaskSnapshot | None,
+) -> TaskTerminalSnapshot | None:
+    """Project the shared status path into the compact terminal snapshot shape."""
+
+    if snapshot is None:
+        return None
+    if snapshot.event == "monitor_store_unavailable":
+        return TaskTerminalSnapshot(
+            tid=snapshot.tid,
+            status="unknown",
+            source="monitor_store_unavailable",
+            terminal=False,
+            error=snapshot.error,
+            observed_at=snapshot.last_timestamp,
+            metadata={
+                "classification": "monitor_store_unavailable",
+                "reason": "store_read_failed",
+            },
+        )
+    if snapshot.status not in status_cmd.TERMINAL_TASK_STATUSES:
+        return None
+
+    reconciliation = snapshot.reconciliation or {}
+    classification = reconciliation.get("classification")
+    source = "monitor_store" if classification == "terminal_monitor_store" else "status"
+    metadata: dict[str, Any] = {
+        "classification": (
+            classification
+            if isinstance(classification, str) and classification
+            else "terminal_status"
+        )
+    }
+    if snapshot.event:
+        metadata["event"] = snapshot.event
+    if snapshot.name:
+        metadata["name"] = snapshot.name
+    if snapshot.metadata:
+        metadata["task_metadata"] = dict(snapshot.metadata)
+    if snapshot.runner is not None:
+        metadata["runner"] = snapshot.runner
+
+    return TaskTerminalSnapshot(
+        tid=snapshot.tid,
+        status=snapshot.status,
+        source=source,
+        error=snapshot.error,
+        return_code=snapshot.return_code,
+        terminal=True,
+        observed_at=snapshot.last_timestamp,
+        metadata=metadata,
+    )
 
 
 def task_ping(

@@ -289,6 +289,159 @@ def _wait_for_task_status(
     )
 
 
+def _seed_terminal_monitor_store_record(
+    context,
+    *,
+    tid: str,
+    status: str = "failed",
+    event: str = "work_failed",
+    error: str | None = "retired failure",
+    return_code: int | None = 1,
+) -> None:
+    store = open_monitor_store(context)
+    store.ensure_schema()
+    observed_at = int(tid) + 279
+    started_at = int(tid) - 500
+    store.upsert_task_event(
+        MonitorTaskEventUpdate(
+            tid=tid,
+            queue_name=WEFT_GLOBAL_LOG_QUEUE,
+            message_id=observed_at,
+            event=event,
+            status=status,
+            observed_at_ns=observed_at,
+            name="retired-terminal-task",
+            runner="host",
+            terminal_seen=True,
+            terminal_event=event,
+            terminal_status=status,
+            return_code=return_code,
+            first_seen_at_ns=started_at,
+            last_seen_at_ns=observed_at,
+            started_at_ns=started_at,
+            completed_at_ns=observed_at,
+            taskspec_summary={
+                "tid": tid,
+                "name": "retired-terminal-task",
+                "metadata": {"kind": "terminal-fallback"},
+            },
+            state={"status": status, "error": error, "return_code": return_code},
+            lifecycle={"event": event, "status": status},
+            resources={},
+            diagnostics={},
+            bookkeeping={},
+        )
+    )
+
+
+def test_terminal_snapshot_falls_back_to_monitor_store_after_raw_log_retirement(
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+    tid = "1779226615233821720"
+    _seed_terminal_monitor_store_record(context, tid=tid)
+
+    snapshot = task_cmd.task_terminal_snapshot(tid, context=context)
+
+    assert snapshot.tid == tid
+    assert snapshot.status == "failed"
+    assert snapshot.source == "monitor_store"
+    assert snapshot.terminal is True
+    assert snapshot.error == "retired failure"
+    assert snapshot.return_code == 1
+    assert snapshot.observed_at == int(tid) + 279
+    assert snapshot.metadata["classification"] == "terminal_monitor_store"
+    assert snapshot.metadata["event"] == "work_failed"
+    assert snapshot.metadata["name"] == "retired-terminal-task"
+    assert snapshot.metadata["task_metadata"] == {"kind": "terminal-fallback"}
+    assert snapshot.ack_targets == ()
+
+
+def test_terminal_snapshot_ignores_nonterminal_monitor_store_rows(
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+    store = open_monitor_store(context)
+    store.ensure_schema()
+    tid = "1779226615233821820"
+    started_at = int(tid) - 500
+    observed_at = int(tid) + 279
+    store.upsert_task_event(
+        MonitorTaskEventUpdate(
+            tid=tid,
+            queue_name=WEFT_GLOBAL_LOG_QUEUE,
+            message_id=observed_at,
+            event="task_started",
+            status="running",
+            observed_at_ns=observed_at,
+            name="retired-running-task",
+            runner="host",
+            terminal_seen=False,
+            first_seen_at_ns=started_at,
+            last_seen_at_ns=observed_at,
+            started_at_ns=started_at,
+            taskspec_summary={
+                "tid": tid,
+                "name": "retired-running-task",
+                "metadata": {"kind": "nonterminal-fallback"},
+            },
+            state={"status": "running", "started_at": started_at},
+            lifecycle={"event": "task_started", "status": "running"},
+            resources={},
+            diagnostics={},
+            bookkeeping={},
+        )
+    )
+
+    snapshot = task_cmd.task_terminal_snapshot(tid, context=context)
+
+    assert snapshot.status == "unknown"
+    assert snapshot.source == "observer"
+    assert snapshot.terminal is False
+
+
+def test_terminal_snapshot_preserves_observer_unknown_when_monitor_schema_missing(
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+    tid = "1779226615233821920"
+
+    snapshot = task_cmd.task_terminal_snapshot(tid, context=context)
+
+    assert snapshot.status == "unknown"
+    assert snapshot.source == "observer"
+    assert snapshot.terminal is False
+
+
+def test_terminal_snapshot_reports_monitor_store_read_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    context = build_context(spec_context=root)
+    tid = "1779226615233821970"
+
+    def fail_open_monitor_store(*args: Any, **kwargs: Any) -> object:
+        del args, kwargs
+        raise RuntimeError("store temporarily unavailable")
+
+    monkeypatch.setattr(task_cmd, "open_monitor_store", fail_open_monitor_store)
+
+    snapshot = task_cmd.task_terminal_snapshot(tid, context=context)
+
+    assert snapshot.status == "unknown"
+    assert snapshot.source == "monitor_store_unavailable"
+    assert snapshot.terminal is False
+    assert snapshot.error == "monitor store unavailable: store temporarily unavailable"
+    assert snapshot.metadata == {
+        "classification": "monitor_store_unavailable",
+        "reason": "store_read_failed",
+    }
+
+
 def test_task_status_falls_back_to_monitor_store_after_raw_log_retirement(
     tmp_path: Path,
 ) -> None:

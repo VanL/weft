@@ -567,6 +567,39 @@ def select_deletable_task_log_messages_for_tids(
         """
 
 
+def select_manager_task_spawned_retention_refs(
+    messages_table: str,
+    collations_table: str,
+) -> str:
+    """Build a query for old excess manager-authored task_spawned refs."""
+
+    return f"""
+        SELECT queue_name, message_id, tid
+        FROM (
+          SELECT
+            m.queue_name,
+            m.message_id,
+            m.tid,
+            ROW_NUMBER() OVER (
+              PARTITION BY m.context_key, m.tid
+              ORDER BY m.message_id DESC
+            ) AS newest_rank
+          FROM {identifier(messages_table)} AS m
+          JOIN {identifier(collations_table)} AS c
+            ON c.context_key = m.context_key AND c.tid = m.tid
+          WHERE m.context_key = ?
+            AND m.queue_name = ?
+            AND m.event = 'task_spawned'
+            AND m.deleted_at_ns IS NULL
+            AND c.raw_deleted_at_ns IS NULL
+            AND (c.role = 'manager' OR c.name = 'manager')
+        ) ranked
+        WHERE newest_rank > ?
+        ORDER BY message_id
+        LIMIT ?
+        """
+
+
 def select_raw_deleted_task_message_refs(
     messages_table: str,
     collations_table: str,

@@ -179,6 +179,40 @@ def test_status_uses_terminal_snapshot_not_diagnostic_snapshot(
     assert observed == {"terminal_snapshot": True}
 
 
+def test_status_returns_monitor_store_terminal_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeTask:
+        def terminal_snapshot(self, timeout: float = 0.0) -> TaskTerminalSnapshot:
+            assert timeout == 0.0
+            return TaskTerminalSnapshot(
+                tid="1770000000000000001",
+                status="failed",
+                source="monitor_store",
+                terminal=True,
+                error="retired failure",
+                metadata={"classification": "terminal_monitor_store"},
+            )
+
+        def snapshot(self) -> object:
+            raise AssertionError("status should not use diagnostic snapshot")
+
+    class FakeClient:
+        def task(self, tid: str) -> FakeTask:
+            assert tid == "1770000000000000001"
+            return FakeTask()
+
+    monkeypatch.setattr(weft_django_client, "get_core_client", lambda: FakeClient())
+
+    snapshot = weft_django.status("1770000000000000001")
+
+    assert snapshot is not None
+    assert snapshot.status == "failed"
+    assert snapshot.source == "monitor_store"
+    assert snapshot.error == "retired failure"
+    assert snapshot.metadata["classification"] == "terminal_monitor_store"
+
+
 def _spec_reference_path(name: str = "native-reference") -> Path:
     return _write_json(
         TEST_ROOT / ".weft" / "tasks" / f"{name}.json",

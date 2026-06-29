@@ -694,7 +694,10 @@ Known-TID status rule:
   global task log from the beginning for a full TID.
 - known-TID terminal snapshots may include task-evidence classification
   metadata such as `terminal_log`, `terminal_ctrl_out`, `wrapper_lost`,
-  `result_without_terminal`, `live`, or `unknown`
+  `result_without_terminal`, `terminal_monitor_store`, `live`, or `unknown`.
+  `terminal_monitor_store` means Weft used terminal Monitor-store collation
+  after raw task-log retirement; it is read-only and has no acknowledgement
+  target
 - `weft_django.status(tid)` returns an object with `.status`, but it does not
   promise the full diagnostic `TaskSnapshot` field set.
 - callers that need diagnostic fields such as `name`, `metadata`, `runtime`,
@@ -1311,6 +1314,8 @@ Once the package is split into a sibling repo:
 
 ## Backlinks
 
+- Terminal status Monitor-store plan:
+  [../plans/2026-06-20-weft-django-terminal-status-monitor-store-plan.md](../plans/2026-06-20-weft-django-terminal-status-monitor-store-plan.md)
 - Client follow hardening plan:
   [../plans/2026-04-21-client-follow-hardening-plan.md](../plans/2026-04-21-client-follow-hardening-plan.md)
 - Client and Django hardening plan:

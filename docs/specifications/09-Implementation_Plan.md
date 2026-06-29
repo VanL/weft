@@ -107,6 +107,9 @@ capabilities, not a separate runtime API.
 - Known-TID terminal snapshots are non-consuming observations. When they include
   exact acknowledgement targets, callers must acknowledge explicitly. This
   keeps read-only observers from stealing task results or mutating queue state.
+  After raw task-log retirement, known-TID terminal snapshots may fall back to
+  terminal Monitor-store rows; nonterminal Monitor-store rows are not live task
+  proof.
 - Realtime event iteration peeks task-log, outbox, and terminal-control
   surfaces instead of consuming them. That lets HTTP/SSE/WebSocket-style
   diagnostics coexist with `weft result`, `weft run`, and Python result waits.
@@ -127,7 +130,7 @@ Client API parity matrix:
 | Submit command argv | `client` | `WeftClient.submit_command` | Convenience wrapper over command submission. |
 | Bind a task handle | `client` | `WeftClient.task` | Normalizes TID and returns a lazy handle. |
 | Task status/result/events | `task_handle` | `Task.snapshot`, `Task.result`, `Task.events`, `Task.realtime_events`, `Task.follow` | Reuses command/event/result helpers; realtime iteration is non-consuming. |
-| Task terminal observation | `task_handle` and `namespace` | `Task.terminal_snapshot`, `client.tasks.terminal_snapshot`, `client.tasks.ack_terminal_snapshot` | Observes known-TID terminal evidence without consuming result queues unless explicitly acknowledged. |
+| Task terminal observation | `task_handle` and `namespace` | `Task.terminal_snapshot`, `client.tasks.terminal_snapshot`, `client.tasks.ack_terminal_snapshot` | Observes known-TID terminal evidence, including terminal Monitor-store fallback after raw task-log retirement, without consuming result queues unless explicitly acknowledged. |
 | Task keyed liveness probe | `task_handle` and `namespace` | `Task.ping`, `client.tasks.ping` | Programmatic counterpart of `weft task ping`; returns the matched PONG payload. |
 | Task stop/kill | `task_handle` and `namespace` | `Task.stop`, `Task.kill`, `client.tasks.stop`, `client.tasks.kill`, `client.tasks.stop_many`, `client.tasks.kill_many` | Delegates to command control convergence and runner fallback behavior. |
 | Task list/stats/watch/TID resolution | `namespace` | `client.tasks.list`, `client.tasks.stats`, `client.tasks.status`, `client.tasks.watch`, `client.tasks.resolve_tid` | Same status reconstruction as CLI task/status surfaces. |
@@ -179,6 +182,10 @@ That index is intentionally lightweight:
   repo tooling
 - the plan index is curated so superseded, roadmap-only, audit-only, and
   unimplemented plans do not read like current project direction
+
+## Related Plans
+
+- [`docs/plans/2026-06-20-weft-django-terminal-status-monitor-store-plan.md`](../plans/2026-06-20-weft-django-terminal-status-monitor-store-plan.md)
 
 ## Related Documents
 
