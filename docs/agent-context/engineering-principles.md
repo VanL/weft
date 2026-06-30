@@ -73,6 +73,26 @@ Avoid mock-only tests for:
 
 Mock only boundaries that are genuinely external or nondeterministic.
 
+## 4.1 Prove the Problem with a Failing Test First
+
+Where principle 4 is about *what* to keep real, this is about *when and why* you
+write the test.
+
+Write a failing test that proves the problem exists, watch it fail, then make it
+pass. If you cannot write the failing test, you do not understand the problem
+well enough to fix it. If something is hard to test, that is information about
+the design, not permission to skip the test. Generate fixtures through
+production code paths (`task_factory`, real `Consumer` / `TaskRunner` flows), not
+synthesis.
+
+## 4.2 Update All Consumers in the Same Change
+
+When you rename a queue, tighten a TaskSpec or result schema, or change any
+shared contract, update every producer and consumer in the same change. A
+partial rename passes isolated checks and fails at runtime; the synchronized
+update is the fix, not a follow-up. This is the change-side companion to
+principle 3's "update forward" rule.
+
 ## 5. Read Specs and Code Before Inference
 
 Do not infer behavior from module names or mental models alone. Read:
@@ -179,4 +199,17 @@ Sessions usually go sideways when one of these happens:
 - a change relies on intuition rather than reading the relevant spec/test/code
 - the failing test is skipped on a non-trivial bug
 - a change is labeled "pre-existing" without proof
+- a regression is called "pre-existing" without running it on the base branch
+  to prove it
 - a later stage starts re-deriving facts that an earlier stage already owns
+
+## The Meta-Principle: Compound Knowledge
+
+Every rule above is an instance of one idea: each unit of engineering work
+should make the next one easier. A shared boundary converter means the next
+agent does not re-derive the canonical form. A blast-radius note means the next
+change knows its impact zone. A failing test means the next debugging session
+starts from known-good. A lesson written down means the next session does not
+repeat the mistake. Treat the guidance docs, `docs/lessons.md`, and explicit
+plan boundaries as compound knowledge — maintain them so Weft gets easier to
+work on correctly over time.

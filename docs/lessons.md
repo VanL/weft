@@ -20,6 +20,61 @@ runbook needs to become stricter.
 - Treat `weft.state.*` queues as runtime-only unless a spec explicitly changes
   that rule.
 
+## Golden Rules
+
+Universal principles that inform every change. The dated sections below are the
+incident log; these are the durable rules distilled from it. _(2026-06-30)_
+
+1. **Canonicalize once, at the boundary.** Normalize CLI/TaskSpec input at the
+   ingest boundary through one shared validation path. Never add runtime
+   dual-case fallback readers — they hide contract bugs.
+2. **Fix forward, never fall back.** Do not add read-time fallback modes to mask
+   drift or corruption. Detect invariant violations and surface them; repair
+   with forward migrations.
+3. **One canonical contract across all consumers.** Same queue names, payload
+   shapes, and vocabulary everywhere. Mixed legacy keys cause cascading
+   mismatches.
+4. **Validate at write time, fail fast.** Catch errors at the point of creation,
+   not in downstream batch gates or runtime checks. Prefer explicit rejection
+   over silently ignoring unsupported fields or modes.
+5. **Update all consumers in the same change.** When renaming queues, tightening
+   the TaskSpec/result schema, or changing any contract, update all producers
+   and consumers together. Partial renames pass isolated checks but fail at
+   runtime.
+6. **Test what you ship.** Add a regression test with each behavior-changing
+   fix. Generate fixtures through production code paths (`task_factory`, real
+   `Consumer` / `TaskRunner` flows), not synthesis.
+7. **Plans fail at boundaries, not in the middle.** For risky work, name what
+   must not change on the durable spine, the queue/TaskSpec contracts that must
+   stay stable, anti-mocking rules, rollout/rollback constraints, and post-deploy
+   observation before implementation starts.
+8. **If a document is human-clear but agent-ambiguous, tighten it immediately.**
+   Missing owner, boundary, verification path, or required action makes agents
+   guess wrong even when the prose feels obvious to a human.
+9. **Agents suggest dependencies; humans add them.** An agent must not introduce
+   a new dependency on its own — propose it with justification (what it is for,
+   why the standard library or an already-vendored dependency will not do, and
+   the cost of taking on permanent code we do not control). The human decides
+   whether it enters the manifest.
+10. **Flag concerns and calibrate uncertainty, even when you did exactly what
+    was asked.** Surface risks noticed in passing instead of letting a completed
+    task hide a known landmine. Distinguish verified from unverified claims with
+    precise language ("I have not confirmed X") rather than a vague "this should
+    work." Report blockers with precise causes.
+11. **Handle the error path, not just the happy path.** A feature whose success
+    path works but whose error/empty/timeout path is silently ignored is
+    incomplete. Name the failure cases in the plan's success criteria and test at
+    least one. Do not paper over an unexpected null/empty with a defensive
+    check — find out why it is null first.
+12. **Formatting is owned by the project formatters — run them; do not
+    hand-format, and do not reformat incidentally.** Style is decided by `ruff`
+    from the repo-managed environment (`./.venv/bin/ruff format` and
+    `./.venv/bin/ruff check weft`, after loading `.envrc`), not by manual
+    whitespace or style changes. In a behavior change, keep the diff to the lines
+    the task requires and do not let an editor or formatter reflow untouched code
+    into the change. Keep formatting-only churn in its own change. If a line
+    changed only because "I was in there," revert it.
+
 ## 2026-05-20 Manager Reuse Replacement Drain
 
 - Manager replacement has two separate duties: stop the superseded manager from
