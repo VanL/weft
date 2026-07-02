@@ -746,6 +746,26 @@ class AgentToolSection(BaseModel):
     approval_required: bool = False
     config: dict[str, Any] = Field(default_factory=dict)
 
+    @field_validator("approval_required")
+    @classmethod
+    def _reject_unsupported_approval_required(cls, v: bool) -> bool:
+        """Reject the unimplemented approval flag instead of ignoring it.
+
+        Weft does not implement tool approval policy ([AR-0.0]); approvals
+        belong to the calling system or to a delegated provider CLI.
+
+        Spec: [AR-0.0], [AR-2.2]
+        """
+        if v:
+            raise ValueError(
+                "approval_required is not supported: Weft does not implement "
+                "tool approval policy. Enforce approvals in the calling "
+                "system, or use a provider_cli runtime where the provider "
+                "CLI owns approvals. See "
+                "docs/specifications/13-Agent_Runtime.md [AR-0.0]."
+            )
+        return v
+
     def model_post_init(self, __context: Any) -> None:
         super().model_post_init(__context)
         object.__setattr__(self, "_allow_mutation", False)

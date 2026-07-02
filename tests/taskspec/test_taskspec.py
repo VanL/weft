@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 
 import pytest
+from pydantic import ValidationError
 
 from weft.core import taskspec as taskspec_pkg
 from weft.core.taskspec import (
     AgentSection,
+    AgentToolSection,
     IOSection,
     ReservedPolicy,
     SpecSection,
@@ -674,3 +676,28 @@ class TestRuntimeReporting:
         log_entry = taskspec.to_log_dict()
         for key in {"tid", "name", "status", "runtime_seconds", "metadata"}:
             assert key in log_entry
+
+
+def test_agent_tool_approval_required_true_is_rejected() -> None:
+    """approval_required has no enforcement path; True must fail loudly.
+
+    Spec: [AR-0.0], [AR-2.2].
+    """
+    with pytest.raises(ValidationError, match="approval_required"):
+        AgentToolSection(
+            name="dangerous_tool",
+            kind="python",
+            ref="tests.tasks.sample_targets:echo_payload",
+            approval_required=True,
+        )
+
+
+def test_agent_tool_approval_required_false_still_validates() -> None:
+    """The default (False) and explicit False stay accepted."""
+    tool = AgentToolSection(
+        name="safe_tool",
+        kind="python",
+        ref="tests.tasks.sample_targets:echo_payload",
+        approval_required=False,
+    )
+    assert tool.approval_required is False
