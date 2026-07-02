@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from simplebroker import BrokerTarget
+from weft._constants import MACOS_SANDBOX_BASE_ENV_PASSTHROUGH
 from weft.core.runners import RunnerOutcome
 from weft.core.runners.subprocess_runner import (
     prepare_command_invocation,
@@ -34,27 +35,6 @@ from weft.helpers import (
     process_create_time,
     terminate_process_tree,
 )
-
-_BASE_ENV_PASSTHROUGH: tuple[str, ...] = (
-    "HOME",
-    "LANG",
-    "LC_ALL",
-    "LC_CTYPE",
-    "LOGNAME",
-    "PATH",
-    "SHELL",
-    "TERM",
-    "TMPDIR",
-    "USER",
-)
-"""Host env keys forwarded into sandboxed processes by default.
-
-Session plumbing only: enough for host binaries to resolve paths, temp
-space, and locale. Everything else requires spec.runner.options
-env_passthrough (host-derived values) or spec.env (fixed values), so
-secrets in the parent environment never leak into sandboxed tasks
-implicitly.
-"""
 
 
 class MacOSSandboxRunner:
@@ -121,7 +101,7 @@ class MacOSSandboxRunner:
         by host state.
         """
         env_vars: dict[str, str] = {}
-        for key in (*_BASE_ENV_PASSTHROUGH, *self._env_passthrough):
+        for key in (*MACOS_SANDBOX_BASE_ENV_PASSTHROUGH, *self._env_passthrough):
             value = os.environ.get(key)
             if value is not None:
                 env_vars[key] = value

@@ -1544,6 +1544,27 @@ DOCKERIZED_AGENT_CONTAINER_DOC_PATH: Final[str] = "/tmp/00-Overview_and_Architec
 CLAUDE_DOCKER_SANDBOX_ENV: Final[dict[str, str]] = {"IS_SANDBOX": "1"}
 """Environment overrides injected into the shipped Claude Docker example."""
 
+MACOS_SANDBOX_BASE_ENV_PASSTHROUGH: Final[tuple[str, ...]] = (
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "LOGNAME",
+    "PATH",
+    "SHELL",
+    "TERM",
+    "TMPDIR",
+    "USER",
+)
+"""Host env keys the macOS sandbox runner forwards into sandboxed processes.
+
+Session plumbing only: enough for host binaries to resolve paths, temp
+space, and locale. Everything else requires spec.runner.options
+env_passthrough (host-derived values) or spec.env (fixed values), so
+secrets in the parent environment never leak into sandboxed tasks
+implicitly.
+"""
+
 CLAUDE_PORTABLE_AUTH_ENV_NAMES: Final[tuple[str, ...]] = (
     "CLAUDE_CODE_OAUTH_TOKEN",
     "ANTHROPIC_AUTH_TOKEN",
