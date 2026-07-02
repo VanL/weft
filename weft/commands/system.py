@@ -39,6 +39,7 @@ from weft._constants import (
     TASKSPEC_TID_SHORT_LENGTH,
     TERMINAL_TASK_EVENTS,
     TERMINAL_TASK_STATUSES,
+    WEFT_CONTEXT_ENV,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
     WEFT_SERVICES_REGISTRY_QUEUE,
@@ -289,7 +290,7 @@ def _resolve_context(
     if spec_context:
         return build_context(spec_context=spec_context)
 
-    env_context = os.environ.get("WEFT_CONTEXT")
+    env_context = os.environ.get(WEFT_CONTEXT_ENV)
     if env_context:
         return build_context(spec_context=env_context)
 

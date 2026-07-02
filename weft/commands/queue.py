@@ -23,6 +23,7 @@ from typing import Any, cast
 
 from simplebroker import commands as sb_commands
 from simplebroker.ext import TimestampError, TimestampGenerator
+from weft._constants import WEFT_CONTEXT_ENV
 from weft.commands.types import (
     EndpointResolution,
     QueueAliasRecord,
@@ -88,7 +89,7 @@ def _context(spec_context: str | None = None) -> WeftContext:
     if spec_context is not None:
         return build_context(spec_context=spec_context)
 
-    env_context = os.environ.get("WEFT_CONTEXT")
+    env_context = os.environ.get(WEFT_CONTEXT_ENV)
     if env_context:
         return build_context(spec_context=env_context)
 

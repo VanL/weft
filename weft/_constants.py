@@ -461,6 +461,9 @@ WEFT_DIRECTORY_NAME_DEFAULT: Final[str] = ".weft"
 WEFT_ENV_FILE_ENV: Final[str] = "WEFT_ENV_FILE"
 """Bootstrap env var naming a dotenv-style file to load before CLI import."""
 
+WEFT_CONTEXT_ENV: Final[str] = "WEFT_CONTEXT"
+"""Environment variable naming the active project context directory."""
+
 PROVIDER_CLI_VERSION_PROBE_TIMEOUT_SECONDS: Final[float] = 15.0
 """Timeout for basic provider CLI version probes."""
 
