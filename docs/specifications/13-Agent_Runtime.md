@@ -240,9 +240,15 @@ authority class as a security control. As verified against
   the caller (via `spec.agent.options` or the tool profile) tries to request
   `dangerously_bypass_approvals_and_sandbox` or `full_auto`. When not
   `bounded`, `--sandbox` follows the resolved tool profile's
-  `workspace_access` (or the caller's `sandbox` option), and
+  `workspace_access` (or a `sandbox` option merged from the tool profile's
+  `provider_options` or the caller), and
   `--dangerously-bypass-approvals-and-sandbox` / `--full-auto` are appended
-  only if the caller explicitly requests them.
+  only if the caller explicitly requests them. Note the shipped
+  `dockerized_agent_tool_profile()` builtin sets
+  `{"sandbox": "danger-full-access"}` in its Codex `provider_options`, so
+  the builtin dockerized-agent Codex path appends
+  `--sandbox danger-full-access` without separate caller input — the
+  container boundary, not the Codex sandbox, is the isolation there.
 - **`gemini`** and **`qwen`** (`GeminiProvider`, `QwenProvider`): append
   `--approval-mode plan` when `authority_class="bounded"` **or**
   `workspace_access="read-only"`. Neither provider has an unconditional

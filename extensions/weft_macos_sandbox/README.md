@@ -47,9 +47,11 @@ that.
 
 ## Security model
 
-This plugin validates that `spec.runner.options.profile` points to an
-existing, non-empty file and that the configured `sandbox_binary` (default
-`sandbox-exec`) is on `PATH`. **It does not parse or validate the profile's
+This plugin's preflight validation only checks that
+`spec.runner.options.profile` exists on disk (not that it is a regular,
+non-empty file) and that the configured `sandbox_binary` (default
+`sandbox-exec`) is on `PATH`; at construction time the option only needs to
+be a non-empty string. **It does not parse or validate the profile's
 contents.** Isolation is exactly what the supplied Seatbelt profile grants —
 nothing more, nothing less. A profile that reads `(allow default)` grants no
 isolation at all; the plugin runs it without complaint. Writing a correctly
