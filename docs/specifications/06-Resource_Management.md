@@ -173,9 +173,10 @@ Enforcement mechanics and security boundary:
   consistent with the trust model in
   [00-Overview_and_Architecture.md](00-Overview_and_Architecture.md)
   ("Observability and Security"): Weft assumes user-level trust, not hostile
-  multi-tenancy, and the security boundary is the OS/filesystem, not a
-  resource-monitor sandbox. Resource limits are a cooperative operational
-  control, not an isolation mechanism against an adversarial task.
+  multi-tenancy. The OS/filesystem is the security boundary, not a
+  resource-monitor sandbox (see also `CLAUDE.md`/`AGENTS.md` §4.11): resource
+  limits are a cooperative operational control, not an isolation mechanism
+  against an adversarial task.
 
 ### Timeout Boundary [RM-5.2]
 
