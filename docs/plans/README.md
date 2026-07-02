@@ -23,7 +23,7 @@ There are currently 148 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
-| [`2026-07-02-runtime-correctness-and-retention-remediation-plan.md`](./2026-07-02-runtime-correctness-and-retention-remediation-plan.md) | Runtime Correctness and Retention Remediation Plan | `draft` | none |
+| [`2026-07-02-runtime-correctness-and-retention-remediation-plan.md`](./2026-07-02-runtime-correctness-and-retention-remediation-plan.md) | Runtime Correctness and Retention Remediation Plan | `completed` | none |
 | [`2026-06-29-manager-task-spawned-retention-policy-plan.md`](./2026-06-29-manager-task-spawned-retention-policy-plan.md) | Manager Task-Spawned Retention Policy Plan | `completed` | none |
 | [`2026-06-20-weft-django-terminal-status-monitor-store-plan.md`](./2026-06-20-weft-django-terminal-status-monitor-store-plan.md) | Weft Django Terminal Status Monitor Store Plan | `completed` | none |
 | [`2026-06-18-hypothesis-property-testing-plan.md`](./2026-06-18-hypothesis-property-testing-plan.md) | Hypothesis Property-Based Testing Plan | `completed` | none |

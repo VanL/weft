@@ -1,6 +1,6 @@
 # Runtime Correctness and Retention Remediation Plan
 
-Status: draft
+Status: completed
 Source specs: docs/specifications/05-Message_Flow_and_State.md [MF-2], [MF-3], [MF-5], (Cleanup Boundary); docs/specifications/07-System_Invariants.md [STATE.1], [QUEUE.6], [OBS.1], [OBS.13.3], [OBS.13.5], [OBS.13.7]; docs/specifications/06-Resource_Management.md [RM-5.1]; docs/specifications/13-Agent_Runtime.md [AR-2.1]; doc-only tasks that fix summary drift cite no spec and say so inline
 Superseded by: none
 
