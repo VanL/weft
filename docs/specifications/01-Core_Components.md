@@ -519,6 +519,12 @@ Current first-party optional runner names:
   `provider_cli` agent tasks. It rejects function, interactive, persistent,
   and long-lived agent-session execution in the first shipped slice.
 
+Stability note: `weft.ext` is the declared plugin contract, but the shipped
+first-party runner plugins (`docker`, `macos-sandbox`, `microsandbox`) also
+import `weft.core` internals that carry no stability guarantee. Third-party
+runner plugins are not yet supported at arm's length and should pin an exact
+weft version.
+
 ### 3.2 Runtime Handles and Control [CC-3.2]
 
 Current rule:

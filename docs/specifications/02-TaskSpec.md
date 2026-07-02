@@ -434,6 +434,10 @@ This prevents execution environment from being overloaded into `spec.type`. A
 command task remains a command task regardless of whether it runs on the host,
 inside Docker, or in another supported backend.
 
+Stability note: shipped first-party runner plugins import `weft.core`
+internals that carry no stability guarantee. Third-party runners are not yet
+supported at arm's length and should pin an exact weft version.
+
 `spec.runner` contract:
 
 - `spec.runner.name`
