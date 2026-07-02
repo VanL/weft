@@ -169,6 +169,83 @@ def test_task_log_apply_requires_archive_and_deletes_exact_rows(
     assert archive_records[-1]["record_type"] == "retention_prune_completed"
 
 
+def test_task_log_apply_appends_to_same_day_archive_across_runs(
+    tmp_path: Path,
+) -> None:
+    """A second apply run against the same archive path must not truncate
+    the first run's pre-delete recovery records.
+
+    Spec: docs/specifications/07-System_Invariants.md [OBS.13.5] (archived
+    payload is the only recovery record for a destructive prune).
+    """
+    ctx = _context(tmp_path)
+    archive = tmp_path / "archive.jsonl"
+
+    tid_a = "1770000000000001003"
+    old_id_a = _write_json(
+        ctx, WEFT_GLOBAL_LOG_QUEUE, {"tid": tid_a, "status": "created"}
+    )
+    _write_json(ctx, WEFT_GLOBAL_LOG_QUEUE, {"tid": tid_a, "status": "completed"})
+
+    result_a = run_retention_prune(
+        RetentionPruneConfig(
+            context_path=ctx.root,
+            family="task-log",
+            apply=True,
+            archive_path=archive,
+            min_age_seconds=0,
+        )
+    )
+    assert result_a.exit_code == 0
+    assert result_a.deleted == 1
+    run_id_a = result_a.run_id
+
+    tid_b = "1770000000000001004"
+    old_id_b = _write_json(
+        ctx, WEFT_GLOBAL_LOG_QUEUE, {"tid": tid_b, "status": "created"}
+    )
+    _write_json(ctx, WEFT_GLOBAL_LOG_QUEUE, {"tid": tid_b, "status": "completed"})
+
+    result_b = run_retention_prune(
+        RetentionPruneConfig(
+            context_path=ctx.root,
+            family="task-log",
+            apply=True,
+            archive_path=archive,
+            min_age_seconds=0,
+        )
+    )
+    assert result_b.exit_code == 0
+    assert result_b.deleted == 1
+    run_id_b = result_b.run_id
+    assert run_id_a != run_id_b
+
+    archive_records = _read_json_records(archive)
+    candidate_message_ids = {
+        record["message_id"]
+        for record in archive_records
+        if record["record_type"] == "retention_prune_candidate"
+    }
+    candidate_run_ids = {
+        record["run_id"]
+        for record in archive_records
+        if record["record_type"] == "retention_prune_candidate"
+    }
+    # Both runs' pre-delete candidate rows must survive in the archive.
+    assert old_id_a in candidate_message_ids
+    assert old_id_b in candidate_message_ids
+    assert run_id_a in candidate_run_ids
+    assert run_id_b in candidate_run_ids
+
+    completion_run_ids = {
+        record["run_id"]
+        for record in archive_records
+        if record["record_type"] == "retention_prune_completed"
+    }
+    assert run_id_a in completion_run_ids
+    assert run_id_b in completion_run_ids
+
+
 def test_ctrl_out_terminal_with_log_is_deleted_and_pong_is_preserved(
     tmp_path: Path,
 ) -> None:

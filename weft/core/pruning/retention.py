@@ -1208,7 +1208,7 @@ def _write_archive(
 ) -> tuple[int, str | None]:
     path = _resolve_archive_path(ctx, config.archive_path)
     try:
-        _write_records(
+        _append_records(
             path,
             run_id,
             config,
@@ -1248,12 +1248,75 @@ def _write_records(
     warnings: Sequence[str],
     truncate_payload: bool,
 ) -> None:
+    """Write a one-shot report, truncating any existing file at *path*.
+
+    Used only for ``config.report_path``, a single-run summary report (not
+    the recovery archive). Each record carries ``run_id`` for provenance.
+    """
+    _write_record_lines(
+        path,
+        "w",
+        run_id,
+        config,
+        candidates,
+        applied_candidates=applied_candidates,
+        errors=errors,
+        warnings=warnings,
+        truncate_payload=truncate_payload,
+    )
+
+
+def _append_records(
+    path: Path,
+    run_id: str,
+    config: RetentionPruneConfig,
+    candidates: Sequence[RetentionPruneCandidate],
+    *,
+    applied_candidates: Sequence[RetentionPruneCandidate],
+    errors: Sequence[str],
+    warnings: Sequence[str],
+    truncate_payload: bool,
+) -> None:
+    """Append pre-delete recovery records to the retention-prune archive.
+
+    The archive is the only pre-delete recovery record for a destructive
+    apply run; truncating it on a same-day rerun would destroy the prior
+    run's records. Each record carries ``run_id`` so multiple runs can be
+    told apart within one date-keyed file.
+
+    Spec: docs/specifications/07-System_Invariants.md [OBS.13.5]
+    """
+    _write_record_lines(
+        path,
+        "a",
+        run_id,
+        config,
+        candidates,
+        applied_candidates=applied_candidates,
+        errors=errors,
+        warnings=warnings,
+        truncate_payload=truncate_payload,
+    )
+
+
+def _write_record_lines(
+    path: Path,
+    mode: Literal["w", "a"],
+    run_id: str,
+    config: RetentionPruneConfig,
+    candidates: Sequence[RetentionPruneCandidate],
+    *,
+    applied_candidates: Sequence[RetentionPruneCandidate],
+    errors: Sequence[str],
+    warnings: Sequence[str],
+    truncate_payload: bool,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     applied_by_id = {
         (candidate.queue, candidate.message_id): candidate
         for candidate in applied_candidates
     }
-    with path.open("w", encoding="utf-8") as handle:
+    with path.open(mode, encoding="utf-8") as handle:
         for candidate in candidates:
             visible = applied_by_id.get(
                 (candidate.queue, candidate.message_id),
