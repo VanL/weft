@@ -336,7 +336,14 @@ def cmd_retention_prune(
     archive_path: Path | None = None,
     report_path: Path | None = None,
 ) -> tuple[int, str, str]:
-    """Command adapter for retention pruning."""
+    """Command adapter for retention pruning.
+
+    Under the default Monitor collation mode (``delete``), most
+    ``weft.log.tasks`` evidence is already deleted at ingest once a family
+    is collated, per [OBS.13.3] — this foreground command principally
+    matters for collation-off deployments and for task-local queues that
+    Monitor collation does not cover.
+    """
 
     normalized_family = cast(RetentionFamily, family)
     config = RetentionPruneConfig(

@@ -1125,7 +1125,15 @@ def prune(
         typer.Option("--report", help="Write a JSONL prune report"),
     ] = None,
 ) -> None:
-    """Prune stale Weft broker rows."""
+    """Prune stale Weft broker rows.
+
+    For ``--family task-local``, ``task-log``, or ``retention`` (retention
+    pruning), note that under the default Monitor collation mode
+    (``delete``), most task-log evidence is already deleted at ingest once
+    a family is collated (spec: [OBS.13.3]). This command principally
+    matters for collation-off deployments or for task-local queues that
+    collation does not cover.
+    """
 
     normalized_family = family.strip()
     if normalized_family == "runtime-state":
