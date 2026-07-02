@@ -84,7 +84,7 @@ Current top-level verbs and subcommands:
 | Surface | Current commands |
 |---------|------------------|
 | `weft` | `init`, `status`, `result`, `run`, `queue`, `manager`, `spec`, `task`, `system` |
-| `weft task` | `list`, `status`, `stop`, `kill`, `tid` |
+| `weft task` | `list`, `status`, `stop`, `kill`, `ping`, `tid` |
 | `weft manager` | `start`, `serve`, `stop`, `list`, `status` |
 | `weft spec` | `create`, `list`, `show`, `delete`, `validate`, `generate` |
 | `weft queue` | `read`, `write`, `peek`, `move`, `list`, `exists`, `stats`, `resolve`, `watch`, `delete`, `broadcast`, `alias add/list/remove` |
