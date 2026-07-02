@@ -1237,13 +1237,23 @@ class BaseTask(MultiQueueWatcher, ABC):
                 last_exc = exc
                 if attempt < attempts:
                     time.sleep(TERMINAL_EVENT_WRITE_RETRY_INTERVAL)
+        # WARNING carries identifiers only: the full payload can include the
+        # TaskSpec dump or error text, which belongs in operator logs only at
+        # debug verbosity.
+        payload_summary = ""
+        if isinstance(payload_for_log, dict):
+            event = payload_for_log.get("event") or payload_for_log.get("type")
+            status = payload_for_log.get("status")
+            payload_summary = f" event={event!r} status={status!r}"
         logger.warning(
-            "Failed to write %s %s after %d attempt(s)",
+            "Failed to write %s for task %s%s after %d attempt(s)",
             log_context,
-            payload_for_log,
+            self.tid,
+            payload_summary,
             attempts,
             exc_info=last_exc,
         )
+        logger.debug("Unwritten %s payload: %s", log_context, payload_for_log)
 
     def _report_state_change(self, event: str, **extra: Any) -> None:
         """Publish a state-change payload to the project log queue.
