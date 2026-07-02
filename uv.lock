@@ -1541,7 +1541,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "weft-macos-sandbox"
-version = "0.5.4"
+version = "0.6.0"
 source = { editable = "extensions/weft_macos_sandbox" }
 dependencies = [
     { name = "weft" },
