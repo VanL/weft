@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import sys
 import time
 from pathlib import Path
@@ -524,3 +525,26 @@ def test_build_context_ignores_root_simplebroker_config_without_weft_config(
     assert ctx.backend_name == "sqlite"
     assert ctx.database_path == (root / ".weft" / "broker.db").resolve()
     assert ctx.broker_target.config_path is None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
+def test_build_context_creates_owner_only_metadata_dirs(tmp_path: Path) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root, autostart=True)
+    assert stat.S_IMODE(ctx.weft_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE(ctx.outputs_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE(ctx.autostart_dir.stat().st_mode) == 0o700
+    # Decision under test: the DEFAULT logs dir is protected by its 0700
+    # parent rather than its own mode (custom WEFT_LOGS_DIR locations keep
+    # caller-owned modes). Pin the placement premise that protection rests on:
+    assert ctx.logs_dir == ctx.weft_dir / "logs"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
+def test_build_context_tightens_preexisting_loose_weft_dir(tmp_path: Path) -> None:
+    root = prepare_project_root(tmp_path)
+    loose = root / ".weft"
+    loose.mkdir(exist_ok=True)
+    os.chmod(loose, 0o775)
+    build_context(spec_context=root)
+    assert stat.S_IMODE(loose.stat().st_mode) == 0o700

@@ -77,6 +77,7 @@ from weft._constants import (
     get_weft_directory_name,
     load_config,
 )
+from weft.helpers import ensure_owner_only_dir
 
 __all__ = [
     "POSTGRES_BACKEND_INSTALL_HINT",
@@ -281,13 +282,17 @@ def build_context(
     }
 
     if create_dirs:
-        paths = {weft_dir, outputs_dir, logs_dir}
+        # Weft-owned metadata dirs are owner-only. User-relocatable paths
+        # (custom logs dir, custom database parent) keep default modes:
+        # Weft does not own their permission policy, and the default logs
+        # dir sits inside the 0700 weft_dir.
+        ensure_owner_only_dir(weft_dir)
+        ensure_owner_only_dir(outputs_dir)
+        logs_dir.mkdir(parents=True, exist_ok=True)
         if database_path is not None:
-            paths.add(database_path.parent)
-        for path in paths:
-            path.mkdir(parents=True, exist_ok=True)
+            database_path.parent.mkdir(parents=True, exist_ok=True)
         if autostart_enabled:
-            autostart_dir.mkdir(parents=True, exist_ok=True)
+            ensure_owner_only_dir(autostart_dir)
 
     if create_database:
         _ensure_database(broker_target, broker_config, database_path=database_path)

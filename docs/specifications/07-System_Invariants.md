@@ -481,14 +481,21 @@ _Implementation mapping_: `weft/core/manager.py`,
 
 ### Context Invariants
 
-_Implementation mapping_: `weft/context.py`, `weft/_constants.py`,
-`weft/commands/tidy.py`.
+_Implementation mapping_: `weft/context.py` (`build_context` directory
+creation), `weft/_constants.py`, `weft/commands/tidy.py`,
+`weft/helpers/__init__.py` (`ensure_owner_only_dir`).
 
 - **CTX.1**: one Weft project context resolves to one broker target
 - **CTX.2**: contexts are isolated by default
 - **CTX.3**: cleanup commands operate within the selected context boundary
 - **CTX.4**: `.weft/` remains the Weft-owned project home even when the broker
   backend is not file-backed
+- **CTX.5**: Weft-created metadata directories (the `.weft/` project home,
+  its `outputs/` child, and the autostart directory) are owner-only (0700),
+  including tightening of pre-existing looser directories at context build.
+  The default logs directory is protected by its 0700 parent rather than
+  its own mode; custom `WEFT_LOGS_DIR` and custom database locations keep
+  caller-owned modes.
 
 ## Validation and Enforcement
 
@@ -710,6 +717,7 @@ doc:
 - [`docs/plans/2026-05-15-manager-reactor-hot-loop-follow-up-plan.md`](../plans/2026-05-15-manager-reactor-hot-loop-follow-up-plan.md)
 - [`docs/plans/2026-05-16-monitor-durable-collation-store-plan.md`](../plans/2026-05-16-monitor-durable-collation-store-plan.md)
 - [`docs/plans/2026-05-18-reactive-task-loop-hot-probe-plan.md`](../plans/2026-05-18-reactive-task-loop-hot-probe-plan.md)
+- [`docs/plans/2026-06-09-evaluation-findings-remediation-plan.md`](../plans/2026-06-09-evaluation-findings-remediation-plan.md)
 
 ## Related Documents
 
