@@ -859,9 +859,14 @@ def write_json_atomically(file_path: Path | str, data: dict[str, Any]) -> None:
 def ensure_owner_only_dir(path: Path | str) -> Path:
     """Create *path* (and parents) and restrict it to the owner (0700).
 
-    Pre-existing directories are tightened with chmod as well, so upgrades
-    repair directories created by older Weft versions with default umask.
-    Only the leaf directory is tightened: intermediate parents created by
+    The mode is passed to mkdir at creation time, so a newly created leaf
+    directory is never wider open than the process umask allows, even for
+    the instant between creation and the follow-up chmod. mkdir's mode is
+    itself masked by umask (POSIX semantics), so the chmod below still runs
+    unconditionally to guarantee 0700 regardless of umask. Pre-existing
+    directories are tightened with chmod as well, so upgrades repair
+    directories created by older Weft versions with default umask. Only the
+    leaf directory is tightened: intermediate parents created by
     mkdir(parents=True) keep default modes deliberately, because callers own
     the policy for paths above the Weft-owned leaf. On Windows, chmod only
     affects the read-only bit; this is best-effort there by design.
@@ -875,7 +880,7 @@ def ensure_owner_only_dir(path: Path | str) -> Path:
     Spec: docs/specifications/07-System_Invariants.md (Context Invariants)
     """
     target = Path(path)
-    target.mkdir(parents=True, exist_ok=True)
+    target.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(target, 0o700)
     return target
 
