@@ -518,6 +518,11 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             # already terminal (one-shot tasks reach `completed` inside
             # `_finalize_message` above), so this call never double-emits a
             # terminal event.
+            #
+            # Accepted trade: if the ok-commit above raises (broker write
+            # failure), this call is skipped and the deferral stays
+            # unfinalized — result-then-terminal ordering is mandated, so
+            # the deferral cannot run before the commit.
             self._finalize_deferred_active_control()
         except Exception as exc:  # pragma: no cover - worker result finalization
             if self._direct_work_waiting:
