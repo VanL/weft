@@ -259,7 +259,10 @@ from weft.core.taskspec import TaskSpec
 
 **Rules**:
 - `from __future__ import annotations` in every file (enables forward references)
-- All imports at the top of the module (no late imports; avoid import loops by design)
+- Imports at the top of the module. Function-level imports are allowed only
+  to break a real import cycle or to guard an optional dependency, and must
+  carry a brief comment naming that reason; plain stdlib late imports are
+  not allowed.
 - Group: stdlib → third-party → local, alphabetized within groups
 - Use `collections.abc` for abstract types (Callable, Iterator, Mapping, Sequence)
 - Use `Path` from pathlib, never `os.path`
