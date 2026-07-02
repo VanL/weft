@@ -183,7 +183,7 @@ Runtime state:      weft.state.services, weft.state.tid_mappings, weft.state.str
 
 **NEVER break**:
 - TID is a 64-bit SimpleBroker hybrid timestamp (microseconds + logical counter), format-compatible with `time.time_ns()` and typically 19 digits; immutable after creation
-- State transitions are forward-only (created → running → completed/failed/timeout/killed)
+- State transitions are forward-only (created → spawning → running → completed/failed/timeout/cancelled/killed)
 - Reserved queue policy must be honored (keep/requeue/clear)
 - Process titles must be shell-safe: `weft-{context_short}-{tid_short}:{name}:{status}[:details]`
 - `spec` and `io` sections are immutable after TaskSpec creation
@@ -312,7 +312,7 @@ QUEUE_OUTBOX_SUFFIX: Final[str] = "outbox"
 DEFAULT_TIMEOUT: Final[float | None] = None
 """Default timeout in seconds. None means no timeout."""
 
-DEFAULT_MEMORY_MB: Final[int] = 512
+DEFAULT_MEMORY_MB: Final[int] = 1024
 """Default memory limit for tasks."""
 
 
