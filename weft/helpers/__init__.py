@@ -31,7 +31,12 @@ import psutil
 from simplebroker import Queue
 from simplebroker import commands as sb_commands
 from simplebroker.ext import BrokerError
-from weft._constants import WEFT_SPAWN_REQUESTS_QUEUE, load_config
+from weft._constants import (
+    ATOMIC_WRITE_RETRY_ATTEMPTS,
+    ATOMIC_WRITE_RETRY_INTERVAL,
+    WEFT_SPAWN_REQUESTS_QUEUE,
+    load_config,
+)
 from weft.ext import RunnerHandle
 
 from .container_detection import (
@@ -763,8 +768,8 @@ def write_file_atomically(
 
     target_path = Path(file_path)
     is_binary = data is not None
-    retry_attempts = 10
-    retry_sleep_seconds = 0.01
+    retry_attempts = ATOMIC_WRITE_RETRY_ATTEMPTS
+    retry_sleep_seconds = ATOMIC_WRITE_RETRY_INTERVAL
 
     try:
         # Create parent directory if it doesn't exist

@@ -18,7 +18,12 @@ from multiprocessing.process import BaseProcess
 from typing import Any, cast
 
 from simplebroker import BrokerTarget
-from weft._constants import TASK_PROCESS_POLL_INTERVAL, TERMINAL_TASK_STATUSES
+from weft._constants import (
+    PARENT_LOSS_WAKE_INTERVAL_CEILING,
+    PARENT_LOSS_WAKE_INTERVAL_FLOOR,
+    TASK_PROCESS_POLL_INTERVAL,
+    TERMINAL_TASK_STATUSES,
+)
 
 from .taskspec import TaskSpec, apply_bundle_root_to_taskspec_payload
 
@@ -64,7 +69,10 @@ def _start_parent_loss_watcher(
     poll_interval: float,
 ) -> threading.Event:
     parent_lost = threading.Event()
-    wake_interval = min(max(poll_interval, 0.05), 0.2)
+    wake_interval = min(
+        max(poll_interval, PARENT_LOSS_WAKE_INTERVAL_FLOOR),
+        PARENT_LOSS_WAKE_INTERVAL_CEILING,
+    )
 
     def _watch_parent() -> None:
         while not parent_lost.is_set():

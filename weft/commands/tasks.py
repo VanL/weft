@@ -24,6 +24,8 @@ from weft._constants import (
     CONTROL_SURFACE_WAIT_INTERVAL,
     CONTROL_SURFACE_WAIT_TIMEOUT,
     QUEUE_CTRL_IN_SUFFIX,
+    TASK_EVIDENCE_POLL_INTERVAL,
+    TASK_PID_EXIT_POLL_INTERVAL,
     TASK_PING_TIMEOUT_SECONDS,
     TASKSPEC_TID_SHORT_LENGTH,
     TERMINAL_ENVELOPE_TYPE,
@@ -411,7 +413,9 @@ def task_terminal_snapshot(
         if evidence is not None:
             snapshot = task_evidence.terminal_snapshot_from_evidence(evidence)
             if snapshot.status in {"running", "pending"} and deadline is not None:
-                time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+                time.sleep(
+                    min(TASK_EVIDENCE_POLL_INTERVAL, max(0.0, deadline - time.monotonic()))
+                )
                 continue
             return snapshot
 
@@ -432,7 +436,7 @@ def task_terminal_snapshot(
                 status="unknown",
                 source="observer",
             )
-        time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+        time.sleep(min(TASK_EVIDENCE_POLL_INTERVAL, max(0.0, deadline - time.monotonic())))
 
 
 def ack_terminal_snapshot(
@@ -1472,7 +1476,7 @@ def _observed_host_pids_are_dead(
             return True
         if time.monotonic() >= deadline:
             return False
-        time.sleep(min(0.02, max(0.0, deadline - time.monotonic())))
+        time.sleep(min(TASK_PID_EXIT_POLL_INTERVAL, max(0.0, deadline - time.monotonic())))
 
 
 def _kill_success_is_proven(

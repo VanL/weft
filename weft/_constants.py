@@ -251,6 +251,41 @@ TASK_MONITOR_CONTROL_CLEANUP_WORKER_LANE: Final[str] = "task_monitor.control_cle
 MANAGER_POLL_INTERVAL: Final[float] = TASK_PROCESS_POLL_INTERVAL
 """Polling interval for foreground manager-service loops."""
 
+TASK_EVIDENCE_POLL_INTERVAL: Final[float] = 0.05
+"""Poll tick while waiting for terminal task evidence to appear.
+
+Terminal evidence converges from queue reads plus process liveness; neither
+exposes a blocking wait with timeout here, so callers poll with a small tick
+bounded by the caller's deadline.
+"""
+
+TASK_PID_EXIT_POLL_INTERVAL: Final[float] = 0.02
+"""Poll tick while waiting for task PIDs to exit after a kill.
+
+psutil exposes no portable event-based process-exit wait for arbitrary
+(non-child) PIDs, so the kill path polls with a small tick bounded by the
+caller's deadline.
+"""
+
+ATOMIC_WRITE_RETRY_ATTEMPTS: Final[int] = 10
+"""Retry budget for atomic replace when the target is transiently locked."""
+
+ATOMIC_WRITE_RETRY_INTERVAL: Final[float] = 0.01
+"""Pause between atomic-replace retries.
+
+Windows file locks release asynchronously and emit no event we can wait on,
+so the writer retries briefly instead.
+"""
+
+PARENT_LOSS_WAKE_INTERVAL_FLOOR: Final[float] = 0.05
+PARENT_LOSS_WAKE_INTERVAL_CEILING: Final[float] = 0.2
+"""Bounds for the parent-loss watcher wake interval.
+
+Parent-process death has no portable notification, so the watcher polls;
+the floor keeps the thread from spinning, the ceiling keeps orphan
+detection prompt.
+"""
+
 CONTROL_SURFACE_WAIT_TIMEOUT: Final[float] = 2.0
 """Maximum time to wait for durable terminal task state before CLI fallback."""
 
