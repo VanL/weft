@@ -660,6 +660,17 @@ STALE_SERVICE_OWNER_DISPOSITION_REASONS: Final[frozenset[str]] = frozenset(
 WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS_DEFAULT: Final[float] = 172800.0
 """Default minimum age before TaskMonitor logs/deletes task-log rows."""
 
+TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS: Final[float] = (
+    WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS_DEFAULT
+)
+"""Default minimum age before store-backed reserved-queue cleanup deletes a
+row. A ``ReservedPolicy.KEEP`` reserved row is recovery-sensitive evidence
+for ``weft queue peek T{tid}.reserved`` ([QUEUE.6], [OBS.13.5]); this must
+not be shorter than the task-log retention window, or the reserved row
+could be deleted while the task-log evidence that justified deleting it is
+still within its own inspection window. Defaulting to the same constant
+keeps both gates in agreement by construction."""
+
 WEFT_LOG_TASKS_EXTERNAL_PATH_DEFAULT: Final[str] = "logs/weft.log"
 """Default external task-log JSONL path relative to the Weft project root."""
 
@@ -1912,6 +1923,20 @@ def _parse_log_tasks_retention_period_seconds(value: str) -> float:
     )
 
 
+def _parse_task_monitor_reserved_cleanup_min_age_seconds(value: str) -> float:
+    """Parse the store-backed reserved-queue cleanup age gate.
+
+    Zero is a valid explicit gate (immediate cleanup once cleanup proof
+    exists); unlike the retention constants this threshold is not required
+    to be strictly positive.
+    """
+
+    return _parse_non_negative_float(
+        value,
+        name="WEFT_TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS",
+    )
+
+
 def _parse_log_tasks_external_path(value: str) -> str:
     """Parse the optional external task-log JSONL path."""
 
@@ -2173,6 +2198,11 @@ def _load_weft_env_vars() -> dict[str, Any]:
             default=WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS_DEFAULT,
             parser=_parse_log_tasks_retention_period_seconds,
         ),
+        "WEFT_TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS": _load_weft_env_value(
+            "WEFT_TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS",
+            default=TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS,
+            parser=_parse_task_monitor_reserved_cleanup_min_age_seconds,
+        ),
         "WEFT_DIRECTORY_NAME": _load_weft_env_value(
             "WEFT_DIRECTORY_NAME",
             default=WEFT_DIRECTORY_NAME_DEFAULT,
@@ -2345,6 +2375,17 @@ def _normalize_weft_override_value(name: str, value: Any) -> Any:
         raise TypeError(
             "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS override must be int, "
             "float, or str"
+        )
+    if name == "WEFT_TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS":
+        if isinstance(value, str):
+            return _parse_task_monitor_reserved_cleanup_min_age_seconds(value)
+        if isinstance(value, int | float):
+            return _parse_task_monitor_reserved_cleanup_min_age_seconds(
+                str(float(value))
+            )
+        raise TypeError(
+            "WEFT_TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS override must be "
+            "int, float, or str"
         )
     if name == "WEFT_TASK_MONITOR_TASK_LOG_CUTOFF_SECONDS":
         raise ValueError(

@@ -28,6 +28,7 @@ from simplebroker.ext import BrokerError
 from weft._constants import (
     HEARTBEAT_MIN_INTERVAL_SECONDS,
     STATUS_RUNTIMELESS_STALE_AFTER_SECONDS,
+    TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS,
     TASK_MONITOR_WEFT_ANOMALY_CLASSIFICATIONS,
     TERMINAL_TASK_EVENTS,
     TERMINAL_TASK_STATUSES,
@@ -83,6 +84,9 @@ class TaskMonitorRuntimeConfig:
     )
     task_log_retention_period_seconds: float = (
         WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS_DEFAULT
+    )
+    reserved_cleanup_min_age_seconds: float = (
+        TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS
     )
     task_log_external_path: str = WEFT_LOG_TASKS_EXTERNAL_PATH_DEFAULT
     task_log_external_enabled: bool = WEFT_LOG_TASKS_EXTERNAL_ENABLED_DEFAULT
@@ -184,6 +188,18 @@ class TaskMonitorRuntimeConfig:
         )
         if task_log_retention_period_seconds <= 0:
             raise ValueError("WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS must be positive")
+
+        reserved_cleanup_min_age_seconds = float(
+            config.get(
+                "WEFT_TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS",
+                TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS,
+            )
+        )
+        if reserved_cleanup_min_age_seconds < 0:
+            raise ValueError(
+                "WEFT_TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS must not be "
+                "negative"
+            )
 
         mode = (
             str(
@@ -335,6 +351,7 @@ class TaskMonitorRuntimeConfig:
             stale_open_family_seconds=stale_open_family_seconds,
             control_queue_delete_limit=control_queue_delete_limit,
             task_log_retention_period_seconds=task_log_retention_period_seconds,
+            reserved_cleanup_min_age_seconds=reserved_cleanup_min_age_seconds,
             task_log_external_path=task_log_external_path,
             task_log_external_enabled=task_log_external_enabled,
             task_log_external_mode=task_log_external_mode,

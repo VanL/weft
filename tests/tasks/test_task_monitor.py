@@ -3238,6 +3238,97 @@ def test_task_monitor_reserved_cleanup_marks_deleted_reserved_probe_checked(
         task.stop()
 
 
+def test_task_monitor_reserved_cleanup_respects_min_age_gate(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A KEEP-policy reserved row must survive until the age gate elapses.
+
+    Spec: [QUEUE.6], [OBS.13.5] -- store-backed reserved cleanup must not
+    delete a failed task's reserved row minutes after failure; it must
+    honor the same retention window as the task-log evidence gate.
+    """
+
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_MODE": "delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    tid = "1778084345905438765"
+    reserved = make_queue(f"T{tid}.reserved")
+    reserved.write("failed-reserved")
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999965"),
+        config=config,
+    )
+    try:
+        store = task._ensure_monitor_store()
+        assert store is not None
+        update = update_from_task_log_payload(
+            {
+                "event": "work_failed",
+                "status": "failed",
+                "tid": tid,
+                "taskspec": {
+                    "tid": tid,
+                    "version": "1.0",
+                    "name": "sample",
+                    "io": {},
+                    "state": {"status": "failed"},
+                    "metadata": {},
+                },
+            },
+            message_id=int(tid),
+        )
+        assert update is not None
+        store.record_task_log_updates(
+            WEFT_GLOBAL_LOG_QUEUE,
+            (update,),
+            checkpoint_message_id=None,
+        )
+        store.mark_summary_emitted(tid, int(tid) + 1)
+
+        # Immediately after failure (now_ns close to terminal evidence),
+        # the default-configured age gate must keep the reserved row.
+        cleanup = task._run_reserved_cleanup_slice(
+            store,
+            now_ns=int(tid) + 2,
+        )
+        record = store.get_task(tid)
+        assert record is not None
+        assert record.reserved_cleanup_checked_at_ns is None
+        assert cleanup.reserved_queues_deleted == 0
+        assert list(reserved.peek_generator()) == ["failed-reserved"]
+
+        # Aging past the configured gate (via config plumbing, not a
+        # module-level constant read) allows the row to be cleaned.
+        gated_ns = (
+            int(tid)
+            + 2
+            + int(task._monitor_config.reserved_cleanup_min_age_seconds * 1_000_000_000)
+            + 1_000_000_000
+        )
+        cleanup = task._run_reserved_cleanup_slice(
+            store,
+            now_ns=gated_ns,
+        )
+        record = store.get_task(tid)
+        assert record is not None
+        assert record.reserved_cleanup_checked_at_ns is not None
+        assert cleanup.reserved_queues_deleted == 1
+        assert list(reserved.peek_generator()) == []
+    finally:
+        task.stop()
+
+
 def test_task_monitor_reserved_cleanup_keeps_failed_delete_retryable(
     broker_env,
     monkeypatch: pytest.MonkeyPatch,
@@ -3298,14 +3389,22 @@ def test_task_monitor_reserved_cleanup_keeps_failed_delete_retryable(
         store.mark_summary_emitted(tid, int(tid) + 1)
         monkeypatch.setattr(task, "_delete_runtime_reserved_queue", fail_delete)
 
+        run_now_ns = time.time_ns()
         cleanup = task._run_reserved_cleanup_slice(
             store,
-            now_ns=time.time_ns(),
+            now_ns=run_now_ns,
         )
         record = store.get_task(tid)
         assert record is not None
         assert record.reserved_cleanup_checked_at_ns is None
-        assert store.list_reserved_cleanup_pending_tasks(limit=10)[0].tid == tid
+        assert (
+            store.list_reserved_cleanup_pending_tasks(
+                limit=10,
+                now_ns=run_now_ns,
+                min_age_seconds=task._monitor_config.reserved_cleanup_min_age_seconds,
+            )[0].tid
+            == tid
+        )
         assert cleanup.pending is True
         assert cleanup.errors == ("delete failed",)
         assert list(reserved.peek_generator()) == ["failed-reserved"]
@@ -7371,6 +7470,17 @@ def test_retirement_backlog_identifies_binding_stage(
     )
     external_path = tmp_path / "task-lifetime.jsonl"
     config = _jsonl_lifecycle_config(external_path, batch_size=5000, scan_limit=50000)
+    # This test backdates ``completed_at_ns`` to exercise the
+    # COALESCE-based terminal-control retention gate at scale, but
+    # deliberately keeps broker message ids (and therefore TIDs and
+    # terminal_message_id) at real "now" -- see
+    # ``_seed_backdated_terminal_family_backlog``'s docstring. The
+    # reserved-cleanup age gate ([QUEUE.6], [OBS.13.5]) is keyed on that
+    # same real-time evidence, so it would become the new binding stage
+    # for retirement under a nonzero gate. Retirement-scale binding-stage
+    # identification is this test's concern, not reserved-KEEP inspection
+    # timing, so the gate is set to an explicit zero here.
+    config["WEFT_TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS"] = 0.0
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     base_tid = time.time_ns()
     tids = tuple(str(base_tid + offset) for offset in range(120))

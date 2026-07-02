@@ -155,6 +155,7 @@ def test_monitor_sql_reserved_cleanup_query_selects_unchecked_families() -> None
     assert "raw_deleted_at_ns IS NOT NULL" in query
     assert "OR disposition_at_ns IS NOT NULL" in query
     assert "terminal_seen = 1 AND summary_emitted_at_ns IS NOT NULL" in query
+    assert "COALESCE(terminal_message_id, CAST(tid AS INTEGER)) <= ?" in query
     assert "ORDER BY last_message_id, tid" in query
     assert "LIMIT ?" in query
     assert "%s" not in query

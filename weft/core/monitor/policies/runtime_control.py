@@ -309,7 +309,16 @@ def select_runtime_reserved_cleanup_candidates(
     task_record: Callable[[str], MonitorTaskCollationRecord | None],
     deadline_reached: Callable[[], bool],
 ) -> RuntimeReservedCleanupSelection:
-    """Select reserved queues with Monitor proof, without deleting them."""
+    """Select reserved queues with Monitor proof, without deleting them.
+
+    ``retention_seconds`` age-gates every candidate, including ones with a
+    Monitor record: terminal-evidence age (``record.terminal_message_id``)
+    where available, TID age as fallback -- the same evidence hierarchy as
+    ``select_reserved_cleanup_pending_tasks``, so a queue that fell through
+    to this pattern-scan fallback (because it was too young for the
+    store-backed query) cannot bypass the age gate here
+    (Spec: [QUEUE.6], [OBS.13.5]).
+    """
 
     if limit <= 0:
         return RuntimeReservedCleanupSelection(pending=bool(queue_names))
@@ -336,10 +345,18 @@ def select_runtime_reserved_cleanup_candidates(
         record = task_record(tid)
         ready = False
         if record is not None:
-            ready = (
+            has_cleanup_proof = (
                 record.raw_deleted_at_ns is not None
                 or record.disposition_at_ns is not None
                 or (record.terminal_seen and record.summary_emitted_at_ns is not None)
+            )
+            age_reference = (
+                record.terminal_message_id
+                if record.terminal_message_id is not None
+                else int(tid)
+            )
+            ready = has_cleanup_proof and is_old_enough(
+                age_reference, now_ns, retention_seconds
             )
         else:
             ready = is_old_enough(int(tid), now_ns, retention_seconds)

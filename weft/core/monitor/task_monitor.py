@@ -3578,12 +3578,21 @@ class TaskMonitor(ServiceTask):
 
         pending_records = store.list_reserved_cleanup_pending_tasks(
             limit=control_limit + 1,
+            now_ns=now_ns,
+            min_age_seconds=self._monitor_config.reserved_cleanup_min_age_seconds,
         )
         records = pending_records[:control_limit]
         monitor_family_limit_hit = len(pending_records) > len(records)
         remaining_limit = max(0, control_limit - len(records))
         snapshot_needed = bool(records) or remaining_limit > 0
-        active_tids = self._active_runtime_tids() if snapshot_needed else set()
+        # Destruction-protected, not merely active: an undecidable newest
+        # tid-mapping row (e.g. an external/container runner handle with no
+        # probeable host PID) must block reserved-queue deletion the same
+        # way it blocks other destructive cleanup decisions elsewhere in
+        # this module (see `_destruction_protected_runtime_tids`).
+        active_tids = (
+            self._destruction_protected_runtime_tids() if snapshot_needed else set()
+        )
         reserved_queue_names = (
             tuple(
                 sorted(
@@ -3622,7 +3631,7 @@ class TaskMonitor(ServiceTask):
             selection = _select_runtime_reserved_cleanup_candidates(
                 now_ns=now_ns,
                 retention_seconds=(
-                    self._monitor_config.task_log_retention_period_seconds
+                    self._monitor_config.reserved_cleanup_min_age_seconds
                 ),
                 limit=remaining_limit,
                 active_tids=active_tids,

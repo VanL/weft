@@ -686,7 +686,17 @@ def select_reserved_cleanup_pending_tasks(
     collations_table: str,
     columns: Sequence[str],
 ) -> str:
-    """Build a query for task families needing reserved-queue cleanup proof."""
+    """Build a query for task families needing reserved-queue cleanup proof.
+
+    The age gate uses ``COALESCE(terminal_message_id, CAST(tid AS INTEGER))
+    <= ?``: terminal-evidence age (hybrid-timestamp domain, same
+    ``is_old_enough`` math the other Monitor cleanup policies use) when a
+    terminal message was observed, falling back to TID age -- also a
+    hybrid timestamp -- when no terminal message id was recorded. This
+    keeps a ``ReservedPolicy.KEEP`` row inspectable for the configured
+    retention window instead of deleting it as soon as cleanup proof
+    exists (Spec: [QUEUE.6], [OBS.13.5]).
+    """
 
     return f"""
         SELECT {identifier_list(columns)}
@@ -699,6 +709,7 @@ def select_reserved_cleanup_pending_tasks(
             OR disposition_at_ns IS NOT NULL
             OR (terminal_seen = 1 AND summary_emitted_at_ns IS NOT NULL)
           )
+          AND COALESCE(terminal_message_id, CAST(tid AS INTEGER)) <= ?
         ORDER BY last_message_id, tid
         LIMIT ?
         """

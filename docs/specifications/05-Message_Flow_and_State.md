@@ -1057,7 +1057,11 @@ self-maintenance, and explicit operator commands for force and compaction:
   than cleanup-owned `ctrl_out` while the retention gate protects them.
   `WEFT_TASK_MONITOR_BATCH_SIZE` caps retained task-log rows or cleanup
   candidates per cycle; it is not the task-log scan depth. Reserved rows remain
-  protected recovery-sensitive evidence by default. Per-cycle collation
+  protected recovery-sensitive evidence by default: the store-backed reserved
+  cleanup worker slice (`select_reserved_cleanup_pending_tasks`) age-gates
+  deletion the same way, on terminal-evidence age where available and TID age
+  as fallback, so a `ReservedPolicy.KEEP` row is never deleted minutes after
+  failure (see [OBS.13.5]). Per-cycle collation
   summaries are operational TaskMonitor evidence only, not durable archive
   records. Long-lived `ServiceTask` subclasses, including Manager, Heartbeat,
   and TaskMonitor, publish durable lifecycle transitions but suppress

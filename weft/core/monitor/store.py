@@ -1092,17 +1092,26 @@ class _MonitorTableAccess:
         self,
         *,
         limit: int,
+        now_ns: int,
+        min_age_seconds: float = 0.0,
     ) -> tuple[MonitorTaskCollationRecord, ...]:
-        """Return retained families needing reserved-queue cleanup proof."""
+        """Return retained families needing reserved-queue cleanup proof.
+
+        Age-gated on terminal-evidence age where available
+        (``terminal_message_id``), TID age as fallback -- both hybrid
+        timestamps in the same domain as ``is_old_enough``
+        (Spec: [QUEUE.6], [OBS.13.5]).
+        """
 
         if limit <= 0:
             return ()
+        cutoff_ns = _retention_cutoff_ns(now_ns, min_age_seconds)
         rows = self._session.run(
             monitor_sql.select_reserved_cleanup_pending_tasks(
                 self._tables.task_collations,
                 _task_columns,
             ),
-            (self._context_key, int(limit)),
+            (self._context_key, cutoff_ns, int(limit)),
             fetch=True,
         )
         return tuple(_record_from_row(row) for row in rows)
@@ -1840,17 +1849,26 @@ class MonitorStore:
         self,
         *,
         limit: int,
+        now_ns: int,
+        min_age_seconds: float = 0.0,
     ) -> tuple[MonitorTaskCollationRecord, ...]:
         """Return families needing reserved-queue cleanup proof.
 
-        Spec: [MF-5], [OBS.13]
+        ``min_age_seconds`` gates deletion on terminal-evidence age (TID
+        age as fallback) so a ``ReservedPolicy.KEEP`` row stays inspectable
+        for the configured retention window instead of being deleted as
+        soon as cleanup proof exists.
+
+        Spec: [MF-5], [OBS.13], [QUEUE.6], [OBS.13.5]
         """
 
         if limit <= 0:
             return ()
         with self._sidecar_session() as session:
             return self._access(session).list_reserved_cleanup_pending_tasks(
-                limit=limit
+                limit=limit,
+                now_ns=now_ns,
+                min_age_seconds=min_age_seconds,
             )
 
     def mark_summary_emitted(
