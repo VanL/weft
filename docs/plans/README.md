@@ -33,7 +33,7 @@ There are currently 148 plan files in this directory.
 | [`2026-06-10-self-healing-runtime-maintenance-plan.md`](./2026-06-10-self-healing-runtime-maintenance-plan.md) | Self-Healing Runtime Maintenance Plan | `completed` | none |
 | [`2026-06-10-include-claimed-peek-migration-plan.md`](./2026-06-10-include-claimed-peek-migration-plan.md) | Include-Claimed Peek Surface — Implementation Plan | `completed` | none |
 | [`2026-06-10-simplebroker-sidecar-migration-plan.md`](./2026-06-10-simplebroker-sidecar-migration-plan.md) | Sidecar Sessions & Public Watcher Surface — Implementation Plan | `completed` | none |
-| [`2026-06-09-evaluation-findings-remediation-plan.md`](./2026-06-09-evaluation-findings-remediation-plan.md) | Evaluation Findings Remediation Plan | `draft` | none |
+| [`2026-06-09-evaluation-findings-remediation-plan.md`](./2026-06-09-evaluation-findings-remediation-plan.md) | Evaluation Findings Remediation Plan | `completed` | none |
 | [`2026-06-01-critical-review-remediation-plan.md`](./2026-06-01-critical-review-remediation-plan.md) | Critical Review Remediation Plan | `completed` | none |
 | [`2026-05-31-task-monitor-orphan-log-and-status-reconciliation-plan.md`](./2026-05-31-task-monitor-orphan-log-and-status-reconciliation-plan.md) | TaskMonitor Orphan Log And Status Reconciliation Plan | `completed` | none |
 | [`2026-05-30-cleanup-progress-fifo-boundary-plan.md`](./2026-05-30-cleanup-progress-fifo-boundary-plan.md) | Cleanup Progress FIFO Boundary Plan | `completed` | none |

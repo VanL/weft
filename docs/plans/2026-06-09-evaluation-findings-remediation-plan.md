@@ -1,6 +1,6 @@
 # Evaluation Findings Remediation Plan
 
-Status: draft
+Status: completed
 Source specs: docs/specifications/13-Agent_Runtime.md [AR-0.0], [AR-2.2]; docs/specifications/02-TaskSpec.md [TS-1]; docs/specifications/05-Message_Flow_and_State.md (Large Output Handling); docs/specifications/07-System_Invariants.md (Context Invariants); docs/specifications/10-CLI_Interface.md [CLI-6]; docs/specifications/01-Core_Components.md [CC-3.1], [CC-3.2]; docs/specifications/00-Quick_Reference.md (CLI table); style/test-only tasks cite no spec and say so inline
 Superseded by: none
 
