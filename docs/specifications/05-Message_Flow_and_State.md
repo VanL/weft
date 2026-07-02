@@ -1016,7 +1016,20 @@ self-maintenance, and explicit operator commands for force and compaction:
 - the supervised task monitor exists in the current contract. Its default
   `delete` mode may delete exact message IDs selected by supported
   Weft-owned cleanup paths. Runtime-state queues such as
-  `weft.state.tid_mappings` remain policy driven. `weft.log.tasks` is now
+  `weft.state.tid_mappings` remain policy driven: within
+  `weft.state.tid_mappings`, the monitor's cleanup policy keeps the newest
+  row per mapping key (`full` TID) regardless of age unless that row's own
+  payload fails a liveness probe (the runtime handle's `(pid, create_time)`
+  pairs checked via `pid_matches_create_time`); superseded (non-newest) rows
+  for a key keep the existing age-only rule. The probe consults only
+  evidence carried in the row payload itself — no terminal-evidence lookup
+  and no Monitor collation-store reach from this policy — and a payload with
+  no probeable host PIDs (e.g. an external/non-host runtime handle) is
+  undecidable and therefore treated as live: undecidable means skip, never
+  delete. This keeps a plain task's liveness evidence intact for as long as
+  it runs, so endpoint resolution, runtime pruning, manager kill-pid
+  resolution, and the monitor's own destructive-slice safety checks (see
+  [OBS.13.7]) continue to see a live owner. `weft.log.tasks` is now
   table driven when Monitor collation is enabled: the monitor scans visible
   rows in FIFO order up to `WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT`, deletes
   malformed rows, folds valid rows into the Monitor table, and then deletes
@@ -1110,7 +1123,12 @@ live in `weft/core/pruning/`; Monitor durable collation lives in
 `weft/core/monitor/collation.py`; monitor cycle wiring lives in
 `weft/core/monitor/task_monitor.py`; command rendering and CLI adaptation live in
 `weft/commands/runtime_prune.py` and
-`weft/commands/retention_prune.py`.
+`weft/commands/retention_prune.py`. The `weft.state.tid_mappings` cleanup
+policy (keep-newest-per-key + payload-liveness gating) lives in
+`weft/core/monitor/policies/tid_mapping.py`; the foreground self-maintenance
+mirror with the same keep-newest-per-key semantic (but no liveness gate,
+since it runs against managers/services/streaming/endpoints/pipelines
+groups, not tid-mappings) lives in `weft/core/pruning/runtime.py`.
 
 ## Queue Management Patterns
 
@@ -1231,6 +1249,7 @@ management live in the companion doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-07-02-runtime-correctness-and-retention-remediation-plan.md`](../plans/2026-07-02-runtime-correctness-and-retention-remediation-plan.md)
 - [`docs/plans/2026-06-29-manager-task-spawned-retention-policy-plan.md`](../plans/2026-06-29-manager-task-spawned-retention-policy-plan.md)
 - [`docs/plans/2026-06-20-weft-django-terminal-status-monitor-store-plan.md`](../plans/2026-06-20-weft-django-terminal-status-monitor-store-plan.md)
 - [`docs/plans/2026-06-11-simplebroker-dump-load-adoption-plan.md`](../plans/2026-06-11-simplebroker-dump-load-adoption-plan.md)

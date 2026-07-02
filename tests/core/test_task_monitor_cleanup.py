@@ -3,14 +3,20 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import psutil
 import pytest
 
 import weft.core.monitor.cleanup as cleanup_mod
 from tests.helpers.test_backend import prepare_project_root
+from tests.helpers.weft_harness import WeftTestHarness
 from weft._constants import (
     QUEUE_RESERVED_SUFFIX,
     TASK_MONITOR_POLICY_RUNTIME_STATE_RETENTION,
@@ -19,6 +25,8 @@ from weft._constants import (
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_TID_MAPPINGS_QUEUE,
 )
+from weft.client import WeftClient
+from weft.commands.queue import peek_queue
 from weft.context import WeftContext, build_context
 from weft.core.monitor.cleanup import (
     TaskMonitorCleanupConfig,
@@ -507,7 +515,35 @@ def test_task_monitor_cleanup_report_only_keeps_selected_rows(tmp_path: Path) ->
     assert len(_read_rows(ctx, WEFT_GLOBAL_LOG_QUEUE)) == 1
 
 
-def test_task_monitor_cleanup_deletes_old_tid_mapping(tmp_path: Path) -> None:
+def _tid_mapping_payload(
+    *,
+    full: str,
+    short: str,
+    host_processes: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {"short": short, "full": full}
+    if host_processes is not None:
+        payload["runtime_handle"] = {
+            "runner": "host",
+            "kind": "process",
+            "id": full,
+            "control": {"authority": "host-pid"},
+            "observations": {"host_processes": host_processes},
+            "metadata": {},
+        }
+    return payload
+
+
+def test_task_monitor_cleanup_deletes_old_tid_mapping_with_no_probeable_owner(
+    tmp_path: Path,
+) -> None:
+    """A mapping payload with no probeable host PIDs is undecidable liveness.
+
+    Per [OBS.13.7] and the Cleanup Boundary policy, undecidable liveness
+    means skip, never delete -- even past min-age. This replaces the old
+    assertion (which encoded the KEYSTONE defect: deleting the newest, and
+    only, mapping row of a task regardless of liveness).
+    """
     ctx = _context(tmp_path)
     mapping_id = _write_json(
         ctx,
@@ -523,13 +559,135 @@ def test_task_monitor_cleanup_deletes_old_tid_mapping(tmp_path: Path) -> None:
     )
 
     assert result.success
+    assert result.deleted == 0
+    assert result.candidates == ()
+    stats = _policy_summary_by_policy(result)
+    assert stats[TASK_MONITOR_POLICY_RUNTIME_STATE_RETENTION]["selected"] == 0
+    assert stats[TASK_MONITOR_POLICY_RUNTIME_STATE_RETENTION]["deleted"] == 0
+    assert len(_read_rows(ctx, WEFT_TID_MAPPINGS_QUEUE)) == 1
+
+
+def test_task_monitor_cleanup_deletes_superseded_rows_of_live_task(
+    tmp_path: Path,
+) -> None:
+    """Non-newest rows for a live task's key keep the age-only rule."""
+    ctx = _context(tmp_path)
+    tid = "1778000000000000002"
+    self_process = psutil.Process(os.getpid())
+    host_processes = [
+        {"pid": os.getpid(), "create_time": self_process.create_time()}
+    ]
+
+    superseded_id = _write_json(
+        ctx,
+        WEFT_TID_MAPPINGS_QUEUE,
+        _tid_mapping_payload(
+            full=tid, short="0000000002", host_processes=host_processes
+        ),
+    )
+    newest_id = _write_json(
+        ctx,
+        WEFT_TID_MAPPINGS_QUEUE,
+        _tid_mapping_payload(
+            full=tid, short="0000000002", host_processes=host_processes
+        ),
+    )
+    assert newest_id > superseded_id
+
+    result = run_task_monitor_cleanup(
+        ctx,
+        TaskMonitorCleanupConfig(batch_size=10, tid_mapping_min_age_seconds=1.0),
+        apply=True,
+        now_ns=_now_after(newest_id, 2.0),
+    )
+
+    assert result.success
+    assert result.deleted == 1
+    assert [candidate.candidate_class for candidate in result.candidates] == [
+        "superseded_tid_mapping"
+    ]
+    remaining = _read_rows(ctx, WEFT_TID_MAPPINGS_QUEUE)
+    assert len(remaining) == 1
+    remaining_payload = json.loads(remaining[0][0])
+    assert remaining_payload["full"] == tid
+
+
+def test_task_monitor_cleanup_preserves_newest_row_of_live_owner_past_min_age(
+    tmp_path: Path,
+) -> None:
+    """The newest mapping row of a live-probing owner survives regardless of age."""
+    ctx = _context(tmp_path)
+    tid = "1778000000000000003"
+    self_process = psutil.Process(os.getpid())
+    mapping_id = _write_json(
+        ctx,
+        WEFT_TID_MAPPINGS_QUEUE,
+        _tid_mapping_payload(
+            full=tid,
+            short="0000000003",
+            host_processes=[
+                {"pid": os.getpid(), "create_time": self_process.create_time()}
+            ],
+        ),
+    )
+
+    # Age well past min-age using the policy's own min-age parameter (not a
+    # monkeypatched constant): a plain task running for "days" should keep
+    # its one mapping row.
+    result = run_task_monitor_cleanup(
+        ctx,
+        TaskMonitorCleanupConfig(batch_size=10, tid_mapping_min_age_seconds=1.0),
+        apply=True,
+        now_ns=_now_after(mapping_id, 3600.0),
+    )
+
+    assert result.success
+    assert result.deleted == 0
+    assert result.candidates == ()
+    assert len(_read_rows(ctx, WEFT_TID_MAPPINGS_QUEUE)) == 1
+
+
+def test_task_monitor_cleanup_deletes_newest_row_of_dead_owner_after_min_age(
+    tmp_path: Path,
+) -> None:
+    """The newest mapping row of a dead owner is deletable once past min-age."""
+    ctx = _context(tmp_path)
+    tid = "1778000000000000004"
+
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "pass"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    ps_proc = psutil.Process(proc.pid)
+    create_time = ps_proc.create_time()
+    proc.wait(timeout=10)
+    deadline = time.monotonic() + 5.0
+    while psutil.pid_exists(proc.pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+    mapping_id = _write_json(
+        ctx,
+        WEFT_TID_MAPPINGS_QUEUE,
+        _tid_mapping_payload(
+            full=tid,
+            short="0000000004",
+            host_processes=[{"pid": proc.pid, "create_time": create_time}],
+        ),
+    )
+
+    result = run_task_monitor_cleanup(
+        ctx,
+        TaskMonitorCleanupConfig(batch_size=10, tid_mapping_min_age_seconds=1.0),
+        apply=True,
+        now_ns=_now_after(mapping_id, 2.0),
+    )
+
+    assert result.success
     assert result.deleted == 1
     assert [candidate.candidate_class for candidate in result.candidates] == [
         "old_tid_mapping"
     ]
-    stats = _policy_summary_by_policy(result)
-    assert stats[TASK_MONITOR_POLICY_RUNTIME_STATE_RETENTION]["selected"] == 1
-    assert stats[TASK_MONITOR_POLICY_RUNTIME_STATE_RETENTION]["deleted"] == 1
     assert _read_rows(ctx, WEFT_TID_MAPPINGS_QUEUE) == []
 
 
@@ -1269,3 +1427,87 @@ def test_task_monitor_cleanup_scan_budget_and_followup_delete_do_not_skip(
     assert second.records_scanned == 2
     assert second.deleted == 2
     assert len(_read_rows(ctx, WEFT_GLOBAL_LOG_QUEUE)) == 1
+
+
+def test_live_task_keeps_tid_mapping_row_through_destructive_monitor_cycle() -> None:
+    """End-to-end: a running task's mapping row survives a destructive cleanup.
+
+    Proves the KEYSTONE fix against a real process, not synthetic rows: a
+    task that outlives `tid_mapping_min_age_seconds` (overridden via the
+    policy's config parameter, never a monkeypatched constant) must still
+    have a `weft.state.tid_mappings` row after a destructive
+    `run_task_monitor_cleanup(apply=True)` pass, because its own liveness
+    probe finds a live host process.
+    """
+    with WeftTestHarness() as harness:
+        harness.ensure_foreground_manager()
+        release_file = None
+        task = None
+        try:
+            client = WeftClient(path=harness.root)
+            release_file = harness.root / "release-tid-mapping-e2e"
+            task = client.submit(
+                {
+                    "name": "tid-mapping-e2e-wait-for-file",
+                    "spec": {
+                        "type": "function",
+                        "function_target": "tests.tasks.sample_targets:wait_for_file",
+                        "args": [str(release_file)],
+                        "keyword_args": {"timeout": 30.0},
+                    },
+                },
+            )
+            harness.register_tid(task.tid)
+
+            deadline = time.monotonic() + 15.0
+            mapping_rows: list[str] = []
+            while time.monotonic() < deadline:
+                snapshot = task.snapshot()
+                if snapshot is not None and snapshot.status == "running":
+                    mapping_rows = [
+                        entry.message
+                        for entry in peek_queue(
+                            client.context,
+                            WEFT_TID_MAPPINGS_QUEUE,
+                            all_messages=True,
+                        )
+                        if json.loads(entry.message).get("full") == task.tid
+                    ]
+                    if mapping_rows:
+                        break
+                time.sleep(0.05)
+            assert mapping_rows, "task never reported a tid mapping row while running"
+
+            # Destructive cleanup pass with min-age forced far below the
+            # task's actual (short) age, so the only thing keeping the row
+            # alive is the liveness probe, not min-age headroom.
+            result = run_task_monitor_cleanup(
+                client.context,
+                TaskMonitorCleanupConfig(batch_size=50, tid_mapping_min_age_seconds=0.0),
+                apply=True,
+                exclude_tids=(),
+            )
+            assert result.success
+
+            remaining = [
+                entry.message
+                for entry in peek_queue(
+                    client.context,
+                    WEFT_TID_MAPPINGS_QUEUE,
+                    all_messages=True,
+                )
+                if json.loads(entry.message).get("full") == task.tid
+            ]
+            assert remaining, (
+                "live task's tid mapping row was deleted by a destructive "
+                "monitor cleanup cycle"
+            )
+
+            snapshot = task.snapshot()
+            assert snapshot is not None
+            assert snapshot.status == "running"
+        finally:
+            if release_file is not None:
+                release_file.write_text("go", encoding="utf-8")
+            if task is not None:
+                harness.wait_for_completion(task.tid, timeout=30.0)

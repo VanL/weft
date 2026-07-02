@@ -1,8 +1,16 @@
 """TaskMonitor cleanup policies for ``weft.state.tid_mappings``.
 
+Keep-newest-per-key + payload-liveness gating (Spec: Cleanup Boundary in
+05-Message_Flow_and_State.md; [OBS.13.7]): the newest mapping row for each
+``full`` key is only a deletion candidate when the payload's own liveness
+probe fails. Superseded (non-newest) rows keep the age-only rule. The probe
+uses only evidence carried in the row payload itself (the runtime handle's
+``(pid, create_time)`` pairs) -- no terminal-evidence lookup and no
+collation-store reach from this policy.
+
 Spec references:
 - docs/specifications/05-Message_Flow_and_State.md [MF-5]
-- docs/specifications/07-System_Invariants.md [OBS.13]
+- docs/specifications/07-System_Invariants.md [OBS.13], [OBS.13.7]
 """
 
 from __future__ import annotations
@@ -13,6 +21,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from weft._constants import (
+    RUNTIME_PRUNE_CLASS_SUPERSEDED_TID_MAPPING,
     TASK_MONITOR_POLICY_RUNTIME_STATE_RETENTION,
     WEFT_TID_MAPPINGS_QUEUE,
 )
@@ -21,6 +30,7 @@ from weft.core.pruning.models import (
     CleanupCandidate,
     CleanupPolicyStats,
     CleanupQueueStats,
+    cleanup_candidate_from_row,
     cleanup_policy_stats,
     cleanup_queue_stats,
 )
@@ -30,6 +40,8 @@ from weft.core.queue_window import (
     QueueWindowRow,
     payload_string,
 )
+from weft.ext import RunnerHandle
+from weft.helpers import handle_has_live_host_process
 
 
 def decode_tid_mapping_row(row: QueueWindowRow) -> DecodedQueueWindowRow:
@@ -68,6 +80,47 @@ def valid_tid_mapping_payload(payload: Mapping[str, Any]) -> bool:
     )
 
 
+def _mapping_row_is_live(payload: Mapping[str, Any] | None) -> bool:
+    """Return whether a mapping payload's own liveness probe finds a live owner.
+
+    Undecidable payloads (no runtime handle, or a handle with no probeable
+    host PIDs -- e.g. external/non-host runtime handles) are treated as
+    live: undecidable means skip, never delete. This is the only liveness
+    evidence this policy consults; it never looks past the row payload.
+    """
+
+    if payload is None:
+        return True
+    handle_payload = payload.get("runtime_handle")
+    if not isinstance(handle_payload, Mapping):
+        return True
+    try:
+        handle = RunnerHandle.from_dict(handle_payload)
+    except ValueError:
+        return True
+    if not handle.scoped_host_processes():
+        return True
+    return handle_has_live_host_process(handle)
+
+
+def _newest_message_id_per_key(
+    rows: Sequence[DecodedQueueWindowRow],
+) -> dict[str, int]:
+    """Return the newest (max message_id) row's id observed for each mapping key."""
+
+    newest: dict[str, int] = {}
+    for row in rows:
+        if row.malformed_reason is not None:
+            continue
+        key = payload_string(row.payload, "full")
+        if key is None:
+            continue
+        current = newest.get(key)
+        if current is None or row.raw.message_id > current:
+            newest[key] = row.raw.message_id
+    return newest
+
+
 def tid_mapping_candidates(
     rows: Sequence[DecodedQueueWindowRow],
     *,
@@ -81,7 +134,13 @@ def tid_mapping_candidates(
     tuple[CleanupPolicyStats, ...],
     tuple[PolicyProgress, ...],
 ]:
-    """Select stale or malformed TID mapping rows for cleanup."""
+    """Select stale or malformed TID mapping rows for cleanup.
+
+    Keeps the newest row per mapping key regardless of age unless its
+    payload's liveness probe fails; superseded (non-newest) rows keep the
+    current age-only rule (Spec: Cleanup Boundary in
+    05-Message_Flow_and_State.md; [OBS.13.7]).
+    """
 
     malformed_candidates = malformed_row_candidates(
         rows,
@@ -90,19 +149,49 @@ def tid_mapping_candidates(
     )
     candidates = list(malformed_candidates)
     claimed = {candidate.message_id for candidate in candidates}
+    newest_ids = _newest_message_id_per_key(rows)
+
+    # Run the normal FIFO age-only pass over every unclaimed row so
+    # `stop_reason` still reflects the true scan position (including for
+    # the common case of a single row per key). The newest row per key is
+    # then pulled back out of the age-only result and re-evaluated under
+    # the liveness gate below instead of being deleted outright.
     old_rows = older_than_candidates(
         rows,
         policy=TASK_MONITOR_POLICY_RUNTIME_STATE_RETENTION,
         now_ns=now_ns,
         min_age_seconds=min_age_seconds,
-        candidate_class="old_tid_mapping",
+        candidate_class=RUNTIME_PRUNE_CLASS_SUPERSEDED_TID_MAPPING,
         reason="older_than_tid_mapping_cleanup_min_age",
         stop_reason="first_tid_mapping_too_young",
         claimed_ids=claimed,
         exclude_tids=exclude_tids,
         tid_from_row=lambda payload, _row: payload_string(payload, "full"),
     )
-    candidates.extend(old_rows.candidates)
+    newest_row_by_id = {row.raw.message_id: row for row in rows}
+    for age_candidate in old_rows.candidates:
+        candidate_tid = age_candidate.tid
+        if (
+            candidate_tid is None
+            or newest_ids.get(candidate_tid) != age_candidate.message_id
+        ):
+            candidates.append(age_candidate)
+            continue
+        # This is the newest row for its key: only a candidate when its
+        # payload's own liveness probe fails. Undecidable payloads are
+        # treated as live and skipped.
+        row = newest_row_by_id.get(age_candidate.message_id)
+        if row is not None and not _mapping_row_is_live(row.payload):
+            candidates.append(
+                cleanup_candidate_from_row(
+                    row.raw,
+                    policy=TASK_MONITOR_POLICY_RUNTIME_STATE_RETENTION,
+                    candidate_class="old_tid_mapping",
+                    reason="older_than_tid_mapping_cleanup_min_age",
+                    tid=age_candidate.tid,
+                    payload=row.payload,
+                )
+            )
     queue_stats = cleanup_queue_stats(
         WEFT_TID_MAPPINGS_QUEUE,
         scanned=len(rows),

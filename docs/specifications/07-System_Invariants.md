@@ -235,7 +235,19 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
     rows outside an explicit cleanup policy, inbox/reserved work without
     terminal task-log proof for the same TID in the cleanup pass, or non-exact
     lifecycle evidence. Manager/global/custom control queues and custom
-    task-local queues are excluded from default monitor cleanup.
+    task-local queues are excluded from default monitor cleanup. For
+    `weft.state.tid_mappings`, this is enforced by keep-newest-per-key +
+    payload-liveness gating: the cleanup policy
+    (`weft/core/monitor/policies/tid_mapping.py`) keeps the newest row per
+    mapping key (`full` TID) regardless of age unless that row's own payload
+    fails a liveness probe against its runtime handle's `(pid, create_time)`
+    pairs; superseded (non-newest) rows for a key keep the age-only rule. The
+    probe consults only the row payload — never a terminal-evidence lookup or
+    a Monitor collation-store reach — and a payload with no probeable host
+    PIDs is undecidable and therefore treated as live (skip, never delete).
+    This preserves the only durable liveness evidence for a plain running
+    task, which endpoint resolution, runtime pruning, manager kill-pid
+    resolution, and this same destructive-slice safety check all depend on.
   - **OBS.13.8**: Task-log collation summaries are operational evidence about
     cleanup work performed, not durable lifecycle truth or archival records.
     User-task rows use `collation_kind=user_task`; manager, built-in service,
@@ -665,6 +677,7 @@ doc:
 
 ## Related Plans
 
+- [`docs/plans/2026-07-02-runtime-correctness-and-retention-remediation-plan.md`](../plans/2026-07-02-runtime-correctness-and-retention-remediation-plan.md)
 - [`docs/plans/2026-06-29-manager-task-spawned-retention-policy-plan.md`](../plans/2026-06-29-manager-task-spawned-retention-policy-plan.md)
 - [`docs/plans/2026-06-18-hypothesis-property-testing-plan.md`](../plans/2026-06-18-hypothesis-property-testing-plan.md)
 - [`docs/plans/2026-06-10-self-healing-runtime-maintenance-plan.md`](../plans/2026-06-10-self-healing-runtime-maintenance-plan.md)

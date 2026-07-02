@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
+import time
 from collections.abc import Sequence
 from typing import cast
 
+import psutil
 import pytest
 
 from weft._constants import (
@@ -34,24 +38,78 @@ def _json_row(queue: str, message_id: int, payload: object) -> QueueWindowRow:
     )
 
 
+def _dead_pid_and_create_time() -> tuple[int, float]:
+    """Spawn, wait for, and return identity of a real now-exited process.
+
+    Used so liveness-gated tests exercise the real `pid_matches_create_time`
+    probe against a genuinely dead owner instead of a guessed-unused PID.
+    """
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "pass"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    create_time = psutil.Process(proc.pid).create_time()
+    proc.wait(timeout=10)
+    deadline = time.monotonic() + 5.0
+    while psutil.pid_exists(proc.pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    return proc.pid, create_time
+
+
+def _dead_owner_mapping_payload(*, full: str, short: str, pid: int, create_time: float) -> dict:
+    return {
+        "short": short,
+        "full": full,
+        "runtime_handle": {
+            "runner": "host",
+            "kind": "process",
+            "id": full,
+            "control": {"authority": "host-pid"},
+            "observations": {
+                "host_processes": [{"pid": pid, "create_time": create_time}]
+            },
+            "metadata": {},
+        },
+    }
+
+
 def test_tid_mapping_progress_reaches_base_after_too_young_boundary() -> None:
-    """Old selected rows followed by a too-young mapping are base-for-now."""
+    """Old selected rows followed by a too-young mapping are base-for-now.
+
+    Each row is the newest (only) row for its own distinct mapping key, so
+    each is only selectable once its payload's liveness probe fails. Both
+    `old_id` and `second_old_id` carry a real, now-exited owner process so
+    the FIFO progress-boundary bookkeeping under test is exercised the same
+    way it was before keep-newest-per-key liveness gating landed.
+    """
 
     old_id = 1_778_000_000_000_000_000
     second_old_id = old_id + 1
     young_id = old_id + 10_000_000_000
+    dead_pid, dead_create_time = _dead_pid_and_create_time()
     rows = tuple(
         decode_tid_mapping_row(row)
         for row in (
             _json_row(
                 WEFT_TID_MAPPINGS_QUEUE,
                 old_id,
-                {"short": "0000000001", "full": str(old_id)},
+                _dead_owner_mapping_payload(
+                    full=str(old_id),
+                    short="0000000001",
+                    pid=dead_pid,
+                    create_time=dead_create_time,
+                ),
             ),
             _json_row(
                 WEFT_TID_MAPPINGS_QUEUE,
                 second_old_id,
-                {"short": "0000000002", "full": str(second_old_id)},
+                _dead_owner_mapping_payload(
+                    full=str(second_old_id),
+                    short="0000000002",
+                    pid=dead_pid,
+                    create_time=dead_create_time,
+                ),
             ),
             _json_row(
                 WEFT_TID_MAPPINGS_QUEUE,
