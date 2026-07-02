@@ -52,7 +52,7 @@ django-channels = [
     "weft-django[channels]>=0.9.30",
 ]
 macos-sandbox = [
-    "weft-macos-sandbox>=0.5.4",
+    "weft-macos-sandbox>=0.6.0",
 ]
 microsandbox = [
     "weft-microsandbox>=0.5.1; platform_system != 'Windows'",
@@ -61,13 +61,13 @@ all = [
     "simplebroker-pg>=2.3.0",
     "weft-docker>=0.9.70",
     "weft-django>=0.9.30",
-    "weft-macos-sandbox>=0.5.4",
+    "weft-macos-sandbox>=0.6.0",
     "weft-microsandbox>=0.5.1; platform_system != 'Windows'",
 ]
 dev = [
     "simplebroker-pg>=2.3.0",
     "weft-docker>=0.9.70",
-    "weft-macos-sandbox>=0.5.4",
+    "weft-macos-sandbox>=0.6.0",
     "weft-microsandbox>=0.5.1; platform_system != 'Windows'",
     "hypothesis>=6",
     "pytest>=7.0",
