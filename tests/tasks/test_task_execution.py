@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import stat
 import sys
 import threading
 import time
@@ -1566,6 +1567,10 @@ def test_large_output_spills_to_disk(tmp_path, broker_env, unique_tid: str) -> N
 
     events = [json.loads(msg) for msg in drain_queue(log_queue)]
     assert any(event["event"] == "output_spilled" for event in events)
+
+    if sys.platform != "win32":
+        assert stat.S_IMODE(Path(output_path).stat().st_mode) == 0o600
+        assert stat.S_IMODE(Path(output_path).parent.stat().st_mode) == 0o700
 
 
 def test_large_output_spills_to_custom_weft_directory_name(

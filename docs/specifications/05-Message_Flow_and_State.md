@@ -987,7 +987,9 @@ file integrity after dereferencing.
 
 _Implementation mapping_: `weft/core/tasks/base.py` `_spill_large_output`,
 `_outputs_base_dir`; `weft/core/tasks/consumer.py` `_emit_single_output`;
-`weft/commands/result.py` result rendering.
+`weft/commands/result.py` result rendering. Spill files are written
+owner-only (0600) inside an owner-only (0700) per-tid directory via the
+shared helpers in `weft/helpers/__init__.py`.
 
 ### Cleanup Boundary
 
@@ -1292,3 +1294,4 @@ management live in the companion doc:
 - [`docs/plans/2026-05-18-reactive-task-loop-hot-probe-plan.md`](../plans/2026-05-18-reactive-task-loop-hot-probe-plan.md)
 - [`docs/plans/2026-05-29-reliability-and-doc-fixes-plan.md`](../plans/2026-05-29-reliability-and-doc-fixes-plan.md)
 - [`docs/plans/2026-05-29-task-monitor-general-lifetime-reporting-plan.md`](../plans/2026-05-29-task-monitor-general-lifetime-reporting-plan.md)
+- [`docs/plans/2026-06-09-evaluation-findings-remediation-plan.md`](../plans/2026-06-09-evaluation-findings-remediation-plan.md)

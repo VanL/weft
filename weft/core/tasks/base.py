@@ -81,11 +81,13 @@ from weft.core.taskspec import ReservedPolicy, TaskSpec
 from weft.ext import RunnerHandle
 from weft.helpers import (
     closing_queue_iterator,
+    ensure_owner_only_dir,
     iter_queue_json_entries,
     kill_process_tree,
     process_create_time,
     redact_taskspec_dump,
     terminate_process_tree,
+    write_owner_only_bytes,
 )
 
 from .multiqueue_watcher import MultiQueueWatcher, QueueMessageContext, QueueMode
@@ -430,9 +432,9 @@ class BaseTask(MultiQueueWatcher, ABC):
     def _spill_large_output(self, encoded: bytes) -> dict[str, Any]:
         assert self.tid is not None
         output_dir = self._outputs_base_dir() / self.tid
-        output_dir.mkdir(parents=True, exist_ok=True)
+        ensure_owner_only_dir(output_dir)
         output_path = output_dir / "output.dat"
-        output_path.write_bytes(encoded)
+        write_owner_only_bytes(output_path, encoded)
 
         sha = hashlib.sha256(encoded).hexdigest()
         preview = encoded[:1024].decode("utf-8", errors="replace")
