@@ -588,8 +588,9 @@ Current rules:
   runtime-cleanup worker. For a proven-dead TID, `T{tid}.ctrl_in`,
   `T{tid}.ctrl_out`, and `T{tid}.inbox` are stale immediately. `T{tid}.outbox`
   and `T{tid}.reserved` remain retention-gated and are selected by the same
-  dead-TID policy only when the TID is older than the task-log retention
-  period. Dead-TID cleanup excludes manager, global, service, and custom
+  dead-TID policy (the name-derived path, which has no monitor record and so
+  no terminal evidence to prefer) only when the TID is older than the
+  task-log retention period. Dead-TID cleanup excludes manager, global, service, and custom
   control queues; the only manager/service exception is the disposed
   stale-service-owner path above, and that exception is limited to the standard
   task-local control pair.
