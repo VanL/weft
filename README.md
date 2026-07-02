@@ -696,6 +696,13 @@ weft task tid [TID] [--pid PID] [--reverse FULL_TID] [--context PATH]
 # List tasks
 weft task list [--status STATUS] [--all] [--stats] [--json] [--context PATH]
 
+# Control running tasks
+weft task stop [TID] [--all] [--pattern TEXT] [--context PATH]
+weft task kill [TID] [--all] [--pattern TEXT] [--context PATH]
+
+# Liveness probe (waits for a matching PONG)
+weft task ping TID [--timeout FLOAT] [--context PATH]
+
 # Manager lifecycle
 weft manager start [--replace] [--context PATH]
 weft manager serve [--replace] [--context PATH]
@@ -710,12 +717,21 @@ weft system dump -o FILE
 weft system load --dry-run -i FILE  # preflight import; exits 3 on conflicts
 weft system load -i FILE            # import the dump
 
+# Prune stale broker rows (dry-run by default)
+weft system prune [--apply|--dry-run] [--family FAMILY] [--force] [--context PATH]
+
+# Scan task evidence and emit JSONL (non-destructive)
+weft system task-monitor [--once|--follow] [--sink stdout|disk] [--log-dir PATH] [--checkpoint PATH] [--no-checkpoint] [--context PATH]
+
 # Generate and store a reusable spec
 weft spec generate --type task > my-task.json
 weft spec create my-task --file my-task.json
 
 # Validate a TaskSpec and optionally preflight runner/runtime availability
 weft spec validate --type task FILE [--load-runner] [--preflight]
+
+# Delete a stored spec
+weft spec delete NAME [--type TEXT] [--context PATH]
 ```
 
 Stored specs are ordinary JSON files. If you want `weft run --spec ...` to
@@ -825,6 +841,10 @@ weft queue list [--json] [--stats] [--endpoints] [-p PATTERN]
 weft queue resolve ENDPOINT_NAME [--json]
 weft queue watch QUEUE [--json] [--peek]
 weft queue delete QUEUE
+
+# Queue introspection
+weft queue exists NAME [--json]
+weft queue stats NAME [--json]
 
 # Broadcast and aliases
 weft queue broadcast [MESSAGE] [--pattern GLOB]
