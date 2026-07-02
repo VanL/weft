@@ -492,6 +492,33 @@ class Consumer(BaseTask, InteractiveTaskMixin):
                 initial_transition=work_result.initial_transition,
                 live_command_streaming=work_result.live_command_streaming,
             )
+            # A STOP/KILL deferred while this work item was active (Spec:
+            # [MF-3]) must still be honored when the outcome is "ok" -- the
+            # non-ok branches of `_ensure_outcome_ok` finalize the deferred
+            # command themselves, but the ok path (`_commit_work_outcome` ->
+            # `_finalize_message`) never touches deferred control state.
+            # Without this call a persistent consumer's status could be left
+            # `running` forever with no terminal event ([STATE.1], [OBS.1]).
+            #
+            # This must run here, inside the try block, *before* the
+            # `finally` below clears `_active_message_timestamp`:
+            # `_finalize_deferred_active_control` reads that attribute to
+            # decide whether a reserved-queue row still needs the configured
+            # disposition policy applied. On the ok path `_finalize_message`
+            # has already consumed the reserved row (the work completed
+            # successfully), so the finalizer's reserved-policy step is a
+            # clean no-op here (`_apply_reserved_policy`/`_ensure_reserved_empty`
+            # tolerate an already-missing row) -- applying `requeue` to
+            # completed work would cause duplicate execution, which
+            # [QUEUE.6] does not intend. Only the task-level part (terminal
+            # transition, envelope, control ack) has any effect.
+            #
+            # `_finalize_deferred_active_control` also no-ops cleanly when
+            # there is no pending deferred command, and when the task is
+            # already terminal (one-shot tasks reach `completed` inside
+            # `_finalize_message` above), so this call never double-emits a
+            # terminal event.
+            self._finalize_deferred_active_control()
         except Exception as exc:  # pragma: no cover - worker result finalization
             if self._direct_work_waiting:
                 self._direct_work_exception = exc

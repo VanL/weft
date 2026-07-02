@@ -565,6 +565,292 @@ def test_structured_active_stop_kill_defers_until_finalize(
     task.cleanup()
 
 
+@pytest.mark.parametrize(
+    ("command", "expected_status"),
+    ((CONTROL_STOP, "cancelled"), (CONTROL_KILL, "killed")),
+)
+def test_deferred_stop_kill_finalizes_persistent_task_on_ok_outcome(
+    broker_env,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+    expected_status: str,
+) -> None:
+    """A STOP/KILL deferred during active work must be honored even when the
+    work outcome is ``ok`` -- a persistent consumer must not exit leaving
+    status ``running`` with no terminal event.
+
+    Spec: [MF-3], [STATE.1], [OBS.1]
+    """
+    db_path, make_queue = broker_env
+    spec = make_command_taskspec(
+        unique_tid,
+        sys.executable,
+        reserved_stop=ReservedPolicy.CLEAR,
+        reserved_error=ReservedPolicy.CLEAR,
+        persistent=True,
+    )
+    task = Consumer(db_path, spec)
+    inbox = make_queue(spec.io.inputs["inbox"])
+    ctrl_in = make_queue(spec.io.control["ctrl_in"])
+    ctrl_out = make_queue(spec.io.control["ctrl_out"])
+    outbox = make_queue(spec.io.outputs["outbox"])
+    reserved = make_queue(f"T{unique_tid}.{QUEUE_RESERVED_SUFFIX}")
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    drain_queue(log_queue)
+    worker_started = threading.Event()
+    release_worker = threading.Event()
+
+    class OkTaskRunner:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        def supports_stream_callbacks(self) -> bool:
+            return False
+
+        def run_with_hooks(
+            self,
+            work_item: Any,
+            **_kwargs: Any,
+        ) -> RunnerOutcome:
+            del work_item
+            worker_started.set()
+            release_worker.wait()
+            return RunnerOutcome(
+                status="ok",
+                value="persistent-ok-result",
+                error=None,
+                stdout=None,
+                stderr=None,
+                returncode=0,
+                duration=0.0,
+            )
+
+    monkeypatch.setattr(consumer_module, "TaskRunner", OkTaskRunner)
+    inbox.write(json.dumps({"args": []}))
+
+    try:
+        task.process_once()
+        assert worker_started.wait(timeout=2.0)
+        assert task.taskspec.state.status == "running"
+
+        ctrl_in.write(command)
+        task.process_once()
+        assert task._deferred_active_control_command == command
+    finally:
+        release_worker.set()
+
+    _drive_consumer_until(
+        task,
+        lambda: task.taskspec.state.status == expected_status,
+    )
+
+    assert task.taskspec.state.status == expected_status
+    assert task._deferred_active_control_command is None
+    assert task.should_stop is True
+
+    terminal_envelope_list = terminal_envelopes(ctrl_out, tid=unique_tid, source="task")
+    assert len(terminal_envelope_list) == 1
+    assert terminal_envelope_list[0]["status"] == expected_status
+
+    ctrl_out_messages = [json.loads(message) for message in drain_queue(ctrl_out)]
+    ack_responses = [
+        message for message in ctrl_out_messages if message.get("command") == command
+    ]
+    assert len(ack_responses) == 1
+    assert ack_responses[0]["status"] == "ack"
+
+    expected_event = "control_stop" if command == CONTROL_STOP else "control_kill"
+    events = [json.loads(msg) for msg in drain_queue(log_queue)]
+    terminal_events = [event for event in events if event["event"] == expected_event]
+    assert len(terminal_events) == 1
+    assert terminal_events[0]["status"] == expected_status
+
+    result_messages = drain_queue(outbox)
+    assert len(result_messages) == 1
+    assert result_messages[0] == "persistent-ok-result"
+
+    assert reserved.has_pending() is False
+    task.cleanup()
+
+
+def test_deferred_stop_finalizes_one_shot_task_without_double_terminal_emission(
+    broker_env,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One-shot tasks already emit a terminal event on the ok path via
+    ``_finalize_message`` -> ``mark_completed``. A deferred STOP finalized
+    afterward must not double-emit a terminal event or overwrite the
+    ``completed`` status.
+
+    Spec: [MF-3], [STATE.1], [OBS.1]
+    """
+    db_path, make_queue = broker_env
+    spec = make_command_taskspec(
+        unique_tid,
+        sys.executable,
+        reserved_stop=ReservedPolicy.CLEAR,
+    )
+    task = Consumer(db_path, spec)
+    inbox = make_queue(spec.io.inputs["inbox"])
+    ctrl_in = make_queue(spec.io.control["ctrl_in"])
+    ctrl_out = make_queue(spec.io.control["ctrl_out"])
+    outbox = make_queue(spec.io.outputs["outbox"])
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    drain_queue(log_queue)
+    worker_started = threading.Event()
+    release_worker = threading.Event()
+
+    class OkTaskRunner:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        def supports_stream_callbacks(self) -> bool:
+            return False
+
+        def run_with_hooks(
+            self,
+            work_item: Any,
+            **_kwargs: Any,
+        ) -> RunnerOutcome:
+            del work_item
+            worker_started.set()
+            release_worker.wait()
+            return RunnerOutcome(
+                status="ok",
+                value="one-shot-ok-result",
+                error=None,
+                stdout=None,
+                stderr=None,
+                returncode=0,
+                duration=0.0,
+            )
+
+    monkeypatch.setattr(consumer_module, "TaskRunner", OkTaskRunner)
+    inbox.write(json.dumps({"args": []}))
+
+    try:
+        task.process_once()
+        assert worker_started.wait(timeout=2.0)
+        assert task.taskspec.state.status == "running"
+
+        ctrl_in.write(CONTROL_STOP)
+        task.process_once()
+        assert task._deferred_active_control_command == CONTROL_STOP
+    finally:
+        release_worker.set()
+
+    _drive_consumer_until(
+        task,
+        lambda: task.taskspec.state.status == "completed",
+    )
+
+    assert task.taskspec.state.status == "completed"
+    assert task._deferred_active_control_command is None
+
+    terminal_envelope_list = terminal_envelopes(ctrl_out, tid=unique_tid, source="task")
+    assert len(terminal_envelope_list) == 1
+    assert terminal_envelope_list[0]["status"] == "completed"
+
+    events = [json.loads(msg) for msg in drain_queue(log_queue)]
+    terminal_status_events = [
+        event
+        for event in events
+        if event.get("event") in {"work_completed", "control_stop", "control_kill"}
+    ]
+    assert len(terminal_status_events) == 1
+    assert terminal_status_events[0]["event"] == "work_completed"
+    assert terminal_status_events[0]["status"] == "completed"
+
+    result_messages = drain_queue(outbox)
+    assert len(result_messages) == 1
+    assert result_messages[0] == "one-shot-ok-result"
+
+    task.cleanup()
+
+
+def test_deferred_stop_on_ok_outcome_does_not_requeue_completed_work(
+    broker_env,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When ``reserved_policy_on_stop`` is ``requeue``, a STOP deferred during
+    active work that completes ``ok`` must NOT requeue the already-consumed
+    reserved row (that would duplicate execution). [QUEUE.6] governs
+    unfinished work; the reserved row here was already consumed by
+    ``_finalize_message`` on the ok path.
+    """
+    db_path, make_queue = broker_env
+    spec = make_command_taskspec(
+        unique_tid,
+        sys.executable,
+        reserved_stop=ReservedPolicy.REQUEUE,
+        persistent=True,
+    )
+    task = Consumer(db_path, spec)
+    inbox = make_queue(spec.io.inputs["inbox"])
+    ctrl_in = make_queue(spec.io.control["ctrl_in"])
+    outbox = make_queue(spec.io.outputs["outbox"])
+    reserved = make_queue(f"T{unique_tid}.{QUEUE_RESERVED_SUFFIX}")
+    worker_started = threading.Event()
+    release_worker = threading.Event()
+
+    class OkTaskRunner:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        def supports_stream_callbacks(self) -> bool:
+            return False
+
+        def run_with_hooks(
+            self,
+            work_item: Any,
+            **_kwargs: Any,
+        ) -> RunnerOutcome:
+            del work_item
+            worker_started.set()
+            release_worker.wait()
+            return RunnerOutcome(
+                status="ok",
+                value="requeue-policy-ok-result",
+                error=None,
+                stdout=None,
+                stderr=None,
+                returncode=0,
+                duration=0.0,
+            )
+
+    monkeypatch.setattr(consumer_module, "TaskRunner", OkTaskRunner)
+    inbox.write(json.dumps({"args": []}))
+
+    try:
+        task.process_once()
+        assert worker_started.wait(timeout=2.0)
+        assert task.taskspec.state.status == "running"
+
+        ctrl_in.write(CONTROL_STOP)
+        task.process_once()
+        assert task._deferred_active_control_command == CONTROL_STOP
+    finally:
+        release_worker.set()
+
+    _drive_consumer_until(
+        task,
+        lambda: task.taskspec.state.status == "cancelled",
+    )
+
+    assert task.taskspec.state.status == "cancelled"
+    assert inbox.has_pending() is False
+    assert reserved.has_pending() is False
+
+    result_messages = drain_queue(outbox)
+    assert len(result_messages) == 1
+    assert result_messages[0] == "requeue-policy-ok-result"
+
+    task.cleanup()
+
+
 def test_runner_error_diagnostics_are_written_to_terminal_task_log(
     broker_env,
     unique_tid: str,
