@@ -694,6 +694,61 @@ def test_superseded_live_row_is_deleted_when_newer_row_is_beyond_scan_window(
     assert second_progress[0].waypoint_reached is False
 
 
+def test_malformed_newer_row_beyond_window_does_not_declassify_valid_live_row(
+    tmp_path: Path,
+) -> None:
+    """Full-queue newest evidence must count only VALID mapping rows.
+
+    Regression: with batch_size=1 the window holds an old valid live-owner
+    mapping; beyond the window sits a NEWER MALFORMED row for the same
+    `full` key (invalid `short`). If the evidence pass counted the
+    malformed row as newest, the valid live row would be declassified as
+    superseded and deleted -- and the malformed row deleted later -- leaving
+    no live mapping at all. The evidence pass must apply the same validity
+    semantics as the in-window path (decode_tid_mapping_row /
+    valid_tid_mapping_payload), so the valid live row stays newest and
+    survives.
+    """
+    ctx = _context(tmp_path)
+    tid = "1778000000000000008"
+    self_process = psutil.Process(os.getpid())
+
+    valid_id = _write_json(
+        ctx,
+        WEFT_TID_MAPPINGS_QUEUE,
+        _tid_mapping_payload(
+            full=tid,
+            short="0000000008",
+            host_processes=[
+                {"pid": os.getpid(), "create_time": self_process.create_time()}
+            ],
+        ),
+    )
+    # Newer sibling for the same key, but malformed: empty `short` fails
+    # valid_tid_mapping_payload (invalid_tid_mapping_shape).
+    malformed_id = _write_json(
+        ctx,
+        WEFT_TID_MAPPINGS_QUEUE,
+        {"short": "", "full": tid},
+    )
+    assert malformed_id > valid_id
+
+    result = run_task_monitor_cleanup(
+        ctx,
+        TaskMonitorCleanupConfig(batch_size=1, tid_mapping_min_age_seconds=1.0),
+        apply=True,
+        now_ns=_now_after(malformed_id, 2.0),
+    )
+
+    assert result.success
+    assert result.deleted == 0
+    assert result.candidates == ()
+    remaining_ids = [
+        message_id for _body, message_id in _read_rows(ctx, WEFT_TID_MAPPINGS_QUEUE)
+    ]
+    assert valid_id in remaining_ids
+
+
 def test_task_monitor_cleanup_preserves_newest_row_of_live_owner_past_min_age(
     tmp_path: Path,
 ) -> None:

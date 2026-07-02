@@ -14,7 +14,6 @@ Spec references:
 
 from __future__ import annotations
 
-import json
 import time
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -75,27 +74,34 @@ def _newest_tid_mapping_ids(ctx: WeftContext) -> dict[str, int]:
     the window alone: a superseded row's newer sibling may lie beyond the
     window, and misclassifying it as newest would liveness-protect it
     forever, stalling age-only cleanup (Spec: Cleanup Boundary in
-    05-Message_Flow_and_State.md; [OBS.13.7]). This pass reads only the
-    ``full`` key and message id from each row; candidate selection stays
-    bounded by the window. A full read of this runtime-state queue mirrors
-    the foreground prune (`weft/core/pruning/runtime.py`) and the monitor's
-    own `_active_runtime_tids`, both of which already read it whole.
+    05-Message_Flow_and_State.md; [OBS.13.7]). Only VALID mapping rows
+    count as evidence, using the same `decode_tid_mapping_row` validity
+    semantics as the in-window path: a newer malformed sibling must not
+    declassify a valid live row as superseded (it would be deleted, and
+    the malformed row deleted later, leaving no live mapping at all).
+    Candidate selection stays bounded by the window. A full read of this
+    runtime-state queue mirrors the foreground prune
+    (`weft/core/pruning/runtime.py`) and the monitor's own
+    `_active_runtime_tids`, both of which already read it whole.
     """
 
     queue = ctx.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
     newest: dict[str, int] = {}
     try:
         for body, message_id in iter_queue_entries(queue):
-            try:
-                payload = json.loads(body)
-            except json.JSONDecodeError:
+            row_id = int(message_id)
+            decoded = decode_tid_mapping_row(
+                QueueWindowRow(
+                    queue=WEFT_TID_MAPPINGS_QUEUE,
+                    body=body,
+                    message_id=row_id,
+                )
+            )
+            if decoded.malformed_reason is not None or decoded.payload is None:
                 continue
-            if not isinstance(payload, dict):
-                continue
-            full = payload.get("full")
+            full = decoded.payload.get("full")
             if not isinstance(full, str) or not full:
                 continue
-            row_id = int(message_id)
             if row_id > newest.get(full, 0):
                 newest[full] = row_id
     finally:
