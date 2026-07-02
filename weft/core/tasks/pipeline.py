@@ -351,7 +351,10 @@ class PipelineTask(BaseTask):
         logger.debug("Ignoring unexpected pipeline inbox message for %s", self.tid)
 
     def process_once(self) -> None:
-        if not self._bootstrapped and not self.should_stop:
+        self._process_pending_termination_signal()
+        if self.should_stop:
+            return
+        if not self._bootstrapped:
             self._bootstrap_children()
         super().process_once()
 

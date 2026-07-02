@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import signal
 import time
 from pathlib import Path
 from typing import Any
@@ -748,3 +749,35 @@ def test_pipeline_task_kill_propagates_to_waiting_children(tmp_path: Path) -> No
         ctx.queue(compiled.runtime.stages[0].ctrl_in_queue, persistent=True).read_one()
         == CONTROL_KILL
     )
+
+
+def test_pipeline_task_pending_termination_signal_skips_bootstrap(
+    tmp_path: Path,
+) -> None:
+    """A pending termination signal noted before the first turn must stop the
+    pipeline before it submits any child spawn requests.
+
+    Spec: docs/specifications/05-Message_Flow_and_State.md [MF-3]
+    """
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    _write_json(ctx.weft_dir / "tasks" / "first.json", _task_payload())
+    compiled = compile_linear_pipeline(
+        load_pipeline_spec_payload(
+            {"name": "pipe", "stages": [{"name": "first", "task": "first"}]}
+        ),
+        context=ctx,
+        task_loader=lambda name: _load_task(root, name),
+    )
+    task = PipelineTask(
+        ctx.broker_target, compiled.pipeline_taskspec, config=ctx.broker_config
+    )
+
+    task.note_termination_signal(signal.SIGTERM)
+    task.process_once()
+
+    assert task.taskspec.state.status == "cancelled"
+    assert task._bootstrapped is False
+
+    spawn_queue = ctx.queue(WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE, persistent=False)
+    assert _drain_json(spawn_queue) == []
