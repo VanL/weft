@@ -701,3 +701,40 @@ def test_agent_tool_approval_required_false_still_validates() -> None:
         approval_required=False,
     )
     assert tool.approval_required is False
+
+
+def test_agent_tool_approval_required_true_rejected_on_post_construction_assignment() -> (
+    None
+):
+    """Post-construction assignment must re-run the field validator too.
+
+    Building a valid tool and then flipping ``approval_required`` to True
+    before the TaskSpec freezes it must not silently bypass the rejection
+    enforced at construction time.
+
+    Spec: [AR-0.0], [AR-2.2].
+    """
+    tool = AgentToolSection(
+        name="safe_tool",
+        kind="python",
+        ref="tests.tasks.sample_targets:echo_payload",
+    )
+    with pytest.raises(ValidationError, match="approval_required"):
+        tool.approval_required = True
+    assert tool.approval_required is False
+
+
+def test_agent_tool_frozen_instance_rejects_assignment_with_attribute_error() -> None:
+    """Freeze guard still wins over assignment validation once frozen.
+
+    ``validate_assignment=True`` must not change the exception type raised
+    by the freeze guard for already-frozen instances.
+    """
+    tool = AgentToolSection(
+        name="safe_tool",
+        kind="python",
+        ref="tests.tasks.sample_targets:echo_payload",
+    )
+    tool._freeze()
+    with pytest.raises(AttributeError, match="frozen AgentToolSection"):
+        tool.name = "renamed"

@@ -736,7 +736,7 @@ class ParameterizationSection(BaseModel):
 class AgentToolSection(BaseModel):
     """Agent tool descriptor for MVP agent runtime support (Spec: [AR-2.2])."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
     name: str = Field(..., min_length=1)
     kind: Literal["python"]
