@@ -1,5 +1,7 @@
 """Shared capability modules consumed by the CLI and Python client."""
 
+from __future__ import annotations
+
 from . import manager
 from .init import cmd_init
 from .result import cmd_result

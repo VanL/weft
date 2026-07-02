@@ -1,5 +1,7 @@
 """Core components for the Weft workflow system."""
 
+from __future__ import annotations
+
 from weft.helpers import format_tid, parse_tid
 
 from .callable import ManagedProcessResult, make_callable

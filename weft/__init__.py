@@ -4,6 +4,8 @@ Durable task execution on SimpleBroker queues: persistent managers,
 multiprocess isolation, and comprehensive observability.
 """
 
+from __future__ import annotations
+
 from ._constants import PROG_NAME, __version__
 from .client import Task, TaskEvent, TaskResult, TaskSnapshot, WeftClient
 from .helpers import (
