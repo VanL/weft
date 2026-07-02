@@ -85,6 +85,10 @@ explicit image recipes. The current shipped image-recipe set is `claude_code`,
 disposable command tasks and one-shot `provider_cli` agent calls with explicit
 guest images and guest executables.
 
+Runner plugins are currently first-party: beyond `weft.ext`, the shipped
+plugins use Weft core internals that have no stability contract yet, so
+third-party runners should pin an exact weft version.
+
 ## Quick Start
 
 ```bash

@@ -4,6 +4,12 @@ Spec references:
 - docs/specifications/01-Core_Components.md [CC-3.1], [CC-3.2]
 - docs/specifications/02-TaskSpec.md [TS-1.3]
 - docs/specifications/13-Agent_Runtime.md [AR-5]
+
+Stability note: this module is the declared contract surface, but the
+shipped first-party runner plugins also import `weft.core` internals that
+carry no stability guarantee. Third-party runner plugins are not yet
+supported at arm's length; if you build one anyway, pin an exact weft
+version.
 """
 
 from __future__ import annotations
