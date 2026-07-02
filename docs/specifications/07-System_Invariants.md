@@ -248,6 +248,25 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
     This preserves the only durable liveness evidence for a plain running
     task, which endpoint resolution, runtime pruning, manager kill-pid
     resolution, and this same destructive-slice safety check all depend on.
+    `stale_open` classification (a non-service open family with no usable
+    reporting interval, aged past `stale_open_family_seconds`) is gated the
+    same way the `stale_service_owner` branch already gates disposal: a
+    candidate whose TID is present in the Monitor's `_active_runtime_tids`
+    set is excluded from summary emission and family disposition, not just
+    from later queue deletion. A quiet running task (state events are
+    transition-only; a running task with no reporting interval emits
+    nothing after `work_started`) is otherwise indistinguishable in the task
+    log from an abandoned family, so gating only at delete time would still
+    let the family be marked disposed — and therefore control-cleanup
+    eligible — while the process is alive. Evidence model: this only proves
+    liveness for runtime handles carrying host-PID evidence (the same
+    `(pid, create_time)` proof `handle_has_live_host_process` checks);
+    non-host runner handles are protected only indirectly, through the
+    tid-mapping cleanup policy's undecidable-means-live rule keeping their
+    row (and therefore their TID) in `weft.state.tid_mappings`, which feeds
+    `_active_runtime_tids`. The gate does not independently probe non-host
+    runners; it inherits whatever liveness evidence upstream tid-mapping
+    retention already preserved.
   - **OBS.13.8**: Task-log collation summaries are operational evidence about
     cleanup work performed, not durable lifecycle truth or archival records.
     User-task rows use `collation_kind=user_task`; manager, built-in service,

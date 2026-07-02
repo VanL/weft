@@ -2605,26 +2605,47 @@ class TaskMonitor(ServiceTask):
     ) -> int:
         """Emit terminal summary dispositions for Monitor collation rows.
 
-        Spec: [MF-5]
+        ``stale_open`` candidates are excluded when their TID has runtime
+        liveness evidence (``_active_runtime_tids``), mirroring the
+        ``stale_service_owner`` branch's gate. This proves liveness for
+        runtime handles with host-PID evidence; non-host handles are
+        protected indirectly via the tid-mapping cleanup policy's
+        undecidable-means-live rule feeding the same set.
+
+        Spec: [MF-5], [OBS.13.7]
         """
 
         summary_marks: list[tuple[str, str | None]] = []
         family_disposition_marks: list[tuple[str, str, str | None, int | None]] = []
         control_delete_marks: list[str] = []
         summary_errors: list[str] = []
-        ready_tasks = list(
-            store.list_summary_ready_tasks(
-                limit=self._monitor_config.batch_size + 1,
-                now_ns=now_ns,
-                retention_seconds=(
-                    self._monitor_config.task_log_retention_period_seconds
-                ),
-                terminal_retention_seconds=0.0,
-                stale_open_family_seconds=(
-                    self._monitor_config.stale_open_family_seconds
-                ),
-            )
+        candidate_tasks = store.list_summary_ready_tasks(
+            limit=self._monitor_config.batch_size + 1,
+            now_ns=now_ns,
+            retention_seconds=(self._monitor_config.task_log_retention_period_seconds),
+            terminal_retention_seconds=0.0,
+            stale_open_family_seconds=(self._monitor_config.stale_open_family_seconds),
         )
+        ready_tasks: list[MonitorSummaryReadyTask] = []
+        if any(ready.close_reason == "stale_open" for ready in candidate_tasks):
+            # [OBS.13.7]: stale_open has no reporting-interval evidence of
+            # its own (that is what makes it "stale_open" rather than
+            # "suspected_inactive"), so a quiet-but-live task looks
+            # identical to an abandoned one from the task-log alone. Gate
+            # disposal on the same host-PID liveness evidence
+            # `_active_runtime_tids` already uses for `stale_service_owner`.
+            # This only proves liveness for runtime handles carrying
+            # host-PID evidence; non-host handles are protected by B1's
+            # undecidable-means-live rule feeding that same set, not by an
+            # independent probe here.
+            active_tids = self._active_runtime_tids()
+            ready_tasks.extend(
+                ready
+                for ready in candidate_tasks
+                if ready.close_reason != "stale_open" or ready.record.tid not in active_tids
+            )
+        else:
+            ready_tasks.extend(candidate_tasks)
         if len(ready_tasks) <= self._monitor_config.batch_size:
             seen_tids = {ready.record.tid for ready in ready_tasks}
             remaining = self._monitor_config.batch_size + 1 - len(ready_tasks)

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
 import threading
 import time
@@ -10,6 +12,7 @@ import traceback
 from collections.abc import Callable
 from typing import Any
 
+import psutil
 import pytest
 
 import weft.core.monitor.task_monitor as task_monitor_mod
@@ -8456,5 +8459,257 @@ def test_task_monitor_maintenance_prunes_superseded_runtime_state_groups(
         assert {
             progress["policy"] for progress in status["last_policy_progress"]
         } <= set(TASK_MONITOR_CLEANUP_POLICY_NAMES)
+    finally:
+        task.stop()
+
+
+def _quiet_running_taskspec(tid: str) -> dict[str, Any]:
+    """Non-service taskspec summary with no reporting interval (quiet task)."""
+
+    return {
+        "tid": tid,
+        "version": "1.0",
+        "name": "quiet-worker",
+        "io": {
+            "inputs": {"inbox": f"T{tid}.inbox"},
+            "outputs": {"outbox": f"T{tid}.outbox"},
+            "control": {
+                "ctrl_in": f"T{tid}.ctrl_in",
+                "ctrl_out": f"T{tid}.ctrl_out",
+            },
+        },
+        "state": {"status": "running"},
+        "metadata": {},
+    }
+
+
+def _tid_mapping_row(
+    *, full: str, short: str, host_processes: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Mirror the runtime-handle mapping payload shape used by BaseTask."""
+
+    return {
+        "short": short,
+        "full": full,
+        "runtime_handle": {
+            "runner": "host",
+            "kind": "process",
+            "id": full,
+            "control": {"authority": "host-pid"},
+            "observations": {"host_processes": host_processes},
+            "metadata": {},
+        },
+    }
+
+
+def test_task_monitor_stale_open_disposal_skips_active_runtime_tid(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A live quiet task's family must not be disposed as stale_open.
+
+    Reproduces the finding-B2 defect directly: a non-service open family
+    older than ``stale_open_family_seconds`` with no usable reporting
+    interval (a "quiet" running task that emits nothing after
+    ``work_started``) must not have its Monitor-store family summarized and
+    disposed while its TID is present in ``_active_runtime_tids`` -- the same
+    liveness evidence (``weft.state.tid_mappings`` host-PID proof) the
+    ``stale_service_owner`` branch already consults before disposal.
+
+    Spec: [OBS.13.7]
+    """
+
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
+            "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
+            "WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS": "5",
+            "WEFT_TASK_MONITOR_MODE": "delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    tid = "1778084345905438761"
+    taskspec = _quiet_running_taskspec(tid)
+    inbox = make_queue(f"T{tid}.inbox")
+    outbox = make_queue(f"T{tid}.outbox")
+    ctrl_in = make_queue(f"T{tid}.ctrl_in")
+    ctrl_out = make_queue(f"T{tid}.ctrl_out")
+    inbox.write("input")
+
+    self_process = psutil.Process(os.getpid())
+    mappings = make_queue(WEFT_TID_MAPPINGS_QUEUE)
+    mappings.write(
+        json.dumps(
+            _tid_mapping_row(
+                full=tid,
+                short=tid[-10:],
+                host_processes=[
+                    {"pid": os.getpid(), "create_time": self_process.create_time()}
+                ],
+            )
+        )
+    )
+
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999971"),
+        config=config,
+    )
+    try:
+        # Age the family well past the stale-open window before running any
+        # cycle: the only thing that should keep it un-disposed is the live
+        # host-PID evidence, not batching/timing headroom.
+        now_ns = int(tid) + 6_000_000_000
+        store = task._ensure_monitor_store()
+        assert store is not None
+        update = update_from_task_log_payload(
+            {
+                "event": "work_started",
+                "status": "running",
+                "tid": tid,
+                "taskspec": taskspec,
+            },
+            message_id=int(tid),
+        )
+        assert update is not None
+        store.record_task_log_updates(
+            WEFT_GLOBAL_LOG_QUEUE,
+            (update,),
+            checkpoint_message_id=None,
+        )
+
+        emitted = task._emit_monitor_store_summaries(
+            store,
+            now_ns=now_ns,
+            apply_disposition=True,
+        )
+        record = store.get_task(tid)
+        assert record is not None
+        assert emitted == 0, "live quiet task's family must not be summarized"
+        assert record.summary_emitted_at_ns is None
+        assert record.disposition_reason is None
+        assert record.suspect_reason is None
+
+        # A destructive runtime-cleanup slice must also leave its queues
+        # untouched -- the family was never marked disposed, so it is not
+        # even control-cleanup eligible.
+        task._run_terminal_control_cleanup_slice(store, now_ns=now_ns)
+
+        assert list(inbox.peek_generator()) == ["input"]
+        assert outbox.stats().total == 0
+        assert ctrl_in.stats().total == 0
+        assert ctrl_out.stats().total == 0
+    finally:
+        task.stop()
+
+
+def test_task_monitor_stale_open_disposal_still_applies_to_dead_family(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A genuinely dead quiet family still disposes as stale_open.
+
+    Companion to
+    ``test_task_monitor_stale_open_disposal_skips_active_runtime_tid``: the
+    liveness gate must not turn stale_open disposal into a no-op. A family
+    whose only mapping row points at an exited process is not "active" and
+    must still be summarized and disposed once past the stale-open window.
+    """
+
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
+            "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
+            "WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS": "5",
+            "WEFT_TASK_MONITOR_MODE": "delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    tid = "1778084345905438763"
+    taskspec = _quiet_running_taskspec(tid)
+    inbox = make_queue(f"T{tid}.inbox")
+    ctrl_in = make_queue(f"T{tid}.ctrl_in")
+    ctrl_out = make_queue(f"T{tid}.ctrl_out")
+    inbox.write("input")
+
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "pass"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    ps_proc = psutil.Process(proc.pid)
+    dead_create_time = ps_proc.create_time()
+    proc.wait(timeout=10)
+    deadline = time.monotonic() + 5.0
+    while psutil.pid_exists(proc.pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+    mappings = make_queue(WEFT_TID_MAPPINGS_QUEUE)
+    mappings.write(
+        json.dumps(
+            _tid_mapping_row(
+                full=tid,
+                short=tid[-10:],
+                host_processes=[
+                    {"pid": proc.pid, "create_time": dead_create_time}
+                ],
+            )
+        )
+    )
+
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999973"),
+        config=config,
+    )
+    try:
+        now_ns = int(tid) + 6_000_000_000
+        store = task._ensure_monitor_store()
+        assert store is not None
+        update = update_from_task_log_payload(
+            {
+                "event": "work_started",
+                "status": "running",
+                "tid": tid,
+                "taskspec": taskspec,
+            },
+            message_id=int(tid),
+        )
+        assert update is not None
+        store.record_task_log_updates(
+            WEFT_GLOBAL_LOG_QUEUE,
+            (update,),
+            checkpoint_message_id=None,
+        )
+
+        emitted = task._emit_monitor_store_summaries(
+            store,
+            now_ns=now_ns,
+            apply_disposition=True,
+        )
+        record = store.get_task(tid)
+        assert record is not None
+        assert emitted == 1
+        assert record.summary_emitted_at_ns is not None
+        assert record.disposition_reason == "stale_open"
+        assert record.suspect_reason == "stale_open"
+
+        task._run_terminal_control_cleanup_slice(store, now_ns=now_ns)
+
+        assert list(inbox.peek_generator()) == []
+        assert ctrl_in.stats().total == 0
+        assert ctrl_out.stats().total == 0
     finally:
         task.stop()

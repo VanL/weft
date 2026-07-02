@@ -1230,7 +1230,19 @@ Current rules:
   classified `suspected_inactive` after the configured reporting gap; open
   families without a usable interval may be classified `stale_open` only after
   `WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS`. These classifications are
-  operational Monitor-table state, not public lifecycle truth. PONG exposes
+  operational Monitor-table state, not public lifecycle truth. `stale_open`
+  disposal is gated on runtime-liveness evidence before it is applied, not
+  only at later queue-delete time: a candidate whose TID is in the Monitor's
+  `_active_runtime_tids` set (the same set the `stale_service_owner` branch
+  already consults) is skipped, mirroring how a quiet-but-live plain task —
+  one with no reporting interval, which by definition emits nothing after
+  `work_started` — is otherwise indistinguishable from an abandoned family in
+  the task log alone. This liveness check proves host-PID evidence directly
+  (`(pid, create_time)` proof); non-host runner handles rely on the
+  tid-mapping cleanup policy's undecidable-means-live rule to keep their
+  `weft.state.tid_mappings` row (and thus their TID in
+  `_active_runtime_tids`) rather than an independent probe here. See
+  [OBS.13.7] for the full evidence-model statement. PONG exposes
   cached external-log status, deferred-write counts, and retention settings
   only; it does not open files, scan queues, flush deferred writes, or query
   Monitor tables. The persistent TaskMonitor runtime mapping in
