@@ -188,3 +188,79 @@ def test_macos_sandbox_runner_preflight_checks_binary(
             },
             preflight=True,
         )
+
+
+def test_sandbox_child_env_is_allowlisted_not_inherited(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    profile = tmp_path / "sandbox.sb"
+    profile.write_text("(version 1)\n(allow default)\n", encoding="utf-8")
+    monkeypatch.setenv("WEFT_TEST_SECRET", "leak-me")
+    monkeypatch.setenv("WEFT_TEST_OPTIN", "forwarded")
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    captured: dict[str, Any] = {}
+
+    class FakeProcess:
+        pid = 4321
+
+    def fake_run_monitored_subprocess(**kwargs: Any) -> plugin.RunnerOutcome:
+        return plugin.RunnerOutcome(
+            status="ok",
+            value=None,
+            error=None,
+            stdout="",
+            stderr="",
+            returncode=0,
+            duration=0.0,
+            runtime_handle=kwargs["runtime_handle"],
+        )
+
+    def fake_popen(argv: Any, **kwargs: Any) -> Any:
+        captured["env"] = kwargs["env"]
+        return FakeProcess()
+
+    monkeypatch.setattr(plugin.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(plugin, "process_create_time", lambda pid: 123.456)
+    monkeypatch.setattr(
+        plugin, "run_monitored_subprocess", fake_run_monitored_subprocess
+    )
+
+    runner = plugin.MacOSSandboxRunner(
+        process_target="python3",
+        args=[],
+        env={"SPEC_VAR": "from-spec"},
+        working_dir=None,
+        timeout=None,
+        limits=None,
+        monitor_class=None,
+        monitor_interval=None,
+        runner_options={
+            "profile": str(profile),
+            "env_passthrough": ["WEFT_TEST_OPTIN"],
+        },
+    )
+    runner.run_with_hooks({})
+
+    env = captured["env"]
+    assert env["SPEC_VAR"] == "from-spec"
+    assert env["WEFT_TEST_OPTIN"] == "forwarded"
+    assert env["PATH"] == "/usr/bin:/bin"
+    assert "WEFT_TEST_SECRET" not in env
+
+
+def test_sandbox_env_passthrough_must_be_string_list(tmp_path: Path) -> None:
+    profile = tmp_path / "sandbox.sb"
+    profile.write_text("(version 1)\n(allow default)\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="env_passthrough"):
+        plugin.MacOSSandboxRunner(
+            process_target="python3",
+            args=[],
+            env={},
+            working_dir=None,
+            timeout=None,
+            limits=None,
+            monitor_class=None,
+            monitor_interval=None,
+            runner_options={"profile": str(profile), "env_passthrough": "oops"},
+        )

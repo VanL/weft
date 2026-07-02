@@ -35,6 +35,27 @@ from weft.helpers import (
     terminate_process_tree,
 )
 
+_BASE_ENV_PASSTHROUGH: tuple[str, ...] = (
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "LOGNAME",
+    "PATH",
+    "SHELL",
+    "TERM",
+    "TMPDIR",
+    "USER",
+)
+"""Host env keys forwarded into sandboxed processes by default.
+
+Session plumbing only: enough for host binaries to resolve paths, temp
+space, and locale. Everything else requires spec.runner.options
+env_passthrough (host-derived values) or spec.env (fixed values), so
+secrets in the parent environment never leak into sandboxed tasks
+implicitly.
+"""
+
 
 class MacOSSandboxRunner:
     """One-shot command runner that wraps commands with sandbox-exec."""
@@ -64,6 +85,19 @@ class MacOSSandboxRunner:
                 "macOS sandbox runner requires spec.runner.options.profile"
             )
 
+        env_passthrough = options.get("env_passthrough")
+        if env_passthrough is None:
+            self._env_passthrough: tuple[str, ...] = ()
+        else:
+            if not isinstance(env_passthrough, list) or not all(
+                isinstance(item, str) and item.strip() for item in env_passthrough
+            ):
+                raise ValueError(
+                    "macOS sandbox runner option env_passthrough must be a "
+                    "list of non-empty environment variable names"
+                )
+            self._env_passthrough = tuple(item.strip() for item in env_passthrough)
+
         self._process_target = process_target.strip()
         self._args = list(args or [])
         self._env = {str(key): str(value) for key, value in dict(env or {}).items()}
@@ -80,6 +114,20 @@ class MacOSSandboxRunner:
     def run(self, work_item: Any) -> RunnerOutcome:
         return self.run_with_hooks(work_item)
 
+    def _build_child_env(self) -> dict[str, str]:
+        """Forward baseline plus opted-in host env keys, then spec env.
+
+        Spec env always wins so TaskSpec-declared values cannot be shadowed
+        by host state.
+        """
+        env_vars: dict[str, str] = {}
+        for key in (*_BASE_ENV_PASSTHROUGH, *self._env_passthrough):
+            value = os.environ.get(key)
+            if value is not None:
+                env_vars[key] = value
+        env_vars.update(self._env)
+        return env_vars
+
     def run_with_hooks(
         self,
         work_item: Any,
@@ -95,8 +143,7 @@ class MacOSSandboxRunner:
             work_item,
             args=self._args,
         )
-        env_vars = os.environ.copy()
-        env_vars.update(self._env)
+        env_vars = self._build_child_env()
         process = subprocess.Popen(
             [self._sandbox_binary, "-f", self._profile, *command],
             stdin=subprocess.PIPE if stdin_data is not None else None,
@@ -195,6 +242,16 @@ class MacOSSandboxRunnerPlugin:
             raise ValueError(
                 "macOS sandbox runner requires spec.runner.options.profile"
             )
+
+        env_passthrough = options.get("env_passthrough")
+        if env_passthrough is not None:
+            if not isinstance(env_passthrough, list) or not all(
+                isinstance(item, str) and item.strip() for item in env_passthrough
+            ):
+                raise ValueError(
+                    "macOS sandbox runner option env_passthrough must be a "
+                    "list of non-empty environment variable names"
+                )
 
         if preflight:
             if sys.platform != "darwin":
