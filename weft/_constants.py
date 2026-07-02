@@ -668,8 +668,13 @@ row. A ``ReservedPolicy.KEEP`` reserved row is recovery-sensitive evidence
 for ``weft queue peek T{tid}.reserved`` ([QUEUE.6], [OBS.13.5]); this must
 not be shorter than the task-log retention window, or the reserved row
 could be deleted while the task-log evidence that justified deleting it is
-still within its own inspection window. Defaulting to the same constant
-keeps both gates in agreement by construction."""
+still within its own inspection window. When
+``WEFT_TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS`` is not explicitly
+set, the runtime config derives the effective gate from the CONFIGURED
+task-log retention period (not this compile-time constant), so the two
+gates agree even when only ``WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS`` is
+overridden. This constant equals that retention period's default and is
+the fallback for direct ``TaskMonitorRuntimeConfig`` construction."""
 
 WEFT_LOG_TASKS_EXTERNAL_PATH_DEFAULT: Final[str] = "logs/weft.log"
 """Default external task-log JSONL path relative to the Weft project root."""
@@ -2200,7 +2205,11 @@ def _load_weft_env_vars() -> dict[str, Any]:
         ),
         "WEFT_TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS": _load_weft_env_value(
             "WEFT_TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS",
-            default=TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS,
+            # None means "not explicitly set": the runtime config derives the
+            # effective gate from the CONFIGURED task-log retention period so
+            # the two gates agree even when only retention is overridden
+            # ([OBS.13.5]). An explicitly set value always wins.
+            default=None,
             parser=_parse_task_monitor_reserved_cleanup_min_age_seconds,
         ),
         "WEFT_DIRECTORY_NAME": _load_weft_env_value(

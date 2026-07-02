@@ -189,17 +189,23 @@ class TaskMonitorRuntimeConfig:
         if task_log_retention_period_seconds <= 0:
             raise ValueError("WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS must be positive")
 
-        reserved_cleanup_min_age_seconds = float(
-            config.get(
-                "WEFT_TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS",
-                TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS,
-            )
+        reserved_gate_value = config.get(
+            "WEFT_TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS"
         )
-        if reserved_cleanup_min_age_seconds < 0:
-            raise ValueError(
-                "WEFT_TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS must not be "
-                "negative"
-            )
+        if reserved_gate_value is None:
+            # Not explicitly set: derive from the CONFIGURED task-log
+            # retention resolved just above (same resolution order), so the
+            # reserved gate tracks a retention override instead of silently
+            # falling back to the compile-time default ([OBS.13.5]: the
+            # gates must agree). An explicitly set key always wins.
+            reserved_cleanup_min_age_seconds = task_log_retention_period_seconds
+        else:
+            reserved_cleanup_min_age_seconds = float(reserved_gate_value)
+            if reserved_cleanup_min_age_seconds < 0:
+                raise ValueError(
+                    "WEFT_TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS must not "
+                    "be negative"
+                )
 
         mode = (
             str(

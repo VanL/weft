@@ -186,6 +186,9 @@ def test_runtime_config_reads_loaded_weft_config() -> None:
     assert runtime_config.processor is None
     assert runtime_config.log_sink == "none"
     assert runtime_config.restart_backoff_seconds == 3.5
+    # Reserved gate absent from config: derived from the configured
+    # task-log retention resolved in the same pass ([OBS.13.5]).
+    assert runtime_config.reserved_cleanup_min_age_seconds == 172800.0
 
 
 def test_runtime_config_defaults_to_delete_builtin() -> None:
@@ -195,6 +198,43 @@ def test_runtime_config_defaults_to_delete_builtin() -> None:
     assert runtime_config.processor is None
     assert runtime_config.task_log_external_path == "logs/weft.log"
     assert runtime_config.task_log_external_enabled is False
+
+
+def test_runtime_config_reserved_gate_tracks_configured_retention() -> None:
+    """Reserved cleanup gate follows an overridden retention when unset.
+
+    An operator setting only WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS must
+    get a reserved-cleanup gate that agrees with it -- the gates-agree
+    invariant ([OBS.13.5], [QUEUE.6]) -- rather than the compile-time
+    default. An explicitly set reserved key still wins.
+    """
+
+    derived = TaskMonitorRuntimeConfig.from_config(
+        load_config({"WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "604800"})
+    )
+    assert derived.task_log_retention_period_seconds == 604800.0
+    assert derived.reserved_cleanup_min_age_seconds == 604800.0
+
+    explicit = TaskMonitorRuntimeConfig.from_config(
+        load_config(
+            {
+                "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "604800",
+                "WEFT_TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS": "3600",
+            }
+        )
+    )
+    assert explicit.task_log_retention_period_seconds == 604800.0
+    assert explicit.reserved_cleanup_min_age_seconds == 3600.0
+
+    explicit_zero = TaskMonitorRuntimeConfig.from_config(
+        load_config(
+            {
+                "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "604800",
+                "WEFT_TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS": 0.0,
+            }
+        )
+    )
+    assert explicit_zero.reserved_cleanup_min_age_seconds == 0.0
 
 
 def test_runtime_config_accepts_custom_processor_only_in_custom_mode() -> None:

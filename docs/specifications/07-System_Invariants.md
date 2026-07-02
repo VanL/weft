@@ -225,10 +225,12 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
     marker unset so the family remains retryable. Reserved cleanup uses public
     SimpleBroker queue APIs from the TaskMonitor runtime-cleanup worker, never
     private queue-table SQL. Deletion is additionally gated on a minimum age
-    (`TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS`, defaulted to the
-    task-log retention period so both gates agree) measured from terminal
-    evidence age where available (`terminal_message_id`) and TID age as
-    fallback, so a `ReservedPolicy.KEEP` row stays inspectable via
+    (`WEFT_TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS`; when unset it
+    follows the configured task-log retention period so both gates agree
+    even under a retention-only override, and an explicit value wins)
+    measured from terminal evidence age where available
+    (`terminal_message_id`) and TID age as fallback, so a
+    `ReservedPolicy.KEEP` row stays inspectable via
     `weft queue peek T{tid}.reserved` for the configured window rather than
     being deleted as soon as cleanup proof exists [QUEUE.6].
   - **OBS.13.6**: Runtime-state queue cleanup is policy driven. Malformed rows

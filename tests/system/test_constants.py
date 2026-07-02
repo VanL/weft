@@ -442,6 +442,7 @@ class TestLoadConfig:
                 "WEFT_LOG_TASKS_EXTERNAL_PATH": "task-log.jsonl",
                 "WEFT_LOG_TASKS_EXTERNAL_MODE": "raw",
                 "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "172800",
+                "WEFT_TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS": "3600",
                 "WEFT_TASK_MONITOR_MODE": "custom",
                 "WEFT_TASK_MONITOR_PROCESSOR": "tests.core.test_task_monitoring:noop",
                 "WEFT_TASK_MONITOR_LOG_SINK": "disk",
@@ -462,6 +463,9 @@ class TestLoadConfig:
         assert config["WEFT_LOG_TASKS_EXTERNAL_ENABLED"] is False
         assert config["WEFT_LOG_TASKS_EXTERNAL_MODE"] == "raw"
         assert config["WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS"] == 172800.0
+        assert (
+            config["WEFT_TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS"] == 3600.0
+        )
         assert config["WEFT_TASK_MONITOR_MODE"] == "custom"
         assert (
             config["WEFT_TASK_MONITOR_PROCESSOR"]
@@ -469,6 +473,34 @@ class TestLoadConfig:
         )
         assert config["WEFT_TASK_MONITOR_LOG_SINK"] == "disk"
         assert config["WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS"] == 2.5
+
+    def test_reserved_cleanup_min_age_unset_is_none_for_derivation(self) -> None:
+        """Absent reserved-gate env resolves to None, not a baked-in float.
+
+        None is the contract that lets ``TaskMonitorRuntimeConfig`` derive
+        the effective gate from the configured task-log retention so the
+        gates agree ([OBS.13.5]); a pre-resolved float here would freeze
+        the compile-time default and break retention-only overrides.
+        """
+
+        with patch.dict(os.environ, {}, clear=True):
+            config = load_config()
+
+        assert (
+            config["WEFT_TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS"] is None
+        )
+
+    def test_reserved_cleanup_min_age_rejects_negative(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"WEFT_TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS": "-1"},
+            clear=True,
+        ):
+            with pytest.raises(
+                ValueError,
+                match="WEFT_TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS",
+            ):
+                load_config()
 
     def test_task_monitor_interval_rejects_below_heartbeat_minimum(self) -> None:
         with patch.dict(
