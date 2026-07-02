@@ -518,8 +518,12 @@ Current rules:
   reached; that worker owns only the queue-delete plus Monitor-store mark
   transaction for standard stale task-local queues. Standard
   `T{tid}.ctrl_in`, `T{tid}.ctrl_out`, and `T{tid}.inbox` are stale at
-  terminal cleanup time. Standard `T{tid}.outbox` is retention-gated, and
-  standard `T{tid}.reserved` is handled by the reserved cleanup policy. For
+  terminal cleanup time. Standard `T{tid}.outbox` is retention-gated: eligible
+  only when the terminal evidence (or, absent terminal evidence, the TID) is
+  older than the configured task-log retention period, so a task's outbox is
+  retained for the full window measured from completion rather than from
+  creation. Standard `T{tid}.reserved` is handled by the reserved cleanup
+  policy, which age-gates the same way (see below). For
   old nonterminal manager or manager-supervised service owner rows, the
   Monitor may record a `stale_service_owner` or `superseded_service_owner`
   disposition without rewriting task lifecycle truth only after same-service

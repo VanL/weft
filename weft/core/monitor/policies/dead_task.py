@@ -104,7 +104,15 @@ def dead_task_queue_cleanup_plan(
     now_ns: int,
     retention_seconds: float,
 ) -> DeadTaskQueueCleanupPlan:
-    """Return the queue cleanup policy for one proven-dead task TID."""
+    """Return the queue cleanup policy for one proven-dead task TID.
+
+    Retention eligibility here is TID-creation-based only, unlike the
+    record-backed ``terminal_task_runtime_queue_cleanup_plan`` (which prefers
+    terminal evidence): this function receives only ``tid``/queues/retention
+    by construction, for TIDs discovered by name-parsing standard queue
+    names with no Monitor collation record and therefore no terminal
+    evidence to prefer (Spec: [MF-5]).
+    """
 
     stale_queue_names = standard_dead_task_stale_queue_names(tid)
     retention_eligible = is_old_enough(int(tid), now_ns, retention_seconds)

@@ -225,12 +225,26 @@ def terminal_task_runtime_queue_cleanup_plan(
     now_ns: int,
     retention_seconds: float,
 ) -> TerminalTaskRuntimeQueueCleanupPlan | None:
-    """Return standard task-local queues eligible for terminal cleanup."""
+    """Return standard task-local queues eligible for terminal cleanup.
+
+    Outbox retention eligibility is age-gated on
+    ``record.terminal_message_id`` (terminal evidence, hybrid-timestamp
+    domain) when present, falling back to TID age -- also a hybrid
+    timestamp -- when no terminal message id was recorded. This mirrors
+    ``select_reserved_cleanup_pending_tasks`` (`sql.py`) so a long-running
+    task's outbox is retained for the full window measured from
+    completion, not creation (Spec: [MF-5]).
+    """
 
     control_queue_names = standard_task_control_queue_names(record)
     if control_queue_names is None:
         return None
-    retention_eligible = is_old_enough(int(record.tid), now_ns, retention_seconds)
+    retention_message_id = (
+        record.terminal_message_id
+        if record.terminal_message_id is not None
+        else int(record.tid)
+    )
+    retention_eligible = is_old_enough(retention_message_id, now_ns, retention_seconds)
     inbox_queue_names = (f"T{record.tid}.{QUEUE_INBOX_SUFFIX}",)
     outbox_queue_names = (
         (f"T{record.tid}.{QUEUE_OUTBOX_SUFFIX}",) if retention_eligible else ()

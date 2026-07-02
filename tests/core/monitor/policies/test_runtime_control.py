@@ -89,6 +89,74 @@ def test_terminal_runtime_cleanup_plan_adds_outbox_after_retention() -> None:
     assert plan.retention_eligible
 
 
+def test_terminal_runtime_cleanup_plan_retention_uses_terminal_evidence_not_creation() -> (
+    None
+):
+    """A task created 3 days ago that completed recently keeps its outbox.
+
+    Retention eligibility is measured from `terminal_message_id` (terminal
+    evidence) when present, not from TID creation age -- otherwise a
+    long-running task loses its outbox within roughly one monitor cycle
+    despite the nominal retention window (Spec: [MF-5]).
+    """
+
+    three_days_ns = 3 * 24 * 60 * 60 * 1_000_000_000
+    tid = "1000000000000000000"
+    now_ns = int(tid) + three_days_ns
+    # Terminal evidence is fresh (task just completed).
+    record = replace(_record(tid), terminal_message_id=now_ns - 1_000_000_000)
+
+    retention_seconds = 2 * 24 * 60 * 60.0  # 2-day retention window
+
+    plan = terminal_task_runtime_queue_cleanup_plan(
+        record,
+        now_ns=now_ns,
+        retention_seconds=retention_seconds,
+    )
+
+    assert plan is not None
+    assert not plan.retention_eligible
+    assert plan.outbox_queue_names == ()
+
+    # Once terminal evidence itself ages past the window, outbox is eligible.
+    later_now_ns = now_ns + int(retention_seconds * 1_000_000_000) + 1_000_000_000
+    later_plan = terminal_task_runtime_queue_cleanup_plan(
+        record,
+        now_ns=later_now_ns,
+        retention_seconds=retention_seconds,
+    )
+    assert later_plan is not None
+    assert later_plan.retention_eligible
+    assert later_plan.outbox_queue_names == (f"T{tid}.outbox",)
+
+
+def test_terminal_runtime_cleanup_plan_falls_back_to_tid_age_without_terminal_evidence() -> (
+    None
+):
+    """A legacy record without `terminal_message_id` keeps today's behavior."""
+
+    tid = "1778084345905438801"
+    record = replace(_record(tid), terminal_message_id=None)
+
+    plan = terminal_task_runtime_queue_cleanup_plan(
+        record,
+        now_ns=int(tid) + 10_000_000_000,
+        retention_seconds=60.0,
+    )
+    assert plan is not None
+    assert not plan.retention_eligible
+    assert plan.outbox_queue_names == ()
+
+    later_plan = terminal_task_runtime_queue_cleanup_plan(
+        record,
+        now_ns=int(tid) + 10_000_000_000,
+        retention_seconds=1.0,
+    )
+    assert later_plan is not None
+    assert later_plan.retention_eligible
+    assert later_plan.outbox_queue_names == (f"T{tid}.outbox",)
+
+
 def test_terminal_runtime_cleanup_plan_rejects_nonstandard_controls() -> None:
     tid = "1778084345905438801"
     record = _record(tid, role="manager")
