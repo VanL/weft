@@ -1359,8 +1359,6 @@ class TaskSpec(BaseModel):
         2. Represents a valid nanosecond timestamp
         3. Within reasonable bounds (not too far in future/past)
         """
-        import time
-
         if v is None or v == "":
             if info.context and info.context.get("template"):
                 return v
@@ -1910,8 +1908,6 @@ class TaskSpec(BaseModel):
         """
         if not self.state.started_at:
             return None
-
-        import time
 
         end_time = self.state.completed_at or time.time_ns()
         return (end_time - self.state.started_at) / 1_000_000_000

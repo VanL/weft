@@ -18,6 +18,7 @@ import base64
 import json
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import replace
@@ -673,8 +674,6 @@ def _run_interactive_session(
                 raise RunUsageError(
                     "prompt_toolkit is required for interactive mode when stdin is a TTY"
                 ) from exc
-
-            import threading
 
             session: PromptSession[str] = PromptSession("weft> ")
             completion_event = threading.Event()
