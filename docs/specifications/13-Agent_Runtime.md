@@ -228,6 +228,10 @@ enforces
 - `templates`: named prompt templates declared in the TaskSpec.
 - `tools`: static tool descriptors resolved at execution time. Tool names are
   unique identifiers for override filtering and backend tool declarations.
+  Tool descriptors accept `approval_required` for schema compatibility, but
+  only `false` is valid: Weft does not implement tool approval policy
+  ([AR-0.0]), and validation rejects `approval_required: true` with guidance
+  to enforce approvals in the calling system or a delegated provider CLI.
 - `output_mode`: caller-facing output shape.
 - `output_schema`: optional structured-output schema.
 - `max_turns`: maximum model/tool turns before failure.
@@ -243,6 +247,8 @@ _Implementation mapping:_ `weft/core/taskspec/model.py` -- `AgentSection`,
 Template rendering: `weft/core/agents/templates.py`
 (`render_agent_template`).
 All fields listed above are implemented.
+`approval_required: true` is rejected by a field validator on
+`AgentToolSection` in `weft/core/taskspec/model.py`.
 
 ## Agent Work Envelope [AR-3]
 
@@ -787,6 +793,7 @@ This slice does not attempt to:
 
 ## Related Plans
 
+- [`docs/plans/2026-06-09-evaluation-findings-remediation-plan.md`](../plans/2026-06-09-evaluation-findings-remediation-plan.md)
 - [`docs/plans/2026-06-17-microsandbox-runner-plan.md`](../plans/2026-06-17-microsandbox-runner-plan.md)
 - [`docs/plans/2026-06-01-critical-review-remediation-plan.md`](../plans/2026-06-01-critical-review-remediation-plan.md)
 - [`docs/plans/2026-05-28-docker-container-profiles-plan.md`](../plans/2026-05-28-docker-container-profiles-plan.md)
