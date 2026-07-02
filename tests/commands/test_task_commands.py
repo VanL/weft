@@ -31,7 +31,12 @@ from weft.core import (
 from weft.core.control_probe import ControlProbeResult, MatchedPong
 from weft.core.tasks import Consumer
 from weft.ext import RunnerHandle
-from weft.helpers import iter_queue_json_entries, kill_process_tree, pid_is_live
+from weft.helpers import (
+    iter_queue_json_entries,
+    kill_process_tree,
+    pid_is_live,
+    process_create_time,
+)
 
 pytestmark = [pytest.mark.shared]
 
@@ -957,6 +962,15 @@ def test_kill_tasks_does_not_count_runner_success_while_observed_pid_lives(
     )
     monkeypatch.setattr(task_cmd, "_await_control_surface", _running_surface)
     monkeypatch.setattr(task_cmd, "_pid_exists", lambda pid: pid == 33333)
+    # PID 33333 is a stand-in, not a real process, so it carries no genuine
+    # create_time. Simulate a verified identity match (as a real host-pid
+    # mapping entry would have) so the force-kill guard signals it -- this
+    # keeps the test's intent (force-kill fires while the runner-observed
+    # PID still lives) independent of the create-time verification added to
+    # close the reused-PID defect.
+    monkeypatch.setattr(
+        task_cmd, "pid_matches_create_time", lambda pid, create_time: pid == 33333
+    )
     monkeypatch.setattr(
         task_cmd,
         "kill_process_tree",
@@ -1209,3 +1223,158 @@ def test_kill_tasks_does_not_force_terminal_consumer_for_external_runner(
     killed = task_cmd.kill_tasks([tid], context_path=root)
 
     assert killed == 1
+
+
+def _latest_mapping_entry(ctx, tid: str) -> dict[str, Any] | None:
+    mapping_queue = ctx.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
+    latest: dict[str, Any] | None = None
+    latest_timestamp = -1
+    for payload, timestamp in iter_queue_json_entries(mapping_queue):
+        if payload.get("full") != tid or timestamp < latest_timestamp:
+            continue
+        latest = payload
+        latest_timestamp = timestamp
+    return latest
+
+
+def test_force_kill_task_processes_kills_pid_with_matching_create_time(
+    tmp_path,
+) -> None:
+    """A host-pid mapping entry whose create_time matches the live process is
+    force-killed (Spec: [CC-3.2]). `_force_kill_task_processes` is the
+    genuinely reachable, previously-unverified signal path: it force-kills
+    any host pids in the mapping regardless of whether a runner-plugin kill
+    already ran, so it must independently guard with `pid_matches_create_time`.
+    """
+    spec, process, worker_pid = _launch_running_task(tmp_path)
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    try:
+        entry = _latest_mapping_entry(ctx, spec.tid)
+        assert entry is not None
+        handle = RunnerHandle.from_dict(entry["runtime_handle"])
+        assert handle.control.get("authority") == "host-pid"
+        # Confirm the recorded create_time genuinely matches the live process.
+        recorded = dict(handle.scoped_host_processes())
+        assert worker_pid in recorded
+        assert recorded[worker_pid] is not None
+        assert recorded[worker_pid] == pytest.approx(
+            process_create_time(worker_pid), abs=0.001
+        )
+
+        task_killed = task_cmd._force_kill_task_processes(entry)
+
+        assert task_killed is True
+        assert _wait_for_process_exit(worker_pid)
+    finally:
+        kill_process_tree(process.pid)
+        kill_process_tree(worker_pid)
+
+
+def test_force_kill_task_processes_refuses_stale_create_time(tmp_path) -> None:
+    """A mapping entry with a mismatched create_time must not be signaled --
+    the command refuses to signal that PID and flows into the same outcome a
+    dead task takes today, instead of killing a PID that may have been
+    reused by an unrelated process (Spec: [CC-3.2])."""
+    spec, process, worker_pid = _launch_running_task(tmp_path)
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    try:
+        entry = _latest_mapping_entry(ctx, spec.tid)
+        assert entry is not None
+        handle_payload = dict(entry["runtime_handle"])
+        # Corrupt the recorded create_time so it no longer matches the live
+        # process -- simulating a stale mapping pointing at a reused PID.
+        handle_payload["observations"] = dict(handle_payload["observations"])
+        handle_payload["observations"]["host_processes"] = [
+            {"pid": worker_pid, "create_time": 1.0}
+        ]
+        stale_entry = dict(entry)
+        stale_entry["runtime_handle"] = handle_payload
+
+        signaled: list[int] = []
+        original_kill_process_tree = task_cmd.kill_process_tree
+        try:
+            task_cmd.kill_process_tree = (  # type: ignore[assignment]
+                lambda pid, **kwargs: signaled.append(pid) or False
+            )
+
+            task_killed = task_cmd._force_kill_task_processes(stale_entry)
+        finally:
+            task_cmd.kill_process_tree = original_kill_process_tree  # type: ignore[assignment]
+
+        assert signaled == []
+        assert task_killed is False
+        # The real worker process was never touched, so it is still alive.
+        assert pid_is_live(worker_pid)
+    finally:
+        kill_process_tree(process.pid)
+        kill_process_tree(worker_pid)
+
+
+def test_force_kill_task_processes_preserves_liveness_fallback_without_create_time(
+    tmp_path,
+) -> None:
+    """A mapping entry with no recorded create_time keeps the shared helper's
+    existing plain-liveness fallback (manager parity), per external review
+    semantics decision: entries whose payload carries no create-time are not
+    skipped, they fall back to `pid_is_live` (Spec: [CC-3.2])."""
+    spec, process, worker_pid = _launch_running_task(tmp_path)
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    try:
+        entry = _latest_mapping_entry(ctx, spec.tid)
+        assert entry is not None
+        handle_payload = dict(entry["runtime_handle"])
+        # Strip create-time identity entirely -- only host_pids remain, which
+        # is what `scoped_host_processes()` falls back to as (pid, None).
+        observations = dict(handle_payload["observations"])
+        observations.pop("host_processes", None)
+        observations["host_pids"] = [worker_pid]
+        handle_payload["observations"] = observations
+        no_create_time_entry = dict(entry)
+        no_create_time_entry["runtime_handle"] = handle_payload
+
+        handle = RunnerHandle.from_dict(handle_payload)
+        recorded = dict(handle.scoped_host_processes())
+        assert recorded[worker_pid] is None
+
+        task_killed = task_cmd._force_kill_task_processes(no_create_time_entry)
+
+        assert task_killed is True
+        assert _wait_for_process_exit(worker_pid)
+    finally:
+        kill_process_tree(process.pid)
+        kill_process_tree(worker_pid)
+
+
+def test_stop_and_kill_via_fallback_guard_is_defensive_and_unreachable_today(
+    tmp_path,
+) -> None:
+    """`_stop_via_fallback`/`_kill_via_fallback` guard their raw-PID loop with
+    `pid_matches_create_time` for defense-in-depth and call-site consistency
+    with `_force_kill_task_processes`, matching the plan's instruction to
+    change `_host_pids_from_mapping` consumers uniformly. That loop is
+    unreachable today: both functions return early via the runner-plugin
+    branch whenever `_runtime_handle_from_mapping` parses a handle, and
+    `_host_processes_from_mapping`/`_host_pids_from_mapping` require that
+    same parseable handle to yield any PIDs. The live host-pid case is
+    therefore fully covered end-to-end through the plugin branch, which
+    itself verifies create-time via `weft.core.runners.host._host_pid_matches`
+    (Spec: [CC-3.2])."""
+    spec, process, worker_pid = _launch_running_task(tmp_path)
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    try:
+        entry = _latest_mapping_entry(ctx, spec.tid)
+        assert entry is not None
+        handle = RunnerHandle.from_dict(entry["runtime_handle"])
+        assert handle.control.get("authority") == "host-pid"
+
+        stopped = task_cmd._stop_via_fallback(entry)
+
+        assert stopped is True
+        assert _wait_for_process_exit(worker_pid)
+    finally:
+        kill_process_tree(process.pid)
+        kill_process_tree(worker_pid)
