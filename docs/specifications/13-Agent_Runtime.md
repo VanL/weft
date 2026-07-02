@@ -218,6 +218,60 @@ enforces
 `weft/core/agents/provider_cli/registry.py`,
 `weft/core/agents/backends/provider_cli.py`.
 
+### Security Model [AR-2.1]
+
+`authority_class` is a coarse, Weft-owned declaration, not a sandbox. Each
+`provider_cli` adapter interprets it independently by deciding, per
+invocation, whether to append its own CLI's non-interactive/no-approval flag.
+There is no single "general implies unrestricted" or "bounded implies safe"
+rule across providers — read the specific adapter before relying on either
+authority class as a security control. As verified against
+`weft/core/agents/provider_cli/registry.py`:
+
+- **`claude_code`** (`ClaudeCodeProvider.build_invocation` /
+  `build_session_invocation`): appends `--permission-mode plan` when
+  `authority_class="bounded"` **or** the resolved tool profile's
+  `workspace_access="read-only"`. Otherwise, if `workspace_access` is not
+  `"none"`, it appends `--dangerously-skip-permissions`. `bounded` also forces
+  `strict_mcp_config=True` and routes all configured MCP servers through an
+  explicit `--mcp-config` file.
+- **`codex`** (`CodexProvider`): when `authority_class="bounded"`, forces
+  `--sandbox read-only` and raises a `ValueError` at option-resolution time if
+  the caller (via `spec.agent.options` or the tool profile) tries to request
+  `dangerously_bypass_approvals_and_sandbox` or `full_auto`. When not
+  `bounded`, `--sandbox` follows the resolved tool profile's
+  `workspace_access` (or the caller's `sandbox` option), and
+  `--dangerously-bypass-approvals-and-sandbox` / `--full-auto` are appended
+  only if the caller explicitly requests them.
+- **`gemini`** and **`qwen`** (`GeminiProvider`, `QwenProvider`): append
+  `--approval-mode plan` when `authority_class="bounded"` **or**
+  `workspace_access="read-only"`. Neither provider has an unconditional
+  "skip permissions" flag; outside the bounded/read-only case they run with
+  no explicit approval-mode flag at all.
+- **`opencode`** (`OpencodeProvider`): does **not** declare
+  `supports_bounded_authority`, so `authority_class="bounded"` is rejected by
+  `validate_authority` before invocation is built. Every invocation —
+  regardless of authority class — unconditionally appends
+  `--dangerously-skip-permissions`. This is the one built-in provider where
+  `authority_class` has no effect on the permission flag at all.
+
+Shipped builtin default: the only builtin agent TaskSpec in the repo,
+`weft/builtins/tasks/dockerized-agent/taskspec.json`, sets
+`spec.agent.authority_class="general"` explicitly and defaults
+`spec.agent.runtime_config.provider="codex"` (parameterizable to
+`claude_code`, `codex`, `gemini`, `opencode`, or `qwen`). Its tool profile
+(`dockerized_agent_tool_profile` in
+`weft/builtins/tasks/dockerized-agent/dockerized_agent.py`) leaves
+`workspace_access` unset (not `"read-only"`), so selecting `claude_code` or
+`opencode` for this builtin does result in the provider's unrestricted
+permission flag being appended; selecting `codex` does not unless the caller
+separately sets `sandbox`/`dangerously_bypass_approvals_and_sandbox`.
+
+This is a Weft-owned authority label enforced by the adapter layer, not a
+process sandbox: nothing here changes the [RM-5.1] enforcement boundary in
+`06-Resource_Management.md`, and a delegated CLI process is still subject to
+the same psutil-child-tree limitation as any other task.
+
 ### Agent Field Semantics [AR-2.2]
 
 - `runtime`: adapter identifier registered in Weft core.
@@ -793,6 +847,7 @@ This slice does not attempt to:
 
 ## Related Plans
 
+- [`docs/plans/2026-07-02-runtime-correctness-and-retention-remediation-plan.md`](../plans/2026-07-02-runtime-correctness-and-retention-remediation-plan.md)
 - [`docs/plans/2026-06-09-evaluation-findings-remediation-plan.md`](../plans/2026-06-09-evaluation-findings-remediation-plan.md)
 - [`docs/plans/2026-06-17-microsandbox-runner-plan.md`](../plans/2026-06-17-microsandbox-runner-plan.md)
 - [`docs/plans/2026-06-01-critical-review-remediation-plan.md`](../plans/2026-06-01-critical-review-remediation-plan.md)

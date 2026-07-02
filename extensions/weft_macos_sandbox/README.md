@@ -45,6 +45,25 @@ TaskSpec-declared values cannot be shadowed by host state.
 full host environment; set `env_passthrough` explicitly if you depended on
 that.
 
+## Security model
+
+This plugin validates that `spec.runner.options.profile` points to an
+existing, non-empty file and that the configured `sandbox_binary` (default
+`sandbox-exec`) is on `PATH`. **It does not parse or validate the profile's
+contents.** Isolation is exactly what the supplied Seatbelt profile grants —
+nothing more, nothing less. A profile that reads `(allow default)` grants no
+isolation at all; the plugin runs it without complaint. Writing a correctly
+restrictive profile is the caller's responsibility.
+
+`sandbox-exec` is an Apple-deprecated, undocumented mechanism: Apple has
+marked the command deprecated for years and publishes no supported API or
+stability guarantee for the Seatbelt profile language it consumes. Treat
+this runner as a best-effort, host-specific containment tool, not a
+supported or guaranteed sandbox boundary — consistent with Weft's broader
+trust model (`docs/specifications/00-Overview_and_Architecture.md`,
+"Observability and Security"): user-level trust, not hostile
+multi-tenancy, with the OS/filesystem as the actual security boundary.
+
 Release tag:
 
 - `weft_macos_sandbox/vX.Y.Z`

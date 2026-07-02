@@ -145,6 +145,38 @@ Current responsibilities:
 - retain recent metrics so the task can publish peak or recent values
 - surface runner-specific stop/kill/describe hooks through the active plugin
 
+Enforcement mechanics and security boundary:
+
+- The default poll cadence is 1.0s (`DEFAULT_POLLING_INTERVAL` in
+  `weft/_constants.py`, threaded through as `spec.polling_interval` and
+  `run_monitored_subprocess`'s `monitor_interval`). Each poll takes one
+  `ResourceMetrics` snapshot and calls `check_limits()`.
+- Memory and file-descriptor/connection limits are enforced on a **single
+  sample**: `PsutilResourceMonitor.check_limits` kills the runtime the first
+  poll where `metrics.memory_mb` (or `open_files`/`connections`) exceeds the
+  configured limit — there is no grace window or debounce for memory.
+- CPU is the one exception: `_is_sustained_cpu_violation` requires at least 5
+  recorded samples and kills only when 4 of the last 5 samples exceeded
+  `cpu_percent` (a "4-of-5" rule), which smooths over short spikes that
+  memory enforcement does not tolerate.
+- On violation, the runner escalates through `terminate_process_tree` /
+  `kill_process_tree` (`weft/helpers/__init__.py`), which walk the process
+  tree via `psutil.Process(...).children(recursive=True)` starting from the
+  worker PID.
+- **Enforcement boundary**: both metric collection (`_process_tree` in
+  `weft/core/resource_monitor.py`) and the kill path walk the *psutil-visible
+  child tree* rooted at the worker PID. A task that detaches from that tree —
+  e.g. by calling `os.setsid()` to start a new session, or by double-forking
+  so the intermediate parent exits and the grandchild is reparented outside
+  the tracked tree — is no longer enumerated by `children(recursive=True)`
+  and is invisible to both limit checks and the kill escalation. This is
+  consistent with the trust model in
+  [00-Overview_and_Architecture.md](00-Overview_and_Architecture.md)
+  ("Observability and Security"): Weft assumes user-level trust, not hostile
+  multi-tenancy, and the security boundary is the OS/filesystem, not a
+  resource-monitor sandbox. Resource limits are a cooperative operational
+  control, not an isolation mechanism against an adversarial task.
+
 ### Timeout Boundary [RM-5.2]
 
 `spec.timeout` is a work-execution timeout. It applies once the runner or
@@ -259,6 +291,7 @@ controls stay here only when they are already shipped and observable:
 
 ## Related Plans
 
+- [`docs/plans/2026-07-02-runtime-correctness-and-retention-remediation-plan.md`](../plans/2026-07-02-runtime-correctness-and-retention-remediation-plan.md)
 - [`docs/plans/2026-06-17-microsandbox-runner-plan.md`](../plans/2026-06-17-microsandbox-runner-plan.md)
 - [`docs/plans/2026-05-29-reliability-and-doc-fixes-plan.md`](../plans/2026-05-29-reliability-and-doc-fixes-plan.md)
 - [`docs/plans/2026-05-08-agent-session-and-task-startup-observability-plan.md`](../plans/2026-05-08-agent-session-and-task-startup-observability-plan.md)
