@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **Breaking:** TaskSpec validation now rejects agent tool descriptors with
+  `approval_required: true`. The flag was previously accepted but silently
+  unenforced; Weft does not implement tool approval policy ([AR-0.0]).
+  Enforce approvals in the calling system or use a `provider_cli` runtime.
+- **Breaking:** the macOS sandbox runner (weft-macos-sandbox 0.6.0) no
+  longer inherits the full host environment. Sandboxed processes now receive
+  a fixed baseline (PATH/HOME/TMPDIR/locale and similar), plus host
+  variables opted in via `spec.runner.options.env_passthrough`, plus
+  `spec.env`.
+- Weft-owned data at rest is now owner-only: `.weft/` metadata directories
+  are created 0700 (and tightened on upgrade), large-output spill files and
+  `weft system dump` exports are written 0600. Dump content is unchanged and
+  still contains TaskSpec env/args verbatim; treat dump files as secrets.
+
 ## 0.9.84 - 2026-06-29
 
 ### Added
@@ -146,6 +164,14 @@
   normal cleanup.
 - Removed stale monitor policy API scaffolding and unused constants/hooks that
   no longer represented live product behavior.
+
+## 0.9.74 - 2026-05-31
+
+### Fixed
+
+- Reconciled orphan task-monitor service state so `weft status` classifies
+  stale internal service log entries as superseded service records instead
+  of reporting dead heartbeat/monitor services as live tasks.
 
 ## 0.9.73 - 2026-05-30
 
