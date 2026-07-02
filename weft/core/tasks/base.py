@@ -62,6 +62,8 @@ from weft._constants import (
     TASK_WORKER_RESULT_QUEUE_MAXSIZE,
     TASKSPEC_TID_SHORT_LENGTH,
     TERMINAL_ENVELOPE_TYPE,
+    TERMINAL_EVENT_WRITE_RETRIES,
+    TERMINAL_EVENT_WRITE_RETRY_INTERVAL,
     TERMINAL_TASK_STATUSES,
     WEFT_ENDPOINTS_REGISTRY_QUEUE,
     WEFT_GLOBAL_LOG_QUEUE,
@@ -1194,6 +1196,55 @@ class BaseTask(MultiQueueWatcher, ABC):
     # ------------------------------------------------------------------
     # Logging and state utilities
     # ------------------------------------------------------------------
+    def _write_state_queue_message(
+        self,
+        queue: Queue,
+        serialized_payload: str,
+        *,
+        terminal: bool,
+        log_context: str,
+        payload_for_log: Any,
+    ) -> None:
+        """Write a state/observability payload with terminal-aware retry.
+
+        Non-terminal writes keep the existing single-attempt, debug-level
+        best-effort behavior. Terminal writes (the one-shot state event and
+        ctrl_out envelope covered by [OBS.1]) get a bounded retry with a
+        short pause and a WARNING-level log (with ``exc_info``) once retries
+        are exhausted, because losing the terminal signal silently is more
+        costly than losing an in-flight progress update. The write is still
+        non-fatal after retries exhaust — the caller must continue its
+        shutdown path regardless.
+
+        Spec: [OBS.1]
+        """
+        if not terminal:
+            try:
+                queue.write(serialized_payload)
+            except (BrokerError, OSError, RuntimeError):
+                logger.debug(
+                    "Failed to write %s %s", log_context, payload_for_log, exc_info=True
+                )
+            return
+
+        attempts = max(1, TERMINAL_EVENT_WRITE_RETRIES)
+        last_exc: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                queue.write(serialized_payload)
+                return
+            except (BrokerError, OSError, RuntimeError) as exc:
+                last_exc = exc
+                if attempt < attempts:
+                    time.sleep(TERMINAL_EVENT_WRITE_RETRY_INTERVAL)
+        logger.warning(
+            "Failed to write %s %s after %d attempt(s)",
+            log_context,
+            payload_for_log,
+            attempts,
+            exc_info=last_exc,
+        )
+
     def _report_state_change(self, event: str, **extra: Any) -> None:
         """Publish a state-change payload to the project log queue.
 
@@ -1227,12 +1278,13 @@ class BaseTask(MultiQueueWatcher, ABC):
         )
 
         serialized_payload = json.dumps(payload)
-        try:
-            self._queue(WEFT_GLOBAL_LOG_QUEUE).write(serialized_payload)
-        except (BrokerError, OSError, RuntimeError):
-            logger.debug(
-                "Failed to write state change event %s", payload, exc_info=True
-            )
+        self._write_state_queue_message(
+            self._queue(WEFT_GLOBAL_LOG_QUEUE),
+            serialized_payload,
+            terminal=self.taskspec.state.status in TERMINAL_TASK_STATUSES,
+            log_context="state change event",
+            payload_for_log=payload,
+        )
         self._last_poll_report_at = time.monotonic()
         self._last_reported_status = self.taskspec.state.status
 
@@ -1282,14 +1334,13 @@ class BaseTask(MultiQueueWatcher, ABC):
             payload["error"] = self.taskspec.state.error
         if self.taskspec.state.return_code is not None:
             payload["return_code"] = self.taskspec.state.return_code
-        try:
-            self._ctrl_out_queue.write(json.dumps(payload))
-        except (BrokerError, OSError, RuntimeError):
-            logger.debug(
-                "Failed to write terminal ctrl_out envelope %s",
-                payload,
-                exc_info=True,
-            )
+        self._write_state_queue_message(
+            self._ctrl_out_queue,
+            json.dumps(payload),
+            terminal=True,
+            log_context="terminal ctrl_out envelope",
+            payload_for_log=payload,
+        )
 
     def note_termination_signal(self, signum: int) -> None:
         """Record an external signal for processing on the task run loop.

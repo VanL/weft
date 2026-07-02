@@ -130,6 +130,7 @@ _SHARED_MODULES = frozenset(
         "tests/tasks/test_task_interactive.py",
         "tests/tasks/test_task_observability.py",
         "tests/tasks/test_task_observer_behavior.py",
+        "tests/tasks/test_terminal_event_retry.py",
     }
 )
 _SQLITE_ONLY_MODULES = frozenset(

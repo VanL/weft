@@ -277,6 +277,26 @@ Windows file locks release asynchronously and emit no event we can wait on,
 so the writer retries briefly instead.
 """
 
+TERMINAL_EVENT_WRITE_RETRIES: Final[int] = 3
+"""Retry budget for writing a task's terminal state event or ctrl_out
+terminal envelope.
+
+A terminal-event write failure is a broker I/O error (e.g. a transient
+lock or disk hiccup) with no completion signal to wait on, so the writer
+retries a bounded number of times instead of giving up on the first
+failure. Non-terminal state-change writes are unaffected and keep the
+existing single-attempt, debug-level best-effort behavior — only the
+one-shot terminal emission [OBS.1] justifies the extra retry cost.
+"""
+
+TERMINAL_EVENT_WRITE_RETRY_INTERVAL: Final[float] = 0.2
+"""Pause between terminal-event write retries.
+
+SimpleBroker exposes no event we can wait on for "the transient write
+failure has cleared", so the writer retries with a short fixed pause
+instead of a blocking wait.
+"""
+
 PARENT_LOSS_WAKE_INTERVAL_FLOOR: Final[float] = 0.05
 PARENT_LOSS_WAKE_INTERVAL_CEILING: Final[float] = 0.2
 """Bounds for the parent-loss watcher wake interval.
