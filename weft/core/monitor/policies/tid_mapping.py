@@ -128,6 +128,7 @@ def tid_mapping_candidates(
     min_age_seconds: float,
     exclude_tids: set[str],
     scan_limit_reached: bool = False,
+    newest_ids: Mapping[str, int] | None = None,
 ) -> tuple[
     list[CleanupCandidate],
     CleanupQueueStats,
@@ -140,6 +141,17 @@ def tid_mapping_candidates(
     payload's liveness probe fails; superseded (non-newest) rows keep the
     current age-only rule (Spec: Cleanup Boundary in
     05-Message_Flow_and_State.md; [OBS.13.7]).
+
+    Args:
+        newest_ids: Optional newest message id per mapping key from
+            evidence BEYOND this bounded row window (the caller's
+            full-queue scan). Required whenever ``rows`` is a truncated
+            window: without it, a superseded row whose newer sibling lies
+            beyond the window would be misclassified as newest and
+            liveness-protected, stalling age-only cleanup. May be omitted
+            when ``rows`` covers the whole queue. Merged per key by max,
+            so missing evidence degrades toward protection (skip), never
+            toward deletion.
     """
 
     malformed_candidates = malformed_row_candidates(
@@ -149,7 +161,11 @@ def tid_mapping_candidates(
     )
     candidates = list(malformed_candidates)
     claimed = {candidate.message_id for candidate in candidates}
-    newest_ids = _newest_message_id_per_key(rows)
+    merged_newest = _newest_message_id_per_key(rows)
+    if newest_ids:
+        for key, message_id in newest_ids.items():
+            if message_id > merged_newest.get(key, 0):
+                merged_newest[key] = message_id
 
     # Run the normal FIFO age-only pass over every unclaimed row so
     # `stop_reason` still reflects the true scan position (including for
@@ -169,20 +185,21 @@ def tid_mapping_candidates(
         tid_from_row=lambda payload, _row: payload_string(payload, "full"),
     )
     newest_row_by_id = {row.raw.message_id: row for row in rows}
+    age_selected: list[CleanupCandidate] = []
     for age_candidate in old_rows.candidates:
         candidate_tid = age_candidate.tid
         if (
             candidate_tid is None
-            or newest_ids.get(candidate_tid) != age_candidate.message_id
+            or merged_newest.get(candidate_tid) != age_candidate.message_id
         ):
-            candidates.append(age_candidate)
+            age_selected.append(age_candidate)
             continue
         # This is the newest row for its key: only a candidate when its
         # payload's own liveness probe fails. Undecidable payloads are
         # treated as live and skipped.
         row = newest_row_by_id.get(age_candidate.message_id)
         if row is not None and not _mapping_row_is_live(row.payload):
-            candidates.append(
+            age_selected.append(
                 cleanup_candidate_from_row(
                     row.raw,
                     policy=TASK_MONITOR_POLICY_RUNTIME_STATE_RETENTION,
@@ -192,6 +209,7 @@ def tid_mapping_candidates(
                     payload=row.payload,
                 )
             )
+    candidates.extend(age_selected)
     queue_stats = cleanup_queue_stats(
         WEFT_TID_MAPPINGS_QUEUE,
         scanned=len(rows),
@@ -208,9 +226,13 @@ def tid_mapping_candidates(
         ),
     )
     reason_counts = Counter(candidate.reason for candidate in candidates)
+    # Waypoint (catch-up cadence) must be claimed from POST-gate selection:
+    # a full window of correctly liveness-protected rows selects nothing and
+    # must not hot-loop the monitor on catch-up intervals with zero forward
+    # progress.
     waypoint_reached = scan_limit_reached and (
         bool(malformed_candidates)
-        or (old_rows.stop_reason is None and bool(old_rows.candidates))
+        or (old_rows.stop_reason is None and bool(age_selected))
     )
     base_reached = not waypoint_reached and (
         old_rows.stop_reason == "first_tid_mapping_too_young"

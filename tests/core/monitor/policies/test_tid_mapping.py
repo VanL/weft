@@ -184,6 +184,99 @@ def test_newest_row_of_dead_owner_is_deleted_after_min_age() -> None:
     assert candidates[0].candidate_class == "old_tid_mapping"
 
 
+def test_newest_ids_evidence_beyond_window_declassifies_protected_row() -> None:
+    """Full-queue newest evidence overrides in-window newest computation.
+
+    When the scanned window is truncated, a live-owner row that looks
+    newest-in-window must still be deleted under the age-only rule if the
+    caller's full-queue evidence proves a newer sibling exists beyond the
+    window.
+    """
+
+    self_pid = os.getpid()
+    self_create_time = psutil.Process(self_pid).create_time()
+    tid = "1778000000000000006"
+
+    superseded_id = _BASE_NS
+    beyond_window_newest_id = _BASE_NS + 10_000_000_000
+    now_ns = beyond_window_newest_id + 3_600_000_000_000
+
+    rows = [
+        _row(
+            "weft.state.tid_mappings",
+            superseded_id,
+            _mapping_payload(
+                full=tid,
+                short="0000000006",
+                host_processes=[{"pid": self_pid, "create_time": self_create_time}],
+            ),
+        ),
+    ]
+
+    # Without beyond-window evidence the row is protected (live newest).
+    protected, _stats, _pstats, _progress = tid_mapping_candidates(
+        _decoded(rows),
+        now_ns=now_ns,
+        min_age_seconds=1.0,
+        exclude_tids=set(),
+        scan_limit_reached=True,
+    )
+    assert protected == []
+
+    # With evidence of a newer sibling beyond the window it is superseded.
+    candidates, _stats, _pstats, progress = tid_mapping_candidates(
+        _decoded(rows),
+        now_ns=now_ns,
+        min_age_seconds=1.0,
+        exclude_tids=set(),
+        scan_limit_reached=True,
+        newest_ids={tid: beyond_window_newest_id},
+    )
+    assert [candidate.message_id for candidate in candidates] == [superseded_id]
+    assert candidates[0].candidate_class == "superseded_tid_mapping"
+    assert progress[0].waypoint_reached is True
+
+
+def test_protected_full_window_does_not_claim_catchup_waypoint() -> None:
+    """A full window of correctly protected rows must not claim a waypoint.
+
+    waypoint_reached feeds the monitor's catch-up cadence; claiming it from
+    pre-gate age candidates while the liveness gate filtered everything
+    would hot-loop the monitor with zero forward progress.
+    """
+
+    self_pid = os.getpid()
+    self_create_time = psutil.Process(self_pid).create_time()
+    tid = "1778000000000000007"
+
+    message_id = _BASE_NS
+    now_ns = message_id + 3_600_000_000_000
+
+    rows = [
+        _row(
+            "weft.state.tid_mappings",
+            message_id,
+            _mapping_payload(
+                full=tid,
+                short="0000000007",
+                host_processes=[{"pid": self_pid, "create_time": self_create_time}],
+            ),
+        ),
+    ]
+
+    candidates, _stats, _pstats, progress = tid_mapping_candidates(
+        _decoded(rows),
+        now_ns=now_ns,
+        min_age_seconds=1.0,
+        exclude_tids=set(),
+        scan_limit_reached=True,
+        newest_ids={tid: message_id},
+    )
+
+    assert candidates == []
+    assert progress[0].waypoint_reached is False
+
+
 def test_newest_row_with_undecidable_liveness_is_skipped() -> None:
     """A payload with no probeable host PIDs is treated as live (skip, never delete)."""
 

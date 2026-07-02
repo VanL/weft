@@ -1026,7 +1026,17 @@ self-maintenance, and explicit operator commands for force and compaction:
   and no Monitor collation-store reach from this policy — and a payload with
   no probeable host PIDs (e.g. an external/non-host runtime handle) is
   undecidable and therefore treated as live: undecidable means skip, never
-  delete. This keeps a plain task's liveness evidence intact for as long as
+  delete. "Newest per key" is decided from full-queue evidence, never from
+  the bounded `WEFT_TASK_MONITOR_BATCH_SIZE` scan window alone: when the
+  window is truncated, the monitor runs a lightweight full-queue
+  newest-per-key pass so a superseded row whose newer sibling lies beyond
+  the window still gets age-only deletion instead of being misclassified as
+  a protected newest row (which would stall cleanup on that row
+  indefinitely). Catch-up waypoints for this policy are claimed only from
+  rows actually selected after the liveness gate, so a full window of
+  correctly protected rows converges at normal cadence rather than
+  hot-looping catch-up cycles with zero forward progress. This keeps a
+  plain task's liveness evidence intact for as long as
   it runs, so endpoint resolution, runtime pruning, manager kill-pid
   resolution, and the monitor's own destructive-slice safety checks (see
   [OBS.13.7]) continue to see a live owner. `weft.log.tasks` is now

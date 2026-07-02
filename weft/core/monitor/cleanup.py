@@ -14,9 +14,10 @@ Spec references:
 
 from __future__ import annotations
 
+import json
 import time
 from collections import Counter
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -58,11 +59,48 @@ from weft.core.queue_window import (
     QueueWindowRow,
     scan_queue_window,
 )
+from weft.helpers import iter_queue_entries
 
 PreApplyReporter = Callable[
     [Sequence[CleanupCandidate]],
     tuple[AppliedCleanupCandidate, ...],
 ]
+
+
+def _newest_tid_mapping_ids(ctx: WeftContext) -> dict[str, int]:
+    """Return the newest message id per mapping key across the FULL queue.
+
+    The tid-mapping cleanup window is bounded by ``batch_size`` and always
+    scans from the queue head, so "newest per key" cannot be decided from
+    the window alone: a superseded row's newer sibling may lie beyond the
+    window, and misclassifying it as newest would liveness-protect it
+    forever, stalling age-only cleanup (Spec: Cleanup Boundary in
+    05-Message_Flow_and_State.md; [OBS.13.7]). This pass reads only the
+    ``full`` key and message id from each row; candidate selection stays
+    bounded by the window. A full read of this runtime-state queue mirrors
+    the foreground prune (`weft/core/pruning/runtime.py`) and the monitor's
+    own `_active_runtime_tids`, both of which already read it whole.
+    """
+
+    queue = ctx.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
+    newest: dict[str, int] = {}
+    try:
+        for body, message_id in iter_queue_entries(queue):
+            try:
+                payload = json.loads(body)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            full = payload.get("full")
+            if not isinstance(full, str) or not full:
+                continue
+            row_id = int(message_id)
+            if row_id > newest.get(full, 0):
+                newest[full] = row_id
+    finally:
+        queue.close()
+    return newest
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,6 +254,18 @@ def run_task_monitor_cleanup(
                 errors.extend(policy_run.errors)
             else:
                 rows = scan_queue_window(ctx, queue_name, limit=config.batch_size)
+                # A window shorter than batch_size reached the queue tail,
+                # so in-window newest-per-key evidence is already complete;
+                # a full window may hide newer sibling rows beyond it and
+                # needs the full-queue newest-per-key pass.
+                newest_tid_mapping_ids = (
+                    _newest_tid_mapping_ids(ctx)
+                    if (
+                        queue_name == WEFT_TID_MAPPINGS_QUEUE
+                        and len(rows) >= config.batch_size
+                    )
+                    else None
+                )
                 (
                     selected,
                     queue_stat_records,
@@ -227,6 +277,7 @@ def run_task_monitor_cleanup(
                     config=config,
                     now_ns=current_ns,
                     exclude_tids=excluded,
+                    newest_tid_mapping_ids=newest_tid_mapping_ids,
                 )
                 applied.extend(
                     _apply_policy_candidates(
@@ -279,6 +330,7 @@ def _select_queue_candidates(
     config: TaskMonitorCleanupConfig,
     now_ns: int,
     exclude_tids: set[str],
+    newest_tid_mapping_ids: Mapping[str, int] | None = None,
 ) -> tuple[
     list[CleanupCandidate],
     tuple[CleanupQueueStats, ...],
@@ -293,6 +345,7 @@ def _select_queue_candidates(
             min_age_seconds=config.tid_mapping_min_age_seconds,
             exclude_tids=exclude_tids,
             scan_limit_reached=len(rows) >= config.batch_size,
+            newest_ids=newest_tid_mapping_ids,
         )
         return candidates, (queue_stats,), policy_stats, policy_progress
     return (

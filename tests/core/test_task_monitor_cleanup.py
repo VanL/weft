@@ -612,6 +612,88 @@ def test_task_monitor_cleanup_deletes_superseded_rows_of_live_task(
     assert remaining_payload["full"] == tid
 
 
+def test_superseded_live_row_is_deleted_when_newer_row_is_beyond_scan_window(
+    tmp_path: Path,
+) -> None:
+    """A superseded row must keep age-only deletion even in a truncated window.
+
+    Regression for the window-bounded newest-per-key defect: with
+    batch_size=1 the scan window holds only the superseded live-owner row,
+    whose newer sibling lies beyond the window. Newest-per-key must be
+    determined from full-queue evidence, not the partial slice, so the
+    superseded row is deleted (age-only) and cleanup progress advances
+    instead of wedging on a permanently "protected" stale row.
+    """
+    ctx = _context(tmp_path)
+    tid = "1778000000000000006"
+    self_process = psutil.Process(os.getpid())
+    host_processes = [
+        {"pid": os.getpid(), "create_time": self_process.create_time()}
+    ]
+
+    superseded_id = _write_json(
+        ctx,
+        WEFT_TID_MAPPINGS_QUEUE,
+        _tid_mapping_payload(
+            full=tid, short="0000000006", host_processes=host_processes
+        ),
+    )
+    newest_id = _write_json(
+        ctx,
+        WEFT_TID_MAPPINGS_QUEUE,
+        _tid_mapping_payload(
+            full=tid, short="0000000006", host_processes=host_processes
+        ),
+    )
+    assert newest_id > superseded_id
+
+    config = TaskMonitorCleanupConfig(
+        batch_size=1,
+        tid_mapping_min_age_seconds=1.0,
+    )
+    first = run_task_monitor_cleanup(
+        ctx,
+        config,
+        apply=True,
+        now_ns=_now_after(newest_id, 2.0),
+    )
+
+    assert first.success
+    assert first.deleted == 1
+    assert [candidate.candidate_class for candidate in first.candidates] == [
+        "superseded_tid_mapping"
+    ]
+    remaining = _read_rows(ctx, WEFT_TID_MAPPINGS_QUEUE)
+    assert [message_id for _body, message_id in remaining] == [newest_id]
+    tid_mapping_progress = [
+        progress
+        for progress in first.policy_progress
+        if progress.domain == WEFT_TID_MAPPINGS_QUEUE
+    ]
+    assert len(tid_mapping_progress) == 1
+    assert tid_mapping_progress[0].waypoint_reached is True
+
+    # Convergence: the next cycle sees the (live, genuinely newest) row,
+    # protects it, and must NOT claim a catch-up waypoint -- otherwise the
+    # monitor hot-loops on catch-up cadence with zero forward progress.
+    second = run_task_monitor_cleanup(
+        ctx,
+        config,
+        apply=True,
+        now_ns=_now_after(newest_id, 2.0),
+    )
+    assert second.success
+    assert second.deleted == 0
+    assert len(_read_rows(ctx, WEFT_TID_MAPPINGS_QUEUE)) == 1
+    second_progress = [
+        progress
+        for progress in second.policy_progress
+        if progress.domain == WEFT_TID_MAPPINGS_QUEUE
+    ]
+    assert len(second_progress) == 1
+    assert second_progress[0].waypoint_reached is False
+
+
 def test_task_monitor_cleanup_preserves_newest_row_of_live_owner_past_min_age(
     tmp_path: Path,
 ) -> None:
