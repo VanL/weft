@@ -3401,7 +3401,15 @@ class Manager(ServiceTask):
                 if time.time_ns() - started_ns > 2_000_000_000:
                     pid = child.process.pid
                     if isinstance(pid, int) and pid > 0:
-                        terminate_process_tree(pid, timeout=0.2)
+                        # SIGTERM only at this rung. Task processes defer
+                        # signal handling to their run loop's next bounded
+                        # wait turn (see launcher._install_signal_handlers),
+                        # so an immediate SIGKILL follow-up would kill them
+                        # before the deferred terminal transition (state
+                        # event, ctrl_out envelope, reserved policy) can run.
+                        # The hard-kill rung stays at drain timeout via
+                        # _terminate_children.
+                        terminate_process_tree(pid, timeout=0.2, kill_after=False)
                 continue
             ctrl_queue = child.ctrl_queue or f"T{tid}.{QUEUE_CTRL_IN_SUFFIX}"
             self._send_stop_command(ctrl_queue)
@@ -3519,7 +3527,7 @@ class Manager(ServiceTask):
         self._drain_stops_children = True
         self.should_stop = True
 
-    def handle_termination_signal(self, signum: int) -> None:
+    def note_termination_signal(self, signum: int) -> None:
         """Record an external signal for processing on the manager loop.
 
         Python signal handlers may run while the manager is inside a broker
@@ -3527,6 +3535,16 @@ class Manager(ServiceTask):
         that interrupted stack frame and can re-enter backend drivers such as
         psycopg. Keep this handler to plain in-memory state; ``process_once``
         owns the broker-visible shutdown work.
+
+        Manager predates and fully supersedes ``BaseTask.note_termination_signal``
+        for its own instances: it already recorded signals in plain in-memory
+        state (this method, formerly named ``handle_termination_signal``) and
+        applied them from ``process_once`` via its own
+        ``_process_pending_termination_signal``. This override keeps that
+        existing, already-correct behavior (including its distinct SIGUSR1
+        handling) rather than switching Manager onto ``BaseTask``'s generic
+        ``_pending_termination_signum`` seam, which Manager's loop does not
+        consult.
         """
 
         sigusr1 = getattr(signal, "SIGUSR1", None)
@@ -3540,8 +3558,20 @@ class Manager(ServiceTask):
         self._pending_termination_signal = signum
         self._external_stop_handled = True
 
+    def handle_termination_signal(self, signum: int) -> None:
+        """Deprecated alias retained for direct-call sites and tests.
+
+        Manager's real deferred-recording logic lives in
+        ``note_termination_signal``; this alias exists because some call sites
+        (e.g. ``launcher._request_parent_loss_shutdown``, which already runs
+        outside the signal frame) still probe for ``handle_termination_signal``
+        by name.
+        """
+
+        self.note_termination_signal(signum)
+
     def _process_pending_termination_signal(self) -> None:
-        """Apply a signal recorded by ``handle_termination_signal``."""
+        """Apply a signal recorded by ``note_termination_signal``."""
 
         signum = self._pending_termination_signal
         if signum is None:

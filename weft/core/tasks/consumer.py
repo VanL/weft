@@ -116,6 +116,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         self._report_state_change(event="task_started")
 
     def process_once(self) -> None:
+        self._process_pending_termination_signal()
         self._in_reactor_turn = True
         try:
             if self._active_work_in_flight:

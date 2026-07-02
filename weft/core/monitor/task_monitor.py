@@ -1320,6 +1320,7 @@ class TaskMonitor(ServiceTask):
         Spec: [CC-2.3], [MF-5]
         """
 
+        self._process_pending_termination_signal()
         worker_results_handled = self._drain_worker_results()
         if self.should_stop:
             return

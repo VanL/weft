@@ -211,9 +211,30 @@ __all__ = ["launch_task_process"]
 
 
 def _install_signal_handlers(task: Any) -> None:
-    """Install signal handlers for spawned task processes."""
+    """Install signal handlers for spawned task processes.
+
+    The installed handler only records the signal in plain in-memory state
+    via ``note_termination_signal``. It must not perform broker queue writes:
+    Python signal handlers can run while the task is inside a broker
+    operation, and SimpleBroker's runner lock is non-reentrant with
+    transactions spanning multiple Python calls, so terminal-transition work
+    (``handle_termination_signal``) is deferred to the run loop's next
+    iteration in ``_task_process_entry``.
+    """
 
     def _handle_signal(signum: int, _frame: Any) -> None:
+        note = getattr(task, "note_termination_signal", None)
+        if callable(note):
+            # Plain in-memory state only. Do not set the watcher stop event
+            # here: Event.set acquires a lock the interrupted main thread may
+            # hold (not async-signal-safe), and setting it before the deferred
+            # termination work runs makes the watcher treat itself as already
+            # stopped (active queues emptied, pending checks short-circuited)
+            # so the terminal transition could not complete its queue writes.
+            # The run loop's bounded wait interval guarantees the recorded
+            # signum is observed promptly.
+            note(signum)
+            return
         handler = getattr(task, "handle_termination_signal", None)
         if callable(handler):
             handler(signum)

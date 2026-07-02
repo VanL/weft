@@ -256,6 +256,7 @@ class BaseTask(MultiQueueWatcher, ABC):
         self._runtime_handle: RunnerHandle | None = None
         self._kill_requested = False
         self._external_stop_handled = False
+        self._pending_termination_signum: int | None = None
 
         super().__init__(
             queue_configs=queue_configs,
@@ -785,6 +786,7 @@ class BaseTask(MultiQueueWatcher, ABC):
 
         Spec: [CC-2.5], [MF-2]
         """
+        self._process_pending_termination_signal()
         worker_results_handled = self._drain_worker_results()
         if not self.should_stop:
             self._drain_queue()
@@ -1288,6 +1290,45 @@ class BaseTask(MultiQueueWatcher, ABC):
                 payload,
                 exc_info=True,
             )
+
+    def note_termination_signal(self, signum: int) -> None:
+        """Record an external signal for processing on the task run loop.
+
+        Python signal handlers may run while the task is inside a broker
+        operation. Performing terminal-transition work here would issue
+        queue writes from inside that interrupted stack frame and can
+        re-enter backend drivers such as psycopg, since SimpleBroker's
+        runner lock is non-reentrant and its transactions span multiple
+        Python calls. Keep this handler to plain in-memory state; the run
+        loop's next iteration (or bounded wait return) owns the
+        broker-visible shutdown work via ``handle_termination_signal``.
+
+        KILL-class signals (``SIGUSR1``) outrank STOP-class signals
+        (``SIGTERM``/``SIGINT``) if both arrive before the pending signal is
+        processed: once a kill has been recorded, a later stop cannot
+        downgrade it.
+        """
+
+        sigusr1 = getattr(signal, "SIGUSR1", None)
+        is_kill_class = sigusr1 is not None and signum == sigusr1
+        pending = self._pending_termination_signum
+        if pending is not None:
+            pending_is_kill_class = sigusr1 is not None and pending == sigusr1
+            if pending_is_kill_class and not is_kill_class:
+                return
+        self._pending_termination_signum = signum
+
+    def _process_pending_termination_signal(self) -> None:
+        """Apply a signal recorded by ``note_termination_signal``.
+
+        Spec: [MF-3]
+        """
+
+        signum = self._pending_termination_signum
+        if signum is None:
+            return
+        self._pending_termination_signum = None
+        self.handle_termination_signal(signum)
 
     def handle_termination_signal(self, signum: int) -> None:
         """Handle an external termination signal inside a task process."""

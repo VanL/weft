@@ -140,6 +140,7 @@ class HeartbeatTask(ServiceTask):
         }
 
     def process_once(self) -> None:
+        self._process_pending_termination_signal()
         if self.should_stop:
             return
 
