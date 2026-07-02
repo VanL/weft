@@ -18,10 +18,16 @@ import json
 import os
 import time
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import IO, Any, Literal, cast
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX platforms (Windows)
+    fcntl = None  # type: ignore[assignment]
 
 from simplebroker.ext import BrokerError
 from weft._constants import (
@@ -1306,6 +1312,33 @@ def _append_records(
     )
 
 
+@contextmanager
+def _exclusive_append_lock(handle: IO[str]) -> Iterator[None]:
+    """Hold an exclusive advisory file lock on *handle* for one write batch.
+
+    Serializes concurrent retention-archive appends so each run's complete
+    record batch lands as contiguous, individually-parseable JSONL lines —
+    the archive is the only pre-delete recovery record, so a torn or
+    interleaved line would defeat it. The handle is flushed before the lock
+    is released so buffered lines cannot escape the critical section.
+
+    POSIX-only best effort: on platforms without ``fcntl`` (Windows) this
+    is a no-op, matching the repo's POSIX-first best-effort precedent for
+    owner-only file permissions in ``weft/helpers``.
+
+    Spec: docs/specifications/07-System_Invariants.md [OBS.13.5]
+    """
+    if fcntl is None:  # pragma: no cover - Windows best-effort fallback
+        yield
+        return
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    try:
+        yield
+    finally:
+        handle.flush()
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 def _write_record_lines(
     path: Path,
     mode: Literal["w", "a"],
@@ -1323,7 +1356,7 @@ def _write_record_lines(
         (candidate.queue, candidate.message_id): candidate
         for candidate in applied_candidates
     }
-    with path.open(mode, encoding="utf-8") as handle:
+    with path.open(mode, encoding="utf-8") as handle, _exclusive_append_lock(handle):
         for candidate in candidates:
             visible = applied_by_id.get(
                 (candidate.queue, candidate.message_id),
@@ -1351,7 +1384,7 @@ def _write_record_lines(
 def _append_summary_record(path: Path, result: RetentionPruneResult) -> None:
     """Append the post-apply archive summary without rewriting pre-delete rows."""
 
-    with path.open("a", encoding="utf-8") as handle:
+    with path.open("a", encoding="utf-8") as handle, _exclusive_append_lock(handle):
         handle.write(
             json.dumps(
                 _summary_record(

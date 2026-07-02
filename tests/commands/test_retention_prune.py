@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,7 @@ from weft._constants import (
 )
 from weft.commands.retention_prune import RetentionPruneConfig, run_retention_prune
 from weft.context import WeftContext, build_context
+from weft.core.pruning.retention import RetentionPruneCandidate, _append_records
 from weft.helpers import iter_queue_entries
 
 pytestmark = [pytest.mark.shared]
@@ -244,6 +246,116 @@ def test_task_log_apply_appends_to_same_day_archive_across_runs(
     }
     assert run_id_a in completion_run_ids
     assert run_id_b in completion_run_ids
+
+
+_CONCURRENT_APPEND_RECORDS = 50
+"""Records per concurrent append worker.
+
+With the ~2KB per-record payload below, each worker writes well past the
+default text-IO buffer size, so an unserialized append would issue multiple
+interleavable write syscalls per batch.
+"""
+
+_CONCURRENT_APPEND_JOIN_TIMEOUT = 60.0
+"""Deadline for joining append workers; generous to avoid CI flakiness."""
+
+
+def _concurrent_append_worker(
+    archive: Path,
+    run_id: str,
+    start_event: Any,
+) -> None:
+    """Append one run's full record batch to *archive* (spawn target)."""
+
+    config = RetentionPruneConfig(
+        family="task-log",
+        apply=True,
+        archive_path=archive,
+        min_age_seconds=0,
+    )
+    payload = {"tid": run_id, "status": "completed", "filler": "x" * 2048}
+    payload_text = json.dumps(payload)
+    candidates = [
+        RetentionPruneCandidate(
+            queue=WEFT_GLOBAL_LOG_QUEUE,
+            family="task-log",
+            message_id=index,
+            tid=run_id,
+            candidate_class=RETENTION_PRUNE_CLASS_TERMINAL_TASK_LOG_SUPERSEDED,
+            reason="concurrent append test",
+            age_seconds=1.0,
+            payload_sha256="0" * 64,
+            payload_size_bytes=len(payload_text),
+            payload_excerpt=payload_text[:200],
+            payload=payload,
+        )
+        for index in range(_CONCURRENT_APPEND_RECORDS)
+    ]
+    start_event.wait()
+    _append_records(
+        archive,
+        run_id,
+        config,
+        candidates,
+        applied_candidates=(),
+        errors=(),
+        warnings=(),
+        truncate_payload=False,
+    )
+
+
+def test_concurrent_archive_appends_produce_complete_jsonl_lines(
+    tmp_path: Path,
+) -> None:
+    """Two real processes appending to the same archive concurrently must
+    each land a complete, non-interleaved batch of parseable JSONL lines.
+
+    The archive is the only pre-delete recovery record; a torn or
+    interleaved line would defeat it. The exclusive append lock is a
+    cross-process file lock, so this test uses real processes (spawn
+    context, per the fork invariant) with a shared start event.
+    """
+    archive = tmp_path / "archive.jsonl"
+    n = _CONCURRENT_APPEND_RECORDS
+    ctx = multiprocessing.get_context("spawn")
+    start_event = ctx.Event()
+    workers = [
+        ctx.Process(
+            target=_concurrent_append_worker,
+            args=(archive, run_id, start_event),
+        )
+        for run_id in ("run-alpha", "run-beta")
+    ]
+    for worker in workers:
+        worker.start()
+    start_event.set()
+    for worker in workers:
+        worker.join(timeout=_CONCURRENT_APPEND_JOIN_TIMEOUT)
+        assert worker.exitcode == 0
+
+    lines = [
+        line
+        for line in archive.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    # 2N candidate records + 2 summary records, every line parseable.
+    assert len(lines) == 2 * n + 2
+    records = [json.loads(line) for line in lines]
+
+    for run_id in ("run-alpha", "run-beta"):
+        run_records = [record for record in records if record["run_id"] == run_id]
+        candidate_ids = [
+            record["message_id"]
+            for record in run_records
+            if record["record_type"] == "retention_prune_candidate"
+        ]
+        assert candidate_ids == list(range(n))
+        summaries = [
+            record
+            for record in run_records
+            if record["record_type"] == "retention_prune_completed"
+        ]
+        assert len(summaries) == 1
 
 
 def test_ctrl_out_terminal_with_log_is_deleted_and_pong_is_preserved(
