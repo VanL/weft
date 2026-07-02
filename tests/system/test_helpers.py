@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import stat
 import subprocess
 import sys
 import threading
@@ -21,6 +22,7 @@ from tests.helpers.weft_harness import WeftTestHarness
 from weft.helpers import (  # noqa: D401 - module already documented
     CommandNotFoundError,
     debug_print,
+    ensure_owner_only_dir,
     format_tid,
     is_debug_enabled,
     is_logging_enabled,
@@ -31,6 +33,7 @@ from weft.helpers import (  # noqa: D401 - module already documented
     log_exception,
     log_info,
     log_warning,
+    open_owner_only_text,
     parse_tid,
     pid_is_live,
     reload_config,
@@ -39,6 +42,7 @@ from weft.helpers import (  # noqa: D401 - module already documented
     send_log,
     write_file_atomically,
     write_json_atomically,
+    write_owner_only_bytes,
 )
 
 
@@ -523,3 +527,40 @@ class TestCliOutputRegistration:
             }
         finally:
             harness.cleanup()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
+def test_ensure_owner_only_dir_creates_and_tightens(tmp_path: Path) -> None:
+    target = tmp_path / "a" / "b"
+    ensure_owner_only_dir(target)
+    assert stat.S_IMODE(target.stat().st_mode) == 0o700
+
+    # Pre-existing loose directory gets tightened, not just created.
+    loose = tmp_path / "loose"
+    loose.mkdir()
+    os.chmod(loose, 0o775)
+    ensure_owner_only_dir(loose)
+    assert stat.S_IMODE(loose.stat().st_mode) == 0o700
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
+def test_write_owner_only_bytes_is_0600(tmp_path: Path) -> None:
+    target = tmp_path / "secret.dat"
+    write_owner_only_bytes(target, b"payload")
+    assert target.read_bytes() == b"payload"
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+    # Overwriting a pre-existing loose file tightens it.
+    os.chmod(target, 0o644)
+    write_owner_only_bytes(target, b"payload2")
+    assert target.read_bytes() == b"payload2"
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
+def test_open_owner_only_text_is_0600(tmp_path: Path) -> None:
+    target = tmp_path / "export.jsonl"
+    with open_owner_only_text(target) as handle:
+        handle.write("line1\n")
+    assert target.read_text(encoding="utf-8") == "line1\n"
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
