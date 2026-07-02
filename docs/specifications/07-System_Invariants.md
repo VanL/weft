@@ -249,24 +249,37 @@ _Implementation mapping_: `weft/core/tasks/base.py`,
     task, which endpoint resolution, runtime pruning, manager kill-pid
     resolution, and this same destructive-slice safety check all depend on.
     `stale_open` classification (a non-service open family with no usable
-    reporting interval, aged past `stale_open_family_seconds`) is gated the
-    same way the `stale_service_owner` branch already gates disposal: a
-    candidate whose TID is present in the Monitor's `_active_runtime_tids`
-    set is excluded from summary emission and family disposition, not just
-    from later queue deletion. A quiet running task (state events are
-    transition-only; a running task with no reporting interval emits
-    nothing after `work_started`) is otherwise indistinguishable in the task
-    log from an abandoned family, so gating only at delete time would still
-    let the family be marked disposed — and therefore control-cleanup
-    eligible — while the process is alive. Evidence model: this only proves
-    liveness for runtime handles carrying host-PID evidence (the same
-    `(pid, create_time)` proof `handle_has_live_host_process` checks);
-    non-host runner handles are protected only indirectly, through the
-    tid-mapping cleanup policy's undecidable-means-live rule keeping their
-    row (and therefore their TID) in `weft.state.tid_mappings`, which feeds
-    `_active_runtime_tids`. The gate does not independently probe non-host
-    runners; it inherits whatever liveness evidence upstream tid-mapping
-    retention already preserved.
+    reporting interval, aged past `stale_open_family_seconds`) is gated on
+    destruction protection at disposal time: a candidate whose TID is in
+    the Monitor's destruction-protected set
+    (`_destruction_protected_runtime_tids`) is excluded from summary
+    emission and family disposition, not just from later queue deletion. A
+    quiet running task (state events are transition-only; a running task
+    with no reporting interval emits nothing after `work_started`) is
+    otherwise indistinguishable in the task log from an abandoned family,
+    so gating only at delete time would still let the family be marked
+    disposed — and therefore control-cleanup eligible — while the process
+    is alive. Evidence model: the destruction-protected set is a superset
+    of `_active_runtime_tids` (live service-registry owners plus runtime
+    handles with live host-PID proof — the same `(pid, create_time)` check
+    as `handle_has_live_host_process`) that additionally protects every
+    TID whose newest `weft.state.tid_mappings` row is undecidable under
+    the tid-mapping cleanup policy's own probe (`mapping_row_is_live`): no
+    runtime handle, or a handle with no probeable host PIDs (e.g. an
+    external/container runner), is undecidable and therefore protected —
+    the same undecidable-means-live rule that keeps the row itself from
+    deletion. A newest row whose probeable host processes are all dead, or
+    a family with no mapping row at all, grants no protection. The same
+    destruction-protected standard applies at delete time to
+    already-disposed families that lack terminal task-log proof; families
+    with terminal proof keep the positive-evidence (`_active_runtime_tids`)
+    recheck only, because an undecidable newest mapping row is never
+    deleted by the tid-mapping policy and would otherwise block terminal
+    control-queue cleanup for every external-runner task indefinitely.
+    `_active_runtime_tids` itself is unchanged: it answers "which owners
+    are proven live?" for staleness proof; the destruction-protected set
+    answers "which TIDs are safe to destroy?" — the two questions are
+    deliberately separate.
   - **OBS.13.8**: Task-log collation summaries are operational evidence about
     cleanup work performed, not durable lifecycle truth or archival records.
     User-task rows use `collation_kind=user_task`; manager, built-in service,

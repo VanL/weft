@@ -8713,3 +8713,345 @@ def test_task_monitor_stale_open_disposal_still_applies_to_dead_family(
         assert ctrl_out.stats().total == 0
     finally:
         task.stop()
+
+
+def _docker_style_mapping_row(*, full: str, short: str) -> dict[str, Any]:
+    """A non-host runtime-handle mapping row with no host-PID evidence.
+
+    Mirrors the shape an external/container runner (e.g. weft_docker)
+    persists: a valid ``RunnerHandle`` whose observations carry no
+    ``host_pids`` or ``host_processes``, so its liveness is undecidable
+    from the row alone. Uses a synthetic runner name so no real container
+    extension is resolved (a ``docker`` runner name makes harness cleanup
+    contact a live Docker daemon). Tests writing this row must drain it
+    before teardown via ``_drain_queue``: harness cleanup resolves runner
+    plugins for mapping rows it finds, and the synthetic runner has none.
+    """
+
+    return {
+        "short": short,
+        "full": full,
+        "runtime_handle": {
+            "runner": "external-container-test",
+            "kind": "container",
+            "id": f"container-{short}",
+            "control": {"authority": "external-runner"},
+            "observations": {"container_id": f"container-{short}"},
+            "metadata": {},
+        },
+    }
+
+
+def _drain_queue(queue: Any) -> None:
+    """Remove all rows from a queue (cleanup for synthetic mapping rows)."""
+
+    while queue.read_one() is not None:
+        pass
+
+
+def _stale_open_test_config() -> dict[str, Any]:
+    """Shared TaskMonitor config for the stale-open liveness-gate tests."""
+
+    return load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
+            "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
+            "WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS": "5",
+            "WEFT_TASK_MONITOR_MODE": "delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+
+
+def _ingest_quiet_running_family(
+    task: TaskMonitor,
+    *,
+    tid: str,
+    taskspec: dict[str, Any],
+) -> MonitorStore:
+    """Ingest one quiet running family into the Monitor store."""
+
+    store = task._ensure_monitor_store()
+    assert store is not None
+    update = update_from_task_log_payload(
+        {
+            "event": "work_started",
+            "status": "running",
+            "tid": tid,
+            "taskspec": taskspec,
+        },
+        message_id=int(tid),
+    )
+    assert update is not None
+    store.record_task_log_updates(
+        WEFT_GLOBAL_LOG_QUEUE,
+        (update,),
+        checkpoint_message_id=None,
+    )
+    return store
+
+
+def test_task_monitor_stale_open_disposal_skips_undecidable_runtime_owner(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A live non-host quiet task is protected without host-PID evidence.
+
+    The stale_open gate must apply the tid-mapping cleanup policy's
+    undecidable-means-live rule, not just positive host-PID proof: a quiet
+    running task on an external/container runner carries no host-PID
+    evidence in its newest ``weft.state.tid_mappings`` row, so it never
+    appears in ``_active_runtime_tids`` -- yet B1 deliberately preserves
+    that row as undecidable-means-live. Row survival without queue
+    survival is not protection: the family must not be summarized,
+    disposed, or have its queues deleted.
+
+    Spec: [OBS.13.7]
+    """
+
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    tid = "1778084345905438767"
+    taskspec = _quiet_running_taskspec(tid)
+    inbox = make_queue(f"T{tid}.inbox")
+    ctrl_in = make_queue(f"T{tid}.ctrl_in")
+    ctrl_out = make_queue(f"T{tid}.ctrl_out")
+    inbox.write("input")
+
+    mappings = make_queue(WEFT_TID_MAPPINGS_QUEUE)
+    mappings.write(json.dumps(_docker_style_mapping_row(full=tid, short=tid[-10:])))
+
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999977"),
+        config=_stale_open_test_config(),
+    )
+    try:
+        store = _ingest_quiet_running_family(task, tid=tid, taskspec=taskspec)
+        now_ns = int(tid) + 6_000_000_000
+
+        emitted = task._emit_monitor_store_summaries(
+            store,
+            now_ns=now_ns,
+            apply_disposition=True,
+        )
+        record = store.get_task(tid)
+        assert record is not None
+        assert emitted == 0, (
+            "undecidable non-host runtime owner must not be summarized"
+        )
+        assert record.summary_emitted_at_ns is None
+        assert record.disposition_reason is None
+
+        task._run_terminal_control_cleanup_slice(store, now_ns=now_ns)
+
+        assert list(inbox.peek_generator()) == ["input"]
+        assert ctrl_in.stats().total == 0
+        assert ctrl_out.stats().total == 0
+    finally:
+        task.stop()
+        _drain_queue(mappings)
+
+
+def test_task_monitor_stale_open_disposal_applies_without_mapping_row(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No mapping row means no protection: the stale family still disposes.
+
+    Companion to
+    ``test_task_monitor_stale_open_disposal_skips_undecidable_runtime_owner``:
+    undecidable-means-live protects evidence that exists but cannot be
+    probed. A family with no ``weft.state.tid_mappings`` row at all has no
+    runtime evidence to protect, so the aged stale_open family is
+    summarized, disposed, and its queues deleted.
+    """
+
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    tid = "1778084345905438769"
+    taskspec = _quiet_running_taskspec(tid)
+    inbox = make_queue(f"T{tid}.inbox")
+    ctrl_in = make_queue(f"T{tid}.ctrl_in")
+    ctrl_out = make_queue(f"T{tid}.ctrl_out")
+    inbox.write("input")
+
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999979"),
+        config=_stale_open_test_config(),
+    )
+    try:
+        store = _ingest_quiet_running_family(task, tid=tid, taskspec=taskspec)
+        now_ns = int(tid) + 6_000_000_000
+
+        emitted = task._emit_monitor_store_summaries(
+            store,
+            now_ns=now_ns,
+            apply_disposition=True,
+        )
+        record = store.get_task(tid)
+        assert record is not None
+        assert emitted == 1
+        assert record.summary_emitted_at_ns is not None
+        assert record.disposition_reason == "stale_open"
+
+        task._run_terminal_control_cleanup_slice(store, now_ns=now_ns)
+
+        assert list(inbox.peek_generator()) == []
+        assert ctrl_in.stats().total == 0
+        assert ctrl_out.stats().total == 0
+    finally:
+        task.stop()
+
+
+def test_task_monitor_delete_recheck_protects_disposed_undecidable_owner(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Delete-time recheck protects a pre-disposed undecidable owner.
+
+    A family already marked disposed as ``stale_open`` (e.g. by a Monitor
+    version predating the disposal-time gate) whose newest mapping row is
+    undecidable must not have its queues deleted by the runtime cleanup
+    slice: without terminal proof, destruction requires the same
+    undecidable-means-live standard as disposal.
+
+    Spec: [OBS.13.7]
+    """
+
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    tid = "1778084345905438771"
+    taskspec = _quiet_running_taskspec(tid)
+    inbox = make_queue(f"T{tid}.inbox")
+    ctrl_in = make_queue(f"T{tid}.ctrl_in")
+    ctrl_out = make_queue(f"T{tid}.ctrl_out")
+    inbox.write("input")
+
+    mappings = make_queue(WEFT_TID_MAPPINGS_QUEUE)
+    mappings.write(json.dumps(_docker_style_mapping_row(full=tid, short=tid[-10:])))
+
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999981"),
+        config=_stale_open_test_config(),
+    )
+    try:
+        store = _ingest_quiet_running_family(task, tid=tid, taskspec=taskspec)
+        now_ns = int(tid) + 6_000_000_000
+        # Legacy pre-gate state: summary and disposition already recorded.
+        store.mark_summary_emitted(tid, now_ns, suspect_reason="stale_open")
+        store.mark_family_disposed(
+            tid,
+            now_ns,
+            disposition_reason="stale_open",
+            suspect_reason="stale_open",
+            suspect_at_ns=now_ns,
+        )
+
+        task._run_terminal_control_cleanup_slice(store, now_ns=now_ns)
+
+        record = store.get_task(tid)
+        assert record is not None
+        assert record.task_control_deleted_at_ns is None
+        assert list(inbox.peek_generator()) == ["input"]
+        assert ctrl_in.stats().total == 0
+        assert ctrl_out.stats().total == 0
+    finally:
+        task.stop()
+        _drain_queue(mappings)
+
+
+def test_task_monitor_delete_recheck_cleans_terminal_family_with_undecidable_row(
+    broker_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Terminal proof outranks an undecidable mapping row at delete time.
+
+    A family with terminal task-log proof must still get its runtime
+    queues cleaned even when its newest ``weft.state.tid_mappings`` row is
+    undecidable (non-host handle): the tid-mapping policy never deletes
+    undecidable newest rows, so treating them as protection against
+    terminal cleanup would block control-queue cleanup for every
+    external-runner task forever. The undecidable-means-live standard
+    applies only to destruction without terminal proof.
+
+    Spec: [OBS.13.4], [OBS.13.7]
+    """
+
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    tid = "1778084345905438773"
+    taskspec = {
+        "tid": tid,
+        "version": "1.0",
+        "name": "quiet-worker",
+        "io": {
+            "inputs": {"inbox": f"T{tid}.inbox"},
+            "outputs": {"outbox": f"T{tid}.outbox"},
+            "control": {
+                "ctrl_in": f"T{tid}.ctrl_in",
+                "ctrl_out": f"T{tid}.ctrl_out",
+            },
+        },
+        "state": {"status": "completed", "return_code": 0},
+        "metadata": {},
+    }
+    inbox = make_queue(f"T{tid}.inbox")
+    ctrl_in = make_queue(f"T{tid}.ctrl_in")
+    ctrl_out = make_queue(f"T{tid}.ctrl_out")
+    inbox.write("input")
+    ctrl_in.write("stop")
+    ctrl_out.write("pong")
+
+    mappings = make_queue(WEFT_TID_MAPPINGS_QUEUE)
+    mappings.write(json.dumps(_docker_style_mapping_row(full=tid, short=tid[-10:])))
+
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999983"),
+        config=_stale_open_test_config(),
+    )
+    try:
+        store = task._ensure_monitor_store()
+        assert store is not None
+        update = update_from_task_log_payload(
+            {
+                "event": "work_completed",
+                "status": "completed",
+                "tid": tid,
+                "taskspec": taskspec,
+            },
+            message_id=int(tid),
+        )
+        assert update is not None
+        store.record_task_log_updates(
+            WEFT_GLOBAL_LOG_QUEUE,
+            (update,),
+            checkpoint_message_id=None,
+        )
+        now_ns = int(tid) + 6_000_000_000
+        store.mark_summary_emitted(tid, now_ns, suspect_reason=None)
+
+        task._run_terminal_control_cleanup_slice(store, now_ns=now_ns)
+
+        record = store.get_task(tid)
+        assert record is not None
+        assert record.task_control_deleted_at_ns is not None
+        assert ctrl_in.stats().total == 0
+        assert ctrl_out.stats().total == 0
+        assert list(inbox.peek_generator()) == []
+    finally:
+        task.stop()
+        _drain_queue(mappings)

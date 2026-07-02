@@ -137,6 +137,9 @@ from weft.core.monitor.policies.runtime_control import (
 from weft.core.monitor.policies.runtime_control import (
     terminal_task_runtime_queue_cleanup_plan as _terminal_task_runtime_queue_cleanup_plan,
 )
+from weft.core.monitor.policies.tid_mapping import (
+    mapping_row_is_live as _mapping_row_is_live,
+)
 from weft.core.monitor.progress import (
     PolicyProgress,
     progress_requires_catchup,
@@ -2605,12 +2608,13 @@ class TaskMonitor(ServiceTask):
     ) -> int:
         """Emit terminal summary dispositions for Monitor collation rows.
 
-        ``stale_open`` candidates are excluded when their TID has runtime
-        liveness evidence (``_active_runtime_tids``), mirroring the
-        ``stale_service_owner`` branch's gate. This proves liveness for
-        runtime handles with host-PID evidence; non-host handles are
-        protected indirectly via the tid-mapping cleanup policy's
-        undecidable-means-live rule feeding the same set.
+        ``stale_open`` candidates are excluded when their TID is
+        destruction-protected (``_destruction_protected_runtime_tids``):
+        proven-live owners via host-PID or service-registry evidence, plus
+        owners whose newest tid-mapping row is undecidable (non-host
+        runner handles with no probeable host PIDs), per the
+        undecidable-means-live rule shared with the tid-mapping cleanup
+        policy.
 
         Spec: [MF-5], [OBS.13.7]
         """
@@ -2632,17 +2636,19 @@ class TaskMonitor(ServiceTask):
             # its own (that is what makes it "stale_open" rather than
             # "suspected_inactive"), so a quiet-but-live task looks
             # identical to an abandoned one from the task-log alone. Gate
-            # disposal on the same host-PID liveness evidence
-            # `_active_runtime_tids` already uses for `stale_service_owner`.
-            # This only proves liveness for runtime handles carrying
-            # host-PID evidence; non-host handles are protected by B1's
-            # undecidable-means-live rule feeding that same set, not by an
-            # independent probe here.
-            active_tids = self._active_runtime_tids()
+            # disposal on destruction protection: proven-live owners
+            # (host-PID evidence, live service registry rows) plus owners
+            # whose newest tid-mapping row is undecidable
+            # (undecidable-means-live, the same rule that preserves the
+            # row itself). Only a family with no runtime evidence at all,
+            # or whose probeable host processes are all dead, may be
+            # disposed as stale_open.
+            protected_tids = self._destruction_protected_runtime_tids()
             ready_tasks.extend(
                 ready
                 for ready in candidate_tasks
-                if ready.close_reason != "stale_open" or ready.record.tid not in active_tids
+                if ready.close_reason != "stale_open"
+                or ready.record.tid not in protected_tids
             )
         else:
             ready_tasks.extend(candidate_tasks)
@@ -3060,6 +3066,53 @@ class TaskMonitor(ServiceTask):
         active_tids.add(self.tid)
         return active_tids
 
+    def _destruction_protected_runtime_tids(self) -> set[str]:
+        """Return TIDs that destructive cleanup must treat as live.
+
+        This answers "is it safe to destroy this TID's runtime state?",
+        which is a different question from ``_active_runtime_tids``
+        ("which owners are proven live right now?"). Staleness proof needs
+        positive evidence; destruction needs the absence of disproof. The
+        returned set is a superset of ``_active_runtime_tids`` that also
+        protects every TID whose newest ``weft.state.tid_mappings`` row is
+        live-or-undecidable under the tid-mapping cleanup policy's own
+        probe (``mapping_row_is_live``): a newest row with no probeable
+        host PIDs (e.g. an external/container runner handle) is
+        undecidable and therefore protected -- the same
+        undecidable-means-live rule that keeps that row itself from being
+        deleted. A newest row whose probeable host processes are all dead
+        grants no protection.
+
+        Spec: [OBS.13.7]
+        """
+
+        protected = self._active_runtime_tids()
+        ctx = self._monitor_context()
+        newest_payload_by_tid: dict[str, tuple[int, Mapping[str, Any]]] = {}
+        mappings = ctx.queue(WEFT_TID_MAPPINGS_QUEUE, persistent=False)
+        try:
+            for body, timestamp in iter_queue_entries(mappings):
+                try:
+                    payload = json.loads(body)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(payload, Mapping):
+                    continue
+                tid = payload.get("full")
+                if not isinstance(tid, str) or not tid:
+                    continue
+                current = newest_payload_by_tid.get(tid)
+                if current is None or int(timestamp) > current[0]:
+                    newest_payload_by_tid[tid] = (int(timestamp), payload)
+        finally:
+            mappings.close()
+        protected.update(
+            tid
+            for tid, (_timestamp, payload) in newest_payload_by_tid.items()
+            if tid not in protected and _mapping_row_is_live(payload)
+        )
+        return protected
+
     def _stale_service_owner_summary_ready_tasks(
         self,
         store: MonitorStore,
@@ -3365,6 +3418,21 @@ class TaskMonitor(ServiceTask):
         records = ready_records[:control_limit]
         family_limit_hit = len(ready_records) > len(records)
         active_tids = self._active_runtime_tids() if records else set()
+        # Delete-time evidence hierarchy [OBS.13.7]: families WITHOUT
+        # terminal task-log proof (disposed-as-suspect, e.g. legacy
+        # stale_open rows disposed before the disposal-time gate existed)
+        # get the full destruction-protection standard, including
+        # undecidable-means-live for non-host runner handles. Families
+        # WITH terminal proof keep the positive-evidence check only:
+        # an undecidable newest mapping row is deliberately never deleted
+        # by the tid-mapping policy, so treating it as protection against
+        # terminal cleanup would block control-queue cleanup for every
+        # external-runner task forever.
+        protected_tids = (
+            self._destruction_protected_runtime_tids()
+            if any(not record.terminal_seen for record in records)
+            else active_tids
+        )
         task_queue_names = (
             self._queue_name_snapshot(
                 patterns=(
@@ -3395,7 +3463,8 @@ class TaskMonitor(ServiceTask):
                 deadline_hit = True
                 unprocessed_selected += 1
                 continue
-            if record.tid in active_tids:
+            skip_tids = active_tids if record.terminal_seen else protected_tids
+            if record.tid in skip_tids:
                 cleanup = _TaskControlCleanupResult(
                     warnings=(f"{record.tid}: skipped active runtime owner",),
                 )

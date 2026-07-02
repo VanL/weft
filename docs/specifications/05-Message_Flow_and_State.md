@@ -1231,18 +1231,21 @@ Current rules:
   families without a usable interval may be classified `stale_open` only after
   `WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS`. These classifications are
   operational Monitor-table state, not public lifecycle truth. `stale_open`
-  disposal is gated on runtime-liveness evidence before it is applied, not
-  only at later queue-delete time: a candidate whose TID is in the Monitor's
-  `_active_runtime_tids` set (the same set the `stale_service_owner` branch
-  already consults) is skipped, mirroring how a quiet-but-live plain task —
-  one with no reporting interval, which by definition emits nothing after
-  `work_started` — is otherwise indistinguishable from an abandoned family in
-  the task log alone. This liveness check proves host-PID evidence directly
-  (`(pid, create_time)` proof); non-host runner handles rely on the
-  tid-mapping cleanup policy's undecidable-means-live rule to keep their
-  `weft.state.tid_mappings` row (and thus their TID in
-  `_active_runtime_tids`) rather than an independent probe here. See
-  [OBS.13.7] for the full evidence-model statement. PONG exposes
+  disposal is gated on destruction-protection evidence before it is applied,
+  not only at later queue-delete time: a candidate whose TID is in the
+  Monitor's destruction-protected set (`_destruction_protected_runtime_tids`)
+  is skipped, mirroring how a quiet-but-live plain task — one with no
+  reporting interval, which by definition emits nothing after `work_started`
+  — is otherwise indistinguishable from an abandoned family in the task log
+  alone. The destruction-protected set covers proven-live owners (live
+  host-PID `(pid, create_time)` proof, live service-registry rows) plus
+  owners whose newest `weft.state.tid_mappings` row is undecidable
+  (non-host runner handles with no probeable host PIDs), applying the same
+  undecidable-means-live rule the tid-mapping cleanup policy uses to keep
+  the row itself. Delete-time rechecks apply the same standard to disposed
+  families without terminal proof, while terminal-proven families keep the
+  positive-evidence recheck only. See [OBS.13.7] for the full
+  evidence-model statement. PONG exposes
   cached external-log status, deferred-write counts, and retention settings
   only; it does not open files, scan queues, flush deferred writes, or query
   Monitor tables. The persistent TaskMonitor runtime mapping in

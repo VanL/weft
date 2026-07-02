@@ -80,13 +80,20 @@ def valid_tid_mapping_payload(payload: Mapping[str, Any]) -> bool:
     )
 
 
-def _mapping_row_is_live(payload: Mapping[str, Any] | None) -> bool:
+def mapping_row_is_live(payload: Mapping[str, Any] | None) -> bool:
     """Return whether a mapping payload's own liveness probe finds a live owner.
 
     Undecidable payloads (no runtime handle, or a handle with no probeable
     host PIDs -- e.g. external/non-host runtime handles) are treated as
     live: undecidable means skip, never delete. This is the only liveness
     evidence this policy consults; it never looks past the row payload.
+
+    Public because the TaskMonitor's destruction-protection gate
+    (``_destruction_protected_runtime_tids``) shares these exact semantics
+    for destructive decisions without terminal proof; the probe must not
+    be duplicated.
+
+    Spec: [OBS.13.7]
     """
 
     if payload is None:
@@ -198,7 +205,7 @@ def tid_mapping_candidates(
         # payload's own liveness probe fails. Undecidable payloads are
         # treated as live and skipped.
         row = newest_row_by_id.get(age_candidate.message_id)
-        if row is not None and not _mapping_row_is_live(row.payload):
+        if row is not None and not mapping_row_is_live(row.payload):
             age_selected.append(
                 cleanup_candidate_from_row(
                     row.raw,
