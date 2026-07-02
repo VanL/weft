@@ -14,6 +14,7 @@ from simplebroker import dump_lines
 from simplebroker.ext import BrokerError
 from weft._constants import WEFT_STATE_QUEUE_PREFIX
 from weft.context import build_context
+from weft.helpers import open_owner_only_text
 
 
 def _claimed_summary(db: Any) -> tuple[int, int]:
@@ -106,7 +107,7 @@ def cmd_dump(
 
     try:
         with context.broker() as db:
-            with open(output_path, "w", encoding="utf-8") as f:
+            with open_owner_only_text(output_path) as f:
                 (
                     alias_count,
                     exported_messages,

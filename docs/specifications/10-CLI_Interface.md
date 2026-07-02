@@ -787,6 +787,10 @@ Current behavior:
 - `system dump` exports visible pending broker messages. If an included queue
   has claimed rows, the command reports the omitted claimed-message count
   instead of pretending the dump is a complete in-flight broker image.
+- `system dump` writes its output file owner-only (0600), tightening
+  pre-existing looser files; dump content (TaskSpec command arguments and
+  `spec.env` values) is written verbatim and unredacted, so dump files should
+  be treated like secret material.
 - `system load --dry-run -i FILE` validates a dump without writing. Plain
   `system load -i FILE` imports the dump.
 - `system load` preserves included broker message IDs during import and
@@ -880,6 +884,7 @@ flags, and future queue or control ergonomics live in the companion doc:
 - [`docs/plans/2026-05-11-manager-serve-operational-log-plan.md`](../plans/2026-05-11-manager-serve-operational-log-plan.md)
 - [`docs/plans/2026-05-13-manager-liveness-and-leadership-robustness-plan.md`](../plans/2026-05-13-manager-liveness-and-leadership-robustness-plan.md)
 - [`docs/plans/2026-05-30-task-monitor-external-log-health-plan.md`](../plans/2026-05-30-task-monitor-external-log-health-plan.md)
+- [`docs/plans/2026-06-09-evaluation-findings-remediation-plan.md`](../plans/2026-06-09-evaluation-findings-remediation-plan.md)
 
 ## Related Documents
 

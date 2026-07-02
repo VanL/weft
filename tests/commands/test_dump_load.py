@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
+import sys
 from pathlib import Path
 
 import pytest
@@ -562,3 +565,16 @@ def test_export_large_message_data(tmp_path: Path) -> None:
     body = json.loads(message_record["body"])
     assert body["data"] == "x" * 10000
     assert len(body["numbers"]) == 1000
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
+def test_cmd_dump_output_file_is_owner_only(tmp_path: Path) -> None:
+    root = prepare_project_root(tmp_path)  # the module's fixtures already use this
+    out_path = tmp_path / "export.jsonl"
+    out_path.write_text("stale", encoding="utf-8")
+    os.chmod(out_path, 0o644)
+
+    exit_code, _message = cmd_dump(output=str(out_path), context_path=str(root))
+
+    assert exit_code == 0
+    assert stat.S_IMODE(out_path.stat().st_mode) == 0o600

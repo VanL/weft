@@ -772,7 +772,10 @@ excluding runtime-only `weft.state.*` queues. Message records carry the broker
 message ID in the `id` field, and `weft system load` preserves those IDs
 through SimpleBroker's import path. Claimed in-flight rows are omitted and
 reported in the dump summary. `weft system load -i FILE` mutates the target
-context; use `--dry-run` for validation only.
+context; use `--dry-run` for validation only. Dump files contain TaskSpec
+command arguments and `spec.env` values verbatim (dump/load is a
+fidelity-preserving surface, so nothing is redacted); the file is created
+owner-only (0600). Treat dump files like secret material.
 
 ### Task Execution
 
