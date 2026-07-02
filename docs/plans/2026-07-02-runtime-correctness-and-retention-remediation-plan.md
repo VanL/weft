@@ -801,3 +801,16 @@ Independent Review Loop): 9 findings, all addressed in the plan text:
 
 This plan is **review-complete and implementation-ready**; status stays
 `draft` until the slices land, per the plan status taxonomy.
+
+Implementation deviation record (Task A1, adjudicated necessary-and-sound
+by post-implementation review): deferral required wiring three files beyond
+the task's list (`manager.py` — its handler was already the in-memory
+recorder, renamed to `note_termination_signal` with a delegating alias;
+`task_monitor.py` and `heartbeat.py` — standalone `process_once` overrides
+now check the pending signum each turn). The manager drain escalation's 2s
+rung became SIGTERM-only (`kill_after=False`): the prior 0.2s SIGKILL
+follow-up defeated child-side deferred termination and corrupted
+`multiprocessing` bookkeeping via psutil reaping (ECHILD), forcing every
+drain to the 15s timeout. Ordering is preserved; the hard-kill rung remains
+at `MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS`. Worst-case: a child that
+ignores SIGTERM survives ~2.2s → up to ~15s during drain.

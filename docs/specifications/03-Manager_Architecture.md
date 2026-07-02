@@ -423,7 +423,7 @@ _Implementation mapping_:
   `submit_spawn_request` carries internal runtime selectors on the manager-owned
   spawn envelope, and `weft/core/manager.py` `Manager._build_child_spec`
   re-applies them when materializing the child TaskSpec.
-- External signal handling — `weft/core/manager.py` :: `Manager.handle_termination_signal` (TERM/INT drain, SIGUSR1 kill).
+- External signal handling — `weft/core/manager.py` :: `Manager.note_termination_signal` records the signal in plain in-memory state (signal handlers must not touch broker connections); the reactor applies it on the next `process_once` turn (TERM/INT drain, SIGUSR1 kill). `Manager.handle_termination_signal` remains as a delegating alias.
 - CLI management — `weft/commands/manager.py` :: `start_command`, `stop_command`, `list_command`, `status_command`; these commands are thin wrappers over the shared lifecycle helper. `weft/commands/status.py` :: `_collect_manager_records` reuses the same lifecycle reader for manager views.
 - Foreground supervision command and process-log diagnostics — `weft/commands/serve.py` :: `serve_command`, registered in `weft/cli/app.py` as `weft manager serve`; structured process-log emission lives in `weft/core/serve_log.py`, `weft/core/manager.py`, and `weft/core/monitor/task_monitor.py`.
 
