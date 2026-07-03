@@ -29,6 +29,11 @@ try:
 except ImportError:  # pragma: no cover - non-POSIX platforms (Windows)
     fcntl = None  # type: ignore[assignment]
 
+try:
+    import msvcrt
+except ImportError:  # pragma: no cover - POSIX platforms
+    msvcrt = None  # type: ignore[assignment]
+
 from simplebroker.ext import BrokerError
 from weft._constants import (
     CONTROL_KILL,
@@ -1322,21 +1327,44 @@ def _exclusive_append_lock(handle: IO[str]) -> Iterator[None]:
     interleaved line would defeat it. The handle is flushed before the lock
     is released so buffered lines cannot escape the critical section.
 
-    POSIX-only best effort: on platforms without ``fcntl`` (Windows) this
-    is a no-op, matching the repo's POSIX-first best-effort precedent for
-    owner-only file permissions in ``weft/helpers``.
+    POSIX uses ``fcntl.flock`` on the archive handle. Windows uses
+    ``msvcrt.locking`` on a per-archive sidecar lock file, because appending
+    through separate process handles is not atomic enough for recovery JSONL
+    batches.
 
     Spec: docs/specifications/07-System_Invariants.md [OBS.13.5]
     """
-    if fcntl is None:  # pragma: no cover - Windows best-effort fallback
+    if fcntl is not None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            handle.flush()
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return
+
+    if msvcrt is None:  # pragma: no cover - no known supported platform
         yield
         return
-    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-    try:
+
+    handle_name = getattr(handle, "name", None)
+    if not isinstance(handle_name, str):  # pragma: no cover - defensive
         yield
-    finally:
-        handle.flush()
-        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return
+    archive_path = Path(handle_name)
+    lock_path = archive_path.with_name(f".{archive_path.name}.lock")
+    with lock_path.open("a+b") as lock_handle:  # pragma: no cover - Windows
+        if lock_handle.tell() == 0:
+            lock_handle.write(b"\0")
+            lock_handle.flush()
+        lock_handle.seek(0)
+        msvcrt.locking(lock_handle.fileno(), msvcrt.LK_LOCK, 1)
+        try:
+            yield
+        finally:
+            handle.flush()
+            lock_handle.seek(0)
+            msvcrt.locking(lock_handle.fileno(), msvcrt.LK_UNLCK, 1)
 
 
 def _write_record_lines(

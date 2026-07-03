@@ -148,6 +148,10 @@ def _wait_for_process_exit(process: Any, *, timeout: float = 10.0) -> bool:
     return False
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="POSIX signal delivery required for task-process SIGTERM deferral",
+)
 def test_sigterm_on_task_process_produces_exactly_one_terminal_event(
     tmp_path: Path,
 ) -> None:
