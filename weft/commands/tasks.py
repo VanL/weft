@@ -418,7 +418,10 @@ def task_terminal_snapshot(
             snapshot = task_evidence.terminal_snapshot_from_evidence(evidence)
             if snapshot.status in {"running", "pending"} and deadline is not None:
                 time.sleep(
-                    min(TASK_EVIDENCE_POLL_INTERVAL, max(0.0, deadline - time.monotonic()))
+                    min(
+                        TASK_EVIDENCE_POLL_INTERVAL,
+                        max(0.0, deadline - time.monotonic()),
+                    )
                 )
                 continue
             return snapshot
@@ -440,7 +443,9 @@ def task_terminal_snapshot(
                 status="unknown",
                 source="observer",
             )
-        time.sleep(min(TASK_EVIDENCE_POLL_INTERVAL, max(0.0, deadline - time.monotonic())))
+        time.sleep(
+            min(TASK_EVIDENCE_POLL_INTERVAL, max(0.0, deadline - time.monotonic()))
+        )
 
 
 def ack_terminal_snapshot(
@@ -1515,7 +1520,9 @@ def _observed_host_pids_are_dead(
             return True
         if time.monotonic() >= deadline:
             return False
-        time.sleep(min(TASK_PID_EXIT_POLL_INTERVAL, max(0.0, deadline - time.monotonic())))
+        time.sleep(
+            min(TASK_PID_EXIT_POLL_INTERVAL, max(0.0, deadline - time.monotonic()))
+        )
 
 
 def _kill_success_is_proven(

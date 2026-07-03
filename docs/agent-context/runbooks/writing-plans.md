@@ -253,6 +253,217 @@ Also call out any review gates that matter for this slice, for example:
 - self-driven fresh-eyes review completed before implementation
 - external review required or not required, with the reason
 
+### 4a. Deviation Log
+
+Every plan that implements against a spec carries a `## Deviation Log`
+section, empty at the start, appended to whenever implementation departs
+from the recorded baseline (see the decision hierarchy: deviation is
+legitimate; undeclared deviation is not). One row per departure:
+
+```markdown
+## Deviation Log
+
+| Spec ref | Planned behavior | Actual behavior | Rationale | Spec proposal |
+|----------|------------------|-----------------|-----------|---------------|
+```
+
+The `Spec proposal` column holds the pointer to the spec-revision slice or
+proposal that reconciles the deviation, or `pending` — it must not stay
+`pending` past the plan's completion gate. An empty deviation log at the end
+of a plan is a claim ("we built exactly what the baseline says"), and like
+any claim it should survive a spot-check against the diff.
+
+### 4b. Spec Baseline
+
+Every plan that implements against a committed spec records where
+implementation started:
+
+```markdown
+## Spec Baseline
+
+- `abc123def` — docs/specifications/02-TaskSpec.md,
+  docs/specifications/05-Message_Flow_and_State.md at plan authoring time
+```
+
+Rules:
+
+- use the commit SHA when the spec is committed
+- if the plan **revises** the spec, say so explicitly (`Plan type:
+  implementation with spec revision`)
+- after the **spec-promotion slice** (see §4d), record a **promotion
+  baseline identifier** — where the proposed delta was applied to
+  `docs/specifications/`. Use a commit SHA when that slice is committed;
+  otherwise use diff base plus worktree state and the spec file diff (same
+  spirit as the spec baseline). Mid-implementation compliance claims are
+  against the promotion baseline, not the pre-promotion identifier. Do not
+  require an intermediate commit before continuing when the user wants
+  uncommitted review — require a recorded identifier and a rerunnable
+  verification gate instead
+- spec-authoring-only plans record the baseline they started from and the
+  identifier after the spec lands
+
+### 4c. Proposed Spec Delta
+
+When a plan changes intended behavior, include exact proposed spec text for
+review — not a summary. The active spec at the baseline identifier remains
+the governing contract until promotion; the delta is the **review target**
+and, after promotion, the **implementation target**.
+
+```markdown
+## Proposed Spec Delta
+
+Promotion strategy (see §4d — pick one):
+
+| Spec file | Strategy | Sections touched |
+|-----------|----------|------------------|
+| docs/specifications/05-Message_Flow_and_State.md | A — in-file, text before link claims | [MF-2] paragraph after … |
+
+### [MF-2] — insert after "…" paragraph
+
+> (exact proposed markdown — replacement or insertion text)
+```
+
+Rules:
+
+- inline exact sections when the delta is small; link
+  `docs/plans/YYYY-MM-DD-<name>-spec-draft.md` when it is large
+- every touched requirement must cite stable section codes such as `[MF-2]`
+  or `[CLI-1.1.1]`
+- name the **promotion strategy** (§4d) — not merely "add to spec"
+- clarification-only deltas (behavior already matches code) still belong
+  here so reviewers see the exact wording
+- do not treat plan-only text as a second governing contract after
+  promotion — once promoted, `docs/specifications/` is canonical
+
+### 4d. Spec-Changing Work — Slice Order
+
+**Owner:** plan author defines slice order; implementer follows it literally.
+**Boundary:** applies when intended behavior in `docs/specifications/`
+changes or new sections are added under it. **Verification:** each slice
+names commands; the final gate includes traceability reconciliation (below).
+**Required action:** pick a plan type; never implement against plan appendix
+text while `docs/specifications/` still reflects the baseline.
+
+#### Plan types
+
+| Type | When | First slice |
+|------|------|-------------|
+| **Implementation** (default) | Behavior decided; code will cite spec paths | Spec-promotion slice (strategy below), then code |
+| **Spec-authoring** | Harvest, clarification, merge — spec is the primary deliverable | Apply delta to `docs/specifications/`; no separate "promotion" task |
+| **Exploration** | Intended behavior not yet decided | No implementation against a governing spec; spike only. When decided, open a new plan and promote first |
+
+Exploration is not "park the spec in the plan." Once behavior is cited from
+shipped code, the text must live in `docs/specifications/` using a named
+promotion strategy so backstitch (and reviewers) can see it.
+
+#### Default slice order (implementation with spec revision)
+
+1. **Plan** — baseline, proposed delta (with promotion strategy), invariants,
+   tasks, deviation log (empty)
+2. **Independent review** — critiques plan **and** proposed delta
+3. **Spec-promotion slice** — apply delta to `docs/specifications/` per the
+   chosen strategy; update the spec's `## Plans` / `## Related Plans`
+   backlink section; record the promotion baseline identifier
+4. **Slices 1…N** — code, tests, implementation notes against the
+   **promoted** spec
+5. **Deviation handling** — if reality disagrees with promoted text:
+   deviation log row, explicit spec edit slice, continue against revised spec
+6. **Final slice: traceability reconciliation** — backlinks, implementation
+   snapshot/status/mapping notes, lessons/runbooks; close link debt (below)
+
+Do **not** make "copy appendix into spec" the **last** slice by default.
+Promotion belongs early — before code cites new spec sections — so later
+tasks are judged against one governing spec. Name the slice
+**spec-promotion slice**; if the repo already assigns a meaning to
+"slice 0" (for example an acceptance-probe suite), do not reuse that name.
+
+#### Two status systems (do not conflate)
+
+A spec change can be staged by **two different mechanisms**, and they must
+not be conflated:
+
+- **Prose `Status:` header or planned-companion prose** on a spec file —
+  governs human/agent **adoption**: whether the spec may be implemented at
+  all. backstitch does **not** read prose status.
+- **Machine classification** — backstitch's per-file glob rungs
+  (`planned_spec_globs`, `exploratory_spec_globs`). In weft, planned specs
+  follow the `*A-*.md` filename convention in `docs/specifications/` (for
+  example `03A-Manager_Architecture_Planned.md`). Classification governs
+  what the scanner reports when shipped code cites the file
+  (`CODE_REF_PLANNED_SPEC` / `CODE_REF_EXPLORATORY_SPEC` warnings).
+  Classification is per-**file**: you cannot stage one paragraph of an
+  active file by reclassifying the whole file without downgrading every
+  section in it.
+
+Plans must say which mechanism they use, and must not assume a
+planned/exploratory classification exists for a new path without naming the
+glob or filename-convention change that creates it.
+
+#### Promotion strategies (pick one in the plan)
+
+**A — In-file edit, text before link claims (default for paragraph edits):**
+In the spec-promotion slice, land requirement text in the existing spec file
+**without** claiming implementation links (`_Implementation mapping_` blocks,
+"implemented by" pointers). Unlinked new text is at worst info-class debt to
+backstitch (`SPEC_SECTION_UNMAPPED`). In a later slice, add the link claims,
+the code, and the reciprocal `Spec:` backlink **together**. Slices between
+promotion and that linking slice must not cite the new sections from code —
+a code backlink to a section that claims no implementation yet is
+warning-class debt (`SPEC_MAPPING_RECIPROCAL_MISSING`), and a code citation
+of a section not yet landed in `docs/specifications/` is error-class
+(`SPEC_SECTION_MISSING`).
+
+**B — Atomic:** Land requirement text, link claims, code, and reciprocal
+backlinks in **one** change. Promotion and implementation are the same
+slice; use when the delta is small or the team prefers a single landing.
+
+**C — New file under an in-flight classification:** Add a **new** spec file
+classified planned/exploratory (in weft, a `*A-*.md` planned companion, or a
+glob change if the path is new). Shipped code may cite it with
+warning-class debt (`CODE_REF_PLANNED_SPEC`) until graduation. Use for
+substantial new behavior, not a paragraph inside an existing active file.
+
+**D — Spec-authoring / clarification only:** No code cites new behavior;
+land text as active (or a prose status update for whole-spec adoption).
+No link claims required unless reciprocity is already claimed.
+
+Do **not** reclassify an existing active spec file as planned/exploratory
+just to stage a single paragraph.
+
+#### Two-PR / stacked-commit trap
+
+If an active spec section **with** implementation-mapping claims lands
+before the reciprocal code backlink, the repo carries reciprocity debt
+(`CODE_BACKLINK_RECIPROCAL_MISSING`) between the two landings. A repository
+holding a zero-warning backstitch gate cannot leave that debt on the main
+branch. Mitigate with strategy A (no link claims until the code slice) or
+strategy B (atomic), and say which in the plan.
+
+#### Graduating an in-flight classification (heavy — not routine)
+
+Moving a spec file from planned/exploratory to active is not a one-line
+edit: narrowing a classification pattern affects every file matching it, and
+weft's `*A-*.md` filename convention requires renaming the file, which
+breaks path-qualified citations (`SPEC_FILE_MISSING`) until backlinks are
+updated. Name graduation steps, citation updates, and verification in the
+plan.
+
+#### Final slice: traceability reconciliation
+
+The last implementation slice is not "tidy prose." It closes the graph:
+
+- complete `_Implementation mapping_` claims and reciprocal `Spec:`
+  backlinks; clear warning-class debt
+- graduate in-flight classifications only when strategy C was used and
+  graduation steps are named
+- rerun the backstitch (or other traceability/self-check) gate named in the
+  plan, from the current state, and record the result. Where the repo
+  declares that gate mandatory (for example a zero-error, zero-warning
+  check), it is not waivable via a "residual-risk budget" — residual risk
+  documents blockers, it does not redefine done
+- update the promotion baseline identifier in plan closeout if the spec
+  moved again
+
 ### 5. Tasks
 
 Tasks should be dependency-ordered and normally executed in sequence unless the
@@ -407,16 +618,19 @@ Every risky plan should say how independent review will happen.
 At minimum, include:
 
 - which other agent or agent family should review the plan
-- which files and docs the reviewer should read
+- which files and docs the reviewer should read — including
+  **`## Proposed Spec Delta`** when the plan changes intended behavior
 - the review prompt or stance
 - how feedback will be handed back to the author
 
 Recommended prompt:
 
-> Read the plan at [path]. Carefully examine the plan and the associated code.
-> Look for errors, bad ideas, and latent ambiguities. Don't do any
-> implementation, but answer carefully: Could you implement this confidently and
-> correctly if asked?
+> Read the plan at [path] and its `## Proposed Spec Delta` (if present),
+> including the named promotion strategy. Carefully examine the plan, the
+> proposed spec text, and the associated code. Look for errors, bad ideas, and
+> latent ambiguities. Don't do any implementation, but answer carefully: Could
+> you implement this confidently and correctly against the delta as promoted,
+> if asked?
 
 The author must then consider each review point explicitly and either update
 the plan, explain why the current path is still the best choice, or record why
@@ -471,6 +685,18 @@ Do not start risky implementation work if the plan is missing any of these:
 - rollback or rollout notes when order or compatibility matters
 - an independent review loop
 
+For **spec-changing implementation** plans, also do not start **code**
+slices until:
+
+- `## Spec Baseline` and `## Proposed Spec Delta` exist
+- independent review of the delta has completed
+- the **spec-promotion slice** has landed in the worktree (or the plan is
+  typed **spec-authoring**, where spec landing is the work)
+- the promotion baseline **identifier** is recorded (commit SHA or diff base
+  + worktree state — not necessarily a commit)
+- the promotion **strategy** (A/B/C/D) and gate-preservation plan are
+  explicit
+
 ## Backlink Rule
 
 When a plan implements a spec in `docs/specifications/`, add a backlink in that
@@ -500,3 +726,13 @@ continues to describe current ownership and behavior accurately.
 - Introducing a second execution path without first proving the current path is
   insufficient.
 - Risky work without an independent review loop.
+- Spec-changing work without `## Proposed Spec Delta` or a promotion baseline
+  identifier.
+- Implementing code that cites spec paths before the spec-promotion slice
+  lands.
+- Treating plan appendix text as the governing contract after promotion.
+- Reclassifying an active spec file as planned/exploratory to stage one
+  section (classification is per-file).
+- Landing actively-mapped spec sections before reciprocal code when the repo
+  holds a zero-warning backstitch gate (use strategy A or B instead).
+- Waiving a mandatory traceability gate via a "residual-risk budget".

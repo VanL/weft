@@ -574,9 +574,7 @@ def test_task_monitor_cleanup_deletes_superseded_rows_of_live_task(
     ctx = _context(tmp_path)
     tid = "1778000000000000002"
     self_process = psutil.Process(os.getpid())
-    host_processes = [
-        {"pid": os.getpid(), "create_time": self_process.create_time()}
-    ]
+    host_processes = [{"pid": os.getpid(), "create_time": self_process.create_time()}]
 
     superseded_id = _write_json(
         ctx,
@@ -627,9 +625,7 @@ def test_superseded_live_row_is_deleted_when_newer_row_is_beyond_scan_window(
     ctx = _context(tmp_path)
     tid = "1778000000000000006"
     self_process = psutil.Process(os.getpid())
-    host_processes = [
-        {"pid": os.getpid(), "create_time": self_process.create_time()}
-    ]
+    host_processes = [{"pid": os.getpid(), "create_time": self_process.create_time()}]
 
     superseded_id = _write_json(
         ctx,
@@ -1620,7 +1616,9 @@ def test_live_task_keeps_tid_mapping_row_through_destructive_monitor_cycle() -> 
             # alive is the liveness probe, not min-age headroom.
             result = run_task_monitor_cleanup(
                 client.context,
-                TaskMonitorCleanupConfig(batch_size=50, tid_mapping_min_age_seconds=0.0),
+                TaskMonitorCleanupConfig(
+                    batch_size=50, tid_mapping_min_age_seconds=0.0
+                ),
                 apply=True,
                 exclude_tids=(),
             )

@@ -241,6 +241,49 @@ terminal observation, an unbounded test drain has no failure boundary.
 - Keep the timeout caller-local. Do not publish task timeout state just because
   a test or UI stream stopped waiting.
 
+### Pattern 8: Prose Pinned Where Structure Is the Contract
+
+**Symptoms**
+
+- Tests assert rendered message text verbatim, so cosmetic rewording breaks CI.
+- Tests (or tools) parse structure back out of a message string, making the
+  message layout load-bearing.
+- Pinned text embeds environment wording (interpreter exception messages,
+  broker backend errors), so a runtime or dependency upgrade breaks unrelated
+  tests.
+
+**What to do**
+
+- Pin structured fields exactly (exit codes, task states, queue names, TIDs,
+  paths, JSON payload keys); assert message text by substring only.
+- Never parse a rendered message; if a consumer needs a value, it belongs in
+  a structured field (a JSON payload key, a state-log field, a typed
+  `ctrl_out` envelope).
+- Golden/freeze fixtures are for behavior deltas that must be reviewed, not
+  for wording; pair every golden with a documented regeneration command.
+
+### Pattern 9: A Declared Contract with No Firing Test
+
+**Symptoms**
+
+- An enumerable contract exists (CLI exit codes, control message types,
+  config keys, documented flags, listed edge cases) and some elements are
+  never exercised by any test.
+- Code paths for contract elements are unreachable or wrong without any
+  suite failure.
+
+**What to do**
+
+- For each enumerable contract, add a coverage gate: every element has at
+  least one test that proves it fires or applies. The CLI exit-code table
+  (0/1/2/124) and the control message set are examples of contracts that
+  need one firing test per element.
+- For config keys specifically, prove each behavior-affecting key changes
+  observable output versus the no-config baseline (no-op prevention).
+
+See engineering-principles §9 and
+`docs/agent-context/runbooks/adversarial-acceptance-probes.md`.
+
 ## Verification Pattern
 
 For changes that touch queue semantics, manager behavior, or task lifecycle:

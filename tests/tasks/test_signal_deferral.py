@@ -205,9 +205,9 @@ def test_sigterm_on_task_process_produces_exactly_one_terminal_event(
             "killed",
         }, f"task did not reach a terminal state in time; latest={latest!r}"
 
-        assert _wait_for_process_exit(
-            process, timeout=10.0
-        ), "task process did not exit within the bounded deadline after SIGTERM"
+        assert _wait_for_process_exit(process, timeout=10.0), (
+            "task process did not exit within the bounded deadline after SIGTERM"
+        )
 
         events = _peek_json_payloads(log_queue)
         terminal_events_seen = [e for e in events if e.get("event") in TERMINAL_EVENTS]

@@ -31,11 +31,16 @@ repository (Codex, Claude, Cursor-style agents, and automation agents).
 - `testing-patterns.md` — Test harness selection, regression strategy, and
   common broker-heavy testing traps.
 - `writing-plans.md` — How to write implementation plans that a zero-context
-  engineer can execute safely, with exact spec-section traceability.
+  engineer can execute safely, with exact spec-section traceability
+  (including spec baseline, proposed spec delta, promotion slices, and
+  status mechanisms).
 - `hardening-plans.md` — How to tighten risky plans so they say what must not
   change, where the hidden couplings are, and how rollback/rollout will work.
 - `review-loops-and-agent-bootstrap.md` — How to choose independent reviewers,
   run plan/work reviews, and feed findings back into the active plan.
+- `adversarial-acceptance-probes.md` — Black-box invariant-floor probes for
+  integration readiness: exit-code honesty, no user-facing tracebacks,
+  per-task failure containment, and firing tests for declared contracts.
 
 ## What Belongs Here
 

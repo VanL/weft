@@ -57,7 +57,9 @@ def _dead_pid_and_create_time() -> tuple[int, float]:
     return proc.pid, create_time
 
 
-def _dead_owner_mapping_payload(*, full: str, short: str, pid: int, create_time: float) -> dict:
+def _dead_owner_mapping_payload(
+    *, full: str, short: str, pid: int, create_time: float
+) -> dict:
     return {
         "short": short,
         "full": full,

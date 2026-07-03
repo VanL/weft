@@ -8772,9 +8772,7 @@ def test_task_monitor_stale_open_disposal_still_applies_to_dead_family(
             _tid_mapping_row(
                 full=tid,
                 short=tid[-10:],
-                host_processes=[
-                    {"pid": proc.pid, "create_time": dead_create_time}
-                ],
+                host_processes=[{"pid": proc.pid, "create_time": dead_create_time}],
             )
         )
     )
@@ -8951,9 +8949,7 @@ def test_task_monitor_stale_open_disposal_skips_undecidable_runtime_owner(
         )
         record = store.get_task(tid)
         assert record is not None
-        assert emitted == 0, (
-            "undecidable non-host runtime owner must not be summarized"
-        )
+        assert emitted == 0, "undecidable non-host runtime owner must not be summarized"
         assert record.summary_emitted_at_ns is None
         assert record.disposition_reason is None
 

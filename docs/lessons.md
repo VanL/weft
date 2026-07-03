@@ -74,6 +74,21 @@ incident log; these are the durable rules distilled from it. _(2026-06-30)_
     the task requires and do not let an editor or formatter reflow untouched code
     into the change. Keep formatting-only churn in its own change. If a line
     changed only because "I was in there," revert it.
+13. **Enumerable contracts get executable gates.** Any list a document asserts
+    — exit codes, queue names, config keys, CLI flags, control message types,
+    listed edge cases — must be mirrored by a machine check that enumerates it
+    (a firing test per element, a no-op prevention test per key). Prose binds
+    only what gets checked; agents comply uniformly with gates and unevenly
+    with everything else. (See engineering-principles §9, testing-patterns
+    Pattern 9, and `docs/agent-context/runbooks/adversarial-acceptance-probes.md`.)
+
+## 2026-07-02 Verification-Lessons Fold
+
+- 2026-07-02: Verification-lessons fold synced from agent-guidance (2026-07-02
+  working tree; record the commit SHA when agent-guidance commits). Source
+  incident record: the backstitch repo's `docs/lessons.md`. Note: weft is
+  backstitch's external test corpus — the four baselined traceability-debt
+  errors in backstitch's Weft gate are weft-side debt to burn down.
 
 ## 2026-05-20 Manager Reuse Replacement Drain
 

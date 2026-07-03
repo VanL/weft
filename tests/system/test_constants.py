@@ -463,9 +463,7 @@ class TestLoadConfig:
         assert config["WEFT_LOG_TASKS_EXTERNAL_ENABLED"] is False
         assert config["WEFT_LOG_TASKS_EXTERNAL_MODE"] == "raw"
         assert config["WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS"] == 172800.0
-        assert (
-            config["WEFT_TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS"] == 3600.0
-        )
+        assert config["WEFT_TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS"] == 3600.0
         assert config["WEFT_TASK_MONITOR_MODE"] == "custom"
         assert (
             config["WEFT_TASK_MONITOR_PROCESSOR"]
@@ -486,9 +484,7 @@ class TestLoadConfig:
         with patch.dict(os.environ, {}, clear=True):
             config = load_config()
 
-        assert (
-            config["WEFT_TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS"] is None
-        )
+        assert config["WEFT_TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS"] is None
 
     def test_reserved_cleanup_min_age_rejects_negative(self) -> None:
         with patch.dict(

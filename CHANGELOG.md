@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.85 - 2026-07-03
 
 ### Changed
 
@@ -17,6 +17,21 @@
   are created 0700 (and tightened on upgrade), large-output spill files and
   `weft system dump` exports are written 0600. Dump content is unchanged and
   still contains TaskSpec env/args verbatim; treat dump files as secrets.
+- Raised the SimpleBroker floor to 4.10.0 and the Postgres backend floor to
+  simplebroker-pg 2.5.0 for the current retention and backend-correctness
+  behavior.
+
+### Fixed
+
+- Hardened terminal-state publication and control handling: terminal-event
+  writes are retried and surfaced with identifiers, deferred STOP/KILL is
+  finalized on successful outcomes, and termination signal handling now runs
+  outside the signal frame.
+- Tightened TaskMonitor retention cleanup around TID mappings, runtime owners,
+  reserved queues, and retention archive appends so cleanup preserves newest
+  live evidence and avoids stale-open or concurrent-append loss.
+- Verified CLI fallback stop/kill against PID create times before acting, so a
+  reused PID cannot be treated as the original task process.
 
 ## 0.9.84 - 2026-06-29
 

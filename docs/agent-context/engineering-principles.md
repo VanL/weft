@@ -119,6 +119,13 @@ cleanup.
 - When changing code at a spec-owned boundary, keep module and function
   docstrings pointing back to the governing spec sections so the code-to-spec
   path stays explicit in both directions.
+- When a plan changes intended behavior, exact proposed spec sections live
+  in the plan for review; the **spec-promotion slice** applies them to
+  `docs/specifications/` per a named strategy (in-file text-first, atomic,
+  new file under an in-flight classification, or spec-authoring only). Prose
+  status and backstitch's machine classification are different mechanisms.
+  After promotion, `docs/specifications/` is the single governing contract —
+  not plan appendix text. See `runbooks/writing-plans.md` §4b–4d.
 
 ## 7. Boundary-First Risky Plans
 
@@ -190,6 +197,42 @@ Bad fits:
 - automatic mutation of project config without an explicit documented contract
 - provider-specific management features that grow faster than the core task
   model
+
+## 9. Enumerable Contracts Get Executable Gates
+
+Any list a document asserts — exit codes, queue names, config keys, CLI
+flags, control message types, listed edge cases — must be mirrored by a
+machine check that enumerates it: a firing test per element, a no-op
+prevention test per behavior-affecting key.
+
+Prose binds only what gets checked. Given identical written guidance, agents
+comply uniformly with automated gates and unevenly with everything else — so
+a contract element without a gate is a contract element that will silently
+diverge. A declared element with no firing test is an untested contract and a
+verification failure, not a style nit. (See testing-patterns Pattern 9 and
+`runbooks/adversarial-acceptance-probes.md`.)
+
+This is the gate-side companion to principle 4.2: updating all consumers keeps
+a contract synchronized; enumerating it in a machine check keeps it honest.
+
+## 10. Variation Is Declared; Deficiency Is Gated
+
+Plans bend on contact with reality, and different pressures produce
+legitimately different designs. Do not build guardrails that force
+convergence; build floors that catch deficiency on any path:
+
+- record the baseline (spec version, contract SHA) the work was built against
+- log deviations from that baseline where a reviewer will find them —
+  deviation is legitimate, undeclared deviation is not
+- hold every result, regardless of design, to the invariant floors: no
+  crash or traceback reaches a user, exit codes and error messages tell the
+  truth, the advertised default invocation works, declared contracts have
+  firing tests, and the work's own status claims survive a rerun
+
+Divergence between attempts is often productive — harvest it. Deficiency is
+the failure mode, and it is orthogonal to which design was chosen. (See
+`runbooks/adversarial-acceptance-probes.md` for the floor probes and
+`runbooks/writing-plans.md` for the deviation log.)
 
 ## Warning Signs
 

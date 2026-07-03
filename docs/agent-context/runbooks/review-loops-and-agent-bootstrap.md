@@ -54,15 +54,18 @@ record reviewer availability when it materially affected the review choice.
 
 Recommended prompt:
 
-> Read the plan at [path]. Carefully examine the plan and the associated code.
-> Look for errors, bad ideas, and latent ambiguities. Don't do any
-> implementation, but answer carefully: Could you implement this confidently and
-> correctly if asked?
+> Read the plan at [path] and its `## Proposed Spec Delta` (if present),
+> including the named promotion strategy. Carefully examine the plan, the
+> proposed spec text, and the associated code. Look for errors, bad ideas, and
+> latent ambiguities. Don't do any implementation, but answer carefully: Could
+> you implement this confidently and correctly against the delta as promoted,
+> if asked?
 
 Give the reviewer:
 
 - the active plan
-- the governing spec or specs, if any
+- the governing spec or specs (baseline identifier), if any, and the plan's
+  `## Proposed Spec Delta` when present
 - the relevant README or implementation-note paths
 - the touched files or intended file list
 
@@ -106,6 +109,13 @@ After review:
 If the reviewer says they could not implement the plan confidently and
 correctly, treat that as a blocker until the ambiguity is fixed or explicitly
 recorded.
+
+Review findings are claims, not facts: reproduce a finding before acting on
+it, and reproduce your own "done/passing" assertions before making them. The
+same discipline applies to status documents — a ledger that says "ship-ready"
+is a claim about the past; the evidence is a rerun in the present. Verifier
+error is real and its cost compounds, because a wrong finding acted on is a
+defect introduced with confidence.
 
 Do not report a high-stakes or complicated plan as implementation-ready while
 external review is still pending. Report it as review-pending instead.

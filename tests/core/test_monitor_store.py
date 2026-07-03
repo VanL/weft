@@ -1198,9 +1198,7 @@ def test_monitor_store_lists_reserved_cleanup_pending_tasks(tmp_path) -> None:
     )
 
     now_ns = terminal.message_id + 100
-    assert (
-        store.list_reserved_cleanup_pending_tasks(limit=10, now_ns=now_ns) == ()
-    )
+    assert store.list_reserved_cleanup_pending_tasks(limit=10, now_ns=now_ns) == ()
     store.mark_summary_emitted(tid, terminal.message_id + 1)
 
     # Explicit zero age gate: this test exercises the checked/unchecked
@@ -1215,9 +1213,7 @@ def test_monitor_store_lists_reserved_cleanup_pending_tasks(tmp_path) -> None:
     record = store.get_task(tid)
     assert record is not None
     assert record.reserved_cleanup_checked_at_ns == terminal.message_id + 2
-    assert (
-        store.list_reserved_cleanup_pending_tasks(limit=10, now_ns=now_ns) == ()
-    )
+    assert store.list_reserved_cleanup_pending_tasks(limit=10, now_ns=now_ns) == ()
     later = _update(tid, terminal.message_id + 3, event="task_activity")
     store.record_task_log_updates(
         WEFT_GLOBAL_LOG_QUEUE,
