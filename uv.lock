@@ -1463,7 +1463,7 @@ requires-dist = [
     { name = "simplebroker", specifier = ">=4.10.0" },
     { name = "simplebroker-pg", marker = "extra == 'all'", specifier = ">=2.5.0" },
     { name = "simplebroker-pg", marker = "extra == 'dev'", specifier = ">=2.5.0" },
-    { name = "simplebroker-pg", marker = "extra == 'pg'", specifier = ">=2.2.1" },
+    { name = "simplebroker-pg", marker = "extra == 'pg'", specifier = ">=2.5.0" },
     { name = "typer", specifier = ">=0.16.0" },
     { name = "types-psutil", marker = "extra == 'dev'", specifier = ">=5.9.5" },
     { name = "typing-extensions", specifier = ">=4.0.0" },

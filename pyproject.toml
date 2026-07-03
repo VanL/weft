@@ -40,16 +40,16 @@ dependencies = [
 
 [project.optional-dependencies]
 pg = [
-    "simplebroker-pg>=2.2.1",
+    "simplebroker-pg>=2.5.0",
 ]
 docker = [
-    "weft-docker>=0.9.70",
+    "weft-docker>=0.9.71",
 ]
 django = [
-    "weft-django>=0.9.30",
+    "weft-django>=0.9.31",
 ]
 django-channels = [
-    "weft-django[channels]>=0.9.30",
+    "weft-django[channels]>=0.9.31",
 ]
 macos-sandbox = [
     "weft-macos-sandbox>=0.6.0",
@@ -59,14 +59,14 @@ microsandbox = [
 ]
 all = [
     "simplebroker-pg>=2.5.0",
-    "weft-docker>=0.9.70",
-    "weft-django>=0.9.30",
+    "weft-docker>=0.9.71",
+    "weft-django>=0.9.31",
     "weft-macos-sandbox>=0.6.0",
     "weft-microsandbox>=0.5.1; platform_system != 'Windows'",
 ]
 dev = [
     "simplebroker-pg>=2.5.0",
-    "weft-docker>=0.9.70",
+    "weft-docker>=0.9.71",
     "weft-macos-sandbox>=0.6.0",
     "weft-microsandbox>=0.5.1; platform_system != 'Windows'",
     "hypothesis>=6",
