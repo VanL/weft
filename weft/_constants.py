@@ -1686,7 +1686,6 @@ SIMPLEBROKER_ENV_MAPPING: Final[dict[str, str]] = {
     "WEFT_AUTO_VACUUM_INTERVAL": "BROKER_AUTO_VACUUM_INTERVAL",
     "WEFT_VACUUM_THRESHOLD": "BROKER_VACUUM_THRESHOLD",
     "WEFT_VACUUM_BATCH_SIZE": "BROKER_VACUUM_BATCH_SIZE",
-    "WEFT_VACUUM_LOCK_TIMEOUT": "BROKER_VACUUM_LOCK_TIMEOUT",
     "WEFT_SKIP_IDLE_CHECK": "BROKER_SKIP_IDLE_CHECK",
     "WEFT_JITTER_FACTOR": "BROKER_JITTER_FACTOR",
     "WEFT_INITIAL_CHECKS": "BROKER_INITIAL_CHECKS",
@@ -1711,6 +1710,14 @@ SIMPLEBROKER_ENV_MAPPING: Final[dict[str, str]] = {
 WEFT_SIMPLEBROKER_DEFAULTS: Final[dict[str, Any]] = {
     "BROKER_PROJECT_SCOPE": True,
 }
+
+REMOVED_SIMPLEBROKER_CONFIG_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "WEFT_VACUUM_LOCK_TIMEOUT",
+        "BROKER_VACUUM_LOCK_TIMEOUT",
+    }
+)
+"""SimpleBroker 5.0 removed these config keys; do not surface them in Weft config."""
 
 
 def _default_broker_default_db_name(weft_directory_name: str) -> str:
@@ -2540,6 +2547,7 @@ def _normalize_weft_overrides(overrides: Mapping[str, Any]) -> dict[str, Any]:
     return {
         key: _normalize_weft_override_value(key, value)
         for key, value in overrides.items()
+        if key not in REMOVED_SIMPLEBROKER_CONFIG_KEYS
     }
 
 

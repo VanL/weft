@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.9.86 - 2026-07-03
+
+### Changed
+
+- Raised the SimpleBroker floor to 5.0.0 and the Postgres backend floor to
+  simplebroker-pg 3.0.0.
+- Ignored stale `WEFT_VACUUM_LOCK_TIMEOUT` and
+  `BROKER_VACUUM_LOCK_TIMEOUT` config overrides, matching the SimpleBroker
+  5.0 removal of that tuning key.
+
 ## 0.9.85 - 2026-07-03
 
 ### Changed

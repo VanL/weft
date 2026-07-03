@@ -741,6 +741,34 @@ class TestLoadConfig:
         assert config["BROKER_DEFAULT_DB_NAME"] == ".engram/broker.db"
         assert config["BROKER_PROJECT_CONFIG_PATH"] == ".engram"
 
+    def test_removed_simplebroker_vacuum_lock_timeout_env_is_ignored(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "WEFT_VACUUM_LOCK_TIMEOUT": "10",
+                "BROKER_VACUUM_LOCK_TIMEOUT": "10",
+            },
+            clear=True,
+        ):
+            config = load_config()
+
+        assert "WEFT_VACUUM_LOCK_TIMEOUT" not in config
+        assert "BROKER_VACUUM_LOCK_TIMEOUT" not in config
+
+    def test_removed_simplebroker_vacuum_lock_timeout_overrides_are_ignored(
+        self,
+    ) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            config = compile_config(
+                {
+                    "WEFT_VACUUM_LOCK_TIMEOUT": "10",
+                    "BROKER_VACUUM_LOCK_TIMEOUT": "10",
+                }
+            )
+
+        assert "WEFT_VACUUM_LOCK_TIMEOUT" not in config
+        assert "BROKER_VACUUM_LOCK_TIMEOUT" not in config
+
     def test_compile_config_rejects_ambiguous_postgres_override_shapes(self) -> None:
         with (
             patch.dict(os.environ, {}, clear=True),

@@ -125,7 +125,10 @@ cleanup.
   new file under an in-flight classification, or spec-authoring only). Prose
   status and backstitch's machine classification are different mechanisms.
   After promotion, `docs/specifications/` is the single governing contract —
-  not plan appendix text. See `runbooks/writing-plans.md` §4b–4d.
+  not plan appendix text. Spec text
+  states contracts as rules (the property every instance satisfies), not
+  only examples; a codifying delta is verified rule-vs-code before
+  promotion. See `runbooks/writing-plans.md` §4b–4d.
 
 ## 7. Boundary-First Risky Plans
 

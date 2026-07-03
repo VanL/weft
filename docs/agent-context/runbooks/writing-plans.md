@@ -332,6 +332,10 @@ Rules:
 - name the **promotion strategy** (§4d) — not merely "add to spec"
 - clarification-only deltas (behavior already matches code) still belong
   here so reviewers see the exact wording
+- when the delta codifies existing behavior as general rules, verify each
+  rule against the implementation before review — rules drafted from
+  memory overclaim, and the reviewer should check rule-vs-code, not just
+  rule-vs-intent
 - do not treat plan-only text as a second governing contract after
   promotion — once promoted, `docs/specifications/` is canonical
 
