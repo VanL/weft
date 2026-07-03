@@ -478,14 +478,14 @@ class DockerRunnerPlugin:
             _resolve_docker_binary(docker_binary)
             if normalized_build is not None:
                 _validate_build_paths(normalized_build)
+            with _docker_client(timeout=5) as client:
+                client.ping()
+                if normalized_network is not None:
+                    _validate_docker_network_exists(client, normalized_network)
         if os.name == "nt":
             raise ValueError(
                 "Docker runner is currently supported only on Linux and macOS"
             )
-        with _docker_client(timeout=5) as client:
-            client.ping()
-            if preflight and normalized_network is not None:
-                _validate_docker_network_exists(client, normalized_network)
 
     def create_runner(
         self,

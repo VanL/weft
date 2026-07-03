@@ -346,6 +346,7 @@ def test_docker_runner_validation_accepts_command_container_profile(
         "_docker_client",
         lambda timeout=10: _fake_docker_client_context(fake_client),
     )
+    monkeypatch.setattr(plugin, "_resolve_docker_binary", lambda value: value)
 
     runner_plugin.validate_taskspec(
         {
@@ -363,8 +364,28 @@ def test_docker_runner_validation_accepts_command_container_profile(
         }
     )
 
-    assert fake_client.ping_count == 1
+    assert fake_client.ping_count == 0
     assert fake_client.network_gets == []
+
+    runner_plugin.validate_taskspec(
+        {
+            "spec": {
+                "type": "command",
+                "process_target": "python3",
+                "runner": {
+                    "name": "docker",
+                    "options": {
+                        "container_profile": "ops",
+                        "container_profile_file": str(profile_file),
+                    },
+                },
+            }
+        },
+        preflight=True,
+    )
+
+    assert fake_client.ping_count == 1
+    assert fake_client.network_gets == ["project_ops"]
 
 
 def test_docker_runner_profile_image_build_conflict_names_profile(
