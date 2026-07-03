@@ -1254,21 +1254,23 @@ def test_force_kill_task_processes_kills_pid_with_matching_create_time(
         assert entry is not None
         handle = RunnerHandle.from_dict(entry["runtime_handle"])
         assert handle.control.get("authority") == "host-pid"
-        # Confirm the recorded create_time genuinely matches the live process.
         recorded = dict(handle.scoped_host_processes())
-        assert worker_pid in recorded
-        assert recorded[worker_pid] is not None
-        assert recorded[worker_pid] == pytest.approx(
-            process_create_time(worker_pid), abs=0.001
-        )
+        assert recorded
+        # Confirm the latest mapping's recorded create_time genuinely matches
+        # each live process it asks the force-kill path to signal.
+        for pid, create_time in recorded.items():
+            assert create_time is not None
+            assert create_time == pytest.approx(process_create_time(pid), abs=0.001)
 
         task_killed = task_cmd._force_kill_task_processes(entry)
 
         assert task_killed is True
-        assert _wait_for_process_exit(worker_pid)
+        assert all(_wait_for_process_exit(pid) for pid in recorded)
     finally:
         kill_process_tree(process.pid)
         kill_process_tree(worker_pid)
+        for pid in recorded if "recorded" in locals() else ():
+            kill_process_tree(pid)
 
 
 def test_force_kill_task_processes_refuses_stale_create_time(tmp_path) -> None:
@@ -1282,12 +1284,16 @@ def test_force_kill_task_processes_refuses_stale_create_time(tmp_path) -> None:
     try:
         entry = _latest_mapping_entry(ctx, spec.tid)
         assert entry is not None
+        handle = RunnerHandle.from_dict(entry["runtime_handle"])
+        recorded = dict(handle.scoped_host_processes())
+        assert recorded
+        target_pid = next(iter(recorded))
         handle_payload = dict(entry["runtime_handle"])
         # Corrupt the recorded create_time so it no longer matches the live
         # process -- simulating a stale mapping pointing at a reused PID.
         handle_payload["observations"] = dict(handle_payload["observations"])
         handle_payload["observations"]["host_processes"] = [
-            {"pid": worker_pid, "create_time": 1.0}
+            {"pid": target_pid, "create_time": 1.0}
         ]
         stale_entry = dict(entry)
         stale_entry["runtime_handle"] = handle_payload
@@ -1305,11 +1311,13 @@ def test_force_kill_task_processes_refuses_stale_create_time(tmp_path) -> None:
 
         assert signaled == []
         assert task_killed is False
-        # The real worker process was never touched, so it is still alive.
-        assert pid_is_live(worker_pid)
+        # The real mapped process was never touched, so it is still alive.
+        assert pid_is_live(target_pid)
     finally:
         kill_process_tree(process.pid)
         kill_process_tree(worker_pid)
+        if "target_pid" in locals():
+            kill_process_tree(target_pid)
 
 
 def test_force_kill_task_processes_preserves_liveness_fallback_without_create_time(
@@ -1325,27 +1333,33 @@ def test_force_kill_task_processes_preserves_liveness_fallback_without_create_ti
     try:
         entry = _latest_mapping_entry(ctx, spec.tid)
         assert entry is not None
+        handle = RunnerHandle.from_dict(entry["runtime_handle"])
+        recorded_with_create_time = dict(handle.scoped_host_processes())
+        assert recorded_with_create_time
+        target_pid = next(iter(recorded_with_create_time))
         handle_payload = dict(entry["runtime_handle"])
         # Strip create-time identity entirely -- only host_pids remain, which
         # is what `scoped_host_processes()` falls back to as (pid, None).
         observations = dict(handle_payload["observations"])
         observations.pop("host_processes", None)
-        observations["host_pids"] = [worker_pid]
+        observations["host_pids"] = [target_pid]
         handle_payload["observations"] = observations
         no_create_time_entry = dict(entry)
         no_create_time_entry["runtime_handle"] = handle_payload
 
         handle = RunnerHandle.from_dict(handle_payload)
         recorded = dict(handle.scoped_host_processes())
-        assert recorded[worker_pid] is None
+        assert recorded[target_pid] is None
 
         task_killed = task_cmd._force_kill_task_processes(no_create_time_entry)
 
         assert task_killed is True
-        assert _wait_for_process_exit(worker_pid)
+        assert _wait_for_process_exit(target_pid)
     finally:
         kill_process_tree(process.pid)
         kill_process_tree(worker_pid)
+        if "target_pid" in locals():
+            kill_process_tree(target_pid)
 
 
 def test_stop_and_kill_via_fallback_guard_is_defensive_and_unreachable_today(
@@ -1370,11 +1384,16 @@ def test_stop_and_kill_via_fallback_guard_is_defensive_and_unreachable_today(
         assert entry is not None
         handle = RunnerHandle.from_dict(entry["runtime_handle"])
         assert handle.control.get("authority") == "host-pid"
+        recorded = dict(handle.scoped_host_processes())
+        assert recorded
+        target_pid = next(iter(recorded))
 
         stopped = task_cmd._stop_via_fallback(entry)
 
         assert stopped is True
-        assert _wait_for_process_exit(worker_pid)
+        assert _wait_for_process_exit(target_pid)
     finally:
         kill_process_tree(process.pid)
         kill_process_tree(worker_pid)
+        if "target_pid" in locals():
+            kill_process_tree(target_pid)
