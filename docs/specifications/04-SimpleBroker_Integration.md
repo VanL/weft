@@ -100,6 +100,9 @@ Current behavior:
 - `MultiQueueWatcher` and `QueueChangeMonitor` call
   `simplebroker.create_activity_waiter_for_queues(...)` for queue fan-in waits
   and treat `None` as the portable polling fallback
+- `MultiQueueWatcher` passes its fan-in waiter through SimpleBroker's watcher
+  lifecycle hook rather than cloning the base watcher retry loop; Weft still
+  owns queue membership, priority, and dispatch policy
 - when the backend returns a native activity waiter, Weft waits on that waiter
   and treats a `True` result as a queue-discovery hint; it must not perform a
   pre-wait SQL pending scan on every wait cycle

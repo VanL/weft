@@ -554,8 +554,10 @@ multi-host task submission or high write concurrency.
 
 Weft uses SimpleBroker's multi-queue activity waiter API, so a long-lived
 watcher shares one backend wait/listen path across the queues it watches
-inside that process. It does not open one Postgres `LISTEN` connection per
-watched queue. The important operational limit is therefore the number of
+inside that process. `MultiQueueWatcher` installs that fan-in waiter through
+SimpleBroker's watcher lifecycle hooks while Weft still owns queue membership,
+priority, and dispatch policy. It does not open one Postgres `LISTEN` connection
+per watched queue. The important operational limit is therefore the number of
 concurrent Weft processes, plus short-lived command and startup spikes.
 
 For production Postgres deployments, give Weft its own connection budget rather

@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Raised the SimpleBroker floor to 5.1.0. `MultiQueueWatcher` now supplies its
+  fan-in activity waiter through SimpleBroker's watcher lifecycle hooks instead
+  of cloning the watcher retry loop.
+
 ## 0.9.86 - 2026-07-03
 
 ### Changed

@@ -39,6 +39,10 @@ class FakeWaiter:
         self.close_calls += 1
 
 
+def test_multi_queue_watcher_uses_base_retry_loop() -> None:
+    assert "_run_with_retries" not in MultiQueueWatcher.__dict__
+
+
 def test_peek_mode_ack_removes_message(broker_env) -> None:
     """Control queue (peek) handlers should see message and remove only when acked."""
     db_path, make_queue = broker_env
@@ -111,6 +115,88 @@ def test_wait_for_activity_uses_simplebroker_multi_queue_waiter(
     assert [queue.name for queue in received["queues"]] == ["wait.one", "wait.two"]
     assert received["stop_event"] is stop_event
     assert fake_waiter.wait_calls == [0.25]
+
+
+def test_start_strategy_uses_multi_queue_activity_waiter(
+    broker_env,
+    monkeypatch,
+) -> None:
+    db_path, _make_queue = broker_env
+    received: dict[str, object] = {}
+    fake_waiter = FakeWaiter()
+
+    def handler(
+        _message: str,
+        _timestamp: int,
+        _context: QueueMessageContext,
+    ) -> None:
+        pass
+
+    def fake_create(queues, *, stop_event):
+        received["queues"] = queues
+        received["stop_event"] = stop_event
+        return fake_waiter
+
+    monkeypatch.setattr(
+        "weft.core.tasks.multiqueue_watcher.create_activity_waiter_for_queues",
+        fake_create,
+    )
+
+    watcher = MultiQueueWatcher(
+        queue_configs={
+            "strategy.one": {"handler": handler},
+            "strategy.two": {"handler": handler},
+        },
+        db=db_path,
+    )
+
+    try:
+        watcher._start_strategy()
+
+        assert [queue.name for queue in received["queues"]] == [
+            "strategy.one",
+            "strategy.two",
+        ]
+        assert watcher._strategy.uses_native_activity() is True
+        assert fake_waiter.close_calls == 0
+    finally:
+        watcher.stop(join=False)
+
+
+def test_reset_multi_activity_waiter_detaches_strategy_waiter(
+    broker_env,
+    monkeypatch,
+) -> None:
+    db_path, _make_queue = broker_env
+    fake_waiter = FakeWaiter()
+
+    def handler(
+        _message: str,
+        _timestamp: int,
+        _context: QueueMessageContext,
+    ) -> None:
+        pass
+
+    monkeypatch.setattr(
+        "weft.core.tasks.multiqueue_watcher.create_activity_waiter_for_queues",
+        lambda queues, *, stop_event: fake_waiter,
+    )
+
+    watcher = MultiQueueWatcher(
+        queue_configs={"reset.one": {"handler": handler}},
+        db=db_path,
+    )
+
+    try:
+        watcher._start_strategy()
+        assert watcher._strategy.uses_native_activity() is True
+
+        watcher._reset_multi_activity_waiter()
+
+        assert fake_waiter.close_calls == 1
+        assert watcher._strategy.uses_native_activity() is False
+    finally:
+        watcher.stop(join=False)
 
 
 def test_wait_for_activity_positive_timeout_uses_waiter_without_precheck(

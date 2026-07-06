@@ -28,7 +28,6 @@ from simplebroker.ext import (
     BaseWatcher,
     BrokerError,
     PollingStrategy,
-    StopWatching,
     default_error_handler,
 )
 from weft._constants import (
@@ -389,8 +388,7 @@ class MultiQueueWatcher(BaseWatcher):
         if waiter is None:
             return
 
-        if getattr(self._strategy, "_activity_waiter", None) is waiter:
-            self._strategy._activity_waiter = None
+        self._strategy.detach_activity_waiter(expected=waiter)
 
         try:
             cast(Any, waiter).close()
@@ -441,26 +439,10 @@ class MultiQueueWatcher(BaseWatcher):
             self._multi_activity_waiter = None
         return self._multi_activity_waiter
 
-    def _start_strategy_for_configured_queues(self) -> None:
-        """Start the polling strategy with a multi-queue activity waiter."""
-        queue = self._get_queue_for_data_version()
-
-        def data_version_getter(q: Queue = queue) -> int | None:
-            return q.get_data_version()
-
-        try:
-            queue.refresh_last_ts()
-        except (BrokerError, OSError, RuntimeError):
-            logger.debug("Initial last_ts refresh failed", exc_info=True)
-
-        def on_data_version_change(q: Queue = queue) -> None:
-            q.refresh_last_ts()
-
-        self._strategy.start(
-            data_version_getter,
-            on_data_version_change=on_data_version_change,
-            activity_waiter=self._ensure_multi_activity_waiter(),
-        )
+    def _create_activity_waiter(self, queue: Queue) -> Any | None:
+        """Supply Weft's multi-queue waiter to SimpleBroker strategy startup."""
+        del queue
+        return self._ensure_multi_activity_waiter()
 
     def wait_for_activity(self, timeout: float | None) -> None:
         """Wait for possible queue activity without consuming messages.
@@ -497,37 +479,6 @@ class MultiQueueWatcher(BaseWatcher):
         """Stop the watcher and close its multi-queue activity waiter."""
         self._reset_multi_activity_waiter()
         super().stop(join=join, timeout=timeout)
-
-    def _run_with_retries(self, max_retries: int = 3) -> None:
-        """Run with SimpleBroker retry semantics and a multi-queue waiter."""
-        retry_count = 0
-        start_time = time.monotonic()
-
-        while retry_count < max_retries:
-            self._check_retry_timeout(start_time, retry_count)
-
-            try:
-                # SimpleBroker 3.3.2 has no protected waiter factory hook, so
-                # this is the narrow override that swaps in the multi-queue API.
-                if hasattr(self._strategy, "start"):
-                    self._start_strategy_for_configured_queues()
-
-                self._in_initial_drain = True
-                try:
-                    self._drain_queue()
-                finally:
-                    self._in_initial_drain = False
-
-                self._process_messages()
-                break
-            except StopWatching:
-                break
-            except KeyboardInterrupt:
-                raise
-            except Exception as exc:  # pragma: no cover - watcher retry boundary
-                retry_count += 1
-                if not self._handle_retry(exc, retry_count, max_retries):
-                    break
 
     def _has_pending_messages(self) -> bool:
         """Return ``True`` when any configured queue still has pending messages.
