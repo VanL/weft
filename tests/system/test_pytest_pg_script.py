@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.machinery
 import importlib.util
+import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -237,6 +238,59 @@ def test_build_pytest_command_defaults_to_full_tests_tree() -> None:
     pytest_index = command.index("pytest")
     assert command[pytest_index + 1] == "tests"
     assert command[command.index("-m") + 1] == "shared"
+
+
+def test_start_postgres_container_keeps_container_until_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The wrapper should not erase failed container logs via docker --rm."""
+
+    pytest_pg = _load_pytest_pg_module()
+    commands: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        commands.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(pytest_pg, "_run", fake_run)
+    monkeypatch.setattr(pytest_pg, "_wait_for_postgres", lambda _name: "54321")
+
+    container_name, dsn = pytest_pg._start_postgres_container()
+
+    assert container_name.startswith("weft-pg-test-")
+    assert dsn == "postgresql://postgres:postgres@127.0.0.1:54321/weft_test"
+    docker_run = commands[0]
+    assert docker_run[:3] == ["docker", "run", "--detach"]
+    assert "--rm" not in docker_run
+
+
+def test_print_container_logs_includes_stdout_and_stderr(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Failure diagnostics should preserve Postgres container output."""
+
+    pytest_pg = _load_pytest_pg_module()
+
+    def fake_run(
+        cmd: list[str],
+        **_kwargs: Any,
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout="database system is ready\n",
+            stderr="server log line\n",
+        )
+
+    monkeypatch.setattr(pytest_pg.subprocess, "run", fake_run)
+
+    pytest_pg._print_container_logs("weft-pg-test-example")
+
+    captured = capsys.readouterr()
+    assert "Postgres container logs (weft-pg-test-example):" in captured.err
+    assert "database system is ready" in captured.err
+    assert "server log line" in captured.err
 
 
 def test_run_pytest_command_forwards_first_interrupt_and_returns_130(

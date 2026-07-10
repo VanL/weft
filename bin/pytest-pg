@@ -121,6 +121,32 @@ def _cleanup_container(container_name: str) -> None:
     )
 
 
+def _print_container_logs(container_name: str) -> None:
+    """Print temporary Postgres logs before cleanup on failure."""
+
+    print(f"Postgres container logs ({container_name}):", file=sys.stderr)
+    result = subprocess.run(
+        ["docker", "logs", container_name],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    stdout = result.stdout.rstrip()
+    stderr = result.stderr.rstrip()
+    if stdout:
+        print(stdout, file=sys.stderr)
+    if stderr:
+        print(stderr, file=sys.stderr)
+    if result.returncode != 0 and not stdout and not stderr:
+        print(
+            f"Unable to read logs for Postgres container {container_name}",
+            file=sys.stderr,
+        )
+
+
 def _wait_for_postgres(container_name: str, *, timeout_seconds: float = 60.0) -> str:
     """Wait for the Postgres container to accept connections and return its host port."""
 
@@ -172,7 +198,6 @@ def _start_postgres_container() -> tuple[str, str]:
             "docker",
             "run",
             "--detach",
-            "--rm",
             "--name",
             container_name,
             "--env",
@@ -500,26 +525,33 @@ def main() -> int:
     elif args.all:
         marker = "not sqlite_only"
     container_name: str | None = None
+    pytest_returncode = 0
 
     try:
         container_name, dsn = _start_postgres_container()
         print(f"Postgres test DSN: {dsn}", flush=True)
         env = _build_test_env(dsn=dsn)
         _initialize_broker_schema(env=env)
-        return _run_pytest_command(
+        pytest_returncode = _run_pytest_command(
             _build_pytest_command(marker=marker, pytest_targets=args.pytest_targets),
             env=env,
         )
+        return pytest_returncode
     except subprocess.CalledProcessError as exc:
+        pytest_returncode = exc.returncode or 1
         return exc.returncode or 1
     except KeyboardInterrupt:
+        pytest_returncode = 130
         print("Interrupted", file=sys.stderr)
         return 130
     except Exception as exc:  # pragma: no cover - defensive CLI wrapper
+        pytest_returncode = 1
         print(str(exc), file=sys.stderr)
         return 1
     finally:
         if container_name and not args.keep_container:
+            if pytest_returncode != 0:
+                _print_container_logs(container_name)
             _cleanup_container(container_name)
 
 
